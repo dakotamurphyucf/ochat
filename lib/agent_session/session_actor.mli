@@ -1579,6 +1579,112 @@ val bind_run_source
   -> source:Runtime_source_preparation.t
   -> (Source_binding.t, Agent_protocol.Error.t) result
 
+module Recurrence_retry : sig
+  (** Process-local ownership of one explicit retry, from source preparation
+      through controller acknowledgement. Neither serializable nor recoverable
+      from a retained execution row. *)
+  type t
+
+  (** Original immutable intent, predecessor and derived next request are DATA.
+      No getter returns an execution/admission permit or a new Closed token. *)
+  val intent : t -> Recurrence_execution_intent.t
+
+  val previous : t -> Recurrence_execution_attempt.t
+  val next_attempt : t -> Recurrence_execution_attempt.t
+
+  (** Exact issuing Eio domain, actual target/Store/negative-cell identity and
+      phase-specific basis. No policy/clock/Store RPC or source admission here.
+      Rejects displaced, attempted/unconfirmed or unavailable retry custody. *)
+  val check_basis : t -> (unit, Agent_protocol.Error.t) result
+end
+
+(** The runtime owner calls this after reserving its existing source lane. Validate
+    original target NoEffects against intent/previous, exact actual Store/Actor,
+    then consume that observation into a newly authenticated deferred preparation.
+    The next immutable Attempt is derived from this request's exact principal,
+    key/CAS/input/mode/generation/SHA and previous ordinal+1; nothing is rebased.
+    The returned pair is issued together; the same opaque retry is retained in
+    Owner.Deferred_source/Report before pending cancellation can escape. *)
+val begin_recurrence_retry_preparation
+  :  t
+  -> observation:No_effects_observation.t
+  -> actor:Operator_authorization.t
+  -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> intent:Recurrence_execution_intent.t
+  -> previous:Recurrence_execution_attempt.t
+  -> request:Run_admission_request.Headless.t
+  -> (Recurrence_retry.t * Run_preparation.Deferred.t, Agent_protocol.Error.t) result
+
+(** Only a retry closed successfully before its controller write can resume.
+    Fresh authorization must have the same frozen principal. The original next request,
+    key/CAS/SHA/ordinal are reused, never supplied/replaced by the caller. Consume
+    the exact previous source completion into a fresh actual Deferred; return the
+    same retry handle. No appended controller ordinal or target write occurs. *)
+val resume_recurrence_retry_preparation
+  :  t
+  -> retry:Recurrence_retry.t
+  -> actor:Operator_authorization.t
+  -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> (Recurrence_retry.t * Run_preparation.Deferred.t, Agent_protocol.Error.t) result
+
+(** The Factory calls this after real target and parent cleanup have succeeded and
+    existing close_effect_deferred/Closed_attempt.complete produced completion.
+    Validates the same deferred cell, request and Factory issuer. Success retains
+    the same handle for resuming source preparation. Acknowledged, attempted,
+    invalid or foreign retries return an error and cannot resume.
+    Existing factual close still happens before this and never depends on success
+    here. Error must not replace the Factory's original failure or exception.
+    The public Source_completion type is already opaque and its constructor needs
+    both Actor's owner and Factory's private key; no callback/Boolean join claim. *)
+val complete_recurrence_retry_source
+  :  t
+  -> retry:Recurrence_retry.t
+  -> completion:Run_preparation.Source_completion.t
+  -> (unit, Agent_protocol.Error.t) result
+
+(** Shared controller operation for a distinct target or the controller itself. Exactly
+    one opaque retry plus its current next binding is required; Selected retry
+    binding cannot admit a Run before this operation's known exact rotation ACK.
+    Actual source/target policy, current controller definition/control/source/birth,
+    fresh grace, both originals and final pure bases remain mandatory. No target
+    Store/Actor RPC runs inside the controller mailbox. Controller.same_store is
+    checked against the physically retained target controller association.
+
+    Pure catalog.rotate_execution constructs one resolve_retry+append candidate.
+    Immediately before the actual writer attempt, exception-safely consume the
+    phase into a pending writer. Only exact candidate ACK releases the next
+    binding and installs immutable ACK fact, before publication. Self-target
+    forwards the same next preparation through persistence and ACK installation;
+    original expected_revision and request_sha256 remain unchanged.
+
+    Exact duplicate row is DATA only. It cannot establish a missing ACK fact or
+    restore/release a closed preparation. Reopened controller/target observes the
+    retained row through existing record/read APIs, with no activation custody. *)
+val rotate_prepared_recurrence_execution
+  :  t
+  -> retry:Recurrence_retry.t
+  -> next:Source_binding.t
+  -> actor:Operator_authorization.t
+  -> authorize:
+       (Session_state.t
+        -> Recurrence_definition.t
+        -> (unit, Agent_protocol.Error.t) result)
+  -> (Recurrence_execution.t, Agent_protocol.Error.t) result
+
+(* A pending, attempted or invalid retry cannot issue another no-effects
+   observation. After controller acknowledgement, the next attempt may qualify
+   through the ordinary joined-cleanup and Store-absence checks. The Actor
+   enforces this independently of Factory bookkeeping and public close calls. *)
+
+(** Early refusal before ordinary prepared-runtime resource acquisition. Checks
+    the exact current actor preparation, original policy and retry ACK phase.
+    Returns no permission across a yield; actual construction/admission must keep
+    its existing later checks. Pending/closed/displaced retry custody rejects. *)
+val check_prepared_run_execution
+  :  t
+  -> preparation:Run_preparation.t
+  -> (unit, Agent_protocol.Error.t) result
+
 module Held_run : sig
   (** Actual actor-issued continuous startup custody for an inert acknowledged
       Run. Neutral with respect to recurrence/Goal ownership. No decoder, issuer

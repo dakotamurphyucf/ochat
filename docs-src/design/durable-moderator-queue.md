@@ -686,3 +686,20 @@ Even an issued observation becomes invalid if subsequent ordinary execution or
 another preparation displaces its live basis. The observation is process-local
 evidence for a separate authorized retry decision; it never starts or retries
 work by itself.
+
+An explicit recurrence retry transfers that observation into the next actual
+target preparation. The old observation is consumed, and the next source binding
+cannot admit a Run until the controller acknowledges the rotation. That one
+transaction resolves the exact predecessor and appends the next bounded ordinal
+with a fresh key. It preserves the original intent, earlier request digests and
+audit evidence. When the controller is also the target, its acknowledgement
+advances the same preparation; it does not rewrite the request's original CAS or
+digest.
+
+If source verification or controller preflight fails before a writer is reached,
+successful joined cleanup can retain the same opaque retry handle. Explicitly
+resuming it uses the same unpublished request, key and ordinal. It cannot select
+a replacement request or revive the old observation. A failed or uncertain
+controller write does not release target admission. After recovery, an exact
+retained rotation can be reported as data, but that data does not restore a lost
+preparation or execution permission. No automatic retry loop is implied.

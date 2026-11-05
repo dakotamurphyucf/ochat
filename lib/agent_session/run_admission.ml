@@ -83,7 +83,7 @@ let observer_equal left right =
   && String.equal left.source_sha256 right.source_sha256
 ;;
 
-let current_installation state selected =
+let prepare_source_index state ~observer:selected =
   let open Result.Let_syntax in
   let index = Option.value state.Session_state.run_state ~default:Run_state.empty in
   let installed = Run_state.installation index in
@@ -253,7 +253,7 @@ let prepare_checked
        | Stopped, Stopped, None when Scope.startup_pending scope -> Ok ()
        | _ -> conflict "authored run start requires an actual pending startup")
   in
-  let%bind index = current_installation state (Scope.observer scope) in
+  let%bind index = prepare_source_index state ~observer:(Scope.observer scope) in
   let%bind source = current_source state index request in
   let%bind owned_work = owned_operation state request operation in
   let%bind facts =
@@ -394,7 +394,7 @@ let prepare_held_from_preparation
            ~retryable:false
            ())
   in
-  let%bind index = current_installation state observer in
+  let%bind index = prepare_source_index state ~observer in
   let%bind source = current_source state index request in
   prepare_facts
     state

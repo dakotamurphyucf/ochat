@@ -17,6 +17,20 @@ val record
   -> attempt:Recurrence_execution_attempt.t
   -> (t * Recurrence_execution.t, Agent_protocol.Error.t) result
 
+(** Resolve the exact retained current predecessor and append one contiguous
+    attempt in one pure candidate. Complete intent, audit evidence and compatible
+    wrappers remain retained. Exact current-successor/predecessor/resolution DATA
+    replay returns the unchanged carrier; later successors are not this replay.
+    No no-effects, retry or target authority is issued. No pruning or occupancy,
+    cursor, control or lifetime-count movement accompanies this operation. *)
+val rotate
+  :  t
+  -> intent:Recurrence_execution_intent.t
+  -> previous:Recurrence_execution_attempt.t
+  -> resolution:Recurrence_retry_resolution.t
+  -> next:Recurrence_execution_attempt.t
+  -> (t * Recurrence_execution.t, Agent_protocol.Error.t) result
+
 type change =
   | Associated
   | Settled of Recurrence_identity.Occurrence.t list

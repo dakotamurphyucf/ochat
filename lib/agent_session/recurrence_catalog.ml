@@ -649,6 +649,40 @@ let record_execution t ~intent ~attempt =
       incoming, row)
 ;;
 
+let rotate_execution t ~intent ~previous ~resolution ~next =
+  let open Result.Let_syntax in
+  let recurrence_id =
+    Recurrence_execution_intent.occurrence intent
+    |> Recurrence_identity.Occurrence.definition
+    |> Recurrence_identity.Definition.recurrence_id
+  in
+  let%bind old =
+    Result.of_option
+      (find t recurrence_id)
+      ~error:(P.Error.invalid_request "retry recurrence identity is not retained")
+  in
+  let%bind entry, row = E.rotate_execution old ~intent ~previous ~resolution ~next in
+  let%bind next = Stored.create entry in
+  match stored t recurrence_id with
+  | Some previous when same_entry previous next -> Ok (t, row)
+  | Some _ | None ->
+    if Int64.equal t.revision Int64.max_value
+    then full "recurrence retry catalog frontier exhausted"
+    else (
+      let incoming =
+        { t with
+          revision = Int64.succ t.revision
+        ; entries =
+            List.map t.entries ~f:(fun previous ->
+              if P.Id.Recurrence.equal (E.id previous.Stored.value) recurrence_id
+              then next
+              else previous)
+        }
+      in
+      let%map () = validate_transition t ~incoming in
+      incoming, row)
+;;
+
 let import_execution t ~origin ~terminal ~automatic =
   let open Result.Let_syntax in
   let recurrence_id =

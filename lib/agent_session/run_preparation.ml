@@ -359,6 +359,67 @@ module Deferred = struct
       Ok { deferred = t; revision = t.revision })
   ;;
 
+  type deferred = t
+
+  module Replacement = struct
+    type t =
+      { previous : Source_completion.t
+      ; next : deferred
+      }
+
+    let check_basis t ~owner ~state =
+      let open Result.Let_syntax in
+      let%bind () = Source_completion.check_basis t.previous ~owner ~state in
+      check_basis t.next ~owner ~state
+    ;;
+
+    let prepare
+          previous
+          ~owner
+          ~source_owner
+          ~state
+          ~actor
+          ~request
+          ~request_sha256
+          ~authorize
+      =
+      let open Result.Let_syntax in
+      let%bind () = Source_completion.check_basis previous ~owner ~state in
+      let%bind () =
+        if Runtime_source_owner.Identity.equal previous.deferred.source_owner source_owner
+        then Ok ()
+        else conflict "retry completion belongs to another Factory"
+      in
+      let%bind next =
+        create_authenticated_request
+          ~owner
+          ~source_owner
+          ~state
+          ~actor
+          ~request
+          ~request_sha256
+          ~authorize
+      in
+      let t = { previous; next } in
+      let%map () = check_basis t ~owner ~state in
+      t
+    ;;
+
+    let check_current t ~owner ~state =
+      let open Result.Let_syntax in
+      let%bind () = check_basis t ~owner ~state in
+      let%bind () = check_current t.next.preparation ~owner ~state in
+      check_basis t ~owner ~state
+    ;;
+
+    let commit t ~owner ~state =
+      let open Result.Let_syntax in
+      let%map () = check_basis t ~owner ~state in
+      exclude t.previous.deferred ~reason:Displaced;
+      t.next
+    ;;
+  end
+
   module Decision = struct
     type deferred = t
 

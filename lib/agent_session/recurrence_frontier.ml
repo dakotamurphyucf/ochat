@@ -1075,6 +1075,36 @@ let validate_transition previous ~incoming ~definitions ~previous_cursor ~cursor
   else invalid "frontier update discarded compatible unknown fields"
 ;;
 
+let rotate_execution t ~definitions ~cursor ~intent ~previous ~resolution ~next =
+  let open Result.Let_syntax in
+  let%bind () = validate t ~definitions ~cursor in
+  let state = value t in
+  let occurrence = Recurrence_execution_intent.occurrence intent in
+  let%bind definition =
+    Result.of_option
+      (List.find definitions ~f:(fun definition ->
+         I.Definition.equal (F.key definition) (I.Occurrence.definition occurrence)))
+      ~error:(P.Error.invalid_request "retry definition is not retained")
+  in
+  let reservation =
+    List.find state.protected_children ~f:(fun row ->
+      I.Occurrence.equal occurrence (Recurrence_child_reservation.occurrence row))
+  in
+  let%bind () = Recurrence_execution_intent.validate intent ~definition ~reservation in
+  let%bind executions, row =
+    Recurrence_executions.rotate state.executions ~intent ~previous ~resolution ~next
+  in
+  if phys_equal executions state.executions
+  then Ok (t, row)
+  else (
+    let%bind state = bump { state with executions } in
+    let%bind incoming = admit t state in
+    let%map () =
+      validate_transition t ~incoming ~definitions ~previous_cursor:cursor ~cursor
+    in
+    incoming, row)
+;;
+
 type settlement =
   { frontier : t
   ; cursor : Recurrence_cursor.t

@@ -198,6 +198,12 @@ module Deferred_run_attempt : sig
       execution authority. An absent observation does not change [result]. *)
   val no_effects : 'a t -> Agent_session.Session_actor.No_effects_observation.t option
 
+  (** The same opaque retry, available only after genuine joined target/parent
+      cleanup and Actor acceptance of its pre-controller-write closure. Initial
+      attempts always return [None]. This is never reconstructed from DATA.
+      When present, [no_effects] is [None]; only this frozen retry can resume. *)
+  val retry : 'a t -> Agent_session.Session_actor.Recurrence_retry.t option
+
   module Outcome : sig
     type 'a attempt = 'a t
 
@@ -230,6 +236,47 @@ val with_effect_deferred_run_source
       -> Runtime_owner.Prepared.t
       -> ('a, Agent_protocol.Error.t) result)
   -> ('a Deferred_run_attempt.Outcome.t, Agent_protocol.Error.t) result
+
+(** Consume the exact old observation into one retry under the same authenticated
+    target source reservation and retained-source verification as initial
+    issuance. The callback receives its actual retry and Prepared; target
+    admission remains blocked until the exact controller rotation ACK.
+
+    A selected source failure can return the same retry through
+    [Deferred_run_attempt.retry] only after successful full cleanup and actual
+    Actor completion. Pending retry closure cannot issue an independent absence
+    observation. A known rotation ACK may instead permit the ordinary NEXT
+    observation after closure, subject to the Actor's factual phase/Store checks.
+    Primary errors, exceptions and cancellation retain the initial API's rules;
+    an exception propagates after factual close and does not fabricate a result. *)
+val with_recurrence_retry_run_source
+  :  t
+  -> Session_registry.entry
+  -> observation:Agent_session.Session_actor.No_effects_observation.t
+  -> actor:Operator_authorization.t
+  -> authorize:(Agent_session.Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> intent:Agent_session.Recurrence_execution_intent.t
+  -> previous:Agent_session.Recurrence_execution_attempt.t
+  -> request:Agent_session.Run_admission_request.Headless.t
+  -> (Agent_session.Session_actor.Recurrence_retry.t
+      -> Runtime_owner.Prepared.t
+      -> ('a, Agent_protocol.Error.t) result)
+  -> ('a Deferred_run_attempt.t, Agent_protocol.Error.t) result
+
+(** Resume only the SAME frozen unpublished request from its actual joined
+    pre-controller-write closure. No new request/intent/ordinal is accepted.
+    Resource selection, cleanup, callback/error and admission rules are identical
+    to [with_recurrence_retry_run_source]. *)
+val resume_recurrence_retry_run_source
+  :  t
+  -> Session_registry.entry
+  -> retry:Agent_session.Session_actor.Recurrence_retry.t
+  -> actor:Operator_authorization.t
+  -> authorize:(Agent_session.Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> (Agent_session.Session_actor.Recurrence_retry.t
+      -> Runtime_owner.Prepared.t
+      -> ('a, Agent_protocol.Error.t) result)
+  -> ('a Deferred_run_attempt.t, Agent_protocol.Error.t) result
 
 (** Parse the genuine held input with its own lexical inference graph. Call only
     from [Session_actor.with_held_input]'s preparation callback, while retaining

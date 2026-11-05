@@ -249,7 +249,11 @@ val with_loaded_source_capabilities_reported
   -> 'a Scope_outcome.t
 
 (** Same existing lifetime lease with explicitly attributable constructor
-    commits. The actor must have issued [preparation] first; every exit releases
+    commits. The actor must have issued [preparation] first. Its actual current
+    execution phase is checked outside the owner mutex before ordinary exclusion,
+    lease admission or native construction; a pending retry cannot enter through
+    an escaped preparation. This check grants no permission across a yield and
+    every later constructor/lease guard remains in force. Every exit releases
     the runtime lease, including cancellation and unexpected exceptions. *)
 val with_prepared_run_runtime
   :  t
@@ -309,6 +313,10 @@ module Deferred_source : sig
 
   val preparation : t -> Agent_session.Run_preparation.Deferred.t
 
+  (** The actual retry issued alongside [preparation], if this is a retry lane.
+      Its presence grants neither controller publication nor target admission. *)
+  val retry : t -> Agent_session.Session_actor.Recurrence_retry.t option
+
   (** Bind the selected source once, while retaining this exact reserved stage.
       Selection is consumed before the Actor call, including rejected or raised
       binding. No retry/fallback or retained Prepared after callback return. *)
@@ -331,6 +339,10 @@ module Deferred_source : sig
         after joined cleanup; callback capture alone cannot cover that cut. *)
     val deferred : 'a t -> Agent_session.Run_preparation.Deferred.t option
 
+    (** Captured together with the actual Deferred before pending cancellation,
+        even if source selection or the callback never starts. *)
+    val retry : 'a t -> Agent_session.Session_actor.Recurrence_retry.t option
+
     val outcome : 'a t -> 'a Decision.t Scope_outcome.t
   end
 end
@@ -350,6 +362,35 @@ val with_effect_deferred_source_reported
   -> actor:Operator_authorization.t
   -> authorize:(Agent_session.Session_state.t -> (unit, Agent_protocol.Error.t) result)
   -> request:Agent_session.Run_admission_request.Headless.t
+  -> (Deferred_source.t -> ('a, Agent_protocol.Error.t) result)
+  -> 'a Deferred_source.Report.t
+
+(** Reserve the same exclusive source stage before consuming the exact old
+    observation into one actual retry and its next Deferred. Source binding and
+    all finalizers use the same one-shot stage as initial issuance. The Factory
+    must factually close the reported Deferred after joined target/parent cleanup;
+    this report alone cannot make the retry resumable or admission-ready. *)
+val with_recurrence_retry_source_reported
+  :  t
+  -> source_owner:Agent_session.Runtime_source_owner.t
+  -> observation:Agent_session.Session_actor.No_effects_observation.t
+  -> actor:Operator_authorization.t
+  -> authorize:(Agent_session.Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> intent:Agent_session.Recurrence_execution_intent.t
+  -> previous:Agent_session.Recurrence_execution_attempt.t
+  -> request:Agent_session.Run_admission_request.Headless.t
+  -> (Deferred_source.t -> ('a, Agent_protocol.Error.t) result)
+  -> 'a Deferred_source.Report.t
+
+(** Re-enter this same source stage only through the same opaque retry's actual
+    joined pre-controller-write closure. The Actor retains the frozen request;
+    callers cannot replace its key, ordinal, principal, CAS or digest. *)
+val resume_recurrence_retry_source_reported
+  :  t
+  -> source_owner:Agent_session.Runtime_source_owner.t
+  -> retry:Agent_session.Session_actor.Recurrence_retry.t
+  -> actor:Operator_authorization.t
+  -> authorize:(Agent_session.Session_state.t -> (unit, Agent_protocol.Error.t) result)
   -> (Deferred_source.t -> ('a, Agent_protocol.Error.t) result)
   -> 'a Deferred_source.Report.t
 

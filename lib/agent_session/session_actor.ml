@@ -5,6 +5,12 @@ module No_effects_observation = struct
   type t =
     { current : unit -> (unit, Agent_protocol.Error.t) result
     ; basis : unit -> (unit, Agent_protocol.Error.t) result
+    ; completion : Run_preparation.Source_completion.t
+    ; controller : Recurrence_controller.t
+    ; observed : Recurrence_controller.observation
+    ; actor : Operator_authorization.t
+    ; authorize : Session_state.t -> (unit, Agent_protocol.Error.t) result
+    ; revision : int64
     }
 
   let check_basis t = t.basis ()
@@ -65,6 +71,70 @@ module Source_binding = struct
     let%bind () = check_basis t in
     let%bind () = t.current () in
     check_basis t
+  ;;
+end
+
+module Recurrence_retry = struct
+  type phase =
+    | Preparing_source
+    | Selected_source of Source_binding.t
+    | Closed_before_writer of Run_preparation.Source_completion.t
+    | Writer_pending of Source_binding.t * bool ref
+    | Attempt_unconfirmed
+    | Acknowledged of Source_binding.t option * Recurrence_execution.t
+    | Invalid
+
+  type t =
+    { issuing_actor : unit ref
+    ; owner : Run_preparation.Owner.t
+    ; controller : Recurrence_controller.t
+    ; source_owner : Runtime_source_owner.Identity.t
+    ; observed : Recurrence_controller.observation
+    ; domain : int
+    ; intent : Recurrence_execution_intent.t
+    ; previous : Recurrence_execution_attempt.t
+    ; next : Recurrence_execution_attempt.t
+    ; request : Run_admission_request.Headless.t
+    ; resolution_revision : int64
+    ; read_actor : Operator_authorization.t
+    ; read_authorize : Session_state.t -> (unit, Agent_protocol.Error.t) result
+    ; mutable deferred : Run_preparation.Deferred.t
+    ; mutable phase : phase
+    ; basis : unit -> (unit, Agent_protocol.Error.t) result
+    ; selected_basis : Source_binding.t -> (unit, Agent_protocol.Error.t) result
+    ; policy : unit -> (unit, Agent_protocol.Error.t) result
+    ; authority : unit -> (unit, Agent_protocol.Error.t) result
+    }
+
+  let intent t = t.intent
+  let previous t = t.previous
+  let next_attempt t = t.next
+
+  let check_basis t =
+    if not (Int.equal t.domain (Stdlib.Domain.self () :> int))
+    then
+      Error (Agent_protocol.Error.invalid_request "retry belongs to another Eio domain")
+    else (
+      match t.phase with
+      | Preparing_source | Selected_source _ | Closed_before_writer _ -> t.basis ()
+      | Writer_pending _ | Attempt_unconfirmed | Acknowledged _ | Invalid ->
+        Error
+          (Agent_protocol.Error.create
+             Conflict
+             ~message:"retry is unavailable or already acknowledged"
+             ~retryable:false
+             ()))
+  ;;
+end
+
+module Deferred_owner = struct
+  type t =
+    | Ordinary of Run_preparation.Deferred.t
+    | Retry of Recurrence_retry.t
+
+  let preparation = function
+    | Ordinary deferred -> deferred
+    | Retry retry -> retry.Recurrence_retry.deferred
   ;;
 end
 
@@ -1306,6 +1376,29 @@ module Effect_deferred_request = struct
         * (Session_state.t -> (unit, Agent_protocol.Error.t) result)
         * Run_admission_request.Headless.t
         -> Run_preparation.Deferred.Decision.t t
+    | Begin_retry :
+        No_effects_observation.t
+        * Operator_authorization.t
+        * (Session_state.t -> (unit, Agent_protocol.Error.t) result)
+        * Recurrence_execution_intent.t
+        * Recurrence_execution_attempt.t
+        * Run_admission_request.Headless.t
+        -> (Recurrence_retry.t * Run_preparation.Deferred.t) t
+    | Resume_retry :
+        Recurrence_retry.t
+        * Operator_authorization.t
+        * (Session_state.t -> (unit, Agent_protocol.Error.t) result)
+        -> (Recurrence_retry.t * Run_preparation.Deferred.t) t
+    | Complete_retry : Recurrence_retry.t * Run_preparation.Source_completion.t -> unit t
+    | Rotate_retry :
+        Recurrence_retry.t
+        * Source_binding.t
+        * Operator_authorization.t
+        * (Session_state.t
+           -> Recurrence_definition.t
+           -> (unit, Agent_protocol.Error.t) result)
+        -> Recurrence_execution.t t
+    | Check_execution : Run_preparation.t -> unit t
     | Exclude : unit t
     | Close : Run_preparation.Deferred.t -> Run_preparation.Closed_attempt.t t
     | Observe :
@@ -2313,7 +2406,7 @@ type t =
   ; mutable run_preparation : Run_preparation.t option
     (* Latest negative-only attempt cell survives logical prep/source closure.
      It grants no admission or execution rights and never accumulates. *)
-  ; mutable effect_deferred : Run_preparation.Deferred.t option
+  ; mutable effect_deferred : Deferred_owner.t option
   ; mutable run_source_binding : Source_binding.t option
   ; mutable held_activation : Held_run.Activation.t option
   ; mutable held_input_scope : Held_input_scope.t option
@@ -2344,11 +2437,33 @@ type t =
 let error code message = Agent_protocol.Error.create code ~message ~retryable:false ()
 
 let exclude_effect_deferred t reason =
-  Option.iter t.effect_deferred ~f:(fun deferred ->
-    Run_preparation.Deferred.exclude deferred ~reason);
-  (* Existing completions retain this same excluded cell. Dropping the Actor's
-     negative-only pointer cannot restore them and avoids work on future commits. *)
-  t.effect_deferred <- None
+  match t.effect_deferred with
+  | None -> ()
+  | Some (Ordinary deferred) ->
+    Run_preparation.Deferred.exclude deferred ~reason;
+    t.effect_deferred <- None
+  | Some (Retry retry) ->
+    Run_preparation.Deferred.exclude retry.deferred ~reason;
+    (* Retain this negative-only phase while the captured preparation can still
+       be presented through ordinary APIs. Exclusion cannot turn it executable. *)
+    (match retry.phase with
+     | Acknowledged _ -> ()
+     | _ -> retry.phase <- Invalid)
+;;
+
+let retry_for_preparation t preparation =
+  match t.effect_deferred with
+  | Some (Retry retry)
+    when phys_equal (Run_preparation.Deferred.preparation retry.deferred) preparation ->
+    Some retry
+  | Some (Ordinary _ | Retry _) | None -> None
+;;
+
+let check_retry_execution t preparation =
+  match retry_for_preparation t preparation with
+  | None -> Ok ()
+  | Some { phase = Acknowledged (Some _, _); _ } -> Ok ()
+  | Some _ -> Error (error Conflict "retry preparation requires its controller ACK")
 ;;
 
 let agent_source_current t generation source =
@@ -3130,12 +3245,18 @@ let held_initialization_of_execution t = function
   | Inference_job _ -> None
 ;;
 
-let check_run_preparation t preparation =
+let check_registered_run_preparation t preparation =
   match t.run_preparation with
   | Some active when phys_equal active preparation ->
     Run_preparation.check preparation ~owner:t.run_preparation_owner ~state:t.state
   | Some _ | None ->
     Error (error Conflict "run preparation is not this actor's live admission")
+;;
+
+let check_run_preparation t preparation =
+  let open Result.Let_syntax in
+  let%bind () = check_retry_execution t preparation in
+  check_registered_run_preparation t preparation
 ;;
 
 let install_live_run_agent_custody t =
@@ -14676,7 +14797,7 @@ let begin_effect_deferred_internal t ~actor ~authorize ~request =
         ~state:t.state
     in
     t.run_preparation <- Some (Run_preparation.Deferred.preparation deferred);
-    t.effect_deferred <- Some deferred;
+    t.effect_deferred <- Some (Ordinary deferred);
     Run_preparation.Deferred.Decision.Prepare deferred
 ;;
 
@@ -14695,6 +14816,7 @@ let close_effect_deferred_internal t deferred =
 let observe_no_run_effects_internal t ~actor ~authorize ~completion =
   let open Result.Let_syntax in
   let preparation = Run_preparation.Source_completion.preparation completion in
+  let%bind () = check_retry_execution t preparation in
   let request = Run_preparation.request preparation in
   let deferred = Run_preparation.Deferred.of_preparation preparation in
   let domain = t.runtime_source_domain in
@@ -14706,7 +14828,10 @@ let observe_no_run_effects_internal t ~actor ~authorize ~completion =
       (not t.stopped)
       && Option.is_none (Eio.Promise.peek t.finished)
       && Option.is_none t.lifecycle_fence
-      && Option.equal phys_equal t.effect_deferred deferred
+      && Option.equal
+           phys_equal
+           (Option.map t.effect_deferred ~f:Deferred_owner.preparation)
+           deferred
     then
       Run_preparation.Source_completion.check_basis
         completion
@@ -14746,22 +14871,351 @@ let observe_no_run_effects_internal t ~actor ~authorize ~completion =
     basis ()
   in
   let%map () = check () in
-  ({ current = check; basis } : No_effects_observation.t)
+  ({ current = check
+   ; basis
+   ; completion
+   ; controller
+   ; observed = current
+   ; actor
+   ; authorize
+   ; revision = t.state.counters.revision
+   }
+   : No_effects_observation.t)
 ;;
 
-let effect_deferred_request
-  : type a. t -> a Effect_deferred_request.t -> (a, Agent_protocol.Error.t) result
+let retry_owner_basis t (retry : Recurrence_retry.t) =
+  if
+    Int.equal retry.domain (Stdlib.Domain.self () :> int)
+    && phys_equal retry.issuing_actor t.inference_owner_identity
+    && phys_equal retry.owner t.run_preparation_owner
+    && (not t.stopped)
+    && Option.is_none (Eio.Promise.peek t.finished)
+    && Option.is_none t.lifecycle_fence
+    &&
+    match t.effect_deferred with
+    | Some (Retry current) -> phys_equal current retry
+    | Some (Ordinary _) | None -> false
+  then Ok ()
+  else Error (error Conflict "retry lost its actual target owner")
+;;
+
+let retry_target_basis t retry =
+  let open Result.Let_syntax in
+  let%bind () = retry_owner_basis t retry in
+  match retry.Recurrence_retry.phase with
+  | Closed_before_writer completion ->
+    Run_preparation.Source_completion.check_basis
+      completion
+      ~owner:t.run_preparation_owner
+      ~state:t.state
+  | Preparing_source | Selected_source _ | Writer_pending _ | Acknowledged _ ->
+    let preparation = Run_preparation.Deferred.preparation retry.deferred in
+    let%bind () =
+      if Option.exists t.run_preparation ~f:(phys_equal preparation)
+      then Ok ()
+      else Error (error Conflict "retry preparation was displaced")
+    in
+    Run_preparation.Deferred.check_basis
+      retry.deferred
+      ~owner:t.run_preparation_owner
+      ~state:t.state
+  | Attempt_unconfirmed | Invalid -> Error (error Conflict "retry is no longer live")
+;;
+
+let derive_retry_attempt ~intent ~previous ~actor request =
+  let open Result.Let_syntax in
+  let%bind () = Recurrence_execution_attempt.validate previous ~intent in
+  let principal_id = (Operator_authorization.principal actor).id in
+  let%bind next =
+    Recurrence_execution_attempt.create
+      ~intent
+      ~number:(Recurrence_execution_attempt.number previous + 1)
+      ~principal_id
+      ~expected_revision:request.Run_admission_request.Headless.expected_revision
+      ~key:request.key
+  in
+  let%bind supplied_sha =
+    Run_admission_request.request_sha256 (Run_admission_request.of_headless request)
+  in
+  if String.equal supplied_sha (Recurrence_execution_attempt.request_sha256 next)
+  then Ok next
+  else Error (error Conflict "retry changed its immutable input or target")
+;;
+
+(* Pure target-side counterpart of held admission's source installation law.
+   Selecting a cold source may supply its first installation; no runtime or Run
+   is created here, and an existing installation must match exactly. *)
+let retry_selected_target_basis t retry binding =
+  let open Result.Let_syntax in
+  let preparation = binding.Source_binding.preparation in
+  let%bind () = retry_target_basis t retry in
+  let actual = Run_preparation.request preparation in
+  let%bind actual_sha = Run_admission_request.request_sha256 actual in
+  let%bind () =
+    if
+      Option.exists t.run_source_binding ~f:(phys_equal binding)
+      && phys_equal preparation (Run_preparation.Deferred.preparation retry.deferred)
+      && Agent_protocol.Session_ref.equal
+           (Recurrence_controller.session retry.controller)
+           (Recurrence_execution_intent.target retry.intent)
+      && Run_admission_request.Caller.equal actual.caller Headless_command
+      && String.equal actual_sha (Recurrence_execution_attempt.request_sha256 retry.next)
+      && String.equal
+           (Run_preparation.request_sha256 preparation)
+           (Recurrence_execution_attempt.request_sha256 retry.next)
+    then Ok ()
+    else Error (error Conflict "retry selected target or immutable request changed")
+  in
+  let%bind () = Runtime_source_preparation.validate_target binding.source t.state in
+  let%bind observer =
+    match Runtime_source_preparation.moderator binding.source with
+    | Legacy observer | Extension observer -> Ok observer
+    | No_moderator -> Error (error Conflict "retry source has no scripted moderator")
+  in
+  let%bind index = Run_admission.prepare_source_index t.state ~observer in
+  let%bind source =
+    Run_source_installation.captured
+      (Run_state.installation index)
+      ~generation:t.state.identity.generation
+  in
+  if
+    Agent_protocol.Run_source.equal
+      source
+      (Recurrence_execution_intent.source retry.intent)
+  then Source_binding.check_basis binding
+  else Error (error Conflict "retry selected source differs from immutable intent")
+;;
+
+let begin_recurrence_retry_internal
+      t
+      ~observation
+      ~actor
+      ~authorize
+      ~intent
+      ~previous
+      ~request
   =
-  fun t request ->
-  match request with
-  | Begin (actor, authorize, request) ->
-    begin_effect_deferred_internal t ~actor ~authorize ~request
-  | Exclude ->
-    exclude_effect_deferred t Ordinary_execution;
+  let open Result.Let_syntax in
+  let%bind () = No_effects_observation.check_current observation in
+  let completed = observation.No_effects_observation.completion in
+  let old = Run_preparation.Source_completion.preparation completed in
+  let%bind old_request = Recurrence_execution_attempt.request previous ~intent in
+  let%bind old_sha =
+    Run_admission_request.request_sha256 (Run_admission_request.of_headless old_request)
+  in
+  let%bind controller = require_recurrence_controller t in
+  let%bind source_owner =
+    Result.of_option
+      t.runtime_source_owner
+      ~error:(error Conflict "retry requires its actual Factory")
+  in
+  let%bind () =
+    if
+      Run_preparation.belongs_to old ~owner:t.run_preparation_owner
+      && Recurrence_controller.same_store observation.controller controller
+      && Agent_protocol.Session_ref.equal
+           (Recurrence_controller.session controller)
+           (Recurrence_execution_intent.target intent)
+      && String.equal old_sha (Run_preparation.request_sha256 old)
+      && Agent_protocol.Id.Principal.equal
+           (Run_preparation.principal_id old)
+           (Recurrence_execution_attempt.principal_id previous)
+    then Ok ()
+    else Error (error Conflict "retry observation belongs to another request or target")
+  in
+  let%bind next = derive_retry_attempt ~intent ~previous ~actor request in
+  let%bind () = effect_deferred_quiescent t in
+  let%bind () =
+    if Option.is_none t.run_preparation
+    then Ok ()
+    else Error (error Conflict "retry source lane already has a preparation")
+  in
+  let previous_owner = t.effect_deferred in
+  let%bind replacement =
+    Run_preparation.Deferred.Replacement.prepare
+      completed
+      ~owner:t.run_preparation_owner
+      ~source_owner
+      ~state:t.state
+      ~actor
+      ~request:(Run_admission_request.of_headless request)
+      ~request_sha256:(Recurrence_execution_attempt.request_sha256 next)
+      ~authorize
+  in
+  let%bind () = No_effects_observation.check_current observation in
+  let%bind () =
+    Run_preparation.Deferred.Replacement.check_current
+      replacement
+      ~owner:t.run_preparation_owner
+      ~state:t.state
+  in
+  let%bind () = No_effects_observation.check_basis observation in
+  let%bind () = effect_deferred_quiescent t in
+  let%bind () =
+    if
+      Option.is_none t.run_preparation
+      && Option.equal phys_equal previous_owner t.effect_deferred
+    then Ok ()
+    else Error (error Conflict "retry source lane changed during authorization")
+  in
+  let%bind deferred =
+    Run_preparation.Deferred.Replacement.commit
+      replacement
+      ~owner:t.run_preparation_owner
+      ~state:t.state
+  in
+  let rec retry : Recurrence_retry.t =
+    { issuing_actor = t.inference_owner_identity
+    ; owner = t.run_preparation_owner
+    ; controller
+    ; source_owner
+    ; observed = observation.observed
+    ; domain = t.runtime_source_domain
+    ; intent
+    ; previous
+    ; next
+    ; request
+    ; resolution_revision = observation.revision
+    ; read_actor = observation.actor
+    ; read_authorize = observation.authorize
+    ; deferred
+    ; phase = Preparing_source
+    ; basis = (fun () -> retry_target_basis t retry)
+    ; selected_basis = (fun binding -> retry_selected_target_basis t retry binding)
+    ; policy =
+        (fun () ->
+          let%bind () = retry_target_basis t retry in
+          let%bind () =
+            Recurrence_command_admission.check_read
+              retry.read_actor
+              ~authorize:retry.read_authorize
+              t.state
+          in
+          let%bind () =
+            check_registered_run_preparation
+              t
+              (Run_preparation.Deferred.preparation retry.deferred)
+          in
+          retry_target_basis t retry)
+    ; authority =
+        (fun () ->
+          let%bind () = retry_target_basis t retry in
+          let%bind () =
+            Recurrence_command_admission.check_read
+              retry.read_actor
+              ~authorize:(fun _ -> Ok ())
+              t.state
+          in
+          let%bind () =
+            Run_preparation.check_current
+              (Run_preparation.Deferred.preparation retry.deferred)
+              ~owner:t.run_preparation_owner
+              ~state:t.state
+          in
+          retry_target_basis t retry)
+    }
+  in
+  t.run_preparation <- Some (Run_preparation.Deferred.preparation deferred);
+  t.effect_deferred <- Some (Retry retry);
+  Ok (retry, deferred)
+;;
+
+let resume_recurrence_retry_internal t ~retry ~actor ~authorize =
+  let open Result.Let_syntax in
+  let%bind () = Recurrence_retry.check_basis retry in
+  let%bind () = retry_owner_basis t retry in
+  let%bind () =
+    if
+      Agent_protocol.Id.Principal.equal
+        (Operator_authorization.principal actor).id
+        (Recurrence_execution_attempt.principal_id retry.next)
+    then Ok ()
+    else Error (error Permission_denied "retry resume changed its frozen next principal")
+  in
+  let%bind completed =
+    match retry.Recurrence_retry.phase with
+    | Closed_before_writer completed -> Ok completed
+    | _ -> Error (error Conflict "retry source is not a joined prewriter closure")
+  in
+  let%bind () = effect_deferred_quiescent t in
+  let%bind () =
+    if Option.is_none t.run_preparation
+    then Ok ()
+    else Error (error Conflict "retry resume source lane is occupied")
+  in
+  let previous_deferred = retry.deferred in
+  let%bind replacement =
+    Run_preparation.Deferred.Replacement.prepare
+      completed
+      ~owner:t.run_preparation_owner
+      ~source_owner:retry.source_owner
+      ~state:t.state
+      ~actor
+      ~request:(Run_admission_request.of_headless retry.request)
+      ~request_sha256:(Recurrence_execution_attempt.request_sha256 retry.next)
+      ~authorize
+  in
+  let%bind () =
+    Recurrence_command_admission.check_read
+      retry.read_actor
+      ~authorize:retry.read_authorize
+      t.state
+  in
+  let%bind () =
+    Run_preparation.Deferred.Replacement.check_current
+      replacement
+      ~owner:t.run_preparation_owner
+      ~state:t.state
+  in
+  let%bind () = retry_owner_basis t retry in
+  let%bind () = effect_deferred_quiescent t in
+  let%bind () =
+    if
+      Option.is_none t.run_preparation
+      && phys_equal retry.deferred previous_deferred
+      && Recurrence_controller.is_current retry.observed
+      &&
+      match retry.phase with
+      | Closed_before_writer current -> phys_equal current completed
+      | _ -> false
+    then Ok ()
+    else Error (error Conflict "retry closed source changed during authorization")
+  in
+  let%bind deferred =
+    Run_preparation.Deferred.Replacement.commit
+      replacement
+      ~owner:t.run_preparation_owner
+      ~state:t.state
+  in
+  retry.deferred <- deferred;
+  retry.phase <- Preparing_source;
+  t.run_preparation <- Some (Run_preparation.Deferred.preparation deferred);
+  Ok (retry, deferred)
+;;
+
+let complete_recurrence_retry_internal t ~retry ~completion =
+  let open Result.Let_syntax in
+  let%bind () = retry_owner_basis t retry in
+  let%bind () =
+    if
+      phys_equal
+        (Run_preparation.Source_completion.preparation completion)
+        (Run_preparation.Deferred.preparation retry.Recurrence_retry.deferred)
+    then Ok ()
+    else Error (error Conflict "retry completion belongs to another source")
+  in
+  let%bind () =
+    Run_preparation.Source_completion.check_basis
+      completion
+      ~owner:t.run_preparation_owner
+      ~state:t.state
+  in
+  match retry.phase with
+  | Preparing_source | Selected_source _ | Closed_before_writer _ ->
+    retry.phase <- Closed_before_writer completion;
     Ok ()
-  | Close deferred -> close_effect_deferred_internal t deferred
-  | Observe (actor, authorize, completion) ->
-    observe_no_run_effects_internal t ~actor ~authorize ~completion
+  | Writer_pending _ | Attempt_unconfirmed | Acknowledged _ | Invalid ->
+    Error (error Conflict "retry controller outcome cannot resume source preparation")
 ;;
 
 let bind_run_source_internal t ~preparation ~source =
@@ -14805,14 +15259,14 @@ let bind_run_source_internal t ~preparation ~source =
     then Result.map (Source_binding.check_current binding) ~f:(fun () -> binding)
     else Error (error Conflict "another source is bound to this preparation")
   | None ->
-    let%bind () = check_run_preparation t preparation in
+    let%bind () = check_registered_run_preparation t preparation in
     let%bind () = source_basis () in
     let rec binding : Source_binding.t =
       { source
       ; preparation
       ; domain = (Stdlib.Domain.self () :> int)
       ; phase = Open Selected
-      ; current = (fun () -> check_run_preparation t preparation)
+      ; current = (fun () -> check_registered_run_preparation t preparation)
       ; basis =
           (fun () ->
             let%bind () = source_basis () in
@@ -14822,6 +15276,12 @@ let bind_run_source_internal t ~preparation ~source =
       }
     in
     t.run_source_binding <- Some binding;
+    (match retry_for_preparation t preparation with
+     | Some retry ->
+       (match retry.phase with
+        | Preparing_source -> retry.phase <- Selected_source binding
+        | _ -> ())
+     | None -> ());
     Ok binding
 ;;
 
@@ -15013,6 +15473,7 @@ let admit_held_recurrence_run_internal t ~binding ~intent ~attempt ~session =
     let%map () = check_basis () in
     Held_run.Admission.Retained admission
   | None ->
+    let%bind () = check_retry_execution t preparation in
     let%bind () =
       match binding.phase with
       | Open Selected -> Ok ()
@@ -21669,7 +22130,15 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Checkpoint _
   | Quiescent_checkpoint _
   | Shutdown -> true
-  | Held_startup (Effect_deferred (Begin _ | Observe _))
+  | Held_startup
+      (Effect_deferred
+         ( Begin _
+         | Observe _
+         | Begin_retry _
+         | Resume_retry _
+         | Complete_retry _
+         | Check_execution _
+         | Rotate_retry _ ))
   | Held_startup (Begin_authored _)
   | Held_startup (Ready_authored _)
   | Held_startup (Claim_authored _)
@@ -21906,6 +22375,42 @@ let check_recurrence_creation_admission t prepared =
   Recurrence_creation_admission.check_current prepared t.state
 ;;
 
+let check_recurrence_new_work_runtime t ~entry ~nominal =
+  let open Result.Let_syntax in
+  let%bind () = require_runtime_admission t in
+  let%bind moderator_halted =
+    Runtime_builder.moderator_snapshot_is_halted t.state.moderator
+  in
+  let%bind () =
+    match t.state.lifecycle.desired, t.state.runtime_initialization, t.state.failure with
+    | Running, Ready, None when not (t.state.halted || moderator_halted) -> Ok ()
+    | (Running | Stopped), (Ready | Pending _), (Some _ | None) ->
+      Error (error Conflict "recurrence execution controller runtime is unavailable")
+  in
+  let%bind snapshot =
+    Recurrence_runtime.snapshot
+      t.recurrence_runtime
+      ~wall:(t.services.now ())
+      ~monotonic:(t.services.monotonic_now ())
+  in
+  let%bind late =
+    Recurrence_runtime.selection_lateness t.recurrence_runtime ~entry ~nominal ~snapshot
+  in
+  let%bind () =
+    match late with
+    | Some late
+      when Int64.(
+             late
+             <= Recurrence_policy.grace_ns
+                  (Recurrence_definition.policy (Recurrence_entry.current entry))) ->
+      Ok ()
+    | None | Some _ ->
+      Error (error Conflict "recurrence execution nominal is outside current grace")
+  in
+  let%bind () = require_runtime_admission t in
+  Ok ()
+;;
+
 let check_recurrence_execution_runtime t prepared =
   let open Result.Let_syntax in
   let%bind () =
@@ -21919,45 +22424,10 @@ let check_recurrence_execution_runtime t prepared =
   match Recurrence_execution_admission.decision prepared with
   | Retained _ -> Ok ()
   | New _ ->
-    let%bind () = require_runtime_admission t in
-    let%bind moderator_halted =
-      Runtime_builder.moderator_snapshot_is_halted t.state.moderator
-    in
-    let%bind () =
-      match
-        t.state.lifecycle.desired, t.state.runtime_initialization, t.state.failure
-      with
-      | Running, Ready, None when not (t.state.halted || moderator_halted) -> Ok ()
-      | (Running | Stopped), (Ready | Pending _), (Some _ | None) ->
-        Error (error Conflict "recurrence execution controller runtime is unavailable")
-    in
-    let%bind snapshot =
-      Recurrence_runtime.snapshot
-        t.recurrence_runtime
-        ~wall:(t.services.now ())
-        ~monotonic:(t.services.monotonic_now ())
-    in
-    let entry = Recurrence_execution_admission.entry prepared in
-    let%bind late =
-      Recurrence_runtime.selection_lateness
-        t.recurrence_runtime
-        ~entry
-        ~nominal:(Recurrence_execution_admission.nominal prepared)
-        ~snapshot
-    in
-    let%bind () =
-      match late with
-      | Some late
-        when Int64.(
-               late
-               <= Recurrence_policy.grace_ns
-                    (Recurrence_definition.policy (Recurrence_entry.current entry))) ->
-        Ok ()
-      | None | Some _ ->
-        Error (error Conflict "recurrence execution nominal is outside current grace")
-    in
-    let%bind () = require_runtime_admission t in
-    Ok ()
+    check_recurrence_new_work_runtime
+      t
+      ~entry:(Recurrence_execution_admission.entry prepared)
+      ~nominal:(Recurrence_execution_admission.nominal prepared)
 ;;
 
 let check_recurrence_execution_admission t prepared =
@@ -22043,6 +22513,215 @@ let record_recurrence_execution_internal ?binding t ~actor ~authorize ~intent ~a
      | Retained row when Recurrence_execution.equal row execution -> Ok row
      | Retained _ | New _ ->
        Error (error Conflict "committed recurrence execution changed before return"))
+;;
+
+let retry_selected_basis ?writer retry next =
+  let open Result.Let_syntax in
+  let%bind () = retry.Recurrence_retry.basis () in
+  let%bind () =
+    match retry.phase with
+    | Selected_source binding when phys_equal binding next -> Ok ()
+    | Writer_pending (binding, actual)
+      when phys_equal binding next && Option.exists writer ~f:(phys_equal actual) -> Ok ()
+    | _ -> Error (error Conflict "retry does not own this selected source or writer")
+  in
+  if
+    phys_equal
+      next.Source_binding.preparation
+      (Run_preparation.Deferred.preparation retry.deferred)
+    && Recurrence_controller.is_current retry.observed
+  then retry.selected_basis next
+  else Error (error Conflict "retry target source or Store observation changed")
+;;
+
+let rotate_recurrence_retry_internal t ~retry ~next ~actor ~authorize =
+  let open Result.Let_syntax in
+  let%bind controller = require_recurrence_controller t in
+  let%bind () =
+    if
+      Int.equal retry.Recurrence_retry.domain (Stdlib.Domain.self () :> int)
+      && Recurrence_controller.same_store controller retry.controller
+    then Ok ()
+    else Error (error Conflict "retry belongs to another Store or Eio domain")
+  in
+  let self = phys_equal retry.issuing_actor t.inference_owner_identity in
+  let%bind () =
+    if
+      Agent_protocol.Session_ref.equal
+        (Recurrence_controller.session controller)
+        (Recurrence_controller.session retry.controller)
+      && not self
+    then Error (error Conflict "same-session retry belongs to another physical actor")
+    else Ok ()
+  in
+  let%bind () =
+    match retry.phase with
+    | Acknowledged _ -> Ok ()
+    | _ -> Recurrence_retry.check_basis retry
+  in
+  let%bind resolution =
+    match retry.phase with
+    | Acknowledged (_, execution) ->
+      let%bind predecessor =
+        Result.of_option
+          (List.find (Recurrence_execution.attempts execution) ~f:(fun old ->
+             Recurrence_execution_attempt.equal
+               (Recurrence_execution.Attempt.request old)
+               retry.previous))
+          ~error:(error Conflict "acknowledged retry lost its predecessor")
+      in
+      Result.of_option
+        (Recurrence_execution.Attempt.retry_resolution predecessor)
+        ~error:(error Conflict "acknowledged retry lost its resolution")
+    | _ ->
+      Recurrence_retry_resolution.create
+        ~intent:retry.intent
+        ~attempt:retry.previous
+        ~target_revision:retry.resolution_revision
+        ~resolved_at:(t.services.now ())
+  in
+  let prepare () =
+    Recurrence_retry_admission.prepare
+      t.state
+      ~controller
+      ~actor
+      ~authorize
+      ~intent:retry.intent
+      ~previous:retry.previous
+      ~resolution
+      ~next:retry.next
+  in
+  let controller_current () =
+    if
+      (not t.stopped)
+      && Option.is_none (Eio.Promise.peek t.finished)
+      && Option.is_none t.lifecycle_fence
+    then Ok ()
+    else Error (error Conflict "retry controller writer is unavailable")
+  in
+  let%bind () = controller_current () in
+  let%bind prepared = prepare () in
+  let%bind () = Recurrence_retry_admission.check_policy prepared t.state in
+  let%bind () = Recurrence_retry_admission.check_basis prepared t.state in
+  match Recurrence_retry_admission.decision prepared with
+  | Retained execution ->
+    (* This path is historical DATA only. It cannot install a missing live ACK. *)
+    Ok execution
+  | New { catalog; execution } ->
+    let%bind () = retry_selected_basis retry next in
+    let run_preparation =
+      Option.some_if self (Run_preparation.Deferred.preparation retry.deferred)
+    in
+    let attempted = ref false in
+    let check_owned () =
+      let%bind () = controller_current () in
+      let%bind () = retry_selected_basis ~writer:attempted retry next in
+      (* Source admission policy is run centrally before this final closure. The
+         target read/new-preparation policy and controller policy precede clock;
+         only originals and callback-free exact bases follow the clock. *)
+      let%bind () = retry.policy () in
+      let%bind () = Recurrence_retry_admission.check_policy prepared t.state in
+      let%bind () =
+        check_recurrence_new_work_runtime
+          t
+          ~entry:(Recurrence_retry_admission.entry prepared)
+          ~nominal:(Recurrence_retry_admission.nominal prepared)
+      in
+      let%bind () = retry.authority () in
+      let%bind () =
+        Recurrence_command_admission.check_write actor ~authorize:(fun _ -> Ok ()) t.state
+      in
+      let%bind () = Recurrence_retry_admission.check_basis prepared t.state in
+      retry_selected_basis ~writer:attempted retry next
+    in
+    let%bind () = Source_binding.check_current next in
+    let%bind () = check_owned () in
+    (* The pending preparation cannot authorize execution. This candidate is
+       pure controller bookkeeping; only persist/install below use the exact
+       preparation to advance the self-target's acknowledged source owner. *)
+    let%bind candidate =
+      prepare_transition
+        t
+        ~delta:(Session_delta.Recurrence_catalog_changed catalog)
+        ~payloads:[]
+    in
+    let selected = retry.phase in
+    retry.phase <- Writer_pending (next, attempted);
+    let acknowledged = ref false in
+    let%bind () =
+      Exn.protect
+        ~finally:(fun () ->
+          if not !acknowledged
+          then (
+            match retry.phase with
+            | Writer_pending (binding, current)
+              when phys_equal binding next && phys_equal current attempted ->
+              retry.phase <- (if !attempted then Attempt_unconfirmed else selected)
+            | _ -> ()))
+        ~f:(fun () ->
+          let%bind () =
+            persist_transition
+              ?run_preparation
+              ~commit_attempted:attempted
+              ~check_before_commit:check_owned
+              t
+              candidate
+          in
+          (* The sole writer has acknowledged THIS candidate. Preserve the fact
+             even if the physical target was invalidated while the writer yielded;
+             an absent live binding is not restored from the saved row. *)
+          install_committed_transition ?run_preparation t candidate;
+          let live =
+            match retry.phase with
+            | Writer_pending (binding, current)
+              when phys_equal binding next
+                   && phys_equal current attempted
+                   && Result.is_ok (retry.basis ())
+                   && Result.is_ok (Source_binding.check_basis next) -> Some next
+            | _ -> None
+          in
+          retry.phase <- Acknowledged (live, execution);
+          acknowledged := true;
+          publish_committed_transition t candidate;
+          Ok ())
+    in
+    let%bind refreshed = prepare () in
+    let%bind () = Recurrence_retry_admission.check_policy refreshed t.state in
+    let%bind () = Recurrence_retry_admission.check_basis refreshed t.state in
+    (match Recurrence_retry_admission.decision refreshed with
+     | Retained row when Recurrence_execution.equal execution row -> Ok row
+     | _ -> Error (error Conflict "acknowledged retry row changed before return"))
+;;
+
+let effect_deferred_request
+  : type a. t -> a Effect_deferred_request.t -> (a, Agent_protocol.Error.t) result
+  =
+  fun t request ->
+  match request with
+  | Begin (actor, authorize, request) ->
+    begin_effect_deferred_internal t ~actor ~authorize ~request
+  | Begin_retry (observation, actor, authorize, intent, previous, request) ->
+    begin_recurrence_retry_internal
+      t
+      ~observation
+      ~actor
+      ~authorize
+      ~intent
+      ~previous
+      ~request
+  | Resume_retry (retry, actor, authorize) ->
+    resume_recurrence_retry_internal t ~retry ~actor ~authorize
+  | Complete_retry (retry, completion) ->
+    complete_recurrence_retry_internal t ~retry ~completion
+  | Rotate_retry (retry, next, actor, authorize) ->
+    rotate_recurrence_retry_internal t ~retry ~next ~actor ~authorize
+  | Check_execution preparation -> check_run_preparation t preparation
+  | Exclude ->
+    exclude_effect_deferred t Ordinary_execution;
+    Ok ()
+  | Close deferred -> close_effect_deferred_internal t deferred
+  | Observe (actor, authorize, completion) ->
+    observe_no_run_effects_internal t ~actor ~authorize ~completion
 ;;
 
 let check_lifecycle_fence t fence =
@@ -26305,6 +26984,34 @@ let observe_no_run_effects t ~actor ~authorize ~completion =
   call t (Held_startup (Effect_deferred (Observe (actor, authorize, completion))))
 ;;
 
+let begin_recurrence_retry_preparation
+      t
+      ~observation
+      ~actor
+      ~authorize
+      ~intent
+      ~previous
+      ~request
+  =
+  call
+    t
+    (Held_startup
+       (Effect_deferred
+          (Begin_retry (observation, actor, authorize, intent, previous, request))))
+;;
+
+let resume_recurrence_retry_preparation t ~retry ~actor ~authorize =
+  call t (Held_startup (Effect_deferred (Resume_retry (retry, actor, authorize))))
+;;
+
+let complete_recurrence_retry_source t ~retry ~completion =
+  call t (Held_startup (Effect_deferred (Complete_retry (retry, completion))))
+;;
+
+let check_prepared_run_execution t ~preparation =
+  call t (Held_startup (Effect_deferred (Check_execution preparation)))
+;;
+
 let bind_run_source t ~preparation ~source =
   call t (Bind_run_source (preparation, source))
 ;;
@@ -27117,6 +27824,12 @@ let record_prepared_recurrence_execution t ~binding ~actor ~authorize ~intent ~a
   recurrence_call
     t
     (Record_prepared_recurrence_execution (binding, actor, authorize, intent, attempt))
+;;
+
+let rotate_prepared_recurrence_execution t ~retry ~next ~actor ~authorize =
+  recurrence_call
+    t
+    (Held_startup (Effect_deferred (Rotate_retry (retry, next, actor, authorize))))
 ;;
 
 let import_held_recurrence_execution

@@ -3015,10 +3015,12 @@ module Deferred_run_attempt = struct
   type 'a t =
     { result : ('a, Agent_protocol.Error.t) result
     ; no_effects : Agent_session.Session_actor.No_effects_observation.t option
+    ; retry : Agent_session.Session_actor.Recurrence_retry.t option
     }
 
   let result t = t.result
   let no_effects t = t.no_effects
+  let retry t = t.retry
 
   module Outcome = struct
     type 'a attempt = 'a t
@@ -3045,7 +3047,7 @@ module Deferred_parent_cleanup = struct
   ;;
 end
 
-let with_effect_deferred_run_source t entry ~actor ~authorize ~request f =
+let with_deferred_run_source t entry ~actor ~authorize ~with_source_stage f =
   let module A = Agent_session in
   let module Scope = Runtime_owner.Scope_outcome in
   let module Deferred = Runtime_owner.Deferred_source in
@@ -3061,29 +3063,22 @@ let with_effect_deferred_run_source t entry ~actor ~authorize ~request f =
   in
   let parent_cleanup = ref Deferred_parent_cleanup.Not_acquired in
   let report =
-    Runtime_owner.with_effect_deferred_source_reported
-      entry.Session_registry.runtime
-      ~source_owner:t.runtime_source_owner
-      ~actor
-      ~authorize
-      ~request
-      (fun deferred ->
-         with_selected_run_source
-           t
-           entry
-           ~with_parent:(fun owner f ->
-             parent_cleanup := Awaiting_report;
-             let outcome =
-               Runtime_owner.with_loaded_source_capabilities_reported
-                 owner
-                 ~source_owner:t.runtime_source_owner
-                 f
-             in
-             parent_cleanup := Reported (Scope.cleanup outcome);
-             Scope.resume outcome)
-           ~with_source:(fun source f ->
-             Result.bind (Deferred.prepare deferred ~source) ~f)
-           (f (Deferred.preparation deferred)))
+    with_source_stage (fun deferred ->
+      with_selected_run_source
+        t
+        entry
+        ~with_parent:(fun owner f ->
+          parent_cleanup := Awaiting_report;
+          let outcome =
+            Runtime_owner.with_loaded_source_capabilities_reported
+              owner
+              ~source_owner:t.runtime_source_owner
+              f
+          in
+          parent_cleanup := Reported (Scope.cleanup outcome);
+          Scope.resume outcome)
+        ~with_source:(fun source f -> Result.bind (Deferred.prepare deferred ~source) ~f)
+        (f deferred))
   in
   let outcome = Deferred.Report.outcome report in
   (* Resumption only applies the established primary/cleanup precedence. Capture
@@ -3104,31 +3099,77 @@ let with_effect_deferred_run_source t entry ~actor ~authorize ~request f =
         capture (fun () ->
           A.Session_actor.close_effect_deferred_preparation entry.actor preparation))
     in
-    let no_effects () =
-      match Scope.Cleanup.status (Scope.cleanup outcome), closed with
-      | Joined, Ok (Ok closed) when Deferred_parent_cleanup.succeeded !parent_cleanup ->
-        let open Result.Let_syntax in
-        let%bind completion =
-          A.Run_preparation.Closed_attempt.complete
-            closed
-            ~source_owner:t.runtime_source_owner
+    let completion =
+      lazy
+        (Eio.Cancel.protect (fun () ->
+           capture (fun () ->
+             match Scope.Cleanup.status (Scope.cleanup outcome), closed with
+             | Joined, Ok (Ok closed)
+               when Deferred_parent_cleanup.succeeded !parent_cleanup ->
+               A.Run_preparation.Closed_attempt.complete
+                 closed
+                 ~source_owner:t.runtime_source_owner
+             | (Never_acquired | Joined | Failed _), _ ->
+               Error
+                 (unavailable
+                    Conflict
+                    "deferred source cleanup did not establish closure"))))
+    in
+    let retry_completion =
+      Option.map (Deferred.Report.retry report) ~f:(fun retry ->
+        let completed =
+          match Lazy.force completion with
+          | Error failure -> Error failure
+          | Ok (Error failure) -> Ok (Error failure)
+          | Ok (Ok completion) ->
+            Eio.Cancel.protect (fun () ->
+              capture (fun () ->
+                A.Session_actor.complete_recurrence_retry_source
+                  entry.actor
+                  ~retry
+                  ~completion))
         in
-        A.Session_actor.observe_no_run_effects entry.actor ~actor ~authorize ~completion
-      | (Never_acquired | Joined | Failed _), _ ->
-        Error (unavailable Conflict "deferred source cleanup did not establish closure")
+        retry, completed)
+    in
+    let resumable_retry =
+      match retry_completion with
+      | Some (retry, Ok (Ok ())) -> Some retry
+      | Some (_, (Error _ | Ok (Error _))) | None -> None
+    in
+    let no_effects () =
+      let%bind completion =
+        match Lazy.force completion with
+        | Ok result -> result
+        | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
+      in
+      A.Session_actor.observe_no_run_effects entry.actor ~actor ~authorize ~completion
     in
     let finish result =
+      (* Even a raised/cancelled body has already factually closed its issued
+         retry above. Completion errors cannot replace the original failure. *)
+      (match retry_completion, result with
+       | Some (_, Error (exn, backtrace)), Ok _ ->
+         Exn.raise_with_original_backtrace exn backtrace
+       | Some (_, (Error _ | Ok _)), Error _ | Some (_, Ok _), Ok _ | None, _ -> ());
       let observation =
-        (* Observation is factual finalization, never new execution. A failed
-           observation cannot replace the body's original failure or certify it. *)
-        match Eio.Cancel.protect (fun () -> capture no_effects) with
-        | Ok observation -> Result.ok observation
-        | Error (exn, backtrace) ->
-          (match result with
-           | Error _ -> None
-           | Ok _ -> Exn.raise_with_original_backtrace exn backtrace)
+        match resumable_retry with
+        | Some _ ->
+          (* Pending rotation retains only this exact frozen retry. It cannot
+             fork another request through an independent NEXT observation. *)
+          None
+        | None ->
+          (* Failure to close as prewriter custody is never interpreted as ACK.
+             The Actor independently rejects every pending/unconfirmed lineage. *)
+          (match Eio.Cancel.protect (fun () -> capture no_effects) with
+           | Ok observation -> Result.ok observation
+           | Error (exn, backtrace) ->
+             (match result with
+              | Error _ -> None
+              | Ok _ -> Exn.raise_with_original_backtrace exn backtrace))
       in
-      Ok (Deferred_run_attempt.Outcome.Attempted { result; no_effects = observation })
+      Ok
+        (Deferred_run_attempt.Outcome.Attempted
+           { result; no_effects = observation; retry = resumable_retry })
     in
     (match primary with
      | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
@@ -3145,6 +3186,80 @@ let with_effect_deferred_run_source t entry ~actor ~authorize ~request f =
                (unavailable
                   Invalid_state
                   "retained Run unexpectedly issued a preparation"))))
+;;
+
+let with_effect_deferred_run_source t entry ~actor ~authorize ~request f =
+  with_deferred_run_source
+    t
+    entry
+    ~actor
+    ~authorize
+    ~with_source_stage:
+      (Runtime_owner.with_effect_deferred_source_reported
+         entry.Session_registry.runtime
+         ~source_owner:t.runtime_source_owner
+         ~actor
+         ~authorize
+         ~request)
+    (fun source -> f (Runtime_owner.Deferred_source.preparation source))
+;;
+
+let retry_source_callback f source prepared =
+  match Runtime_owner.Deferred_source.retry source with
+  | Some retry -> f retry prepared
+  | None -> Error (unavailable Invalid_state "retry source lost its issued retry")
+;;
+
+let retry_source_attempt = function
+  | Deferred_run_attempt.Outcome.Attempted attempt -> Ok attempt
+  | Retained _ -> Error (unavailable Invalid_state "retry source returned retained DATA")
+;;
+
+let with_recurrence_retry_run_source
+      t
+      entry
+      ~observation
+      ~actor
+      ~authorize
+      ~intent
+      ~previous
+      ~request
+      f
+  =
+  with_deferred_run_source
+    t
+    entry
+    ~actor
+    ~authorize
+    ~with_source_stage:
+      (Runtime_owner.with_recurrence_retry_source_reported
+         entry.Session_registry.runtime
+         ~source_owner:t.runtime_source_owner
+         ~observation
+         ~actor
+         ~authorize
+         ~intent
+         ~previous
+         ~request)
+    (retry_source_callback f)
+  |> Result.bind ~f:retry_source_attempt
+;;
+
+let resume_recurrence_retry_run_source t entry ~retry ~actor ~authorize f =
+  with_deferred_run_source
+    t
+    entry
+    ~actor
+    ~authorize
+    ~with_source_stage:
+      (Runtime_owner.resume_recurrence_retry_source_reported
+         entry.Session_registry.runtime
+         ~source_owner:t.runtime_source_owner
+         ~retry
+         ~actor
+         ~authorize)
+    (retry_source_callback f)
+  |> Result.bind ~f:retry_source_attempt
 ;;
 
 let restore_authored_selection t ~artifacts ~public record =

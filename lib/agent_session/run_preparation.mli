@@ -217,6 +217,44 @@ module Deferred : sig
     -> state:Session_state.t
     -> (Closed_attempt.t, Agent_protocol.Error.t) result
 
+  type deferred = t
+
+  module Replacement : sig
+    (** Immutable validated issuance DATA, not installed Actor permission or a
+        second live retry cell. Preparation runs the actual new authorization
+        without consuming the old completion. The Actor must then repeat its
+        genuine old Store/read checks and new original before [commit]. *)
+    type t
+
+    val prepare
+      :  Source_completion.t
+      -> owner:Owner.t
+      -> source_owner:Runtime_source_owner.Identity.t
+      -> state:Session_state.t
+      -> actor:Operator_authorization.t
+      -> request:Run_admission_request.t
+      -> request_sha256:string
+      -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
+      -> (t, Agent_protocol.Error.t) result
+
+    (** Repeat new original currentness, bracketed by both pure bases. No old
+        observation callback is stored in the newly issued preparation. *)
+    val check_current
+      :  t
+      -> owner:Owner.t
+      -> state:Session_state.t
+      -> (unit, Agent_protocol.Error.t) result
+
+    (** Callback-free exact old/new validation then irreversible old exclusion.
+        The Actor publishes the returned actual Deferred in a nonfailing tail.
+        Repeated commit rejects the consumed old completion. *)
+    val commit
+      :  t
+      -> owner:Owner.t
+      -> state:Session_state.t
+      -> (deferred, Agent_protocol.Error.t) result
+  end
+
   module Decision : sig
     type deferred = t
 

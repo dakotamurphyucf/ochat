@@ -994,6 +994,41 @@ let record_execution t ~intent ~attempt =
     candidate, row)
 ;;
 
+let rotate_execution t ~intent ~previous ~resolution ~next =
+  let open Result.Let_syntax in
+  let%bind old = frontier t in
+  let%bind updated, row =
+    Recurrence_frontier.rotate_execution
+      old
+      ~definitions:(definitions t)
+      ~cursor:(cursor t)
+      ~intent
+      ~previous
+      ~resolution
+      ~next
+  in
+  if Int64.equal (Recurrence_frontier.revision old) (Recurrence_frontier.revision updated)
+  then Ok (t, row)
+  else (
+    let%bind () =
+      if
+        equal_control (control t) Enabled
+        && I.Definition.equal
+             (I.Occurrence.definition (Recurrence_execution_intent.occurrence intent))
+             (F.key (current t))
+        && Int64.equal
+             (Recurrence_execution_intent.control_revision intent)
+             (control_revision t)
+      then Ok ()
+      else invalid "new retry requires exact enabled definition/control"
+    in
+    let%bind frontier = Stored_frontier.create updated in
+    let candidate = C.with_value t { (C.value t) with frontier = Some frontier } in
+    let%bind () = validate_transition t ~incoming:candidate in
+    let%map _ = to_document candidate |> protocol in
+    candidate, row)
+;;
+
 let effective_control t ~current_revision ~archived =
   let birth = F.birth_lifecycle_revision (current t) in
   let comparison = P.Session_lifecycle.Revision.compare birth current_revision in

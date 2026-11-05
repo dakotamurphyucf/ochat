@@ -251,3 +251,238 @@ let%expect_test
   [%expect
     {| native bounded prefix roundtrips; capacity rejection preserves all 32 claims and original bytes |}]
 ;;
+
+let%expect_test "pure rotation preserves complete custody and advances each carrier once" =
+  let module Catalog = A.Recurrence_catalog in
+  let module Resolution = A.Recurrence_retry_resolution in
+  let module Growth = A.Capacity_growth in
+  let definition = definition "rotation" in
+  let selected, _, _ =
+    step (enabled definition) ~phase:None (snapshot ~wall:(at_ms 0) ~elapsed_ms:0)
+  in
+  let intent = capture_intent definition selected (original_nominal selected) in
+  let attempt number key =
+    Attempt.create
+      ~intent
+      ~number
+      ~principal_id
+      ~expected_revision:(Int64.of_int (number + 7))
+      ~key:(P.Idempotency_key.of_string key |> protocol_ok)
+    |> protocol_ok
+  in
+  let resolution previous revision =
+    Resolution.create
+      ~intent
+      ~attempt:previous
+      ~target_revision:revision
+      ~resolved_at:timestamp
+    |> protocol_ok
+  in
+  let previous = attempt 0 "rotation:0" in
+  let recorded, initial =
+    E.record_execution selected ~intent ~attempt:previous |> protocol_ok
+  in
+  let audited =
+    Execution.record_rejection initial ~code:Conflict
+    |> protocol_ok
+    |> fun row -> Execution.mark_uncertain row ~code:Persistence_error |> protocol_ok
+  in
+  let raw =
+    Execution.to_json audited
+    |> fun json ->
+    append json "future_execution" (`Number "1.00e2")
+    |> map_payload ~f:(fun payload ->
+      match field payload "attempts" with
+      | `Array [ first ] ->
+        set
+          payload
+          "attempts"
+          (`Array [ append first "future_attempt" (`Number "2.00e1") ])
+      | _ -> assert false)
+  in
+  let replace_execution entry json =
+    edit_frontier entry ~f:(fun payload ->
+      match field payload "executions" with
+      | `Array [ wrapper ] ->
+        set
+          payload
+          "executions"
+          (`Array
+              [ (set wrapper "execution" json
+                 |> fun wrapper -> set wrapper "future_wrapper" (`String "retained"))
+              ])
+      | _ -> assert false)
+  in
+  let recorded = replace_execution recorded raw in
+  let catalog =
+    Catalog.of_jsonaf
+      (`Object
+          [ "revision", `String "3"
+          ; ( "entries"
+            , `Array
+                [ `Object
+                    [ "id", P.Id.Recurrence.to_json (E.id recorded)
+                    ; "document", entry_json recorded
+                    ]
+                ] )
+          ; "receipts", `Array []
+          ])
+    |> protocol_ok
+  in
+  let find catalog = Catalog.find catalog (E.id recorded) |> Option.value_exn in
+  let catalog_json catalog = Catalog.to_jsonaf catalog |> protocol_ok in
+  let settled = resolution previous 7L in
+  let next = attempt 1 "rotation:1" in
+  let rotated, row =
+    Catalog.rotate_execution catalog ~intent ~previous ~resolution:settled ~next
+    |> protocol_ok
+  in
+  let updated = find rotated in
+  [%test_eq: int64] (Int64.succ (Catalog.revision catalog)) (Catalog.revision rotated);
+  [%test_eq: int64]
+    (Int64.succ (H.revision (frontier recorded)))
+    (H.revision (frontier updated));
+  assert (A.Recurrence_cursor.equal (E.cursor recorded) (E.cursor updated));
+  [%test_eq: int64] (E.control_revision recorded) (E.control_revision updated);
+  [%test_eq: int] 1 (H.pending_count (frontier updated));
+  assert (H.Summary.equal (H.summary (frontier recorded)) (H.summary (frontier updated)));
+  assert (List.is_empty (H.ready (frontier updated)));
+  let wrapper =
+    match
+      field
+        (D.Document.payload (H.to_document (frontier updated) |> document_ok))
+        "executions"
+    with
+    | `Array [ wrapper ] -> wrapper
+    | _ -> assert false
+  in
+  assert (D.Json.equal (field wrapper "future_wrapper") (`String "retained"));
+  assert (
+    D.Json.equal (field (Execution.to_json row) "future_execution") (`Number "1.00e2"));
+  let first = List.hd_exn (Execution.attempts row) in
+  assert (
+    Option.equal P.Error.equal_code (Some Conflict) (Execution.Attempt.rejection first));
+  assert (
+    Option.equal
+      P.Error.equal_code
+      (Some Persistence_error)
+      (Execution.Attempt.uncertainty first));
+  assert (
+    Option.equal
+      Resolution.equal
+      (Some settled)
+      (Execution.Attempt.retry_resolution first));
+  let raw_first =
+    match field (field (Execution.to_json row) "payload") "attempts" with
+    | `Array (first :: _) -> first
+    | _ -> assert false
+  in
+  assert (D.Json.equal (field raw_first "future_attempt") (`Number "2.00e1"));
+  let replay, replay_row =
+    Catalog.rotate_execution rotated ~intent ~previous ~resolution:settled ~next
+    |> protocol_ok
+  in
+  assert (phys_equal replay rotated);
+  assert (Execution.equal replay_row row);
+  assert (D.Json.equal (catalog_json rotated) (catalog_json replay));
+  let paused = E.pause updated ~reason:Operator_pause |> protocol_ok in
+  let paused_replay, _ =
+    E.rotate_execution paused ~intent ~previous ~resolution:settled ~next |> protocol_ok
+  in
+  assert (phys_equal paused paused_replay);
+  let invalid (result : (_, P.Error.t) result) =
+    match result with
+    | Error error -> [%test_eq: P.Error.code] Invalid_request error.code
+    | Ok _ -> failwith "invalid pure rotation was admitted"
+  in
+  invalid
+    (Catalog.rotate_execution
+       rotated
+       ~intent
+       ~previous
+       ~resolution:(resolution previous 8L)
+       ~next);
+  invalid
+    (Catalog.rotate_execution
+       rotated
+       ~intent
+       ~previous:(attempt 0 "rotation:other")
+       ~resolution:settled
+       ~next);
+  invalid
+    (E.rotate_execution
+       paused
+       ~intent
+       ~previous:next
+       ~resolution:(resolution next 8L)
+       ~next:(attempt 2 "rotation:2"));
+  let saturated, row =
+    List.fold
+      (List.init 6 ~f:(fun i -> i + 2))
+      ~init:(rotated, row)
+      ~f:(fun (catalog, row) number ->
+        let previous = Execution.Attempt.request (Execution.current_attempt row) in
+        let next = attempt number ("rotation:" ^ Int.to_string number) in
+        let incoming, row =
+          Catalog.rotate_execution
+            catalog
+            ~intent
+            ~previous
+            ~resolution:(resolution previous (Int64.of_int (number + 6)))
+            ~next
+          |> protocol_ok
+        in
+        [%test_eq: int64]
+          (Int64.succ (Catalog.revision catalog))
+          (Catalog.revision incoming);
+        [%test_eq: int] 1 (H.pending_count (frontier (find incoming)));
+        incoming, row)
+  in
+  [%test_eq: int] 8 (List.length (Execution.attempts row));
+  let unchanged = catalog_json saturated in
+  let last = Execution.Attempt.request (Execution.current_attempt row) in
+  invalid
+    (Attempt.create
+       ~intent
+       ~number:8
+       ~principal_id
+       ~expected_revision:15L
+       ~key:(P.Idempotency_key.of_string "rotation:8" |> protocol_ok));
+  (* A different request at ordinal seven is a duplicate-ordinal replacement,
+     not an exercise of an independently reachable ninth append. *)
+  invalid
+    (Catalog.rotate_execution
+       saturated
+       ~intent
+       ~previous:last
+       ~resolution:(resolution last 20L)
+       ~next:(attempt 7 "rotation:duplicate-ordinal"));
+  invalid (Catalog.rotate_execution saturated ~intent ~previous ~resolution:settled ~next);
+  assert (D.Json.equal unchanged (catalog_json saturated));
+  let padded = append raw "padding" (`String "") in
+  let bounded = Execution.of_json padded |> protocol_ok in
+  let measured = Growth.measure padded ~limits:Execution.limits |> protocol_ok in
+  let reserve = Execution.reserved_growth bounded |> protocol_ok in
+  let padding =
+    D.Limits.max_bytes Execution.limits
+    - Growth.encoded_bytes measured
+    - Growth.encoded_bytes reserve
+    - 1
+  in
+  let near_full =
+    replace_execution recorded (set padded "padding" (`String (String.make padding 'x')))
+  in
+  let unchanged = entry_json near_full in
+  invalid (E.rotate_execution near_full ~intent ~previous ~resolution:settled ~next);
+  assert (D.Json.equal unchanged (entry_json near_full));
+  [%test_eq: int] 1 (H.pending_count (frontier near_full));
+  print_endline
+    "one rotation advances catalog and frontier once; exact duplicate retains both";
+  print_endline
+    "eight attempts retained; ordinal eight, duplicate ordinal, stale and capacity reject";
+  [%expect
+    {|
+    one rotation advances catalog and frontier once; exact duplicate retains both
+    eight attempts retained; ordinal eight, duplicate ordinal, stale and capacity reject
+    |}]
+;;

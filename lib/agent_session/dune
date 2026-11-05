@@ -62,6 +62,7 @@
   recurrence_command_admission
   recurrence_creation_admission
   recurrence_execution_admission
+  recurrence_retry_admission
   recurrence_settlement_admission
   recurrence_source
   recurrence_reconciliation

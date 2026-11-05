@@ -818,6 +818,10 @@ let with_execution_runtime t ~owner f =
 ;;
 
 let with_prepared_run_runtime t ~preparation f =
+  let open Result.Let_syntax in
+  let%bind () =
+    Agent_session.Session_actor.check_prepared_run_execution t.actor ~preparation
+  in
   with_runtime_lease ~run_preparation:preparation t ~retain_resources:false f
 ;;
 
@@ -1179,10 +1183,12 @@ module Deferred_source = struct
     { owner : owner
     ; stage : source_stage
     ; deferred : Agent_session.Run_preparation.Deferred.t
+    ; retry : Agent_session.Session_actor.Recurrence_retry.t option
     ; mutable source_attempted : bool
     }
 
   let preparation t = t.deferred
+  let retry t = t.retry
 
   let prepare t ~source =
     let open Result.Let_syntax in
@@ -1237,16 +1243,62 @@ module Deferred_source = struct
   module Report = struct
     type 'a t =
       { deferred : Agent_session.Run_preparation.Deferred.t option
+      ; retry : Agent_session.Session_actor.Recurrence_retry.t option
       ; outcome : 'a Decision.t Scope_outcome.t
       }
 
     let deferred t = t.deferred
+    let retry t = t.retry
     let outcome t = t.outcome
   end
 end
 
-let with_effect_deferred_source_reported t ~source_owner ~actor ~authorize ~request f =
+module Deferred_issuance = struct
+  type t =
+    | Initial of Agent_session.Run_admission_request.Headless.t
+    | Retry of
+        { observation : Agent_session.Session_actor.No_effects_observation.t
+        ; intent : Agent_session.Recurrence_execution_intent.t
+        ; previous : Agent_session.Recurrence_execution_attempt.t
+        ; request : Agent_session.Run_admission_request.Headless.t
+        }
+    | Resume of Agent_session.Session_actor.Recurrence_retry.t
+
+  type decision =
+    | Retained of Agent_protocol.Run_receipt.t
+    | Issued of
+        { deferred : Agent_session.Run_preparation.Deferred.t
+        ; retry : Agent_session.Session_actor.Recurrence_retry.t option
+        }
+
+  let issue t target ~actor ~authorize =
+    let module Actor = Agent_session.Session_actor in
+    match t with
+    | Initial request ->
+      Actor.begin_effect_deferred_headless_preparation target ~actor ~authorize ~request
+      |> Result.map ~f:(function
+        | Agent_session.Run_preparation.Deferred.Decision.Retained receipt ->
+          Retained receipt
+        | Prepare deferred -> Issued { deferred; retry = None })
+    | Retry { observation; intent; previous; request } ->
+      Actor.begin_recurrence_retry_preparation
+        target
+        ~observation
+        ~actor
+        ~authorize
+        ~intent
+        ~previous
+        ~request
+      |> Result.map ~f:(fun (retry, deferred) -> Issued { deferred; retry = Some retry })
+    | Resume retry ->
+      Actor.resume_recurrence_retry_preparation target ~retry ~actor ~authorize
+      |> Result.map ~f:(fun (retry, deferred) -> Issued { deferred; retry = Some retry })
+  ;;
+end
+
+let with_deferred_source_reported t ~source_owner ~actor ~authorize ~issuance f =
   let deferred = ref None in
+  let retry = ref None in
   let outcome =
     match Scope_outcome.capture (fun () -> check_source_owner t source_owner) with
     | Raised (exn, backtrace) ->
@@ -1258,33 +1310,71 @@ let with_effect_deferred_source_reported t ~source_owner ~actor ~authorize ~requ
         let open Result.Let_syntax in
         let%bind decision =
           Eio.Cancel.protect (fun () ->
-            let result =
-              Agent_session.Session_actor.begin_effect_deferred_headless_preparation
-                t.actor
-                ~actor
-                ~authorize
-                ~request
-            in
+            let result = Deferred_issuance.issue issuance t.actor ~actor ~authorize in
             Result.iter result ~f:(function
-              | Agent_session.Run_preparation.Deferred.Decision.Prepare issued ->
-                deferred := Some issued
+              | Deferred_issuance.Issued issued ->
+                (* Capture the actual pair before pending cancellation can escape,
+                   including when source selection never invokes its callback. *)
+                deferred := Some issued.deferred;
+                retry := issued.retry
               | Retained _ -> ());
             result)
         in
         match decision with
         | Retained receipt -> Ok (Deferred_source.Decision.Retained receipt)
-        | Prepare issued ->
+        | Issued issued ->
           let source =
             { Deferred_source.owner = t
             ; stage
-            ; deferred = issued
+            ; deferred = issued.deferred
+            ; retry = issued.retry
             ; source_attempted = false
             }
           in
           Eio.Fiber.check ();
           Result.map (f source) ~f:(fun result -> Deferred_source.Decision.Fresh result))
   in
-  { Deferred_source.Report.deferred = !deferred; outcome }
+  { Deferred_source.Report.deferred = !deferred; retry = !retry; outcome }
+;;
+
+let with_effect_deferred_source_reported t ~source_owner ~actor ~authorize ~request f =
+  with_deferred_source_reported
+    t
+    ~source_owner
+    ~actor
+    ~authorize
+    ~issuance:(Deferred_issuance.Initial request)
+    f
+;;
+
+let with_recurrence_retry_source_reported
+      t
+      ~source_owner
+      ~observation
+      ~actor
+      ~authorize
+      ~intent
+      ~previous
+      ~request
+      f
+  =
+  with_deferred_source_reported
+    t
+    ~source_owner
+    ~actor
+    ~authorize
+    ~issuance:(Deferred_issuance.Retry { observation; intent; previous; request })
+    f
+;;
+
+let resume_recurrence_retry_source_reported t ~source_owner ~retry ~actor ~authorize f =
+  with_deferred_source_reported
+    t
+    ~source_owner
+    ~actor
+    ~authorize
+    ~issuance:(Deferred_issuance.Resume retry)
+    f
 ;;
 
 module Held_runtime_residency = struct

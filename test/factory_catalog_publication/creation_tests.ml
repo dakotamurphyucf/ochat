@@ -27,6 +27,18 @@ let protect_cleanup ~finally f =
     Exn.raise_with_original_backtrace exn backtrace
 ;;
 
+let with_max_root_agents (config : Agent_server.Config.t) ~max_root_agents =
+  { config with
+    workspaces =
+      List.map config.workspaces ~f:(fun workspace ->
+        { workspace with
+          Agent_server.Config.Workspace.prompt_limits =
+            List.map workspace.prompt_limits ~f:(fun limit ->
+              { limit with Agent_server.Config.Workspace.max_root_agents })
+        })
+  }
+;;
+
 let with_daemon
       ?(prompt_text = "<developer>Pinned source during creation.</developer>")
       ?(schemas = false)
@@ -36,6 +48,7 @@ let with_daemon
       ?(tool_contract = Chatml_compilation.Tool_contract.Standard)
       ?(prepare_sources = fun _ _ -> ())
       ?(wrap_env = Fn.id)
+      ?(max_root_agents = 1)
       ~policy
       f
   =
@@ -77,7 +90,11 @@ let with_daemon
                ~sw
                ~env:(wrap_env (env :> Eio_unix.Stdenv.base))
                ~config:
-                 (let config = config ~profile root root prompt in
+                 (let config =
+                    with_max_root_agents
+                      (config ~profile root root prompt)
+                      ~max_root_agents
+                  in
                   { config with
                     prompts =
                       List.map config.prompts ~f:(fun entry ->

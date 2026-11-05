@@ -351,6 +351,51 @@ let validate_transition t ~incoming =
     invalid "one transition cannot add or import multiple execution facts"
 ;;
 
+let rotate t ~intent ~previous ~resolution ~next =
+  let open Result.Let_syntax in
+  let%bind () = Attempt.validate previous ~intent in
+  let%bind () = Attempt.validate next ~intent in
+  let%bind () =
+    Recurrence_retry_resolution.validate resolution ~intent ~attempt:previous
+  in
+  let key = Intent.occurrence intent in
+  let%bind row =
+    Result.of_option
+      (find_row t key)
+      ~error:(P.Error.invalid_request "retry execution occurrence is not retained")
+  in
+  let%bind () =
+    if Intent.equal (Execution.intent row.execution) intent
+    then Ok ()
+    else invalid "retry changed the complete retained intent"
+  in
+  let current = Execution.current_attempt row.execution in
+  if Attempt.equal (Execution.Attempt.request current) next
+  then (
+    match List.rev (Execution.attempts row.execution) with
+    | _current :: predecessor :: _
+      when Attempt.equal (Execution.Attempt.request predecessor) previous
+           && Option.equal
+                Recurrence_retry_resolution.equal
+                (Execution.Attempt.retry_resolution predecessor)
+                (Some resolution) -> Ok (t, row.execution)
+    | [] | [ _ ] | _ :: _ :: _ -> invalid "retry duplicate changed its predecessor")
+  else if not (Attempt.equal (Execution.Attempt.request current) previous)
+  then invalid "retry requires the exact current predecessor"
+  else (
+    let%bind resolved = Execution.resolve_retry row.execution resolution in
+    let%bind execution = Execution.append_attempt resolved next in
+    let updated = with_execution row execution in
+    let%bind present =
+      check
+        (List.map (stored t) ~f:(fun row ->
+           if Occurrence.equal (occurrence row) key then updated else row))
+    in
+    let incoming = Present present in
+    let%map () = validate_transition t ~incoming in
+    incoming, execution)
+;;
+
 let reserved_growth t =
   List.fold_result (rows t) ~init:Capacity_growth.zero ~f:(fun growth execution ->
     let%bind.Result child = Execution.reserved_growth execution in

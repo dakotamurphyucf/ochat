@@ -86,6 +86,16 @@ val run : t -> Agent_protocol.Run.t
 val receipt : t -> Agent_protocol.Run_receipt.t
 val index : t -> Run_state.t
 
+(** Pure prospective source index shared by ordinary, held and retry planning.
+    An existing observer must match exactly; an absent source advances its actual
+    installation epoch once and validates the resulting index, without retiring
+    live Runs. The returned DATA installs nothing and grants no source or
+    execution authority. No runtime construction, history or Run allocation. *)
+val prepare_source_index
+  :  Session_state.t
+  -> observer:Agent_protocol.Invocation.observer
+  -> (Run_state.t, Agent_protocol.Error.t) result
+
 module Held_plan : sig
   (** Validated inert admission DATA, not a runtime, source authorization or
       live held owner. The index precedes addition of the Run/receipt so its
