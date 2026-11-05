@@ -40,7 +40,12 @@ let require = function
 
 let create ?(run_preparation = ref None) actor ~source ~upstream =
   Eio.Cancel.protect (fun () ->
-    Result.map (A.open_inference_owner actor ~source) ~f:(fun owner ->
+    let opened =
+      match !run_preparation with
+      | None -> A.open_inference_owner actor ~source
+      | Some preparation -> A.open_prepared_inference_owner actor ~preparation ~source
+    in
+    Result.map opened ~f:(fun owner ->
       { actor
       ; mutation_owner = Runtime run_preparation
       ; owner

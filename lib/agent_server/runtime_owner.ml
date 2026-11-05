@@ -156,6 +156,8 @@ type t =
   ; moderator_work_mutex : Eio.Mutex.t
   ; mutable runtime : Agent_session.Runtime_builder.t option
   ; mutable prepared_source : source_stage option
+  ; mutable activation_handoff : bool
+  ; domain : int
   ; mutable closed : bool
   ; mutable close_finished : bool
   ; mutable foreground_retirement :
@@ -164,6 +166,18 @@ type t =
   ; mutable background_leases : background_lease list
   ; mutable retired_resources : Agent_session.Runtime_builder.t list
   }
+
+let stage_has_activation_handoff stage =
+  Option.exists stage.continuation ~f:(fun continuation ->
+    Agent_session.Session_actor.Held_run.Activation.handoff_acknowledged
+      (Agent_session.Session_actor.Admitted_activation.Continuation.target continuation))
+;;
+
+let has_activation_handoff t =
+  if not (Int.equal t.domain (Stdlib.Domain.self () :> int))
+  then invalid_arg "Runtime_owner.has_activation_handoff: foreign domain";
+  t.activation_handoff || Option.exists t.prepared_source ~f:stage_has_activation_handoff
+;;
 
 module Execution_access = struct
   type t =
@@ -218,6 +232,8 @@ let create_internal
   ; moderator_work_mutex = Eio.Mutex.create ()
   ; runtime = initial
   ; prepared_source = None
+  ; activation_handoff = false
+  ; domain = (Stdlib.Domain.self () :> int)
   ; closed = false
   ; close_finished = false
   ; foreground_retirement = None
@@ -1086,6 +1102,8 @@ let with_source_stage_reported t f =
         with_owner_lock t ~protect:true (fun () ->
           match t.prepared_source, !reserved with
           | Some current, Some owned when phys_equal current owned ->
+            t.activation_handoff
+            <- t.activation_handoff || stage_has_activation_handoff owned;
             t.prepared_source <- None
           | Some _, (Some _ | None) | None, (Some _ | None) -> ())
       in

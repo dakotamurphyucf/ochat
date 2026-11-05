@@ -637,10 +637,15 @@ val validate_session_removal
     owned leases. Missing loaded ancestry alone preserves a pending initial start
     only when immutable generation/source/epoch/linkage remains valid. Known
     retirement consumes it; unavailable/corrupt observations remain errors.
-    No nested reservation for this same session is acquired. *)
+    No nested reservation for this same session is acquired. The supplied actual
+    original selection actor is retained through eager runtime reconstruction;
+    Ready legacy Session_resume acquires its genuine Runtime_construction scope
+    with that same current actor and CAS. No saved creator or absent-original
+    fallback is inferred. Automatic recovery remains a separate host path. *)
 val recover_owned_session
   :  t
   -> Agent_store.Session_store.Handle.t
+  -> actor:Operator_authorization.t
   -> (Session_registry.entry, Agent_protocol.Error.t) Result.t
 
 (** Pure same-host actual Handle ownership check before reconstruction transfer. *)
@@ -733,3 +738,50 @@ val reconcile_seed_creations
   -> limits:Seed_recovery_limits.t
   -> checkpoint:(unit -> unit)
   -> (unit, Agent_protocol.Error.t) Result.t
+
+module Recurrence_source_preview : sig
+  (** Joined immutable proposal DATA; no preparation, source loan, NoEffects,
+      runtime or execution permission. The later actual service restages it. *)
+  type t
+
+  val source : t -> Agent_protocol.Run_source.t
+  val expected_revision : t -> int64
+end
+
+(** Acquire the exact local target's canonical metadata owner without runtime
+    construction, inference migration, Session_resume or autonomous start. Reuse
+    an existing actual owner physically; reconstruct an indexed target once under
+    the actual registry lifecycle reservation, owned Handle and recovery owner.
+    Active/Automatic lifecycle, actual provenance/profile/workspace/ancestry and
+    NONQUEUING capacity remain required. Repeat the original Send_messages/read
+    proof and supplied nonyielding host state policy outside internal mutexes.
+    Failure preserves the primary error/exception and owns unfinished cleanup.
+    Success stays unselected until actual checked handoff or explicit selection;
+    full source failure can retain this SAME unloaded owner for genuine retry. *)
+val acquire_recurrence_target
+  :  t
+  -> session:Agent_protocol.Session_ref.t
+  -> actor:Operator_authorization.t
+  -> authorize:(Agent_session.Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> (Session_registry.entry, Agent_protocol.Error.t) result
+
+(** Select/verify the actual source through the existing static source path and
+    installation rules. Join every temporary source/parent loan before returning
+    source+CAS DATA. No native/MCP, Manager, initializer, input/history, runtime or
+    provider work. The original proof and actual source/revision repeat after
+    yields and cleanup. Cold/unrealized Generated parents are not warmed. *)
+val preview_recurrence_source
+  :  t
+  -> Session_registry.entry
+  -> actor:Operator_authorization.t
+  -> authorize:(Agent_session.Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> (Recurrence_source_preview.t, Agent_protocol.Error.t) result
+
+(** Pure exact registered-owner selection check. Metadata-only targets are valid
+    registered source/activation owners but cannot serve as selected controllers.
+    Ordinary genuine pre-registration creation remains a separate private path. *)
+val check_execution_selected_entry
+  :  t
+  -> Session_registry.entry
+  -> session:Agent_protocol.Session_ref.t
+  -> (unit, Agent_protocol.Error.t) result

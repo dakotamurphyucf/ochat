@@ -221,6 +221,15 @@ val open_inference_owner
   -> source:Transcript.Source_id.t
   -> (Inference_owner.t, Agent_protocol.Error.t) Result.t
 
+(** Open through the exact live preparation. An unselected owner additionally
+    requires the preparation's actual held initialization or authored scope;
+    preparation data alone does not permit construction. *)
+val open_prepared_inference_owner
+  :  t
+  -> preparation:Run_preparation.t
+  -> source:Transcript.Source_id.t
+  -> (Inference_owner.t, Agent_protocol.Error.t) result
+
 (** Serialized original-ledger admission and durable ACK precede handle return.
     Optional associations require actual per-execution evidence; no inference from
     the actor's current operation. Untracked admission also ACKs its ordinal. *)
@@ -426,6 +435,7 @@ val create_with_owner_lease_duration
     All controls retain [create_with_owner_lease_duration]'s meaning. *)
 val create_with_runtime_source_owner
   :  runtime_source_owner:Runtime_source_owner.Identity.t
+  -> ordinary_execution_admission:(unit -> (unit, Agent_protocol.Error.t) result)
   -> schedule_permission_timeouts:bool
   -> sw:Eio.Switch.t
   -> clock:_ Eio.Time.clock
@@ -3682,4 +3692,12 @@ val install_held_runtime
   -> continuation:Admitted_activation.Continuation.t
   -> worker:Operation_worker.t
   -> inference:Inference_client.Execution.t
+  -> (unit, Agent_protocol.Error.t) result
+
+(** Same actual retirement/lifecycle admission with the existing exact Held
+    Continuation. Only its physical issuing actor and live checked preparation
+    can enter construction before ordinary selection. No caller Boolean bypass. *)
+val check_held_runtime_admission
+  :  t
+  -> continuation:Admitted_activation.Continuation.t
   -> (unit, Agent_protocol.Error.t) result

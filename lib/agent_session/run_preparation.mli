@@ -92,6 +92,102 @@ module Authorization : sig
   val check : t -> Session_state.t -> (unit, Agent_protocol.Error.t) result
 end
 
+module Custody : sig
+  (** Shared process-local owner, original authorization, acknowledged session
+      revision and actual constructor Job subset. This contains no admission
+      request, Run binding, source selection or deferred eligibility. The same
+      issuing Actor serializes every operation. No constructor is exposed. *)
+  type t
+
+  val belongs_to : t -> owner:Owner.t -> bool
+  val principal_id : t -> Agent_protocol.Id.Principal.t
+  val original_actor : t -> Operator_authorization.t option
+
+  (** Exact owner/current session revision and original host policy. This alone
+      does not validate Run/source/Goal associations or grant execution. *)
+  val check
+    :  t
+    -> owner:Owner.t
+    -> state:Session_state.t
+    -> (unit, Agent_protocol.Error.t) result
+
+  (** Original-proof currentness after callback-free custody preflight. No host
+      policy callback; the caller must refresh it separately for new effects. *)
+  val check_current
+    :  t
+    -> owner:Owner.t
+    -> state:Session_state.t
+    -> (unit, Agent_protocol.Error.t) result
+
+  (** Callback-free owner/session/generation/revision check. Closed custody
+      rejects; this does not authorize new effects or factual writes by itself. *)
+  val check_basis
+    :  t
+    -> owner:Owner.t
+    -> state:Session_state.t
+    -> (unit, Agent_protocol.Error.t) result
+
+  val capture_authorization
+    :  t
+    -> owner:Owner.t
+    -> state:Session_state.t
+    -> (Authorization.t, Agent_protocol.Error.t) result
+
+  (** Only after the exact durable owned session ACK. Advances precisely one
+      revision and closes/clears the constructor subset on failure. The one
+      acknowledged revision is also the attached INITIAL deferred attempt's
+      factual basis and survives closure; common callers cannot leave a second
+      revision tracker stale. No source, request CAS or Run binding is rebased. *)
+  val advance
+    :  t
+    -> owner:Owner.t
+    -> previous:Session_state.t
+    -> current:Session_state.t
+    -> (unit, Agent_protocol.Error.t) result
+
+  (** Idempotent irreversible release. Clears the actual constructor subset,
+      retaining the last acknowledged revision for existing initial historical
+      evidence. It cannot issue deferred eligibility or a source completion. *)
+  val close : t -> unit
+
+  module Constructor_jobs : sig
+    type custody := t
+
+    (** The exact shared constructor subset plan. Issuance requires the private
+        Actor owner/current custody and fresh actual Job, or its selected owned
+        checkpoint. The initial adapter below uses this SAME implementation. *)
+    type t
+
+    val prepare_add
+      :  custody
+      -> owner:Owner.t
+      -> state:Session_state.t
+      -> job:Agent_protocol.Job.t
+      -> (t, Agent_protocol.Error.t) result
+
+    val prepare_handoff
+      :  custody
+      -> owner:Owner.t
+      -> state:Session_state.t
+      -> (Agent_protocol.Id.Job.t list * t, Agent_protocol.Error.t) result
+
+    val check_before_commit
+      :  t
+      -> owner:Owner.t
+      -> state:Session_state.t
+      -> (unit, Agent_protocol.Error.t) result
+
+    (** Install only after the exact Job/checkpoint ACK and custody advance.
+        Already-closed custody stays closed and receives no subset update. *)
+    val acknowledge : t -> unit
+  end
+end
+
+(** Projection of the SAME physical custody, not a new owner or conversion to a
+    different admission family. Initial request/digest/deferred evidence remains
+    attached only to this initial preparation. *)
+val custody : t -> Custody.t
+
 val capture_authorization
   :  t
   -> owner:Owner.t
@@ -266,7 +362,7 @@ end
 
 module Constructor_jobs : sig
   type preparation := t
-  type t
+  type t = Custody.Constructor_jobs.t
 
   (** Prepare bookkeeping for one genuine fresh constructor Job. Issuance needs
       the Actor's existing private owner secret and current preparation; a caller

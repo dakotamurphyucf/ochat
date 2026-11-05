@@ -48,7 +48,7 @@ let with_preparation entry key f =
     ~f:(fun () -> f preparation)
 ;;
 
-let frames env entry =
+let journal_entries env entry =
   let handle = Option.value_exn entry.Agent_server.Session_registry.store_handle in
   let journal =
     Agent_store.Journal.open_existing
@@ -60,7 +60,12 @@ let frames env entry =
     |> store_ok
   in
   let scan = Agent_store.Journal.scan journal |> store_ok in
-  List.map scan.entries ~f:(fun entry -> Agent_store.Frame.payload entry.frame)
+  scan.entries
+;;
+
+let frames env entry =
+  journal_entries env entry
+  |> List.map ~f:(fun entry -> Agent_store.Frame.payload entry.frame)
 ;;
 
 let assert_same before entry =

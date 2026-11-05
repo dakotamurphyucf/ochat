@@ -331,7 +331,56 @@ val select_indexed
     Successful recovery returns actual entry plus fresh Current for its same Handle
     after legitimate recovery publication; the original witness cannot remain
     current across that publication. Validate fresh currentness/availability and
-    exact entry owner before installing under short mutex. [authorize] must be a
-    pure non-yielding current principal/visibility check, run on both the original
-    and recovered canonical summary. It must not call back into the registry. Failed provisional
-    cleanup remains registry-owned with original and secondary diagnostics. *)
+    exact entry owner before installing under short mutex. [authorize] runs on
+    both original and recovered canonical summaries OUTSIDE the registry mutex.
+    The final policy check is followed immediately by a nonwaiting pure registry
+    commit; contention rejects rather than yielding across that authorization.
+    Failed provisional cleanup remains registry-owned with original and secondary
+    diagnostics. *)
+
+(** Call only from the registry/owners' creating Eio domain. Current ordinary
+    execution selections. Metadata-acquired owners remain in [entries] for
+    reads, controls, factual completion and shutdown, but are absent here until
+    this exact owner's actual activation handoff. No ID-only selection. *)
+val execution_entries : t -> entry list
+
+(** Call only from the registry/owners' creating Eio domain. Pure exact
+    binding/Actor/Owner/Handle selection observation. Takes no mutex, invokes no
+    callback and grants no effect permission. *)
+val execution_selected : t -> entry -> bool
+
+(** Same owned Handle/Current reconstruction/publication as [select_indexed],
+    retaining a metadata-acquired canonical binding instead of selecting ordinary
+    execution. Authorization runs outside the registry mutex; final publication
+    checks only pure reservation, Handle, Current and physical ownership facts.
+    The same Actor/Owner remains owned across joined source failures and retries.
+    Does not install a runtime or enqueue an autonomous start. Each attempt reads
+    the actual checked canonical index before obtaining Current; failed recovery
+    never restores its old indexed snapshot. Secondary postfailure refresh errors
+    preserve the primary and do not certify resource cleanup or no effects. *)
+val acquire_indexed_target
+  :  t
+  -> Lifecycle_reservation.t
+  -> store:Agent_store.Session_store.t
+  -> handle:Agent_store.Session_store.Handle.t
+  -> authorize:(Agent_protocol.Session.t -> (unit, Agent_protocol.Error.t) result)
+  -> recover:
+       (unit
+        -> ( entry * Agent_store.Session_store.Lifecycle.Current.t
+             , Agent_protocol.Error.t )
+             result)
+  -> (entry, Agent_protocol.Error.t) result
+
+(** Explicit selection of the SAME loaded metadata owner under the issuing
+    lifecycle reservation and exact owned Handle/Current. The caller retains its
+    actual Actor lifecycle fence through this checked publication. No public
+    caller-authored selected Boolean or substitute owner is accepted. *)
+val select_loaded
+  :  t
+  -> Lifecycle_reservation.t
+  -> store:Agent_store.Session_store.t
+  -> handle:Agent_store.Session_store.Handle.t
+  -> current:Agent_store.Session_store.Lifecycle.Current.t
+  -> entry
+  -> authorize:(Agent_protocol.Session.t -> (unit, Agent_protocol.Error.t) result)
+  -> (unit, Agent_protocol.Error.t) result

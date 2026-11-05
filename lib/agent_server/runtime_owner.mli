@@ -737,3 +737,10 @@ module For_testing : sig
     -> (unit -> ('a, Agent_protocol.Error.t) result)
     -> ('a, Agent_protocol.Error.t) result
 end
+
+(** Historical actual root handoff of this exact owner. Pure same-domain read of
+    the live source stage and its sticky ACK captured before stage release,
+    including lost replies or later cleanup failure. A new/reopened owner starts
+    false. Retirement preserves this fact; it grants no fresh effect permission.
+    No mutex, Actor RPC, clock or host callback is invoked. *)
+val has_activation_handoff : t -> bool

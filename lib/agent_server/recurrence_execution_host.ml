@@ -99,7 +99,15 @@ module Controller = struct
     }
 
   let actor t = t.actor
-  let basis t = check_entry t.host t.entry ~session:t.session
+
+  let basis t =
+    let open Result.Let_syntax in
+    let%bind () = current t.host in
+    Session_factory.check_execution_selected_entry
+      t.host.factory
+      t.entry
+      ~session:t.session
+  ;;
 
   let authorize t state =
     let open Result.Let_syntax in
@@ -165,7 +173,10 @@ let controller host entry =
               ~retryable:false
               ())
   in
-  let basis () = check_entry host entry ~session in
+  let basis () =
+    let%bind () = current host in
+    Session_factory.check_execution_selected_entry host.factory entry ~session
+  in
   let%bind () = basis () in
   let scopes = P.Scope.[ Send_messages; View_session_transcript ] in
   let scopes =
@@ -436,4 +447,46 @@ let captured_target (controller : Controller.t) ~child ~target =
   let%bind () = check_state session target_state in
   let%bind () = Captured.check_target captured target_state in
   Selected_target.create controller target session (Captured captured)
+;;
+
+let acquire_existing_target (controller : Controller.t) ~session =
+  let open Result.Let_syntax in
+  let%bind () = Controller.basis controller in
+  let%bind () =
+    if
+      P.Id.Server.equal (P.Session_ref.server_id session) controller.host.server_id
+      && List.mem
+           controller.grant.existing_targets
+           (P.Session_ref.session_id session)
+           ~equal:P.Id.Session.equal
+    then Ok ()
+    else denied "existing recurrence target is not configured on this host"
+  in
+  let%bind principal =
+    principal controller.host ~scopes:P.Scope.[ Send_messages; View_session_transcript ]
+  in
+  let actor =
+    Operator_authorization.guarded ~principal ~is_current:(fun () ->
+      Result.is_ok (Controller.basis controller))
+  in
+  let authorize state =
+    let%bind () = Controller.basis controller in
+    check_state session state
+  in
+  let%bind target =
+    Session_factory.acquire_recurrence_target
+      controller.host.factory
+      ~session
+      ~actor
+      ~authorize
+  in
+  existing_target controller ~target
+;;
+
+let preview_target_source (target : Target.t) =
+  Session_factory.preview_recurrence_source
+    target.controller.host.factory
+    target.entry
+    ~actor:target.actor
+    ~authorize:(Target.authorize target)
 ;;

@@ -720,7 +720,7 @@ let implementation_sources =
   ; ( "bin/ochat_agent_stdio.ml"
     , "8d134cd11c7df2a60e6b4b77a5ff7f9ea0c28a8a2674a3dd9f573adaa7623902" )
   ; ( "lib/agent_server/session_factory.ml"
-    , "9c3b8ae794f7b9e97d9eda8b6b8fb4a6a6552d446a0463ecbd69f0c1f93f6c14" )
+    , "8b5f2ada6b160add2d2dc376a458bbe9851d72790ae535b02b7427bd9e434f3a" )
   ; ( "bin/inference_composition.ml"
     , "1f57451d5543a5fe8f2f23dc0e593374b64946d088cba164acd1c087a7cdce18" )
   ; ( "lib/agent_protocol/developer_command_id.ml"
@@ -842,7 +842,7 @@ let implementation_sources =
   ; ( "lib/agent_server/command_handler.ml"
     , "9c0c8f4815a4ae12c2879e291b9b8aeead2c88bc51fa44c987c319f4143160fb" )
   ; ( "lib/agent_server/runtime_owner.ml"
-    , "6109bccfddef1550f313f33f74858920695555b96fe9fbf12abe3e9739423d61" )
+    , "ee530ab95d144f784b04ff7e2523c7d40b535f977d28b3f17440c66d27dc9321" )
   ; ( "lib/agent_session/managed_submission_tracking.ml"
     , "6c8804b2d0c2033631b965769af63c5240afeb6dabff72695c818dc1a68baed8" )
   ; ( "lib/agent_server/managed_output_cursor.ml"
@@ -868,7 +868,7 @@ let implementation_sources =
   ; ( "lib/agent_protocol/subscription.ml"
     , "a5447544cbe1cd55302cd70a3c50bf7f6b0ec07ad3af8ce1f70b7b90dfbd07bc" )
   ; ( "lib/agent_server/job_scheduler.ml"
-    , "fef8098605682e45b5eea681178cd65227e88521c2b95f811cc5e5193d0c4302" )
+    , "f315fe1bc02118349c01b402be597b5683c3a8c5797a95ea7eb0c53f351e34b4" )
   ; ( "lib/agent_server/job_scheduler_developer.ml"
     , "18062ce3137c3b1782fb4015657ca304a591341a33e1d1da47d362b137b7fd19" )
   ; ( "lib/agent_server/developer_background_job_runner.ml"
@@ -898,7 +898,7 @@ let implementation_sources =
   ; ( "lib/agent_server/developer_host.ml"
     , "45be3610abdb3090ee3f0929b5317dc978af1020ae4cffdca2268b66fb395bf1" )
   ; ( "lib/agent_server/schedule_scheduler.ml"
-    , "f6c3ed44cccf5a39f71b5eef052ee5e185f4fc066f7d53239033a915f28fff5a" )
+    , "aabe5b73e774c29485ad59227a6899bdfd9c619f27b3911b1e0a822a4c9a60e1" )
   ; ( "lib/agent_session/background_execution.ml"
     , "33996f6b8a1165fc7e992c5c019a2db478b67b1fe6ddb3fed34fa8b731454254" )
   ; ( "lib/agent_session/captured_agent_runner.ml"
@@ -966,7 +966,7 @@ let implementation_sources =
   ; ( "lib/agent_session/script_subscription_service.ml"
     , "54c775836b551733687e907ff46a2a7a0cc26bd46ff915cc6fd5f0cf5116f069" )
   ; ( "lib/agent_session/session_actor.ml"
-    , "d6c81cf1ee7c6c5377e2608efb4f8120929373e1dcf803f443b37e13c4748cff" )
+    , "1242854f08bfaa1aca01d521fb93dde5525a49f20e51b64a375ba30a1730acc3" )
   ; ( "lib/agent_session/job_custody.ml"
     , "3f3a132b6fd32f11eba332ec3ae9f6ff4dbfb771dd542ab12cab5a1316e8f3b3" )
   ; ( "lib/agent_session/staged_jobs.ml"
