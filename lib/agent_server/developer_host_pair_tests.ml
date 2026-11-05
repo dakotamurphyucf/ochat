@@ -1227,7 +1227,7 @@ let%test_module "retained Developer Host policy" =
           ~registry:shared.registry
           ~developer_registry:(Some (Developer_host.registry host))
           ~capacity:shared.capacity
-          ~model_job_inference:(Session_factory.model_job_inference shared.factory)
+          ~conversation_host:(Factory shared.factory)
       in
       Developer_host.install_scheduler host scheduler |> required "scheduler install";
       let route =

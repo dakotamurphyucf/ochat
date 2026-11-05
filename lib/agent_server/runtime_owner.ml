@@ -12,11 +12,15 @@ module Source_stage_binding = struct
   type t =
     | Initial of Agent_session.Session_actor.Source_binding.t
     | Existing_goal of Agent_session.Session_actor.Goal_continuation.Source_binding.t
+    | Existing_goal_execution of
+        Agent_session.Session_actor.Goal_execution_runtime.Source_binding.t
 
   let close = function
     | Initial binding -> Agent_session.Session_actor.Source_binding.close binding
     | Existing_goal binding ->
       Agent_session.Session_actor.Goal_continuation.Source_binding.close binding
+    | Existing_goal_execution binding ->
+      Agent_session.Session_actor.Goal_execution_runtime.Source_binding.close binding
   ;;
 end
 
@@ -84,6 +88,23 @@ module Prepared_goal_continuation = struct
     let open Result.Let_syntax in
     let%bind () = check_prepared_stage t.stage ~basis:t.basis in
     Agent_session.Session_actor.Goal_continuation.Source_binding.check_basis t.binding
+  ;;
+end
+
+module Prepared_goal_execution = struct
+  type t =
+    { stage : source_stage
+    ; binding : Agent_session.Session_actor.Goal_execution_runtime.Source_binding.t
+    ; basis : unit -> (unit, Agent_protocol.Error.t) result
+    }
+
+  let binding t = t.binding
+
+  let check_basis t =
+    let open Result.Let_syntax in
+    let%bind () = check_prepared_stage t.stage ~basis:t.basis in
+    Agent_session.Session_actor.Goal_execution_runtime.Source_binding.check_basis
+      t.binding
   ;;
 end
 
@@ -562,6 +583,33 @@ let foreground_retirement_finished t =
     | Error error -> raise (Cleanup_failed error))
 ;;
 
+(* A successful unloaded retirement is historical DATA. Join outside the mutex,
+   then clear only that exact handle while the runtime is still absent. *)
+let completed_unloaded_retirement t =
+  let candidate =
+    with_owner_lock t ~protect:true (fun () ->
+      match t.closed, t.unloading, t.runtime, t.foreground_retirement with
+      | false, None, None, Some retirement
+        when Agent_session.Session_actor.Runtime_retirement.is_finished retirement ->
+        Some retirement
+      | (true | false), (Some _ | None), (Some _ | None), (Some _ | None) -> None)
+  in
+  Option.bind candidate ~f:(fun retirement ->
+    match Agent_session.Session_actor.Runtime_retirement.await retirement with
+    | Ok () -> Some retirement
+    | Error _ -> None)
+;;
+
+let forget_completed_retirement_locked t completed_retirement =
+  match
+    completed_retirement, t.foreground_retirement, t.closed, t.unloading, t.runtime
+  with
+  | Some completed, Some current, false, None, None when phys_equal completed current ->
+    t.foreground_retirement <- None
+  | (Some _ | None), (Some _ | None), (true | false), (Some _ | None), (Some _ | None) ->
+    ()
+;;
+
 let source_lane_idle t =
   if not (Int.equal t.domain (Stdlib.Domain.self () :> int))
   then invalid_arg "Runtime_owner.source_lane_idle: foreign domain";
@@ -756,6 +804,24 @@ let with_runtime_lease ?execution_access ?run_preparation t ~retain_resources f 
     f
 ;;
 
+let loaded_runtime_basis_locked t runtime =
+  if t.closed
+  then Error (closed_error ())
+  else if
+    Option.is_some t.unloading
+    || Option.is_some t.foreground_retirement
+    || prepared_source_blocks_runtime t
+    || not (Option.exists t.runtime ~f:(phys_equal runtime))
+  then Error (background_busy ())
+  else Ok ()
+;;
+
+let check_runtime_execution (runtime : Agent_session.Runtime_builder.t) =
+  match runtime.check_execution with
+  | None -> Ok ()
+  | Some check -> check ()
+;;
+
 let with_loaded_runtime_reported_internal t f =
   with_lease_reported
     t
@@ -775,13 +841,18 @@ let with_loaded_runtime_reported_internal t f =
                ())
         | false, None, None, Some runtime -> Ok runtime
       in
-      let%map () =
-        match runtime.Agent_session.Runtime_builder.check_execution with
-        | None -> Ok ()
-        | Some check -> check ()
-      in
-      runtime, None)
-    f
+      Ok (runtime, Some runtime))
+    (fun runtime ->
+       let open Result.Let_syntax in
+       (* Delegation checks may read Store/Actor state. The same actual lease
+          retains this physical runtime while that IO runs outside our mutex. *)
+       let%bind () = check_runtime_execution runtime in
+       Eio.Fiber.check ();
+       let%bind () =
+         with_owner_lock t ~protect:true (fun () -> loaded_runtime_basis_locked t runtime)
+       in
+       Eio.Fiber.check ();
+       f runtime)
 ;;
 
 let with_loaded_runtime t f =
@@ -875,6 +946,71 @@ let with_execution_runtime t ~owner f =
     in
     let execution_access : Execution_access.t = { stage; runtime; borrow } in
     with_runtime_lease ~execution_access t ~retain_resources:false f
+;;
+
+module Loaded_job_runtime = struct
+  type 'a t =
+    | No_runtime
+    | Reused of 'a
+end
+
+let with_loaded_goal_job_runtime t ~owner f =
+  let module Actor = Agent_session.Session_actor in
+  let open Result.Let_syntax in
+  let completed_retirement = completed_unloaded_retirement t in
+  let%bind selected =
+    with_owner_lock t ~protect:true (fun () ->
+      forget_completed_retirement_locked t completed_retirement;
+      match t.closed, t.unloading, t.foreground_retirement, t.runtime with
+      | true, _, _, _ -> Error (closed_error ())
+      | false, Some _, _, _ | false, None, Some _, _ -> Error (background_busy ())
+      | false, None, None, runtime ->
+        if prepared_source_blocks_runtime t
+        then Error (background_busy ())
+        else Ok runtime)
+  in
+  match selected with
+  | None -> Ok Loaded_job_runtime.No_runtime
+  | Some runtime ->
+    let%bind borrow =
+      Actor.job_runtime_resource
+        t.actor
+        ~owner
+        ~worker:runtime.worker
+        ~inference:runtime.inference_execution
+        ~moderator_manager:runtime.moderator_manager
+    in
+    let%bind result =
+      with_lease
+        t
+        ~survives_stop:false
+        ~admit:(fun () ->
+          let%bind () = loaded_runtime_basis_locked t runtime in
+          let%map () = Actor.Runtime_construction_resource.check_basis borrow in
+          runtime, Some runtime)
+        (fun runtime ->
+           (* The physical cancellation lease protects resources while delegated
+             authority may perform IO. No callback or Actor RPC runs under the
+             Owner mutex, and no runtime escapes before the final exact proof. *)
+           let%bind () = check_runtime_execution runtime in
+           Eio.Fiber.check ();
+           let%bind current =
+             Actor.job_runtime_resource
+               t.actor
+               ~owner
+               ~worker:runtime.worker
+               ~inference:runtime.inference_execution
+               ~moderator_manager:runtime.moderator_manager
+           in
+           let%bind () =
+             with_owner_lock t ~protect:true (fun () ->
+               let%bind () = loaded_runtime_basis_locked t runtime in
+               Actor.Runtime_construction_resource.check_basis current)
+           in
+           Eio.Fiber.check ();
+           f runtime)
+    in
+    Ok (Loaded_job_runtime.Reused result)
 ;;
 
 let with_prepared_run_runtime t ~preparation f =
@@ -1076,42 +1212,14 @@ let with_source_stage_reported t f =
   let retire () = Option.iter !reserved ~f:close_source_stage in
   let primary =
     try
-      let completed_retirement =
-        let candidate =
-          with_owner_lock t ~protect:true (fun () ->
-            match t.closed, t.unloading, t.runtime, t.foreground_retirement with
-            | false, None, None, Some retirement
-              when Agent_session.Session_actor.Runtime_retirement.is_finished retirement
-              -> Some retirement
-            | (true | false), (Some _ | None), (Some _ | None), (Some _ | None) -> None)
-        in
-        (* Joining even an already-finished handle belongs outside the owner mutex.
-       Admission below still requires the exact same completed retirement. *)
-        Option.bind candidate ~f:(fun retirement ->
-          match Agent_session.Session_actor.Runtime_retirement.await retirement with
-          | Ok () -> Some retirement
-          | Error _ -> None)
-      in
+      let completed_retirement = completed_unloaded_retirement t in
       let report =
         with_lease_reported
           t
           ~survives_stop:false
           ~retire
           ~admit:(fun () ->
-            (match
-               ( completed_retirement
-               , t.foreground_retirement
-               , t.closed
-               , t.unloading
-               , t.runtime )
-             with
-             | Some completed, Some current, false, None, None
-               when phys_equal completed current -> t.foreground_retirement <- None
-             | ( (Some _ | None)
-               , (Some _ | None)
-               , (true | false)
-               , (Some _ | None)
-               , (Some _ | None) ) -> ());
+            forget_completed_retirement_locked t completed_retirement;
             match t.closed, t.unloading, t.foreground_retirement, t.prepared_source with
             | true, _, _, _ -> Error (closed_error ())
             | false, Some _, _, _ | false, None, Some _, _ | false, None, None, Some _ ->
@@ -1453,6 +1561,18 @@ module Held_runtime_residency = struct
     | Handed_off of Agent_session.Runtime_builder.t
 end
 
+let bind_existing_goal_source owner stage attempted ~label ~source ~bind ~wrap =
+  let open Result.Let_syntax in
+  let%bind () = consume_source_selection owner stage attempted ~label in
+  Eio.Cancel.protect (fun () ->
+    let result = bind source in
+    Result.iter result ~f:(fun binding ->
+      let owned = wrap binding in
+      stage.binding <- Some owned;
+      if stage.closed then Source_stage_binding.close owned);
+    result)
+;;
+
 module Goal_resume_source = struct
   type owner = t
 
@@ -1468,25 +1588,19 @@ module Goal_resume_source = struct
   let prepare t ~source =
     let module Actor = Agent_session.Session_actor in
     let open Result.Let_syntax in
-    let%bind () =
-      consume_source_selection
+    let%bind binding =
+      bind_existing_goal_source
         t.owner
         t.stage
         t.source_attempted
         ~label:"Goal resume source"
-    in
-    let%bind binding =
-      Eio.Cancel.protect (fun () ->
-        let result =
+        ~source
+        ~bind:(fun source ->
           Actor.bind_goal_continuation_source
             t.owner.actor
             ~preparation:t.preparation
-            ~source
-        in
-        Result.iter result ~f:(fun binding ->
-          t.stage.binding <- Some (Existing_goal binding);
-          if t.stage.closed then Actor.Goal_continuation.Source_binding.close binding);
-        result)
+            ~source)
+        ~wrap:(fun binding -> Source_stage_binding.Existing_goal binding)
     in
     let prepared : Prepared_goal_continuation.t =
       { stage = t.stage; binding; basis = source_stage_basis t.owner t.stage }
@@ -1558,6 +1672,131 @@ let with_goal_resume_source_reported t ~source_owner ~actor ~authorize ~session 
   { Goal_resume_source.Report.preparation = !preparation; outcome }
 ;;
 
+module Goal_execution_source = struct
+  type owner = t
+
+  type t =
+    { owner : owner
+    ; stage : source_stage
+    ; preparation : Agent_session.Session_actor.Goal_execution_runtime.Preparation.t
+    ; source_attempted : bool ref
+    }
+
+  let prepare t ~source =
+    let module Actor = Agent_session.Session_actor in
+    let open Result.Let_syntax in
+    let%bind binding =
+      bind_existing_goal_source
+        t.owner
+        t.stage
+        t.source_attempted
+        ~label:"Goal execution source"
+        ~source
+        ~bind:(fun source ->
+          Actor.bind_goal_execution_runtime_source
+            t.owner.actor
+            ~preparation:t.preparation
+            ~source)
+        ~wrap:(fun binding -> Source_stage_binding.Existing_goal_execution binding)
+    in
+    let prepared : Prepared_goal_execution.t =
+      { stage = t.stage; binding; basis = source_stage_basis t.owner t.stage }
+    in
+    let%bind () = Prepared_goal_execution.check_basis prepared in
+    Eio.Fiber.check ();
+    Ok prepared
+  ;;
+
+  module Decision = struct
+    type 'a t =
+      | No_work
+      | Suspended_goal of Agent_session.Goal_execution_selection.Suspension.t
+      | Fresh of 'a
+  end
+
+  module Report = struct
+    type 'a t =
+      { preparation :
+          Agent_session.Session_actor.Goal_execution_runtime.Preparation.t option
+      ; outcome : 'a Decision.t Scope_outcome.t
+      }
+
+    let preparation t = t.preparation
+    let outcome t = t.outcome
+  end
+end
+
+module Goal_execution_issuance = struct
+  type t =
+    | Wake of Agent_protocol.Run_wake.t
+    | Claimed_job of Agent_session.Session_actor.Job_runtime_owner.t
+
+  let issue t actor =
+    let module Actor = Agent_session.Session_actor in
+    match t with
+    | Wake wake -> Actor.begin_goal_wake_preparation actor ~wake
+    | Claimed_job owner ->
+      Actor.begin_goal_job_runtime_preparation actor ~owner
+      |> Result.map ~f:(fun preparation ->
+        Actor.Goal_execution_runtime.Wake_issuance.Prepare preparation)
+  ;;
+end
+
+let with_goal_execution_source_reported t ~source_owner ~issuance f =
+  let module Actor = Agent_session.Session_actor in
+  let preparation = ref None in
+  let outcome =
+    match Scope_outcome.capture (fun () -> check_source_owner t source_owner) with
+    | Raised (exn, backtrace) ->
+      { Scope_outcome.primary = Raised (exn, backtrace); cleanup = Never_acquired }
+    | Returned (Error failure) ->
+      { Scope_outcome.primary = Returned (Error failure); cleanup = Never_acquired }
+    | Returned (Ok ()) ->
+      with_source_stage_reported t (fun stage ->
+        let open Result.Let_syntax in
+        let%bind decision =
+          Eio.Cancel.protect (fun () ->
+            let result = Goal_execution_issuance.issue issuance t.actor in
+            Result.iter result ~f:(function
+              | Actor.Goal_execution_runtime.Wake_issuance.Prepare issued ->
+                preparation := Some issued
+              | No_work | Suspended_goal _ -> ());
+            result)
+        in
+        match decision with
+        | No_work -> Ok Goal_execution_source.Decision.No_work
+        | Suspended_goal suspension -> Ok (Suspended_goal suspension)
+        | Prepare issued ->
+          let source =
+            { Goal_execution_source.owner = t
+            ; stage
+            ; preparation = issued
+            ; source_attempted = ref false
+            }
+          in
+          Eio.Fiber.check ();
+          Result.map (f source) ~f:(fun result ->
+            Goal_execution_source.Decision.Fresh result))
+  in
+  { Goal_execution_source.Report.preparation = !preparation; outcome }
+;;
+
+let with_goal_wake_source_reported t ~source_owner ~wake f =
+  with_goal_execution_source_reported
+    t
+    ~source_owner
+    ~issuance:(Goal_execution_issuance.Wake wake)
+    f
+;;
+
+let with_goal_job_source_reported t ~source_owner ~owner f =
+  with_goal_execution_source_reported
+    t
+    ~source_owner
+    ~issuance:(Goal_execution_issuance.Claimed_job owner)
+    f
+;;
+
 module Runtime_request = struct
   module Actor = Agent_session.Session_actor
 
@@ -1573,15 +1812,22 @@ module Runtime_request = struct
         ; continuation : Actor.Goal_continuation.t
         }
         -> Actor.Goal_continuation.t t
+    | Existing_goal_execution :
+        { prepared : Prepared_goal_execution.t
+        ; execution : Actor.Goal_execution_runtime.t
+        }
+        -> Actor.Goal_execution_runtime.t t
 
   let stage : type a. a t -> source_stage = function
     | Initial { prepared; _ } -> prepared.stage
     | Existing_goal { prepared; _ } -> prepared.stage
+    | Existing_goal_execution { prepared; _ } -> prepared.stage
   ;;
 
   let basis : type a. a t -> unit -> (unit, Agent_protocol.Error.t) result = function
     | Initial { prepared; _ } -> prepared.basis
     | Existing_goal { prepared; _ } -> prepared.basis
+    | Existing_goal_execution { prepared; _ } -> prepared.basis
   ;;
 
   let check_prepared : type a. a t -> (unit, Agent_protocol.Error.t) result = function
@@ -1594,12 +1840,22 @@ module Runtime_request = struct
           ~binding:prepared.binding
       in
       Prepared_goal_continuation.check_basis prepared
+    | Existing_goal_execution { prepared; execution } ->
+      let open Result.Let_syntax in
+      let%bind () =
+        Actor.Goal_execution_runtime.check_source_binding
+          execution
+          ~binding:prepared.binding
+      in
+      Prepared_goal_execution.check_basis prepared
   ;;
 
   let source : type a. a t -> Agent_session.Runtime_builder.Source.t = function
     | Initial { prepared; _ } -> Actor.Source_binding.source prepared.binding
     | Existing_goal { prepared; _ } ->
       Actor.Goal_continuation.Source_binding.source prepared.binding
+    | Existing_goal_execution { prepared; _ } ->
+      Actor.Goal_execution_runtime.Source_binding.source prepared.binding
   ;;
 
   let acquire : type a. Actor.t -> a t -> (a, Agent_protocol.Error.t) result =
@@ -1609,6 +1865,11 @@ module Runtime_request = struct
     | Existing_goal { prepared; continuation } ->
       Actor.Goal_continuation.check_source_binding continuation ~binding:prepared.binding
       |> Result.map ~f:(fun () -> continuation)
+    | Existing_goal_execution { prepared; execution } ->
+      Actor.Goal_execution_runtime.check_source_binding
+        execution
+        ~binding:prepared.binding
+      |> Result.map ~f:(fun () -> execution)
   ;;
 
   let construction : type a. a t -> a -> Actor.Runtime_construction.t =
@@ -1616,6 +1877,8 @@ module Runtime_request = struct
     match request with
     | Initial _ -> Actor.Runtime_construction.of_admitted active
     | Existing_goal _ -> Actor.Runtime_construction.of_goal active
+    | Existing_goal_execution _ ->
+      Actor.Runtime_construction.of_existing_goal_execution active
   ;;
 
   let begin_cold
@@ -1628,7 +1891,8 @@ module Runtime_request = struct
     fun actor request construction ->
     match request with
     | Initial _ -> Ok ()
-    | Existing_goal _ -> Actor.begin_goal_runtime_construction actor ~construction
+    | Existing_goal _ | Existing_goal_execution _ ->
+      Actor.begin_goal_runtime_construction actor ~construction
   ;;
 end
 
@@ -1751,7 +2015,7 @@ let with_runtime_construction_internal (type a) t (request : a Runtime_request.t
             let%bind () =
               match request with
               | Runtime_request.Initial _ -> Ok ()
-              | Existing_goal _ ->
+              | Existing_goal _ | Existing_goal_execution _ ->
                 let%bind () = Runtime_request.begin_cold t.actor request context in
                 check_effect context
             in
@@ -1864,7 +2128,7 @@ let install_runtime_for_request
   | Some (Held_runtime_residency.Reused existing) when phys_equal existing runtime ->
     (match request with
      | Initial _ -> Ok ()
-     | Existing_goal _ -> install ())
+     | Existing_goal _ | Existing_goal_execution _ -> install ())
   | Some (Local existing) when phys_equal existing runtime ->
     Eio.Cancel.protect (fun () ->
       let%bind () = install () in
@@ -2008,14 +2272,19 @@ let start_held_authored_runtime t ~prepared ~held ~checked =
        result)
 ;;
 
-let resume_goal_episode t ~prepared ~continuation =
+let with_joined_existing_goal_runtime
+      (type a)
+      t
+      (request : a Runtime_request.t)
+      ~run_resume
+      f
+  =
   let module Actor = Agent_session.Session_actor in
   let module Construction = Actor.Runtime_construction in
-  let request = Runtime_request.Existing_goal { prepared; continuation } in
   with_runtime_construction_internal
     t
     request
-    (fun runtime continuation construction residency ->
+    (fun runtime active construction residency ->
        let open Result.Let_syntax in
        let%bind resume =
          match !residency with
@@ -2027,11 +2296,11 @@ let resume_goal_episode t ~prepared ~continuation =
            Error
              (Agent_protocol.Error.create
                 Conflict
-                ~message:"Goal resume runtime residency changed before installation"
+                ~message:"Goal runtime residency changed before installation"
                 ~retryable:false
                 ())
        in
-       prepared.stage.handoff_runtime <- Some runtime;
+       (Runtime_request.stage request).handoff_runtime <- Some runtime;
        let%bind () =
          install_runtime_for_request t request ~runtime ~construction ~residency
        in
@@ -2039,21 +2308,50 @@ let resume_goal_episode t ~prepared ~continuation =
        let%bind () =
          match resume with
          | None -> Ok ()
-         | Some resume -> Actor.run_goal_runtime_resume t.actor ~continuation ~resume
+         | Some resume -> run_resume active resume
        in
-       (* The joined callback may have durably Waited or settled its original
-         episode. Only the actual Actor continuation decides whether any new
-         Operation is legal; a terminal binding needs no fresh execution grant. *)
-       let result = Actor.continue_goal_episode t.actor ~continuation in
+       let result = f runtime active construction in
        if Construction.handoff_acknowledged construction
        then residency := Some (Held_runtime_residency.Handed_off runtime);
-       (* A known command receipt is factual data, not callback success. Keep
-          the actual failure primary through this inner construction cleanup;
-          the outer source report retains the receipt for service classification. *)
-       Result.bind result ~f:(function
+       result)
+;;
+
+let resume_goal_episode t ~prepared ~continuation =
+  let module Actor = Agent_session.Session_actor in
+  with_joined_existing_goal_runtime
+    t
+    (Runtime_request.Existing_goal { prepared; continuation })
+    ~run_resume:(fun continuation resume ->
+      Actor.run_goal_runtime_resume t.actor ~continuation ~resume)
+    (fun _runtime continuation _construction ->
+       (* A joined lifecycle may really Wait or settle. A command receipt alone
+         does not permit another Operation; preserve its actual final decision. *)
+       Result.bind (Actor.continue_goal_episode t.actor ~continuation) ~f:(function
          | (Actor.Goal_resume_result.Resumed _ | Retained _) as result -> Ok result
          | Resume_failed { receipt = _; error } | Rejected error | Uncertain error ->
            Error error))
+;;
+
+let with_goal_job_runtime t ~prepared ~execution f =
+  let module Actor = Agent_session.Session_actor in
+  let open Result.Let_syntax in
+  let%bind () =
+    match Actor.Goal_execution_runtime.kind execution with
+    | Claimed_job -> Ok ()
+    | Queued_wake | Subscription_wake ->
+      Error
+        (Agent_protocol.Error.invalid_request
+           "Goal Job runtime requires its actual Job owner")
+  in
+  with_joined_existing_goal_runtime
+    t
+    (Runtime_request.Existing_goal_execution { prepared; execution })
+    ~run_resume:(fun execution resume ->
+      Actor.run_goal_execution_runtime_resume t.actor ~execution ~resume)
+    (fun runtime execution _construction ->
+       let%bind () = Actor.acknowledge_goal_job_runtime t.actor ~execution in
+       Eio.Fiber.check ();
+       f runtime)
 ;;
 
 let with_unloaded t f =

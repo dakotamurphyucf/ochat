@@ -47,8 +47,9 @@ val fingerprint
     authorize an unavailable policy handler. This does not install factory lifetime
     selection, stopped-ancestor resources or workspace retention.
 
-    [authored_capabilities] resolves an authored reservation's exact private tool
-    closure. It is a trusted host adapter, unavailable by default. It must verify
+    [authored_capabilities] resolves an ordinary or captured authored reservation's
+    exact private tool closure, selected by the shared validated source accessor.
+    It is a trusted host adapter, unavailable by default. It must verify
     the recorded authored name/source against the parent's current, source-bound
     tool registration in [public], then return only that implementation's approved
     private resources, under its retained resource lease and actual caller policy.
@@ -89,8 +90,8 @@ val check_preparation
   -> permission_profile:Permission_policy.t
   -> (unit, Agent_protocol.Error.t) result
 
-(** The same preparation gate, additionally requiring the exact authored origin
-    and live prepared private registry. Prevents constructing a child with a
+(** The same preparation gate, additionally requiring the exact ordinary or
+    captured authored source selector and live prepared private registry. Prevents constructing a child with a
     different resource set than the one validated by this authority guard. *)
 val check_authored_preparation
   :  t

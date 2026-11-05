@@ -1112,8 +1112,7 @@ let%test_unit "claimed developer model runner publishes a real offline response"
            ~registry:(Agent_server.Session_registry.create ())
            ~developer_registry:(Some registry)
            ~capacity
-           ~model_job_inference:(fun _ _ ->
-             Error (P.Error.invalid_request "unused conversation inference"))
+           ~conversation_host:Developer_only
        in
        let await_succeeded job_id =
          Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->

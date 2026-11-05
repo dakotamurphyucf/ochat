@@ -223,12 +223,31 @@ let prepare revision ~script_preparation ~invocation ~env ~checkpoint =
     ~checkpoint
 ;;
 
+let captured_invocation source =
+  let module Invocation = Runtime_script_preparation.Invocation in
+  let origin = Captured_recurrence_source.origin source in
+  match Recurrence_child_origin.source_kind origin with
+  | Artifact -> Invocation.of_root (Recurrence_child_origin.root_invocation origin)
+  | Authored_tool _ -> Invocation.Delegated_ui
+;;
+
 let prepare_captured source ~script_preparation ~invocation ~env ~checkpoint =
+  let module Invocation = Runtime_script_preparation.Invocation in
+  let open Result.Let_syntax in
+  let origin = Captured_recurrence_source.origin source in
+  let%bind () =
+    if
+      Invocation.equal
+        invocation
+        (Invocation.of_root (Recurrence_child_origin.root_invocation origin))
+    then Ok ()
+    else Error (failure "captured source differs from its child root invocation")
+  in
   prepare_revision
     (Captured source)
     (Captured_recurrence_source.revision source)
     ~script_preparation
-    ~invocation
+    ~invocation:(captured_invocation source)
     ~env
     ~checkpoint
 ;;
@@ -329,11 +348,18 @@ let validate_target t (state : Session_state.t) =
       in
       if matches then Ok () else mismatch ()
   in
+  let expected_invocation =
+    match t.selection with
+    | Captured source ->
+      (* The actual origin/target comparison above owns the child root family.
+         Only its captured authored kind selects the restricted delegated role. *)
+      captured_invocation source
+    | Authored _ | Authored_child _ | Generated _ ->
+      Runtime_script_preparation.Invocation.of_root state.spec.root_invocation
+  in
   if
     P.Id.Prompt_revision.equal (artifact t).revision_id state.spec.prompt_revision_id
-    && Runtime_script_preparation.Invocation.equal
-         t.invocation
-         (Runtime_script_preparation.Invocation.of_root state.spec.root_invocation)
+    && Runtime_script_preparation.Invocation.equal t.invocation expected_invocation
   then Ok ()
   else mismatch ()
 ;;

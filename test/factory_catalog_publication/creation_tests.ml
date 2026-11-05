@@ -40,6 +40,7 @@ let with_max_root_agents (config : Agent_server.Config.t) ~max_root_agents =
 ;;
 
 let with_daemon
+      ?(startup_mode = Daemon.Execute)
       ?(prompt_text = "<developer>Pinned source during creation.</developer>")
       ?(schemas = false)
       ?(sources = [])
@@ -106,6 +107,7 @@ let with_daemon
                ~options:
                  { Daemon.default_options with
                    inference_policy = policy
+                 ; startup_mode
                  ; qualify_chatml_extensions
                  }
                ()

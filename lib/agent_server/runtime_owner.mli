@@ -239,7 +239,8 @@ val with_execution_runtime
 (** Borrow only an already installed runtime, admitted under the existing owner
     gate and cancellable/joined by stop or close. Closed, unloading, retiring and
     unloaded owners reject; this never invokes the builder or initializer.
-    Installed execution checks still apply. The callback runs outside the gate;
+    Installed execution checks run outside the mutex under the same physical
+    cancellation lease, followed by a pure installed-owner check. The callback runs outside the gate;
     no runtime, native resource or callback may escape its lifetime. Error,
     cancellation and exceptions release the same existing lease. This grants no
     source, session or tool authority. *)
@@ -834,3 +835,93 @@ val resume_goal_episode
   -> prepared:Prepared_goal_continuation.t
   -> continuation:Agent_session.Session_actor.Goal_continuation.t
   -> (Agent_session.Session_actor.Goal_resume_result.t, Agent_protocol.Error.t) result
+
+module Prepared_goal_execution : sig
+  type t
+
+  val binding : t -> Agent_session.Session_actor.Goal_execution_runtime.Source_binding.t
+  val check_basis : t -> (unit, Agent_protocol.Error.t) result
+end
+
+module Goal_execution_source : sig
+  type t
+
+  val prepare
+    :  t
+    -> source:Agent_session.Runtime_builder.Source.t
+    -> (Prepared_goal_execution.t, Agent_protocol.Error.t) result
+
+  module Decision : sig
+    type 'a t =
+      | No_work
+      | Suspended_goal of Agent_session.Goal_execution_selection.Suspension.t
+      | Fresh of 'a
+  end
+
+  module Report : sig
+    type 'a t
+
+    (** Captured under protection before post-RPC cancellation can escape, even
+        when no source/callback ran. Factory owns exact factual close after joins. *)
+    val preparation
+      :  'a t
+      -> Agent_session.Session_actor.Goal_execution_runtime.Preparation.t option
+
+    val outcome : 'a t -> 'a Decision.t Scope_outcome.t
+  end
+end
+
+(** Hidden Factory key matches BOTH actual Owner and Actor. Reserve SAME source
+    stage before Begin outside mutex; no active lease/coexisting preparation.
+    Select once, bind once, revoke source before joining lease. No NoEffects or
+    command receipt; primary Error/exn/cancel remains separate from actual cleanup.
+    Factual close is Factory-owned after target plus generated-parent joins. *)
+val with_goal_wake_source_reported
+  :  t
+  -> source_owner:Agent_session.Runtime_source_owner.t
+  -> wake:Agent_protocol.Run_wake.t
+  -> (Goal_execution_source.t -> ('a, Agent_protocol.Error.t) result)
+  -> 'a Goal_execution_source.Report.t
+
+(** SAME stage/CPS and cleanup core; only issuance differs. Goal-attributed scope
+    required; caller must remain inside actual Actor.with_job_execution. No_work/
+    Suspended are impossible for this branch: stale owner fails, Held does not
+    abandon a Running Job. Ordinary Jobs use unchanged ordinary runtime APIs. *)
+val with_goal_job_source_reported
+  :  t
+  -> source_owner:Agent_session.Runtime_source_owner.t
+  -> owner:Agent_session.Session_actor.Job_runtime_owner.t
+  -> (Goal_execution_source.t -> ('a, Agent_protocol.Error.t) result)
+  -> 'a Goal_execution_source.Report.t
+
+(** Resource bracket for SAME still-active Job. No authority from [f], which must
+    use actual outer with_job_execution services and join its work. Cold Init and
+    Session_resume use the common constructor, then the Actor binds the actual
+    physical install and joined lifecycle into this SAME Job scope before callback
+    entry. No second durable Job claim or attempt increment; completion remains
+    the scheduler's existing owner.
+    Loaded reuse does no Init/resume. Exceptions/cancellation/primary failure and
+    all actual cleanup retain existing semantics. *)
+val with_goal_job_runtime
+  :  t
+  -> prepared:Prepared_goal_execution.t
+  -> execution:Agent_session.Session_actor.Goal_execution_runtime.t
+  -> (Agent_session.Runtime_builder.t -> ('a, Agent_protocol.Error.t) result)
+  -> ('a, Agent_protocol.Error.t) result
+
+module Loaded_job_runtime : sig
+  type 'a t =
+    | No_runtime
+    | Reused of 'a
+end
+
+(** Already-admitted exact Job resource borrower. Never constructs or reserves a
+    source stage, and never reacquires Enabled/quiescence permission. No_runtime
+    denotes genuine absence before acquisition only; other failures stay errors.
+    The callback joins under the same ordinary cancellable lease used elsewhere;
+    Stop/retirement joins it. Does not bypass an unrelated prepared source. *)
+val with_loaded_goal_job_runtime
+  :  t
+  -> owner:Agent_session.Session_actor.Job_runtime_owner.t
+  -> (Agent_session.Runtime_builder.t -> ('a, Agent_protocol.Error.t) result)
+  -> ('a Loaded_job_runtime.t, Agent_protocol.Error.t) result

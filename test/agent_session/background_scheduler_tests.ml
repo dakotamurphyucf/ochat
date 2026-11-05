@@ -142,7 +142,7 @@ let with_capacity_scheduler
         ~registry
         ~developer_registry:None
         ~capacity
-        ~model_job_inference:(fun _ _ -> failwith "unexpected model job inference")
+        ~conversation_host:Background_only
     in
     let scheduler = start () in
     Exn.protect
@@ -457,8 +457,7 @@ let%test_unit "shared capacity alternates conversation and developer owner turns
                 ~registry
                 ~developer_registry:(Some owners)
                 ~capacity
-                ~model_job_inference:(fun _ _ ->
-                  Error (Agent_protocol.Error.invalid_request "unused model job"))
+                ~conversation_host:Background_only
             in
             Exn.protect
               ~finally:(fun () ->
@@ -667,8 +666,7 @@ let%test_unit "developer scan advances beyond an unsupported 64-job window" =
                 ~registry
                 ~developer_registry:(Some owners)
                 ~capacity
-                ~model_job_inference:(fun _ _ ->
-                  Error (Agent_protocol.Error.invalid_request "unused model job"))
+                ~conversation_host:Background_only
             in
             Exn.protect
               ~finally:(fun () ->
@@ -849,8 +847,7 @@ let%test_unit "a saturated developer root leaves another physical root runnable"
                     ~registry
                     ~developer_registry:(Some owners)
                     ~capacity
-                    ~model_job_inference:(fun _ _ ->
-                      Error (Agent_protocol.Error.invalid_request "unused model job"))
+                    ~conversation_host:Background_only
                 in
                 Exn.protect
                   ~finally:(fun () ->

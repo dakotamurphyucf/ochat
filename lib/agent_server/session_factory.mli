@@ -855,3 +855,17 @@ val with_goal_resume_source_reported
   -> request:Agent_session.Goal_resume_request.t
   -> (Runtime_owner.Prepared_goal_continuation.t -> ('a, Agent_protocol.Error.t) result)
   -> ('a Goal_resume_source.t, Agent_protocol.Error.t) result
+
+(** Caller remains within Actor.with_job_execution; opaque SAME scope, not Job
+    DTO, selects Goal construction. Uses SAME selected-source report core and
+    Owner.with_goal_job_runtime after all real association checks. Callback is a
+    resource borrower, not an issuer/adoption certificate. Its actual Actor job
+    services remain required for inference/native effects. No completion/requeue.
+    Ordinary-attributed owners reject (scheduler uses old ordinary path); current
+    original/expiry/policy/physical checks are repeated at actual effects. *)
+val with_goal_job_runtime
+  :  t
+  -> Session_registry.entry
+  -> owner:Agent_session.Session_actor.Job_runtime_owner.t
+  -> (Agent_session.Runtime_builder.t -> ('a, Agent_protocol.Error.t) result)
+  -> ('a, Agent_protocol.Error.t) result

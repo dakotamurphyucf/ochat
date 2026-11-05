@@ -27,13 +27,24 @@ val bind
   -> capabilities:Chat_response.Tool_capability.t
   -> (t, Agent_protocol.Error.t) result
 
+(** Recheck this SAME installed wrapper's original source-bound implementation
+    and exact live private resource fingerprint. The host already owns the public
+    and private registries under their real resource loan. This neither selects
+    another owner nor authenticates a caller, ledger record or execution. *)
+val check_current
+  :  t
+  -> public:Chat_response.Tool_capability.t
+  -> current:Chat_response.Tool_capability.t
+  -> (unit, Agent_protocol.Error.t) result
+
 (** Resolve an already verified durable authored record against this exact
     source-bound wrapper and current live resources. Intended for
     Delegation_authority's authored-capabilities callback, including ancestry
     checks. The host must retain the resource lease and supply current registries.
     Same-name replacement, narrowed-away wrapper, changed source/private resources
-    and generated records reject. This does not authenticate a record or caller;
-    the common authority service still checks the ledger, parent, lifecycle,
+    and non-authored records reject. Ordinary and captured authored selectors use
+    the same source-bound check; immutable selector data grants no resources.
+    This does not authenticate a record or caller; the common authority service still checks the ledger, parent, lifecycle,
     durable resource pins and actual execution permissions. *)
 val resolve
   :  t

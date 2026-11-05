@@ -6,9 +6,19 @@ open! Core
     remain owned by the existing artifact store. *)
 type t
 
-(** Capture the exact retained definition JSON and selected reservation. The
-    initial Spec digest normalizes only its delegation locator to absent; the
-    actual locator is independently checked against the admitted record. *)
+(** Child root family selected by the immutable source kind. Artifact sources
+    retain the defining root; authored specialists use the existing Ui child
+    family independently of the parent's root or tool ABI. This is data only;
+    actual compiled-role custody and resource admission remain separate. *)
+val root_invocation_for_source
+  :  source_kind:Agent_store.Captured_source_kind.t
+  -> Prompt_definition.t
+  -> Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.t
+
+(** Capture the exact retained definition JSON and selected reservation. Checks
+    the initial Spec's root against [root_invocation_for_source] before hashing.
+    The digest normalizes only its delegation locator to absent; the actual
+    locator is independently checked against the admitted record. *)
 val create
   :  Recurrence_definition.t
   -> reservation:Recurrence_child_reservation.t
@@ -24,6 +34,12 @@ val of_record : Agent_store.Delegation_store.record -> (t, Agent_protocol.Error.
 (** Same immutable source selector validated with the lower captured origin.
     The actual source owner/private bindings must still be resolved and checked. *)
 val source_kind : t -> Agent_store.Captured_source_kind.t
+
+(** Actual child root family derived from this origin's validated source kind.
+    The retained defining metadata remains the original parent provenance. *)
+val root_invocation
+  :  t
+  -> Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.t
 
 (** Validate against an actual full controller definition supplied by its owner:
     exact reservation/target, source kind and original Prompt_definition. Neither

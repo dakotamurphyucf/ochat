@@ -100,7 +100,7 @@ let dispatch env sw actor backend job request tools =
              ; per_kind = 1
              ; max_nested_depth = 1
              })
-      ~model_job_inference:(fun _ _ -> failwith "unexpected model job")
+      ~conversation_host:Background_only
   in
   Exn.protect
     ~finally:(fun () ->

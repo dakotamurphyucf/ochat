@@ -80,18 +80,32 @@ let entry t ~public ~name =
   entry
 ;;
 
+let realized_capabilities prepared =
+  if Lazy.is_val prepared.B.resources.native.capabilities
+  then capabilities prepared
+  else denied "delegation.authored_resources: private capabilities are not realized"
+;;
+
 let find t ~public ~name =
-  Result.map (entry t ~public ~name) ~f:(fun entry -> entry.prepared)
+  let open Result.Let_syntax in
+  let%bind entry = entry t ~public ~name in
+  let%bind current = realized_capabilities entry.prepared in
+  let%map () = Binding.check_current entry.binding ~public ~current in
+  entry.prepared
 ;;
 
 let resolve t (record : Agent_store.Delegation_store.record) ~public =
   let open Result.Let_syntax in
-  match record.admission.authored_tool with
+  let%bind source =
+    Agent_store.Delegation_store.Admission.authored_source record.admission
+    |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
+  in
+  match source with
   | None ->
     denied "delegation.authored_resources: generated origin has no authored wrapper"
   | Some origin ->
     let%bind entry = entry t ~public ~name:origin.name in
-    let%bind current = capabilities entry.prepared in
+    let%bind current = realized_capabilities entry.prepared in
     Binding.resolve entry.binding ~record ~public ~current
 ;;
 

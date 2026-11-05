@@ -21,18 +21,27 @@ val install
   -> Agent_session.Runtime_builder.authored_resources list
   -> (unit, Agent_protocol.Error.t) result
 
-(** Find the captured private closure through a live wrapper present in [public].
+(** Find the captured private closure through the SAME source-bound live wrapper
+    present in [public], rechecking its installed implementation and exact current
+    private registry fingerprint. Private capabilities must already be realized;
+    lookup never realizes resources or runs setup effects. Actual installation
+    and preparation retain their existing resource realization ownership.
+
     The caller must already hold the owning runtime/resource lease. Names alone
-    cannot discover another owner's wrapper or private tools. *)
+    cannot discover another owner's wrapper or private tools. This is not caller,
+    native effect or recurrence admission. *)
 val find
   :  t
   -> public:Chat_response.Tool_capability.t
   -> name:string
   -> (Agent_session.Runtime_builder.authored_resources, Agent_protocol.Error.t) result
 
-(** Resolve a private ledger origin against the current source-bound wrapper.
-    Suitable for Delegation_authority's authored_capabilities callback. The common
-    authority service separately validates ledger, ancestry and current policy. *)
+(** Resolve a validated ordinary or captured authored selector against the SAME
+    current source-bound wrapper and already-realized private registry. Lookup
+    never performs resource setup. Suitable for Delegation_authority's
+    authored_capabilities callback, under the actual owner's resource lease.
+    The common authority service separately validates ledger, ancestry and current
+    policy; immutable selector data grants no resource or execution permission. *)
 val resolve
   :  t
   -> Agent_store.Delegation_store.record

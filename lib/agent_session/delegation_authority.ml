@@ -132,10 +132,16 @@ let check_invocation_owner (record : D.record) (parent : Session_state.t) =
      | _ -> denied "delegation.invocation_ended: one-off caller is no longer executing")
 ;;
 
+let authored_source (record : D.record) =
+  D.Admission.authored_source record.admission
+  |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
+;;
+
 let selected_bindings t record ~public ~expected =
   let open Result.Let_syntax in
+  let%bind source = authored_source record in
   let%bind ceiling =
-    match record.D.admission.authored_tool, t.authored_capabilities with
+    match source, t.authored_capabilities with
     | None, _ -> Ok public
     | Some _, Some resolve -> resolve record ~public
     | Some _, None ->
@@ -255,8 +261,9 @@ let rec read_chain t ~visited ~depth ~expected ~require_execution reference =
      actor-backed checks before returning; lifecycle coordination owns the lease
      through actual execution and is responsible for cancellation after this point. *)
   let%bind () = independent_authorized t record in
+  let%bind source = authored_source record in
   let%bind () =
-    match record.admission.authored_tool with
+    match source with
     | None -> Ok ()
     | Some _ ->
       (* The private closure is scoped to this edge. Never pass it as the public
@@ -344,12 +351,10 @@ let check_authored_preparation
   =
   let open Result.Let_syntax in
   let%bind record, parent = read t in
+  let%bind source = authored_source record in
   let%bind () =
     match
-      Option.equal
-        D.Admission.equal_authored_tool
-        record.admission.authored_tool
-        (Some origin)
+      Option.equal D.Admission.equal_authored_tool source (Some origin)
       && String.equal (C.fingerprint capabilities) (C.fingerprint t.capabilities)
     with
     | true -> Ok ()

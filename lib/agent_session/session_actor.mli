@@ -852,6 +852,26 @@ module Job_runtime_owner : sig
       | Goal
   end
 
+  (** Snapshot routing only, using the same retained-parent lookup as actual
+      scope issuance. Historical missing inference classification never becomes
+      Unbound. Conflicting/unavailable ancestry rejects. This acquires no scope,
+      permission, runtime or Job claim; the Actor repeats actual ownership checks. *)
+  val classify
+    :  Session_state.t
+    -> Agent_protocol.Job.t
+    -> (Attribution.t, Agent_protocol.Error.t) result
+
+  (** Snapshot-only fresh-claim selection using the SAME retained Run lookup.
+      A queued Job of a current Held Goal suspends without claiming, retiring or
+      advancing its attempt. Running/terminal factual work stays eligible here;
+      its resource/effect owners retain their independent current guards.
+      Stale or unavailable queued ownership rejects, never becomes Ordinary.
+      This value grants no scope or execution permission. *)
+  val selection
+    :  Session_state.t
+    -> Agent_protocol.Job.t
+    -> (Goal_execution_selection.t, Agent_protocol.Error.t) result
+
   (** Immutable causal routing DATA. Historical missing inference provenance
       still retains genuine Run ancestry; Ordinary is not an inference Unbound
       classification. The Goal branch needs actual source/scope/currentness;
@@ -2189,6 +2209,17 @@ val add_job
   :  t
   -> Agent_protocol.Job.t
   -> (Agent_protocol.Job.t, Agent_protocol.Error.t) result
+
+(** Factual maintenance of an exact due queued Job. Reuses actual retained
+    Run authority retirement, preserving stale generation errors and writer
+    failures. Never claims an execution attempt, even if a held Goal becomes
+    Enabled while its original authority callback yields. Acquires no runtime,
+    source or capacity. Actual startup-owned deferred Jobs retain their owner. *)
+val reconcile_job_authority
+  :  t
+  -> job_id:Agent_protocol.Id.Job.t
+  -> generation:int
+  -> (unit, Agent_protocol.Error.t) result
 
 (** Scheduled [Queued] descendants with [Pending] or [Delivered] delivery
     remain queued ([Ok None], without a write) while their exact acknowledged
@@ -4304,3 +4335,16 @@ val goal_job_runtime_services
   :  t
   -> execution:Goal_execution_runtime.t
   -> (job_execution, Agent_protocol.Error.t) result
+
+(** Already-admitted Job RESOURCE retention only. Exact active physical scope,
+    retained Run/original and actual installed worker/inference/Manager; no new
+    Enabled or foreground-quiescence requirement. Current/deadline checks occur
+    here outside Owner locks. The returned same-domain proof has a pure physical
+    basis for final lease publication; effects retain their independent gates. *)
+val job_runtime_resource
+  :  t
+  -> owner:Job_runtime_owner.t
+  -> worker:Operation_worker.t
+  -> inference:Inference_client.Execution.t
+  -> moderator_manager:Chat_response.Moderator_manager.t option
+  -> (Runtime_construction_resource.t, Agent_protocol.Error.t) result

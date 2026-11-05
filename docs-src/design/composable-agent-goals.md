@@ -494,6 +494,32 @@ request. A model preparation failure after a durable Job claim follows the same
 terminal completion path as execution failure; it does not leave a Running Job
 behind or invent a provider attempt.
 
+The model-job scheduler resolves the captured recipe through its actual session
+Factory inside the claimed Job's execution scope. Goal-owned Jobs borrow resources
+through that same Factory; ordinary Jobs retain the ordinary background-runtime
+path. An already claimed Goal Job can retain its installed runtime while the Goal
+is held. This does not admit fresh inference or native effects: those operations
+still pass their own current Goal, source, original-authority and deadline checks.
+Borrowing the loaded runtime does not replay initialization or create another Job
+attempt. If no runtime is installed, reconstruction uses the existing captured-source
+and initialization path; a failed borrow never silently selects that cold path.
+Resource borrowing checks the Job deadline again after potentially yielding
+authorization, before entering the caller's callback.
+
+A held Goal's queued Jobs remain queued without advancing their attempts. The
+Actor checks this at the actual claim and repeats it before persisting the claim;
+the scheduler also excludes suspended candidates before fair ordering. Factual
+authority retirement remains active while work is paused: expired original
+authority can still cancel its Job and interrupt its Run. That maintenance path
+cannot claim a Job, even if the Goal is resumed while authorization is checked.
+
+Low-level scheduler hosts declare the services they actually supply. A Factory
+host supports conversation model jobs and Goal source ownership; a background-only
+host supports ordinary asynchronous tools; a developer-only host supplies no new
+conversation execution. Unsupported candidates remain queued before fair selection
+and claiming. These host choices describe available services, not permission to
+execute work.
+
 Host turns are accounted at the real Operation_started transaction; compaction
 is not a host turn. Ledger changes reconcile existing Goal partitions against the
 same before/after canonical rows. Revised usage replaces the retained contribution,

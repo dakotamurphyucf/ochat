@@ -50,9 +50,18 @@ val prepare
   -> checkpoint:(unit -> unit)
   -> (t, Agent_protocol.Error.t) result
 
-(** Retain the actual captured child admission while selecting its ordinary
-    programs. The original artifact's defining metadata is preserved, not
-    rewritten to the target's absent catalog identity. *)
+(** Retain the actual captured child admission and original defining metadata.
+    The supplied invocation must match the origin-derived child root family.
+    Artifact sources retain that root invocation; captured authored specialists
+    select the existing restricted Delegated_ui role with the child Standard ABI.
+    The defining parent's root and tool ABI remain unchanged provenance. Exact
+    retained compiled-role custody must match this child contract; it is not
+    recompiled into another ABI. [validate_target] checks the same derived role;
+    unrelated source kinds cannot use it to widen invocation matching.
+
+    The Factory must authenticate the actual wrapper/private resources and retain
+    the genuine parent resource loan through consumers. The source discriminator
+    is immutable data and grants none of that authority. *)
 val prepare_captured
   :  Captured_recurrence_source.t
   -> script_preparation:Runtime_script_preparation.t option
@@ -103,6 +112,8 @@ val programs : t -> Chatml_prompt_programs.Restored.t option
 
 (** Pure exact target/family comparison. Every child selection checks its actual
     immutable child association, even when another session shares its artifact.
+    Captured authored sources must match the origin-derived child Ui family
+    and restricted delegated role, independently of the parent's defining role.
     Ordinary missing-definition rules remain strict. No callbacks, current
     operator/delegation permission, runtime admission or execution proof here. *)
 val validate_target : t -> Session_state.t -> (unit, Agent_protocol.Error.t) result

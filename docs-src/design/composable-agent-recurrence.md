@@ -531,6 +531,22 @@ The upper creation owner validates a captured origin against the complete actual
 controller definition, including its target digest and original prompt definition.
 Decoding the lower delegation record alone cannot establish that association.
 
+An authored specialist retains its own delegated compiler contract. The defining
+parent's `Headless` or `Ui` role remains source provenance; it does not select the
+child's role. An authored captured child uses the stored `Ui` family and the
+restricted `Delegated_ui` compiler surface with its already selected Standard tool
+ABI. Artifact-only targets retain their original root role. The origin validates
+the child's initial specification and restored state against this source-specific
+choice. Neither a parent mode nor a matching tool name authorizes a broader
+compiler surface, changes captured code, or grants native tool access.
+
+Fresh captured children have no admitted conversation history before their Run.
+Their initial source messages must be evaluated and allocated through the common
+initialization owner after held admission. Ordinary authored children keep their
+existing admitted-history requirement; resumed captured children use retained
+history. Reusing the delegated builder must preserve that distinction instead of
+fabricating an empty stored history or evaluating initial content before admission.
+
 A fresh child is a new session and transaction; its captured source may be
 identical to the controller's source. Only the captured-recurrence source kind
 permits the same parent and child artifact revision. The creation owner must

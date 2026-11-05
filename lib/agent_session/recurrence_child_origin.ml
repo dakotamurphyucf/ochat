@@ -13,7 +13,18 @@ type t =
   ; definition : Prompt_definition.t
   }
 
+let root_invocation_for_source ~source_kind (definition : Prompt_definition.t) =
+  match source_kind with
+  | Source.Artifact -> definition.root_invocation
+  | Source.Authored_tool _ -> Ui
+;;
+
 let source_kind t = Raw.source_kind t.raw
+
+let root_invocation t =
+  root_invocation_for_source ~source_kind:(source_kind t) t.definition
+;;
+
 let reservation t = t.reservation
 let definition t = t.definition
 let invalid message = Error (P.Error.invalid_request message)
@@ -45,6 +56,15 @@ let create definition ~reservation ~initial_spec =
     | Fresh_child { source_kind; _ } -> Ok source_kind
   in
   let%bind definition = Recurrence_target.fresh_definition_json target in
+  let%bind defining = Prompt_definition.of_jsonaf definition in
+  let%bind () =
+    if
+      Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.equal
+        initial_spec.Session_state.Spec.root_invocation
+        (root_invocation_for_source ~source_kind defining)
+    then Ok ()
+    else invalid "captured child root differs from its selected source contract"
+  in
   let%bind initial_spec_sha256 = spec_digest initial_spec in
   let create =
     match source_kind with
@@ -127,7 +147,7 @@ let validate_source t (state : Session_state.t) =
     && Option.exists state.spec.delegation ~f:(Store.Reference.equal expected)
     && Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.equal
          state.spec.root_invocation
-         t.definition.root_invocation
+         (root_invocation t)
     && String.equal state.spec.permission_profile t.definition.permission_profile
     && Option.equal String.equal state.spec.runtime_policy t.definition.runtime_policy
   then Ok ()

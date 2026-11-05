@@ -1779,7 +1779,7 @@ let compose
       ~registry
       ~developer_registry:(Option.map developer ~f:Developer_host.registry)
       ~capacity:job_capacity
-      ~model_job_inference:(Session_factory.model_job_inference factory)
+      ~conversation_host:(Factory factory)
   in
   Startup_cleanup.adopt_job_scheduler_exn startup_cleanup job_scheduler;
   let%bind () =

@@ -1493,8 +1493,7 @@ let%test_unit "shared scheduler overlaps two physically admitted jobs of one roo
              ~registry:(Agent_server.Session_registry.create ())
              ~developer_registry:(Some owners)
              ~capacity
-             ~model_job_inference:(fun _ _ ->
-               Error (P.Error.invalid_request "unused conversation inference"))
+             ~conversation_host:Developer_only
          in
          Exn.protect
            ~finally:(fun () ->
@@ -1586,8 +1585,7 @@ let%test_unit "developer scheduler retirement joins an entered protected handler
              ~registry:(Agent_server.Session_registry.create ())
              ~developer_registry:(Some owners)
              ~capacity
-             ~model_job_inference:(fun _ _ ->
-               Error (P.Error.invalid_request "unused conversation inference"))
+             ~conversation_host:Developer_only
          in
          Exn.protect
            ~finally:(fun () ->
@@ -1992,8 +1990,7 @@ let%test_unit "malformed saved Async_tool enters one physical Failed attempt" =
              ~registry:(Agent_server.Session_registry.create ())
              ~developer_registry:(Some owners)
              ~capacity
-             ~model_job_inference:(fun _ _ ->
-               Error (P.Error.invalid_request "unused conversation inference"))
+             ~conversation_host:Developer_only
          in
          Exn.protect
            ~finally:(fun () -> Agent_server.Job_scheduler.close_and_wait scheduler |> ok)

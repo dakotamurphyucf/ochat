@@ -12154,6 +12154,71 @@ let preview_recurrence_source t entry ~actor ~authorize =
   { Recurrence_source_preview.source; expected_revision = after.counters.revision }
 ;;
 
+let select_existing_goal_source t entry ~parent_cleanup ~prepare ~check_selected f =
+  let module Scope = Runtime_owner.Scope_outcome in
+  with_selected_source
+    t
+    entry
+    ~with_parent:(fun owner f ->
+      parent_cleanup := Deferred_parent_cleanup.Awaiting_report;
+      let outcome =
+        Runtime_owner.with_loaded_source_capabilities_reported
+          owner
+          ~source_owner:t.runtime_source_owner
+          f
+      in
+      parent_cleanup := Reported (Scope.cleanup outcome);
+      Scope.resume outcome)
+    ~with_source:(fun source f -> Result.bind (prepare source) ~f)
+    ~check_selected
+    f
+;;
+
+let finish_existing_goal_source ~outcome ~parent_cleanup ~preparation ~end_preparation =
+  let module Scope = Runtime_owner.Scope_outcome in
+  let cleanup =
+    match parent_cleanup with
+    | Deferred_parent_cleanup.Not_acquired -> Scope.cleanup outcome
+    | Reported parent -> Scope.Cleanup.combine parent (Scope.cleanup outcome)
+    | Awaiting_report ->
+      Scope.Cleanup.combine
+        (Scope.Cleanup.failed
+           (Protocol
+              (unavailable
+                 Internal_error
+                 "Goal parent source cleanup report is unavailable")))
+        (Scope.cleanup outcome)
+  in
+  match preparation with
+  | None -> cleanup
+  | Some preparation ->
+    (* Actual target/parent reporters have returned before factual Actor close.
+       Missing or failed cleanup is never promoted to joined by this close. *)
+    let closed =
+      Eio.Cancel.protect (fun () ->
+        try Ok (end_preparation preparation) with
+        | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ()))
+    in
+    (match closed with
+     | Ok (Ok ()) -> cleanup
+     | Ok (Error failure) ->
+       Scope.Cleanup.combine cleanup (Scope.Cleanup.failed (Protocol failure))
+     | Error (exn, backtrace) ->
+       Scope.Cleanup.combine cleanup (Scope.Cleanup.failed (Raised (exn, backtrace))))
+;;
+
+let resume_existing_goal_source outcome cleanup =
+  let module Scope = Runtime_owner.Scope_outcome in
+  match Scope.resume outcome with
+  | Error _ as failure -> failure
+  | Ok _ as result ->
+    (match Scope.Cleanup.status cleanup with
+     | Never_acquired | Joined -> result
+     | Failed (Protocol failure, _) -> Error failure
+     | Failed (Raised (exn, backtrace), _) ->
+       Exn.raise_with_original_backtrace exn backtrace)
+;;
+
 module Goal_resume_source = struct
   module Decision = Runtime_owner.Goal_resume_source.Decision
 
@@ -12165,17 +12230,7 @@ module Goal_resume_source = struct
 
   let receipt t = t.receipt
   let cleanup t = t.cleanup
-
-  let result t =
-    match Runtime_owner.Scope_outcome.resume t.outcome with
-    | Error _ as failure -> failure
-    | Ok _ as result ->
-      (match Runtime_owner.Scope_outcome.Cleanup.status t.cleanup with
-       | Never_acquired | Joined -> result
-       | Failed (Protocol failure, _) -> Error failure
-       | Failed (Raised (exn, backtrace), _) ->
-         Exn.raise_with_original_backtrace exn backtrace)
-  ;;
+  let result t = resume_existing_goal_source t.outcome t.cleanup
 end
 
 let with_goal_resume_source_reported
@@ -12207,54 +12262,22 @@ let with_goal_resume_source_reported
       ~session
       ~request
       (fun stage ->
-         with_selected_source
+         select_existing_goal_source
            t
            entry
-           ~with_parent:(fun owner f ->
-             parent_cleanup := Awaiting_report;
-             let outcome =
-               Runtime_owner.with_loaded_source_capabilities_reported
-                 owner
-                 ~source_owner:t.runtime_source_owner
-                 f
-             in
-             parent_cleanup := Reported (Scope.cleanup outcome);
-             Scope.resume outcome)
-           ~with_source:(fun source f -> Result.bind (Source.prepare stage ~source) ~f)
+           ~parent_cleanup
+           ~prepare:(fun source -> Source.prepare stage ~source)
            ~check_selected:Runtime_owner.Prepared_goal_continuation.check_basis
            f)
   in
   let outcome = Source.Report.outcome report in
   let cleanup =
-    match !parent_cleanup with
-    | Not_acquired -> Scope.cleanup outcome
-    | Reported parent -> Scope.Cleanup.combine parent (Scope.cleanup outcome)
-    | Awaiting_report ->
-      Scope.Cleanup.combine
-        (Scope.Cleanup.failed
-           (Protocol
-              (unavailable
-                 Internal_error
-                 "Goal resume parent source cleanup report is unavailable")))
-        (Scope.cleanup outcome)
-  in
-  let cleanup =
-    match Source.Report.preparation report with
-    | None -> cleanup
-    | Some preparation ->
-      (* Both source scopes have returned and joined before this factual close.
-         Local source revocation already excluded fresh admission before joins. *)
-      let closed =
-        Eio.Cancel.protect (fun () ->
-          try Ok (Actor.end_goal_continuation_preparation entry.actor ~preparation) with
-          | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ()))
-      in
-      (match closed with
-       | Ok (Ok ()) -> cleanup
-       | Ok (Error failure) ->
-         Scope.Cleanup.combine cleanup (Scope.Cleanup.failed (Protocol failure))
-       | Error (exn, backtrace) ->
-         Scope.Cleanup.combine cleanup (Scope.Cleanup.failed (Raised (exn, backtrace))))
+    finish_existing_goal_source
+      ~outcome
+      ~parent_cleanup:!parent_cleanup
+      ~preparation:(Source.Report.preparation report)
+      ~end_preparation:(fun preparation ->
+        Actor.end_goal_continuation_preparation entry.actor ~preparation)
   in
   let receipt =
     match Source.Report.preparation report with
@@ -12265,4 +12288,91 @@ let with_goal_resume_source_reported
        | Returned (Ok (Fresh _) | Error _) | Raised _ -> None)
   in
   Ok { Goal_resume_source.outcome; receipt; cleanup }
+;;
+
+let with_goal_execution_source t (entry : Session_registry.entry) ~with_stage f =
+  let module Actor = Agent_session.Session_actor in
+  let module Source = Runtime_owner.Goal_execution_source in
+  let open Result.Let_syntax in
+  let%bind state = Actor.state entry.actor in
+  let session =
+    Agent_protocol.Session_ref.create
+      ~server_id:(Agent_store.Session_store.server_id t.store)
+      ~session_id:state.identity.session_id
+  in
+  let%bind () = check_registered_entry t entry ~session in
+  let%bind () =
+    if Runtime_owner.belongs_to_actor entry.runtime entry.actor
+    then Ok ()
+    else Error (unavailable Invalid_state "source runtime belongs to another Actor")
+  in
+  let parent_cleanup = ref Deferred_parent_cleanup.Not_acquired in
+  let report =
+    with_stage (fun stage ->
+      select_existing_goal_source
+        t
+        entry
+        ~parent_cleanup
+        ~prepare:(fun source -> Source.prepare stage ~source)
+        ~check_selected:Runtime_owner.Prepared_goal_execution.check_basis
+        (fun prepared ->
+           let%bind execution =
+             Actor.prepare_goal_execution_runtime
+               entry.actor
+               ~binding:(Runtime_owner.Prepared_goal_execution.binding prepared)
+           in
+           f prepared execution))
+  in
+  let outcome = Source.Report.outcome report in
+  let cleanup =
+    finish_existing_goal_source
+      ~outcome
+      ~parent_cleanup:!parent_cleanup
+      ~preparation:(Source.Report.preparation report)
+      ~end_preparation:(fun preparation ->
+        Actor.end_goal_execution_runtime_preparation entry.actor ~preparation)
+  in
+  resume_existing_goal_source outcome cleanup
+;;
+
+let with_goal_job_runtime t (entry : Session_registry.entry) ~owner f =
+  let module Actor = Agent_session.Session_actor in
+  let open Result.Let_syntax in
+  let%bind state = Actor.state entry.actor in
+  let session =
+    Agent_protocol.Session_ref.create
+      ~server_id:(Agent_store.Session_store.server_id t.store)
+      ~session_id:state.identity.session_id
+  in
+  let%bind () = check_registered_entry t entry ~session in
+  let%bind () =
+    match Actor.Job_runtime_owner.attribution owner with
+    | Goal -> Actor.check_job_runtime_owner entry.actor ~owner
+    | Ordinary ->
+      Error
+        (unavailable Invalid_request "ordinary Job requires its ordinary runtime path")
+  in
+  let%bind reused = Runtime_owner.with_loaded_goal_job_runtime entry.runtime ~owner f in
+  match reused with
+  | Reused result -> Ok result
+  | No_runtime ->
+    let%bind decision =
+      with_goal_execution_source
+        t
+        entry
+        ~with_stage:
+          (Runtime_owner.with_goal_job_source_reported
+             entry.runtime
+             ~source_owner:t.runtime_source_owner
+             ~owner)
+        (fun prepared execution ->
+           Runtime_owner.with_goal_job_runtime entry.runtime ~prepared ~execution f)
+    in
+    (match decision with
+     | Fresh result -> Ok result
+     | No_work | Suspended_goal _ ->
+       Error
+         (unavailable
+            Invalid_state
+            "claimed Job source did not retain its actual execution"))
 ;;

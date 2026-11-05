@@ -171,8 +171,9 @@ let install_reserved ~delegations ~reservation ~artifact_store t =
     | Some _ ->
       error "delegation.revoked" "generated artifact reservation has been revoked"
   in
+  let%bind source = D.Admission.authored_source current.admission |> store_result in
   let%bind () =
-    match current.admission.authored_tool with
+    match source with
     | None -> Ok ()
     | Some _ ->
       error

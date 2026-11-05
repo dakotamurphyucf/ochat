@@ -244,6 +244,25 @@ let%expect_test "captured authored source is explicit data with exact legacy cus
         ~liveness:Detached
         ~start_immediately:false
     in
+    let module Root = Chat_response.Script_contract_plan.Program.Role.Moderator_invocation
+    in
+    (* Parent provenance is Headless; the actual authored specialist keeps its
+       own delegated UI role. Artifact-only children retain the parent role. *)
+    assert (Root.equal definition.root_invocation Headless);
+    assert (
+      Root.equal
+        (Origin.root_invocation_for_source
+           ~source_kind:(Authored_tool authored_tool)
+           definition)
+        Ui);
+    assert (
+      Root.equal
+        (Origin.root_invocation_for_source ~source_kind:Artifact definition)
+        Headless);
+    let old_spec = { initial.spec with root_invocation = Headless } in
+    assert (
+      Result.is_error
+        (Origin.create full_definition ~reservation:row ~initial_spec:old_spec));
     let raw =
       Origin.create full_definition ~reservation:row ~initial_spec:initial.spec
       |> protocol_ok
@@ -256,8 +275,17 @@ let%expect_test "captured authored source is explicit data with exact legacy cus
     let old_definition = definition_with_target full_definition legacy in
     let old_row = reservation old_definition in
     let old_origin =
-      Origin.create old_definition ~reservation:old_row ~initial_spec:initial.spec
+      Origin.create old_definition ~reservation:old_row ~initial_spec:old_spec
       |> protocol_ok
+    in
+    let old_spec_sha256 =
+      A.Session_state_document.project_spec
+        { old_spec with delegation = None }
+        ~workspace:A.Workspace_instance.to_jsonaf
+      |> P.Json_codec.canonical_string
+      |> protocol_ok
+      |> Digestif.SHA256.digest_string
+      |> Digestif.SHA256.to_hex
     in
     let expected_old_origin =
       D.Document.create
@@ -268,7 +296,7 @@ let%expect_test "captured authored source is explicit data with exact legacy cus
           (`Object
               [ "reservation", Reservation.to_json old_row
               ; "definition", Raw.definition raw
-              ; "initial_spec_sha256", `String (Raw.initial_spec_sha256 raw)
+              ; "initial_spec_sha256", `String old_spec_sha256
               ])
       |> document_ok
       |> D.Document.json

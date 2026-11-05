@@ -127,8 +127,9 @@ val load_artifact
 
 (** Inspect the exact artifact recorded by a host-owned authored admission.
     Store.load admits its complete manifest and verifies its materialized tree.
-    Require the recorded revision/manifest, authored origin, supported ordinary
-    parser/runtime versions, and either complete legacy captured metadata or
+    Require the recorded revision/manifest, validated ordinary or captured
+    authored source selector, supported ordinary parser/runtime versions, and
+    either complete legacy captured metadata or
     complete current publisher metadata. Mixed metadata rejects.
 
     This does not authenticate original wrapper/private resources, admit execution,

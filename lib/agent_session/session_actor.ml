@@ -423,6 +423,12 @@ type job_scope =
   ; mutable cancel : (unit -> unit) option
   }
 
+module Job_claim_purpose = struct
+  type t =
+    | Execute
+    | Retire_only
+end
+
 module Job_runtime_owner = struct
   module Attribution = struct
     type t =
@@ -437,6 +443,49 @@ module Job_runtime_owner = struct
     ; execute : Native_tool_invocation.executor
     ; attribution : Attribution.t
     }
+
+  (* Routing retains native ancestry without manufacturing inference Unbound. *)
+  let run_of_job state (job : Agent_protocol.Job.t) =
+    match job.inference_origin with
+    | Some _ -> Goal_work_attribution.run_of_job state job
+    | None ->
+      Result.map
+        (Goal_work_attribution.Retained_parent.of_job state job)
+        ~f:
+          (Option.map ~f:(fun parent -> parent.Goal_work_attribution.Retained_parent.run))
+  ;;
+
+  let classify state job =
+    let open Result.Let_syntax in
+    let%bind run = run_of_job state job in
+    let%map attribution =
+      Option.value_map run ~default:(Ok None) ~f:(Goal_work_attribution.of_run state)
+    in
+    match attribution with
+    | None -> Attribution.Ordinary
+    | Some _ -> Goal
+  ;;
+
+  (* A saved Job is not yet its Running execution claim. Only queued work
+     participates in fresh Goal selection; factual maintenance of an admitted
+     attempt must not acquire a new Enabled decision. *)
+  let selection state (job : Agent_protocol.Job.t) =
+    let open Result.Let_syntax in
+    match job.status with
+    | Queued ->
+      let%bind run = run_of_job state job in
+      Option.value_map
+        run
+        ~default:(Ok Goal_execution_selection.Eligible)
+        ~f:(Goal_execution_selection.of_run state)
+    | Running
+    | Waiting_permission _
+    | Waiting_completion _
+    | Succeeded
+    | Failed _
+    | Cancelled
+    | Interrupted _ -> Ok Goal_execution_selection.Eligible
+  ;;
 
   let attribution t =
     if not (Int.equal t.domain (Stdlib.Domain.self () :> int))
@@ -2106,6 +2155,12 @@ module Goal_continuation_request = struct
     | Close_execution : Goal_execution_runtime.Preparation.t -> unit t
     | Check_job_owner : Job_runtime_owner.t -> unit t
     | Acknowledge_job_resource : Goal_execution_runtime.t -> unit t
+    | Job_resource :
+        Job_runtime_owner.t
+        * Operation_worker.t
+        * Inference_client.Execution.t
+        * Chat_response.Moderator_manager.t option
+        -> (Runtime_construction_resource.t * Run_admission.Scope.t) t
 end
 
 module Runtime_constructor_mutation_request = struct
@@ -3033,7 +3088,9 @@ type _ request =
   | Publish_job_progress :
       Agent_protocol.Id.Invocation.t * Ochat_function.Progress.t
       -> unit request
-  | Claim_job : Agent_protocol.Id.Job.t * int -> Agent_protocol.Job.t option request
+  | Claim_job :
+      Job_claim_purpose.t * Agent_protocol.Id.Job.t * int
+      -> Agent_protocol.Job.t option request
   | Complete_job :
       Agent_protocol.Id.Job.t * int * int * Runtime_builder.model_job_outcome
       -> Agent_protocol.Job.t request
@@ -3741,6 +3798,19 @@ let goal_runtime_scope_basis t (scope : Goal_continuation.runtime_scope) =
     else Error (error Conflict "Goal resume runtime owner changed")
   in
   Runtime_source_preparation.validate_target scope.continuation.binding.source t.state
+;;
+
+let select_goal_runtime t continuation =
+  let open Result.Let_syntax in
+  let preparation = continuation.Goal_continuation.binding.preparation in
+  let%bind scope =
+    match preparation.runtime_phase with
+    | (Installed scope | Callback_completed scope | Handed_off (scope, _) | Retired scope)
+      when phys_equal scope.continuation continuation -> Ok scope
+    | _ -> Error (error Conflict "Goal continuation has no exact installed runtime")
+  in
+  let%map () = goal_runtime_scope_basis t scope in
+  scope
 ;;
 
 let goal_runtime_run t (scope : Goal_continuation.runtime_scope) =
@@ -15629,14 +15699,7 @@ type job_execution =
 (* Runtime routing is not inference classification. Historical native Jobs
    retain their actual stored Run ancestry without acquiring Unbound inference;
    explicit inference provenance remains strict, as at the existing native gate. *)
-let job_runtime_run t (job : Agent_protocol.Job.t) =
-  match job.inference_origin with
-  | Some _ -> Goal_work_attribution.run_of_job t.state job
-  | None ->
-    Result.map
-      (Goal_work_attribution.Retained_parent.of_job t.state job)
-      ~f:(Option.map ~f:(fun parent -> parent.Goal_work_attribution.Retained_parent.run))
-;;
+let job_runtime_run t job = Job_runtime_owner.run_of_job t.state job
 
 let job_execution_for_owner t (runtime_owner : Job_runtime_owner.t) =
   let scope = runtime_owner.scope in
@@ -15672,19 +15735,13 @@ let job_execution_for_owner t (runtime_owner : Job_runtime_owner.t) =
 let with_job_execution t ~job_id ~generation ~attempt ~deadline f =
   with_job_scope t ~job_id ~generation ~attempt ~deadline (fun ~scope ~execute ->
     let open Result.Let_syntax in
-    let%bind parent = job_runtime_run t scope.job in
-    let%bind attribution =
-      Option.value_map parent ~default:(Ok None) ~f:(Goal_work_attribution.of_run t.state)
-    in
+    let%bind attribution = Job_runtime_owner.classify t.state scope.job in
     let runtime_owner : Job_runtime_owner.t =
       { domain = (Stdlib.Domain.self () :> int)
       ; issuing_actor = t.inference_owner_identity
       ; scope
       ; execute
-      ; attribution =
-          (match attribution with
-           | None -> Ordinary
-           | Some _ -> Goal)
+      ; attribution
       }
     in
     f (job_execution_for_owner t runtime_owner))
@@ -18658,6 +18715,7 @@ let retire_unauthorized_run_job t (job : Agent_protocol.Job.t) =
     if not retired
     then Ok false
     else (
+      let now = t.services.now () in
       let job =
         { job with
           status = Cancelled
@@ -18665,12 +18723,21 @@ let retire_unauthorized_run_job t (job : Agent_protocol.Job.t) =
             background_terminal_result
               job
               (Cancelled "run authority retired before dispatch")
-        ; completed_at = Some (t.services.now ())
-        ; delivery = Discarded { at = t.services.now (); reason = Authority_changed }
+        ; completed_at = Some now
         }
       in
+      let jobs =
+        match job.delivery with
+        | Pending ->
+          (* Discarding delivery requires an already terminal Job. Preserve both
+             ordered facts in one transaction with the actual Run retirement. *)
+          [ job
+          ; { job with delivery = Discarded { at = now; reason = Authority_changed } }
+          ]
+        | Not_required | Delivered _ | Discarded _ -> [ job ]
+      in
       let%map _ =
-        update_jobs t [ job ] ~run_deltas:[ Session_delta.Run_state_changed index ]
+        update_jobs t jobs ~run_deltas:[ Session_delta.Run_state_changed index ]
       in
       true)
 ;;
@@ -18683,7 +18750,38 @@ let goal_runtime_job_deferred t (job : Agent_protocol.Job.t) =
     Result.is_ok (goal_runtime_scope_basis t scope))
 ;;
 
+let goal_job_suspended t job =
+  match Job_runtime_owner.selection t.state job with
+  | Ok (Goal_execution_selection.Suspended_goal _) -> true
+  | Ok Eligible | Error _ -> false
+;;
+
+let check_job_claim_selection t (previous : Agent_protocol.Job.t) =
+  let open Result.Let_syntax in
+  let%bind run = Job_runtime_owner.run_of_job t.state previous in
+  let%bind () =
+    Option.value_map run ~default:(Ok ()) ~f:(fun run -> check_run_binding t run.id)
+  in
+  (* Original authorization may yield. Read the exact occurrence and policy
+     again before the claim writer; a late refusal is not passive suspension. *)
+  let%bind current = find_job t previous.id in
+  let%bind () =
+    if
+      Jsonaf.exactly_equal
+        (Agent_protocol.Job.to_json current)
+        (Agent_protocol.Job.to_json previous)
+    then Ok ()
+    else Error (error Conflict "Job changed before execution claim")
+  in
+  match Job_runtime_owner.selection t.state current with
+  | Ok Goal_execution_selection.Eligible -> Ok ()
+  | Ok (Suspended_goal _) ->
+    Error (error Conflict "Goal was held before Job execution claim")
+  | Error failure -> Error failure
+;;
+
 let claim_job
+      ?(purpose = Job_claim_purpose.Execute)
       ?initialization_scope
       ?run_preparation
       ?check_before_commit
@@ -18697,85 +18795,123 @@ let claim_job
   if held_authored_job_deferred t job || goal_runtime_job_deferred t job
   then Ok None
   else (
-    let authored_preparation = held_authored_job_preparation t job in
-    let run_preparation = Option.first_some authored_preparation run_preparation in
-    let check_before_commit =
-      match goal_runtime_job t job with
-      | Some scope ->
-        Some
-          (fun () -> check_runtime_construction_effect (Existing_goal scope.continuation))
-      | None ->
-        (match authored_preparation with
-         | Some _ -> held_startup_effect t authored_preparation
-         | None -> check_before_commit)
-    in
-    let%bind () =
-      if Session_state.execution_migration_required t.state
-      then
-        Error
-          (error Migration_required "job execution requires explicit runtime migration")
-      else Ok ()
-    in
-    let%bind () =
-      match
-        List.exists t.job_scopes ~f:(fun scope ->
-          Agent_protocol.Id.Job.equal scope.job.id job_id)
-      with
-      | false -> Ok ()
-      | true -> Error (error Conflict "job's prior execution scope has not finished")
-    in
-    match job.status with
-    | Agent_protocol.Job.Queued when job_is_due t job ->
-      let%bind () =
+    match purpose with
+    | Retire_only
+      when Option.is_some (held_authored_job t job)
+           || Option.is_some (goal_runtime_job t job) ->
+      (* A private constructor/callback still owns its real Jobs, including
+         the interval between its own ACK and outside-mailbox refresh. *)
+      Ok None
+    | Retire_only ->
+      (match job.status with
+       | Queued when job_is_due t job ->
+         let%map _ = retire_unauthorized_run_job t job in
+         None
+       | Queued
+       | Running
+       | Waiting_permission _
+       | Waiting_completion _
+       | Succeeded
+       | Failed _
+       | Cancelled
+       | Interrupted _ -> Ok None)
+    | Execute ->
+      let authored_preparation = held_authored_job_preparation t job in
+      let run_preparation = Option.first_some authored_preparation run_preparation in
+      let check_before_commit =
         match goal_runtime_job t job with
         | Some scope ->
-          check_runtime_construction_effect (Existing_goal scope.continuation)
-        | None -> require_selected_or_held_execution t run_preparation
+          Some
+            (fun () ->
+              check_runtime_construction_effect (Existing_goal scope.continuation))
+        | None ->
+          (match authored_preparation with
+           | Some _ -> held_startup_effect t authored_preparation
+           | None -> check_before_commit)
       in
-      let%bind retired = retire_unauthorized_run_job t job in
-      if retired
-      then Ok None
-      else if job.attempt = Int.max_value
-      then Error (error Invalid_state "job attempt counter overflow")
-      else (
-        let previous = job in
-        let job =
-          { job with
-            status = Running
-          ; attempt = job.attempt + 1
-          ; started_at = Some (t.services.now ())
-          ; next_run_at = None
-          ; result = None
-          }
-        in
-        let%bind row = Job_custody.find t.job_agent_custody ~job:previous in
-        let%bind () =
-          Option.value_map row ~default:(Ok ()) ~f:(fun row ->
-            let%bind () = check_job_moderator_binding t (Job_custody.Row.binding row) in
-            let%bind admission = Job_custody.Row.admission row in
-            check_agent_admission admission)
-        in
-        let%bind job_custody =
-          Job_custody.prepare_claim t.job_agent_custody ~previous ~claimed:job
-        in
-        let%map _ =
-          update_jobs
-            ?initialization_scope
-            ?check_before_commit
-            ?run_preparation
-            ~job_custody
-            t
-            [ job ]
-        in
-        Some job)
-    | Queued -> Ok None
-    | Running
-    | Waiting_permission _
-    | Waiting_completion _
-    | Succeeded
-    | Failed _
-    | Cancelled
-    | Interrupted _ -> Ok None)
+      let%bind () =
+        if Session_state.execution_migration_required t.state
+        then
+          Error
+            (error Migration_required "job execution requires explicit runtime migration")
+        else Ok ()
+      in
+      let%bind () =
+        match
+          List.exists t.job_scopes ~f:(fun scope ->
+            Agent_protocol.Id.Job.equal scope.job.id job_id)
+        with
+        | false -> Ok ()
+        | true -> Error (error Conflict "job's prior execution scope has not finished")
+      in
+      (match job.status with
+       | Agent_protocol.Job.Queued when job_is_due t job ->
+         let%bind () =
+           match goal_runtime_job t job with
+           | Some scope ->
+             check_runtime_construction_effect (Existing_goal scope.continuation)
+           | None -> require_selected_or_held_execution t run_preparation
+         in
+         let%bind retired = retire_unauthorized_run_job t job in
+         if retired
+         then Ok None
+         else (
+           let%bind selection = Job_runtime_owner.selection t.state job in
+           match selection with
+           | Suspended_goal _ -> Ok None
+           | Eligible ->
+             if job.attempt = Int.max_value
+             then Error (error Invalid_state "job attempt counter overflow")
+             else (
+               let previous = job in
+               let job =
+                 { job with
+                   status = Running
+                 ; attempt = job.attempt + 1
+                 ; started_at = Some (t.services.now ())
+                 ; next_run_at = None
+                 ; result = None
+                 }
+               in
+               let%bind row = Job_custody.find t.job_agent_custody ~job:previous in
+               let%bind () =
+                 Option.value_map row ~default:(Ok ()) ~f:(fun row ->
+                   let%bind () =
+                     check_job_moderator_binding t (Job_custody.Row.binding row)
+                   in
+                   let%bind admission = Job_custody.Row.admission row in
+                   check_agent_admission admission)
+               in
+               let%bind job_custody =
+                 Job_custody.prepare_claim t.job_agent_custody ~previous ~claimed:job
+               in
+               let check_before_commit () =
+                 let%bind () =
+                   Option.value_map check_before_commit ~default:(Ok ()) ~f:(fun check ->
+                     check ())
+                 in
+                 (* Policy callbacks above may yield. Repeat the exact queued
+                    occurrence and current Goal selection at the real writer. *)
+                 check_job_claim_selection t previous
+               in
+               let%map _ =
+                 update_jobs
+                   ?initialization_scope
+                   ~check_before_commit
+                   ?run_preparation
+                   ~job_custody
+                   t
+                   [ job ]
+               in
+               Some job))
+       | Queued -> Ok None
+       | Running
+       | Waiting_permission _
+       | Waiting_completion _
+       | Succeeded
+       | Failed _
+       | Cancelled
+       | Interrupted _ -> Ok None))
 ;;
 
 let job_failure message =
@@ -24368,7 +24504,8 @@ let lifecycle_request_allowed : type a. a request -> bool = function
          | Select_execution_wake _
          | Close_execution _
          | Check_job_owner _
-         | Acknowledge_job_resource _ ))
+         | Acknowledge_job_resource _
+         | Job_resource _ ))
   | Complete_run_constructor_model_job _
   | Interrupt_run_constructor_job _
   | Cancel_run_constructor_schedule _
@@ -29163,19 +29300,6 @@ let install_runtime_construction_internal t construction worker inference manage
     Ok ()
 ;;
 
-let select_goal_runtime t continuation =
-  let open Result.Let_syntax in
-  let preparation = continuation.Goal_continuation.binding.preparation in
-  let%bind scope =
-    match preparation.runtime_phase with
-    | (Installed scope | Callback_completed scope | Handed_off (scope, _) | Retired scope)
-      when phys_equal scope.continuation continuation -> Ok scope
-    | _ -> Error (error Conflict "Goal continuation has no exact installed runtime")
-  in
-  let%map () = goal_runtime_scope_basis t scope in
-  scope
-;;
-
 let acknowledge_goal_job_runtime_internal t (execution : Goal_execution_runtime.t) =
   let open Result.Let_syntax in
   let preparation = execution.binding.preparation in
@@ -29937,6 +30061,133 @@ let runtime_construction_resource_internal t construction owner =
        let%bind () = check_runtime_construction_effect construction in
        let%map () = basis () in
        { Held_authored_resource.domain = (Stdlib.Domain.self () :> int); basis })
+;;
+
+(* An acknowledged Job borrows installed resources without acquiring fresh
+   Goal execution permission. Authorization runs outside the mailbox below; this
+   retained token's basis is pure and suitable for Owner lease publication. *)
+let job_runtime_resource_internal t (owner : Job_runtime_owner.t) worker inference manager
+  =
+  let open Result.Let_syntax in
+  let%bind () = check_job_runtime_owner_internal t owner in
+  let%bind () =
+    match owner.attribution with
+    | Goal -> Ok ()
+    | Ordinary ->
+      Error (error Invalid_request "ordinary Job has no Goal resource borrower")
+  in
+  let%bind job = job_scope_current t owner.scope in
+  let%bind parent = Goal_work_attribution.Retained_parent.of_job t.state job in
+  let%bind parent =
+    Result.of_option parent ~error:(error Conflict "Goal Job has no retained Run work")
+  in
+  let run = parent.run in
+  let%bind index =
+    Result.of_option
+      t.state.run_state
+      ~error:(error Conflict "Goal Job Run index is absent")
+  in
+  let%bind link =
+    Result.of_option
+      (Run_state.goal_link index run.id)
+      ~error:(error Conflict "Goal Job immutable association is absent")
+  in
+  let%bind goal =
+    Option.bind t.state.goal_catalog ~f:(fun catalog ->
+      Goal_catalog.find catalog (Run_goal_link.goal_id link))
+    |> Result.of_option ~error:(error Conflict "Goal Job Goal is absent")
+  in
+  let%bind policy = Goal_activation_policy.create ~goal ~link in
+  let%bind binding =
+    Result.of_option
+      (Run_authorities.find t.run_authorities run.id)
+      ~error:(error Permission_denied "Goal Job lost its live Run authority")
+  in
+  let scope = Run_authorities.scope binding in
+  let%bind _ =
+    Result.of_option
+      (Run_admission.Scope.original_actor scope)
+      ~error:(error Permission_denied "Goal Job original authentication is unavailable")
+  in
+  let basis () =
+    let%bind current = job_scope_current t owner.scope in
+    let%bind () =
+      if
+        Int.equal owner.domain (Stdlib.Domain.self () :> int)
+        && phys_equal owner.issuing_actor t.inference_owner_identity
+        && runtime_admission_open t
+        && (not t.stopped)
+        && Option.is_none (Eio.Promise.peek t.finished)
+        && owner.scope.active
+        && (not owner.scope.cancel_requested)
+        && Atomic.get owner.scope.authority_live
+        && (match current.status with
+            | Running | Waiting_permission _ -> true
+            | Queued
+            | Waiting_completion _
+            | Succeeded
+            | Failed _
+            | Cancelled
+            | Interrupted _ -> false)
+        && Option.exists t.operation_worker ~f:(phys_equal worker)
+        && Option.exists t.inference_execution ~f:(phys_equal inference)
+        && Option.equal phys_equal t.moderator_manager manager
+        && Run_authorities.is_current t.run_authorities binding ~run_id:run.id
+      then Ok ()
+      else Error (error Conflict "Goal Job resource borrower was retired or displaced")
+    in
+    let%bind current_index =
+      Result.of_option
+        t.state.run_state
+        ~error:(error Conflict "Goal Job Run index is absent")
+    in
+    let%bind current_run =
+      Result.of_option
+        (Run_state.find current_index run.id)
+        ~error:(error Conflict "Goal Job original Run is absent")
+    in
+    let%bind installed =
+      Run_source_installation.captured
+        (Run_state.installation current_index)
+        ~generation:t.state.identity.generation
+    in
+    let%bind () =
+      if
+        Option.exists
+          (Run_state.goal_link current_index run.id)
+          ~f:(Run_goal_link.equal link)
+        && Agent_protocol.Run_source.equal installed run.source
+        && Agent_protocol.Run_source.equal current_run.source run.source
+        && List.mem
+             current_run.owned_work
+             parent.work
+             ~equal:Agent_protocol.Run_work.equal
+        && (not
+              (List.mem
+                 current_run.relinquished_work
+                 parent.work
+                 ~equal:Agent_protocol.Run_work.equal))
+        && (not
+              (List.exists current_run.terminal_work ~f:(fun terminal ->
+                 Agent_protocol.Run_work.equal terminal.work parent.work)))
+        &&
+        match current_run.lifecycle with
+        | Admitted | Active | Waiting _ -> true
+        | Terminal _ -> false
+      then Ok ()
+      else Error (error Conflict "Goal Job original retained work or source changed")
+    in
+    let%bind () =
+      Goal_activation_policy.check_association
+        policy
+        ~state:t.state
+        ~run:current_run
+        ~admission:(Agent_protocol.Goal_episode.admission (Run_goal_link.episode link))
+    in
+    Goal_activation_policy.check_admitted_policy policy ~state:t.state
+  in
+  let%map () = basis () in
+  { Held_authored_resource.domain = (Stdlib.Domain.self () :> int); basis }, scope
 ;;
 
 let end_runtime_construction_internal t construction =
@@ -31355,7 +31606,9 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
             end_goal_continuation_preparation_internal t preparation
           | Check_job_owner owner -> check_job_runtime_owner_internal t owner
           | Acknowledge_job_resource execution ->
-            acknowledge_goal_job_runtime_internal t execution)
+            acknowledge_goal_job_runtime_internal t execution
+          | Job_resource (owner, worker, inference, manager) ->
+            job_runtime_resource_internal t owner worker inference manager)
        | Effect_deferred request -> effect_deferred_request t request
        | Input_graph request -> input_graph_request t request
        | Begin_authored (continuation, startup, snapshot) ->
@@ -31538,7 +31791,7 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
     | Complete_initialization_model_job (scope, job_id, generation, attempt, outcome) ->
       complete_initialization_model_job t scope job_id generation attempt outcome
     | Add_job job -> add_job t job
-    | Claim_job (job_id, generation) -> claim_job t job_id generation
+    | Claim_job (purpose, job_id, generation) -> claim_job ~purpose t job_id generation
     | Complete_job (job_id, generation, attempt, outcome) ->
       complete_job t job_id generation attempt outcome
     | Complete_background_job (job_id, generation, attempt, outcome) ->
@@ -32947,7 +33200,9 @@ let claim_job t ~job_id ~generation =
            if
              Int.equal generation job.generation
              && Int.equal generation t.state.identity.generation
-             && (held_authored_job_deferred t job || goal_runtime_job_deferred t job)
+             && (held_authored_job_deferred t job
+                 || goal_runtime_job_deferred t job
+                 || goal_job_suspended t job)
            then None
            else held_authored_job t job
          else None))
@@ -32959,12 +33214,17 @@ let claim_job t ~job_id ~generation =
       Agent_protocol.Id.Job.equal job.id job_id
       && Int.equal generation job.generation
       && Int.equal generation t.state.identity.generation
-      && goal_runtime_job_deferred t job)
+      && (goal_runtime_job_deferred t job || goal_job_suspended t job))
   in
   let%bind.Result () =
     if deferred then Ok () else refresh_goal_runtime_job t ~job_id ~generation
   in
-  call t (Claim_job (job_id, generation))
+  call t (Claim_job (Execute, job_id, generation))
+;;
+
+let reconcile_job_authority t ~job_id ~generation =
+  let%map.Result _ = call t (Claim_job (Retire_only, job_id, generation)) in
+  ()
 ;;
 
 let complete_job t ~job_id ~generation ~attempt outcome =
@@ -33792,6 +34052,27 @@ let continue_goal_episode t ~continuation =
 let runtime_construction_resource t ~construction ~owner =
   let%bind.Result () = Runtime_construction.refresh construction in
   call t (Held_startup (Construction (Resource (construction, owner))))
+;;
+
+let job_runtime_resource t ~owner ~worker ~inference ~moderator_manager =
+  let open Result.Let_syntax in
+  let%bind resource, scope =
+    call
+      t
+      (Held_startup
+         (Goal_continuation (Job_resource (owner, worker, inference, moderator_manager))))
+  in
+  (* Original callbacks/deadline sampling stay outside Owner and Actor mutexes.
+     The final pure resource basis is not fresh execution permission. *)
+  let%bind () = check_job_runtime_owner t ~owner in
+  let%bind () = Run_admission.Scope.authorize scope t.state in
+  let%bind () = Run_admission.Scope.check_current scope in
+  (* Original authorization may yield past this Job scope's deadline. Resample
+     after all callbacks, outside either mutex; the retained Owner basis stays
+     callback- and clock-free. *)
+  let%bind () = check_job_runtime_owner_internal t owner in
+  let%map () = Runtime_construction_resource.check_basis resource in
+  resource
 ;;
 
 let end_runtime_construction t ~construction =

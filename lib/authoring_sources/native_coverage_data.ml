@@ -258,7 +258,7 @@ let implementation_sources =
   ; ( "lib/agent_server/managed_output_page.ml"
     , "a14130666a4495de0c35df1c01974922da31daed064f1f7622a9b686b9c38ba5" )
   ; ( "lib/agent_server/session_factory.ml"
-    , "3d6240f14e44492b43fbd1fc8cd9398191b29ead03bbaedd091fd1ef184aa438" )
+    , "19db3b635a3ca8fdc74d016964add5b36444f8e29b02ec1c664e344bc769c4ad" )
   ; ( "lib/agent_session/authoring_context_tool.ml"
     , "6e318b45f799b485f802dc6d5e4d8bc031721e379cc8800f6ed484d59694840d" )
   ; ( "lib/agent_session/authoring_reference_scope.ml"
@@ -268,9 +268,9 @@ let implementation_sources =
   ; ( "lib/agent_session/authoring_validation_tool.ml"
     , "b0196f46eec21c0ecead94b1165e7ec5ccfc5c3662a955d4f6230a22278ec59b" )
   ; ( "lib/agent_session/delegation_authority.ml"
-    , "1296afd747dd9317e822ef3c1efbdc795188f27a0cb6f25664b2673ecb848a74" )
+    , "c46726c90eaebb01ea32a72786540461bbafb5bed5331d9b42d906e280afb120" )
   ; ( "lib/agent_session/generated_definition.ml"
-    , "f2c2ead7ec5ef439115a19458eece9e7165289b2ecf6f663226011a32112b0c9" )
+    , "b2f538dbffb99ed7e6a2c7d073341ab7e4a2fe33a17d3d364aba7d2b9101dc6b" )
   ; ( "lib/agent_session/generated_session_request.ml"
     , "90af4ba27a871509ae8b0805f36c008d7167fc748104c7055b7660d960ce6a8d" )
   ; ( "lib/agent_session/generated_session_tool.ml"
