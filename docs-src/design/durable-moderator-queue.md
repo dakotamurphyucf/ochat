@@ -635,6 +635,14 @@ synchronous `Model.call` work can still execute within the lifecycle callback.
 This keeps background claims from racing startup's final Store validation without
 discarding queued work or weakening its later authorization checks.
 Resource retention does not replace the tool's own authorization checks.
+Read-only and read-write clients can attach or detach while this installed
+startup waits for permission. This does not change unattended permission policy:
+an `Ask` decision still uses its configured fallback when no writable responder
+is attached. Membership changes preserve the startup's existing
+preparation only after the attachment write is acknowledged. They do not renew
+the startup's original authority: read-only clients cannot approve tools, and
+approval by a new operator cannot override revocation of the original caller.
+Owner-control changes retain their normal startup invalidation behavior.
 Background model work uses a cancellation-aware runtime lease. Stop and close
 cancel and join that work before releasing the runtime's resources.
 

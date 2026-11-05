@@ -21080,6 +21080,23 @@ let attach_owner t subscribe ~principal_id ~reclaim_token =
   Ok (attachment, subscriber, current_snapshot t, Some issued_reclaim_token)
 ;;
 
+(* Nonowner membership changes preserve only an already installed startup's
+   factual preparation. They do not borrow or renew its original authority;
+   owner-control changes and pre-activation source bindings keep ordinary
+   preparation retirement. *)
+let held_authored_attachment_scope t mode : Held_authored_start.t option =
+  match mode with
+  | Agent_protocol.Session.Owner_read_write -> None
+  | Read_only | Read_write ->
+    (match t.held_authored_start, t.run_source_binding with
+     | Some scope, None ->
+       Option.some_if
+         (Result.is_ok (held_authored_basis t scope)
+          && Option.is_some (held_authored_factual_preparation t scope))
+         scope
+     | None, _ | Some _, Some _ -> None)
+;;
+
 let attach_nonowner t mode subscribe =
   let open Result.Let_syntax in
   let%bind () = validate_attachment_capacity t ~replacing:false in
@@ -21093,7 +21110,10 @@ let attach_nonowner t mode subscribe =
       }
   in
   let%bind _ =
-    transition t ~delta:(Session_delta.Attachment_added attachment) ~payloads:[]
+    let delta = Session_delta.Attachment_added attachment in
+    match held_authored_attachment_scope t mode with
+    | Some scope -> install_held_authored_fact t scope ~delta ~payloads:[]
+    | None -> transition t ~delta ~payloads:[]
   in
   let subscriber = install_subscriber t attachment_id subscribe in
   Ok (attachment, subscriber, current_snapshot t, None)
@@ -21120,12 +21140,13 @@ let detach t attachment_id =
     (match attachment.mode, t.state.spec.protocol.liveness with
      | Owner_read_write, Owner_bound { disconnect_grace_ms; _ } ->
        mark_owner_disconnected t attachment disconnect_grace_ms
-     | _, _ ->
+     | Owner_read_write, (Detached | Process_bound)
+     | (Read_write | Read_only), (Detached | Process_bound | Owner_bound _) ->
        Result.map
-         (transition
-            t
-            ~delta:(Session_delta.Attachment_removed attachment_id)
-            ~payloads:[])
+         (let delta = Session_delta.Attachment_removed attachment_id in
+          match held_authored_attachment_scope t attachment.mode with
+          | Some scope -> install_held_authored_fact t scope ~delta ~payloads:[]
+          | None -> transition t ~delta ~payloads:[])
          ~f:(fun _ -> ()))
 ;;
 

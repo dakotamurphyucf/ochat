@@ -943,6 +943,144 @@ let approve_authored_tool child held handle (permission : P.Permission.t) =
   approved
 ;;
 
+let attach_late_authored_approver
+      env
+      sw
+      connection
+      child
+      held
+      ~permission
+      ~counters
+      ~notify
+      ~client_error
+  =
+  let before = state child in
+  [%test_eq: string] "read_file" permission.P.Permission.tool_name;
+  [%test_eq: P.Permission.state] Pending permission.state;
+  let admission = Held.admission held in
+  let run current =
+    A.Run_state.find (Option.value_exn current.A.Session_state.run_state) admission.run_id
+    |> Option.value_exn
+  in
+  let before_run = run before in
+  let counts = !(counters.constructions), !(counters.providers) in
+  let assert_waiting expected_attachments =
+    let current = state child in
+    [%test_eq: int * int] counts (!(counters.constructions), !(counters.providers));
+    assert (P.Run.equal before_run (run current));
+    assert (
+      P.Session.equal_desired_state before.lifecycle.desired current.lifecycle.desired);
+    (match before.lifecycle.observed, current.lifecycle.observed with
+     | Waiting_for_permission expected, Waiting_for_permission actual ->
+       assert (P.Id.Permission.equal expected actual)
+     | _ ->
+       raise_s
+         [%sexp
+           "late attachment changed permission wait"
+         , (before.lifecycle : A.Session_state.Lifecycle.t)
+         , (current.lifecycle : A.Session_state.Lifecycle.t)]);
+    [%test_eq: int64]
+      before.counters.owner_lease_generation
+      current.counters.owner_lease_generation;
+    assert (List.equal P.Invocation.equal before.invocations current.invocations);
+    assert (
+      List.equal
+        P.Moderator_execution.equal
+        before.moderator_executions
+        current.moderator_executions);
+    assert (
+      List.equal
+        (fun left right ->
+           Jsonaf.exactly_equal (P.Job.to_json left) (P.Job.to_json right))
+        before.jobs
+        current.jobs);
+    assert (Option.equal Jsonaf.exactly_equal before.moderator current.moderator);
+    assert (
+      List.equal
+        (fun left right ->
+           Jsonaf.exactly_equal (P.Permission.to_json left) (P.Permission.to_json right))
+        before.permissions
+        current.permissions);
+    [%test_eq: int] (List.length expected_attachments) (List.length current.attachments);
+    List.iter expected_attachments ~f:(fun (expected : P.Session.Attachment.t) ->
+      let actual =
+        List.find_exn current.attachments ~f:(fun actual ->
+          P.Id.Attachment.equal actual.id expected.id)
+      in
+      assert (
+        Jsonaf.exactly_equal
+          (P.Session.Attachment.to_json expected)
+          (P.Session.Attachment.to_json actual)))
+  in
+  let read_only =
+    Agent_client.Session_handle.attach
+      ~sw
+      ~clock:(Eio.Stdenv.clock env)
+      ~connection
+      ~session_id:before.identity.session_id
+      ~mode:Read_only
+      ~subscribe:false
+      ()
+    |> protocol_ok
+  in
+  let read_only_attachment = Agent_client.Session_handle.attachment read_only in
+  assert (
+    not
+      (List.exists before.attachments ~f:(fun attachment ->
+         P.Id.Attachment.equal attachment.id read_only_attachment.id)));
+  [%test_eq: P.Session.attachment_mode] Read_only read_only_attachment.mode;
+  assert (Option.is_none read_only_attachment.owner_lease);
+  protect_cleanup
+    ~finally:(fun () -> Agent_client.Session_handle.close read_only)
+    (fun () ->
+       assert_waiting (read_only_attachment :: before.attachments);
+       (match
+          Agent_client.Session_handle.respond_permission
+            read_only
+            ~permission_id:permission.id
+            ~permission_generation:permission.generation
+            ~choice:Approve_once
+            ~reason:None
+        with
+        | Error error ->
+          assert (P.Error.equal_code error.code Permission_denied);
+          [%test_eq: bool] false error.retryable
+        | Ok _ -> failwith "late read-only attachment approved native execution");
+       assert_waiting (read_only_attachment :: before.attachments);
+       Agent_client.Session_handle.detach read_only |> protocol_ok);
+  assert_waiting before.attachments;
+  let read_write =
+    Agent_client.Session_handle.attach
+      ~sw
+      ~clock:(Eio.Stdenv.clock env)
+      ~connection
+      ~session_id:before.identity.session_id
+      ~mode:Read_write
+      ~on_update:(fun _ -> notify ())
+      ~on_error:(fun error ->
+        client_error := Some error;
+        notify ())
+      ()
+    |> protocol_ok
+  in
+  let retained = ref false in
+  protect_cleanup
+    ~finally:(fun () ->
+      if not !retained then Agent_client.Session_handle.close read_write)
+    (fun () ->
+       let attachment = Agent_client.Session_handle.attachment read_write in
+       [%test_eq: P.Session.attachment_mode] Read_write attachment.mode;
+       assert (not (P.Id.Attachment.equal attachment.id read_only_attachment.id));
+       assert (
+         not
+           (List.exists before.attachments ~f:(fun previous ->
+              P.Id.Attachment.equal previous.id attachment.id)));
+       assert (Option.is_none attachment.owner_lease);
+       assert_waiting (attachment :: before.attachments);
+       retained := true;
+       read_write)
+;;
+
 let assert_authored_approvals child approved =
   let current = state child in
   [%test_eq: int] 2 (List.length approved);
@@ -1246,6 +1384,7 @@ let on_event ctx state event = Task.pure(state)
                  in
                  let client_error = ref None in
                  let approval_handle = ref None in
+                 let responder_handle = ref None in
                  let approvals : P.Permission.t list ref = ref [] in
                  let policy =
                    T.inference_policy
@@ -1319,6 +1458,9 @@ let on_event ctx state event = Task.pure(state)
                                ~finally:(fun () ->
                                  Option.iter
                                    !approval_handle
+                                   ~f:Agent_client.Session_handle.close;
+                                 Option.iter
+                                   !responder_handle
                                    ~f:Agent_client.Session_handle.close)
                                (fun () ->
                                   with_planner env sw daemon parent (fun () ->
@@ -1328,7 +1470,9 @@ let on_event ctx state event = Task.pure(state)
                                         match case with
                                         | Legacy_empty | Legacy_children -> ()
                                         | V1_children ->
-                                          assert (List.is_empty (state child).grants);
+                                          (* Existing Ask policy needs a real writer.
+                                             This seed never approves: distinct late
+                                             attachments below exercise the wait. *)
                                           let handle =
                                             Agent_client.Session_handle.attach
                                               ~sw
@@ -1337,14 +1481,11 @@ let on_event ctx state event = Task.pure(state)
                                               ~session_id:
                                                 (state child).identity.session_id
                                               ~mode:Read_write
-                                              ~on_update:(fun _ -> notify ())
-                                              ~on_error:(fun error ->
-                                                client_error := Some error;
-                                                notify ())
+                                              ~subscribe:false
                                               ()
                                             |> protocol_ok
                                           in
-                                          approval_handle := Some handle)
+                                          responder_handle := Some handle)
                                       ~check_prewarm:
                                         (match case with
                                          | Legacy_empty -> true
@@ -1385,17 +1526,33 @@ let on_event ctx state event = Task.pure(state)
                                                         raise_s
                                                           [%sexp (error : P.Error.t)]);
                                                     let pending =
-                                                      match !approval_handle with
-                                                      | None -> []
-                                                      | Some _ ->
-                                                        List.filter
-                                                          (state child).permissions
-                                                          ~f:(fun permission ->
-                                                            P.Permission.equal_state
-                                                              permission.state
-                                                              Pending)
+                                                      List.filter
+                                                        (state child).permissions
+                                                        ~f:(fun permission ->
+                                                          P.Permission.equal_state
+                                                            permission.state
+                                                            Pending)
                                                     in
-                                                    match pending, !approval_handle with
+                                                    let handle =
+                                                      match pending, !approval_handle with
+                                                      | [ permission ], None ->
+                                                        let handle =
+                                                          attach_late_authored_approver
+                                                            env
+                                                            sw
+                                                            connection
+                                                            child
+                                                            held
+                                                            ~permission
+                                                            ~counters
+                                                            ~notify
+                                                            ~client_error
+                                                        in
+                                                        approval_handle := Some handle;
+                                                        Some handle
+                                                      | _, handle -> handle
+                                                    in
+                                                    match pending, handle with
                                                     | [ permission ], Some handle ->
                                                       assert (
                                                         not
@@ -1434,7 +1591,11 @@ let on_event ctx state event = Task.pure(state)
                                                               , (case : Authored_case.t)]
                                                           | None ->
                                                             (match !approval_handle with
-                                                             | None -> Eio.Fiber.yield ()
+                                                             | None ->
+                                                               (* Before late attachment,
+                                                                  read actual committed
+                                                                  Pending through the mailbox. *)
+                                                               Eio.Fiber.yield ()
                                                              | Some _ ->
                                                                if
                                                                  Int.equal
