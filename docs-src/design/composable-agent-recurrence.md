@@ -786,6 +786,13 @@ revision used for admission. The exclusion is scheduling bookkeeping, not an
 execution grant; the actual Factory and Actor still enforce authorization,
 source identity, revisions and writer acknowledgements.
 
+Occupancy includes pending executions retained by configured controllers that
+are indexed but not currently loaded. Changing a controller's target allowlist
+does not erase its historical target occupancy. If one of these records cannot
+be read, the dispatcher retains that uncertainty and rejects new work until the
+read succeeds; it does not assume the target is free or initialize the controller
+to inspect it.
+
 Only actual joined attempts can retain live retry evidence, bounded by the
 retained occurrence frontier. An initial source failure before recording an
 attempt may re-enter with its exact original request when its live no-effects
@@ -794,6 +801,13 @@ retained while its occurrence is pending; the next pass cannot silently issue a
 replacement request. A recorded attempt uses the existing checked retry path.
 Restarted hosts reconcile saved records; they cannot recreate that live evidence
 from a key, receipt or stored identifier.
+
+If a target finishes before its controller imports the terminal receipt, a fresh
+dispatcher can import that exact retained receipt after reopening the store.
+Reconciliation does not repeat the target's inference. Graceful daemon shutdown
+cancels and joins its scheduler's in-flight source preparation before closing the
+store. Unconsumed Ready occurrences remain durable; closing the process does not
+turn them into completed executions.
 
 A live daemon may continue after client disconnect. Embedded execution requires
 its controller to remain selected/open in the host; store reopening does not
