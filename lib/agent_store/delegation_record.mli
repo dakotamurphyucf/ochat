@@ -12,7 +12,7 @@ module Key : sig
 end
 
 module Admission : sig
-  type authored_tool =
+  type authored_tool = Captured_source_kind.Authored_tool.t =
     { name : string
     ; source_sha256 : string
     }
@@ -45,6 +45,11 @@ module Admission : sig
     ; inference_target : (Inference.Request.Target.t[@sexp.opaque]) option [@sexp.option]
     }
   [@@deriving equal, sexp]
+
+  (** Immutable metadata only; validates the shared selector and rejects both
+      top-level source fields being present. This does not authenticate a record
+      or resolve its actual live source/resources. *)
+  val authored_source : t -> (authored_tool option, Store_error.t) result
 end
 
 type stage =

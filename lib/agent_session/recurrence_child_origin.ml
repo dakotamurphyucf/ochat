@@ -4,6 +4,7 @@ module D = Document_schema
 module R = Recurrence_child_reservation
 module Store = Agent_store.Delegation_store
 module Raw = Agent_store.Delegation_captured_origin
+module Source = Agent_store.Captured_source_kind
 
 type t =
   { record : Store.record
@@ -12,6 +13,7 @@ type t =
   ; definition : Prompt_definition.t
   }
 
+let source_kind t = Raw.source_kind t.raw
 let reservation t = t.reservation
 let definition t = t.definition
 let invalid message = Error (P.Error.invalid_request message)
@@ -36,11 +38,20 @@ let spec_digest spec =
 let create definition ~reservation ~initial_spec =
   let open Result.Let_syntax in
   let%bind () = R.validate reservation ~definition in
-  let%bind definition =
-    Recurrence_target.fresh_definition_json (Recurrence_definition.target definition)
+  let target = Recurrence_definition.target definition in
+  let%bind source_kind =
+    match Recurrence_target.view target with
+    | Existing_session _ -> invalid "captured origin requires a fresh-child target"
+    | Fresh_child { source_kind; _ } -> Ok source_kind
   in
+  let%bind definition = Recurrence_target.fresh_definition_json target in
   let%bind initial_spec_sha256 = spec_digest initial_spec in
-  Raw.create ~reservation:(R.to_json reservation) ~definition ~initial_spec_sha256
+  let create =
+    match source_kind with
+    | Artifact -> Raw.create
+    | Authored_tool authored_tool -> Raw.create_authored ~authored_tool
+  in
+  create ~reservation:(R.to_json reservation) ~definition ~initial_spec_sha256
   |> document_result
 ;;
 
@@ -70,6 +81,21 @@ let of_record (record : Store.record) =
     && String.equal record.admission.manifest_sha256 (R.manifest_sha256 reservation)
   then Ok { record; raw; reservation; definition }
   else invalid "captured origin differs from delegation admission"
+;;
+
+let validate_definition t definition =
+  let open Result.Let_syntax in
+  let%bind () = R.validate t.reservation ~definition in
+  let target = Recurrence_definition.target definition in
+  let%bind target_definition = Recurrence_target.fresh_definition_json target in
+  match Recurrence_target.view target with
+  | Existing_session _ -> invalid "captured origin requires a fresh-child target"
+  | Fresh_child { source_kind = selected; _ } ->
+    if
+      Source.equal (source_kind t) selected
+      && D.Json.equal (Raw.definition t.raw) target_definition
+    then Ok ()
+    else invalid "captured origin differs from the actual target definition/source"
 ;;
 
 let validate_source t (state : Session_state.t) =

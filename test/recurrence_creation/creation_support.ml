@@ -83,7 +83,7 @@ let authorize_creation state definition =
   let open Result.Let_syntax in
   let%bind () = authorize state in
   match A.Recurrence_target.view (F.target definition) with
-  | Fresh_child { artifact; definition; parent; mode = _ } ->
+  | Fresh_child { artifact; definition; parent; mode = _; source_kind = _ } ->
     assert definition.enabled;
     assert (
       P.Id.Prompt_revision.equal

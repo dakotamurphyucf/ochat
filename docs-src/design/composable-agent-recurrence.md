@@ -512,6 +512,25 @@ owner must validate those original values with their actual domains and perform
 fresh current-authority checks. Artifact payloads remain with the existing
 artifact owner rather than being duplicated in each ledger record.
 
+A captured target also distinguishes an artifact source from a particular authored
+tool source. The latter retains the tool name and exact source digest inside the
+captured origin; it does not set the separate ordinary authored-delegation field.
+Its target requires `recurrence.authored-tool-source.v1`, and its lower captured
+origin requires `delegation.captured-authored-source.v1`. A missing selector means
+the existing artifact interpretation. Explicit null, a selector without its
+semantic marker, or the marker without its selector rejects. Existing artifact
+encoding and target hashes stay unchanged; the new selector participates in the
+captured target digest. Compatible unknown selector fields remain in their
+original document carrier.
+
+These selectors are data, not permission to use a tool's private dependencies.
+The runtime must resolve the genuine authored source and private resource bindings
+under the existing parent resource loan, then repeat current permission checks.
+It cannot replace those bindings with similarly named public controller tools.
+The upper creation owner validates a captured origin against the complete actual
+controller definition, including its target digest and original prompt definition.
+Decoding the lower delegation record alone cannot establish that association.
+
 A fresh child is a new session and transaction; its captured source may be
 identical to the controller's source. Only the captured-recurrence source kind
 permits the same parent and child artifact revision. The creation owner must

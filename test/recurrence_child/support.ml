@@ -172,7 +172,7 @@ let authorize_creation current definition =
   let open Result.Let_syntax in
   let%bind () = authorize current in
   match Target.view (A.Recurrence_definition.target definition) with
-  | Fresh_child { definition; artifact = _; parent = _; mode = _ }
+  | Fresh_child { definition; artifact = _; parent = _; mode = _; source_kind = _ }
     when definition.enabled && P.Principal.has_scope principal Create_sessions -> Ok ()
   | Fresh_child _ | Existing_session _ ->
     Error

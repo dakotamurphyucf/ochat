@@ -44,6 +44,7 @@ type view =
       ; definition : Prompt_definition.t
       ; parent : Parent.t
       ; mode : Agent_protocol.Run.Mode.t option
+      ; source_kind : Agent_store.Captured_source_kind.t
       }
 
 (** The frozen input is ordinary user content, never Authored_start. Its complete
@@ -66,6 +67,18 @@ val create_existing
     authorizes them. *)
 val create_fresh
   :  mode:Agent_protocol.Run.Mode.t
+  -> artifact:Agent_store.Captured_prompt_artifact.t
+  -> definition:Prompt_definition.t
+  -> parent:Parent.t
+  -> (t, Agent_protocol.Error.t) result
+
+(** Same complete captured custody as create_fresh, with an explicit authored
+    source selector. Data construction does not authenticate that binding or
+    grant its private resources. The selector and required semantics participate
+    in this target's exact digest. Existing create_fresh remains Artifact. *)
+val create_authored
+  :  authored_tool:Agent_store.Captured_source_kind.Authored_tool.t
+  -> mode:Agent_protocol.Run.Mode.t
   -> artifact:Agent_store.Captured_prompt_artifact.t
   -> definition:Prompt_definition.t
   -> parent:Parent.t

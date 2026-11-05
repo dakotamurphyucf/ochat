@@ -9474,7 +9474,9 @@ let create_recurrence_child t ~parent ~permit =
               (unavailable
                  Invalid_request
                  "recurrence child requires captured fresh target")
-          | Fresh_child { artifact = _; definition; parent = captured; mode = _ } ->
+          | Fresh_child
+              { artifact = _; definition; parent = captured; mode = _; source_kind = _ }
+            ->
             let%bind profile =
               permission_profile t (Parent.permission_profile captured)
             in
@@ -9527,7 +9529,7 @@ let create_recurrence_child t ~parent ~permit =
       let definition = Checked.definition checked in
       let%bind artifact, captured_definition, captured_parent =
         match A.Recurrence_target.view (A.Recurrence_definition.target definition) with
-        | Fresh_child { artifact; definition; parent; mode = _ } ->
+        | Fresh_child { artifact; definition; parent; mode = _; source_kind = _ } ->
           Ok (Agent_store.Captured_prompt_artifact.value artifact, definition, parent)
         | Existing_session _ ->
           Error (unavailable Invalid_request "recurrence target is not a fresh child")

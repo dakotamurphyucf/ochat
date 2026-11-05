@@ -720,7 +720,7 @@ let implementation_sources =
   ; ( "bin/ochat_agent_stdio.ml"
     , "8d134cd11c7df2a60e6b4b77a5ff7f9ea0c28a8a2674a3dd9f573adaa7623902" )
   ; ( "lib/agent_server/session_factory.ml"
-    , "07a2d00dd0f21f286d862692d1468525e08002fdfce6d5da87729b735694ac38" )
+    , "3d6240f14e44492b43fbd1fc8cd9398191b29ead03bbaedd091fd1ef184aa438" )
   ; ( "bin/inference_composition.ml"
     , "1f57451d5543a5fe8f2f23dc0e593374b64946d088cba164acd1c087a7cdce18" )
   ; ( "lib/agent_protocol/developer_command_id.ml"

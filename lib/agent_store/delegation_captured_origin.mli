@@ -23,6 +23,19 @@ val create
   -> initial_spec_sha256:string
   -> (t, Document_schema.Error.t) result
 
+(** Explicit immutable source interpretation. Historical absence is Artifact;
+    authored selectors require their supported source semantic marker. *)
+val source_kind : t -> Captured_source_kind.t
+
+(** The actual upper owner supplies the selector from its captured definition.
+    Includes the new required semantics; no source loan or authority is created. *)
+val create_authored
+  :  authored_tool:Captured_source_kind.Authored_tool.t
+  -> reservation:Jsonaf.t
+  -> definition:Jsonaf.t
+  -> initial_spec_sha256:string
+  -> (t, Document_schema.Error.t) result
+
 val reservation : t -> Jsonaf.t
 val definition : t -> Jsonaf.t
 val initial_spec_sha256 : t -> string

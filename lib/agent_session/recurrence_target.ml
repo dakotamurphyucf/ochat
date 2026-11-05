@@ -5,6 +5,10 @@ module X = Persistence_codec
 module C = D.Extension_carrier
 module Parent = Recurrence_parent
 module Artifact = Agent_store.Captured_prompt_artifact
+module Source = Agent_store.Captured_source_kind
+
+let authored_semantics = "recurrence.authored-tool-source.v1"
+let explicit_mode_semantics = "recurrence.explicit-run-mode.v1"
 
 type view =
   | Existing_session of
@@ -18,6 +22,7 @@ type view =
       ; definition : Prompt_definition.t
       ; parent : Parent.t
       ; mode : P.Run.Mode.t option
+      ; source_kind : Source.t
       }
 
 type t =
@@ -99,8 +104,14 @@ let validate_view = function
     if Int64.(configuration_revision < 0L)
     then invalid "negative target configuration revision"
     else Ok ()
-  | Fresh_child { artifact; definition; parent; mode = _ } ->
+  | Fresh_child { artifact; definition; parent; mode = _; source_kind } ->
     let open Result.Let_syntax in
+    let%bind () =
+      match source_kind with
+      | Artifact -> Ok ()
+      | Authored_tool selector ->
+        Source.Authored_tool.validate selector |> protocol_result
+    in
     let%bind _ = Prompt_definition.to_jsonaf definition in
     let%bind _ = Parent.to_jsonaf parent in
     let%bind _ = Artifact.to_document artifact |> protocol_result in
@@ -144,22 +155,34 @@ let encode = function
           ; "configuration_revision", X.int64_json configuration_revision
           ; "input", P.Session.Message_content.to_json input
           ])
-  | Fresh_child { artifact; definition; parent; mode } ->
+  | Fresh_child { artifact; definition; parent; mode; source_kind } ->
     let open Result.Let_syntax in
     let%bind artifact = Artifact.to_document artifact |> protocol_result in
     let%bind definition = Prompt_definition.to_jsonaf definition in
-    let%map parent = Parent.to_jsonaf parent in
-    `Object
+    let%bind parent = Parent.to_jsonaf parent in
+    let%map selector =
+      match source_kind with
+      | Artifact -> Ok None
+      | Authored_tool selector ->
+        Source.Authored_tool.to_json selector
+        |> protocol_result
+        |> Result.map ~f:Option.some
+    in
+    let fields =
       [ "kind", `String "fresh_child"
       ; "artifact", D.Document.json artifact
       ; "definition", definition
       ; "parent", parent
       ]
-    |> fun json ->
-    (match mode, json with
-     | None, _ -> json
-     | Some mode, `Object fields -> `Object (fields @ [ "mode", P.Run.Mode.to_json mode ])
-     | Some _, _ -> assert false)
+    in
+    let fields =
+      match mode with
+      | None -> fields
+      | Some mode -> fields @ [ "mode", P.Run.Mode.to_json mode ]
+    in
+    `Object
+      (fields
+       @ Option.to_list (Option.map selector ~f:(fun json -> "authored_source", json)))
 ;;
 
 let decode json =
@@ -189,13 +212,22 @@ let decode json =
       in
       let%bind definition = X.required fields "definition" Prompt_definition.of_jsonaf in
       let%bind parent = X.required fields "parent" Parent.of_jsonaf in
-      let%map mode =
+      let%bind mode =
         match D.Json.field json ~name:"mode" with
         | Absent -> Ok None
         | Null -> invalid "captured recurrence Run mode cannot be null"
         | Value json -> Result.map (P.Run.Mode.of_json json) ~f:Option.some
       in
-      Fresh_child { artifact; definition; parent; mode }
+      let%map source_kind =
+        match D.Json.field json ~name:"authored_source" with
+        | Absent -> Ok Source.Artifact
+        | Null -> invalid "captured authored source cannot be null"
+        | Value json ->
+          Source.Authored_tool.of_json json
+          |> protocol_result
+          |> Result.map ~f:(fun selector -> Source.Authored_tool selector)
+      in
+      Fresh_child { artifact; definition; parent; mode; source_kind }
     | _ -> invalid "unsupported recurrence target kind"
   in
   let%map () = validate_view target in
@@ -243,6 +275,7 @@ let shape =
           ; "definition", Prompt_definition.shape
           ; "parent", Parent.shape
           ; "mode", v
+          ; "authored_source", Source.Authored_tool.shape
           ] )
     ]
 ;;
@@ -253,7 +286,7 @@ let codec =
     ~kind:"ochat.recurrence_target"
     ~version:1
     ~shape
-    ~supported_semantics:[ "recurrence.explicit-run-mode.v1" ]
+    ~supported_semantics:[ explicit_mode_semantics; authored_semantics ]
     ~validate:(fun target -> document_result (validate_view target))
     ~decode:(fun json -> document_result (decode json))
     ~encode:(fun target -> document_result (encode target))
@@ -282,7 +315,14 @@ let validate_slices document =
   | "existing_session" -> slice "input" input_limits
   | "fresh_child" ->
     let%bind () = slice "definition" metadata_limits in
-    slice "parent" metadata_limits
+    let%bind () = slice "parent" metadata_limits in
+    (match D.Json.field json ~name:"authored_source" with
+     | Absent -> Ok ()
+     | Null ->
+       Agent_store.Document_fields.invalid
+         "authored_source"
+         "authored source cannot be null"
+     | Value selector -> D.Json.validate ~limits:metadata_limits selector)
   | _ ->
     Error
       (D.Error.Invalid_field
@@ -307,12 +347,31 @@ let of_document document =
       if
         List.mem
           (D.Document.required_semantics document)
-          "recurrence.explicit-run-mode.v1"
+          explicit_mode_semantics
           ~equal:String.equal
       then Ok ()
       else
         Error
           (D.Error.Required_semantics_unknown "missing recurrence.explicit-run-mode.v1")
+  in
+  let authored =
+    match C.value carrier with
+    | Existing_session _ | Fresh_child { source_kind = Artifact; _ } -> false
+    | Fresh_child { source_kind = Authored_tool _; _ } -> true
+  in
+  let marked =
+    List.mem
+      (D.Document.required_semantics document)
+      authored_semantics
+      ~equal:String.equal
+  in
+  let%bind () =
+    if Bool.equal authored marked
+    then Ok ()
+    else
+      Agent_store.Document_fields.invalid
+        "required_semantics"
+        "captured authored source semantics differ from selector"
   in
   admitted (C.value carrier) document
 ;;
@@ -327,10 +386,20 @@ let create target =
   let%bind document =
     D.Domain_codec.encode codec (C.of_authored_value target) |> protocol_result
   in
-  let%bind document =
+  let semantics =
     match target with
-    | Existing_session _ | Fresh_child { mode = None; _ } -> Ok document
-    | Fresh_child { mode = Some _; _ } ->
+    | Existing_session _ -> []
+    | Fresh_child { mode; source_kind; _ } ->
+      (if Option.is_some mode then [ explicit_mode_semantics ] else [])
+      @
+        (match source_kind with
+        | Artifact -> []
+        | Authored_tool _ -> [ authored_semantics ])
+  in
+  let%bind document =
+    match semantics with
+    | [] -> Ok document
+    | _ :: _ ->
       (match D.Document.json document with
        | `Object fields ->
          D.Document.inspect
@@ -339,7 +408,7 @@ let create target =
                (List.filter fields ~f:(fun (name, _) ->
                   not (String.equal name "required_semantics"))
                 @ [ ( "required_semantics"
-                    , `Array [ `String "recurrence.explicit-run-mode.v1" ] )
+                    , `Array (List.map semantics ~f:(fun name -> `String name)) )
                   ]))
          |> protocol_result
        | _ -> assert false)
@@ -353,7 +422,20 @@ let create_existing ~session ~source ~configuration_revision ~input =
 ;;
 
 let create_fresh ~mode ~artifact ~definition ~parent =
-  create (Fresh_child { artifact; definition; parent; mode = Some mode })
+  create
+    (Fresh_child
+       { artifact; definition; parent; mode = Some mode; source_kind = Artifact })
+;;
+
+let create_authored ~authored_tool ~mode ~artifact ~definition ~parent =
+  create
+    (Fresh_child
+       { artifact
+       ; definition
+       ; parent
+       ; mode = Some mode
+       ; source_kind = Authored_tool authored_tool
+       })
 ;;
 
 let digest t = Ok t.sha256

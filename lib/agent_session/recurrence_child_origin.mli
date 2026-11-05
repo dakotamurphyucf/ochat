@@ -21,6 +21,19 @@ val create
     the installed exact artifact publication and authorize each effect. *)
 val of_record : Agent_store.Delegation_store.record -> (t, Agent_protocol.Error.t) result
 
+(** Same immutable source selector validated with the lower captured origin.
+    The actual source owner/private bindings must still be resolved and checked. *)
+val source_kind : t -> Agent_store.Captured_source_kind.t
+
+(** Validate against an actual full controller definition supplied by its owner:
+    exact reservation/target, source kind and original Prompt_definition. Neither
+    this comparison nor of_record authenticates that definition or grants effects.
+    of_record alone cannot compare to a full definition it does not retain. *)
+val validate_definition
+  :  t
+  -> Recurrence_definition.t
+  -> (unit, Agent_protocol.Error.t) result
+
 val reservation : t -> Recurrence_child_reservation.t
 val definition : t -> Prompt_definition.t
 
