@@ -24,6 +24,7 @@ let shared_features =
     , "ACK-owned lifecycle and completion handoffs, explicit compactor guidance \
        reservation and actual writer-profile Clear admission"
     , [ "lib/agent_session/session_actor.ml"
+      ; "lib/agent_session/goal_descendant_admission_custody.ml"
       ; "lib/agent_session/initial_lifecycle_startup.ml"
       ; "lib/agent_session/execution_custody.ml"
       ; "lib/agent_server/session_factory.ml"
@@ -44,6 +45,7 @@ let shared_features =
        receipt identity"
     , [ "lib/agent_session/administration.ml"
       ; "lib/agent_session/session_actor.ml"
+      ; "lib/agent_session/goal_descendant_admission_custody.ml"
       ; "lib/agent_session/turn_admission_staging.ml"
       ; "lib/agent_session/managed_submission_tracking.ml"
       ; "lib/agent_server/managed_output_cursor.ml"
@@ -79,6 +81,7 @@ let shared_features =
     , [ "lib/agent_session/legacy_moderator_checkpoint.ml"
       ; "lib/agent_session/session_state.ml"
       ; "lib/agent_session/session_actor.ml"
+      ; "lib/agent_session/goal_descendant_admission_custody.ml"
       ; "lib/agent_server/session_factory.ml"
       ; "lib/agent_server/job_scheduler.ml"
       ; "lib/chat_response/moderator_manager.ml"
@@ -90,6 +93,7 @@ let shared_features =
   ; ( "lifecycle.stop"
     , "Graceful and cancel dispositions, joined cleanup and independent child lifetimes"
     , [ "lib/agent_session/session_actor.ml"
+      ; "lib/agent_session/goal_descendant_admission_custody.ml"
       ; "lib/agent_session/recurrence_activation_custody.ml"
       ; "lib/agent_session/actor_reply.ml"
       ; "lib/agent_session/background_execution.ml"
@@ -468,6 +472,7 @@ let shared_features =
       ; "lib/agent_server/job_scheduler_developer.ml"
       ; "lib/agent_session/background_execution.ml"
       ; "lib/agent_session/session_actor.ml"
+      ; "lib/agent_session/goal_descendant_admission_custody.ml"
       ]
     , "runtime.recovery.background"
     , [ "test/chatml_composition/background_recovery_tests.ml"
@@ -531,6 +536,7 @@ let moderator_features =
       ; "lib/agent_session/legacy_callback_runtime.ml"
       ; "lib/agent_session/constructor_permission_checkpoint.ml"
       ; "lib/agent_session/session_actor.ml"
+      ; "lib/agent_session/goal_descendant_admission_custody.ml"
       ; "lib/agent_session/execution_custody.ml"
       ; "lib/agent_session/legacy_queue_custody.ml"
       ; "lib/agent_session/legacy_queue_checkpoint.ml"
@@ -579,6 +585,7 @@ let moderator_features =
     , [ "lib/chat_response/background_delivery.ml"
       ; "lib/agent_session/background_job_event.ml"
       ; "lib/agent_session/session_actor.ml"
+      ; "lib/agent_session/goal_descendant_admission_custody.ml"
       ; "lib/agent_session/run_job_completion.ml"
       ; "lib/agent_session/run_transition.ml"
       ; "lib/agent_session/run_work_settlement.ml"
@@ -636,6 +643,7 @@ let moderator_features =
       ; "lib/agent_session/notification_history.ml"
       ; "lib/agent_session/notification_wake_selection.ml"
       ; "lib/agent_session/session_actor.ml"
+      ; "lib/agent_session/goal_descendant_admission_custody.ml"
       ]
     , "runtime.delivery.notifications"
     , [ "test/chatml_composition/notification_ancestry_tests.ml"
@@ -999,7 +1007,9 @@ let implementation_sources =
   ; ( "lib/agent_session/initial_lifecycle_startup.ml"
     , "34befd9d623fc41ffc0e0013960277ff03d4cde6d0f2febf6f0149dd91f074eb" )
   ; ( "lib/agent_session/session_actor.ml"
-    , "04d793b9b1fd8e4d12913bbbbe66046c72e7d953d951260de13da0893dda3de6" )
+    , "c152e8c62e1757f63a7fb3e001d787d655d472a3ecd62e5a3a58c4bb0f6a8a0f" )
+  ; ( "lib/agent_session/goal_descendant_admission_custody.ml"
+    , "eaaf482d96347053fe7627c876e3b169e1949f9a539a081669ad7502c9b603cd" )
   ; ( "lib/agent_session/job_custody.ml"
     , "6a3b5951629d8440ebfcaf9f72aa625cf522087e8996bb73cec82ce16abfa120" )
   ; ( "lib/agent_session/staged_jobs.ml"
