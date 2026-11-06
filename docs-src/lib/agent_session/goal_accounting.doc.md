@@ -58,7 +58,17 @@ Snapshots also bound aggregate counts by canonical lifetime coverage. These are
 storage consistency checks, not runtime permission or evidence that an authored
 Goal executed.
 
-Actual execution-owner attribution, budget enforcement, atomic inference
-admission/retirement and final provider submission guards remain integration
-work. The controller and authored `Goal.finish`/worker-join qualification must
-use those actual owners; storage fixtures do not satisfy that execution gate.
+The Actor's inference admission and retirement paths consume these partitions
+through `Canonical_usage_update`, alongside the existing Goal attribution and
+budget guards. Storage consistency does not itself grant execution: the actual
+source, original authority and final provider submission checks still apply.
+The controller and authored `Goal.finish`/worker-join qualification must use those
+owners; storage fixtures alone do not satisfy that execution gate.
+
+`Delegated_usage` applies the same canonical retirement fold to a delegated
+child's complete own ledger. `Child_contributions` retains bounded, replaceable
+snapshots from immediate children separately from the parent's own usage. Missing
+historical partitions remain unknown. Imports require independently current read
+authority and the actual Factory/Actor association; they confer no ancestor Goal
+control. See [immediate-child accounting](../../development/goal-accounting.md#immediate-child-usage-snapshots)
+for replacement, capacity and recovery rules.

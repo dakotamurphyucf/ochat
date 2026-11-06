@@ -252,6 +252,22 @@ let atom_to_jsonaf ~limits ~state_document delta =
     in
     `Object
       [ "kind", `String "inference_ledger_changed"; "value", D.Document.json document ]
+  | Delegated_inference_ledger_changed (ledger, usage) ->
+    let%bind ledger =
+      Inference_ledger.to_document ledger
+      |> Result.map_error ~f:(fun error ->
+        P.Error.invalid_request
+          (Sexp.to_string_hum (Inference_ledger.Error.sexp_of_t error)))
+    in
+    let%map usage = Delegated_usage.to_document usage in
+    `Object
+      [ "kind", `String "delegated_inference_ledger_changed"
+      ; "ledger", D.Document.json ledger
+      ; "usage", D.Document.json usage
+      ]
+  | Child_contributions_changed children ->
+    let%map value = Child_contributions.to_jsonaf children in
+    `Object [ "kind", `String "child_contributions_changed"; "value", value ]
   | Job_changed value ->
     let%bind () =
       match value.P.Job.status with
@@ -594,6 +610,30 @@ let atom_of_jsonaf ~limits json =
           (Sexp.to_string_hum (Inference_ledger.Error.sexp_of_t error)))
     in
     Delta.Inference_ledger_changed ledger
+  | "delegated_inference_ledger_changed" ->
+    let%bind ledger = X.required fields "ledger" X.raw in
+    let%bind ledger =
+      D.Document.inspect ledger ~limits
+      |> Result.map_error ~f:(fun error ->
+        P.Error.invalid_request (Sexp.to_string_hum (D.Error.sexp_of_t error)))
+    in
+    let%bind ledger =
+      Inference_ledger.of_document ledger ~limits:Inference_ledger.Limits.default
+      |> Result.map_error ~f:(fun error ->
+        P.Error.invalid_request
+          (Sexp.to_string_hum (Inference_ledger.Error.sexp_of_t error)))
+    in
+    let%bind usage = X.required fields "usage" X.raw in
+    let%bind usage =
+      D.Document.inspect usage ~limits:Delegated_usage.limits
+      |> Result.map_error ~f:(fun error ->
+        P.Error.invalid_request (Sexp.to_string_hum (D.Error.sexp_of_t error)))
+    in
+    let%map usage = Delegated_usage.of_document usage in
+    Delta.Delegated_inference_ledger_changed (ledger, usage)
+  | "child_contributions_changed" ->
+    let%map children = X.required fields "value" Child_contributions.of_jsonaf in
+    Delta.Child_contributions_changed children
   | "job_changed" ->
     Result.map (X.required fields "value" P.Job.of_json) ~f:(fun value ->
       Delta.Job_changed value)
@@ -819,6 +859,14 @@ let shape =
              ; ( "model_job_target_restored"
                , X.shape_exn [ "kind", D.Shape.value; "value", Model_job_target.shape ] )
              ; ( "inference_ledger_changed"
+               , X.shape_exn [ "kind", D.Shape.value; "value", D.Shape.value ] )
+             ; ( "delegated_inference_ledger_changed"
+               , X.shape_exn
+                   [ "kind", D.Shape.value
+                   ; "ledger", D.Shape.value
+                   ; "usage", D.Shape.value
+                   ] )
+             ; ( "child_contributions_changed"
                , X.shape_exn [ "kind", D.Shape.value; "value", D.Shape.value ] )
              ; ( "job_changed"
                , X.shape_exn [ "kind", D.Shape.value; "value", Session_record_shapes.job ]
@@ -1500,6 +1548,12 @@ let apply t ?transaction_metadata ~limits previous =
       | "instruction_selection_changed" ->
         scalar [ "instruction_selection" ] "value" Instruction_selection.shape
       | "goal_accounts_changed" -> scalar [ "goal_accounts" ] "value" D.Shape.value
+      | "child_contributions_changed" ->
+        scalar [ "child_contributions" ] "value" D.Shape.value
+      | "delegated_inference_ledger_changed" ->
+        let%bind payload = scalar [ "inference_ledger" ] "ledger" D.Shape.value in
+        let%bind usage = field "usage" in
+        patch_scalar ~limits ~shape:D.Shape.value payload [ "delegated_usage" ] usage
       | "goal_catalog_changed" -> scalar [ "goal_catalog" ] "value" Goal_catalog.shape
       | "recurrence_catalog_changed" ->
         scalar [ "recurrence_catalog" ] "value" Recurrence_catalog.shape

@@ -44,6 +44,16 @@ val add_record : t -> Inference.Observation.Attempt_record.t -> (t, Counter.erro
 
 val add_untracked : t -> (t, Counter.error) result
 
+(** Checked multiplicity of canonical Untracked admissions, without an unbounded
+    per-attempt loop. Negative counts and lifetime-count overflow reject. *)
+val add_untracked_count : t -> count:int64 -> (t, Counter.error) result
+
+(** Read-only algebra for disjoint canonical partitions. Each component is added
+    independently; subsets are never added into their containers. Count overflow
+    rejects, token overflow stays labelled, and mixed estimator provenance stays
+    mixed. This does not authenticate disjointness or permit a durable import. *)
+val add_disjoint : t -> t -> (t, Counter.error) result
+
 (** Bounded durable aggregate projection, never provider evidence or permission.
     Decode validates every component's contribution counts against attempts. *)
 module Persistence : sig

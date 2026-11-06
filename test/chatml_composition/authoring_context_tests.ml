@@ -557,13 +557,18 @@ let%expect_test
        assert (
          List.length (Chat_response.Authoring_reference_index.receipts index)
          = List.length state.invocations);
+       (* Isolate authoring-reference migration from the later child-accounting
+          fields, so rejection still exercises the intended reference guard. *)
+       let legacy_state =
+         { restored with delegated_usage = None; child_contributions = None }
+       in
        assert (
-         Result.is_error (State.upgrade_schema { restored with schema_version = 19 }));
+         Result.is_error (State.upgrade_schema { legacy_state with schema_version = 19 }));
        assert (List.equal I.equal state.invocations restored.invocations);
        assert (
-         Result.is_error (State.upgrade_schema { restored with schema_version = 18 }));
+         Result.is_error (State.upgrade_schema { legacy_state with schema_version = 18 }));
        let legacy =
-         { restored with
+         { legacy_state with
            schema_version = 18
          ; invocations = List.map restored.invocations ~f:without_reference
          ; conversation = { restored.conversation with authoring_publication = None }

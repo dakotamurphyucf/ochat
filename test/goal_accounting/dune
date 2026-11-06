@@ -1,5 +1,5 @@
 (library
  (name goal_accounting_tests)
- (libraries core expect_test_helpers_core ochat.inference ochat.agent_protocol ochat.agent_session ochat.document_schema ochat.transcript)
+ (libraries core expect_test_helpers_core ochat.inference ochat.agent_protocol ochat.agent_session ochat.agent_store ochat.document_schema ochat.transcript)
  (inline_tests)
  (preprocess (pps ppx_jane ppx_expect)))

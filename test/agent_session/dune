@@ -1,6 +1,7 @@
 (library
  (name agent_session_test)
  (modules
+  delegated_usage_persistence_tests
   fixtures
   inference_ports
   document_adoption_tests

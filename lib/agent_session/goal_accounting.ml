@@ -70,23 +70,28 @@ let usage t ~ledger:current =
 
 let reconcile t ~before ~after =
   let open Result.Let_syntax in
-  List.fold_result (bindings t) ~init:(t, []) ~f:(fun (candidate, retired) binding ->
-    let ordinal = L.Handle.ordinal binding.Binding.handle in
-    let%bind old = bound_row before binding in
-    match L.find after ~ordinal with
-    | Some row ->
-      if L.Handle.equal (L.Row.handle row) binding.handle
-      then Ok (candidate, retired)
-      else Error Error.Conflicting_binding
-    | None ->
-      if not (ended (L.Row.record old))
-      then Error Error.Invalid_retirement
-      else (
-        let%map settled =
-          counter (Usage.add_record candidate.settled (L.Row.record old))
-        in
-        ( { candidate with settled; bindings = Map.remove candidate.bindings ordinal }
-        , binding :: retired )))
+  let%map plan =
+    Canonical_usage_fold.prepare
+      t.settled
+      ~before
+      ~after
+      ~handles:(List.map (bindings t) ~f:Binding.handle)
+    |> Result.map_error ~f:fold_error
+  in
+  let retired =
+    List.fold
+      (Canonical_usage_fold.Plan.retired plan)
+      ~init:Int64.Set.empty
+      ~f:(fun retired handle -> Set.add retired (L.Handle.ordinal handle))
+  in
+  ( { t with
+      settled = Canonical_usage_fold.Plan.settled plan
+    ; bindings =
+        Map.filter_keys t.bindings ~f:(fun ordinal -> not (Set.mem retired ordinal))
+    }
+  , List.filter (bindings t) ~f:(fun binding ->
+      Set.mem retired (L.Handle.ordinal binding.handle))
+    |> List.rev )
 ;;
 
 let check_episode t goal episode ~after =

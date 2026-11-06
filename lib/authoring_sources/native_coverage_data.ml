@@ -303,7 +303,7 @@ let implementation_sources =
   ; ( "lib/agent_server/recurrence_authored_source.ml"
     , "e8f4b287579ae891c1d8197671c335e4e07afb02105ac206a44025701111bf3b" )
   ; ( "lib/agent_server/session_factory.ml"
-    , "41cffafed674a81135477850f50d61aea69dd47318b01ef216d73094cef98a25" )
+    , "2c41ecc0ed8529c0ee2fd9b9aa682dd014fa52792c74b528869679d3e909537d" )
   ; ( "lib/agent_session/authoring_context_tool.ml"
     , "6e318b45f799b485f802dc6d5e4d8bc031721e379cc8800f6ed484d59694840d" )
   ; ( "lib/agent_session/authoring_reference_scope.ml"

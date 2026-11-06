@@ -1,9 +1,11 @@
 open! Core
 
 (** Process-local issuer retained privately by the actual Factory. It grants no
-    execution, source selection or Store authority. The Factory uses it only
-    inside its fixed source lifetime, after all actually acquired target and
-    parent resources have successfully joined. No decoder or restoration exists.
+    execution, source selection or Store authority. Fixed source completion uses
+    it only after actually acquired target and parent resources successfully join.
+    Factual child accounting also uses the private issuer to authenticate the
+    actual Factory/Actor/Store association; that use supplies no cleanup evidence
+    or NoEffects permission. No decoder or restoration exists.
     Operations using the issuer belong to its creating Eio domain. *)
 type t
 

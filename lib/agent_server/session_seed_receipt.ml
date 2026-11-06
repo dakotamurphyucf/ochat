@@ -70,6 +70,8 @@ let created_document transaction ~limits =
   | Model_job_target_captured _
   | Model_job_recipe_target_captured _
   | Model_job_target_restored _
+  | Delegated_inference_ledger_changed _
+  | Child_contributions_changed _
   | Inference_ledger_changed _
   | Job_changed _
   | Schedule_changed _

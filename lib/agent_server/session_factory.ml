@@ -445,6 +445,13 @@ let imported_state provisional legacy =
 let metadata = Session_projection.metadata
 let index_entry = Session_projection.index_entry
 
+let initialize_child_accounting t state =
+  Agent_session.Child_accounting.initialize_new
+    state
+    ~max_children:t.limits.delegation_recovery_max_count
+    ~max_encoded_bytes:t.limits.delegation_recovery_max_bytes
+;;
+
 let initialize_layout
       t
       ~principal
@@ -481,6 +488,11 @@ let initialize_layout
       instance
       profile
       ~inference_target
+  in
+  let%bind state =
+    initialize_child_accounting t state
+    |> Result.map_error ~f:(fun error ->
+      Agent_store.Store_error.Corrupt error.Agent_protocol.Error.message)
   in
   on_state state;
   Agent_store.Session_store.Initial_projection.create
@@ -9307,10 +9319,59 @@ type child_creation_source =
       -> (History_entry.t list * int, Agent_protocol.Error.t) result
   }
 
+(* Private creation-only bridge. [child] is the actual allocation retained by
+   with_uninstalled_recovery_entry; no caller-supplied public entry reaches here.
+   Parent/child authority remains the existing creation policy and native borrow.
+   The new ACK records only an Unobserved immutable immediate-child association. *)
+let register_installed_child ?native_callback t parent child ~reference ~check_parent =
+  let module S = Agent_store.Session_store in
+  let module P = Agent_protocol in
+  let module A = Agent_session.Session_actor in
+  let open Result.Let_syntax in
+  let%bind () =
+    match parent.Session_registry.store_handle, child.Session_registry.store_handle with
+    | Some parent_handle, Some child_handle
+      when S.owns_handle t.store parent_handle
+           && S.owns_handle t.store child_handle
+           && P.Id.Session.equal
+                (S.Handle.session_id parent_handle)
+                reference.Agent_store.Delegation_store.Reference.key.parent_session_id
+           && P.Id.Session.equal
+                (S.Handle.session_id child_handle)
+                reference.child_session_id
+           && Runtime_owner.belongs_to_actor parent.runtime parent.actor
+           && Runtime_owner.belongs_to_actor child.runtime child.actor ->
+      check_registered_owner
+        t
+        parent
+        ~session:
+          (P.Session_ref.create
+             ~server_id:(S.server_id t.store)
+             ~session_id:(S.Handle.session_id parent_handle))
+    | (Some _ | None), (Some _ | None) ->
+      Error (unavailable Conflict "installed child lost its actual Factory allocation")
+  in
+  let%bind proof =
+    A.observe_child_installation
+      child.actor
+      ~source_owner:t.runtime_source_owner
+      ~reference
+  in
+  A.register_child_installation
+    ?native_callback
+    parent.actor
+    ~source_owner:t.runtime_source_owner
+    ~child:proof
+    ~check_parent
+    ~max_children:t.limits.delegation_recovery_max_count
+    ~max_encoded_bytes:t.limits.delegation_recovery_max_bytes
+;;
+
 let create_delegated_session
       ?(start_immediately = false)
       ?(lifetime = Owned)
       ?invocation_owner
+      ?native_callback
       t
       ~parent_session_id
       ~idempotency_key
@@ -9629,6 +9690,7 @@ let create_delegated_session
                       }
                   }
                 in
+                let%bind initial = initialize_child_accounting t initial in
                 let%bind () = State.validate initial in
                 S.create_session_initialized
                   t.store
@@ -9672,6 +9734,15 @@ let create_delegated_session
           let%bind record =
             D.advance ledger record Child_installed
             |> Result.map_error ~f:protocol_of_store
+          in
+          let%bind () =
+            register_installed_child
+              ?native_callback
+              t
+              parent
+              entry
+              ~reference
+              ~check_parent
           in
           A.checkpoint parent.actor ~persist:(fun current ->
             match check_parent current with
@@ -10100,6 +10171,7 @@ let create_recurrence_child t ~parent ~permit =
           ; parent_stop_epoch = record.admission.parent_stop_epoch
           }
         in
+        let%bind initial = initialize_child_accounting t initial in
         let%bind () = A.Session_state.validate initial in
         let%bind () = A.Recurrence_child_origin.validate_initial_state origin initial in
         let%bind checked, _ = refresh () in
@@ -10224,7 +10296,14 @@ let create_recurrence_child t ~parent ~permit =
              let%bind proof =
                Actor.verify_recurrence_child entry.actor ~reservation:row
              in
-             let%bind _ = Actor.link_recurrence_child parent.actor ~permit ~child:proof in
+             let%bind _ =
+               Actor.link_recurrence_child
+                 parent.actor
+                 ~permit
+                 ~child:proof
+                 ~max_children:t.limits.delegation_recovery_max_count
+                 ~max_encoded_bytes:t.limits.delegation_recovery_max_bytes
+             in
              let%bind checked, _ = refresh () in
              let%bind () = Actor.Recurrence_child_link.check_current proof in
              let%bind () = Checked.check_current checked in
@@ -10253,7 +10332,8 @@ let create_recurrence_child t ~parent ~permit =
   with_generated_creation_lock ~protect:false t run
 ;;
 
-let create_generated_session
+let create_generated_session_internal
+      ?native_callback
       ?(start_immediately = false)
       ?(lifetime = Owned)
       t
@@ -10331,6 +10411,7 @@ let create_generated_session
   create_delegated_session
     ~start_immediately
     ~lifetime
+    ?native_callback
     t
     ~parent_session_id
     ~idempotency_key
@@ -10338,7 +10419,27 @@ let create_generated_session
     ~prepare_source
 ;;
 
+let create_generated_session
+      ?start_immediately
+      ?lifetime
+      t
+      ~parent_session_id
+      ~idempotency_key
+      ~display_name
+      definition
+  =
+  create_generated_session_internal
+    ?start_immediately
+    ?lifetime
+    t
+    ~parent_session_id
+    ~idempotency_key
+    ~display_name
+    definition
+;;
+
 let create_authored_session
+      ?native_callback
       ?invocation_owner
       t
       ~parent_session_id
@@ -10524,6 +10625,7 @@ let create_authored_session
     ~start_immediately:true
     ~lifetime:Owned
     ?invocation_owner
+    ?native_callback
     t
     ~parent_session_id
     ~idempotency_key
@@ -10860,6 +10962,34 @@ let reconcile_generated_creations t =
                                     let%bind record =
                                       D.advance ledger record Child_installed
                                       |> Result.map_error ~f:protocol_of_store
+                                    in
+                                    let check_parent latest =
+                                      let%bind latest_fingerprint =
+                                        Authority.fingerprint ?moderator latest
+                                      in
+                                      match
+                                        ( latest.State.lifecycle.desired
+                                        , latest.halted
+                                        , latest.failure )
+                                      with
+                                      | Running, false, None
+                                        when String.equal fingerprint latest_fingerprint
+                                             && Int64.equal
+                                                  latest.stop_epoch
+                                                  before.stop_epoch -> Ok ()
+                                      | (Running | Stopped), _, _ ->
+                                        Error
+                                          (unavailable
+                                             Permission_denied
+                                             "recovered child parent authority changed")
+                                    in
+                                    let%bind () =
+                                      register_installed_child
+                                        t
+                                        parent
+                                        child
+                                        ~reference
+                                        ~check_parent
                                     in
                                     let%bind () =
                                       A.checkpoint parent.actor ~persist:(fun latest ->
@@ -11423,6 +11553,7 @@ let authored_one_off t prepared borrowed ~input =
     ~f:(fun () ->
       let%bind child =
         create_authored_session
+          ~native_callback:borrowed
           ~invocation_owner:context.id
           t
           ~parent_session_id:context.session_id
@@ -11512,6 +11643,7 @@ let authored_call_services t prepared borrowed =
           let context = (N.borrowed_invocation borrowed).context in
           let%bind child =
             create_authored_session
+              ~native_callback:borrowed
               t
               ~parent_session_id:context.session_id
               ~idempotency_key:key
@@ -11568,6 +11700,67 @@ let authored_call_services t prepared borrowed =
     }
   in
   host, t.managed_sessions
+;;
+
+let import_child_usage t ~parent ~child ~actor ~authorize_parent ~authorize_child =
+  let module P = Agent_protocol in
+  let module S = Agent_store.Session_store in
+  let module A = Agent_session.Session_actor in
+  let open Result.Let_syntax in
+  let association entry =
+    match entry.Session_registry.store_handle with
+    | None -> Error (unavailable Conflict "child usage requires an actual Store owner")
+    | Some handle ->
+      check_registered_owner
+        t
+        entry
+        ~session:
+          (P.Session_ref.create
+             ~server_id:(S.server_id t.store)
+             ~session_id:(S.Handle.session_id handle))
+  in
+  let%bind () = association parent in
+  let%bind () = association child in
+  let%bind parent_state = A.state parent.actor in
+  let%bind () =
+    Agent_session.Recurrence_command_admission.check_read
+      actor
+      ~authorize:authorize_parent
+      parent_state
+  in
+  let%bind child_state = A.state child.actor in
+  let%bind reference =
+    Result.of_option
+      child_state.spec.delegation
+      ~error:(unavailable Conflict "child usage requires its actual delegation reference")
+  in
+  let%bind () =
+    if P.Id.Session.equal reference.key.parent_session_id parent_state.identity.session_id
+    then Ok ()
+    else Error (unavailable Permission_denied "child usage belongs to another parent")
+  in
+  let%bind observation =
+    A.observe_child_usage
+      child.actor
+      ~source_owner:t.runtime_source_owner
+      ~actor
+      ~authorize:(fun state ->
+        let%bind () = association child in
+        authorize_child state)
+      ~reference
+  in
+  let%bind () = association parent in
+  let%bind () = association child in
+  A.import_child_usage
+    parent.actor
+    ~source_owner:t.runtime_source_owner
+    ~actor
+    ~authorize:(fun state ->
+      let%bind () = association parent in
+      authorize_parent state)
+    ~observation
+    ~max_children:t.limits.delegation_recovery_max_count
+    ~max_encoded_bytes:t.limits.delegation_recovery_max_bytes
 ;;
 
 let create_from_native t borrowed (request : Agent_session.Generated_session_request.t) =
@@ -11669,7 +11862,8 @@ let create_from_native t borrowed (request : Agent_session.Generated_session_req
     | Independent -> Independent
   in
   let%bind child =
-    create_generated_session
+    create_generated_session_internal
+      ~native_callback:borrowed
       t
       ~lifetime
       ~start_immediately:request.start_immediately

@@ -667,6 +667,28 @@ let project_fields_with_presence
       Goal_accounts.to_jsonaf accounts
       |> Result.map ~f:(fun raw -> [ "goal_accounts", raw ])
   in
+  let%bind delegated_usage_fields =
+    match t.delegated_usage with
+    | None ->
+      Ok
+        (if Session_state_presence.delegated_usage_is_absent presence
+         then []
+         else [ "delegated_usage", `Null ])
+    | Some own ->
+      let%map document = Delegated_usage.to_document own in
+      [ "delegated_usage", D.Document.json document ]
+  in
+  let%bind child_contributions_fields =
+    match t.child_contributions with
+    | None ->
+      Ok
+        (if Session_state_presence.child_contributions_is_absent presence
+         then []
+         else [ "child_contributions", `Null ])
+    | Some children ->
+      let%map json = Child_contributions.to_jsonaf children in
+      [ "child_contributions", json ]
+  in
   let%bind instruction_selection_fields =
     match t.instruction_selection with
     | None ->
@@ -715,6 +737,8 @@ let project_fields_with_presence
      @ run_state_fields run_state_field t.run_state
      @ goal_catalog_fields
      @ goal_accounts_fields
+     @ delegated_usage_fields
+     @ child_contributions_fields
      @ instruction_selection_fields
      @ recurrence_catalog_fields
      @ [ ( "moderator_executions"
@@ -842,6 +866,23 @@ let state_fields_of_jsonaf ?capture ~limits json =
     J.optional_as fields "goal_accounts" (X.nullable Goal_accounts.of_jsonaf)
     |> Result.map ~f:Option.join
   in
+  let%bind delegated_usage =
+    J.optional_as
+      fields
+      "delegated_usage"
+      (X.nullable (fun raw ->
+         let%bind document =
+           D.Document.inspect raw ~limits:Delegated_usage.limits
+           |> Result.map_error ~f:(fun error ->
+             P.Error.invalid_request (Sexp.to_string_hum (D.Error.sexp_of_t error)))
+         in
+         Delegated_usage.of_document document))
+    |> Result.map ~f:Option.join
+  in
+  let%bind child_contributions =
+    J.optional_as fields "child_contributions" (X.nullable Child_contributions.of_jsonaf)
+    |> Result.map ~f:Option.join
+  in
   let%bind instruction_selection =
     J.optional_as
       fields
@@ -905,6 +946,8 @@ let state_fields_of_jsonaf ?capture ~limits json =
     ; run_state
     ; goal_catalog
     ; goal_accounts
+    ; delegated_usage
+    ; child_contributions
     ; instruction_selection
     ; recurrence_catalog
     ; subscriptions
@@ -954,6 +997,8 @@ let state_shape =
     ; "run_state", X.nullable_shape Run_state.shape
     ; "goal_catalog", X.nullable_shape Goal_catalog.shape
     ; "goal_accounts", D.Shape.value
+    ; "delegated_usage", D.Shape.value
+    ; "child_contributions", D.Shape.value
     ; "instruction_selection", X.nullable_shape Instruction_selection.shape
     ; "recurrence_catalog", X.nullable_shape Recurrence_catalog.shape
     ; "managed_stops", X.array_shape_exn ~identity_field:"id" Managed_stop.shape
@@ -980,6 +1025,7 @@ module Original = struct
     { template : D.Document.t
     ; limits : D.Limits.t
     ; inference_ledger : Inference_ledger.t
+    ; delegated_basis : Inference_ledger.t * Delegated_usage.t option
     ; jobs : P.Job.t list
     ; invocations : P.Invocation.t list
     ; queue_provenance : Queue_provenance_validation.t
@@ -1065,6 +1111,22 @@ let validate_run_capacity (state : S.t) document ~limits =
       let%bind growth = Goal_accounts.reserved_growth accounts |> X.document_result in
       Capacity_growth.remaining_limits growth limits |> X.document_result
   in
+  let%bind limits =
+    let%bind growth =
+      match state.delegated_usage with
+      | None -> Ok Capacity_growth.zero
+      | Some own -> Delegated_usage.reserved_growth own |> X.document_result
+    in
+    Capacity_growth.remaining_limits growth limits |> X.document_result
+  in
+  let%bind limits =
+    let%bind growth =
+      match state.child_contributions with
+      | None -> Ok Capacity_growth.zero
+      | Some children -> Child_contributions.reserved_growth children |> X.document_result
+    in
+    Capacity_growth.remaining_limits growth limits |> X.document_result
+  in
   let%bind terminal =
     Run_terminal_document.capture state ~shape:state_shape ~document ~limits
   in
@@ -1134,6 +1196,7 @@ let decoded ?evidence carrier ~limits =
         { template
         ; limits
         ; inference_ledger = (D.Extension_carrier.value carrier).S.inference_ledger
+        ; delegated_basis = state.inference_ledger, state.delegated_usage
         ; jobs = state.jobs
         ; invocations = state.invocations
         ; queue_provenance = S.queue_provenance state
@@ -1675,13 +1738,12 @@ let validate_ledger_carrier (t : t) ~limits =
       if D.Limits.equal original.limits limits
       then Ok original.inference_ledger
       else (
-        let%bind raw =
-          Agent_store.Document_fields.required
-            (D.Document.payload original.template)
-            "inference_ledger"
-            Result.return
+        let%bind accepted =
+          Inference_ledger.to_document original.inference_ledger
+          |> Result.map_error ~f:ledger_error
+          |> X.document_result
         in
-        ledger_of_jsonaf ~limits raw |> X.document_result)
+        ledger_of_jsonaf ~limits (D.Document.json accepted) |> X.document_result)
     in
     Inference_ledger.validate_update previous ~incoming:(value t).inference_ledger
     |> Result.map_error ~f:ledger_error
@@ -1836,6 +1898,82 @@ let validate_accounts_carrier t ~limits =
          (value t))
 ;;
 
+let validate_delegated_update ~before ~previous ~after ~incoming =
+  match previous, incoming with
+  | None, None -> Ok ()
+  | Some previous, Some incoming ->
+    Delegated_usage.validate_transition previous ~incoming ~before ~after
+    |> X.document_result
+  | None, Some _ ->
+    Error
+      (D.Error.Invalid_field
+         { path = [ "delegated_usage" ]
+         ; reason = "historical partition cannot bootstrap exact zero"
+         })
+  | Some _, None ->
+    Error
+      (D.Error.Invalid_field
+         { path = [ "delegated_usage" ]; reason = "delegated usage cannot be discarded" })
+;;
+
+let validate_delegated_carrier t =
+  match t.original with
+  | None -> Ok ()
+  | Some original ->
+    let before, previous = original.delegated_basis in
+    validate_delegated_update
+      ~before
+      ~previous
+      ~after:(value t).inference_ledger
+      ~incoming:(value t).delegated_usage
+;;
+
+let validate_children_update previous incoming =
+  let open Result.Let_syntax in
+  match previous, incoming with
+  | None, None -> Ok ()
+  | None, Some incoming ->
+    (match Child_contributions.inventory incoming with
+     | Historical_children_unknown -> Ok ()
+     | Complete_inventory ->
+       Error
+         (D.Error.Invalid_field
+            { path = [ "child_contributions" ]
+            ; reason = "historical inventory cannot become complete"
+            }))
+  | Some _, None ->
+    Error
+      (D.Error.Invalid_field
+         { path = [ "child_contributions" ]
+         ; reason = "child contribution slots cannot be discarded"
+         })
+  | Some previous, Some incoming ->
+    let%bind merged = Child_contributions.adopt previous ~incoming |> X.document_result in
+    let%bind merged = Child_contributions.to_jsonaf merged |> X.document_result in
+    let%bind actual = Child_contributions.to_jsonaf incoming |> X.document_result in
+    if D.Json.equal merged actual
+    then Ok ()
+    else Error (D.Error.Extension_conflict [ "child_contributions" ])
+;;
+
+let validate_children_carrier t =
+  let open Result.Let_syntax in
+  match t.original with
+  | None -> Ok ()
+  | Some original ->
+    let%bind previous =
+      match
+        D.Json.field (D.Document.payload original.template) ~name:"child_contributions"
+      with
+      | Absent | Null -> Ok None
+      | Value raw ->
+        Child_contributions.of_jsonaf raw
+        |> X.document_result
+        |> Result.map ~f:Option.some
+    in
+    validate_children_update previous (value t).child_contributions
+;;
+
 let encode t ~limits =
   let open Result.Let_syntax in
   let%bind () = validate_run_carrier t in
@@ -1845,6 +1983,8 @@ let encode t ~limits =
   let%bind () = validate_instruction_carrier t in
   let%bind () = validate_recurrence_carrier t in
   let%bind () = validate_accounts_carrier t ~limits in
+  let%bind () = validate_delegated_carrier t in
+  let%bind () = validate_children_carrier t in
   let%bind () = validate_ledger_carrier t ~limits in
   let%bind document =
     match t.original with
@@ -1892,6 +2032,18 @@ let adopt previous ~limits incoming =
       (value incoming).recurrence_catalog
   in
   let%bind () = validate_accounts_update (value previous) (value incoming) in
+  let%bind () =
+    validate_delegated_update
+      ~before:(value previous).inference_ledger
+      ~previous:(value previous).delegated_usage
+      ~after:(value incoming).inference_ledger
+      ~incoming:(value incoming).delegated_usage
+  in
+  let%bind () =
+    validate_children_update
+      (value previous).child_contributions
+      (value incoming).child_contributions
+  in
   let%bind () = validate_goal_carrier previous in
   let%bind () = validate_goal_carrier incoming in
   let%bind () = validate_instruction_carrier previous in
@@ -2250,6 +2402,34 @@ module Transaction = struct
   let value t = value t.staged
   let with_value t state = { staged = with_value t.staged state }
 
+  let update_canonical_usage t ~ledger ~delegated_usage =
+    let open Result.Let_syntax in
+    let current = value t in
+    let%bind () =
+      Inference_ledger.validate_update current.inference_ledger ~incoming:ledger
+      |> Result.map_error ~f:ledger_error
+      |> X.document_result
+    in
+    let%bind () =
+      validate_delegated_update
+        ~before:current.inference_ledger
+        ~previous:current.delegated_usage
+        ~after:ledger
+        ~incoming:delegated_usage
+    in
+    let staged =
+      (with_value t { current with inference_ledger = ledger; delegated_usage }).staged
+    in
+    let original =
+      Option.map staged.original ~f:(fun original ->
+        { original with
+          inference_ledger = ledger
+        ; delegated_basis = ledger, delegated_usage
+        })
+    in
+    Ok { staged = { staged with original } }
+  ;;
+
   let update_goal_catalog t incoming =
     let open Result.Let_syntax in
     let%bind () = validate_goal_carrier t.staged in
@@ -2364,6 +2544,7 @@ module Transaction = struct
           { template = document
           ; limits
           ; inference_ledger = state.S.inference_ledger
+          ; delegated_basis = state.inference_ledger, state.delegated_usage
           ; jobs = state.jobs
           ; invocations = state.invocations
           ; queue_provenance = S.queue_provenance state

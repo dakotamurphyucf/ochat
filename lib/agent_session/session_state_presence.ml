@@ -12,6 +12,8 @@ type t =
   { run_state_absent : bool
   ; goal_catalog_absent : bool
   ; goal_accounts_absent : bool
+  ; delegated_usage_absent : bool
+  ; child_contributions_absent : bool
   ; instruction_selection_absent : bool
   ; recurrence_catalog_absent : bool
   ; delivery_bindings : bool Map.M(Delivery_id).t
@@ -21,6 +23,8 @@ let authored =
   { run_state_absent = false
   ; goal_catalog_absent = false
   ; goal_accounts_absent = false
+  ; delegated_usage_absent = false
+  ; child_contributions_absent = false
   ; instruction_selection_absent = false
   ; recurrence_catalog_absent = false
   ; delivery_bindings = Map.empty (module Delivery_id)
@@ -30,6 +34,8 @@ let authored =
 let run_state_is_absent t = t.run_state_absent
 let goal_catalog_is_absent t = t.goal_catalog_absent
 let goal_accounts_is_absent t = t.goal_accounts_absent
+let delegated_usage_is_absent t = t.delegated_usage_absent
+let child_contributions_is_absent t = t.child_contributions_absent
 let instruction_selection_is_absent t = t.instruction_selection_absent
 let recurrence_catalog_is_absent t = t.recurrence_catalog_absent
 
@@ -61,6 +67,16 @@ let of_document document ~limits =
   in
   let goal_accounts_absent =
     match D.Json.field payload ~name:"goal_accounts" with
+    | Absent -> true
+    | Null | Value _ -> false
+  in
+  let delegated_usage_absent =
+    match D.Json.field payload ~name:"delegated_usage" with
+    | Absent -> true
+    | Null | Value _ -> false
+  in
+  let child_contributions_absent =
+    match D.Json.field payload ~name:"child_contributions" with
     | Absent -> true
     | Null | Value _ -> false
   in
@@ -111,6 +127,8 @@ let of_document document ~limits =
   { run_state_absent
   ; goal_catalog_absent
   ; goal_accounts_absent
+  ; delegated_usage_absent
+  ; child_contributions_absent
   ; instruction_selection_absent
   ; recurrence_catalog_absent
   ; delivery_bindings

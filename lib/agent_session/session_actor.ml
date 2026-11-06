@@ -2496,6 +2496,67 @@ module Native_goal_request = struct
     | Prepare : Native_goal_owner.t * int list -> unit t
 end
 
+(* Factual association witnesses retain actual process-local owners; decoded
+   identifiers cannot construct them. *)
+module Child_installation = struct
+  type t =
+    { controller : Recurrence_controller.t
+    ; source_owner : Runtime_source_owner.Identity.t
+    ; reference : Agent_store.Delegation_store.Reference.t
+    ; check_current : unit -> (unit, Agent_protocol.Error.t) result
+    }
+end
+
+(* Snapshot contents are
+   immutable historical DATA. Refresh returns a negative-only final read guard;
+   it cannot issue source/execution permission or replace snapshot contents. *)
+module Child_usage_observation = struct
+  type t =
+    { controller : Recurrence_controller.t
+    ; source_owner : Runtime_source_owner.Identity.t
+    ; reference : Agent_store.Delegation_store.Reference.t
+    ; snapshot : Child_usage_snapshot.t option
+    ; refresh_read :
+        unit
+        -> (unit -> (unit, Agent_protocol.Error.t) result, Agent_protocol.Error.t) result
+    }
+end
+
+module Child_usage_import = struct
+  type t =
+    | Imported of Child_contributions.disposition
+    | Historical_absence
+end
+
+module Child_accounting_request = struct
+  type _ t =
+    | Observe_installation :
+        Runtime_source_owner.t * Agent_store.Delegation_store.Reference.t
+        -> Child_installation.t t
+    | Register_installation :
+        Native_tool_invocation.borrowed option
+        * Runtime_source_owner.t
+        * Child_installation.t
+        * (Session_state.t -> (unit, Agent_protocol.Error.t) result)
+        * int
+        * int
+        -> unit t
+    | Observe_usage :
+        Runtime_source_owner.t
+        * Operator_authorization.t
+        * (Session_state.t -> (unit, Agent_protocol.Error.t) result)
+        * Agent_store.Delegation_store.Reference.t
+        -> Child_usage_observation.t t
+    | Import_usage :
+        Runtime_source_owner.t
+        * Operator_authorization.t
+        * (Session_state.t -> (unit, Agent_protocol.Error.t) result)
+        * Child_usage_observation.t
+        * int
+        * int
+        -> Child_usage_import.t t
+end
+
 module Recurrence_read_request = struct
   type authorize = Session_state.t -> (unit, Agent_protocol.Error.t) result
 
@@ -2508,6 +2569,7 @@ module Recurrence_read_request = struct
 end
 
 type _ request =
+  | Child_accounting : 'a Child_accounting_request.t -> 'a request
   | Native_goal : 'a Native_goal_request.t -> 'a request
   | Open_inference_owner :
       Run_preparation.t option * Transcript.Source_id.t
@@ -2994,7 +3056,7 @@ type _ request =
       Recurrence_child_reservation.t
       -> Recurrence_child_link.t request
   | Link_recurrence_child :
-      Recurrence_creation.t * Recurrence_child_link.t
+      Recurrence_creation.t * Recurrence_child_link.t * int * int
       -> Recurrence_child_association.t request
   | Recurrence_read : 'a Recurrence_read_request.t -> 'a request
   | Apply_goal_command :
@@ -5605,6 +5667,8 @@ let rec deferred_execution_delta (previous : Session_state.t) (delta : Session_d
   | Model_job_recipe_target_captured _
   | Model_job_target_restored _
   | Inference_ledger_changed _
+  | Delegated_inference_ledger_changed _
+  | Child_contributions_changed _
   | Managed_submission_admitted _
   | Managed_submission_changed _
   | Managed_stop_admitted _
@@ -6370,23 +6434,28 @@ let commit_inference_ledger
     Ok ())
   else (
     let%bind accounting =
-      Goal_ledger_reconciliation.prepare
+      Canonical_usage_update.prepare
+        t.state.inference_ledger
         ~accounts:t.state.goal_accounts
         ~catalog:t.state.goal_catalog
-        ~before:t.state.inference_ledger
         ~after:ledger
+        ~delegated_usage:t.state.delegated_usage
         ~admission
     in
     let accounting_delta =
-      if Goal_ledger_reconciliation.changed accounting
+      if Canonical_usage_update.accounts_changed accounting
       then
         [ Session_delta.Goal_accounts_changed
-            (Option.value_exn (Goal_ledger_reconciliation.accounts accounting))
+            (Option.value_exn (Canonical_usage_update.accounts accounting))
         ]
       else []
     in
     let delta =
-      Session_delta.Batch (Inference_ledger_changed ledger :: accounting_delta)
+      Session_delta.Batch
+        (Session_delta.inference_ledger_update
+           ledger
+           ~delegated_usage:(Canonical_usage_update.delegated_usage accounting)
+         :: accounting_delta)
     in
     let payloads =
       [ Agent_protocol.Event.Durable.Payload.Session_updated
@@ -6586,9 +6655,10 @@ let admit_inference
     else Error (error Conflict "inference graph excludes new attempts")
   in
   let%bind protected_ordinals =
-    Goal_ledger_reconciliation.protected_ordinals
-      t.state.goal_accounts
-      ~ledger:t.state.inference_ledger
+    Canonical_usage_update.protected_ordinals
+      t.state.inference_ledger
+      ~accounts:t.state.goal_accounts
+      ~delegated_usage:t.state.delegated_usage
   in
   let%bind ledger, handle, _tracking =
     Inference_ledger.admit
@@ -8548,7 +8618,19 @@ let commit_reconciled_administration t attachment_id expected kind candidate =
       ~generation:candidate.Session_state.identity.generation
     |> Result.map_error ~f:inference_error
   in
-  let candidate = { candidate with inference_ledger; counters = t.state.counters } in
+  let%bind delegated_usage =
+    match t.state.delegated_usage with
+    | None -> Ok None
+    | Some own ->
+      Delegated_usage.reconcile
+        own
+        ~before:t.state.inference_ledger
+        ~after:inference_ledger
+      |> Result.map ~f:Option.some
+  in
+  let candidate =
+    { candidate with inference_ledger; delegated_usage; counters = t.state.counters }
+  in
   commit_administration t attachment_id t.state.counters.revision kind candidate
 ;;
 
@@ -8561,6 +8643,8 @@ let initialization_basis (basis : Session_state.t) (state : Session_state.t) =
   ; counters = basis.counters
   ; inference_ledger = basis.inference_ledger
   ; goal_accounts = basis.goal_accounts
+  ; delegated_usage = basis.delegated_usage
+  ; child_contributions = basis.child_contributions
   ; jobs = basis.jobs
   ; model_job_targets = basis.model_job_targets
   ; schedules = basis.schedules
@@ -21776,6 +21860,372 @@ let prepare_native_goal_completion t execution outcome resolved =
        resolved, plan)
 ;;
 
+(* Factual accounting operations require the same live Factory/Actor owner. *)
+let child_accounting_owner t ~source_owner =
+  let open Result.Let_syntax in
+  let%bind () =
+    if
+      (not t.stopped)
+      && Option.is_none (Eio.Promise.peek t.finished)
+      && Option.is_none t.lifecycle_fence
+      && Option.exists
+           t.runtime_source_owner
+           ~f:(Runtime_source_owner.matches source_owner)
+    then Ok ()
+    else Error (error Conflict "child accounting lost its actual Factory/Actor owner")
+  in
+  require_recurrence_controller t
+;;
+
+let child_contributions_changed (state : Session_state.t) incoming =
+  let open Result.Let_syntax in
+  let%bind incoming = Child_contributions.to_jsonaf incoming in
+  match state.child_contributions with
+  | None -> Ok true
+  | Some previous ->
+    let%map previous = Child_contributions.to_jsonaf previous in
+    not (Document_schema.Json.equal previous incoming)
+;;
+
+let observe_child_installation_internal t ~source_owner ~reference =
+  let module D = Agent_store.Delegation_store in
+  let open Result.Let_syntax in
+  let%bind controller = child_accounting_owner t ~source_owner in
+  let state = t.state in
+  let association () =
+    let%bind _ = child_accounting_owner t ~source_owner in
+    if
+      phys_equal state t.state
+      && Agent_protocol.Id.Session.equal
+           state.identity.session_id
+           reference.D.Reference.child_session_id
+      && Agent_protocol.Id.Prompt_revision.equal
+           state.spec.prompt_revision_id
+           reference.revision_id
+      && Option.exists state.spec.delegation ~f:(D.Reference.equal reference)
+    then Ok ()
+    else Error (error Conflict "child installation differs from its actual Spec")
+  in
+  let%bind () = association () in
+  let%bind record = Recurrence_controller.resolve_delegation controller reference in
+  let%bind () =
+    match record.stage, record.revocation with
+    | (Child_installed | Linked), None -> Ok ()
+    | (Reserved | Artifact_installed), None
+    | (Reserved | Artifact_installed | Child_installed | Linked), Some _ ->
+      Error (error Conflict "child installation is not durably installed and live")
+  in
+  let%bind current = Recurrence_controller.observe controller state in
+  let check_current () =
+    let%bind () = association () in
+    if Recurrence_controller.is_current current
+    then Ok ()
+    else Error (error Conflict "child installation Store observation changed")
+  in
+  let%map () = check_current () in
+  Child_installation.
+    { controller
+    ; source_owner = Runtime_source_owner.identity source_owner
+    ; reference
+    ; check_current
+    }
+;;
+
+(* A native callback already owns admission. This selection adds no permission:
+   it ties the DATA ACK to the SAME registered invocation and its real Init,
+   existing-Goal or initial callback acknowledgement. Never select ambient Init. *)
+let child_installation_native_execution t borrowed =
+  let module N = Native_tool_invocation in
+  let module I = Agent_protocol.Invocation in
+  let open Result.Let_syntax in
+  let%bind _ = N.borrowed_capabilities borrowed in
+  let invocation = N.borrowed_invocation borrowed in
+  List.find t.invocation_executions ~f:(fun execution ->
+    I.equal execution.dispatched invocation
+    && execution.accepts_children
+    && Atomic.get execution.authority_live)
+  |> Result.of_option
+       ~error:(error Conflict "child installation lost its native callback owner")
+;;
+
+let register_child_installation_internal
+      ?native_callback
+      t
+      ~source_owner
+      ~(child : Child_installation.t)
+      ~check_parent
+      ~max_children
+      ~max_encoded_bytes
+  =
+  let module D = Agent_store.Delegation_store in
+  let open Result.Let_syntax in
+  let%bind controller = child_accounting_owner t ~source_owner in
+  let%bind () =
+    if
+      Runtime_source_owner.matches source_owner child.source_owner
+      && Recurrence_controller.same_store controller child.controller
+      && Agent_protocol.Id.Session.equal
+           child.reference.key.parent_session_id
+           t.state.identity.session_id
+      && Int.equal child.reference.key.parent_generation t.state.identity.generation
+    then Ok ()
+    else Error (error Conflict "child installation belongs to another parent/Store")
+  in
+  let%bind () = check_parent t.state in
+  let%bind () = child.check_current () in
+  let%bind record = Recurrence_controller.resolve_delegation controller child.reference in
+  let%bind () =
+    if
+      Agent_protocol.Id.Prompt_revision.equal
+        record.admission.parent_revision_id
+        t.state.spec.prompt_revision_id
+      && Option.is_none record.revocation
+      &&
+      match record.stage with
+      | Child_installed | Linked -> true
+      | Reserved | Artifact_installed -> false
+    then Ok ()
+    else Error (error Conflict "child installation parent source or record changed")
+  in
+  let%bind execution =
+    match native_callback with
+    | None -> Ok None
+    | Some borrowed ->
+      child_installation_native_execution t borrowed |> Result.map ~f:Option.some
+  in
+  let%bind native_current =
+    match execution with
+    | None -> Ok None
+    | Some execution ->
+      authorized_native_child_basis t (Inference_invocation execution)
+      |> Result.map ~f:Option.some
+  in
+  let before = t.state in
+  let%bind children =
+    Child_accounting.register
+      before
+      ~reference:child.reference
+      ~max_children
+      ~max_encoded_bytes
+  in
+  let check () =
+    let%bind _ = child_accounting_owner t ~source_owner in
+    let%bind () = check_parent t.state in
+    let%bind () = child.check_current () in
+    let%bind () =
+      match native_callback, execution, native_current with
+      | None, None, None -> Ok ()
+      | Some borrowed, Some selected, Some current ->
+        let%bind actual = child_installation_native_execution t borrowed in
+        if phys_equal selected actual
+        then current.check_current ()
+        else Error (error Conflict "child installation native owner was replaced")
+      | None, (Some _ | None), (Some _ | None) | Some _, (Some _ | None), (Some _ | None)
+        -> Error (error Conflict "child installation native selection is incomplete")
+    in
+    if phys_equal before t.state
+    then Ok ()
+    else Error (error Conflict "child installation parent snapshot changed")
+  in
+  let%bind () = check () in
+  let%bind changed = child_contributions_changed before children in
+  if not changed
+  then Ok ()
+  else (
+    let%bind constructor =
+      match execution with
+      | None -> Ok None
+      | Some execution ->
+        initialization_of_inference_execution t (Inference_invocation execution)
+    in
+    let preparation =
+      match constructor, native_current with
+      | Some constructor, _ -> Initialization_scope.initial_preparation constructor
+      | None, Some current -> current.selected.execution.preparation
+      | None, None -> None
+    in
+    let%bind candidate =
+      prepare_transition
+        ?run_preparation:preparation
+        t
+        ~delta:(Session_delta.Child_contributions_changed children)
+        ~payloads:[]
+    in
+    let initialization_acknowledgement =
+      Option.map constructor ~f:(fun scope ->
+        Initialization_scope.Acknowledgement.prepare scope candidate.state)
+    in
+    let%bind goal_runtime_acknowledgement =
+      Option.bind execution ~f:(fun execution ->
+        goal_runtime_of_execution t (Inference_invocation execution))
+      |> Option.value_map ~default:(Ok None) ~f:(fun scope ->
+        Goal_runtime_acknowledgement.prepare t scope ~candidate
+        |> Result.map ~f:Option.some)
+    in
+    let%bind held_authored_callback_acknowledgement =
+      Option.bind execution ~f:(fun execution ->
+        held_authored_of_execution t (Inference_invocation execution))
+      |> Option.value_map ~default:(Ok None) ~f:(fun scope ->
+        Held_authored_callback_acknowledgement.prepare t scope ~candidate)
+    in
+    install
+      ?run_preparation:preparation
+      ?initialization_acknowledgement
+      ?goal_runtime_acknowledgement
+      ?held_authored_callback_acknowledgement
+      ~check_before_commit:(fun () ->
+        let%bind () = check () in
+        Option.value_map
+          initialization_acknowledgement
+          ~default:(Ok ())
+          ~f:Initialization_scope.Acknowledgement.check_basis)
+      t
+      candidate)
+;;
+
+(* Authorizers are the existing current read policy. As elsewhere in the
+   factual readers, these callbacks must be
+   nonyielding; Store observation remains an explicit yielding phase. *)
+let child_usage_original actor =
+  if
+    Operator_authorization.is_current actor
+    && Agent_protocol.Principal.has_scope
+         (Operator_authorization.principal actor)
+         View_session_transcript
+  then Ok ()
+  else Error (error Permission_denied "child usage read authority is no longer current")
+;;
+
+let child_usage_read t ~source_owner ~actor ~authorize =
+  let open Result.Let_syntax in
+  let%bind _ = child_accounting_owner t ~source_owner in
+  let%bind () = child_usage_original actor in
+  let%bind () = authorize t.state in
+  let%bind _ = child_accounting_owner t ~source_owner in
+  child_usage_original actor
+;;
+
+let observe_child_usage_internal t ~source_owner ~actor ~authorize ~reference =
+  let module D = Agent_store.Delegation_store in
+  let open Result.Let_syntax in
+  let association () =
+    let%bind _ = child_accounting_owner t ~source_owner in
+    if
+      Agent_protocol.Id.Session.equal
+        t.state.identity.session_id
+        reference.D.Reference.child_session_id
+      && Agent_protocol.Id.Prompt_revision.equal
+           t.state.spec.prompt_revision_id
+           reference.revision_id
+      && Option.exists t.state.spec.delegation ~f:(D.Reference.equal reference)
+    then Ok ()
+    else Error (error Conflict "child usage source differs from its actual Spec")
+  in
+  let refresh_read () =
+    let%bind () = child_usage_read t ~source_owner ~actor ~authorize in
+    let%bind () = association () in
+    let state = t.state in
+    let%bind controller = child_accounting_owner t ~source_owner in
+    let%bind _ = Recurrence_controller.resolve_delegation controller reference in
+    let%bind current = Recurrence_controller.observe controller state in
+    let check () =
+      let%bind () = child_usage_original actor in
+      let%bind () = association () in
+      if phys_equal state t.state && Recurrence_controller.is_current current
+      then Ok ()
+      else Error (error Conflict "child usage read basis changed before import")
+    in
+    let%bind () = child_usage_read t ~source_owner ~actor ~authorize in
+    let%map () = check () in
+    check
+  in
+  let%bind check = refresh_read () in
+  let state = t.state in
+  let%bind snapshot = Child_accounting.snapshot state in
+  let%bind () = check () in
+  let%map controller = child_accounting_owner t ~source_owner in
+  Child_usage_observation.
+    { controller
+    ; source_owner = Runtime_source_owner.identity source_owner
+    ; reference
+    ; snapshot
+    ; refresh_read
+    }
+;;
+
+let import_child_usage_internal
+      t
+      ~source_owner
+      ~actor
+      ~authorize
+      ~(observation : Child_usage_observation.t)
+      ~max_children
+      ~max_encoded_bytes
+  =
+  let open Result.Let_syntax in
+  let%bind () = child_usage_read t ~source_owner ~actor ~authorize in
+  let%bind controller = child_accounting_owner t ~source_owner in
+  let%bind () =
+    if
+      Runtime_source_owner.matches source_owner observation.source_owner
+      && Recurrence_controller.same_store controller observation.controller
+      && Agent_protocol.Id.Session.equal
+           observation.reference.key.parent_session_id
+           t.state.identity.session_id
+      && not
+           (Agent_protocol.Id.Session.equal
+              observation.reference.child_session_id
+              t.state.identity.session_id)
+    then Ok ()
+    else Error (error Conflict "child usage observation belongs to another parent/Store")
+  in
+  (* Refresh visibility over the SAME actual child, without changing the older
+     acknowledged snapshot. This calls no other Actor mailbox and acquires no
+     Registry/Owner lock; explicit Store observation remains outside their locks. *)
+  let%bind child_current = observation.refresh_read () in
+  let%bind _ =
+    Recurrence_controller.resolve_delegation controller observation.reference
+  in
+  let before = t.state in
+  let%bind parent_current = Recurrence_controller.observe controller before in
+  let%bind children =
+    Child_accounting.register
+      before
+      ~reference:observation.reference
+      ~max_children
+      ~max_encoded_bytes
+  in
+  let%bind children, result =
+    match observation.snapshot with
+    | None -> Ok (children, Child_usage_import.Historical_absence)
+    | Some snapshot ->
+      let%map children, disposition = Child_contributions.replace children ~snapshot in
+      children, Child_usage_import.Imported disposition
+  in
+  let%bind () = child_usage_read t ~source_owner ~actor ~authorize in
+  let check () =
+    let%bind _ = child_accounting_owner t ~source_owner in
+    let%bind () = child_usage_original actor in
+    let%bind () = child_current () in
+    if phys_equal before t.state && Recurrence_controller.is_current parent_current
+    then Ok ()
+    else Error (error Conflict "child usage import parent basis changed")
+  in
+  let%bind () = check () in
+  let%bind changed = child_contributions_changed before children in
+  if not changed
+  then Ok result
+  else (
+    let%map _ =
+      transition
+        ~check_before_commit:check
+        t
+        ~delta:(Session_delta.Child_contributions_changed children)
+        ~payloads:[]
+    in
+    result)
+;;
+
 let finish_invocation t execution outcome requests commit_starts authoring_reference =
   let open Result.Let_syntax in
   let revision = t.state.counters.revision in
@@ -22473,9 +22923,10 @@ let allocate_inference t execution owner relation configuration =
     Error (error Permission_denied "goal policy holds fresh inference admission")
   | (Unbound | Ready _) as decision ->
     let%bind protected_ordinals =
-      Goal_ledger_reconciliation.protected_ordinals
-        t.state.goal_accounts
-        ~ledger:t.state.inference_ledger
+      Canonical_usage_update.protected_ordinals
+        t.state.inference_ledger
+        ~accounts:t.state.goal_accounts
+        ~delegated_usage:t.state.delegated_usage
     in
     let%bind ledger, handle, tracking =
       Inference_ledger.admit
@@ -26129,6 +26580,7 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Recurrence_due_ids
   | Begin_recurrence_due _
   | Finish_recurrence_due _
+  | Child_accounting _
   | Recurrence_read (Definitions _ | Query _ | Planning _)
   | Apply_recurrence_command _
   | Reserve_recurrence_child _
@@ -32445,6 +32897,38 @@ let native_goal_resume_status t ~admission ~authorize ~invocation_id =
   call t (Native_goal (Resume_status (admission, authorize, invocation_id)))
 ;;
 
+let handle_child_accounting_request
+  : type a. t -> a Child_accounting_request.t -> (a, Agent_protocol.Error.t) result
+  =
+  fun t request ->
+  match request with
+  | Observe_installation (source_owner, reference) ->
+    observe_child_installation_internal t ~source_owner ~reference
+  | Register_installation
+      (native_callback, source_owner, child, check_parent, max_children, max_encoded_bytes)
+    ->
+    register_child_installation_internal
+      ?native_callback
+      t
+      ~source_owner
+      ~child
+      ~check_parent
+      ~max_children
+      ~max_encoded_bytes
+  | Observe_usage (source_owner, actor, authorize, reference) ->
+    observe_child_usage_internal t ~source_owner ~actor ~authorize ~reference
+  | Import_usage
+      (source_owner, actor, authorize, observation, max_children, max_encoded_bytes) ->
+    import_child_usage_internal
+      t
+      ~source_owner
+      ~actor
+      ~authorize
+      ~observation
+      ~max_children
+      ~max_encoded_bytes
+;;
+
 let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
   fun t request ->
   if Option.is_some t.lifecycle_fence && not (lifecycle_request_allowed request)
@@ -33198,7 +33682,7 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
         Ok ())
       else Error (error Conflict "activation custody belongs to another actor")
     | Verify_recurrence_child reservation -> observe_recurrence_child t reservation
-    | Link_recurrence_child (permit, child) ->
+    | Link_recurrence_child (permit, child, max_children, max_encoded_bytes) ->
       let open Result.Let_syntax in
       let%bind checked = refresh_recurrence_creation t permit in
       let%bind controller = require_recurrence_controller t in
@@ -33222,6 +33706,20 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
           ~error:(error Conflict "recurrence parent lost its catalog")
       in
       let%bind next = Recurrence_catalog.link_child catalog association in
+      let%bind children =
+        Child_accounting.register
+          t.state
+          ~reference:(Recurrence_child_association.reference association)
+          ~max_children
+          ~max_encoded_bytes
+      in
+      let%bind children_changed = child_contributions_changed t.state children in
+      let catalog_changed =
+        not
+          (Int64.equal
+             (Recurrence_catalog.revision next)
+             (Recurrence_catalog.revision catalog))
+      in
       let check () =
         let%bind () = Recurrence_creation.Checked.check_current checked in
         let%bind () = child.check_current () in
@@ -33229,18 +33727,20 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
       in
       let%bind () = check () in
       let%bind () =
-        if
-          Int64.equal
-            (Recurrence_catalog.revision next)
-            (Recurrence_catalog.revision catalog)
+        if (not catalog_changed) && not children_changed
         then Ok ()
         else (
-          let%bind transition =
-            prepare_transition
-              t
-              ~delta:(Session_delta.Recurrence_catalog_changed next)
-              ~payloads:[]
+          let delta =
+            Session_delta.Batch
+              ((if catalog_changed
+                then [ Session_delta.Recurrence_catalog_changed next ]
+                else [])
+               @
+               if children_changed
+               then [ Session_delta.Child_contributions_changed children ]
+               else [])
           in
+          let%bind transition = prepare_transition t ~delta ~payloads:[] in
           let%bind () = check () in
           let%bind () = persist_transition t transition in
           install_committed_transition t transition;
@@ -33986,6 +34486,7 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
     | Detach attachment_id -> detach t attachment_id
     | Renew_owner (attachment_id, generation) -> renew_owner t attachment_id generation
     | Owner_expired generation -> owner_expired t generation
+    | Child_accounting request -> handle_child_accounting_request t request
     | Checkpoint persist -> persist t.state
     | Quiescent_checkpoint inspect ->
       (match
@@ -35674,6 +36175,53 @@ let recurrence_call t ?(priority = Mailbox.Normal) request =
          unavailable ())
 ;;
 
+let observe_child_installation t ~source_owner ~reference =
+  recurrence_call t (Child_accounting (Observe_installation (source_owner, reference)))
+;;
+
+let register_child_installation
+      ?native_callback
+      t
+      ~source_owner
+      ~child
+      ~check_parent
+      ~max_children
+      ~max_encoded_bytes
+  =
+  recurrence_call
+    t
+    (Child_accounting
+       (Register_installation
+          ( native_callback
+          , source_owner
+          , child
+          , check_parent
+          , max_children
+          , max_encoded_bytes )))
+;;
+
+let observe_child_usage t ~source_owner ~actor ~authorize ~reference =
+  recurrence_call
+    t
+    (Child_accounting (Observe_usage (source_owner, actor, authorize, reference)))
+;;
+
+let import_child_usage
+      t
+      ~source_owner
+      ~actor
+      ~authorize
+      ~observation
+      ~max_children
+      ~max_encoded_bytes
+  =
+  recurrence_call
+    t
+    (Child_accounting
+       (Import_usage
+          (source_owner, actor, authorize, observation, max_children, max_encoded_bytes)))
+;;
+
 let reserve_recurrence_child t ~actor ~authorize ~occurrence ~expected_control_revision =
   recurrence_call
     t
@@ -35721,8 +36269,10 @@ let verify_recurrence_child t ~reservation =
   recurrence_call t (Verify_recurrence_child reservation)
 ;;
 
-let link_recurrence_child t ~permit ~child =
-  recurrence_call t (Link_recurrence_child (permit, child))
+let link_recurrence_child t ~permit ~child ~max_children ~max_encoded_bytes =
+  recurrence_call
+    t
+    (Link_recurrence_child (permit, child, max_children, max_encoded_bytes))
 ;;
 
 let sweep_recurrences t =

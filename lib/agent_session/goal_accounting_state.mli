@@ -88,6 +88,7 @@ type marks =
   ; untracked_turns : int64
   }
 
+val fold_error : Canonical_usage_fold.Error.t -> Error.t
 val marks : L.t -> (marks, Error.t) result
 val check_session : t -> L.t -> (unit, Error.t) result
 val ended : O.Attempt_record.t -> bool

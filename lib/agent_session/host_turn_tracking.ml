@@ -1,5 +1,15 @@
 open! Core
 
+module Ledger_state = struct
+  type t =
+    { ledger : Inference_ledger.t
+    ; accounts : Goal_accounts.t option
+    ; delegated_usage : Delegated_usage.t option
+    ; accounts_changed : bool
+    ; changes_rev : Session_delta.t list
+    }
+end
+
 let apply ~previous state delta payloads =
   let open Result.Let_syntax in
   let ledger_error _ =
@@ -22,20 +32,37 @@ let apply ~previous state delta payloads =
     |> Result.map ~f:ignore
   in
   let invalid message = Error (Agent_protocol.Error.invalid_request message) in
-  let reconcile (ledger, accounts, changed) after ~admission =
+  let reconcile (current : Ledger_state.t) after ~admission =
     let%map prepared =
-      Goal_ledger_reconciliation.prepare
-        ~accounts
-        ~catalog:state.Session_state.goal_catalog
-        ~before:ledger
+      Canonical_usage_update.prepare
+        current.ledger
         ~after
+        ~accounts:current.accounts
+        ~catalog:state.Session_state.goal_catalog
+        ~delegated_usage:current.delegated_usage
         ~admission
     in
-    ( after
-    , Goal_ledger_reconciliation.accounts prepared
-    , changed || Goal_ledger_reconciliation.changed prepared )
+    let accounts = Canonical_usage_update.accounts prepared in
+    let delegated_usage = Canonical_usage_update.delegated_usage prepared in
+    let accounts_changed = Canonical_usage_update.accounts_changed prepared in
+    let changes =
+      Session_delta.inference_ledger_update after ~delegated_usage
+      ::
+      (if accounts_changed
+       then
+         Option.to_list
+           (Option.map accounts ~f:(fun accounts ->
+              Session_delta.Goal_accounts_changed accounts))
+       else [])
+    in
+    { Ledger_state.ledger = after
+    ; accounts
+    ; delegated_usage
+    ; accounts_changed = current.accounts_changed || accounts_changed
+    ; changes_rev = List.rev_append changes current.changes_rev
+    }
   in
-  let started ((ledger, _, _) as current) operation =
+  let started ({ Ledger_state.ledger; _ } as current) operation =
     let%bind () = admit_operation operation in
     let%bind () =
       match operation.Agent_protocol.Operation.state with
@@ -78,7 +105,7 @@ let apply ~previous state delta payloads =
         reconcile current after ~admission)
       else invalid "host turn start lacks actual operation admission"
   in
-  let finished ((ledger, _, _) as current) payload operation =
+  let finished ({ Ledger_state.ledger; _ } as current) payload operation =
     let%bind () = admit_operation operation in
     let consistent =
       match payload, operation.Agent_protocol.Operation.state with
@@ -124,10 +151,16 @@ let apply ~previous state delta payloads =
           in
           reconcile current after ~admission:None)
   in
-  let%map inference_ledger, goal_accounts, accounts_changed =
+  let%map final =
     List.fold_result
       payloads
-      ~init:(state.Session_state.inference_ledger, state.goal_accounts, false)
+      ~init:
+        { Ledger_state.ledger = state.Session_state.inference_ledger
+        ; accounts = state.goal_accounts
+        ; delegated_usage = state.delegated_usage
+        ; accounts_changed = false
+        ; changes_rev = []
+        }
       ~f:(fun ledger payload ->
         match payload with
         | Agent_protocol.Event.Durable.Payload.Operation_started operation ->
@@ -138,6 +171,15 @@ let apply ~previous state delta payloads =
         | Operation_interrupted operation -> finished ledger payload operation
         | _ -> Ok ledger)
   in
+  let { Ledger_state.ledger = inference_ledger
+      ; accounts = goal_accounts
+      ; delegated_usage
+      ; accounts_changed
+      ; changes_rev
+      }
+    =
+    final
+  in
   if
     (not accounts_changed)
     && Int64.equal
@@ -145,21 +187,10 @@ let apply ~previous state delta payloads =
          (Inference_ledger.revision state.inference_ledger)
   then state, delta
   else (
-    let state = { state with inference_ledger; goal_accounts } in
-    let delta =
-      match Session_replacement_delta.classify delta with
-      | Some replacement -> Session_replacement_delta.with_state replacement state
-      | None ->
-        let accounting =
-          if accounts_changed
-          then
-            Option.to_list
-              (Option.map goal_accounts ~f:(fun accounts ->
-                 Session_delta.Goal_accounts_changed accounts))
-          else []
-        in
-        Session_delta.Batch
-          (delta :: Session_delta.Inference_ledger_changed inference_ledger :: accounting)
-    in
+    let state = { state with inference_ledger; goal_accounts; delegated_usage } in
+    (* Retain each actual edge. Collapsing a finish and later retirement into
+       one before/after leaf would erase the row needed by the cumulative fold.
+       Session_transition runs replacement reconciliation before this phase. *)
+    let delta = Session_delta.Batch (delta :: List.rev changes_rev) in
     state, delta)
 ;;

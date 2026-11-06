@@ -42,6 +42,9 @@ type t =
   | Model_job_recipe_target_captured of Model_job_target.t
   | Model_job_target_restored of Model_job_target.t
   | Inference_ledger_changed of (Inference_ledger.t[@sexp.opaque])
+  | Delegated_inference_ledger_changed of
+      (Inference_ledger.t[@sexp.opaque]) * (Delegated_usage.t[@sexp.opaque])
+  | Child_contributions_changed of (Child_contributions.t[@sexp.opaque])
   | Job_changed of Agent_protocol.Job.t
   | Schedule_changed of Agent_protocol.Schedule.t
   | Invocation_changed of Agent_protocol.Invocation.t
@@ -87,6 +90,13 @@ type t =
   | Halt_changed of string option
   | Reset_generation of int
 [@@deriving sexp]
+
+(** Shared representation selection for actual inference/host-turn writers.
+    Applying an ordinary leaf to an already partitioned child is rejected. *)
+val inference_ledger_update
+  :  Inference_ledger.t
+  -> delegated_usage:Delegated_usage.t option
+  -> t
 
 (** Apply under finite durable bounds; direct native callers default to the
     shared 64MiB durable profile. Document owners pass their configured limits.

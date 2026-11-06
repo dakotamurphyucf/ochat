@@ -4138,6 +4138,8 @@ val link_recurrence_child
   :  t
   -> permit:Recurrence_creation.t
   -> child:Recurrence_child_link.t
+  -> max_children:int
+  -> max_encoded_bytes:int
   -> (Recurrence_child_association.t, Agent_protocol.Error.t) result
 
 (** Current authorized read with effective lifecycle retirement. No native/script
@@ -4549,3 +4551,78 @@ val native_goal_resume_status
         -> (unit, Agent_protocol.Error.t) result)
   -> invocation_id:Agent_protocol.Id.Invocation.t
   -> (Goal_native_resume.Status.t, Agent_protocol.Error.t) result
+
+(* Same creating Eio domain only. These values are factual
+   association/read DATA, not child/Goal execution or source authority. *)
+module Child_installation : sig
+  type t
+end
+
+module Child_usage_observation : sig
+  type t
+end
+
+module Child_usage_import : sig
+  type t =
+    | Imported of Child_contributions.disposition
+    | Historical_absence
+end
+
+(** Only the actual Factory privately supplies its existing issuer, after
+    verifying its real child allocation/Actor/Store tuple. The proof exposes no
+    usage. Exact Spec reference, same issuer and actual Store Current are required;
+    decoded references, copied readonly identities and foreign Actors cannot
+    mint a proof acceptable to this parent Factory. Creating another issuer does
+    not make it equal to an existing Factory's private issuer. *)
+val observe_child_installation
+  :  t
+  -> source_owner:Runtime_source_owner.t
+  -> reference:Agent_store.Delegation_store.Reference.t
+  -> (Child_installation.t, Agent_protocol.Error.t) result
+
+(** Factual bounded slot ACK under the existing native/captured creation guard.
+    [check_parent] must not yield or call another mailbox. It is the same current
+    creation policy; this API creates no policy/Goal grant. It resolves the actual
+    delegation and repeats pure association checks before the writer. Same slot is
+    idempotent. Unknown ACK prohibits Linked/start; acknowledged Unobserved slots
+    are retained even if later publication fails. *)
+val register_child_installation
+  :  ?native_callback:Native_tool_invocation.borrowed
+  -> t
+  -> source_owner:Runtime_source_owner.t
+  -> child:Child_installation.t
+  -> check_parent:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> max_children:int
+  -> max_encoded_bytes:int
+  -> (unit, Agent_protocol.Error.t) result
+
+(** Independently authorized child transcript visibility before and after actual
+    Store observation. The Factory additionally checks the actual owner tuple.
+    An older snapshot remains immutable while refresh checks current visibility
+    and the same live physical child/Store; a newer revision is not new authority.
+    Historical missing accounting remains an opaque observation with no snapshot,
+    never invented zero. No runtime or delegation scan is loaded into its version.
+    The callback is nonyielding and may not call a mailbox. *)
+val observe_child_usage
+  :  t
+  -> source_owner:Runtime_source_owner.t
+  -> actor:Operator_authorization.t
+  -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> reference:Agent_store.Delegation_store.Reference.t
+  -> (Child_usage_observation.t, Agent_protocol.Error.t) result
+
+(** Parent read authority is checked independently. A factual first import may
+    register one bounded Unobserved slot, retaining historical inventory uncertainty.
+    Only exact actual child associations accept snapshots. Duplicate
+    and stale imports do not write when their slot already exists. The final writer guard calls no mailbox or
+    policy and repeats original/physical/snapshot currentness. Known acknowledged
+    facts are not undone by a post-ACK visibility failure. *)
+val import_child_usage
+  :  t
+  -> source_owner:Runtime_source_owner.t
+  -> actor:Operator_authorization.t
+  -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> observation:Child_usage_observation.t
+  -> max_children:int
+  -> max_encoded_bytes:int
+  -> (Child_usage_import.t, Agent_protocol.Error.t) result

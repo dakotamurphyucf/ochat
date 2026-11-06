@@ -672,7 +672,7 @@ let implementation_sources =
   ; ( "lib/agent_session/legacy_moderator_checkpoint.ml"
     , "e541ee7532b2a3e96d7c06c539cd1637c0ddaa1c55d7f1c51cec24b6d9c4f399" )
   ; ( "lib/agent_session/session_state.ml"
-    , "4c3007f2766732f41925ebb62c26011d3174d46cf192c53bf0b25b72f49babe5" )
+    , "7a75340c567d0604a69f984e5a9267c041ac97cf5e430e123b06c00a52a59e0f" )
   ; ( "lib/agent_session/script_tool_calls.ml"
     , "ba391e326cf6e4cc7711d2070c912b728f5343f70b2c3f18235c935f59cd04cc" )
   ; ( "lib/chat_response/agent_guidance.ml"
@@ -702,7 +702,7 @@ let implementation_sources =
   ; ( "lib/context_compaction/compactor.ml"
     , "7b11eae5ce4d929bf1ab4702111d03f70fe97cfe8543135c73782c2b92391ff0" )
   ; ( "lib/agent_session/session_transition.ml"
-    , "4ecbf130526447ffbb4e36604f436a8bc3d3bd2d3623fd7eac0c5b7f08e26540" )
+    , "143bf616e843fa53c9cdf97ec2ed19e7f41ef96870125714bbbe83fddfb33949" )
   ; ( "lib/agent_session/instruction_clear_capacity.ml"
     , "baa952a408f74f0795059df9e7f6bb3c677957c1866c6d2b20cb83fc7a475e0e" )
   ; ( "lib/agent_session/session_terminal_journal.ml"
@@ -736,7 +736,7 @@ let implementation_sources =
   ; ( "bin/ochat_agent_stdio.ml"
     , "8d134cd11c7df2a60e6b4b77a5ff7f9ea0c28a8a2674a3dd9f573adaa7623902" )
   ; ( "lib/agent_server/session_factory.ml"
-    , "41cffafed674a81135477850f50d61aea69dd47318b01ef216d73094cef98a25" )
+    , "2c41ecc0ed8529c0ee2fd9b9aa682dd014fa52792c74b528869679d3e909537d" )
   ; ( "bin/inference_composition.ml"
     , "1f57451d5543a5fe8f2f23dc0e593374b64946d088cba164acd1c087a7cdce18" )
   ; ( "lib/agent_protocol/developer_command_id.ml"
@@ -854,7 +854,7 @@ let implementation_sources =
   ; ( "lib/chatml_trace/chatml_trace.mli"
     , "8ebf49b2e1858f86daadf6fb687cce0436edec79bdb46935fd7ae2647e1e8f7b" )
   ; ( "lib/agent_session/administration.ml"
-    , "798836e32d154f322a0fdd0760d1348956515c3887b65e4b94b5c83c61bdb7e3" )
+    , "0f951950de12d6795320fb4dec3d8662355642899234752cb32bcf29eb6e25d2" )
   ; ( "lib/agent_server/command_handler.ml"
     , "9c0c8f4815a4ae12c2879e291b9b8aeead2c88bc51fa44c987c319f4143160fb" )
   ; ( "lib/agent_server/runtime_owner.ml"
@@ -984,7 +984,7 @@ let implementation_sources =
   ; ( "lib/agent_session/notification_wake_selection.ml"
     , "001872ff3729d6a4a7cd861cd6ec4ebbf75296637bd5c5cdaf3ede82c6f9b6ba" )
   ; ( "lib/agent_session/session_actor.ml"
-    , "e488dc19737fe6ab60a7d0a98e99ccba96e8e5d3cfcc97a07d5e64b66ea2db04" )
+    , "2f4691eb66108d8ffe84ce257ae2c3b98f48c10dd920c18575943d0d1f4c558e" )
   ; ( "lib/agent_session/job_custody.ml"
     , "6a3b5951629d8440ebfcaf9f72aa625cf522087e8996bb73cec82ce16abfa120" )
   ; ( "lib/agent_session/staged_jobs.ml"

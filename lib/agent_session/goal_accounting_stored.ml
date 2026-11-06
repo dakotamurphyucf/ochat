@@ -316,18 +316,39 @@ let validate_transition previous ~incoming ~before ~after =
   let%bind () = validate_update previous ~incoming in
   (* Exact retirement evidence is checked independently of any new admission.
        Actual admission authorization remains with the actor integration. *)
-  let%bind expected =
-    List.fold_result previous.bindings ~init:previous.settled ~f:(fun settled c ->
-      if List.exists incoming.bindings ~f:(fun n -> Int64.equal n.ordinal c.ordinal)
-      then Ok settled
-      else (
-        match L.find before ~ordinal:c.ordinal, L.find after ~ordinal:c.ordinal with
-        | Some row, None when ended (L.Row.record row) ->
-          Usage.add_record settled (L.Row.record row)
-          |> Result.map_error ~f:(fun _ ->
-            P.Error.invalid_request "retirement aggregate overflow")
-        | _ -> invalid "accounting binding removed without actual canonical retirement"))
+  let%bind handles =
+    List.map previous.bindings ~f:(fun c ->
+      match L.find before ~ordinal:c.ordinal with
+      | None -> invalid "accounting binding lacks its actual before-ledger row"
+      | Some row ->
+        let binding =
+          Binding.{ handle = L.Row.handle row; run_id = c.run_id; source = c.source }
+        in
+        if claim_equal c (claim binding)
+        then Ok binding.handle
+        else invalid "accounting binding differs from its actual before-ledger row")
+    |> Result.all
   in
+  let%bind fold =
+    Canonical_usage_fold.prepare previous.settled ~before ~after ~handles
+    |> Result.map_error ~f:(fun error ->
+      P.Error.invalid_request
+        (Sexp.to_string_hum (Canonical_usage_fold.Error.sexp_of_t error)))
+  in
+  let%bind () =
+    List.fold_result previous.bindings ~init:() ~f:(fun () c ->
+      let removed =
+        not (List.exists incoming.bindings ~f:(fun n -> Int64.equal n.ordinal c.ordinal))
+      in
+      let retired =
+        List.exists (Canonical_usage_fold.Plan.retired fold) ~f:(fun handle ->
+          Int64.equal (L.Handle.ordinal handle) c.ordinal)
+      in
+      if Bool.equal removed retired
+      then Ok ()
+      else invalid "accounting binding removal differs from actual canonical retirement")
+  in
+  let expected = Canonical_usage_fold.Plan.settled fold in
   let delta =
     Int64.(
       Usage.untracked_attempts incoming.settled

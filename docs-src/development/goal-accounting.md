@@ -100,3 +100,60 @@ idempotency, physical reopen and rejection of retired-row resurrection. It uses 
 The separate fixture timeout default remains 30 seconds. A diagnostic run that
 only reaches the boundary is not end-to-end qualification; retain the full local
 exit result when reporting retirement/reopen coverage.
+
+## Immediate-child usage snapshots
+
+Delegated usage is a factual accounting projection. It grants no child execution,
+Goal control, transcript access, source lease or cleanup-completion authority.
+`Session_factory.import_child_usage` requires both entries to be the same
+Factory's actual registered Actor/Owner/Handle tuples. It checks the original
+current transcript-read authority independently for parent and child. A decoded
+child ID, immutable reference or usage snapshot cannot substitute for those checks.
+
+Each delegated child maintains its own cumulative partition over its real
+canonical inference ledger. The shared retirement fold seals exact ended rows
+before they disappear. It also retains admitted Attempt/Turn counters when the
+canonical profile cannot retain a tracked row. New generation and recovery do not
+reset the cumulative partition. The canonical ledger and its partition change in
+one paired leaf; an ordinary ledger-only update cannot leave the partition stale.
+Ordered terminal/start edges in one transaction remain ordered through replay and
+Created preservation. A failed leaf admits no prefix of that transaction.
+
+A snapshot contains the child's immutable delegation reference, actual acknowledged
+session revision, its own usage/counters and an aggregate of its immediate-child
+contribution slots. It contains no provider Handle, configuration, tool resources,
+conversation or read permission. Export does not discover mutable descendants and
+silently change a snapshot under an unchanged revision. An older snapshot may be
+imported only while independent current read authority and the same live
+Actor/Store association remain valid; its old revision is not an authority proof.
+
+The parent keeps at most one current snapshot in each bounded immediate-child
+slot. A newer snapshot replaces that child's whole contribution. Repeated or stale
+snapshots do not add another charge; different contents at the same revision
+reject. Authoritative retained usage corrections can decrease token totals, while
+cumulative admission counters cannot decrease. A grandchild reaches an ancestor
+only through its immediate parent's subtree snapshot. A direct grandchild import
+into that ancestor rejects rather than adding a second accounting path.
+
+New Factory births start with a complete empty child inventory. The real creation
+path acknowledges an immutable Unobserved slot before publishing Linked or
+starting the child. Captured occurrence publication includes its slot in the same
+reciprocal-link transaction. An unknown slot acknowledgement does not permit start,
+refund, removal or invented zero; same-request recovery retains the actual child
+identity and bounded slot. A later failure after a known slot ACK leaves that
+Unobserved association protected.
+
+Historical absent accounting is explicitly incomplete. A factual first import
+may register an actual immediate association but does not convert an old inventory
+to complete. Unobserved children, unknown historical inventory and missing old
+own-partitions remain visible uncertainty; scanning only the currently visible
+children cannot prove that no other historical children existed. Unknown carrier
+fields and protected row data participate in admission/preservation checks and
+cannot be discarded to make a fold or import fit the configured bound.
+
+These child contributions remain separate from the parent's own canonical
+partition. They do not turn a parent count reservation into evidence of a child
+Operation or inference admission, and do not install an ancestor Goal grant.
+Execution and later messages continue to require their authentic immutable child
+admission, current source/generation, original authority and actual control policy.
+Observed token totals remain evidence rather than a distributed hard spending cap.

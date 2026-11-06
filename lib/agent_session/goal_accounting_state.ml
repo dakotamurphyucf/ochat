@@ -111,7 +111,15 @@ let equal a b =
   && Int64.equal a.last_ledger_revision b.last_ledger_revision
 ;;
 
-type marks =
+let fold_error = function
+  | Canonical_usage_fold.Error.Scope_mismatch -> Error.Scope_mismatch
+  | Conflicting_binding -> Error.Conflicting_binding
+  | Missing_bound_row -> Error.Missing_bound_row
+  | Invalid_retirement -> Error.Invalid_retirement
+  | Counter_exhausted -> Error.Counter_exhausted
+;;
+
+type marks = Canonical_usage_fold.Marks.t =
   { attempt : int64
   ; turn : int64
   ; untracked_attempts : int64
@@ -119,33 +127,7 @@ type marks =
   }
 
 let marks ledger =
-  let open Result.Let_syntax in
-  let summary = L.summary ledger in
-  let coverage = Q.Summary.coverage summary in
-  let turns = Q.Summary.turns summary in
-  let%bind attempt =
-    sum
-      [ Q.Summary.retained_attempts summary
-      ; coverage.retired_attempts
-      ; coverage.untracked_attempts
-      ]
-  in
-  let%map turn =
-    sum
-      [ turns.pending
-      ; turns.completed
-      ; turns.failed
-      ; turns.cancelled
-      ; turns.interrupted
-      ; coverage.retired_turns
-      ; coverage.untracked_turns
-      ]
-  in
-  { attempt
-  ; turn
-  ; untracked_attempts = coverage.untracked_attempts
-  ; untracked_turns = coverage.untracked_turns
-  }
+  Canonical_usage_fold.Marks.of_ledger ledger |> Result.map_error ~f:fold_error
 ;;
 
 let check_session t ledger =

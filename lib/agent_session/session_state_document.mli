@@ -118,7 +118,9 @@ val adopt
     required spec.root_invocation. Historical absence converts to Ui, the actual
     previous native root contract; present invalid values reject. Existing unknown
     fields remain in the original preservation carrier. The native state schema25
-    also rejects Headless claims in an older native schema.
+    also rejects Headless claims in an older native schema. Native schema26
+    introduces owned delegated accounting; historical absence stays absent and
+    cannot bootstrap exact zero or complete child inventory.
      The v8 to v9 step wraps each
     original pending entry, preserving its entire raw document, and introduces
     independent pending revision/disposition fields with unknown legacy owner. The v7 to v8 step is
@@ -210,6 +212,16 @@ module Transaction : sig
 
   val value : t -> Session_state.t
   val with_value : t -> Session_state.t -> t
+
+  (** Validate one actual canonical edge and its paired own partition, then
+      advance the private accepted ledger/usage basis. The original complete
+      carrier template and all other prefix custody stay unchanged.
+      This is DATA admission, never a runtime or child-import permission. *)
+  val update_canonical_usage
+    :  t
+    -> ledger:Inference_ledger.t
+    -> delegated_usage:Delegated_usage.t option
+    -> (t, Document_schema.Error.t) result
 
   (** Validate one ordered Goal-catalog leaf against the current prefix and
       advance its preservation-validation basis. Every changed Goal and catalog

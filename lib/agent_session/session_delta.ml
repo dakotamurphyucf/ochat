@@ -35,6 +35,9 @@ type t =
   | Model_job_recipe_target_captured of Model_job_target.t
   | Model_job_target_restored of Model_job_target.t
   | Inference_ledger_changed of (Inference_ledger.t[@sexp.opaque])
+  | Delegated_inference_ledger_changed of
+      (Inference_ledger.t[@sexp.opaque]) * (Delegated_usage.t[@sexp.opaque])
+  | Child_contributions_changed of (Child_contributions.t[@sexp.opaque])
   | Job_changed of Agent_protocol.Job.t
   | Schedule_changed of Agent_protocol.Schedule.t
   | Invocation_changed of Agent_protocol.Invocation.t
@@ -152,6 +155,12 @@ let retire_pending_dispositions state ~history_ids ~limits =
   }
 ;;
 
+let inference_ledger_update ledger ~delegated_usage =
+  match delegated_usage with
+  | None -> Inference_ledger_changed ledger
+  | Some usage -> Delegated_inference_ledger_changed (ledger, usage)
+;;
+
 let rec apply ?(limits = native_limits) (state : Session_state.t) = function
   | Batch deltas -> List.fold_result deltas ~init:state ~f:(apply ~limits)
   | Created created ->
@@ -211,6 +220,40 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
           (Agent_protocol.Error.invalid_request "replacement discarded goal accounting")
     in
     let%bind () =
+      match state.delegated_usage, created.delegated_usage with
+      | None, None -> Ok ()
+      | Some previous, Some incoming ->
+        Delegated_usage.validate_transition
+          previous
+          ~incoming
+          ~before:state.inference_ledger
+          ~after:created.inference_ledger
+      | None, Some _ ->
+        Error
+          (Agent_protocol.Error.invalid_request
+             "replacement cannot bootstrap historical delegated usage")
+      | Some _, None ->
+        Error
+          (Agent_protocol.Error.invalid_request "replacement discarded delegated usage")
+    in
+    let%bind child_contributions =
+      match state.child_contributions, created.child_contributions with
+      | None, None -> Ok None
+      | Some previous, Some incoming ->
+        Child_contributions.adopt previous ~incoming |> Result.map ~f:Option.some
+      | None, Some incoming ->
+        (match Child_contributions.inventory incoming with
+         | Historical_children_unknown -> Ok (Some incoming)
+         | Complete_inventory ->
+           Error
+             (Agent_protocol.Error.invalid_request
+                "replacement cannot prove historical child completeness"))
+      | Some _, None ->
+        Error
+          (Agent_protocol.Error.invalid_request
+             "replacement discarded child contributions")
+    in
+    let%bind () =
       Job_inference_provenance.validate_transition
         ~previous:state.jobs
         ~incoming:created.jobs
@@ -234,7 +277,7 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
           (Agent_protocol.Error.invalid_request
              "replacement discarded durable run custody")
     in
-    created
+    { created with child_contributions }
   | Managed_stop_admitted receipt ->
     let open Result.Let_syntax in
     let%bind () = Managed_stop.validate receipt in
@@ -711,8 +754,66 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
        Error
          (Agent_protocol.Error.invalid_request
             "restored model job target generation changed"))
+  | Delegated_inference_ledger_changed (inference_ledger, incoming) ->
+    let open Result.Let_syntax in
+    let%bind previous =
+      Result.of_option
+        state.delegated_usage
+        ~error:
+          (Agent_protocol.Error.invalid_request
+             "historical delegated partition cannot bootstrap from a ledger mutation")
+    in
+    let%bind () =
+      Inference_ledger.validate_update state.inference_ledger ~incoming:inference_ledger
+      |> Result.map_error ~f:(fun error ->
+        Agent_protocol.Error.invalid_request
+          (Sexp.to_string_hum (Inference_ledger.Error.sexp_of_t error)))
+    in
+    let%bind () =
+      Inference_ledger.validate
+        inference_ledger
+        ~limits:Inference_ledger.Limits.default
+        ~session_id:state.identity.session_id
+        ~generation:state.identity.generation
+      |> Result.map_error ~f:(fun error ->
+        Agent_protocol.Error.invalid_request
+          (Sexp.to_string_hum (Inference_ledger.Error.sexp_of_t error)))
+    in
+    let%bind () =
+      Delegated_usage.validate_transition
+        previous
+        ~incoming
+        ~before:state.inference_ledger
+        ~after:inference_ledger
+    in
+    let%map delegated_usage = Delegated_usage.adopt previous ~incoming in
+    { state with inference_ledger; delegated_usage = Some delegated_usage }
+  | Child_contributions_changed incoming ->
+    let open Result.Let_syntax in
+    let%bind children =
+      match state.child_contributions with
+      | Some previous -> Child_contributions.adopt previous ~incoming
+      | None ->
+        (match Child_contributions.inventory incoming with
+         | Historical_children_unknown ->
+           let%map _ = Child_contributions.to_jsonaf incoming in
+           incoming
+         | Complete_inventory ->
+           Error
+             (Agent_protocol.Error.invalid_request
+                "historical child inventory cannot become complete"))
+    in
+    Ok { state with child_contributions = Some children }
   | Inference_ledger_changed inference_ledger ->
     let open Result.Let_syntax in
+    let%bind () =
+      match state.delegated_usage with
+      | None -> Ok ()
+      | Some _ ->
+        Error
+          (Agent_protocol.Error.invalid_request
+             "partitioned child requires its paired canonical usage mutation")
+    in
     let%bind () =
       Inference_ledger.validate_update state.inference_ledger ~incoming:inference_ledger
       |> Result.map_error ~f:(fun error ->
@@ -1318,15 +1419,27 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
            ~message:"session generation did not advance"
            ~retryable:false
            ())
-    else (
-      let%map.Result inference_ledger =
+    else
+      let open Result.Let_syntax in
+      let%bind inference_ledger =
         Inference_ledger.with_generation state.inference_ledger ~generation
         |> Result.map_error ~f:(fun error ->
           Agent_protocol.Error.invalid_request
             (Sexp.to_string_hum (Inference_ledger.Error.sexp_of_t error)))
       in
+      let%map delegated_usage =
+        match state.delegated_usage with
+        | None -> Ok None
+        | Some own ->
+          Delegated_usage.reconcile
+            own
+            ~before:state.inference_ledger
+            ~after:inference_ledger
+          |> Result.map ~f:Option.some
+      in
       { state with
         inference_ledger
+      ; delegated_usage
       ; identity = { state.identity with generation }
       ; pending_initial_start = false
       ; conversation =
@@ -1334,7 +1447,7 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
             authoring_reference_index = None
           ; authoring_publication = None
           }
-      })
+      }
 ;;
 
 let capture_new_model_jobs ?(limits = native_limits) state delta =

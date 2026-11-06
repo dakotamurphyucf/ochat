@@ -988,3 +988,30 @@ val with_native_goal_resume_source_reported
   -> selection:Agent_session.Session_actor.Goal_native_resume.Selection.t
   -> (Runtime_owner.Prepared_goal_continuation.t -> ('a, Agent_protocol.Error.t) result)
   -> ('a Goal_resume_source.t, Agent_protocol.Error.t) result
+
+(** Same creating Eio domain only. Import one immutable acknowledged usage snapshot from the actual immediate
+    child into its actual parent's bounded contribution slot. Both supplied
+    entries must be this Factory's canonical registered Actor/Owner/Handle tuple;
+    a decoded reference, copied entry or read-only issuer identity is insufficient.
+    This does not discover, select, initialize or execute a child. The caller uses
+    existing metadata ownership to obtain entries and independently supplies the
+    current transcript-read policy for each. No source/Goal rights are granted.
+
+    Reads and parent write are sequential; no registry/Owner lock or parent
+    mailbox is held while calling the child Actor. Nonyielding policy callbacks
+    may not call another mailbox. Original expiry/revocation and actual ownership
+    are checked again after the reads. Stored child revision decides replacement;
+    an older authenticated snapshot never becomes a new authority or delta charge.
+    Historical absence preserves an Unobserved slot and explicit unknown coverage.
+    Writer/cancellation errors propagate; an unknown parent ACK never fabricates
+    zero, removal, refund or a successful import. *)
+val import_child_usage
+  :  t
+  -> parent:Session_registry.entry
+  -> child:Session_registry.entry
+  -> actor:Operator_authorization.t
+  -> authorize_parent:
+       (Agent_session.Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> authorize_child:
+       (Agent_session.Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> (Agent_session.Session_actor.Child_usage_import.t, Agent_protocol.Error.t) result

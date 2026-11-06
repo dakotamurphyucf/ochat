@@ -161,6 +161,13 @@ let%expect_test
   let actual_child = ref None in
   let root_finished = ref false in
   let second_created = ref false in
+  let parent_requests = ref 0 in
+  let child_polls = ref 0 in
+  let parent_polls = ref 0 in
+  let parent_revision_changes = ref 0 in
+  let parent_last_revision = ref None in
+  let phase_first_elapsed = ref [] in
+  let failed_elapsed = ref 0. in
   let complete id = Native.complete !inputs id in
   let call = Wire.call in
   Fixtures.with_daemon
@@ -202,7 +209,9 @@ let%expect_test
     ~expected_requests:8
     ~expect_moderator:true
     ~completion_timeout:60.
-    ~inspect_request:(fun _ request -> inputs := request)
+    ~inspect_request:(fun number request ->
+      parent_requests := number;
+      inputs := request)
     ~auxiliary_response:(fun inputs ->
       let child_request =
         List.exists inputs ~f:(function
@@ -296,7 +305,18 @@ let%expect_test
         []
       | _ -> failwith "unexpected native private execution transcript")
     ~after_turn:(fun env handle parent ->
-      phase := "configure actual recurrence hosts";
+      let mono_clock = Eio.Stdenv.mono_clock env in
+      let started = Eio.Time.Mono.now mono_clock in
+      let elapsed () =
+        let span = Mtime.span started (Eio.Time.Mono.now mono_clock) in
+        Float.(Mtime.Span.to_float_ns span / 1_000_000_000.)
+      in
+      let set_phase name =
+        phase := name;
+        if not (List.Assoc.mem !phase_first_elapsed name ~equal:String.equal)
+        then phase_first_elapsed := (name, elapsed ()) :: !phase_first_elapsed
+      in
+      set_phase "configure actual recurrence hosts";
       last_parent := Some (state parent);
       assert !root_finished;
       let daemon = Option.value_exn !actual_daemon in
@@ -362,90 +382,101 @@ let%expect_test
         try
           Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 30. (fun () ->
             let acknowledged_child = ref false in
+            let selected_child = ref None in
             let rec await_child () =
-              if not !acknowledged_child
-              then (
-                phase := "process actual recurrence entry";
-                match Driver.process_entry driver parent with
-                | Ok () | Error { code = Conflict; retryable = true; _ } -> ()
-                | Error error -> raise_s [%sexp (error : P.Error.t)]);
-              phase := "await admitted captured child";
-              let parent_state = state parent in
-              last_parent := Some parent_state;
-              let catalog = Option.value_exn parent_state.recurrence_catalog in
-              let recurrence =
-                A.Recurrence_catalog.find catalog child_id |> Option.value_exn
+              Int.incr child_polls;
+              let selected =
+                match !selected_child with
+                | Some child_id -> Some child_id
+                | None ->
+                  if not !acknowledged_child
+                  then (
+                    set_phase "process actual recurrence entry";
+                    match Driver.process_entry driver parent with
+                    | Ok () | Error { code = Conflict; retryable = true; _ } -> ()
+                    | Error error -> raise_s [%sexp (error : P.Error.t)]);
+                  set_phase "await admitted captured child";
+                  let parent_state = state parent in
+                  last_parent := Some parent_state;
+                  let catalog = Option.value_exn parent_state.recurrence_catalog in
+                  let recurrence =
+                    A.Recurrence_catalog.find catalog child_id |> Option.value_exn
+                  in
+                  let frontier = A.Recurrence_entry.frontier recurrence |> protocol_ok in
+                  (attempt
+                   := match A.Recurrence_frontier.executions frontier with
+                      | [] -> None
+                      | execution :: _ ->
+                        let current = A.Recurrence_execution.current_attempt execution in
+                        Some
+                          ( A.Recurrence_execution_attempt.number
+                              (A.Recurrence_execution.Attempt.request current)
+                          , A.Recurrence_execution.Attempt.rejection current
+                          , A.Recurrence_execution.Attempt.uncertainty current
+                          , Option.is_some (A.Recurrence_execution.Attempt.origin current)
+                          , Option.is_some
+                              (A.Recurrence_execution.Attempt.terminal current) ));
+                  (match A.Recurrence_frontier.child_associations frontier with
+                   | [ actual_association ] ->
+                     (* Cache only the child identity selected by the actual
+                        retained controller origin ACK. Joining that worker does
+                        not require decoding the unchanged controller carrier on
+                        every poll. Fresh origin/catalog checks remain below. *)
+                     (acknowledged_child
+                      := match !attempt with
+                         | Some (_, _, _, true, _) -> true
+                         | Some _ | None -> false);
+                     association
+                     := Some (A.Recurrence_child_association.to_json actual_association);
+                     let reference =
+                       A.Recurrence_child_association.reference actual_association
+                     in
+                     if !acknowledged_child
+                     then selected_child := Some reference.child_session_id;
+                     Some reference.child_session_id
+                   | [] -> None
+                   | _ -> failwith "native capture created multiple children")
               in
-              let frontier = A.Recurrence_entry.frontier recurrence |> protocol_ok in
-              (attempt
-               := match A.Recurrence_frontier.executions frontier with
-                  | [] -> None
-                  | execution :: _ ->
-                    let current = A.Recurrence_execution.current_attempt execution in
-                    Some
-                      ( A.Recurrence_execution_attempt.number
-                          (A.Recurrence_execution.Attempt.request current)
-                      , A.Recurrence_execution.Attempt.rejection current
-                      , A.Recurrence_execution.Attempt.uncertainty current
-                      , Option.is_some (A.Recurrence_execution.Attempt.origin current)
-                      , Option.is_some (A.Recurrence_execution.Attempt.terminal current)
-                      ));
-              match A.Recurrence_frontier.child_associations frontier with
-              | [ actual_association ] ->
-                (* The actual controller ACK already retained the origin. Stop
-                   dispatching this occurrence; join its installed worker below. *)
-                (acknowledged_child
-                 := match !attempt with
-                    | Some (_, _, _, true, _) -> true
-                    | Some _ | None -> false);
-                association
-                := Some (A.Recurrence_child_association.to_json actual_association);
-                let reference =
-                  A.Recurrence_child_association.reference actual_association
+              let child =
+                Option.bind selected ~f:(Registry.find (Daemon.registry daemon))
+              in
+              match child with
+              | Some child ->
+                set_phase "join actual captured child moderator";
+                let current =
+                  Actor.with_moderator_checkpoint child.actor (fun () ->
+                    Actor.state child.actor)
+                  |> protocol_ok
                 in
-                (match
-                   Registry.find (Daemon.registry daemon) reference.child_session_id
-                 with
-                 | Some child ->
-                   phase := "join actual captured child moderator";
-                   let current =
-                     Actor.with_moderator_checkpoint child.actor (fun () ->
-                       Actor.state child.actor)
-                     |> protocol_ok
-                   in
-                   last_child := Some current;
-                   if
-                     List.exists current.moderator_executions ~f:(fun receipt ->
-                       match receipt.P.Moderator_execution.status with
-                       | Failed _ | Interrupted _ -> true
-                       | Running | Completed _ -> false)
-                   then
-                     raise_s
-                       [%sexp
-                         "captured startup cannot complete"
-                       , (diagnostic_state current : Sexp.t)];
-                   if
-                     Int.equal !child_providers 1
-                     && Option.is_none current.active_operation
-                     && List.length current.invocations = 1
-                     && List.for_all current.moderator_executions ~f:(fun receipt ->
-                       match receipt.P.Moderator_execution.status with
-                       | Completed _ -> true
-                       | Running | Failed _ | Interrupted _ -> false)
-                   then child, current
-                   else (
-                     Eio.Fiber.yield ();
-                     await_child ())
-                 | None ->
-                   Eio.Fiber.yield ();
-                   await_child ())
-              | [] ->
+                last_child := Some current;
+                if
+                  List.exists current.moderator_executions ~f:(fun receipt ->
+                    match receipt.P.Moderator_execution.status with
+                    | Failed _ | Interrupted _ -> true
+                    | Running | Completed _ -> false)
+                then
+                  raise_s
+                    [%sexp
+                      "captured startup cannot complete"
+                    , (diagnostic_state current : Sexp.t)];
+                if
+                  Int.equal !child_providers 1
+                  && Option.is_none current.active_operation
+                  && List.length current.invocations = 1
+                  && List.for_all current.moderator_executions ~f:(fun receipt ->
+                    match receipt.P.Moderator_execution.status with
+                    | Completed _ -> true
+                    | Running | Failed _ | Interrupted _ -> false)
+                then child, current
+                else (
+                  Eio.Fiber.yield ();
+                  await_child ())
+              | None ->
                 Eio.Fiber.yield ();
                 await_child ()
-              | _ -> failwith "native capture created multiple children"
             in
             let child, current = await_child () in
-            phase := "verify actual captured child startup";
+            set_phase "verify actual captured child startup";
             actual_child := Some child;
             let native = List.hd_exn current.invocations in
             [%test_eq: string] "read_file" native.context.tool_name;
@@ -489,7 +520,7 @@ let%expect_test
                 (Some origin)
                 (A.Recurrence_execution.Attempt.origin attempt));
             let before = current in
-            phase := "submit parent existing-target selection turn";
+            set_phase "submit parent existing-target selection turn";
             let submission =
               Agent_client.Session_handle.send_message
                 handle
@@ -501,13 +532,28 @@ let%expect_test
             in
             ignore (Option.value_exn submission.operation_id : P.Id.Operation.t);
             let rec await_second () =
-              phase := "await parent existing-target selection turn";
+              Int.incr parent_polls;
+              set_phase "await parent existing-target selection turn";
+              (* Capture before State: a committed append between the snapshot
+                 and await resolves this exact promise. The final Operation
+                 transition always emits completed/failed/cancelled evidence;
+                 private observation ACKs need not wake this terminal wait. *)
+              let changed = A.Durable_event_log.changed parent.durable_events in
               let current = state parent in
               last_parent := Some current;
+              if
+                not
+                  (Option.equal
+                     Int64.equal
+                     !parent_last_revision
+                     (Some current.counters.revision))
+              then (
+                Int.incr parent_revision_changes;
+                parent_last_revision := Some current.counters.revision);
               if !second_created && Option.is_none current.active_operation
               then ()
               else (
-                Eio.Fiber.yield ();
+                Eio.Promise.await changed;
                 await_second ())
             in
             await_second ();
@@ -547,11 +593,20 @@ let%expect_test
                same-parent native preview reuses the live loan without child replay")
         with
         | exn ->
+          failed_elapsed := elapsed ();
           Exn.reraise
             exn
             (Sexp.to_string_hum
                [%sexp
                  { phase = (!phase : string)
+                 ; elapsed_seconds = (!failed_elapsed : float)
+                 ; phase_first_elapsed =
+                     (List.rev !phase_first_elapsed : (string * float) list)
+                 ; parent_requests = (!parent_requests : int)
+                 ; child_polls = (!child_polls : int)
+                 ; parent_polls = (!parent_polls : int)
+                 ; parent_revision_changes = (!parent_revision_changes : int)
+                 ; parent_last_revision = (!parent_last_revision : int64 option)
                  ; parent = (Option.map !last_parent ~f:diagnostic_state : Sexp.t option)
                  ; child = (Option.map !last_child ~f:diagnostic_state : Sexp.t option)
                  ; association = (!association : Jsonaf.t option)

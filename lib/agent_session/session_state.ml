@@ -138,6 +138,8 @@ type 'spec fields =
   ; run_state : Run_state.t option [@sexp.option]
   ; goal_catalog : Goal_catalog.t option [@sexp.option]
   ; goal_accounts : (Goal_accounts.t option[@sexp.opaque])
+  ; delegated_usage : (Delegated_usage.t option[@sexp.opaque])
+  ; child_contributions : (Child_contributions.t option[@sexp.opaque])
   ; instruction_selection : Instruction_selection.t option [@sexp.option]
   ; recurrence_catalog : Recurrence_catalog.t option [@sexp.option]
   ; subscriptions : Agent_protocol.Subscription.t list [@sexp.list]
@@ -171,11 +173,19 @@ let execution_migration_required (t : t) =
   | Stopping -> false
 ;;
 
-let current_schema_version = 25
+let current_schema_version = 26
 
 let upgrade_schema (t : t) =
   if t.schema_version = current_schema_version
   then Ok t
+  else if
+    t.schema_version < current_schema_version
+    && (Option.is_some t.delegated_usage || Option.is_some t.child_contributions)
+  then
+    Error
+      (Agent_protocol.Error.invalid_request "delegated usage requires session schema 26")
+  else if t.schema_version = 25
+  then Ok { t with schema_version = current_schema_version }
   else if
     t.schema_version < current_schema_version
     && Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.equal
@@ -453,6 +463,8 @@ let create_fields ~(identity : Identity.t) ~spec ~desired ~initial_history =
   ; run_state = None
   ; goal_catalog = None
   ; goal_accounts = None
+  ; delegated_usage = None
+  ; child_contributions = None
   ; instruction_selection = None
   ; recurrence_catalog = None
   ; subscriptions = []
@@ -1097,6 +1109,47 @@ let validate (t : t) =
         ~catalog:t.goal_catalog
         ~ledger:t.inference_ledger
         ~runs:t.run_state
+  in
+  let%bind () =
+    match t.delegated_usage, t.spec.delegation with
+    | None, (None | Some _) -> Ok ()
+    | Some _, None ->
+      Error
+        (Agent_protocol.Error.invalid_request
+           "own delegated usage requires its actual delegation reference")
+    | Some own, Some reference ->
+      if
+        Agent_store.Delegation_store.Reference.equal
+          reference
+          (Delegated_usage.reference own)
+      then Delegated_usage.validate own ~ledger:t.inference_ledger
+      else
+        Error
+          (Agent_protocol.Error.invalid_request
+             "delegated usage admission identity differs")
+  in
+  let%bind () =
+    match t.child_contributions with
+    | None -> Ok ()
+    | Some children ->
+      let%bind _ = Child_contributions.to_jsonaf children in
+      List.fold_result
+        (Child_contributions.references children)
+        ~init:()
+        ~f:(fun () reference ->
+          if
+            Agent_protocol.Id.Session.equal
+              reference.Agent_store.Delegation_store.Reference.key.parent_session_id
+              t.identity.session_id
+            && not
+                 (Agent_protocol.Id.Session.equal
+                    reference.child_session_id
+                    t.identity.session_id)
+          then Ok ()
+          else
+            Error
+              (Agent_protocol.Error.invalid_request
+                 "child contribution belongs to another parent"))
   in
   let%bind () =
     match t.instruction_selection with

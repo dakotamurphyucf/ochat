@@ -100,6 +100,32 @@ let native_delta_requires payload =
 
 let native_name = Agent_protocol.Goal_native_resume_intent.persistence_semantics
 
+let usage_state_requires payload =
+  List.exists [ "delegated_usage"; "child_contributions" ] ~f:(fun name ->
+    match D.Json.field payload ~name with
+    | Value _ -> true
+    | Absent | Null -> false)
+;;
+
+let usage_delta_requires payload =
+  match D.Json.field payload ~name:"changes" with
+  | Value (`Array changes) ->
+    List.exists changes ~f:(fun change ->
+      match D.Json.field change ~name:"kind" with
+      | Value
+          (`String ("delegated_inference_ledger_changed" | "child_contributions_changed"))
+        -> true
+      | Value (`String "created") ->
+        (match D.Json.field change ~name:"state" with
+         | Value state ->
+           (match D.Json.field state ~name:"payload" with
+            | Value payload -> usage_state_requires payload
+            | Absent | Null -> false)
+         | Absent | Null -> false)
+      | Value _ | Absent | Null -> false)
+  | Value _ | Absent | Null -> false
+;;
+
 let require_state document ~limits =
   let open Result.Let_syntax in
   let%bind document =
@@ -112,11 +138,18 @@ let require_state document ~limits =
       ~limits
       ~required:(state_requires (D.Document.payload document))
   in
+  let%bind document =
+    require
+      document
+      ~name:native_name
+      ~limits
+      ~required:(native_state_requires (D.Document.payload document))
+  in
   require
     document
-    ~name:native_name
+    ~name:Agent_protocol.Session_storage_semantics.delegated_usage
     ~limits
-    ~required:(native_state_requires (D.Document.payload document))
+    ~required:(usage_state_requires (D.Document.payload document))
 ;;
 
 let check_state document =
@@ -127,10 +160,16 @@ let check_state document =
   let%bind () =
     check document ~name ~required:(state_requires (D.Document.payload document))
   in
+  let%bind () =
+    check
+      document
+      ~name:native_name
+      ~required:(native_state_requires (D.Document.payload document))
+  in
   check
     document
-    ~name:native_name
-    ~required:(native_state_requires (D.Document.payload document))
+    ~name:Agent_protocol.Session_storage_semantics.delegated_usage
+    ~required:(usage_state_requires (D.Document.payload document))
 ;;
 
 let require_delta document ~limits =
@@ -145,11 +184,18 @@ let require_delta document ~limits =
       ~limits
       ~required:(delta_requires (D.Document.payload document))
   in
+  let%bind document =
+    require
+      document
+      ~name:native_name
+      ~limits
+      ~required:(native_delta_requires (D.Document.payload document))
+  in
   require
     document
-    ~name:native_name
+    ~name:Agent_protocol.Session_storage_semantics.delegated_usage
     ~limits
-    ~required:(native_delta_requires (D.Document.payload document))
+    ~required:(usage_delta_requires (D.Document.payload document))
 ;;
 
 let check_delta document =
@@ -160,8 +206,14 @@ let check_delta document =
   let%bind () =
     check document ~name ~required:(delta_requires (D.Document.payload document))
   in
+  let%bind () =
+    check
+      document
+      ~name:native_name
+      ~required:(native_delta_requires (D.Document.payload document))
+  in
   check
     document
-    ~name:native_name
-    ~required:(native_delta_requires (D.Document.payload document))
+    ~name:Agent_protocol.Session_storage_semantics.delegated_usage
+    ~required:(usage_delta_requires (D.Document.payload document))
 ;;

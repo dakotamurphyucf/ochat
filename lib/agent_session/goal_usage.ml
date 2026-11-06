@@ -118,9 +118,52 @@ module Metric = struct
       Result.map (Unknown.add t.unknown reason) ~f:(fun unknown -> { t with unknown })
   ;;
 
-  let add_untracked t =
-    Result.map (increment t.untracked_attempts) ~f:(fun untracked_attempts ->
+  let add_untracked_count t count =
+    Result.map (add_count t.untracked_attempts count) ~f:(fun untracked_attempts ->
       { t with untracked_attempts })
+  ;;
+
+  let add_disjoint t other =
+    let open Result.Let_syntax in
+    let%bind actual_attempts = add_count t.actual_attempts other.actual_attempts in
+    let%bind estimated_attempts =
+      add_count t.estimated_attempts other.estimated_attempts
+    in
+    let%bind untracked_attempts =
+      add_count t.untracked_attempts other.untracked_attempts
+    in
+    let%bind not_reported = add_count t.unknown.not_reported other.unknown.not_reported in
+    let%bind explicit_null =
+      add_count t.unknown.explicit_null other.unknown.explicit_null
+    in
+    let%bind interrupted = add_count t.unknown.interrupted other.unknown.interrupted in
+    let%bind not_submitted =
+      add_count t.unknown.not_submitted other.unknown.not_submitted
+    in
+    let%map before_tracking =
+      add_count t.unknown.before_tracking other.unknown.before_tracking
+    in
+    let add_sum (left : Sum.sum) (right : Sum.sum) =
+      match left, right with
+      | Sum.Tokens _, Tokens value -> add_tokens left value
+      | Overflow, (Tokens _ | Overflow) | Tokens _, Overflow -> Sum.Overflow
+    in
+    { actual = add_sum t.actual other.actual
+    ; actual_attempts
+    ; estimated = add_sum t.estimated other.estimated
+    ; estimated_attempts
+    ; first_estimator = Option.first_some t.first_estimator other.first_estimator
+    ; mixed_estimators =
+        (t.mixed_estimators
+         || other.mixed_estimators
+         ||
+         match t.first_estimator, other.first_estimator with
+         | Some left, Some right -> not (equal_estimator left right)
+         | None, (None | Some _) | Some _, None -> false)
+    ; unknown =
+        { not_reported; explicit_null; interrupted; not_submitted; before_tracking }
+    ; untracked_attempts
+    }
   ;;
 end
 
@@ -188,11 +231,27 @@ let add_record t record =
   { next with attempts }
 ;;
 
-let add_untracked t =
+let add_untracked_count t ~count =
   let open Result.Let_syntax in
-  let%bind attempts = increment t.attempts in
-  let%bind untracked_attempts = increment t.untracked_attempts in
-  let%map next = map_metrics t ~f:(fun metric _ -> Metric.add_untracked metric) in
+  let%bind _ = Counter.of_int64 count in
+  let%bind attempts = add_count t.attempts count in
+  let%bind untracked_attempts = add_count t.untracked_attempts count in
+  let%map next =
+    map_metrics t ~f:(fun metric _ -> Metric.add_untracked_count metric count)
+  in
+  { next with attempts; untracked_attempts }
+;;
+
+let add_untracked t = add_untracked_count t ~count:1L
+
+let add_disjoint t other =
+  let open Result.Let_syntax in
+  let%bind attempts = add_count t.attempts other.attempts in
+  let%bind untracked_attempts = add_count t.untracked_attempts other.untracked_attempts in
+  let%map next =
+    map_metrics t ~f:(fun metric kind ->
+      Metric.add_disjoint metric (component other kind))
+  in
   { next with attempts; untracked_attempts }
 ;;
 

@@ -30,8 +30,22 @@ let admit_encoded previous ~delta ~(next : Session_state.t) ~limits =
         ~expiry_archive:None
         ~limits
     | Goal_catalog_changed incoming -> Transaction.update_goal_catalog carrier incoming
-    | ( Created _
-      | Lifecycle_changed _
+    | ( Inference_ledger_changed _
+      | Delegated_inference_ledger_changed _
+      | Reset_generation _
+      | Created _ ) as delta ->
+      let open Result.Let_syntax in
+      let%bind state =
+        Session_delta.apply ~limits (Transaction.value carrier) delta |> X.document_result
+      in
+      let%map carrier =
+        Transaction.update_canonical_usage
+          carrier
+          ~ledger:state.inference_ledger
+          ~delegated_usage:state.delegated_usage
+      in
+      Transaction.with_value carrier state
+    | ( Lifecycle_changed _
       | Metadata_changed _
       | Organization_changed _
       | Initial_start_consumed
@@ -41,6 +55,7 @@ let admit_encoded previous ~delta ~(next : Session_state.t) ~limits =
       | Canonical_entries_appended _
       | Instruction_selection_changed _
       | Goal_accounts_changed _
+      | Child_contributions_changed _
       | Recurrence_catalog_changed _
       | Run_state_changed _
       | Canonical_history_replaced _
@@ -61,7 +76,6 @@ let admit_encoded previous ~delta ~(next : Session_state.t) ~limits =
       | Model_job_target_captured _
       | Model_job_recipe_target_captured _
       | Model_job_target_restored _
-      | Inference_ledger_changed _
       | Job_changed _
       | Schedule_changed _
       | Invocation_changed _
@@ -85,8 +99,7 @@ let admit_encoded previous ~delta ~(next : Session_state.t) ~limits =
       | Compaction_archived _
       | Owner_lease_generation_changed _
       | Failure_changed _
-      | Halt_changed _
-      | Reset_generation _ ) as delta ->
+      | Halt_changed _ ) as delta ->
       let%bind.Result state =
         Session_delta.apply ~limits (Transaction.value carrier) delta |> X.document_result
       in

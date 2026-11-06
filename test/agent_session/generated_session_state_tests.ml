@@ -307,7 +307,7 @@ let%expect_test
       Store.close store |> store_ok));
   [%expect
     {|
-    ((checkpoint_schema 25) (stage Child_installed)
+    ((checkpoint_schema 26) (stage Child_installed)
      (retained_revocation (Parent_stopped))
      (rejected_inconsistent_checkpoints 6))
     |}]

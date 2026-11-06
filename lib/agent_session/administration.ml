@@ -140,7 +140,14 @@ let admit_generation (state : Session_state.t) =
         ~retryable:false
         ())
   in
-  let state = { state with inference_ledger } in
+  let%bind delegated_usage =
+    match state.delegated_usage with
+    | None -> Ok None
+    | Some own ->
+      Delegated_usage.reconcile own ~before:state.inference_ledger ~after:inference_ledger
+      |> Result.map ~f:Option.some
+  in
+  let state = { state with inference_ledger; delegated_usage } in
   let%map () = Session_state.validate state in
   state
 ;;

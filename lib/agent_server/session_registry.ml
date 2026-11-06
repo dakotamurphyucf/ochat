@@ -1156,9 +1156,11 @@ let commit_retired t reservation ~store =
     install_lifecycle_projection t reservation indexed)
 ;;
 
-let has_pending_cleanup t session_id =
-  Eio.Mutex.use_ro t.mutex (fun () -> cleanup_pending t session_id)
-;;
+(* This existing negative sampler is confined to the creating Eio domain.
+   Failed-cleanup list updates are nonyielding, so a same-domain read observes
+   the complete old or new list without entering the registry mutex. In
+   particular retained-policy callbacks must not wait on that mutex. *)
+let has_pending_cleanup t session_id = cleanup_pending t session_id
 
 let lifecycle_reserved t session_id =
   Eio.Mutex.use_ro t.mutex (fun () ->
