@@ -520,7 +520,7 @@ let implementation_sources =
   ; ( "lib/chatml/chatml_owned_source.ml"
     , "84b3a946d19d92a4530ec9a13f2ec0fe72adaad9790ec167f085372ddf26feeb" )
   ; ( "lib/chatml/chatml_checkpoint.ml"
-    , "a574f6bbc3b71389e2789bf74863354f6eab3ffbe8c9c254f9b88bc1acefb879" )
+    , "38ab46bd74c76cb71f94ee979ba5349ba27ce006e28fd976c496fd51c7abe56f" )
   ; ( "lib/chatml/chatml_builtin_spec.ml"
     , "85a25e01db7c9e5b801c2b37a78404bb6314a6c7f986667e21e2c1fcb9d5d212" )
   ; ( "lib/chatml_sources/chatml_source.ml"
