@@ -9,7 +9,10 @@ module Driver = Agent_server.Goal_native_resume_dispatcher
 let native_intent entry invocation =
   List.find_exn (state entry).invocations ~f:(fun actual ->
     P.Id.Invocation.equal actual.context.id invocation.P.Invocation.context.id)
-  |> fun actual -> Option.value_exn actual.P.Invocation.native_goal_resume
+  |> fun actual ->
+  match actual.P.Invocation.native_goal_action with
+  | Some (P.Goal_native_action_intent.Resume intent) -> intent
+  | None | Some (Start _) -> failwith "expected actual native Resume intent"
 ;;
 
 let goal_run current admission =
@@ -21,11 +24,14 @@ let goal_run current admission =
 
 let no_accepted entry =
   List.iter (state entry).invocations ~f:(fun invocation ->
-    Option.iter invocation.P.Invocation.native_goal_resume ~f:(fun intent ->
-      match Intent.phase intent with
-      | Staged | Discarded _ -> ()
-      | Accepted _ | Dispatch_claimed _ | Rejected _ ->
-        failwith "rolled-back callback published an accepted command"))
+    Option.iter invocation.P.Invocation.native_goal_action ~f:(function
+      | P.Goal_native_action_intent.Start _ ->
+        failwith "unexpected Start in Resume fixture"
+      | Resume intent ->
+        (match Intent.phase intent with
+         | Staged | Discarded _ -> ()
+         | Accepted _ | Dispatch_claimed _ | Rejected _ ->
+           failwith "rolled-back callback published an accepted command")))
 ;;
 
 let%expect_test

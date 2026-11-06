@@ -215,15 +215,18 @@ let features =
       ; "test/chatml_composition/authoring_reference_scope_tests.ml"
       ] )
   ; ( "goals.selected_metadata"
-    , "Six explicitly selected same-session Goal metadata tools with lexical native \
+    , "Selected same-session Goal metadata and Start tools with lexical native \
        admission, transferred original custody and atomic callback-staged commands"
     , [ "lib/agent_session/goal_native_admission.ml"
       ; "lib/agent_session/goal_native_metadata_tool.ml"
+      ; "lib/agent_session/goal_native_start_tool.ml"
       ; "lib/agent_session/goal_native_metadata_service.ml"
       ; "lib/agent_session/goal_native_metadata_view.ml"
       ]
     , "runtime.goal_metadata"
-    , [ "test/factory_catalog_publication/goal_native_metadata_tests.ml" ] )
+    , [ "test/factory_catalog_publication/goal_native_metadata_tests.ml"
+      ; "test/factory_catalog_publication/goal_native_start_tests.ml"
+      ] )
   ; ( "recurrence.selected_metadata"
     , "Nine explicitly selected same-controller native metadata operations with genuine \
        invocation/current original checks and admitted write semantics"
@@ -289,7 +292,7 @@ let implementation_sources =
   ; ( "lib/agent_server/developer_claim_deadline.ml"
     , "04bb3b5eae209fbc7af9b938e65d9896f9838421dbc48ea823ac802fd0803f63" )
   ; ( "lib/agent_protocol/invocation.ml"
-    , "3ffaf76aef781866e2517970053c7b008013111b3460bdb028ee628cd4890e2c" )
+    , "1664307adefac83f0bff4ecc2e67bbc7ab71f121b036e6326030a5804ab290c5" )
   ; ( "lib/agent_server/developer_background_job_runner.ml"
     , "9450ea610c424f91480b70ca733226137fa0b18325f07bf789da3e582e8d1876" )
   ; ( "lib/agent_server/developer_managed_tool_executor.ml"
@@ -313,7 +316,7 @@ let implementation_sources =
   ; ( "lib/agent_server/recurrence_authored_source.ml"
     , "e8f4b287579ae891c1d8197671c335e4e07afb02105ac206a44025701111bf3b" )
   ; ( "lib/agent_server/session_factory.ml"
-    , "b21d42100673d859c93baf69d9b4239bd9c0f5b521314377ffac2ac5cee8a472" )
+    , "9ee74ec05e8f4c257b1d8171e7c52700d16c5ffee7579e5d0f2e44a770acbe48" )
   ; ( "lib/agent_session/authoring_context_tool.ml"
     , "6e318b45f799b485f802dc6d5e4d8bc031721e379cc8800f6ed484d59694840d" )
   ; ( "lib/agent_session/authoring_reference_scope.ml"
@@ -401,11 +404,13 @@ let implementation_sources =
   ; ( "lib/agent_session/recurrence_service.ml"
     , "ee3c04f4c48a296d9ce311656c386709da550569513ac3995d44f30d52cccd41" )
   ; ( "lib/agent_session/goal_native_admission.ml"
-    , "65295af6c0d9d946ad225b1095a6bcfc4c58b66572bd131268cdc4540ba62d8b" )
+    , "b5c03a89fd40afb66932b6a17c32f79d24c515371b54cb85ede32d4c73335082" )
+  ; ( "lib/agent_session/goal_native_start_tool.ml"
+    , "9e80d161cbf8d2aacd0feb278ffa0ea1b341707646f170c264054e3421e889f6" )
   ; ( "lib/agent_session/goal_native_metadata_tool.ml"
-    , "3d33f3536350c0611e0abf837c9304d0a609a8ebaa79206fccda68f85c3aeeac" )
+    , "c0ab4a67e694f548e65057823214ccb7937660192036a5f41b577f9f51543f9b" )
   ; ( "lib/agent_session/goal_native_metadata_service.ml"
-    , "00d915fdd81d78e360676d5f7d78969555434d71daaa735836c9ff69280468b7" )
+    , "6e5111767454357c4a3310a7acf7f3f8de2cab95bb9f5638d30a5c647fff87d2" )
   ; ( "lib/agent_session/goal_native_metadata_view.ml"
     , "24f7259f0bd64562b2b5d1d030ba0629acb1368e762090b92aaa3a4d04b9421f" )
   ]
@@ -522,15 +527,15 @@ let topic_contracts =
     , "67c46da5b0c221e9d663c4c7d25bee64ff31977d3326891e01ef35d359b9a150" )
   ; ( "one_off_v1"
     , "runtime.goal_metadata"
-    , "c71b0411396f9adbf4e6e9832f1614099e300963fce6749a0ef73a75629823fe" )
+    , "0347f1949c39989c76cb2c74c61e63921f020babaf8e61a2e804553d85856b32" )
   ; ( "tool_v1"
     , "runtime.goal_metadata"
-    , "8296f003bbc69ba7795be5db04d5801d9d13b1f28e965f31439979f209839efd" )
+    , "0f683c45b8cc026bb667fcbb4f167b4f019c97b8388b302510c67231d8974867" )
   ; ( "moderator_v1"
     , "runtime.goal_metadata"
-    , "51bcc3aa417415544abc7e21941946fbfa89e2326d7f0aaaf505d55bb1ae9d13" )
+    , "c94d39b6c53c1b46efacdd1911a54e9b58c0c24e503b46ac49607798fd68695f" )
   ; ( "delegated_moderator_v1"
     , "runtime.goal_metadata"
-    , "f62943c00929b109ba604736a71b41981ddf52dd3d78c7e5812e0d0ca5bdfe3d" )
+    , "b1bc4ccde77053f83fb0db2f9305e6ac1ed15e1a255e2bfea6c946a1c6595228" )
   ]
 ;;

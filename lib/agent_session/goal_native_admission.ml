@@ -11,6 +11,7 @@ module Effect = struct
     | Abandon
     | Objective
     | Progress
+    | Start
     | Resume
   [@@deriving equal, enumerate]
 
@@ -21,6 +22,7 @@ module Effect = struct
     | Abandon -> "goal_abandon"
     | Objective -> "goal_objective"
     | Progress -> "goal_progress"
+    | Start -> "goal_start"
     | Resume -> "goal_resume"
   ;;
 end
@@ -64,7 +66,7 @@ let check_now t (state : Session_state.t) ~effect_kind =
   let scope =
     match effect_kind with
     | Effect.Get -> P.Scope.View_session_transcript
-    | Create | Hold | Abandon | Objective | Progress | Resume -> Send_messages
+    | Create | Hold | Abandon | Objective | Progress | Start | Resume -> Send_messages
   in
   if
     Effect.equal t.effect_kind effect_kind

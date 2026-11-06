@@ -38,7 +38,7 @@ let changes_document changes ~limits =
     D.Document.create
       ~limits
       ~kind:"session.delta"
-      ~version:6
+      ~version:7
       ~payload:(`Object [ "changes", `Array changes ])
   in
   Session_storage_semantics.require_delta document ~limits
@@ -1112,13 +1112,59 @@ let upgrade document ~limits =
   let%bind pending_input_step =
     D.Conversion.Step.of_function ~kind:"session.delta" ~from_version:5 ~f:Result.return
   in
+  let%bind native_goal_action_step =
+    D.Conversion.Step.of_function ~kind:"session.delta" ~from_version:6 ~f:(fun payload ->
+      let%bind changes = F.required payload "changes" F.array in
+      let%bind changes =
+        List.map changes ~f:(fun change ->
+          let%bind kind = F.required change "kind" F.string in
+          let field, convert =
+            match kind with
+            | "invocation_changed" | "invocation_reconciled" ->
+              "value", P.Native_goal_action_conversion.invocation_record
+            | "created" ->
+              ( "state"
+              , fun raw ->
+                  let%bind state = D.Document.inspect ~limits raw in
+                  let%map state = Session_state_document.upgrade state ~limits in
+                  D.Document.json state )
+            | _ -> "", Result.return
+          in
+          if String.is_empty field
+          then Ok change
+          else (
+            let%bind value = F.required change field convert in
+            match change with
+            | `Object fields ->
+              Ok
+                (`Object
+                    (List.map fields ~f:(fun (name, old) ->
+                       name, if String.equal name field then value else old)))
+            | _ -> F.invalid "change" "must be an object"))
+        |> Result.all
+      in
+      match payload with
+      | `Object fields ->
+        Ok
+          (`Object
+              (List.map fields ~f:(fun (name, old) ->
+                 name, if String.equal name "changes" then `Array changes else old)))
+      | _ -> F.invalid "payload" "must be an object")
+  in
   let%bind conversion =
     D.Conversion.create
       ~limits
-      ~targets:[ "session.delta", 6 ]
-      ~max_steps:5
+      ~targets:[ "session.delta", 7 ]
+      ~max_steps:6
       ~max_operations:100_000
-      ~steps:[ step; ledger_step; history_revision_step; run_step; pending_input_step ]
+      ~steps:
+        [ step
+        ; ledger_step
+        ; history_revision_step
+        ; run_step
+        ; pending_input_step
+        ; native_goal_action_step
+        ]
   in
   D.Conversion.upgrade conversion document
 ;;
@@ -1127,7 +1173,7 @@ let codec ~limits =
   D.Domain_codec.create
     ~limits
     ~kind:"session.delta"
-    ~version:6
+    ~version:7
     ~shape
     ~supported_semantics:Session_storage_semantics.supported
     ~decode:(fun json -> decode_payload ~limits json |> X.document_result)

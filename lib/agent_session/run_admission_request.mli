@@ -6,7 +6,8 @@ module Caller : sig
   type t =
     | Writer of Agent_protocol.Id.Attachment.t
     | Headless_command
-  [@@deriving equal, sexp]
+    | Native_goal_start of Agent_protocol.Goal_native_start_request.t
+  [@@deriving equal, sexp_of]
 end
 
 module Headless : sig
@@ -43,6 +44,15 @@ type t = private
 
 val of_writer : Agent_protocol.Run_start.t -> t
 val of_headless : Headless.t -> t
+
+(** Internal native DATA normalization. The actual Actor captures this revision
+    once after source reservation and durable claim. Native command digest never
+    includes this private preparation CAS. This function issues no custody. *)
+val of_native_goal_start
+  :  session_id:Agent_protocol.Id.Session.t
+  -> expected_revision:int64
+  -> Agent_protocol.Goal_native_start_request.t
+  -> (t, Agent_protocol.Error.t) result
 
 (** Writer requests use their exact original wire encoding. Headless commands
     use a disjoint canonical envelope; neither path includes executable authority. *)

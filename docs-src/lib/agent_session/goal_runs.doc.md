@@ -218,11 +218,11 @@ scheduler and do not complete end-to-end goal automation by themselves.
 
 ## Native command custody
 
-A selected native Goal adapter can stage objective/progress edits and a bounded
-same-episode Resume intent in its actual callback transaction. The lexical native
+A selected native Goal adapter can stage objective/progress edits and an explicit
+Start or same-episode Resume intent in its actual callback transaction. The lexical native
 receipt is speculative until the parent checkpoint acknowledges it. Parent
 rollback, a caught-and-rolled-back Tool.call, failed native completion and invalid
-multiple-Resume selection retire the speculative loans. A durable Accepted
+multiple-action selection retire the speculative loans. A durable Accepted
 Invocation records the original request; it does not say that the Goal command
 has executed.
 
@@ -258,9 +258,59 @@ Known Goal ACK and attempted/uncertain writer outcomes prevent a later negative
 host detail from being persisted as a definitely pre-admission Rejected command.
 No status projection writes a post-Started Invocation revision that could
 invalidate the first execution prefix. Status IDs and decoded receipts grant no
-execution permission. New Invocation children require the understood native
-Resume semantics marker in both session snapshots and delta documents;
-historical absence retains its previous wire representation.
+execution permission. Native actions occupy one optional `native_goal_action` field, tagged Start or
+Resume. Session snapshots and delta documents require the matching
+`goal.native-start.v1` or `goal.native-resume.v1` semantics marker. Explicit schema
+conversion wraps older Resume data without changing its request digest or
+receipt. Conversion preserves compatible unknown intent fields and the original
+stored frame hashes; it never restores execution permission. Start uses its own
+full-input decoder: the complete encoded Run input is bounded to 1 MiB/depth 64,
+with at most 4096 extra request-envelope bytes and one depth level. Metadata
+request limits do not truncate that input.
+
+## Starting an episode from a callback
+
+Start creates the first Workflow episode for a held Goal, or a new episode after
+its previous episode has actually terminated. Resume continues the existing
+nonterminal episode. Both use the same finite dispatcher and runtime source
+owner; neither enables work merely by changing Goal metadata.
+
+A Start request captures the Goal and catalog revisions, installed source,
+generation, input, and idempotency key. The Actor supplies the actual session and
+principal. The request does not guess the session revision that will exist after
+the callback commits. After source reservation and the durable dispatch claim,
+the Actor captures that revision once for preparation. Ordinary headless requests
+continue to require their exact original session-revision check.
+
+A fresh legacy or `extensibility-v1` `Session_start` callback may create a Goal
+and then stage Start using the returned projected revisions. Its callback must commit and release its
+source before the first Workflow is admitted. Use a real user submission in this
+case: the initial callback has already consumed authored startup, so Start does
+not run that callback again. A later Hold, Abandon, or edit can invalidate a
+staged request's exact Goal/catalog revisions; dispatch does not silently refresh
+them or clear an operator pause.
+
+For an authenticated first `extensibility-v1` callback, physical runtime
+installation retains the current original authorization until that callback
+claims it once. This handoff is bound to the installed worker, moderator, source,
+and generation; unloading or replacing that runtime retires the pending handoff.
+It cannot be reconstructed from stored session data, reused for a resumed
+callback, or used to bypass the selected tools and host policy.
+
+Admission writes the new Run, Goal episode, immutable link, and the invocation's
+Start admission receipt in the same transaction. The Goal retains its existing
+account across episodes. The original callback permission remains attached to
+the admitted Run for fresh work; closing startup preparation does not prematurely
+retire it. Source replacement, original revocation, Stop, and terminal completion
+retain their existing authority and cleanup rules.
+
+An admitted receipt remains queryable after activation fails, while the session
+is busy, or after a later episode becomes current. An uncertain writer result
+must remain uncertain; it is not permission to repeat admission. Reopening a
+session restores those facts without reconstructing the callback's original
+permission. The explicitly selected `goal_start` tool stages this request through
+the actual Factory service. Checked ChatML convenience helpers and bundled
+orchestration instructions are a separate integration.
 
 ## Native creation and safe controls in the callback checkpoint
 
@@ -314,10 +364,10 @@ Ready. These are distinct actual lifecycle boundaries.
 
 Goal metadata requires an actually installed moderator source. A fresh legacy
 Pending session cannot attach its first Goal before its genuine callback has
-installed that source. The remaining fresh startup integration must join native
-Create inside that callback to native Start after its release. Source installation
-already belongs to the actual callback claim; a saved or published source
-description cannot replace it.
+installed that source. Fresh startup therefore stages native Create and Start
+inside that actual callback; the accepted Start is consumed only after callback
+and source release. Source installation already belongs to the actual callback
+claim; a saved or published source description cannot replace it.
 
 While durable desired state remains Stopped before initial input handoff, native
 Goal metadata is permitted only for the actual callback of the admitted initial
@@ -347,6 +397,8 @@ local execution owner without the generic no-handoff Run interruption.
 Ordinary delegated loading still consumes the same constructor. Its real Scoped
 Init or deferred Installed_resume route does not acquire a Goal lifecycle owner
 from stored source or Goal metadata. The existing source-stage cleanup and
-administration cancellation remain authoritative. The public checked-helper and
-Start/Resume packaging remain separate integration work; no new executor or
-metadata permission issuer is added.
+administration cancellation remain authoritative. The explicitly selected Start
+adapter uses the existing Factory staging port.
+Checked convenience helpers, bundled orchestration instructions and remaining
+Resume packaging are separate integration work; no new executor or metadata
+permission issuer is added.

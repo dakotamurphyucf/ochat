@@ -270,11 +270,17 @@ module Source_completion : sig
 end
 
 module Closed_attempt : sig
+  type preparation := t
+
   (** Factual closure by the actual Actor's existing private Owner. It retains
       exact request/principal/digest, source issuer identity and irreversible
       exclusion/write disposition. Logical closure alone proves no resource join
       or no-effects outcome. No constructor or decoder is exposed. *)
   type t
+
+  (** Exact preparation of this actual closed attempt. This factual projection
+      grants no eligibility, source join or no-effects permission. *)
+  val preparation : t -> preparation
 
   (** The actual Factory retains [source_owner] privately and invokes this only
       after its fixed outer source CPS has successfully joined every acquired

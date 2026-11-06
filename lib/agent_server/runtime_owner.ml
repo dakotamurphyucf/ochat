@@ -501,9 +501,23 @@ let install ?run_preparation ?original_actor t (runtime : Agent_session.Runtime_
         ~preparation
         (runtime.moderator_snapshot ())
   in
+  let%bind initial_startup =
+    match run_preparation, original_actor, runtime.moderator_activation with
+    | None, Some _, Some activation when activation.startup_pending () ->
+      let%bind state = Agent_session.Session_actor.state t.actor in
+      (match state.lifecycle.desired with
+       | Stopped -> Ok None
+       | Running ->
+         let%map startup = Agent_session.Runtime_builder.authored_start runtime in
+         Option.some_if
+           (Agent_session.Initial_lifecycle_startup.eligible startup ~state)
+           startup)
+    | (Some _ | None), (Some _ | None), (Some _ | None) -> Ok None
+  in
   let%map () =
     Agent_session.Session_actor.set_runtime_worker
       ?actor:original_actor
+      ?initial_startup
       ?moderator_manager:runtime.moderator_manager
       t.actor
       ~worker:(Some runtime.worker)
@@ -1358,7 +1372,7 @@ module Deferred_source = struct
   end
 end
 
-module Deferred_issuance = struct
+module Deferred_operator_request = struct
   type t =
     | Initial of Agent_session.Run_admission_request.Headless.t
     | Retry of
@@ -1368,6 +1382,17 @@ module Deferred_issuance = struct
         ; request : Agent_session.Run_admission_request.Headless.t
         }
     | Resume of Agent_session.Session_actor.Recurrence_retry.t
+end
+
+module Deferred_issuance = struct
+  type t =
+    | Operator of
+        { actor : Operator_authorization.t
+        ; authorize :
+            Agent_session.Session_state.t -> (unit, Agent_protocol.Error.t) result
+        ; request : Deferred_operator_request.t
+        }
+    | Native_start of Agent_session.Session_actor.Goal_native_start.Selection.t
 
   type decision =
     | Retained of Agent_protocol.Run_receipt.t
@@ -1376,9 +1401,9 @@ module Deferred_issuance = struct
         ; retry : Agent_session.Session_actor.Recurrence_retry.t option
         }
 
-  let issue t target ~actor ~authorize =
+  let issue_operator (request : Deferred_operator_request.t) target ~actor ~authorize =
     let module Actor = Agent_session.Session_actor in
-    match t with
+    match request with
     | Initial request ->
       Actor.begin_effect_deferred_headless_preparation target ~actor ~authorize ~request
       |> Result.map ~f:(function
@@ -1399,9 +1424,21 @@ module Deferred_issuance = struct
       Actor.resume_recurrence_retry_preparation target ~retry ~actor ~authorize
       |> Result.map ~f:(fun (retry, deferred) -> Issued { deferred; retry = Some retry })
   ;;
+
+  let issue t target =
+    match t with
+    | Operator { actor; authorize; request } ->
+      issue_operator request target ~actor ~authorize
+    | Native_start selection ->
+      Agent_session.Session_actor.begin_native_goal_start_preparation target ~selection
+      |> Result.map ~f:(function
+        | Agent_session.Run_preparation.Deferred.Decision.Retained receipt ->
+          Retained receipt
+        | Prepare deferred -> Issued { deferred; retry = None })
+  ;;
 end
 
-let with_deferred_source_reported t ~source_owner ~actor ~authorize ~issuance f =
+let with_deferred_source_reported t ~source_owner ~issuance f =
   let deferred = ref None in
   let retry = ref None in
   let outcome =
@@ -1415,7 +1452,7 @@ let with_deferred_source_reported t ~source_owner ~actor ~authorize ~issuance f 
         let open Result.Let_syntax in
         let%bind decision =
           Eio.Cancel.protect (fun () ->
-            let result = Deferred_issuance.issue issuance t.actor ~actor ~authorize in
+            let result = Deferred_issuance.issue issuance t.actor in
             Result.iter result ~f:(function
               | Deferred_issuance.Issued issued ->
                 (* Capture the actual pair before pending cancellation can escape,
@@ -1446,9 +1483,7 @@ let with_effect_deferred_source_reported t ~source_owner ~actor ~authorize ~requ
   with_deferred_source_reported
     t
     ~source_owner
-    ~actor
-    ~authorize
-    ~issuance:(Deferred_issuance.Initial request)
+    ~issuance:(Deferred_issuance.Operator { actor; authorize; request = Initial request })
     f
 ;;
 
@@ -1466,9 +1501,9 @@ let with_recurrence_retry_source_reported
   with_deferred_source_reported
     t
     ~source_owner
-    ~actor
-    ~authorize
-    ~issuance:(Deferred_issuance.Retry { observation; intent; previous; request })
+    ~issuance:
+      (Deferred_issuance.Operator
+         { actor; authorize; request = Retry { observation; intent; previous; request } })
     f
 ;;
 
@@ -1476,9 +1511,15 @@ let resume_recurrence_retry_source_reported t ~source_owner ~retry ~actor ~autho
   with_deferred_source_reported
     t
     ~source_owner
-    ~actor
-    ~authorize
-    ~issuance:(Deferred_issuance.Resume retry)
+    ~issuance:(Deferred_issuance.Operator { actor; authorize; request = Resume retry })
+    f
+;;
+
+let with_native_goal_start_source_reported t ~source_owner ~selection f =
+  with_deferred_source_reported
+    t
+    ~source_owner
+    ~issuance:(Deferred_issuance.Native_start selection)
     f
 ;;
 

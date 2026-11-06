@@ -3716,14 +3716,14 @@ let runtime_foundation ~sources =
          ; surfaces = shared
          ; excerpts =
              [ { path = "guide/native-goal-metadata.md"
-               ; heading = "# Selected native Goal metadata and controls"
+               ; heading = "# Selected native Goal tools"
                ; include_children = true
                }
              ]
          ; review =
              Audited
                { excerpt_sha256 =
-                   [ "4a59eb6c75f06d02dbac8c55717167522d44a65d008fea7a38928ab84c257ebc" ]
+                   [ "ea471419986d37942aa5648389abaae75ff664bf750debdb307e46b0d0c7c40d" ]
                ; evidence =
                    [ "test/factory_catalog_publication/goal_native_metadata_tests.ml" ]
                }

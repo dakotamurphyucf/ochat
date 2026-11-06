@@ -24,6 +24,7 @@ let shared_features =
     , "ACK-owned lifecycle and completion handoffs, explicit compactor guidance \
        reservation and actual writer-profile Clear admission"
     , [ "lib/agent_session/session_actor.ml"
+      ; "lib/agent_session/initial_lifecycle_startup.ml"
       ; "lib/agent_session/execution_custody.ml"
       ; "lib/agent_server/session_factory.ml"
       ; "lib/context_compaction/compactor.ml"
@@ -33,6 +34,7 @@ let shared_features =
       ]
     , "instructions.sources"
     , [ "test/agent_session/agent_authority_tests.ml"
+      ; "test/factory_catalog_publication/goal_native_start_tests.ml"
       ; "test/agent_session/instruction_selection_persistence_tests.ml"
       ; "test/agent_session/instruction_clear_capacity_tests.ml"
       ; "test/chatml_composition/instruction_runtime_tests.ml"
@@ -741,7 +743,7 @@ let implementation_sources =
   ; ( "bin/ochat_agent_stdio.ml"
     , "8d134cd11c7df2a60e6b4b77a5ff7f9ea0c28a8a2674a3dd9f573adaa7623902" )
   ; ( "lib/agent_server/session_factory.ml"
-    , "b21d42100673d859c93baf69d9b4239bd9c0f5b521314377ffac2ac5cee8a472" )
+    , "9ee74ec05e8f4c257b1d8171e7c52700d16c5ffee7579e5d0f2e44a770acbe48" )
   ; ( "bin/inference_composition.ml"
     , "1f57451d5543a5fe8f2f23dc0e593374b64946d088cba164acd1c087a7cdce18" )
   ; ( "lib/agent_protocol/developer_command_id.ml"
@@ -869,7 +871,7 @@ let implementation_sources =
   ; ( "lib/agent_session/delegated_runtime_load.ml"
     , "c202fb7653c63d810965bf80d65b60bc91067f544ffb886a4539fc67e0d0e859" )
   ; ( "lib/agent_server/runtime_owner.ml"
-    , "48c90286128cafa4c4614e55a1faa3e4c5d777c3b2113c24873d5fd6572992aa" )
+    , "73c9a9e31ed42fc41043e9bf5d28977ec7cad007d87ad02db917325c87935963" )
   ; ( "lib/agent_session/managed_submission_tracking.ml"
     , "6c8804b2d0c2033631b965769af63c5240afeb6dabff72695c818dc1a68baed8" )
   ; ( "lib/agent_server/managed_output_cursor.ml"
@@ -994,8 +996,10 @@ let implementation_sources =
     , "54c775836b551733687e907ff46a2a7a0cc26bd46ff915cc6fd5f0cf5116f069" )
   ; ( "lib/agent_session/notification_wake_selection.ml"
     , "001872ff3729d6a4a7cd861cd6ec4ebbf75296637bd5c5cdaf3ede82c6f9b6ba" )
+  ; ( "lib/agent_session/initial_lifecycle_startup.ml"
+    , "34befd9d623fc41ffc0e0013960277ff03d4cde6d0f2febf6f0149dd91f074eb" )
   ; ( "lib/agent_session/session_actor.ml"
-    , "1f73ed7f3e000bf841c4997d8099f883f815520d4744dad7f077c547adef5c88" )
+    , "46bad560196b07c2dc78fcf25f59ccab68190bb2cca92f40526957fa8c072bf2" )
   ; ( "lib/agent_session/job_custody.ml"
     , "6a3b5951629d8440ebfcaf9f72aa625cf522087e8996bb73cec82ce16abfa120" )
   ; ( "lib/agent_session/staged_jobs.ml"

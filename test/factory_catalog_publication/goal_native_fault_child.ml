@@ -64,8 +64,9 @@ let () =
          |> Goal_admission_fault_tests.atoms
          |> List.filter_map ~f:(function
            | Invocation_changed invocation
-             when Option.is_some invocation.P.Invocation.native_goal_resume ->
-             Some invocation
+             when Option.exists invocation.P.Invocation.native_goal_action ~f:(function
+                    | P.Goal_native_action_intent.Resume _ -> true
+                    | Start _ -> false) -> Some invocation
            | _ -> None)
        in
        let invocation = List.hd_exn selected in

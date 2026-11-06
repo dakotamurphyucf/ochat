@@ -132,40 +132,42 @@ module Context = struct
   ;;
 end
 
-let activate context prepared activation =
+let activate
+      factory
+      (entry : Session_registry.entry)
+      ~(input : P.Run_start.Input.t)
+      prepared
+      activation
+  =
   let held = Actor.Goal_activation.held activation in
   let checked = Actor.Goal_activation.checked activation in
-  match (A.Goal_activation_request.request context.Context.request).input with
+  match input with
   | Authored_start ->
     Runtime_owner.start_held_authored_runtime_result
-      context.entry.runtime
+      entry.runtime
       ~prepared
       ~held
       ~checked
   | User_submission _ ->
     Runtime_owner.with_held_input_runtime_result
-      context.entry.runtime
+      entry.runtime
       ~prepared
       ~held
       ~checked
       (fun runtime ->
          Runtime_owner.Held_input_runtime.submit runtime ~prepare:(fun ~runtime ~scope ->
-           Factory.prepare_held_input
-             context.service.factory
-             ~entry:context.entry
-             ~runtime
-             ~scope))
+           Factory.prepare_held_input factory ~entry ~runtime ~scope))
 ;;
 
-let admit_selected context fact prepared =
+let admit_selected factory entry ~check_entry ~session ~intent ~input fact prepared =
   let open Result.Let_syntax in
-  let%bind () = Context.check_entry context in
+  let%bind () = check_entry () in
   let%bind decision =
     Actor.admit_held_goal_run
-      context.Context.entry.actor
+      entry.Session_registry.actor
       ~binding:(Runtime_owner.Prepared.binding prepared)
-      ~intent:(A.Goal_activation_request.intent context.request)
-      ~session:context.session
+      ~intent
+      ~session
   in
   match decision with
   | Rejected error -> Error error
@@ -183,7 +185,7 @@ let admit_selected context fact prepared =
     := Admission_fact.Known
          (Actor.Held_run.admission (Actor.Goal_activation.held activation));
     let admission = Actor.Held_run.admission (Actor.Goal_activation.held activation) in
-    let%map result = activate context prepared activation in
+    let%map result = activate factory entry ~input prepared activation in
     (match result with
      | Runtime_owner.Construction_result.Built admission ->
        Callback_success.Activated admission
@@ -208,7 +210,16 @@ let start_episode service ~entry ~actor ~session ~request =
         ~actor
         ~authorize:(Context.authorize context)
         ~request:(A.Goal_activation_request.request request)
-        (fun _deferred prepared -> admit_selected context fact prepared)
+        (fun _deferred prepared ->
+           admit_selected
+             service.factory
+             entry
+             ~check_entry:(fun () -> Context.check_entry context)
+             ~session
+             ~intent:(A.Goal_activation_request.intent request)
+             ~input:(A.Goal_activation_request.request request).input
+             fact
+             prepared)
     in
     (match outcome with
      | Retained admission ->
@@ -315,4 +326,56 @@ let resume_native_episode factory ~entry ~selection =
       ~check_entry
       ~with_source:
         (Factory.with_native_goal_resume_source_reported factory entry ~selection)
+;;
+
+let start_native_episode factory ~entry ~selection =
+  let module Selection = Actor.Goal_native_start.Selection in
+  let module Request = P.Goal_native_start_request in
+  let open Result.Let_syntax in
+  let session = Selection.session selection in
+  let request = Selection.request selection in
+  let check_entry () = Factory.check_registered_entry factory entry ~session in
+  let receipt () =
+    let%bind () = check_entry () in
+    Actor.native_goal_start_receipt entry.Session_registry.actor ~selection
+  in
+  let validate_retained admission =
+    let%bind actual = receipt () in
+    if Option.exists actual ~f:(P.Run_receipt.equal admission)
+    then Ok admission
+    else
+      Error
+        (P.Error.create
+           Conflict
+           ~message:"retained Run does not match the selected native Goal admission"
+           ~retryable:false
+           ())
+  in
+  let%bind retained = receipt () in
+  match retained with
+  | Some admission -> Ok (Outcome.Retained admission)
+  | None ->
+    let%bind intent = A.Goal_native_start_association.intent request in
+    let fact = ref Admission_fact.Before_admission in
+    let%bind outcome =
+      Factory.with_native_goal_start_source
+        factory
+        ~entry
+        ~selection
+        (fun _deferred prepared ->
+           admit_selected
+             factory
+             entry
+             ~check_entry
+             ~session
+             ~intent
+             ~input:(Request.input request)
+             fact
+             prepared)
+    in
+    (match outcome with
+     | Retained admission ->
+       let%map admission = validate_retained admission in
+       Outcome.Retained admission
+     | Attempted actual -> Ok (Outcome.Attempted { Attempt.actual; fact = !fact }))
 ;;

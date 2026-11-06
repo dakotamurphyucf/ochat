@@ -368,6 +368,8 @@ end
 module Closed_attempt = struct
   type t = closed_attempt
 
+  let preparation t = t.deferred.preparation
+
   let complete t ~source_owner =
     let open Result.Let_syntax in
     let%bind () =

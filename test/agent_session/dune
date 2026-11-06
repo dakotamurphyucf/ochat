@@ -3,6 +3,8 @@
  (modules
   delegated_usage_persistence_tests
   fixtures
+  native_goal_action_conversion_tests
+  native_goal_action_physical_recovery_tests
   inference_ports
   document_adoption_tests
   decode_evidence_tests
