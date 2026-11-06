@@ -208,7 +208,7 @@ let%expect_test
                (A.Session_state_document.value restored).conversation.canonical_history)
               .content_revision))
       (String.is_substring json ~substring:"\"evidence\":\"keep\"");
-    [%expect {| version=11 revision=0 unknown=true |}])
+    [%expect {| version=12 revision=0 unknown=true |}])
 ;;
 
 let%expect_test
@@ -757,6 +757,7 @@ let%expect_test
                         ; schedule_limits = A.Staged_schedules.default_limits
                         ; notification_limits = A.Staged_notifications.default_limits
                         ; ingress_limits = A.Staged_ingress.default_limits
+                        ; goal_descendant_profile
                         ; subscription_limits = A.Staged_subscriptions.default_limits
                         ; state_committed =
                             (fun _ events ->

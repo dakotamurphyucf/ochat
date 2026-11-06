@@ -140,6 +140,7 @@ type 'spec fields =
   ; goal_accounts : (Goal_accounts.t option[@sexp.opaque])
   ; delegated_usage : (Delegated_usage.t option[@sexp.opaque])
   ; child_contributions : (Child_contributions.t option[@sexp.opaque])
+  ; goal_descendants : (Goal_descendants.t option[@sexp.opaque])
   ; instruction_selection : Instruction_selection.t option [@sexp.option]
   ; recurrence_catalog : Recurrence_catalog.t option [@sexp.option]
   ; subscriptions : Agent_protocol.Subscription.t list [@sexp.list]
@@ -173,13 +174,23 @@ let execution_migration_required (t : t) =
   | Stopping -> false
 ;;
 
-let current_schema_version = 26
+let current_schema_version = 27
 
 let upgrade_schema (t : t) =
   if t.schema_version = current_schema_version
   then Ok t
   else if
     t.schema_version < current_schema_version
+    && (Option.is_some t.goal_descendants
+        || Option.exists t.child_contributions ~f:Child_contributions.has_goal_origins)
+  then
+    Error
+      (Agent_protocol.Error.invalid_request
+         "descendant Goal evidence requires session schema 27")
+  else if t.schema_version = 26
+  then Ok { t with schema_version = current_schema_version }
+  else if
+    t.schema_version < 26
     && (Option.is_some t.delegated_usage || Option.is_some t.child_contributions)
   then
     Error
@@ -465,6 +476,7 @@ let create_fields ~(identity : Identity.t) ~spec ~desired ~initial_history =
   ; goal_accounts = None
   ; delegated_usage = None
   ; child_contributions = None
+  ; goal_descendants = None
   ; instruction_selection = None
   ; recurrence_catalog = None
   ; subscriptions = []
@@ -1150,6 +1162,25 @@ let validate (t : t) =
             Error
               (Agent_protocol.Error.invalid_request
                  "child contribution belongs to another parent"))
+  in
+  let%bind () =
+    match t.goal_descendants with
+    | None ->
+      if Option.exists t.child_contributions ~f:Child_contributions.has_goal_origins
+      then
+        Error
+          (Agent_protocol.Error.invalid_request
+             "scoped child contributions require their descendant accounting owner")
+      else Ok ()
+    | Some descendants ->
+      Goal_descendants.validate_context
+        descendants
+        ~session_id:t.identity.session_id
+        ~ledger:t.inference_ledger
+        ~children:t.child_contributions
+        ~catalog:t.goal_catalog
+        ~accounts:t.goal_accounts
+        ~delegation:t.spec.delegation
   in
   let%bind () =
     match t.instruction_selection with

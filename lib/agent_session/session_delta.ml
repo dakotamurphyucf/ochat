@@ -38,6 +38,7 @@ type t =
   | Delegated_inference_ledger_changed of
       (Inference_ledger.t[@sexp.opaque]) * (Delegated_usage.t[@sexp.opaque])
   | Child_contributions_changed of (Child_contributions.t[@sexp.opaque])
+  | Goal_descendants_changed of (Goal_descendants.Update.t[@sexp.opaque])
   | Job_changed of Agent_protocol.Job.t
   | Schedule_changed of Agent_protocol.Schedule.t
   | Invocation_changed of Agent_protocol.Invocation.t
@@ -788,6 +789,17 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
     in
     let%map delegated_usage = Delegated_usage.adopt previous ~incoming in
     { state with inference_ledger; delegated_usage = Some delegated_usage }
+  | Goal_descendants_changed update ->
+    let child_contributions =
+      match Goal_descendants.Update.children update with
+      | Preserve -> state.child_contributions
+      | Replace children -> Some children
+    in
+    Ok
+      { state with
+        goal_descendants = Some (Goal_descendants.Update.accounting update)
+      ; child_contributions
+      }
   | Child_contributions_changed incoming ->
     let open Result.Let_syntax in
     let%bind children =
@@ -1547,6 +1559,7 @@ let validate_goal_accounts delta ~(previous : Session_state.t) ~(next : Session_
     | Inference_ledger_changed _
     | Delegated_inference_ledger_changed _
     | Child_contributions_changed _
+    | Goal_descendants_changed _
     | Job_changed _
     | Schedule_changed _
     | Invocation_changed _
@@ -1591,4 +1604,220 @@ let validate_goal_accounts delta ~(previous : Session_state.t) ~(next : Session_
     ~incoming:next.goal_accounts
     ~after:next.inference_ledger
     ~catalog:next.goal_catalog
+;;
+
+let validate_goal_descendants
+      delta
+      ~(previous : Session_state.t)
+      ~(next : Session_state.t)
+  =
+  let module B = Goal_accounts.Ordered_bootstrap in
+  let module O = Goal_descendants_ordered in
+  let open Result.Let_syntax in
+  let rec observe (accounts, cursor) = function
+    | Batch deltas -> List.fold_result deltas ~init:(accounts, cursor) ~f:observe
+    | Goal_catalog_changed catalog ->
+      let%bind accounts = B.advance accounts (Catalog catalog) in
+      let%map cursor = O.advance cursor (Catalog catalog) in
+      accounts, cursor
+    | Goal_accounts_changed incoming ->
+      let%bind accounts = B.advance accounts (Accounts incoming) in
+      let%map cursor = O.advance cursor (Accounts incoming) in
+      accounts, cursor
+    | Created state ->
+      let%bind accounts =
+        B.advance
+          accounts
+          (Replacement { catalog = state.goal_catalog; accounts = state.goal_accounts })
+      in
+      let%map cursor =
+        O.advance cursor (Replacement (Session_descendant_projection.of_state state))
+      in
+      accounts, cursor
+    | Goal_descendants_changed update ->
+      let creation =
+        match Goal_descendants.Update.reason update with
+        | Register_new_root { goal_id; _ } -> B.creation accounts ~goal_id
+        | Register_child _
+        | Register_branch _
+        | Reserve _
+        | Record_included _
+        | Import _
+        | Close_before_writer _ -> None
+      in
+      let%map cursor = O.advance cursor (Update { update; creation }) in
+      accounts, cursor
+    | Inference_ledger_changed ledger | Delegated_inference_ledger_changed (ledger, _) ->
+      let%map cursor = O.advance cursor (Canonical ledger) in
+      accounts, cursor
+    | Reset_generation generation ->
+      let%map cursor = O.advance cursor (Reset_generation generation) in
+      accounts, cursor
+    | Child_contributions_changed children ->
+      let%map cursor = O.advance cursor (Ordinary_children children) in
+      accounts, cursor
+    | Active_operation_changed operation ->
+      let%map cursor = O.advance cursor (Active_operation operation) in
+      accounts, cursor
+    | Invocation_changed invocation | Invocation_reconciled invocation ->
+      let%map cursor = O.advance cursor (Invocation invocation) in
+      accounts, cursor
+    | Moderator_execution_changed execution | Moderator_execution_reconciled execution ->
+      let%map cursor = O.advance cursor (Moderator_execution execution) in
+      accounts, cursor
+    | Lifecycle_changed _
+    | Metadata_changed _
+    | Organization_changed _
+    | Initial_start_consumed
+    | Stop_epoch_changed _
+    | Parent_stop_epoch_changed _
+    | Workspace_changed _
+    | Canonical_entries_appended _
+    | Canonical_history_replaced _
+    | Authoring_references_forgotten _
+    | Authoring_publication_changed _
+    | Initial_prompt_count_changed _
+    | Deferred_entries_enqueued _
+    | Deferred_entries_adopted
+    | Pending_inputs_changed _
+    | Automatic_turn_budget_enabled _
+    | Automatic_turn_pauses_changed _
+    | Attachment_added _
+    | Attachment_removed _
+    | Permission_changed _
+    | Grant_changed _
+    | Inference_target_captured _
+    | Configuration_revision_changed _
+    | Inference_target_changed _
+    | Model_job_target_captured _
+    | Model_job_recipe_target_captured _
+    | Model_job_target_restored _
+    | Job_changed _
+    | Schedule_changed _
+    | Managed_submission_admitted _
+    | Managed_submission_changed _
+    | Managed_stop_admitted _
+    | Subscription_changed _
+    | Subscription_expired _
+    | Subscription_cancelled _
+    | Delivery_changed _
+    | Ingress_changed _
+    | Delivery_committed _
+    | Delivery_wake_changed _
+    | Instruction_selection_changed _
+    | Recurrence_catalog_changed _
+    | Run_state_changed _
+    | Moderator_changed _
+    | Shell_changed _
+    | History_block_reserved _
+    | Compaction_generation_changed _
+    | Compaction_archived _
+    | History_deleted _
+    | History_edited _
+    | Owner_lease_generation_changed _
+    | Failure_changed _
+    | Halt_changed _ -> Ok (accounts, cursor)
+  in
+  let accounts =
+    B.begin_
+      ~previous:previous.goal_accounts
+      ~before:previous.inference_ledger
+      ~catalog:previous.goal_catalog
+  in
+  let%bind cursor = Session_descendant_projection.begin_ previous in
+  let%bind _, cursor = observe (accounts, cursor) delta in
+  O.check cursor ~incoming:(Session_descendant_projection.of_state next)
+;;
+
+let rec validate_descendant_publication delta ~revision =
+  match delta with
+  | Batch deltas ->
+    List.fold_result deltas ~init:() ~f:(fun () delta ->
+      validate_descendant_publication delta ~revision)
+  | Goal_descendants_changed update ->
+    (match Goal_descendants.Update.reason update with
+     | Record_included { fact; _ } ->
+       let frame =
+         Goal_descendant_occurrence.frame
+           (Goal_descendants.Canonical.Fact.occurrence fact)
+       in
+       if
+         Int64.equal
+           revision
+           (Goal_descendant_occurrence.Frame.candidate_session_revision frame)
+       then Ok ()
+       else
+         Error
+           (Agent_protocol.Error.invalid_request
+              "local Included receipt differs from published session revision")
+     | Register_new_root _
+     | Register_child _
+     | Register_branch _
+     | Reserve _
+     | Import _
+     | Close_before_writer _ -> Ok ())
+  | Created _
+  | Goal_catalog_changed _
+  | Goal_accounts_changed _
+  | Lifecycle_changed _
+  | Metadata_changed _
+  | Organization_changed _
+  | Initial_start_consumed
+  | Stop_epoch_changed _
+  | Parent_stop_epoch_changed _
+  | Workspace_changed _
+  | Canonical_entries_appended _
+  | Canonical_history_replaced _
+  | Authoring_references_forgotten _
+  | Authoring_publication_changed _
+  | Initial_prompt_count_changed _
+  | Deferred_entries_enqueued _
+  | Deferred_entries_adopted
+  | Pending_inputs_changed _
+  | Active_operation_changed _
+  | Automatic_turn_budget_enabled _
+  | Automatic_turn_pauses_changed _
+  | Attachment_added _
+  | Attachment_removed _
+  | Permission_changed _
+  | Grant_changed _
+  | Inference_target_captured _
+  | Configuration_revision_changed _
+  | Inference_target_changed _
+  | Model_job_target_captured _
+  | Model_job_recipe_target_captured _
+  | Model_job_target_restored _
+  | Inference_ledger_changed _
+  | Delegated_inference_ledger_changed _
+  | Child_contributions_changed _
+  | Job_changed _
+  | Schedule_changed _
+  | Invocation_changed _
+  | Managed_submission_admitted _
+  | Managed_submission_changed _
+  | Managed_stop_admitted _
+  | Invocation_reconciled _
+  | Moderator_execution_changed _
+  | Moderator_execution_reconciled _
+  | Subscription_changed _
+  | Subscription_expired _
+  | Subscription_cancelled _
+  | Delivery_changed _
+  | Ingress_changed _
+  | Delivery_committed _
+  | Delivery_wake_changed _
+  | Instruction_selection_changed _
+  | Recurrence_catalog_changed _
+  | Run_state_changed _
+  | Moderator_changed _
+  | Shell_changed _
+  | History_block_reserved _
+  | Compaction_generation_changed _
+  | Compaction_archived _
+  | History_deleted _
+  | History_edited _
+  | Owner_lease_generation_changed _
+  | Failure_changed _
+  | Halt_changed _
+  | Reset_generation _ -> Ok ()
 ;;

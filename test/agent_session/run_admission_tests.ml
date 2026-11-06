@@ -81,6 +81,7 @@ let with_startup_actor
               ; create_reclaim_token = (fun () -> "run-start-reclaim")
               ; state_committed = (fun _ _ -> ())
               ; job_results
+              ; goal_descendant_profile
               ; subscription_limits = A.Staged_subscriptions.default_limits
               ; schedule_limits = A.Staged_schedules.default_limits
               ; notification_limits = A.Staged_notifications.default_limits

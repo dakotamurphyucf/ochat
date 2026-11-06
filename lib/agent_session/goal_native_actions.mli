@@ -80,6 +80,7 @@ module Plan : sig
     :  Entry.t list
     -> state:Session_state.t
     -> session:Agent_protocol.Session_ref.t
+    -> descendant_profile:Goal_descendants.Profile.t
     -> now:Agent_protocol.Timestamp.t
     -> (t, Agent_protocol.Error.t) result
 

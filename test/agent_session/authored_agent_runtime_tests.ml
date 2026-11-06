@@ -210,6 +210,7 @@ let on_event ctx state event = match event with
                   { name = "researcher"
                   ; source_sha256 = Source.fingerprint prepared.source
                   }
+            ; goal_origin = None
             ; captured_recurrence = None
             ; authority_sha256 = Authority.fingerprint parent |> protocol_ok
             ; capability_pins =
@@ -522,6 +523,7 @@ let on_event ctx state event = match event with
                 ; schedule_limits = Agent_session.Staged_schedules.default_limits
                 ; notification_limits = Agent_session.Staged_notifications.default_limits
                 ; ingress_limits = Agent_session.Staged_ingress.default_limits
+                ; goal_descendant_profile
                 ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
                 ; state_committed = (fun _ _ -> ())
                 }

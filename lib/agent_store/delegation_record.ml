@@ -35,6 +35,7 @@ module Admission = struct
     ; parent_stop_epoch : int64 option [@sexp.option]
     ; authority_sha256 : string
     ; authored_tool : authored_tool option [@sexp.option]
+    ; goal_origin : Delegation_goal_origin.t option [@sexp.option]
     ; captured_recurrence : Delegation_captured_origin.t option [@sexp.option]
     ; capability_pins : (string * string) list
     ; lifetime : lifetime

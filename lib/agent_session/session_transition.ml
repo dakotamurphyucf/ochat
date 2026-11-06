@@ -127,6 +127,7 @@ let apply ~now state ~delta ~payloads =
      host-turn edges. Their actual order must survive the document writer. *)
   let%bind state, delta = Host_turn_tracking.apply ~previous state delta payloads in
   let%bind () = Session_delta.validate_goal_accounts delta ~previous ~next:state in
+  let%bind () = Session_delta.validate_goal_descendants delta ~previous ~next:state in
   let payloads = projected_payloads ~previous state payloads in
   let instruction_status state =
     Instruction_selection.summary
@@ -185,6 +186,7 @@ let apply ~now state ~delta ~payloads =
     else payloads
   in
   let%bind revision = increment "session revision" state.counters.revision in
+  let%bind () = Session_delta.validate_descendant_publication delta ~revision in
   let%bind transaction_sequence =
     increment "transaction sequence" state.counters.transaction_sequence
   in

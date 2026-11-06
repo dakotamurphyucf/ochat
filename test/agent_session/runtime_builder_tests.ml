@@ -299,6 +299,7 @@ let run ctx input = Task.bind(Tool.call("run_chatml", `Object([
                 ; schedule_limits = Agent_session.Staged_schedules.default_limits
                 ; notification_limits = Agent_session.Staged_notifications.default_limits
                 ; ingress_limits = Agent_session.Staged_ingress.default_limits
+                ; goal_descendant_profile
                 ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
                 ; state_committed = (fun _ _ -> ())
                 }

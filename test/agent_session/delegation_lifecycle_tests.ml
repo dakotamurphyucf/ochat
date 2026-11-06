@@ -39,6 +39,7 @@ let actor ~env ~sw ~state ~reject_save =
         ; schedule_limits = Agent_session.Staged_schedules.default_limits
         ; notification_limits = Agent_session.Staged_notifications.default_limits
         ; ingress_limits = Agent_session.Staged_ingress.default_limits
+        ; goal_descendant_profile
         ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
         ; state_committed = (fun _ _ -> ())
         }
@@ -83,6 +84,7 @@ let with_fixture ?(lifetime = D.Admission.Owned) ?(reject_transition = fun _ -> 
                 ; parent_revision_id = prompt_revision_id
                 ; parent_stop_epoch = None
                 ; authored_tool = None
+                ; goal_origin = None
                 ; captured_recurrence = None
                 ; authority_sha256 = digest "parent authority"
                 ; capability_pins = []

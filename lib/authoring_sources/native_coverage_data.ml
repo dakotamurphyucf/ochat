@@ -316,7 +316,7 @@ let implementation_sources =
   ; ( "lib/agent_server/recurrence_authored_source.ml"
     , "e8f4b287579ae891c1d8197671c335e4e07afb02105ac206a44025701111bf3b" )
   ; ( "lib/agent_server/session_factory.ml"
-    , "9ee74ec05e8f4c257b1d8171e7c52700d16c5ffee7579e5d0f2e44a770acbe48" )
+    , "397a8007481c92eddd65fff4347a30e1830596d4fb75fc3a4d224f5f6d306209" )
   ; ( "lib/agent_session/authoring_context_tool.ml"
     , "6e318b45f799b485f802dc6d5e4d8bc031721e379cc8800f6ed484d59694840d" )
   ; ( "lib/agent_session/authoring_reference_scope.ml"
@@ -366,7 +366,7 @@ let implementation_sources =
   ; ( "lib/agent_session/session_management_native.ml"
     , "8ccb5239373707dacbceec1ce9a0c5146eea5360921ad0a5209bcc2928bce806" )
   ; ( "lib/agent_store/delegation_store.ml"
-    , "995e942b820e7812192f247ec6d7cea6b69f9137c8fb1b93dbca0db7ab19da88" )
+    , "e674a3f3e1b0e2afaadfe9dca885056a02225ee2bbc42efcbdfe4ddf36487b36" )
   ; ( "lib/chat_response/authoring_context.ml"
     , "b12dd8cc2405019d95b7713039fc6737397df2619da736f6478a5143cb1b358b" )
   ; ( "lib/chat_response/authoring_validation.ml"

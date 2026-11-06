@@ -2243,6 +2243,7 @@ type services =
   ; schedule_limits : Staged_schedules.limits
   ; notification_limits : Staged_notifications.limits
   ; ingress_limits : Staged_ingress.limits
+  ; goal_descendant_profile : Goal_descendants.Profile.t
   }
 
 module Compaction_inference = struct
@@ -6228,6 +6229,7 @@ let rec deferred_execution_delta (previous : Session_state.t) (delta : Session_d
   | Inference_ledger_changed _
   | Delegated_inference_ledger_changed _
   | Child_contributions_changed _
+  | Goal_descendants_changed _
   | Managed_submission_admitted _
   | Managed_submission_changed _
   | Managed_stop_admitted _
@@ -13023,6 +13025,7 @@ let prepare_native_goal_plan t ?actions ?completed entries =
         entries
         ~state:t.state
         ~session:(Recurrence_controller.session controller)
+        ~descendant_profile:t.services.goal_descendant_profile
         ~now:(t.services.now ())
     in
     let%map accepted =
@@ -22912,6 +22915,7 @@ let native_goal_projection t actions =
         entries
         ~state:t.state
         ~session:(Recurrence_controller.session controller)
+        ~descendant_profile:t.services.goal_descendant_profile
         ~now:(t.services.now ())
     in
     Goal_native_actions.Plan.state plan
@@ -22984,6 +22988,7 @@ let stage_native_goal_command t admission authorize ~effect_kind make_request =
         ~actor
         ~authorize:(authorize actor)
         ~session
+        ~descendant_profile:t.services.goal_descendant_profile
         ~request
         ~now:(t.services.now ())
     in
@@ -36372,6 +36377,7 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
           ~actor
           ~authorize
           ~session
+          ~descendant_profile:t.services.goal_descendant_profile
           ~request
           ~now:(t.services.now ())
       in

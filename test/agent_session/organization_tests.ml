@@ -216,6 +216,7 @@ let%expect_test
               ; schedule_limits = S.Staged_schedules.default_limits
               ; notification_limits = S.Staged_notifications.default_limits
               ; ingress_limits = S.Staged_ingress.default_limits
+              ; goal_descendant_profile
               ; subscription_limits = S.Staged_subscriptions.default_limits
               ; state_committed =
                   (fun _ _ -> publication_outside_admission := not !inside_admission)
@@ -422,6 +423,7 @@ let%expect_test
                           ; schedule_limits = S.Staged_schedules.default_limits
                           ; notification_limits = S.Staged_notifications.default_limits
                           ; ingress_limits = S.Staged_ingress.default_limits
+                          ; goal_descendant_profile
                           ; subscription_limits = S.Staged_subscriptions.default_limits
                           ; state_committed =
                               (fun state events ->

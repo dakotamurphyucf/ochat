@@ -63,7 +63,10 @@ let admission_to_json (a : Admission.t) =
      ]
      @ Option.to_list
          (Option.map a.captured_recurrence ~f:(fun origin ->
-            "captured_recurrence", Delegation_captured_origin.to_json origin)))
+            "captured_recurrence", Delegation_captured_origin.to_json origin))
+     @ Option.to_list
+         (Option.map a.goal_origin ~f:(fun origin ->
+            "goal_origin", Delegation_goal_origin.to_json origin)))
 ;;
 
 let stage_to_string = function
@@ -162,6 +165,15 @@ let admission_of_json ~limits json =
       let%bind document = F.document ~limits:Delegation_captured_origin.limits json in
       Delegation_captured_origin.of_document document)
   in
+  let%bind goal_origin =
+    match D.Json.field json ~name:"goal_origin" with
+    | Absent -> Ok None
+    | Null -> F.invalid "goal_origin" "historical Goal origin must be omitted"
+    | Value json ->
+      Delegation_goal_origin.of_json ~max_scopes:Int.max_value ~limits json
+      |> F.protocol
+      |> Result.map ~f:Option.some
+  in
   let%bind pins = F.required json "capability_pins" F.array in
   let%bind capability_pins =
     List.map pins ~f:(fun json ->
@@ -192,6 +204,7 @@ let admission_of_json ~limits json =
     ; authority_sha256
     ; authored_tool
     ; captured_recurrence
+    ; goal_origin
     ; capability_pins
     ; lifetime
     ; created_at
@@ -286,6 +299,7 @@ let record_shape =
       ; "authority_sha256", scalar
       ; "authored_tool", D.Shape.nullable authored
       ; "captured_recurrence", scalar
+      ; "goal_origin", Delegation_goal_origin.shape
       ; "capability_pins", pins
       ; "lifetime", lifetime
       ; "created_at", scalar
@@ -303,14 +317,44 @@ let record_shape =
 ;;
 
 let captured_semantics = "delegation.captured-recurrence.v1"
+let goal_semantics = "delegation.goal-origin.v1"
+let supported_semantics = [ captured_semantics; goal_semantics ]
+
+let upgrade document =
+  let open Result.Let_syntax in
+  let%bind () =
+    F.expect_versions
+      document
+      ~kind:"delegation.intent"
+      ~versions:[ 6; 7 ]
+      ~supported_semantics
+  in
+  (* This is a wire-only conversion. In particular the admission subtree is
+     neither decoded nor reserialized, and absent origin stays absent. *)
+  let%bind step =
+    D.Conversion.Step.of_function
+      ~kind:"delegation.intent"
+      ~from_version:6
+      ~f:Result.return
+  in
+  let%bind conversion =
+    D.Conversion.create
+      ~limits
+      ~targets:[ "delegation.intent", 7 ]
+      ~max_steps:1
+      ~max_operations:1
+      ~steps:[ step ]
+  in
+  D.Conversion.upgrade conversion document
+;;
 
 let codec () =
   D.Domain_codec.create
     ~limits
     ~kind:"delegation.intent"
-    ~version:6
+    ~version:7
     ~shape:record_shape
-    ~supported_semantics:[ captured_semantics ]
+    ~supported_semantics
     ~decode:(record_of_json ~limits)
     ~encode:(fun record -> Ok (record_to_json record))
 ;;
@@ -319,36 +363,44 @@ let value = D.Extension_carrier.value
 
 let of_document document =
   let open Result.Let_syntax in
+  let%bind document = upgrade document in
   let%bind codec = codec () in
   let%bind carrier = D.Domain_codec.decode codec document in
+  let required =
+    [ captured_semantics, Option.is_some (value carrier).admission.captured_recurrence
+    ; goal_semantics, Option.is_some (value carrier).admission.goal_origin
+    ]
+  in
   if
-    Option.is_some (value carrier).admission.captured_recurrence
-    && not
-         (List.mem
-            (D.Document.required_semantics document)
-            captured_semantics
-            ~equal:String.equal)
-  then
-    F.invalid "required_semantics" "captured recurrence origin requires source semantics"
+    List.exists required ~f:(fun (semantic, populated) ->
+      populated
+      && not
+           (List.mem
+              (D.Document.required_semantics document)
+              semantic
+              ~equal:String.equal))
+  then F.invalid "required_semantics" "populated delegation origin requires its semantics"
   else Ok carrier
 ;;
 
-let require_captured_semantics t document =
-  if
-    Option.is_none (value t).admission.captured_recurrence
-    || List.mem
-         (D.Document.required_semantics document)
-         captured_semantics
-         ~equal:String.equal
+let require_origin_semantics t document =
+  let required =
+    [ captured_semantics, Option.is_some (value t).admission.captured_recurrence
+    ; goal_semantics, Option.is_some (value t).admission.goal_origin
+    ]
+    |> List.filter_map ~f:(fun (semantic, populated) ->
+      if populated then Some semantic else None)
+  in
+  let semantics =
+    D.Document.required_semantics document
+    @ List.filter required ~f:(fun semantic ->
+      not (List.mem (D.Document.required_semantics document) semantic ~equal:String.equal))
+  in
+  if List.equal String.equal semantics (D.Document.required_semantics document)
   then Ok document
   else (
     match D.Document.json document with
     | `Object fields ->
-      let semantics =
-        captured_semantics
-        :: List.filter (D.Document.required_semantics document) ~f:(fun name ->
-          not (String.equal name captured_semantics))
-      in
       D.Document.inspect
         ~limits
         (`Object
@@ -362,7 +414,7 @@ let to_document t =
   let open Result.Let_syntax in
   let%bind codec = codec () in
   let%bind encoded = D.Domain_codec.encode codec t in
-  let%bind encoded = require_captured_semantics t encoded in
+  let%bind encoded = require_origin_semantics t encoded in
   match D.Extension_carrier.template t with
   | None -> Ok encoded
   | Some original ->

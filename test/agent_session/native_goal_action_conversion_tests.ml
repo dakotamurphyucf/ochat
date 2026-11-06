@@ -160,7 +160,7 @@ let%expect_test "old raw State becomes one canonical preservation basis" =
       [%sexp
         (D.Document.version encoded : int)
       , (D.Document.required_semantics encoded : string list)]);
-  [%expect {| (11 (goal.native-resume.v1)) |}]
+  [%expect {| (12 (goal.native-resume.v1)) |}]
 ;;
 
 let%expect_test "old raw delta changed/reconciled/Created keeps original physical digest" =
@@ -240,9 +240,9 @@ let%expect_test "old raw delta changed/reconciled/Created keeps original physica
       print_s [%sexp (kind : string), (D.Document.version converted : int)]));
   [%expect
     {|
-    (invocation_changed 7)
-    (invocation_reconciled 7)
-    (created 7)
+    (invocation_changed 8)
+    (invocation_reconciled 8)
+    (created 8)
     |}]
 ;;
 

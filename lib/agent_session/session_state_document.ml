@@ -1,6 +1,6 @@
 open! Core
 
-let current_version = 11
+let current_version = 12
 
 module P = Agent_protocol
 module X = Persistence_codec
@@ -689,6 +689,17 @@ let project_fields_with_presence
       let%map json = Child_contributions.to_jsonaf children in
       [ "child_contributions", json ]
   in
+  let%bind goal_descendants_fields =
+    match t.goal_descendants with
+    | None ->
+      Ok
+        (if Session_state_presence.goal_descendants_is_absent presence
+         then []
+         else [ "goal_descendants", `Null ])
+    | Some descendants ->
+      let%map document = Goal_descendants.to_document descendants in
+      [ "goal_descendants", D.Document.json document ]
+  in
   let%bind instruction_selection_fields =
     match t.instruction_selection with
     | None ->
@@ -739,6 +750,7 @@ let project_fields_with_presence
      @ goal_accounts_fields
      @ delegated_usage_fields
      @ child_contributions_fields
+     @ goal_descendants_fields
      @ instruction_selection_fields
      @ recurrence_catalog_fields
      @ [ ( "moderator_executions"
@@ -883,6 +895,19 @@ let state_fields_of_jsonaf ?capture ~limits json =
     J.optional_as fields "child_contributions" (X.nullable Child_contributions.of_jsonaf)
     |> Result.map ~f:Option.join
   in
+  let%bind goal_descendants =
+    J.optional_as
+      fields
+      "goal_descendants"
+      (X.nullable (fun raw ->
+         let%bind document =
+           D.Document.inspect raw ~limits:Goal_descendants.limits
+           |> Result.map_error ~f:(fun error ->
+             P.Error.invalid_request (Sexp.to_string_hum (D.Error.sexp_of_t error)))
+         in
+         Goal_descendants.of_document document))
+    |> Result.map ~f:Option.join
+  in
   let%bind instruction_selection =
     J.optional_as
       fields
@@ -948,6 +973,7 @@ let state_fields_of_jsonaf ?capture ~limits json =
     ; goal_accounts
     ; delegated_usage
     ; child_contributions
+    ; goal_descendants
     ; instruction_selection
     ; recurrence_catalog
     ; subscriptions
@@ -999,6 +1025,7 @@ let state_shape =
     ; "goal_accounts", D.Shape.value
     ; "delegated_usage", D.Shape.value
     ; "child_contributions", D.Shape.value
+    ; "goal_descendants", D.Shape.value
     ; "instruction_selection", X.nullable_shape Instruction_selection.shape
     ; "recurrence_catalog", X.nullable_shape Recurrence_catalog.shape
     ; "managed_stops", X.array_shape_exn ~identity_field:"id" Managed_stop.shape
@@ -1026,6 +1053,7 @@ module Original = struct
     ; limits : D.Limits.t
     ; inference_ledger : Inference_ledger.t
     ; delegated_basis : Inference_ledger.t * Delegated_usage.t option
+    ; descendants : Goal_descendants_ordered.Projection.t
     ; jobs : P.Job.t list
     ; invocations : P.Invocation.t list
     ; queue_provenance : Queue_provenance_validation.t
@@ -1041,6 +1069,7 @@ type t =
   { carrier : S.t D.Extension_carrier.t
   ; original : Original.t option
   ; ordered_goal_accounts : Goal_accounts.Ordered_bootstrap.t option
+  ; ordered_goal_descendants : Goal_descendants_ordered.t option
   }
 
 let value t = D.Extension_carrier.value t.carrier
@@ -1053,6 +1082,7 @@ let authored value =
   { carrier = D.Extension_carrier.of_authored_value value
   ; original = None
   ; ordered_goal_accounts = None
+  ; ordered_goal_descendants = None
   }
 ;;
 
@@ -1133,7 +1163,31 @@ let validate_run_capacity (state : S.t) document ~limits =
     let%bind growth =
       match state.child_contributions with
       | None -> Ok Capacity_growth.zero
-      | Some children -> Child_contributions.reserved_growth children |> X.document_result
+      | Some children ->
+        let%bind depth =
+          Child_contributions.required_depth children |> X.document_result
+        in
+        (* The component document is nested at payload/child_contributions. *)
+        let%bind () =
+          Capacity_depth.validate depth ~ancestors:2 ~limits |> X.document_result
+        in
+        Child_contributions.reserved_growth children |> X.document_result
+    in
+    Capacity_growth.remaining_limits growth limits |> X.document_result
+  in
+  let%bind limits =
+    let%bind growth =
+      match state.goal_descendants with
+      | None -> Ok Capacity_growth.zero
+      | Some descendants ->
+        let%bind depth =
+          Goal_descendants.required_depth descendants |> X.document_result
+        in
+        (* The component document is nested at payload/goal_descendants. *)
+        let%bind () =
+          Capacity_depth.validate depth ~ancestors:2 ~limits |> X.document_result
+        in
+        Goal_descendants.reserved_growth descendants |> X.document_result
     in
     Capacity_growth.remaining_limits growth limits |> X.document_result
   in
@@ -1202,12 +1256,14 @@ let decoded ?evidence carrier ~limits =
   let%map presence = Session_state_presence.of_document template ~limits in
   { carrier
   ; ordered_goal_accounts = None
+  ; ordered_goal_descendants = None
   ; original =
       Some
         { template
         ; limits
         ; inference_ledger = (D.Extension_carrier.value carrier).S.inference_ledger
         ; delegated_basis = state.inference_ledger, state.delegated_usage
+        ; descendants = Session_descendant_projection.of_state state
         ; jobs = state.jobs
         ; invocations = state.invocations
         ; queue_provenance = S.queue_provenance state
@@ -1602,11 +1658,14 @@ let upgrade document ~limits =
                    ))))
         | _ -> F.invalid "payload" "must be an object")
   in
+  let%bind goal_descendants_step =
+    D.Conversion.Step.of_function ~kind:"session.state" ~from_version:11 ~f:Result.return
+  in
   let%bind conversion =
     D.Conversion.create
       ~limits
-      ~targets:[ "session.state", 11 ]
-      ~max_steps:10
+      ~targets:[ "session.state", 12 ]
+      ~max_steps:11
       ~max_operations:100_000
       ~steps:
         [ step
@@ -1619,6 +1678,7 @@ let upgrade document ~limits =
         ; pending_input_step
         ; root_invocation_step
         ; native_goal_action_step
+        ; goal_descendants_step
         ]
   in
   D.Conversion.upgrade conversion document
@@ -2037,6 +2097,17 @@ let validate_children_carrier t =
     validate_children_update previous (value t).child_contributions
 ;;
 
+let validate_descendants_carrier t =
+  let incoming = Session_descendant_projection.of_state (value t) in
+  match t.ordered_goal_descendants, t.original with
+  | Some ordered, _ ->
+    Goal_descendants_ordered.check ordered ~incoming |> X.document_result
+  | None, Some original ->
+    Goal_descendants_ordered.validate_checkpoint ~before:original.descendants ~incoming
+    |> X.document_result
+  | None, None -> Ok ()
+;;
+
 let encode t ~limits =
   let open Result.Let_syntax in
   let%bind () = validate_run_carrier t in
@@ -2048,6 +2119,7 @@ let encode t ~limits =
   let%bind () = validate_accounts_carrier t ~limits in
   let%bind () = validate_delegated_carrier t in
   let%bind () = validate_children_carrier t in
+  let%bind () = validate_descendants_carrier t in
   let%bind () = validate_ledger_carrier t ~limits in
   let%bind document =
     match t.original with
@@ -2108,6 +2180,14 @@ let adopt previous ~limits incoming =
     validate_children_update
       (value previous).child_contributions
       (value incoming).child_contributions
+  in
+  let%bind () = validate_descendants_carrier previous in
+  let%bind () = validate_descendants_carrier incoming in
+  let%bind () =
+    Goal_descendants_ordered.validate_checkpoint
+      ~before:(Session_descendant_projection.of_state (value previous))
+      ~incoming:(Session_descendant_projection.of_state (value incoming))
+    |> X.document_result
   in
   let%bind () = validate_goal_carrier previous in
   let%bind () = validate_goal_carrier incoming in
@@ -2210,6 +2290,7 @@ let retire_canonical_entries t ~retained_ids ~initial_count ~limits =
   { carrier = D.Extension_carrier.with_value carrier state
   ; original = t.original
   ; ordered_goal_accounts = t.ordered_goal_accounts
+  ; ordered_goal_descendants = t.ordered_goal_descendants
   }
 ;;
 
@@ -2406,7 +2487,11 @@ let transfer_pending_internal
     then Ok ()
     else Error (invalid "pending custody transfer differs from pure candidate")
   in
-  Ok { incoming with ordered_goal_accounts = t.ordered_goal_accounts }
+  Ok
+    { incoming with
+      ordered_goal_accounts = t.ordered_goal_accounts
+    ; ordered_goal_descendants = t.ordered_goal_descendants
+    }
 ;;
 
 let transfer_pending t ~plan ~archive ~expiry_archive ~limits =
@@ -2420,7 +2505,7 @@ let transfer_pending t ~plan ~archive ~expiry_archive ~limits =
     ~decode_incoming:decode
 ;;
 
-module Admitted = struct
+module Encoded = struct
   type nonrec state_document = t
 
   type t =
@@ -2430,6 +2515,13 @@ module Admitted = struct
 
   let state_document t = t.state_document
   let document t = t.document
+
+  let validate_publication t ~revision =
+    match t.state_document.ordered_goal_descendants with
+    | None -> Ok ()
+    | Some ordered ->
+      Goal_descendants_ordered.validate_publication ordered ~revision |> X.document_result
+  ;;
 
   let merge_created t ~captured ~limits =
     let open Result.Let_syntax in
@@ -2458,10 +2550,40 @@ module Admitted = struct
         let%map captured = decoded ~limits carrier in
         { (with_value captured (value previous)) with
           ordered_goal_accounts = previous.ordered_goal_accounts
+        ; ordered_goal_descendants = previous.ordered_goal_descendants
         }
     in
     let%map document = encode state_document ~limits in
     { state_document; document }
+  ;;
+end
+
+module Admitted = struct
+  type nonrec state_document = t
+  type t = Admitted of Encoded.t
+
+  let state_document (Admitted encoded) = Encoded.state_document encoded
+  let document (Admitted encoded) = Encoded.document encoded
+
+  let merge_created (Admitted encoded) ~captured ~limits =
+    let%map.Result encoded = Encoded.merge_created encoded ~captured ~limits in
+    Admitted encoded
+  ;;
+end
+
+module Prefix = struct
+  type nonrec state_document = t
+  type t = Prefix of Encoded.t
+
+  let document (Prefix encoded) = Encoded.document encoded
+
+  let merge_created (Prefix encoded) ~captured ~limits =
+    let%map.Result encoded = Encoded.merge_created encoded ~captured ~limits in
+    Prefix encoded
+  ;;
+
+  let validate_publication (Prefix encoded) ~revision =
+    Encoded.validate_publication encoded ~revision
   ;;
 end
 
@@ -2472,6 +2594,69 @@ module Transaction = struct
   let value t = value t.staged
   let with_value t state = { staged = with_value t.staged state }
 
+  let advance_descendants t step =
+    match t.staged.ordered_goal_descendants with
+    | None ->
+      Error
+        (D.Error.Invalid_field
+           { path = [ "goal_descendants" ]
+           ; reason = "ordered descendant basis is absent"
+           })
+    | Some ordered ->
+      let%map.Result ordered =
+        Goal_descendants_ordered.advance ordered step |> X.document_result
+      in
+      { staged = { t.staged with ordered_goal_descendants = Some ordered } }
+  ;;
+
+  module Descendant_observation = struct
+    type t =
+      | Ordinary_children of Child_contributions.t
+      | Active_operation of P.Operation.t option
+      | Invocation of P.Invocation.t
+      | Moderator_execution of P.Moderator_execution.t
+  end
+
+  let observe_descendants t (observation : Descendant_observation.t) =
+    let step : Goal_descendants_ordered.step =
+      match observation with
+      | Ordinary_children children -> Ordinary_children children
+      | Active_operation operation -> Active_operation operation
+      | Invocation invocation -> Invocation invocation
+      | Moderator_execution execution -> Moderator_execution execution
+    in
+    advance_descendants t step
+  ;;
+
+  let update_goal_descendants t update =
+    let open Result.Let_syntax in
+    let creation =
+      match Goal_descendants.Update.reason update with
+      | Register_new_root { goal_id; _ } ->
+        Option.bind t.staged.ordered_goal_accounts ~f:(fun cursor ->
+          Goal_accounts.Ordered_bootstrap.creation cursor ~goal_id)
+      | Register_child _
+      | Register_branch _
+      | Reserve _
+      | Record_included _
+      | Import _
+      | Close_before_writer _ -> None
+    in
+    let%map t = advance_descendants t (Update { update; creation }) in
+    let current = value t in
+    let child_contributions =
+      match Goal_descendants.Update.children update with
+      | Preserve -> current.child_contributions
+      | Replace children -> Some children
+    in
+    with_value
+      t
+      { current with
+        goal_descendants = Some (Goal_descendants.Update.accounting update)
+      ; child_contributions
+      }
+  ;;
+
   let continue_after_history t ~admitted ~(next : S.t) ~limits =
     let open Result.Let_syntax in
     let invalid reason = Error (D.Error.Invalid_field { path = []; reason }) in
@@ -2480,6 +2665,12 @@ module Transaction = struct
       | Some expected, Some actual when phys_equal expected actual -> Ok ()
       | Some _, Some _ | Some _, None | None, Some _ | None, None ->
         invalid "history continuation lost its actual transaction accounting custody"
+    in
+    let%bind () =
+      match t.staged.ordered_goal_descendants, admitted.ordered_goal_descendants with
+      | Some expected, Some actual when phys_equal expected actual -> Ok ()
+      | Some _, Some _ | Some _, None | None, Some _ | None, None ->
+        invalid "history continuation lost its actual descendant accounting custody"
     in
     (* Identity here is the SAME issued private validation cursor, not a
        substitute for semantic state comparison or an execution permission. *)
@@ -2494,6 +2685,8 @@ module Transaction = struct
           goal_catalog = incoming.goal_catalog
         ; goal_accounts = incoming.goal_accounts
         ; inference_ledger = incoming.inference_ledger
+        ; goal_descendants = incoming.goal_descendants
+        ; child_contributions = incoming.child_contributions
         }
     in
     let%bind () =
@@ -2522,6 +2715,7 @@ module Transaction = struct
         ~after:ledger
         ~incoming:delegated_usage
     in
+    let%bind t = advance_descendants t (Canonical ledger) in
     let staged =
       (with_value t { current with inference_ledger = ledger; delegated_usage }).staged
     in
@@ -2552,6 +2746,7 @@ module Transaction = struct
     let%bind () = validate_goal_carrier t.staged in
     let%bind () = validate_goal_update (value t).goal_catalog (Some incoming) in
     let%bind ordered_goal_accounts = advance_goal_accounting t (Catalog incoming) in
+    let%bind t = advance_descendants t (Catalog incoming) in
     let staged = with_value t { (value t) with goal_catalog = Some incoming } in
     let original =
       Option.map staged.staged.original ~f:(fun original ->
@@ -2570,6 +2765,7 @@ module Transaction = struct
       |> X.document_result
     in
     let%bind ordered_goal_accounts = advance_goal_accounting t (Accounts accounts) in
+    let%bind t = advance_descendants t (Accounts accounts) in
     let staged = with_value t { current with goal_accounts = Some accounts } in
     Ok { staged = { staged.staged with ordered_goal_accounts } }
   ;;
@@ -2581,6 +2777,11 @@ module Transaction = struct
         t
         (Replacement
            { catalog = incoming.goal_catalog; accounts = incoming.goal_accounts })
+    in
+    let%bind t =
+      advance_descendants
+        t
+        (Replacement (Session_descendant_projection.of_state incoming))
     in
     Ok { staged = { t.staged with ordered_goal_accounts } }
   ;;
@@ -2683,12 +2884,14 @@ module Transaction = struct
     let%map presence = Session_state_presence.of_document document ~limits in
     { carrier = D.Extension_carrier.with_value carrier state
     ; ordered_goal_accounts = None
+    ; ordered_goal_descendants = None
     ; original =
         Some
           { template = document
           ; limits
           ; inference_ledger = state.S.inference_ledger
           ; delegated_basis = state.inference_ledger, state.delegated_usage
+          ; descendants = Session_descendant_projection.of_state state
           ; jobs = state.jobs
           ; invocations = state.invocations
           ; queue_provenance = S.queue_provenance state
@@ -2703,8 +2906,9 @@ module Transaction = struct
     let open Result.Let_syntax in
     (* A public with_value cannot turn an unvalidated account into a baseline. *)
     let%bind () = validate_accounts_carrier document ~limits in
+    let%bind () = validate_descendants_carrier document in
     let%bind () = S.validate (value { staged = document }) |> X.document_result in
-    let%map _ = encode_prefix document ~limits in
+    let%bind _ = encode_prefix document ~limits in
     let current = value { staged = document } in
     let ordered_goal_accounts =
       Some
@@ -2713,7 +2917,15 @@ module Transaction = struct
            ~before:current.inference_ledger
            ~catalog:current.goal_catalog)
     in
-    { staged = { document with ordered_goal_accounts } }
+    let%map ordered_goal_descendants =
+      Session_descendant_projection.begin_ current |> X.document_result
+    in
+    { staged =
+        { document with
+          ordered_goal_accounts
+        ; ordered_goal_descendants = Some ordered_goal_descendants
+        }
+    }
   ;;
 
   let checkpoint t ~limits =
@@ -2740,7 +2952,7 @@ module Transaction = struct
     { staged }
   ;;
 
-  let finish_encoded t ~(next : S.t) ~limits =
+  let encode_candidate t ~(next : S.t) ~limits =
     let open Result.Let_syntax in
     let expected = value t in
     let normalized =
@@ -2767,7 +2979,19 @@ module Transaction = struct
     in
     let candidate = (with_value t next).staged in
     let%map document = encode candidate ~limits in
-    { Admitted.state_document = candidate; document }
+    { Encoded.state_document = candidate; document }
+  ;;
+
+  let checkpoint_encoded t ~next ~limits =
+    let%map.Result encoded = encode_candidate t ~next ~limits in
+    Prefix.Prefix encoded
+  ;;
+
+  let finish_encoded t ~(next : S.t) ~limits =
+    let open Result.Let_syntax in
+    let%bind encoded = encode_candidate t ~next ~limits in
+    let%map () = Encoded.validate_publication encoded ~revision:next.counters.revision in
+    Admitted.Admitted encoded
   ;;
 
   let finish t ~next ~limits =

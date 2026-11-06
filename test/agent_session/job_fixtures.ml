@@ -143,6 +143,7 @@ let with_actor
             ; schedule_limits
             ; notification_limits
             ; ingress_limits
+            ; goal_descendant_profile
             ; subscription_limits
             ; state_committed
             }

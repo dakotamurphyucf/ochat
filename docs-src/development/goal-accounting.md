@@ -157,3 +157,76 @@ Operation or inference admission, and do not install an ancestor Goal grant.
 Execution and later messages continue to require their authentic immutable child
 admission, current source/generation, original authority and actual control policy.
 Observed token totals remain evidence rather than a distributed hard spending cap.
+
+## Scoped descendant evidence
+
+The lower delegation admission can freeze a child's inherited Goal origins.
+An origin names the owning session and Goal, the originating Workflow episode,
+and the first-child branch through which that Goal reaches the child. Different
+branches of one persistent Goal may originate in different episodes. These
+immutable facts grant no permission. Historical missing origin remains unknown;
+an explicitly unrelated child has a known empty scope vector.
+
+Scoped usage travels in the same immediate-child snapshot as whole-child usage.
+Each scope reuses the child's actual own partition and adds only associated
+immediate-child subtotals. At an intermediate session, the full inherited scope
+must match. At the owning session, disjoint first-child branches are combined by
+owner and Goal identity. Positively unrelated subtrees contribute neither usage
+nor uncertainty to that Goal, even if their whole-child usage is unobserved.
+Missing historical associations remain labelled uncertainty. Scoped fields
+require their storage semantic marker; decoding never silently fills an old
+origin or changes an older snapshot's logical digest.
+
+A branch reservation has a monotonically increasing nonce, the next included
+prefix, and one exact prospective leaf occurrence. Confirmation replaces that
+pending occurrence with included evidence. A proven no-writer closure consumes
+the nonce without advancing the prefix, so the next reservation cannot reuse
+the closed identity. Replaying an older terminal receipt cannot clear a newer
+pending occurrence. The pure branch operations validate these data relations;
+the runtime must still establish the real canonical acknowledgement or sealed
+no-writer proof. A timeout is neither proof and cannot refund capacity.
+
+The session owns the descendant component and its captured host limits. Creating
+an actual new Goal records an empty root alongside that Goal's original-ledger
+account bootstrap. This works in an existing, nonempty session: it does not turn
+historical child inventory or the session's own missing origin into known zero.
+A later episode or source change does not reset an existing root or its branches.
+
+Changes use a closed `Goal_descendants.Update`: root or branch registration,
+reservation, local canonical inclusion, child import, or sealed no-writer closure.
+The session validator replays that reason against the actual ordered state and
+checks the complete candidate. An import carries its child replacement in the
+same update that confirms the corresponding pending reservation. Ordinary child
+updates cannot change a positive-origin slot or its scoped observation.
+
+Local inclusion consumes one actual canonical ledger edge. The receipt identifies
+the local session's next committed revision; parent reservations and imported
+receipts instead retain their remote coordinates. Snapshot encoding, journal
+replay and native publication all preserve this distinction. Replacing a state,
+editing its carried value, or importing a newer snapshot cannot silently bypass
+the ordered checks. Existing-slot growth is reserved within the captured component
+and complete session limits, including preserved future fields.
+
+Capacity checks cover both additive growth (bytes, fields and nodes) and maximum
+JSON depth. They measure compatible future receipt shapes through the existing
+preservation carrier, then include their actual enclosing component/session paths.
+A currently shallow pending value is therefore rejected if its required terminal
+receipt would exceed the configured depth. This does not increase the configured
+limits or reserve another copy of canonical usage.
+
+Ordered replay keeps an unstamped prefix separate from a finalized mutation.
+Both undergo complete state, preservation and capacity checks. Finalization
+also checks each newly included local occurrence against the actual published
+session revision, after optional transaction metadata is applied. Later corrections
+or a generation reset in the same transaction cannot erase that obligation.
+Only the dedicated accounting operations can supply creation evidence; ordinary
+context observations cannot introduce it.
+
+The current integration is a DATA foundation. The actual public Create command
+registers its local root, while delegated and recurrence session creation still
+leave Goal origin unknown. Those creation paths do not yet capture an active
+Goal's inherited scopes or enforce descendant turn/attempt ceilings. Runtime
+integration must supply the actual frozen origin, reserve the parent frontier
+before child effects, and consume genuine canonical acknowledgements or sealed
+no-writer outcomes. Retained origin, reservation and Included DATA cannot replace
+those execution-owner proofs.

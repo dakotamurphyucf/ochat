@@ -63,7 +63,7 @@ module Stored = struct
         ~supported_semantics:Agent_protocol.Session_storage_semantics.supported_children
         state
         ~kind:"session.state"
-        ~versions:[ 1; 2; 3; 4; 5; 6; 7; 8; 9; 10; 11 ]
+        ~versions:[ 1; 2; 3; 4; 5; 6; 7; 8; 9; 10; 11; 12 ]
     in
     let state = D.Document.payload state in
     let%bind identity = F.required state "identity" Result.return in

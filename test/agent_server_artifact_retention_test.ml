@@ -147,6 +147,7 @@ let%expect_test
                 ; parent_revision_id = state.spec.prompt_revision_id
                 ; parent_stop_epoch = Some state.stop_epoch
                 ; authored_tool = None
+                ; goal_origin = None
                 ; captured_recurrence = None
                 ; authority_sha256 =
                     Agent_session.Delegation_authority.fingerprint state |> protocol_ok

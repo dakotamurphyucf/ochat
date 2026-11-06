@@ -40,6 +40,10 @@ type services =
   ; schedule_limits : Staged_schedules.limits
   ; notification_limits : Staged_notifications.limits
   ; ingress_limits : Staged_ingress.limits
+  ; goal_descendant_profile : Goal_descendants.Profile.t
+    (** Trusted immutable host profile captured from actual delegation depth,
+        child-count and child-byte bounds. Used only for genuinely new Goal
+        roots; persisted accounting keeps its captured profile. *)
   }
 
 type submission =

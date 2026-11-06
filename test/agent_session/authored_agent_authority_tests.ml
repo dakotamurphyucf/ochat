@@ -150,6 +150,7 @@ let%expect_test "authored private tools remain scoped across mixed delegation an
               ; parent_revision_id = parent.spec.prompt_revision_id
               ; parent_stop_epoch = Some parent.stop_epoch
               ; authored_tool
+              ; goal_origin = None
               ; captured_recurrence = None
               ; authority_sha256 = Authority.fingerprint parent |> protocol_ok
               ; capability_pins =

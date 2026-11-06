@@ -32,6 +32,7 @@ let admission name =
     ; parent_stop_epoch = None
     ; authority_sha256 = digest "captured authority selection"
     ; authored_tool = None
+    ; goal_origin = None
     ; captured_recurrence = None
     ; capability_pins = []
     ; lifetime = Owned
@@ -240,4 +241,57 @@ let future_frame_bytes carrier =
   |> List.map ~f:(fun document -> String.length (frame document))
   |> List.max_elt ~compare:Int.compare
   |> Option.value_exn
+;;
+
+let goal_origin ?(epoch = 1L) (key : L.Key.t) (admission : L.Admission.t) =
+  let owner = P.Session_ref.create ~server_id ~session_id:key.parent_session_id in
+  let source =
+    P.Run_source.create
+      ~observer:{ script_id = "goal-origin"; source_sha256 = digest "goal creator" }
+      ~generation:key.parent_generation
+      ~installation_epoch:epoch
+    |> protocol_ok
+  in
+  let receipt =
+    P.Run_receipt.create
+      ~run_id:(P.Id.Run.of_string "run_origin" |> protocol_ok)
+      ~principal_id:key.principal_id
+      ~source
+      ~key:key.idempotency_key
+      ~request_sha256:(digest "goal admission")
+      ~kind:Admission
+      ~run_revision:0L
+      ~session_revision:1L
+      ~committed_at:timestamp
+    |> protocol_ok
+  in
+  let creator_episode =
+    P.Goal_episode.of_json
+      (`Object
+          [ "session", P.Session_ref.to_json owner
+          ; "admission", P.Run_receipt.to_json receipt
+          ])
+    |> protocol_ok
+  in
+  let module G = Agent_store.Delegation_goal_origin in
+  let branch =
+    G.Anchor.create
+      ~parent_session_id:key.parent_session_id
+      ~parent_generation:key.parent_generation
+      ~principal_id:key.principal_id
+      ~key:key.idempotency_key
+      ~child_session_id:admission.child_session_id
+      ~transaction_id:admission.transaction_id
+    |> protocol_ok
+  in
+  let scope =
+    G.Scope.create
+      ~owner
+      ~goal_id:(P.Id.Goal.of_string "goal_origin" |> protocol_ok)
+      ~source
+      ~creator_episode
+      ~branch
+    |> protocol_ok
+  in
+  G.associated ~max_scopes:1 [ scope ] |> protocol_ok
 ;;

@@ -48,6 +48,7 @@ let rec has_stop_epoch (delta : Agent_session.Session_delta.t) =
   | Inference_ledger_changed _
   | Delegated_inference_ledger_changed _
   | Child_contributions_changed _
+  | Goal_descendants_changed _
   | Job_changed _
   | Schedule_changed _
   | Invocation_changed _

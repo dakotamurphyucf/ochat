@@ -158,7 +158,7 @@ let%expect_test
           |> A.Session_state_document.encode ~limits:document_limits
           |> document_ok
         in
-        [%test_eq: int] 11 (D.Document.version current);
+        [%test_eq: int] 12 (D.Document.version current);
         let row =
           match Conversion.member (D.Document.payload current) "invocations" with
           | `Array [ row ] -> row
@@ -268,7 +268,7 @@ let%expect_test
              current.previous_transaction_hash
              (Some original_hash));
          [%test_eq: int] 6 (D.Document.version old.delta);
-         [%test_eq: int] 7 (D.Document.version current.delta)
+         [%test_eq: int] 8 (D.Document.version current.delta)
        | _ -> failwith "physical chain changed transaction count");
       Option.iter old_checkpoint ~f:(fun (path, bytes) ->
         assert (String.equal bytes (Eio.Path.load path)));

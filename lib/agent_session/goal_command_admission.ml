@@ -38,6 +38,7 @@ let prepare
       ~actor
       ~authorize
       ~session
+      ~descendant_profile
       ~(request : Goal_command.t)
       ~now
   =
@@ -96,13 +97,30 @@ let prepare
                (Goal_catalog.find catalog id)
                ~error:(P.Error.invalid_request "new goal catalog entry is absent")
            in
-           let%map accounts =
+           let%bind accounts =
              Goal_accounts.bootstrap
                (Option.value state.goal_accounts ~default:Goal_accounts.empty)
                ~goal
                ~ledger:state.inference_ledger
            in
-           [ Session_delta.Goal_accounts_changed accounts ]
+           let%bind account =
+             Result.of_option
+               (Goal_accounts.find accounts id)
+               ~error:(P.Error.invalid_request "new Goal accounting is absent")
+           in
+           let%map descendants =
+             Goal_descendants.register_new_root
+               state.goal_descendants
+               ~host_profile:descendant_profile
+               ~session
+               ~children:state.child_contributions
+               ~goal
+               ~account
+               ~before_ledger:state.inference_ledger
+           in
+           [ Session_delta.Goal_accounts_changed accounts
+           ; Goal_descendants_changed descendants
+           ]
          | Revise_objective _
          | Record_progress _
          | Hold _
