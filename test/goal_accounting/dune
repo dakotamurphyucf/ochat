@@ -1,5 +1,15 @@
+(copy_files ../../lib/agent_session/goal_descendant_root_route.ml)
+(copy_files ../../lib/agent_session/goal_descendant_root_route.mli)
+(library
+ (name descendant_root_route_test_support)
+ (modules goal_descendant_root_route)
+ (libraries core ochat.agent_session ochat.agent_protocol ochat.agent_store)
+ (flags (:standard -open Agent_session))
+ (preprocess (pps ppx_jane)))
+
 (library
  (name goal_accounting_tests)
- (libraries core expect_test_helpers_core ochat.inference ochat.agent_protocol ochat.agent_session ochat.agent_store ochat.document_schema ochat.transcript)
+ (modules (:standard \ goal_descendant_root_route))
+ (libraries descendant_root_route_test_support core expect_test_helpers_core ochat.inference ochat.agent_protocol ochat.agent_session ochat.agent_store ochat.document_schema ochat.transcript)
  (inline_tests)
  (preprocess (pps ppx_jane ppx_expect)))

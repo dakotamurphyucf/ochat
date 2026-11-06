@@ -41,3 +41,60 @@ val check_activation
     admission hold from an explicit operator state change. No live allocation
     is authenticated or revoked by this pure comparison. *)
 val same_allocation_policy : Agent_protocol.Goal.t -> Agent_protocol.Goal.t -> bool
+
+(** Read-only disjoint descendant subtotal and its explicit historical/unobserved
+    coverage. These projections grant no authority or provenance. The actual
+    State adapter obtains them from accepted root-scoped child contributions. *)
+module Descendants : sig
+  type t =
+    { usage : Goal_usage.t
+    ; coverage_unknown : bool
+    }
+end
+
+module Count_availability : sig
+  type t =
+    | Available
+    | Reserved
+    | Exhausted
+    | Unknown
+  [@@deriving equal, sexp_of]
+end
+
+module Deferred : sig
+  type t =
+    | Reserved
+    | Unknown
+  [@@deriving equal, sexp_of]
+end
+
+type scoped_decision =
+  | Decided of decision
+  | Deferred of Deferred.t
+
+(** SAME account/ledger validation, control and deadline precede count policy;
+    selected combined observed usage follows it. Only known Exhausted creates a
+    count Hold. Pending/unknown count capacity defers without any durable Hold.
+    A known selected subtotal at ceiling holds even with incomplete coverage;
+    below ceiling, selected token uncertainty also holds. No-token policies do
+    not turn coverage uncertainty into a token gate. *)
+val check_scoped
+  :  Agent_protocol.Goal.t
+  -> accounting:Goal_accounting.t
+  -> ledger:Inference_ledger.t
+  -> descendants:Descendants.t
+  -> availability:Count_availability.t
+  -> now:Agent_protocol.Timestamp.t
+  -> dimension:dimension
+  -> (scoped_decision, Agent_protocol.Error.t) result
+
+(** NEW activation eligibility including accepted descendants, without any
+    dimension count check. Existing [check_activation] retains its own-only
+    model contract. Already-admitted work uses neither activation API. *)
+val check_scoped_activation
+  :  Agent_protocol.Goal.t
+  -> accounting:Goal_accounting.t
+  -> ledger:Inference_ledger.t
+  -> descendants:Descendants.t
+  -> now:Agent_protocol.Timestamp.t
+  -> (decision, Agent_protocol.Error.t) result

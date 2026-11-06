@@ -107,6 +107,15 @@ val retire_runtime_worker
   -> closing:bool
   -> (Runtime_retirement.t, Agent_protocol.Error.t) result
 
+(** Outside the Actor mailbox and ownership-state/registry locks, request
+    cancellation on this Actor's SAME retained native ACK and join its existing
+    bounded factual cleanup, then retry an already sealed prewriter Slot.
+    Preserves positive partial progress on error/cancellation. Does not infer a
+    no-writer outcome for Active or attempted-unknown Slots; lifecycle fencing
+    rejects every outstanding Slot/ACK. Source owners call this before cancelling
+    the Actor switch or closing the Store, after cutting fresh runtime admission. *)
+val drain_descendant_cleanup : t -> (unit, Agent_protocol.Error.t) result
+
 module Compaction_inference : sig
   (** Trusted process-local selected auxiliary lifetime. Operation and complete
       selection are captured by durable compaction admission. The callback runs
@@ -236,7 +245,9 @@ val open_prepared_inference_owner
 
 (** Serialized original-ledger admission and durable ACK precede handle return.
     Optional associations require actual per-execution evidence; no inference from
-    the actor's current operation. Untracked admission also ACKs its ordinal. *)
+    the actor's current operation. Untracked admission also ACKs its ordinal.
+    Inherited or unavailable delegated Goal origin requires the allocation
+    sibling and rejects here before canonical admission. *)
 val admit_inference
   :  t
   -> owner:Inference_owner.t
@@ -245,6 +256,17 @@ val admit_inference
   -> invocation_id:Agent_protocol.Id.Invocation.t option
   -> configuration:Inference.Observation.Configuration.t
   -> (Inference_ledger.Handle.t, Agent_protocol.Error.t) Result.t
+
+(** Guard-preserving allocation through the actual canonical owner. Inherited
+    work retains native ancestor admission and original submission guards. *)
+val admit_inference_allocation
+  :  t
+  -> owner:Inference_owner.t
+  -> relation:Transcript.Scope.relation
+  -> operation_id:Agent_protocol.Id.Operation.t option
+  -> invocation_id:Agent_protocol.Id.Invocation.t option
+  -> configuration:Inference.Observation.Configuration.t
+  -> (Inference_allocation.t, Agent_protocol.Error.t) Result.t
 
 val acknowledge_inference
   :  t
@@ -278,11 +300,15 @@ val complete_inference
   -> Inference_client.Completion.t
   -> (unit, Agent_protocol.Error.t) Result.t
 
-(** Called once after allocation's joined lifetime. Routing is removed even if
-    interruption ACK fails; the bounded durable row remains recovery authority.
-    Uses the actual live Attempt.delivery when acknowledged. Without that owned
-    instance, Prepared is definitely not submitted and Running conservatively
-    possibly submitted. No provider terminal is manufactured. *)
+(** Called after allocation's joined lifetime. Only a positive factual ACK
+    retires the exact live registration. Joined exact-handle membership remains
+    only while its canonical row is retained, for factual correction without
+    provider permission. A failed release retains its genuine
+    graph/handle custody for the existing owner or canonical recovery; it grants
+    no retry through an unavailable physical writer. Uses the actual live
+    Attempt.delivery when acknowledged. Without that instance, Prepared is
+    definitely not submitted and Running conservatively possibly submitted.
+    No provider terminal is manufactured. *)
 val release_inference
   :  t
   -> owner:Inference_owner.t
@@ -301,9 +327,10 @@ val finish_inference_owner
   -> owner:Inference_owner.t
   -> (unit, Agent_protocol.Error.t) Result.t
 
-(** Explicit constructor-only mutations under the actor-issued preparation.
-    Each request captures the token; the actor checks its issuer/current policy
-    before persistence. Ordinary APIs above never infer constructor custody. *)
+(** Explicit constructor mutations under the actor-issued preparation. Fresh
+    admission checks current authorization. Joined factual mutations use the
+    actual retained graph, canonical registration and original preparation
+    custody without granting further provider use. *)
 module Constructor_mutations : sig
   val admit_inference
     :  t
@@ -314,6 +341,18 @@ module Constructor_mutations : sig
     -> invocation_id:Agent_protocol.Id.Invocation.t option
     -> configuration:Inference.Observation.Configuration.t
     -> (Inference_ledger.Handle.t, Agent_protocol.Error.t) Result.t
+
+  (** Guard-preserving allocation through the actual canonical owner. Inherited
+      work retains native ancestor admission and original submission guards. *)
+  val admit_inference_allocation
+    :  t
+    -> preparation:Run_preparation.t
+    -> owner:Inference_owner.t
+    -> relation:Transcript.Scope.relation
+    -> operation_id:Agent_protocol.Id.Operation.t option
+    -> invocation_id:Agent_protocol.Id.Invocation.t option
+    -> configuration:Inference.Observation.Configuration.t
+    -> (Inference_allocation.t, Agent_protocol.Error.t) Result.t
 
   val acknowledge_inference
     :  t
@@ -1575,9 +1614,11 @@ val enable_run_constructor_turn_budget
   -> (unit, Agent_protocol.Error.t) result
 
 (** Final checked admission consumes original input from the actual issuing
-    preparation. Always releases custody. Distinguishes definite no-run rejection
+    preparation. Releases custody or transfers its SAME close obligation to the
+    retained inherited admission until an actual no-writer proof/canonical ACK.
+    Distinguishes definite no-run rejection
     from an attempted uncertain final persistence; exceptions/cancellation retain
-    their primary backtrace and still close custody. *)
+    their primary backtrace; uncertain canonical writers retain actual custody. *)
 val admit_prepared_run
   :  t
   -> command_audit:Document_schema.Document.t option
@@ -1618,6 +1659,9 @@ val begin_headless_run_preparation
   -> request:Run_admission_request.Headless.t
   -> (Run_preparation.Decision.t, Agent_protocol.Error.t) result
 
+(** Idempotent caller exit. A preparation transferred to the exact inherited
+    admission retains its closing owner across uncertain persistence; only that
+    owner settles no-writer/ACK. This does not keep fresh execution authorized. *)
 val end_run_preparation : t -> Run_preparation.t -> (unit, Agent_protocol.Error.t) result
 
 (** Issue NEW effect-deferred provenance under this Actor's existing preparation
@@ -1960,6 +2004,23 @@ val submit_message_authenticated_with_command_audit
     This does not create a client attachment or grant approval rights. *)
 val submit_managed_message
   :  t
+  -> reference:Agent_store.Delegation_store.Reference.t
+  -> key:Agent_protocol.Idempotency_key.t
+  -> request_sha256:string
+  -> generation:int
+  -> max_receipts:int option
+  -> Agent_protocol.History.entry
+  -> (Managed_submission.t, Agent_protocol.Error.t) result
+
+(** Same internal managed admission under the exact actual native calling
+    scope already authenticated by Factory. Retains that lexical borrow for
+    negative admitted-operation refresh outside the mailbox and pure currentness
+    before a new inherited Turn writer. No client attachment, source grant,
+    agent-creation right or arbitrary authorization callback is supplied. Receipt
+    replay and busy/deferred no-Turn behavior match [submit_managed_message]. *)
+val submit_managed_message_native
+  :  t
+  -> borrowed:Native_tool_invocation.borrowed
   -> reference:Agent_store.Delegation_store.Reference.t
   -> key:Agent_protocol.Idempotency_key.t
   -> request_sha256:string
@@ -2873,6 +2934,58 @@ val with_idle_moderator_observation_tools
       -> (unit, Agent_protocol.Error.t) result)
   -> (bool, Agent_protocol.Error.t) result
 
+(** Process-local owner for the aggregate legacy moderator callback. Create
+    before entering the host's finite cancellation-protected claim/drain/capture
+    block. A successful claim is retained by the Actor before the reply; this
+    value grants no source, Run or child-creation permission. Other moderator
+    families keep their existing borrow protocols. All operations belong to the
+    actual Actor domain. Result-returning operations reject a foreign domain;
+    [cancel] and [leave_capture] do nothing before touching the cell when called
+    from a foreign domain: neither cancellation nor capture-exit proof is then
+    installed. *)
+module Idle_moderator_completion : sig
+  type actor = t
+  type t
+
+  val create : actor -> t
+  val claim : t -> (History_entry.t list option, Agent_protocol.Error.t) result
+
+  (** Capture the actual callback drain exactly once and consume it through the
+      existing ordinary completion path. Retains each real selected writer and
+      State ACK, including no-Turn metadata, Goal Hold and compaction prefixes.
+      An attempted write without an installed ACK remains uncertain; no callback
+      replay or global failure rewrite is performed. *)
+  val capture
+    :  t
+    -> Runtime_builder.moderator_drain
+    -> (unit, Agent_protocol.Error.t) result
+
+  (** Actual callback-returned error before capture. Failure metadata has its
+      own real attempted/ACK outcome and cannot erase an uncertain completion. *)
+  val fail_callback
+    :  t
+    -> failure:Agent_protocol.Error.t
+    -> (unit, Agent_protocol.Error.t) result
+
+  (** Non-yielding one-shot exit signal in the finite host block's finally.
+      Does not release the claim or assert that a writer was unattempted. *)
+  val leave_capture : t -> unit
+
+  (** Read the same captured completion result after leaving the finite block. *)
+  val finish : t -> (unit, Agent_protocol.Error.t) result
+
+  (** First-wins negative cancellation, followed by Actor-owned factual cleanup.
+      No RPC is made synchronously. Cleanup never retries an uncertain writer.
+      Fiber-setup failure is retained on the same owner and cannot replace the
+      original callback error or cancellation; [join_retirement] reports it. *)
+  val cancel : t -> failure:Agent_protocol.Error.t -> unit
+
+  (** Join the same retirement outside mailbox and Owner state locks. A failed
+      or unknown writer retains the exact owner and primary diagnostic; source
+      close must propagate the failure and retain its resources. *)
+  val join_retirement : t -> (unit, Agent_protocol.Error.t) result
+end
+
 (** [claim_idle_moderator] acquires the process-local exclusive moderator
     borrow only when the running session is idle and unblocked. *)
 val claim_idle_moderator
@@ -3034,10 +3147,19 @@ val update_organization
   -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
 
 (** The accepted edit and optional Starting Turn are one durable transition.
-    Save_only invokes no worker/preparation/recovery port. Publication precedes
-    worker launch, within the command's protected commit handoff. Started means
-    admitted host operation, not provider dispatch; owner interruption is recovered
-    through existing operation/receipt reconciliation and never rolled back. *)
+    Save_only invokes no worker/preparation/recovery port. No-Start paths stay
+    local and perform no ancestor wait. A positive inherited Start retains its
+    exact archive, prepared history and selected worker while reserving roots
+    outside the Actor mailbox and ownership locks. The actual writer repeats
+    attachment/lease, session/generation/revision and source checks.
+    The native ACK installs the operation's unconfirmed guard before publication;
+    complete ancestor confirmation admits that same guard before worker effects.
+    History handoff rejects a changed selected worker after ACK; its accepted
+    history and Included accounting remain factual. Publication precedes launch,
+    within the protected ACK handoff, without masking external waits.
+    Started means admitted host operation, not provider dispatch. A disconnected
+    client cannot roll back acknowledged history; owner interruption uses the
+    existing operation/receipt reconciliation. *)
 
 val edit_history
   :  t
@@ -3681,6 +3803,11 @@ module Runtime_construction : sig
       resource joins. Does not erase a writer's subsequent factual known ACK. *)
   val close : t -> unit
 
+  (** Pure actual Initial admission close obligation, not a canonical ACK or
+      execution grant. Lexical cleanup retains the same source/runtime through
+      uncertain persistence; lifecycle close still revokes effects. *)
+  val admission_retained : t -> bool
+
   (** Historical final adoption ACK fact only: same physical runtime additionally
       required by Owner. Covers actual Started, Waiting and Settled outcomes.
       Ordinary delegated installation is always false and does not promote
@@ -3758,6 +3885,13 @@ end
     from original episode + actual Run + exact terminal receipt. Only live
     Admitted/Active with no pending Finish attaches a new Administrative Operation
     from retained history. No parser, User input, Continue intent or second Run.
+    The exact joined source, Run work and selected worker are captured before
+    cancellable ancestor admission outside the Actor. The real Goal controller
+    installs once at the same State ACK as inherited Included accounting; launch
+    waits for actual ancestor confirmation and the SAME selected worker. A
+    prepared or uncertain writer is not an ACK and retains its actual owner for
+    factual cleanup/recovery. Waiting, Settled, Controlled and retained outcomes
+    reserve no Turn; their genuine metadata writers keep their existing results.
     Known command ACK remains in every post-ACK failure. *)
 val continue_goal_episode
   :  t
@@ -4428,7 +4562,12 @@ val with_held_input
     Input/startup/preparation and original controller-permit scopes may then exit;
     the transferred cell remains subject to controller Stop/source/control and
     original revocation until the actual winning worker branch's final fence.
-    Factual worker termination follows the existing Run settlement law. *)
+    Factual worker termination follows the existing Run settlement law. Inherited
+    Goal scopes reserve and confirm through the shared descendant Turn owner
+    outside the Actor mailbox and Owner mutex. Only the initial finite handoff
+    request is cancellation-protected; ancestor waits remain cancellable. Unknown
+    canonical writers retain the exact parsed input, preparation exit, staged
+    native owner and reservation set until factual settlement or recovery. *)
 val submit_held_run_input
   :  t
   -> scope:Held_input_scope.t
@@ -4821,6 +4960,139 @@ val native_goal_resume_status
   -> invocation_id:Agent_protocol.Id.Invocation.t
   -> (Goal_native_resume.Status.t, Agent_protocol.Error.t) result
 
+module Child_origin : sig
+  module Preparation : sig
+    (** Same-domain birth custody captured by the actual parent Actor. It retains
+        the original Factory/Store and native execution selection, not a public
+        Goal ID or an ambient current Goal. No decoder; no effect permission. *)
+    type t
+  end
+
+  module Bound : sig
+    (** One actual lower-key/child/transaction allocation. Exact retry returns
+        the same binding; a different allocation cannot reuse its preparation. *)
+    type t
+
+    (** Frozen DATA for this exact lower admission only. It cannot reconstruct
+        preparation custody, issue a root route or authorize initialization. *)
+    val origin : t -> Agent_store.Delegation_goal_origin.t
+  end
+
+  module Reservation : sig
+    (** Same-domain private lower ACK, retaining actual Factory/Store and exact
+        frozen origin. No decoder and no initializer permission by itself. *)
+    type t
+  end
+end
+
+(** Capture in the actual admitted native callback BEFORE yielding compilation
+    or source preparation. Checks exact Admission/binding and registered native
+    execution, actual original Run/Goal basis and original Factory/controller.
+    [ancestry=None] is accepted only for this Actor's actual Spec with no
+    delegation. A delegated parent needs complete known origin from the same
+    Factory's checked private chain, re-resolved in this Actor's controller Store.
+    Historical Unknown is never reconstructed or downgraded to Unrelated.
+    Associated private origin additionally requires actual scoped accounting with
+    the same session and positive origin. Known Unrelated permits historical
+    missing/Unknown own accounting, but any positive stored origin must agree.
+
+    This token classifies birth; it is not a current external root policy grant.
+    Original native permission and all future owner-route/effect guards remain
+    required. Currentness is repeated at binding, not extended by retention.
+    Private Store reads and original authorization run outside the Actor mailbox;
+    finite capture/consume checks retain the exact immutable parent basis. *)
+val prepare_native_child_origin
+  :  t
+  -> source_owner:Runtime_source_owner.t
+  -> admission:Native_tool_invocation.Admission.t
+  -> binding:Chat_response.Tool_capability.binding
+  -> ancestry:Delegation_authority.Checked_ancestry.t option
+  -> (Child_origin.Preparation.t, Agent_protocol.Error.t) result
+
+(** Separate trusted host-management path under its original operator admission.
+    Classifies a new child explicitly Unrelated and never selects ambient Goal
+    state. It is not a fallback after native preparation fails and does not grant
+    management permission. Requires the original Factory/Actor/controller.
+    Store observation is outside the mailbox against its exact captured basis. *)
+val prepare_unrelated_child_origin
+  :  t
+  -> source_owner:Runtime_source_owner.t
+  -> (Child_origin.Preparation.t, Agent_protocol.Error.t) result
+
+(** Bind explicit Unrelated management birth to the exact protected recurrence
+    row issued by this Actor. Revalidates the original opaque permit and derives
+    its immutable principal/key/child/transaction without caller scalar IDs. The
+    row principal may differ from both controller creator and reauthorizing caller.
+    No ambient Goal attribution is selected and no child effect is authorized. *)
+val bind_recurrence_child_origin
+  :  t
+  -> source_owner:Runtime_source_owner.t
+  -> permit:Recurrence_creation.t
+  -> (Child_origin.Bound.t, Agent_protocol.Error.t) result
+
+(** Bind before private lower reserve and child initialization. Rechecks original
+    parent/native/Store selection and complete retained ancestry. Key principal
+    matches the parent's factual creating_principal, as existing Factory creation
+    requires; this does not turn that identity into execution permission.
+    Inherited first-child anchors remain exact; only actual local Goal attribution
+    adds this new edge. No reservation/frontier or runtime effect is performed.
+    This prepares NEW birth only. An existing lower key must separately reconcile
+    its retained original admission/origin; a fresh invocation must not reclassify
+    that child under a later Goal episode or retrofit historical omission.
+    Refresh invalidates its prior cached guard before any wait; failed/cancelled
+    or superseded attempts cannot renew it. Only the finite final mailbox check
+    consumes the exact externally observed capture and binds this allocation. *)
+val bind_child_origin
+  :  t
+  -> preparation:Child_origin.Preparation.t
+  -> key:Agent_store.Delegation_store.Key.t
+  -> child_session_id:Agent_protocol.Id.Session.t
+  -> transaction_id:Agent_protocol.Id.Transaction.t
+  -> (Child_origin.Bound.t, Agent_protocol.Error.t) result
+
+(** New reservation: exact Bound key/child/transaction/frozen origin; resolution
+    is through actual Actor controller Store, never the supplied locator itself.
+    Accepts live Reserved or later stage. No permission/initializer ACK minted. *)
+val observe_child_origin_reservation
+  :  t
+  -> source_owner:Runtime_source_owner.t
+  -> bound:Child_origin.Bound.t
+  -> reference:Agent_store.Delegation_store.Reference.t
+  -> (Child_origin.Reservation.t, Agent_protocol.Error.t) result
+
+(** Existing lower key: derives original origin only from actual private record.
+    Exact positive parent slot/frontier replays without a new write. A retained
+    Unrelated admission with no child slot may recover through the same finite
+    registration as new birth. An old Unknown slot or changed reference/origin
+    cannot be relabelled. No new Bound or current Goal/episode classification.
+    Historical lower omission stays Unknown and is not upgraded. A retained
+    Associated admission may recover a missing frontier only against existing
+    local roots through GD.register_retained_branch; all its local scopes and
+    the exact child slot register atomically without canonical/account changes. *)
+val observe_retained_child_origin_reservation
+  :  t
+  -> source_owner:Runtime_source_owner.t
+  -> reference:Agent_store.Delegation_store.Reference.t
+  -> (Child_origin.Reservation.t, Agent_protocol.Error.t) result
+
+(** Parent GD/C ACK BEFORE child initializer/runtime construction. New local-root
+    branch uses GD.register_branch; inherited-only or Unrelated GD.register_child.
+    Historical absent GD accepts only proposed finite first-Unrelated reason,
+    never an Associated partial origin. Existing frontier exact replay no-ops;
+    a retained private Unrelated admission can recover a genuinely absent slot.
+    Retained Associated uses GD.register_retained_branch for missing local
+    frontiers and preserves original source/creator attribution. This factual
+    recovery never authorizes execution after source adoption.
+    Actual native original is retained from Bound on new path; retained replay
+    takes genuine current borrowed callback independently of creator episode.
+    Existing operator/parent policy remains check_parent, no child Actor needed. *)
+val register_child_origin_reservation
+  :  t
+  -> reservation:Child_origin.Reservation.t
+  -> native_callback:Native_tool_invocation.borrowed option
+  -> check_parent:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> (unit, Agent_protocol.Error.t) result
+
 (* Same creating Eio domain only. These values are factual
    association/read DATA, not child/Goal execution or source authority. *)
 module Child_installation : sig
@@ -4836,6 +5108,44 @@ module Child_usage_import : sig
     | Imported of Child_contributions.disposition
     | Historical_absence
 end
+
+(** Factual snapshot of the actual child matching the exact private birth
+    Reservation. Factory invokes outside mailbox/Owner locks while retaining its
+    actual creation resource lease. A private finite child capture proves exact
+    Spec reference/session/source-owner/controller; actual lower resolution and
+    Store observation run outside the mailbox; finite consume rechecks same
+    immutable State/issuer/controller/currentness before returning the existing
+    opaque observation. Child_accounting.snapshot uses that actual captured State.
+
+    Neither transcript-read authority nor parent fresh Goal policy is required
+    to observe this factual accounting projection. No origin is inferred from
+    snapshot fields; exact positive lower origin must match child GD. Nonzero
+    retained snapshots remain factual DATA; absence never becomes zero. *)
+val observe_child_origin_usage
+  :  t
+  -> reservation:Child_origin.Reservation.t
+  -> (Child_usage_observation.t, Agent_protocol.Error.t) result
+
+(** Import through the SAME private finite factual kernel as operator usage
+    import, with closed birth-reservation provenance instead of a public generic
+    authorize callback. The parent requires its exact acknowledged slot/frontier;
+    the observation must retain that same reference/controller/source owner.
+    Store/child refresh happens outside the mailbox; finite consume validates
+    exact original State and final negative guards before the existing writer.
+
+    [native_callback] preserves the original creation callback's Init/Goal/Held
+    acknowledgement custody independently of transcript-read permission. It does
+    not select a new parent Goal or grant child activation. Existing management
+    check_parent remains nonyielding and cannot be replaced by decoded IDs.
+    Duplicate/stale/absence disposition remains the existing DATA result; no
+    canonical admission, replacement stream or new root confirmation is minted. *)
+val import_child_origin_usage
+  :  t
+  -> reservation:Child_origin.Reservation.t
+  -> observation:Child_usage_observation.t
+  -> native_callback:Native_tool_invocation.borrowed option
+  -> check_parent:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> (Child_usage_import.t, Agent_protocol.Error.t) result
 
 (** Only the actual Factory privately supplies its existing issuer, after
     verifying its real child allocation/Actor/Store tuple. The proof exposes no
@@ -4895,3 +5205,273 @@ val import_child_usage
   -> max_children:int
   -> max_encoded_bytes:int
   -> (Child_usage_import.t, Agent_protocol.Error.t) result
+
+(** Runtime descendant admission owners. Constructors retain native custody;
+    decoded DATA grants none of these capabilities. All operations use their
+    creating Eio domain. *)
+module Descendant_admission : sig
+  module Preparation : sig
+    type t
+
+    val occurrence : t -> Goal_descendant_occurrence.t
+    val scopes : t -> Agent_store.Delegation_goal_origin.Scope.t list
+
+    (** SAME captured own Spec reference, for routing only. No authority. *)
+    val delegation : t -> Agent_store.Delegation_store.Reference.t option
+  end
+
+  module Root_route : sig
+    type t
+
+    (** Frozen locator DATA only, never authority for another Actor/Store. *)
+    val scope : t -> Agent_store.Delegation_goal_origin.Scope.t
+  end
+
+  module Reservation : sig
+    type t
+  end
+
+  module Reservation_attempt : sig
+    (** Root-issued no-write plan with SAME original basis/preparation/policy
+        cell and physical writer-attempt/ACK cells. Host retains BEFORE commit. *)
+    type t
+
+    val scope : t -> Agent_store.Delegation_goal_origin.Scope.t
+
+    (** Existing actual positive ACK, including after publication failure.
+        None is uncertainty/unattempted, never permission or a no-writer seal. *)
+    val acknowledged : t -> Reservation.t option
+
+    (** Readonly native writer/ACK outcome. No reservation constructor or refund
+        authority. Host cleanup checks its issuing domain and exact child seal. *)
+    type outcome =
+      | Not_attempted
+      | Acknowledged of Reservation.t
+      | Attempt_unconfirmed
+
+    val outcome : t -> outcome
+  end
+
+  module Reservation_set : sig
+    (** Claimed exactly once by its physical Preparation in the actual child
+        Slot, BEFORE first host await. No constructor, caller retain, reset,
+        decoder or snapshot replacement. Claim survives factual cleanup. *)
+    type t
+
+    val attempts : t -> Reservation_attempt.t list
+
+    (** SAME opaque preparation retained before the first host await. *)
+    val preparation : t -> Preparation.t
+  end
+
+  module Reserve_result : sig
+    type t =
+      | Reserved of Reservation.t
+      | Blocked of Goal_descendants.Availability.t
+      | Attempt_unconfirmed of Reservation_attempt.t
+  end
+
+  module Root_before_writer : sig
+    type t
+  end
+
+  module Before_writer : sig
+    type t
+
+    val check_current : t -> (unit, Agent_protocol.Error.t) result
+  end
+
+  module Closed_before_writer : sig
+    type t
+  end
+
+  module Acknowledgement : sig
+    (** Genuine actual child installed ACK: SAME Prep/identity + real canonical
+        Handle/Turn_handle/tracking + installed State + complete Included vector
+        + SAME driver-owned Reservation_set. No constructor or decoder. *)
+    type t
+
+    val reservations : t -> Reservation_set.t
+  end
+
+  module Import_acknowledgement : sig
+    (** Positive actual immediate-parent import owner over SAME existing opaque
+        Child_usage_observation carrier, not snapshot/disposition DTO alone. *)
+    type t
+
+    (** Importing parent's OWN installed Spec reference. The incoming child
+        observation reference is not the next ancestor edge. Routing DATA only. *)
+    val delegation : t -> Agent_store.Delegation_store.Reference.t option
+  end
+
+  module Confirmation : sig
+    type t
+  end
+
+  module Root_admitted : sig
+    type t
+  end
+
+  module Admitted_views : sig
+    type t
+
+    val check_current : t -> (unit, Agent_protocol.Error.t) result
+  end
+
+  (** Factual usage of the actual child under its genuine installed canonical
+      ACK. Same Factory/Store/full source session and own Spec reference/origin
+      are mandatory; actual Actor reconstruction is allowed. Capture and consume
+      are finite; Store resolution/observation runs outside the Actor mailbox and
+      ownership-state/registry locks, with exact
+      post-await State/controller fences before interpreting errors.
+
+      Reuses the existing opaque snapshot carrier; current usage may be newer
+      than the ACK. No transcript grant, fresh Goal/source eligibility, old
+      execution-owner liveness or initialized-runtime load is required. An
+      initialized actual accounting snapshot is required; absence is not zero.
+      Refresh retains immutable snapshot contents and returns only a current
+      negative source guard. *)
+  val observe_acknowledged_usage
+    :  t
+    -> source_owner:Runtime_source_owner.t
+    -> acknowledgement:Acknowledgement.t
+    -> (Child_usage_observation.t, Agent_protocol.Error.t) result
+
+  (** Same factual source observation for the importing parent's next edge,
+      under its genuine positive immediate-parent import ACK. Authenticates its
+      OWN retained Spec reference, never the incoming child's reference. *)
+  val observe_imported_usage
+    :  t
+    -> source_owner:Runtime_source_owner.t
+    -> acknowledgement:Import_acknowledgement.t
+    -> (Child_usage_observation.t, Agent_protocol.Error.t) result
+
+  (** Outer capture, actual Store observation outside the Actor mailbox and
+      ownership-state/registry locks, then finite consume. Every local-owner
+      scope is selected from the actual complete vector. *)
+  val bind_root_routes
+    :  t
+    -> source_owner:Runtime_source_owner.t
+    -> ancestry:Delegation_authority.Checked_ancestry.t
+    -> preparation:Preparation.t
+    -> (Root_route.t list, Agent_protocol.Error.t) result
+
+  (** Begin atomically creates and retains the next canonical root attempt in
+      SAME uniquely claimed driver Set before replying. Duplicate scope rejects;
+      retry the original retained attempt. No capacity is reserved by Begin.
+      Commit recomputes current policy/count/nonce and may defer without writer.
+      Physically attempted/unknown attempts NEVER re-enter the writer. *)
+  val begin_reservation
+    :  t
+    -> route:Root_route.t
+    -> reservations:Reservation_set.t
+    -> (Reservation_attempt.t, Agent_protocol.Error.t) result
+
+  val commit_reservation
+    :  t
+    -> attempt:Reservation_attempt.t
+    -> (Reserve_result.t, Agent_protocol.Error.t) result
+
+  val reconcile_reservation
+    :  t
+    -> attempt:Reservation_attempt.t
+    -> (Reserve_result.t, Agent_protocol.Error.t) result
+
+  val refresh_reserved
+    :  t
+    -> reservation:Reservation.t
+    -> (Root_before_writer.t, Agent_protocol.Error.t) result
+
+  val prepare_before_writer
+    :  preparation:Preparation.t
+    -> reservations:Reservation_set.t
+    -> views:Root_before_writer.t list
+    -> (Before_writer.t, Agent_protocol.Error.t) result
+
+  (** Factual exact pending retirement under SAME actual physical child seal.
+      Does not require live policy cell/current execution/Goal eligibility. *)
+  val close_before_writer
+    :  t
+    -> reservation:Reservation.t
+    -> closed:Closed_before_writer.t
+    -> (unit, Agent_protocol.Error.t) result
+
+  (** Same pure import planner/kernel as existing child usage; actual opaque
+      source observation and physical Factory/Store association, no transcript
+      or execution grant. Facts survive Held/closed/revocation/source changes. *)
+  val import_usage
+    :  t
+    -> source_owner:Runtime_source_owner.t
+    -> observation:Child_usage_observation.t
+    -> (Import_acknowledgement.t, Agent_protocol.Error.t) result
+
+  val confirmation
+    :  Acknowledgement.t
+    -> imports:Import_acknowledgement.t list
+    -> (Confirmation.t, Agent_protocol.Error.t) result
+
+  val refresh_admitted_root
+    :  t
+    -> reservation:Reservation.t
+    -> acknowledgement:Acknowledgement.t
+    -> confirmation:Confirmation.t
+    -> (Root_admitted.t, Agent_protocol.Error.t) result
+
+  val admitted_views
+    :  acknowledgement:Acknowledgement.t
+    -> confirmation:Confirmation.t
+    -> views:Root_admitted.t list
+    -> (Admitted_views.t, Agent_protocol.Error.t) result
+end
+
+module Descendant_host : sig
+  (** Actual Factory adapter captured under original Runtime_source_owner.
+      Calls occur ONLY in existing child outer driver, never the Actor mailbox or ownership-state/Registry
+      lock. Driver already owns exact set before first callback await. Child
+      producer/writer/suffix and truthful post-ACK release remain Actor-owned. *)
+  type t =
+    { prepare :
+        Descendant_admission.Preparation.t
+        -> Descendant_admission.Reservation_set.t
+        -> (Descendant_admission.Before_writer.t, Agent_protocol.Error.t) result
+    ; close :
+        Descendant_admission.Reservation_set.t
+        -> Descendant_admission.Closed_before_writer.t
+        -> (unit, Agent_protocol.Error.t) result
+    ; confirm :
+        Descendant_admission.Acknowledgement.t
+        -> (Descendant_admission.Confirmation.t, Agent_protocol.Error.t) result
+    ; refresh_admitted :
+        Descendant_admission.Acknowledgement.t
+        -> Descendant_admission.Confirmation.t
+        -> (Descendant_admission.Admitted_views.t, Agent_protocol.Error.t) result
+    }
+
+  module Binding : sig
+    (** Actual Factory source lifetime, with no execution permission or decoder. *)
+    type t
+
+    (** Pure same-domain retirement of this exact physical source. Idempotent;
+        cannot clear a newer binding. Original native Plan retains its SAME host
+        for factual ACK confirmation/close after retirement. No seal or refund. *)
+    val close : t -> unit
+  end
+end
+
+(** Finite actual Factory install before build/Init, including ordinary Ready
+    reload without a Runtime_construction. Requires SAME issuer/domain/controller
+    and physical selected State. Replaces only fresh host use; no Store/RPC or
+    host callback runs in the Actor mailbox. Producer retains SAME binding/host
+    before any root wait. Native original source/permission and policy checks
+    remain independent; canonical/episode progress alone is not retirement.
+    Retains the SAME actual delegated ancestry guard for historical own-origin
+    classification outside the mailbox; omission alone never means Unrelated. *)
+val install_descendant_host
+  :  t
+  -> source_owner:Runtime_source_owner.t
+  -> expected:Session_state.t
+  -> check_ancestry:
+       (unit -> (Delegation_authority.Checked_ancestry.t, Agent_protocol.Error.t) result)
+         option
+  -> host:Descendant_host.t
+  -> (Descendant_host.Binding.t, Agent_protocol.Error.t) result

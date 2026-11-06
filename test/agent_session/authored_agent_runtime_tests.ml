@@ -210,7 +210,7 @@ let on_event ctx state event = match event with
                   { name = "researcher"
                   ; source_sha256 = Source.fingerprint prepared.source
                   }
-            ; goal_origin = None
+            ; goal_origin = Some Agent_store.Delegation_goal_origin.unrelated
             ; captured_recurrence = None
             ; authority_sha256 = Authority.fingerprint parent |> protocol_ok
             ; capability_pins =
@@ -478,6 +478,9 @@ let on_event ctx state event = match event with
                 ; reserved_history_through = Int64.of_int runtime.reserved_history_through
                 }
             }
+          in
+          let initial =
+            initialize_new_unrelated_child initial ~server_id:(Store.server_id store)
           in
           let handle =
             Store.create_session

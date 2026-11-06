@@ -707,6 +707,84 @@ let%test_unit "descendant roots require their actual ordered Create and retained
              ~limits:document_limits
              (carried previous)))
     in
+    (* Historical omission may bootstrap exactly one new Unrelated child, through
+       the same finite native/document replay edge. It cannot grant an ordinary
+       replacement or Children leaf permission to invent that component. *)
+    let historical = { initial with goal_descendants = None } in
+    let reference =
+      Store.Delegation_store.reference_of_jsonaf
+        (`Object
+            [ ( "key"
+              , `Object
+                  [ ( "parent_session_id"
+                    , P.Id.Session.to_json historical.identity.session_id )
+                  ; ( "parent_generation"
+                    , `Number (Int.to_string historical.identity.generation) )
+                  ; "principal_id", P.Id.Principal.to_json principal_id
+                  ; "idempotency_key", `String "first-unrelated-bootstrap"
+                  ] )
+            ; "child_session_id", `String "ses_first_unrelated_bootstrap"
+            ; "revision_id", `String "prv_first_unrelated_bootstrap"
+            ; "request_sha256", `String (String.make 64 'a')
+            ; "admission_sha256", `String (String.make 64 'b')
+            ])
+      |> Result.map_error ~f:Store.Store_error.to_protocol_error
+      |> protocol_ok
+    in
+    let first_child =
+      Descendants.register_first_unrelated_child
+        ~host_profile:goal_descendant_profile
+        ~session
+        ~reference
+        ~children:historical.child_contributions
+        ~ledger:historical.inference_ledger
+      |> protocol_ok
+    in
+    let delta = A.Session_delta.Goal_descendants_changed first_child in
+    let transition =
+      A.Session_transition.apply ~now:timestamp historical ~delta ~payloads:[]
+      |> protocol_ok
+    in
+    let admitted =
+      A.Session_document_transition.admit_encoded
+        (carried historical)
+        ~delta
+        ~next:transition.state
+        ~limits:document_limits
+      |> document_ok
+      |> SD.Admitted.state_document
+    in
+    let encoded =
+      A.Session_delta_document.create
+        delta
+        ~limits:document_limits
+        ~state_document:SD.authored
+      |> document_ok
+    in
+    let replayed =
+      A.Session_delta_document.apply encoded ~limits:document_limits (carried historical)
+      |> document_ok
+    in
+    assert (
+      D.Json.equal
+        (descendants_json (SD.value admitted))
+        (descendants_json (SD.value replayed)));
+    assert (D.Json.equal (ledger_json historical) (ledger_json (SD.value replayed)));
+    assert (
+      Option.is_none
+        (Descendants.origin (Option.value_exn (SD.value replayed).goal_descendants)));
+    rejected historical (Created transition.state);
+    rejected
+      historical
+      (Child_contributions_changed (Option.value_exn transition.state.child_contributions));
+    let forged = SD.with_value (carried historical) transition.state in
+    assert (Result.is_error (SD.encode forged ~limits:document_limits));
+    assert (
+      Result.is_error
+        (SD.adopt
+           (carried historical)
+           ~limits:document_limits
+           (SD.authored transition.state)));
     (* Equal held Goal/account DATA are not proof of the actual creation edge.
        Created replacement and duplicate catalog/account leaves cannot supply it. *)
     rejected old_held update;

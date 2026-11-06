@@ -116,9 +116,17 @@ let%expect_test
            stopped_state.conversation.canonical_history);
        let restored = restore_state stopped_state |> store_ok in
        assert_same_session_snapshot stopped_state restored;
-       assert (
-         Result.is_error (State.upgrade_schema { restored with schema_version = 16 }));
-       let legacy = { restored with schema_version = 16; managed_stops = [] } in
+       (* Model the actual older shape, before child accounting was introduced. *)
+       let legacy =
+         { restored with
+           schema_version = 16
+         ; goal_descendants = None
+         ; delegated_usage = None
+         ; child_contributions = None
+         }
+       in
+       assert (Result.is_error (State.upgrade_schema legacy));
+       let legacy = { legacy with managed_stops = [] } in
        [%test_eq: int]
          State.current_schema_version
          (State.upgrade_schema legacy |> protocol_ok).schema_version;

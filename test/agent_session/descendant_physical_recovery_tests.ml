@@ -212,28 +212,15 @@ let record previous pending =
   prepared
 ;;
 
-let snapshot child scope =
-  let base = A.Child_accounting.snapshot child |> protocol_ok |> Option.value_exn in
-  let included = GD.local_included (gd child) |> List.hd_exn in
-  let scoped =
-    S.Goal_scope.create
-      ~scope
-      ~own:(S.own base)
-      ~descendants:(S.descendants base)
-      ~included:(Some included)
-    |> protocol_ok
-  in
-  S.create_with_scopes
-    ~reference:(S.reference base)
-    ~revision:(S.revision base)
-    ~own:(S.own base)
-    ~descendants:(S.descendants base)
-    ~canonical_coverage:
-      (P.Inference_query.Summary.coverage
-         (L.summary child.A.Session_state.inference_ledger))
-    ~origin:(Option.value_exn (GD.origin (gd child)))
-    ~goal_scopes:[ scoped ]
-  |> protocol_ok
+let snapshot child =
+  let snapshot = A.Child_accounting.snapshot child |> protocol_ok |> Option.value_exn in
+  [%test_eq: int64] 1L (S.Coverage.unobserved_children (S.coverage snapshot));
+  List.iter
+    (S.goal_scopes snapshot |> Option.value_exn)
+    ~f:(fun scoped ->
+      assert (S.Partition.equal (S.Goal_scope.own scoped) (S.own snapshot));
+      [%test_eq: int64] 0L (S.Coverage.unobserved_children (S.Goal_scope.coverage scoped)));
+  snapshot
 ;;
 
 let import root snapshot =
@@ -280,6 +267,105 @@ let assert_same_domain expected actual =
     L.to_document state.A.Session_state.inference_ledger |> ledger |> D.Document.json
   in
   assert (D.Json.equal (ledger expected) (ledger actual))
+;;
+
+(* Actual persisted State projections below exercise the local policy adapter.
+   Changing a budget in a temporary command candidate grants no runtime permit
+   and does not add writes to the physical recovery scenario. *)
+let policy_candidate state ~attempts ~tokens =
+  let goal = Goal_run_tests.current_goal state in
+  let budget =
+    P.Goal.Budget.create
+      ~admitted_turns:(Some 1L)
+      ~admitted_attempts:attempts
+      ~observed_tokens:tokens
+      ~deadline:None
+    |> protocol_ok
+  in
+  let candidate, _ =
+    Bootstrap.project
+      state
+      ~session:(P.Goal.session goal)
+      ~key:"local-policy-probe"
+      (Change_budget (P.Goal.id goal, budget))
+  in
+  A.Session_state.validate candidate |> protocol_ok;
+  candidate
+;;
+
+let local_admission state dimension =
+  let goal = Goal_run_tests.current_goal state in
+  let episode = P.Goal.episode goal |> Option.value_exn in
+  let run =
+    A.Run_state.runs (Option.value_exn state.A.Session_state.run_state)
+    |> List.find ~f:(P.Goal_episode.matches_run episode)
+    |> Option.value_exn
+  in
+  let attribution = A.Goal_work_attribution.of_run state run |> protocol_ok in
+  let before =
+    A.Goal_catalog.to_jsonaf (Option.value_exn state.goal_catalog) |> protocol_ok
+  in
+  let decision =
+    A.Goal_charge_admission.prepare state ~attribution ~now:timestamp ~dimension
+    |> protocol_ok
+  in
+  let after =
+    A.Goal_catalog.to_jsonaf (Option.value_exn state.goal_catalog) |> protocol_ok
+  in
+  assert (D.Json.equal before after);
+  assert (P.Goal.State.equal (P.Goal.state goal) (Open Enabled));
+  decision
+;;
+
+let assert_pending_local_policy state known =
+  let candidate =
+    policy_candidate state ~attempts:(Some (Int64.succ known)) ~tokens:None
+  in
+  (match local_admission candidate Attempt with
+   | Deferred { goal_id; reason = Reserved } ->
+     assert (P.Id.Goal.equal goal_id Goal_run_tests.goal_id)
+   | _ -> failwith "persisted descendant pending did not defer local admission");
+  let unlimited = policy_candidate state ~attempts:None ~tokens:None in
+  match local_admission unlimited Attempt with
+  | Ready _ -> ()
+  | _ -> failwith "unlimited local count was blocked by pending/unknown coverage"
+;;
+
+let assert_committed_local_policy state known =
+  let candidate = policy_candidate state ~attempts:(Some known) ~tokens:None in
+  (match local_admission candidate Attempt with
+   | Held { goal_id; reason = Budget_gate Admitted_attempts; delta = Some _ } ->
+     assert (P.Id.Goal.equal goal_id Goal_run_tests.goal_id)
+   | _ -> failwith "accepted descendant count did not hold next local admission");
+  (match local_admission candidate Host_turn with
+   | Ready _ -> ()
+   | _ -> failwith "descendant Attempt incorrectly filled local Turn ceiling");
+  let tokens =
+    P.Goal.Budget.Token_stop.create ~component:Input ~ceiling:10L |> protocol_ok
+  in
+  let candidate = policy_candidate state ~attempts:None ~tokens:(Some tokens) in
+  let goal = Goal_run_tests.current_goal candidate in
+  let account =
+    A.Goal_accounts.find (Option.value_exn candidate.goal_accounts) (P.Goal.id goal)
+    |> Option.value_exn
+    |> fun account ->
+    A.Goal_accounting_document.resolve account ~goal ~ledger:candidate.inference_ledger
+    |> protocol_ok
+  in
+  [%test_eq: int64] 0L (A.Goal_accounting.admitted_attempts account);
+  let activation =
+    A.Goal_charge_admission.check_activation
+      candidate
+      ~goal
+      ~accounting:account
+      ~now:timestamp
+    |> protocol_ok
+  in
+  match local_admission candidate Attempt, activation with
+  | Ready _, Allow when Int64.equal known 1L -> ()
+  | Held { reason = Budget_gate Observed_tokens; _ }, Hold (Budget_gate Observed_tokens)
+    when Int64.equal known 2L -> ()
+  | _ -> failwith "scoped child observations did not govern local fresh/activation policy"
 ;;
 
 let%expect_test
@@ -402,6 +488,43 @@ let%expect_test
           in
           let root_document = decorated root in
           let child = Depth.new_child_state ~parent:root ~scope ~own_reference in
+          (* An unobserved unrelated grandchild affects whole-child coverage,
+             but must never taint the inherited Goal's projection. *)
+          let unrelated =
+            Depth.reference
+              ~parent_session_id:child.identity.session_id
+              ~parent_generation:child.identity.generation
+              ~child_session_id:
+                (P.Id.Session.of_string "ses_unrelated_grandchild" |> protocol_ok)
+              ~name:"unrelated-grandchild"
+          in
+          let register =
+            GD.register_child
+              (gd child)
+              ~children:(children child)
+              ~reference:unrelated
+              ~origin:O.unrelated
+            |> protocol_ok
+          in
+          let child = (transition child (Goal_descendants_changed register)).state in
+          (* This is the unpublished model supplied to the initial journal,
+             not a transaction already appended to that journal. *)
+          let child =
+            { child with
+              counters =
+                { child.counters with transaction_sequence = 0L; event_sequence = 0L }
+            }
+          in
+          ignore (snapshot child : S.t);
+          let retained =
+            A.Child_accounting.register
+              root
+              ~reference:own_reference
+              ~max_children:1
+              ~max_encoded_bytes:1
+            |> protocol_ok
+          in
+          assert (D.Json.equal (C.to_jsonaf retained |> protocol_ok) (children_json root));
           let child_document = decorated child in
           let root_initial = Persistence.Restored.of_state_document root_document in
           let child_initial = Persistence.Restored.of_state_document child_document in
@@ -487,6 +610,7 @@ let%expect_test
                 reserve (stored root_writer) scope (occurrence first_child 1L)
               in
               commit root_writer reserved;
+              assert_pending_local_policy (stored root_writer) 0L;
               Eio.Switch.run (fun sw ->
                 let journal = Bootstrap.journal env child_directory ~existing:false in
                 Bootstrap.with_writer
@@ -516,7 +640,7 @@ let%expect_test
               let child = Persistence.Restored.state child_recovered.state in
               assert_same_domain (Option.value_exn !expected_child) child;
               let before = stored root_writer in
-              let prepared = import before (snapshot child scope) in
+              let prepared = import before (snapshot child) in
               let before_hash = Persistence.transaction_hash root_writer in
               let journal_payloads () =
                 Store.Journal.scan journal
@@ -539,6 +663,7 @@ let%expect_test
                | Ok () -> failwith "paired import passed the injected persistence failure");
               assert (List.equal String.equal before_payloads (journal_payloads ()));
               assert_same_domain before (stored root_writer);
+              assert_pending_local_policy (stored root_writer) 0L;
               assert (
                 Option.equal
                   String.equal
@@ -555,6 +680,7 @@ let%expect_test
               reject := false;
               commit root_writer prepared;
               assert_confirmed (stored root_writer) own_reference 1L;
+              assert_committed_local_policy (stored root_writer) 1L;
               expected_root := Some (stored root_writer);
               checkpoint_at root_writer root_snapshots));
           Eio.Switch.run (fun sw ->
@@ -570,6 +696,9 @@ let%expect_test
               ~next:3L
               ~previous_hash:recovered.latest_transaction_hash
               (fun writer ->
+                 assert_committed_local_policy
+                   (Persistence.Restored.state recovered.state)
+                   1L;
                  let root_writer =
                    make
                      writer
@@ -589,6 +718,7 @@ let%expect_test
                    reserve (stored root_writer) scope (occurrence child 2L)
                  in
                  commit root_writer reserved;
+                 assert_pending_local_policy (stored root_writer) 1L;
                  Eio.Switch.run (fun sw ->
                    let journal = Bootstrap.journal env child_directory ~existing:true in
                    Bootstrap.with_writer
@@ -613,7 +743,7 @@ let%expect_test
                              pending);
                         expected_child := Some (stored child_writer)));
                  let child = Option.value_exn !expected_child in
-                 commit root_writer (import (stored root_writer) (snapshot child scope));
+                 commit root_writer (import (stored root_writer) (snapshot child));
                  assert_confirmed (stored root_writer) own_reference 2L;
                  expected_root := Some (stored root_writer)));
           let root =
@@ -637,6 +767,7 @@ let%expect_test
           assert_same_domain (Option.value_exn !expected_root) root;
           assert_same_domain (Option.value_exn !expected_child) child;
           assert_confirmed root own_reference 2L;
+          assert_committed_local_policy root 2L;
           List.iter [ root; child ] ~f:(fun state ->
             assert (
               D.Json.equal (member (gd_json state) "future_physical_descendants") sentinel);

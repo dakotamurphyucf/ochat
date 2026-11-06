@@ -1267,6 +1267,15 @@ module Runtime_construction = struct
       Delegated_load.Preparation.close load.preparation
   ;;
 
+  let admission_retained = function
+    | Initial continuation ->
+      let activation = continuation.Admitted_activation.Continuation.target in
+      if not (Int.equal activation.domain (Stdlib.Domain.self () :> int))
+      then invalid_arg "held admission belongs to another Eio domain";
+      Run_preparation.Admission_exit.is_retained activation.preparation
+    | Existing_goal _ | Delegated_load _ -> false
+  ;;
+
   let handoff_acknowledged = function
     | Delegated_load _ -> false
     | Initial continuation ->
@@ -1420,6 +1429,8 @@ module Held_input_scope = struct
   type phase =
     | Parsing
     | Parsed_ready of Runtime_input_preparation.Prepared_input.t
+    | Admission_pending of
+        Runtime_input_preparation.Prepared_input.t * Run_preparation.Admission_exit.t
     | Consumed of Held_operation.Proof.t
     | Root_attempt_unconfirmed
     | Closed
@@ -1449,7 +1460,11 @@ module Held_input_scope = struct
     let%bind () =
       match t.phase with
       | Parsing -> Ok ()
-      | Parsed_ready _ | Consumed _ | Root_attempt_unconfirmed | Closed ->
+      | Parsed_ready _
+      | Admission_pending _
+      | Consumed _
+      | Root_attempt_unconfirmed
+      | Closed ->
         Error
           (Agent_protocol.Error.create
              Conflict
@@ -1601,16 +1616,69 @@ let retire_agent_admission = Execution_custody.Admission.retire
 let check_agent_admission = Execution_custody.Admission.check
 let transfer_agent_admission = Execution_custody.Admission.transfer
 
+module Operation_descendant_guard = struct
+  type admitted =
+    { submission : Inference_runtime.Submission_guard.t
+    ; check_current : unit -> (unit, Agent_protocol.Error.t) result
+    }
+
+  type phase =
+    | Unconfirmed
+    | Admitted of admitted
+    | Retired
+
+  type t = { mutable phase : phase }
+
+  let conflict message =
+    Error (Agent_protocol.Error.create Conflict ~message ~retryable:false ())
+  ;;
+
+  let create_unconfirmed () = { phase = Unconfirmed }
+  let retire t = t.phase <- Retired
+
+  let admit t admitted =
+    match t.phase with
+    | Unconfirmed ->
+      let%map.Result () = admitted.check_current () in
+      t.phase <- Admitted admitted
+    | Admitted _ | Retired -> conflict "inherited operation guard already consumed"
+  ;;
+
+  let check_current t =
+    match t.phase with
+    | Unconfirmed -> conflict "inherited operation is not root-confirmed"
+    | Retired -> conflict "inherited operation guard is retired"
+    | Admitted admitted -> admitted.check_current ()
+  ;;
+
+  let refresh t =
+    match t.phase with
+    | Unconfirmed -> conflict "inherited operation is not root-confirmed"
+    | Retired -> conflict "inherited operation guard is retired"
+    | Admitted admitted ->
+      (try
+         Inference_runtime.Submission_guard.check admitted.submission;
+         match t.phase with
+         | Admitted current when phys_equal current admitted -> admitted.check_current ()
+         | Unconfirmed | Admitted _ | Retired ->
+           conflict "inherited operation guard changed during refresh"
+       with
+       | Inference_allocation.Rejected failure -> Error failure)
+  ;;
+end
+
 module Operation_owner = struct
   type t =
     { operation_id : Agent_protocol.Id.Operation.t
     ; admission : agent_admission
     ; held : Held_operation.t option
+    ; descendant_guard : Operation_descendant_guard.t option
     }
 
   let retire t =
     retire_agent_admission t.admission;
-    Option.iter t.held ~f:Held_operation.retire
+    Option.iter t.held ~f:Held_operation.retire;
+    Option.iter t.descendant_guard ~f:Operation_descendant_guard.retire
   ;;
 end
 
@@ -2917,7 +2985,6 @@ module Runtime_construction_request = struct
         * Chat_response.Moderation.Event.t
         -> queued_event_borrow option t
     | Finish_resume : Goal_continuation.runtime_scope -> Goal_callback_control.t option t
-    | Continue_goal : Goal_continuation.t -> Goal_resume_result.t t
     | Resource :
         Runtime_construction.t * Agent_protocol.Job.launch_owner
         -> Runtime_construction_resource.t t
@@ -2948,9 +3015,6 @@ module Held_startup_request = struct
         Admitted_activation.Continuation.t * Agent_protocol.Job.launch_owner
         -> Held_authored_resource.t t
     | Begin_input : Admitted_activation.Continuation.t -> Held_input_scope.t t
-    | Submit_input :
-        Held_input_scope.t * Runtime_input_preparation.Prepared_input.t
-        -> submission t
     | Ready_input :
         Held_input_scope.t * Runtime_input_preparation.Prepared_input.t
         -> unit t
@@ -3039,6 +3103,121 @@ end
 
 (* Factual association witnesses retain actual process-local owners; decoded
    identifiers cannot construct them. *)
+module Child_accounting_basis = Goal_descendant_admission_custody.Child_accounting_basis
+
+module Child_origin = struct
+  type preparation =
+    { issuing_actor : unit ref
+    ; domain : int
+    ; session : Agent_protocol.Session_ref.t
+    ; generation : int
+    ; principal_id : Agent_protocol.Id.Principal.t
+    ; inherited : Agent_store.Delegation_goal_origin.t
+    ; attribution : Goal_work_attribution.t option
+    ; max_scopes : int
+    ; capture_current : unit ref -> (captured_refresh, Agent_protocol.Error.t) result
+    ; mutable refresh_current : unit -> (unit, Agent_protocol.Error.t) result
+    ; mutable refresh_attempt : unit ref option
+    ; mutable captured : captured_refresh option
+    ; mutable observed : observed_refresh option
+    ; mutable bound : bound option
+    }
+
+  and bound =
+    { preparation : preparation
+    ; key : Agent_store.Delegation_store.Key.t
+    ; child_session_id : Agent_protocol.Id.Session.t
+    ; transaction_id : Agent_protocol.Id.Transaction.t
+    ; origin : Agent_store.Delegation_goal_origin.t
+    }
+
+  and captured_refresh =
+    { preparation : preparation
+    ; attempt : unit ref
+    ; observe : unit -> (observed_refresh, Agent_protocol.Error.t) result
+    }
+
+  and observed_refresh =
+    { captured : captured_refresh
+    ; check_current : unit -> (unit, Agent_protocol.Error.t) result
+    }
+
+  module Reservation = struct
+    type t =
+      { issuing_actor : unit ref
+      ; domain : int
+      ; controller : Recurrence_controller.t
+      ; source_owner : Runtime_source_owner.t
+      ; reference : Agent_store.Delegation_store.Reference.t
+      ; origin : Agent_store.Delegation_goal_origin.t
+      ; bound : bound option
+      }
+  end
+
+  module Native_registration = struct
+    type t =
+      { execution : invocation_execution
+      ; preparation : Run_preparation.t option
+      ; check_current : unit -> (unit, Agent_protocol.Error.t) result
+      }
+  end
+
+  module Captured_reservation = struct
+    type t =
+      { basis : Child_accounting_basis.t
+      ; reference : Agent_store.Delegation_store.Reference.t
+      ; bound : bound option
+      ; native_callback : Native_tool_invocation.borrowed option
+      ; execution : invocation_execution option
+      }
+  end
+
+  module Observed_reservation = struct
+    type t =
+      { captured : Captured_reservation.t
+      ; record : Agent_store.Delegation_store.record
+      ; current : Recurrence_controller.observation
+      ; native_registration : Native_registration.t option
+      }
+  end
+
+  module Preparation = struct
+    type t = preparation
+
+    let check_current t =
+      match t.observed with
+      | Some observed -> observed.check_current ()
+      | None ->
+        Error
+          (Agent_protocol.Error.create
+             Conflict
+             ~message:"child origin has no consumed current observation"
+             ~retryable:false
+             ())
+    ;;
+
+    let refresh_current t = t.refresh_current ()
+  end
+
+  module Bound = struct
+    type t = bound
+
+    let origin (t : t) = t.origin
+    let check_current (t : t) = Preparation.check_current t.preparation
+    let refresh_current (t : t) = Preparation.refresh_current t.preparation
+  end
+
+  module Captured_refresh = struct
+    type t = captured_refresh
+
+    let observe t = t.observe ()
+  end
+
+  module Observed_refresh = struct
+    type t = observed_refresh
+  end
+end
+
 module Child_installation = struct
   type t =
     { controller : Recurrence_controller.t
@@ -3051,17 +3230,676 @@ end
 (* Snapshot contents are
    immutable historical DATA. Refresh returns a negative-only final read guard;
    it cannot issue source/execution permission or replace snapshot contents. *)
-module Child_usage_observation = struct
-  type t =
-    { controller : Recurrence_controller.t
-    ; source_owner : Runtime_source_owner.Identity.t
-    ; reference : Agent_store.Delegation_store.Reference.t
-    ; snapshot : Child_usage_snapshot.t option
-    ; refresh_read :
-        unit
-        -> (unit -> (unit, Agent_protocol.Error.t) result, Agent_protocol.Error.t) result
-    }
+module Child_usage_observation = Goal_descendant_admission_custody.Child_usage_observation
+
+(* Native child admission custody; construction stays inside Session_actor. *)
+module Descendant_preparation = Goal_descendant_admission_custody.Descendant_preparation
+
+(* Native custody shared by the child canonical owner and actual root handlers.
+   Only child/factual canonical owners construct ACK/import objects. *)
+module Descendant_admission_data =
+  Goal_descendant_admission_custody.Descendant_admission_data
+
+module Descendant_host_data = Goal_descendant_admission_custody.Descendant_host_data
+
+module Descendant_origin_observation = struct
+  module Captured = struct
+    type t =
+      { basis : Child_accounting_basis.t
+      ; binding : Descendant_host_data.Binding.t
+      }
+  end
+
+  module Observed = struct
+    type t =
+      { captured : Captured.t
+      ; ancestry : Delegation_authority.Checked_ancestry.t
+      ; record : Agent_store.Delegation_store.record
+      ; current : Recurrence_controller.observation
+      }
+  end
 end
+
+module Descendant_admission_slot =
+  Goal_descendant_admission_custody.Descendant_admission_slot
+
+module Inherited_turn = struct
+  module Cancellation = struct
+    type t =
+      | Not_requested
+      | Requested of Agent_protocol.Error.t
+  end
+
+  module Cleanup = struct
+    type progress =
+      | Needs_both
+      | Terminal_done
+      | Confirmed of Descendant_admission_data.Confirmation.t
+      | Done
+
+    type owner =
+      | Idle
+      | Running of (unit, Agent_protocol.Error.t) result Eio.Promise.t
+  end
+
+  module Run_reply = struct
+    type _ t =
+      | Receipt : Agent_protocol.Run_receipt.t t
+      | Prepared_outcome : Run_admission_outcome.t t
+
+    let of_receipt : type outcome. outcome t -> Agent_protocol.Run_receipt.t -> outcome =
+      fun reply receipt ->
+      match reply with
+      | Receipt -> receipt
+      | Prepared_outcome -> Run_admission_outcome.Admitted receipt
+    ;;
+  end
+
+  module Managed_origin = struct
+    type t =
+      | Native of Native_tool_invocation.borrowed
+      | Trusted_host
+  end
+
+  module History_input = struct
+    module Edit = struct
+      type t =
+        { request : Agent_protocol.History_edit.Edit_request.t
+        ; prepared : History_edit_transition.t
+        ; admission : Turn_admission.t
+        ; worker : Operation_worker.t
+        }
+    end
+
+    module Continue = struct
+      type t =
+        { request : Agent_protocol.History_edit.Continue_request.t
+        ; recovery : History_continuation.t
+        ; admission : Turn_admission.t
+        ; worker : Operation_worker.t
+        }
+    end
+
+    type _ t =
+      | Edit : Edit.t -> History_edit_result.t t
+      | Continue : Continue.t -> History_continuation_result.t t
+
+    let admission : type outcome. outcome t -> Turn_admission.t = function
+      | Edit input -> input.admission
+      | Continue input -> input.admission
+    ;;
+
+    let worker : type outcome. outcome t -> Operation_worker.t = function
+      | Edit input -> input.worker
+      | Continue input -> input.worker
+    ;;
+
+    let delta : type outcome. outcome t -> Session_delta.t = function
+      | Edit input -> History_edit_transition.delta input.prepared
+      | Continue input ->
+        Session_delta.Batch
+          (History_continuation.deltas input.recovery
+           @ Turn_admission.deltas input.admission)
+    ;;
+
+    let payloads : type outcome. outcome t -> Agent_protocol.Event.Durable.Payload.t list =
+      function
+      | Edit input -> History_edit_transition.payloads input.prepared
+      | Continue input ->
+        History_continuation.payloads input.recovery
+        @ Turn_admission.payloads input.admission
+    ;;
+
+    let edit_result prepared ~session =
+      let edited = History_edit_transition.edited_entry prepared in
+      ({ session
+       ; history_id = edited.id
+       ; content_revision = edited.content_revision
+       ; archived_revision = History_edit_transition.archived_revision prepared
+       ; continuation = History_edit_transition.continuation prepared
+       }
+       : History_edit_result.t)
+    ;;
+
+    let result : type outcome. outcome t -> session:Agent_protocol.Session.t -> outcome =
+      fun input ~session ->
+      match input with
+      | Edit input -> edit_result input.prepared ~session
+      | Continue input ->
+        ({ session
+         ; continuation =
+             Agent_protocol.History_edit.Continuation.Started
+               (Turn_admission.operation input.admission).id
+         }
+         : History_continuation_result.t)
+    ;;
+  end
+
+  module Held_input_selection = struct
+    type t =
+      { scope : Held_input_scope.t
+      ; input : Runtime_input_preparation.Prepared_input.t
+      ; worker : Operation_worker.t
+      ; run : Agent_protocol.Run.t
+      ; binding : Run_authorities.binding
+      ; original : Operator_authorization.t
+      }
+  end
+
+  module Goal_resume_selection = struct
+    type t =
+      { scope : Goal_continuation.runtime_scope
+      ; run : Agent_protocol.Run.t
+      ; recovery : History_continuation.t
+      ; turn : Turn_admission.t
+      ; next : Run_state.t
+      ; original : Operator_authorization.t
+      }
+  end
+
+  module Source = struct
+    type message =
+      { attachment_id : Agent_protocol.Id.Attachment.t
+      ; submitting_principal : Agent_protocol.Id.Principal.t
+      ; operation : Agent_protocol.Operation.t
+      ; custody : agent_custody option
+      ; entry : Agent_protocol.History.entry
+      ; original_actor : Operator_authorization.t option
+      ; accepted : bool
+      }
+
+    type managed =
+      { origin : Managed_origin.t
+      ; receipt : Managed_submission.t
+      ; operation : Agent_protocol.Operation.t
+      ; custody : agent_custody option
+      ; entry : Agent_protocol.History.entry
+      }
+
+    type run_user =
+      { scope : Run_admission.Scope.t
+      ; request : Run_admission_request.t
+      ; admission : Run_admission.t
+      ; previous_authorities : Run_authorities.t
+      ; authorities : Run_authorities.t
+      ; binding : Run_authorities.binding
+      ; preparation : Run_preparation.t option
+      ; preparation_exit : Run_preparation.Admission_exit.t option
+      ; operation : Agent_protocol.Operation.t
+      ; custody : agent_custody option
+      ; entry : Agent_protocol.History.entry
+      }
+
+    type held_input =
+      { selection : Held_input_selection.t
+      ; pending : Pending_turn.t
+      ; handoff : Run_input_handoff.t
+      ; operation : Agent_protocol.Operation.t
+      ; custody : agent_custody option
+      ; preparation_exit : Run_preparation.Admission_exit.t
+      }
+
+    type goal_resume = { selection : Goal_resume_selection.t }
+
+    type 'result history =
+      { input : 'result History_input.t
+      ; custody : agent_custody option
+      }
+
+    type _ t =
+      | Message : message -> submission t
+      | Managed : managed -> Managed_submission.t t
+      | Run_user : run_user * 'result Run_reply.t -> 'result t
+      | History : 'result history -> 'result t
+      | Held_input : held_input -> submission t
+      | Goal_resume : goal_resume -> Goal_resume_result.t t
+
+    let operation : type result. result t -> Agent_protocol.Operation.t = function
+      | Message source -> source.operation
+      | Held_input source -> source.operation
+      | Goal_resume source -> Turn_admission.operation source.selection.turn
+      | Managed source -> source.operation
+      | Run_user (source, _) -> source.operation
+      | History source -> Turn_admission.operation (History_input.admission source.input)
+    ;;
+
+    let custody : type result. result t -> agent_custody option = function
+      | Message source -> source.custody
+      | Held_input source -> source.custody
+      | Goal_resume _ -> None
+      | Managed source -> source.custody
+      | Run_user (source, _) -> source.custody
+      | History source -> source.custody
+    ;;
+
+    let preparation : type result. result t -> Run_preparation.t option = function
+      | Message _ | Managed _ | History _ | Goal_resume _ -> None
+      | Run_user (source, _) -> source.preparation
+      | Held_input source ->
+        Some
+          (Admitted_activation.Continuation.target source.selection.scope.continuation)
+            .preparation
+    ;;
+
+    let run : type result. result t -> run_user option = function
+      | Message _ | Managed _ | History _ | Goal_resume _ -> None
+      | Run_user (source, _) -> Some source
+      | Held_input _ -> None
+    ;;
+  end
+
+  type 'result t =
+    { slot : Descendant_admission_slot.t
+    ; before : Session_state.t
+    ; commit_attempted : bool ref
+    ; delta : Session_delta.t
+    ; payloads : Agent_protocol.Event.Durable.Payload.t list
+    ; completion_sample : Recurrence_runtime.Completion.sample option
+    ; remaining_audit : Document_schema.Document.t option
+    ; source : 'result Source.t
+    ; mutable phase : 'result phase
+    ; mutable cancellation : Cancellation.t
+    }
+
+  and 'result phase =
+    | Pending
+    | Writer_prepared of 'result acknowledged
+    | Acknowledged of 'result acknowledged
+    | Closed
+
+  and 'result acknowledged =
+    { plan : 'result t
+    ; native : Descendant_admission_data.Acknowledgement.t
+    ; stage : 'result Source.t Turn_admission_staging.t
+    ; owner : Operation_owner.t
+    ; guard : Operation_descendant_guard.t
+    ; mutable consumed : bool
+    ; mutable cleanup_progress : Cleanup.progress
+    ; mutable cleanup_owner : Cleanup.owner
+    }
+
+  let request_cancellation t ~failure =
+    match t.cancellation with
+    | Not_requested -> t.cancellation <- Requested failure
+    | Requested _ -> ()
+  ;;
+
+  module Acknowledged = struct
+    type 'result t = 'result acknowledged
+
+    let acknowledgement t = t.native
+  end
+
+  (* Owns the actual staged native owner even after an uncertain writer has
+     returned and its caller unwinds. This is not a positive canonical ACK. *)
+  type prepared = Prepared : 'outcome acknowledged -> prepared
+  type cleanup = Pack : 'outcome Acknowledged.t -> cleanup
+
+  module Capture = struct
+    type 'outcome plan = 'outcome t
+
+    type 'outcome phase =
+      | Waiting
+      | Captured of 'outcome plan
+      | Transferred
+      | Cancelled
+
+    type 'outcome t = { mutable phase : 'outcome phase }
+
+    let create () = { phase = Waiting }
+
+    let conflict message =
+      Error (Agent_protocol.Error.create Conflict ~message ~retryable:false ())
+    ;;
+
+    let check_waiting t =
+      match t.phase with
+      | Waiting -> Ok ()
+      | Captured _ | Transferred | Cancelled ->
+        conflict "message capture is no longer waiting"
+    ;;
+
+    let publish t plan =
+      let%map.Result () = check_waiting t in
+      t.phase <- Captured plan
+    ;;
+
+    let transfer t plan =
+      match t.phase with
+      | Captured actual when phys_equal actual plan ->
+        t.phase <- Transferred;
+        Ok ()
+      | Waiting | Captured _ | Transferred | Cancelled ->
+        conflict "message capture has another native pending owner"
+    ;;
+
+    let cancel t =
+      let pending =
+        match t.phase with
+        | Captured plan -> Some plan
+        | Waiting | Transferred | Cancelled -> None
+      in
+      (match t.phase with
+       | Transferred -> ()
+       | Waiting | Captured _ | Cancelled -> t.phase <- Cancelled);
+      pending
+    ;;
+  end
+
+  module Origin_requirement = struct
+    type t =
+      | Ordinary
+      | Scoped
+      | Need_private_origin
+  end
+
+  module Input = struct
+    type message =
+      { original_actor : Operator_authorization.t option
+      ; attachment_id : Agent_protocol.Id.Attachment.t
+      ; submitting_principal : Agent_protocol.Id.Principal.t
+      ; timing : Agent_protocol.Pending_input.Timing.t
+      ; entry : Agent_protocol.History.entry
+      }
+
+    type managed =
+      { origin : Managed_origin.t
+      ; reference : Agent_store.Delegation_store.Reference.t
+      ; key : Agent_protocol.Idempotency_key.t
+      ; request_sha256 : string
+      ; generation : int
+      ; max_receipts : int option
+      ; entry : Agent_protocol.History.entry
+      }
+
+    type run_user =
+      { scope : Run_admission.Scope.t
+      ; request : Run_admission_request.t
+      ; session : Agent_protocol.Session_ref.t
+      ; request_sha256 : string
+      ; preparation : Run_preparation.t option
+      ; attempted : bool ref
+      ; entry : Agent_protocol.History.entry option
+      }
+
+    type _ t =
+      | Message : message -> submission t
+      | Managed : managed -> Managed_submission.t t
+      | Run_user : run_user * 'result Run_reply.t -> 'result t
+      | Edit_history :
+          Agent_protocol.History_edit.Edit_request.t
+          -> History_edit_result.t t
+      | Continue_history :
+          Agent_protocol.History_edit.Continue_request.t
+          -> History_continuation_result.t t
+      | History : 'result History_input.t -> 'result t
+      | Held_input :
+          Held_input_scope.t * Runtime_input_preparation.Prepared_input.t
+          -> submission t
+      | Held_input_selected : Held_input_selection.t -> submission t
+      | Goal_resume : Goal_continuation.t -> Goal_resume_result.t t
+      | Goal_resume_selected : Goal_resume_selection.t -> Goal_resume_result.t t
+  end
+
+  module Origin_capture = struct
+    type 'result t =
+      { origin : Descendant_origin_observation.Captured.t
+      ; input : 'result Input.t
+      ; capture : 'result Capture.t
+      ; remaining_audit : Document_schema.Document.t option
+      }
+  end
+
+  module Origin_observation = struct
+    type 'result t =
+      { captured : 'result Origin_capture.t
+      ; origin : Descendant_origin_observation.Observed.t
+      }
+  end
+
+  module Decision = struct
+    type 'result pending = 'result t
+
+    type 'result t =
+      | Completed of 'result
+      | Pending of 'result pending
+      | Need_private_origin of 'result Origin_capture.t
+  end
+
+  module Request = struct
+    type 'outcome plan = 'outcome t
+
+    type _ t =
+      | Submit_message :
+          Operator_authorization.t option
+          * Agent_protocol.Id.Attachment.t
+          * Agent_protocol.Id.Principal.t
+          * Agent_protocol.Pending_input.Timing.t
+          * Agent_protocol.History.entry
+          * submission Capture.t
+          -> submission Decision.t t
+      | Submit_managed :
+          Input.managed * Managed_submission.t Capture.t
+          -> Managed_submission.t Decision.t t
+      | Admit_run :
+          Input.run_user * 'result Run_reply.t * 'result Capture.t
+          -> 'result Decision.t t
+      | Resolve_prepared_outcome :
+          Input.run_user * Agent_protocol.Error.t
+          -> Run_admission_outcome.t t
+      | Edit_history :
+          Agent_protocol.History_edit.Edit_request.t * History_edit_result.t Capture.t
+          -> History_edit_result.t Decision.t t
+      | Continue_history :
+          Agent_protocol.History_edit.Continue_request.t
+          * History_continuation_result.t Capture.t
+          -> History_continuation_result.t Decision.t t
+      | Submit_held_input :
+          Held_input_scope.t
+          * Runtime_input_preparation.Prepared_input.t
+          * submission Capture.t
+          -> submission Decision.t t
+      | Submit_goal_resume :
+          Goal_continuation.t * Goal_resume_result.t Capture.t
+          -> Goal_resume_result.t Decision.t t
+      | Submit_observed_origin : 'result Origin_observation.t -> 'result Decision.t t
+      | Commit :
+          'outcome plan * Descendant_admission_data.Before_writer.t
+          -> 'outcome Acknowledged.t t
+      | Finish :
+          'outcome Acknowledged.t
+          * Descendant_admission_data.Confirmation.t
+          * Descendant_admission_data.Admitted_views.t
+          -> 'outcome t
+      | Retire : 'outcome Acknowledged.t * Agent_protocol.Error.t -> unit t
+
+    let lifecycle_allowed : type outcome. outcome t -> bool = function
+      | Retire _ | Resolve_prepared_outcome _ -> true
+      | Submit_message _
+      | Submit_managed _
+      | Admit_run _
+      | Edit_history _
+      | Continue_history _
+      | Submit_held_input _
+      | Submit_goal_resume _
+      | Submit_observed_origin _
+      | Commit _
+      | Finish _ -> false
+    ;;
+  end
+
+  let slot t = t.slot
+end
+
+module Inherited_attempt = struct
+  module Original = struct
+    type t =
+      | Legacy of { preparation : Run_preparation.t option }
+      | Runtime of
+          { execution : inference_execution
+          ; basis : inference_basis
+          ; startup : Admitted_inference.Startup.t
+          ; check_before : unit -> (unit, Agent_protocol.Error.t) result
+          ; admission : (Agent_protocol.Id.Goal.t * Goal_accounting.Admission.t) option
+          }
+  end
+
+  module Acknowledgement = struct
+    module Original = struct
+      type t =
+        | Legacy of
+            { preparation : Run_preparation.t option
+            ; registration :
+                (Inference_owner.Registration.t, Agent_protocol.Error.t) result ref
+            }
+        | Runtime of
+            { execution : inference_execution
+            ; basis : inference_basis
+            ; startup : Admitted_inference.Startup.t
+            ; selected : (Admitted_inference.t, Agent_protocol.Error.t) result ref
+            }
+    end
+
+    type t =
+      { descendant : Descendant_admission_data.Acknowledgement.t
+      ; slot : Descendant_admission_slot.t
+      ; owner : Inference_owner.t
+      ; handle : Inference_ledger.Handle.t
+      ; original : Original.t
+      }
+  end
+
+  module Plan = struct
+    type t =
+      { slot : Descendant_admission_slot.t
+      ; owner : Inference_owner.t
+      ; configuration : Inference.Observation.Configuration.t
+      ; before : Inference_ledger.t
+      ; after : Inference_ledger.t
+      ; handle : Inference_ledger.Handle.t
+      ; tracking : Inference_ledger.tracking
+      ; original : Original.t
+      ; mutable acknowledged : Acknowledgement.t option
+      }
+  end
+
+  module Prepared = struct
+    type t =
+      | Ordinary of Inference_allocation.t
+      | Inherited of Plan.t
+  end
+
+  module Committed = struct
+    type t =
+      | Acknowledged of Acknowledgement.t
+      | Attempt_unconfirmed of Plan.t
+  end
+
+  module Request = struct
+    type _ t =
+      | Capture_origin : Descendant_origin_observation.Captured.t t
+      | Allocate_runtime :
+          Descendant_origin_observation.Observed.t option
+          * inference_execution
+          * Inference_owner.t
+          * Transcript.Scope.relation
+          * Inference.Observation.Configuration.t
+          -> Prepared.t t
+      | Prepare_legacy :
+          Descendant_origin_observation.Observed.t option
+          * Run_preparation.t option
+          * Inference_owner.t
+          * Transcript.Scope.relation
+          * Agent_protocol.Id.Operation.t option
+          * Agent_protocol.Id.Invocation.t option
+          * Inference.Observation.Configuration.t
+          -> Prepared.t t
+      | Commit : Plan.t * Descendant_admission_data.Before_writer.t -> Committed.t t
+      | Refresh :
+          Acknowledgement.t
+          * Descendant_admission_data.Confirmation.t
+          * Descendant_admission_data.Admitted_views.t
+          -> (unit -> unit) t
+      | Release : Acknowledgement.t -> unit t
+  end
+end
+
+(* Closed finite private operations; these are not callbacks or an arbitrary
+   Actor request executor. All Store phases stay in the outer wrapper. *)
+module Descendant_root_request = struct
+  module R = Descendant_admission_data
+
+  type _ operation =
+    | Bind :
+        Runtime_source_owner.t * Delegation_authority.Checked_ancestry.t * R.Preparation.t
+        -> R.Root_route.t list operation
+    | Begin : R.Root_route.t * R.Reservation_set.t -> R.Reservation_attempt.t operation
+    | Commit : R.Reservation_attempt.t -> R.Reserve_result.t operation
+    | Reconcile : R.Reservation_attempt.t -> R.Reserve_result.t operation
+    | Refresh_reserved : R.Reservation.t -> R.Root_before_writer.t operation
+    | Close :
+        R.Reservation.t * Descendant_preparation.Closed_before_writer.t
+        -> unit operation
+    | Import :
+        Runtime_source_owner.t * Child_usage_observation.t
+        -> R.Import_acknowledgement.t operation
+    | Refresh_admitted :
+        R.Reservation.t * R.Acknowledgement.t * R.Confirmation.t
+        -> R.Root_admitted.t operation
+
+  let factual : type outcome. outcome operation -> bool = function
+    | Reconcile _ | Close _ | Import _ -> true
+    | Bind _ | Begin _ | Commit _ | Refresh_reserved _ | Refresh_admitted _ -> false
+  ;;
+
+  type 'result capture =
+    { basis : Child_accounting_basis.t
+    ; records : Agent_store.Delegation_store.record list
+    ; operation : 'result operation
+    }
+
+  type 'result observed =
+    { captured : 'result capture
+    ; current : Recurrence_controller.observation
+    ; child_current : (unit -> (unit, Agent_protocol.Error.t) result) option
+    }
+
+  module Admitted_observed = struct
+    type t =
+      { captured : R.Root_admitted.t capture
+      ; owner : Recurrence_controller.Retained_owner.t
+      }
+  end
+
+  module Admitted_refresh = struct
+    type 'result t =
+      | Current of 'result
+      | State_changed
+  end
+
+  type _ t =
+    | Capture : 'result operation -> 'result capture t
+    | Consume : 'result observed -> 'result t
+    | Consume_admitted : Admitted_observed.t -> R.Root_admitted.t Admitted_refresh.t t
+
+  let lifecycle_allowed : type outcome. outcome t -> bool = function
+    | Capture operation -> factual operation
+    | Consume observed -> factual observed.captured.operation
+    | Consume_admitted _ -> false
+  ;;
+end
+
+module Root_reserve_acknowledgement =
+  Goal_descendant_admission_custody.Root_reserve_acknowledgement
+
+(* Retains a factual no-writer-close ACK on the same native Reservation.
+   It never tests fresh policy or infers a close from a missing pending. *)
+module Root_close_acknowledgement =
+  Goal_descendant_admission_custody.Root_close_acknowledgement
+
+(* Finite positive factual import ACK. No policy cell participates. *)
+module Descendant_import_acknowledgement =
+  Goal_descendant_admission_custody.Descendant_import_acknowledgement
 
 module Child_usage_import = struct
   type t =
@@ -3069,8 +3907,116 @@ module Child_usage_import = struct
     | Historical_absence
 end
 
+(* Genuine canonical/import ACKs are closed factual source custody. They do
+   not require the old execution owner to remain live after an acknowledged
+   writer. Current source capture still authenticates actual Factory/Store. *)
+module Descendant_usage = struct
+  module Source = struct
+    type t =
+      | Acknowledged of Descendant_admission_data.Acknowledgement.t
+      | Imported of Descendant_admission_data.Import_acknowledgement.t
+  end
+
+  type captured =
+    { basis : Child_accounting_basis.t
+    ; source : Source.t
+    ; reference : Agent_store.Delegation_store.Reference.t
+    ; origin : Agent_store.Delegation_goal_origin.t
+    }
+
+  type observed =
+    { captured : captured
+    ; record : Agent_store.Delegation_store.record
+    ; current : Recurrence_controller.observation
+    }
+end
+
+module Child_origin_usage = struct
+  type captured =
+    { basis : Child_accounting_basis.t
+    ; reservation : Child_origin.Reservation.t
+    ; native_registration : Child_origin.Native_registration.t option
+    }
+
+  type observed =
+    { captured : captured
+    ; record : Agent_store.Delegation_store.record
+    ; current : Recurrence_controller.observation
+    ; child_current : (unit -> (unit, Agent_protocol.Error.t) result) option
+    }
+end
+
 module Child_accounting_request = struct
   type _ t =
+    | Prepare_native_origin :
+        Runtime_source_owner.t
+        * Native_tool_invocation.Admission.t
+        * Chat_response.Tool_capability.binding
+        * Delegation_authority.Checked_ancestry.t option
+        -> Child_origin.Preparation.t t
+    | Prepare_unrelated_origin : Runtime_source_owner.t -> Child_origin.Preparation.t t
+    | Install_descendant_host :
+        Runtime_source_owner.t
+        * Session_state.t
+        * (unit
+           -> (Delegation_authority.Checked_ancestry.t, Agent_protocol.Error.t) result)
+            option
+        * Descendant_host_data.t
+        -> Descendant_host_data.Binding.t t
+    | Capture_origin_refresh :
+        Child_origin.Preparation.t * unit ref
+        -> Child_origin.Captured_refresh.t t
+    | Consume_origin_refresh : Child_origin.Observed_refresh.t -> unit t
+    | Bind_origin :
+        Child_origin.Preparation.t
+        * Agent_store.Delegation_store.Key.t
+        * Agent_protocol.Id.Session.t
+        * Agent_protocol.Id.Transaction.t
+        -> Child_origin.Bound.t t
+    | Prepare_recurrence_origin :
+        Runtime_source_owner.t * Recurrence_creation.t
+        -> Child_origin.Preparation.t t
+    | Capture_reservation :
+        Runtime_source_owner.t
+        * Child_origin.Bound.t option
+        * Agent_store.Delegation_store.Reference.t
+        * Native_tool_invocation.borrowed option
+        -> Child_origin.Captured_reservation.t t
+    | Observe_reservation :
+        Child_origin.Observed_reservation.t
+        -> Child_origin.Reservation.t t
+    | Register_reservation :
+        Child_origin.Reservation.t
+        * Child_origin.Observed_reservation.t
+        * Native_tool_invocation.borrowed option
+        * (Session_state.t -> (unit, Agent_protocol.Error.t) result)
+        -> unit t
+    | Capture_descendant_usage :
+        Runtime_source_owner.t * Descendant_usage.Source.t
+        -> Descendant_usage.captured t
+    | Observe_descendant_usage :
+        Descendant_usage.observed
+        * (unit
+           -> ( unit -> (unit, Agent_protocol.Error.t) result
+                , Agent_protocol.Error.t )
+                result)
+        -> Child_usage_observation.t t
+    | Capture_origin_usage : Child_origin.Reservation.t -> Child_origin_usage.captured t
+    | Observe_origin_usage :
+        Child_origin_usage.observed
+        * (unit
+           -> ( unit -> (unit, Agent_protocol.Error.t) result
+                , Agent_protocol.Error.t )
+                result)
+        -> Child_usage_observation.t t
+    | Capture_origin_import :
+        Child_origin.Reservation.t * Native_tool_invocation.borrowed option
+        -> Child_origin_usage.captured t
+    | Import_origin_usage :
+        Child_origin_usage.observed
+        * Child_usage_observation.t
+        * (Session_state.t -> (unit, Agent_protocol.Error.t) result)
+        -> Child_usage_import.t t
     | Observe_installation :
         Runtime_source_owner.t * Agent_store.Delegation_store.Reference.t
         -> Child_installation.t t
@@ -3125,8 +4071,109 @@ module Goal_request = struct
         -> Goal_command_receipt.t t
 end
 
+module Idle_completion_data = struct
+  module Write = Idle_completion_write
+
+  type action =
+    | Checkpoint
+    | Stop
+    | Callback_failure
+    | Compaction
+    | Turn
+
+  type basis =
+    { generation : int
+    ; source : Agent_protocol.Invocation.observer option
+    ; worker : Operation_worker.t option
+    }
+
+  type prefix =
+    | Empty
+    | Reconciled of Write.t
+    | Checkpointed of Write.t
+    | Checkpointed_and_reconciled of
+        { checkpoint : Write.t
+        ; reconciliation : Write.t
+        }
+
+  type operation_kind =
+    | Turn of (Agent_protocol.Operation.t * agent_custody option) Turn_admission_staging.t
+    | Compaction of History_entry.Allocator.t * History_entry.t list
+
+  type operation_phase =
+    | Prepared
+    | Acknowledged
+    | Handed_off
+    | Terminal_acknowledged
+    | Terminated
+  [@@deriving equal]
+
+  type operation_suffix =
+    { operation : Agent_protocol.Operation.t
+    ; owner : Operation_owner.t
+    ; owner_slot : Operation_owner.t option
+    ; worker : Operation_worker.t option
+    ; installed : bool ref
+    ; kind : operation_kind
+    ; mutable phase : operation_phase
+    ; mutable native_write : Write.t option
+    ; previous_owner : Operation_owner.t option
+    }
+
+  type suffix =
+    | Operation of operation_suffix
+    | Stop of Agent_protocol.Job.t list * Agent_protocol.Permission.t list
+
+  type phase =
+    | Fresh
+    | Claimed of basis
+    | Completing of basis
+    | Retired
+
+  type cleanup =
+    | Idle
+    | Running of (unit, Agent_protocol.Error.t) result Eio.Promise.t
+    | Scheduling_failed of Agent_protocol.Error.t * Write.Diagnostic.t
+
+  type t =
+    { issuing_actor : unit ref
+    ; identity : unit ref
+    ; domain : int
+    ; exited : unit Eio.Promise.t
+    ; exit : unit Eio.Promise.u
+    ; mutable phase : phase
+    ; mutable action : action option
+    ; mutable prefix : prefix
+    ; mutable pending_prefix : prefix option
+    ; mutable write : Write.t option
+    ; mutable suffix : suffix option
+    ; mutable drain : Runtime_builder.moderator_drain option
+    ; mutable outcome : (unit, Agent_protocol.Error.t) result option
+    ; mutable cancellation : Agent_protocol.Error.t option
+    ; mutable cleanup : cleanup
+    }
+
+  let request_cancellation t failure =
+    if Option.is_none t.cancellation then t.cancellation <- Some failure
+  ;;
+
+  type completion = t
+
+  module Request = struct
+    type _ t =
+      | Claim : History_entry.t list option t
+      | Complete : Runtime_builder.moderator_drain -> unit t
+      | Fail : Agent_protocol.Error.t -> unit t
+      | Claim_paired : completion -> History_entry.t list option t
+      | Capture_paired : completion * Runtime_builder.moderator_drain -> unit t
+      | Fail_paired : completion * Agent_protocol.Error.t -> unit t
+      | Retire_paired : completion -> unit t
+  end
+end
+
 type _ request =
   | Goal_request : 'a Goal_request.t -> 'a request
+  | Descendant_root : 'a Descendant_root_request.t -> 'a request
   | Child_accounting : 'a Child_accounting_request.t -> 'a request
   | Native_goal : 'a Native_goal_request.t -> 'a request
   | Open_inference_owner :
@@ -3140,12 +4187,7 @@ type _ request =
       * Agent_protocol.Id.Invocation.t option
       * Inference.Observation.Configuration.t
       -> Inference_ledger.Handle.t request
-  | Allocate_inference :
-      inference_execution
-      * Inference_owner.t
-      * Transcript.Scope.relation
-      * Inference.Observation.Configuration.t
-      -> Inference_allocation.t request
+  | Inherited_inference : 'a Inherited_attempt.Request.t -> 'a request
   | Admit_model_job :
       inference_execution * Agent_protocol.Job.t
       -> Agent_protocol.Job.t request
@@ -3648,13 +4690,7 @@ type _ request =
   | Defer_history :
       Agent_protocol.Id.Attachment.t * Agent_protocol.History.entry list
       -> Agent_protocol.Session.t request
-  | Submit_message :
-      Operator_authorization.t option
-      * Agent_protocol.Id.Attachment.t
-      * Agent_protocol.Id.Principal.t
-      * Agent_protocol.Pending_input.Timing.t
-      * Agent_protocol.History.entry
-      -> submission request
+  | Inherited_turn : 'outcome Inherited_turn.Request.t -> 'outcome request
   | Control_pending :
       Agent_protocol.Id.Principal.t
       * Pending_inspection.projection
@@ -3707,12 +4743,6 @@ type _ request =
   | Checkpoint_run_moderator :
       Run_preparation.t * Jsonaf.t option * Chat_response.Moderator_manager.t option
       -> Agent_protocol.Session.t request
-  | Admit_prepared_run :
-      Run_preparation.t
-      * Run_admission.Scope.t
-      * Agent_protocol.Session_ref.t
-      * Agent_protocol.History.entry option
-      -> Run_admission_outcome.t request
   | Begin_run_preparation :
       Operator_authorization.t option
       * (Session_state.t -> (unit, Agent_protocol.Error.t) result)
@@ -3735,33 +4765,12 @@ type _ request =
       * Agent_protocol.Run_start.t
       * string
       -> Agent_protocol.Run_receipt.t option request
-  | Admit_run :
-      Run_admission.Scope.t
-      * Agent_protocol.Run_start.t
-      * Agent_protocol.Session_ref.t
-      * string
-      * Agent_protocol.History.entry option
-      -> Agent_protocol.Run_receipt.t request
-  | Submit_managed_message :
-      Agent_store.Delegation_store.Reference.t
-      * Agent_protocol.Idempotency_key.t
-      * string
-      * int
-      * int option
-      * Agent_protocol.History.entry
-      -> Managed_submission.t request
   | Compact :
       Operator_authorization.t option * Agent_protocol.Id.Attachment.t * int64 option
       -> Agent_protocol.Session.t request
   | Delete_history :
       Agent_protocol.Id.Attachment.t * int64 * Agent_protocol.History.Id.t
       -> Agent_protocol.Session.t request
-  | Edit_history :
-      Agent_protocol.History_edit.Edit_request.t
-      -> History_edit_result.t request
-  | Continue_history :
-      Agent_protocol.History_edit.Continue_request.t
-      -> History_continuation_result.t request
   | Adopt_deferred : Agent_protocol.Session.t request
   | Reserve_history_block : int -> History_id_source.reservation request
   | Commit_worker_entry : Agent_protocol.Id.Operation.t * History_entry.t -> unit request
@@ -3963,10 +4972,8 @@ type _ request =
   | Skip_schedule :
       Agent_protocol.Id.Schedule.t * int
       -> Agent_protocol.Schedule.t request
-  | Claim_idle_moderator : History_entry.t list option request
+  | Idle_completion : 'a Idle_completion_data.Request.t -> 'a request
   | Apply_observation_follow_up : bool request
-  | Complete_idle_moderator : Runtime_builder.moderator_drain -> unit request
-  | Fail_idle_moderator : Agent_protocol.Error.t -> unit request
   | Expire_permission :
       Agent_protocol.Id.Permission.t * int * Agent_protocol.Permission.choice
       -> unit request
@@ -4029,6 +5036,12 @@ type t =
   ; recurrence_creation_owner : unit ref
   ; recurrence_activation_owner : Activation_custody.Owner.t
   ; mutable recurrence_activations : Activation_custody.t list
+  ; mutable descendant_policy_cells : Goal_root_policy.t list
+  ; mutable descendant_host_binding : Descendant_host_data.Binding.t option
+  ; mutable idle_completion : Idle_completion_data.t option
+  ; mutable inherited_turn_prepared : Inherited_turn.prepared option
+  ; mutable inherited_turn_cleanup : Inherited_turn.cleanup option
+  ; mutable descendant_admission_slot : Descendant_admission_slot.t option
   ; configuration_update_owner : Configuration_update.Owner.t
   ; configuration_capture : Configuration_capture.t
   ; mutable operation_worker : Operation_worker.t option
@@ -4091,6 +5104,669 @@ type t =
   }
 
 let error code message = Agent_protocol.Error.create code ~message ~retryable:false ()
+
+(* Source lifetime only: native source/permission and root policy guards remain
+   independent. Complete State/episode progress is not source retirement. *)
+let check_descendant_host t (binding : Descendant_host_data.Binding.t) =
+  if
+    (not t.stopped)
+    && Option.is_none (Eio.Promise.peek t.finished)
+    && Option.is_none t.lifecycle_fence
+    && Option.is_none t.runtime_retirement
+    && Int.equal binding.domain (Stdlib.Domain.self () :> int)
+    && phys_equal binding.issuing_actor t.inference_owner_identity
+    && Option.exists t.runtime_source_owner ~f:(fun owner ->
+      Runtime_source_owner.matches binding.source_owner owner)
+    && Option.exists t.recurrence_controller ~f:(phys_equal binding.controller)
+    && Option.exists t.descendant_host_binding ~f:(phys_equal binding)
+    && not binding.closed
+  then Ok ()
+  else Error (error Conflict "descendant source binding is no longer current")
+;;
+
+let capture_descendant_host t =
+  let open Result.Let_syntax in
+  let%bind binding =
+    Result.of_option
+      t.descendant_host_binding
+      ~error:(error Permission_denied "descendant source host is unavailable")
+  in
+  let%map () = check_descendant_host t binding in
+  binding
+;;
+
+let require_recurrence_controller t =
+  Result.of_option
+    t.recurrence_controller
+    ~error:(error Invalid_state "recurrence controller lifecycle owner is not installed")
+;;
+
+let inherited_turn_required (state : Session_state.t) =
+  let open Inherited_turn.Origin_requirement in
+  match Option.bind state.goal_descendants ~f:Goal_descendants.origin with
+  | Some origin ->
+    if List.is_empty (Agent_store.Delegation_goal_origin.scopes origin)
+    then Ordinary
+    else Scoped
+  | None -> if Option.is_none state.spec.delegation then Ordinary else Need_private_origin
+;;
+
+(* Factual accounting operations require the same live Factory/Actor owner. *)
+let child_accounting_owner t ~source_owner =
+  let open Result.Let_syntax in
+  let%bind () =
+    if
+      (not t.stopped)
+      && Option.is_none (Eio.Promise.peek t.finished)
+      && Option.is_none t.lifecycle_fence
+      && Option.exists
+           t.runtime_source_owner
+           ~f:(Runtime_source_owner.matches source_owner)
+    then Ok ()
+    else Error (error Conflict "child accounting lost its actual Factory/Actor owner")
+  in
+  require_recurrence_controller t
+;;
+
+(* Private common basis only. Request-specific Store/record/authorization
+   observations belong outside the mailbox, not in this finite capture/check. *)
+let capture_child_accounting_basis t ~source_owner =
+  let%map.Result controller = child_accounting_owner t ~source_owner in
+  Child_accounting_basis.
+    { issuing_actor = t.inference_owner_identity
+    ; domain = (Stdlib.Domain.self () :> int)
+    ; state = t.state
+    ; controller
+    ; source_owner
+    }
+;;
+
+let check_child_accounting_identity t (basis : Child_accounting_basis.t) =
+  let open Result.Let_syntax in
+  let%bind controller = child_accounting_owner t ~source_owner:basis.source_owner in
+  if
+    phys_equal basis.issuing_actor t.inference_owner_identity
+    && Int.equal basis.domain (Stdlib.Domain.self () :> int)
+    && phys_equal basis.controller controller
+  then Ok ()
+  else
+    Error (error Conflict "child accounting Actor/controller/State observation changed")
+;;
+
+let check_child_accounting_capture t (basis : Child_accounting_basis.t) =
+  let%bind.Result () = check_child_accounting_identity t basis in
+  if phys_equal basis.state t.state
+  then Ok ()
+  else
+    Error (error Conflict "child accounting Actor/controller/State observation changed")
+;;
+
+let check_child_accounting_basis t basis ~current =
+  let%bind.Result () = check_child_accounting_capture t basis in
+  if Recurrence_controller.is_current current
+  then Ok ()
+  else Error (error Conflict "child accounting Store observation changed")
+;;
+
+let child_origin_ancestry (state : Session_state.t) ~source_owner ~controller ancestry =
+  let module D = Agent_store.Delegation_store in
+  let module Origin = Agent_store.Delegation_goal_origin in
+  let open Result.Let_syntax in
+  match state.spec.delegation, ancestry with
+  | None, None -> Ok (Origin.unrelated, fun (_ : Session_state.t) -> Ok ())
+  | None, Some _ ->
+    Error (error Conflict "child origin ancestry differs from the actual root Spec")
+  | Some _, None ->
+    Error (error Permission_denied "child origin requires its actual private ancestry")
+  | Some reference, Some ancestry ->
+    let%bind () =
+      if Delegation_authority.Checked_ancestry.issued_by ancestry ~source_owner
+      then Ok ()
+      else Error (error Conflict "child origin ancestry has a foreign Factory issuer")
+    in
+    let records = Delegation_authority.Checked_ancestry.records ancestry in
+    let%bind record =
+      match records with
+      | record :: _ when D.Reference.equal (D.reference record) reference -> Ok record
+      | _ :: _ | [] ->
+        Error (error Conflict "child origin ancestry differs from its actual Spec")
+    in
+    let%bind inherited =
+      Result.of_option
+        record.admission.goal_origin
+        ~error:
+          (error
+             Permission_denied
+             "child origin inherited Goal ancestry is historically unknown")
+    in
+    let check_projection (state : Session_state.t) =
+      let%bind () =
+        if Option.exists state.spec.delegation ~f:(D.Reference.equal reference)
+        then Ok ()
+        else Error (error Conflict "child origin parent delegation changed")
+      in
+      let scoped = not (List.is_empty (Origin.scopes inherited)) in
+      match state.goal_descendants with
+      | None ->
+        if scoped
+        then
+          Error
+            (error Permission_denied "inherited child origin has no scoped accounting")
+        else Ok ()
+      | Some accounting ->
+        if
+          not
+            (Agent_protocol.Session_ref.equal
+               (Goal_descendants.session accounting)
+               (Recurrence_controller.session controller))
+        then
+          Error (error Conflict "inherited child accounting belongs to another session")
+        else (
+          match Goal_descendants.origin accounting with
+          | Some actual when Origin.equal inherited actual -> Ok ()
+          | Some _ ->
+            Error
+              (error Conflict "child accounting origin differs from private admission")
+          | None ->
+            if scoped
+            then
+              Error
+                (error Permission_denied "inherited child accounting origin is unknown")
+            else Ok ())
+    in
+    let refresh (observed_state : Session_state.t) =
+      let%bind () =
+        List.fold_result records ~init:() ~f:(fun () expected ->
+          let%bind actual =
+            Recurrence_controller.resolve_delegation controller (D.reference expected)
+          in
+          if
+            D.equal_record actual expected
+            && Option.is_none actual.revocation
+            && D.equal_stage actual.stage Linked
+          then Ok ()
+          else Error (error Conflict "child origin private ancestry changed"))
+      in
+      check_projection observed_state
+    in
+    let%map () = check_projection state in
+    inherited, refresh
+;;
+
+let capture_descendant_origin_observation t =
+  let open Result.Let_syntax in
+  let%bind binding = capture_descendant_host t in
+  let%map basis = capture_child_accounting_basis t ~source_owner:binding.source_owner in
+  Descendant_origin_observation.Captured.{ basis; binding }
+;;
+
+let check_descendant_origin_capture
+      t
+      (captured : Descendant_origin_observation.Captured.t)
+  =
+  let%bind.Result () = check_child_accounting_capture t captured.basis in
+  check_descendant_host t captured.binding
+;;
+
+let descendant_origin_leaf (captured : Descendant_origin_observation.Captured.t) ancestry =
+  let module D = Agent_store.Delegation_store in
+  let open Result.Let_syntax in
+  let%bind () =
+    if
+      Delegation_authority.Checked_ancestry.issued_by
+        ancestry
+        ~source_owner:captured.basis.source_owner
+    then Ok ()
+    else Error (error Conflict "origin ancestry has a foreign Factory issuer")
+  in
+  match
+    ( captured.basis.state.spec.delegation
+    , Delegation_authority.Checked_ancestry.records ancestry )
+  with
+  | Some reference, record :: _ when D.Reference.equal reference (D.reference record) ->
+    Ok record
+  | (None | Some _), (_ :: _ | []) ->
+    Error (error Conflict "origin ancestry differs from actual delegated source")
+;;
+
+let check_descendant_origin_observation
+      t
+      (observed : Descendant_origin_observation.Observed.t)
+  =
+  let module D = Agent_store.Delegation_store in
+  let open Result.Let_syntax in
+  let captured = observed.captured in
+  let%bind () = check_descendant_origin_capture t captured in
+  let%bind () = check_child_accounting_basis t captured.basis ~current:observed.current in
+  let%bind leaf = descendant_origin_leaf captured observed.ancestry in
+  let%bind () =
+    if
+      D.equal_record leaf observed.record
+      && D.equal_stage observed.record.stage Linked
+      && Option.is_none observed.record.revocation
+    then Ok ()
+    else Error (error Conflict "origin private admission changed")
+  in
+  let%bind origin, _ =
+    child_origin_ancestry
+      captured.basis.state
+      ~source_owner:captured.basis.source_owner
+      ~controller:captured.basis.controller
+      (Some observed.ancestry)
+  in
+  if List.is_empty (Agent_store.Delegation_goal_origin.scopes origin)
+  then Ok ()
+  else
+    Error
+      (error Permission_denied "delegated source lacks its inherited scoped accounting")
+;;
+
+(* Shared outer Store kernel for birth and native-ACK factual sources. The
+   captured immutable projection is fenced after each await before its error is
+   interpreted; no filesystem observation enters a finite Actor request. *)
+let observe_child_accounting_source t (basis : Child_accounting_basis.t) ~reference =
+  let open Result.Let_syntax in
+  let%bind () = check_child_accounting_capture t basis in
+  let record = Recurrence_controller.resolve_delegation basis.controller reference in
+  let%bind () = check_child_accounting_capture t basis in
+  let%bind record = record in
+  let observation = Recurrence_controller.observe basis.controller basis.state in
+  let%bind () = check_child_accounting_capture t basis in
+  let%map current = observation in
+  record, current
+;;
+
+let observe_descendant_origin_external
+      t
+      (captured : Descendant_origin_observation.Captured.t)
+  =
+  let open Result.Let_syntax in
+  let%bind () = check_descendant_origin_capture t captured in
+  let%bind check_ancestry =
+    Result.of_option
+      captured.binding.check_ancestry
+      ~error:
+        (error Permission_denied "delegated source has no actual private ancestry guard")
+  in
+  let ancestry = check_ancestry () in
+  let%bind () = check_descendant_origin_capture t captured in
+  let%bind ancestry = ancestry in
+  let%bind leaf = descendant_origin_leaf captured ancestry in
+  let observation =
+    observe_child_accounting_source
+      t
+      captured.basis
+      ~reference:(Agent_store.Delegation_store.reference leaf)
+  in
+  let%bind () = check_descendant_origin_capture t captured in
+  let%map record, current = observation in
+  Descendant_origin_observation.Observed.{ captured; ancestry; record; current }
+;;
+
+(* Captures the actual native producer basis. No public constructor is exposed. *)
+let capture_descendant_preparation t ~occurrence ~writer_attempted =
+  let module P = Agent_protocol in
+  let module O = Agent_store.Delegation_goal_origin in
+  let open Result.Let_syntax in
+  let before = t.state in
+  let%bind controller = require_recurrence_controller t in
+  let session = Recurrence_controller.session controller in
+  let%bind source_owner =
+    Result.of_option
+      t.runtime_source_owner
+      ~error:(error Permission_denied "child preparation has no actual Factory issuer")
+  in
+  let%bind accounting =
+    Result.of_option
+      before.goal_descendants
+      ~error:(error Permission_denied "child preparation inherited origin is unavailable")
+  in
+  let%bind origin =
+    Result.of_option
+      (Goal_descendants.origin accounting)
+      ~error:
+        (error
+           Permission_denied
+           "child preparation inherited origin is historical Unknown")
+  in
+  let frame = Goal_descendant_occurrence.frame occurrence in
+  let%bind () =
+    if
+      (not (List.is_empty (O.scopes origin)))
+      && Option.exists before.spec.delegation ~f:(fun reference ->
+        P.Id.Session.equal reference.child_session_id before.identity.session_id)
+      && P.Session_ref.equal (Goal_descendants.session accounting) session
+      && P.Session_ref.equal (Goal_descendant_occurrence.Frame.session frame) session
+      && Int.equal
+           (Goal_descendant_occurrence.Frame.generation frame)
+           before.identity.generation
+      && (not (Int64.equal before.counters.revision Int64.max_value))
+      && Int64.equal
+           (Goal_descendant_occurrence.Frame.candidate_session_revision frame)
+           (Int64.succ before.counters.revision)
+      && not !writer_attempted
+    then Ok ()
+    else
+      Error
+        (error Conflict "child preparation requires its actual next inherited occurrence")
+  in
+  let issuing_actor = t.inference_owner_identity in
+  let domain = t.runtime_source_domain in
+  let check_owner () =
+    if
+      Int.equal domain (Stdlib.Domain.self () :> int)
+      && phys_equal issuing_actor t.inference_owner_identity
+      && (not t.stopped)
+      && Option.is_none (Eio.Promise.peek t.finished)
+      && Option.is_none t.lifecycle_fence
+      && Option.exists
+           t.runtime_source_owner
+           ~f:(Runtime_source_owner.Identity.equal source_owner)
+      && Option.exists t.recurrence_controller ~f:(phys_equal controller)
+    then Ok ()
+    else Error (error Conflict "child preparation lost its actual live owner")
+  in
+  let check_before () =
+    if phys_equal before t.state
+    then Ok ()
+    else Error (error Conflict "child preparation actual before projection changed")
+  in
+  let%bind () = check_owner () in
+  Ok
+    { Descendant_preparation.issuing_actor
+    ; domain
+    ; source_owner
+    ; before
+    ; session
+    ; controller
+    ; origin
+    ; occurrence
+    ; writer_attempted
+    ; phase = ref Descendant_preparation.Phase.Open
+    ; reservation_set_claim = None
+    ; check_owner
+    ; check_before
+    }
+;;
+
+let descendant_admission_slot_owner t (slot : Descendant_admission_slot.t) =
+  let preparation = slot.preparation in
+  if
+    Descendant_preparation.on_domain preparation
+    && phys_equal preparation.issuing_actor t.inference_owner_identity
+  then Ok ()
+  else Error (error Conflict "descendant admission slot belongs to another actual owner")
+;;
+
+let require_available_descendant_admission_slot t =
+  if not (Int.equal t.runtime_source_domain (Stdlib.Domain.self () :> int))
+  then Error (error Conflict "descendant admission slot belongs to another domain")
+  else (
+    match
+      t.descendant_admission_slot, t.inherited_turn_prepared, t.inherited_turn_cleanup
+    with
+    | None, None, None -> Ok ()
+    | Some _, _, _ | None, Some _, _ | None, None, Some _ ->
+      Error
+        (Agent_protocol.Error.create
+           Conflict
+           ~message:
+             "another descendant admission retains the prospective occurrence or native \
+              ACK"
+           ~retryable:true
+           ()))
+;;
+
+let acquire_descendant_admission_slot t ~occurrence ~writer_attempted =
+  let open Result.Let_syntax in
+  let%bind () = require_available_descendant_admission_slot t in
+  let%bind binding = capture_descendant_host t in
+  let%bind preparation = capture_descendant_preparation t ~occurrence ~writer_attempted in
+  let%map reservations = Descendant_admission_data.Reservation_set.create preparation in
+  let slot =
+    { Descendant_admission_slot.preparation
+    ; reservations
+    ; binding
+    ; phase = Active
+    ; cleanup = Idle
+    }
+  in
+  t.descendant_admission_slot <- Some slot;
+  slot
+;;
+
+let check_descendant_admission_slot t (slot : Descendant_admission_slot.t) =
+  let open Result.Let_syntax in
+  let%bind () = descendant_admission_slot_owner t slot in
+  let%bind () =
+    match t.descendant_admission_slot, slot.phase with
+    | Some actual, Active when phys_equal actual slot -> Ok ()
+    | Some _, (Active | Sealed _ | Released _ | Acknowledged _)
+    | None, (Active | Sealed _ | Released _ | Acknowledged _) ->
+      Error (error Conflict "descendant admission lost its exact active slot")
+  in
+  let%bind () = check_descendant_host t slot.binding in
+  Descendant_preparation.check_basis slot.preparation
+;;
+
+let seal_descendant_admission_slot t (slot : Descendant_admission_slot.t) =
+  let open Result.Let_syntax in
+  let%bind () = descendant_admission_slot_owner t slot in
+  match slot.phase with
+  | Sealed closed -> Ok closed
+  | Released closed -> Ok closed
+  | Acknowledged _ ->
+    Error (error Conflict "acknowledged descendant admission cannot prove no writer")
+  | Active ->
+    let%map closed =
+      Descendant_preparation.seal_before_writer
+        slot.preparation
+        ~owner:t.inference_owner_identity
+    in
+    slot.phase <- Sealed closed;
+    closed
+;;
+
+let release_closed_descendant_admission_slot
+      t
+      (slot : Descendant_admission_slot.t)
+      ~closed
+  =
+  let module R = Descendant_admission_data in
+  let open Result.Let_syntax in
+  let%bind () = descendant_admission_slot_owner t slot in
+  let%bind () =
+    match slot.phase with
+    | Sealed actual when phys_equal actual closed -> Ok ()
+    | Released actual when phys_equal actual closed -> Ok ()
+    | Active | Sealed _ | Released _ | Acknowledged _ ->
+      Error (error Conflict "descendant admission release requires its exact child seal")
+  in
+  let%bind () =
+    if
+      Descendant_preparation.Closed_before_writer.belongs_to
+        closed
+        ~preparation:slot.preparation
+    then Ok ()
+    else Error (error Conflict "descendant admission release has another physical seal")
+  in
+  let%bind () =
+    List.fold
+      (R.Reservation_set.attempts slot.reservations)
+      ~init:(Ok ())
+      ~f:(fun result attempt ->
+        let%bind () = result in
+        match R.Reservation_attempt.outcome attempt with
+        | Not_attempted -> Ok ()
+        | Attempt_unconfirmed ->
+          Error
+            (error
+               Conflict
+               "unconfirmed root writer retains descendant admission custody")
+        | Acknowledged reservation ->
+          let%bind known = Root_close_acknowledgement.acknowledged reservation ~closed in
+          if known
+          then Ok ()
+          else
+            Error
+              (error
+                 Conflict
+                 "root reservation has no positive exact close acknowledgement"))
+  in
+  let%bind () =
+    match t.inherited_turn_prepared with
+    | None -> Ok ()
+    | Some (Prepared prepared) ->
+      (match prepared.plan.phase with
+       | Closed when phys_equal prepared.plan.slot slot -> Ok ()
+       | Pending | Writer_prepared _ | Acknowledged _ | Closed ->
+         Error
+           (error Conflict "prepared Turn owner has not retired its exact sealed slot"))
+  in
+  match t.descendant_admission_slot, slot.phase with
+  | Some actual, Sealed _ when phys_equal actual slot ->
+    slot.phase <- Released closed;
+    t.descendant_admission_slot <- None;
+    t.inherited_turn_prepared <- None;
+    Ok ()
+  | _, Released _ -> Ok ()
+  | Some _, (Active | Sealed _ | Acknowledged _)
+  | None, (Active | Sealed _ | Acknowledged _) ->
+    Error (error Conflict "descendant admission release cannot clear another actual slot")
+;;
+
+let prepare_descendant_admission_slot_ack t slot ~acknowledgement =
+  let module R = Descendant_admission_data in
+  let open Result.Let_syntax in
+  let%bind () = check_descendant_admission_slot t slot in
+  let%bind () = R.Acknowledgement.validate_content acknowledgement in
+  let%bind () =
+    if
+      phys_equal acknowledgement.R.Acknowledgement.preparation slot.preparation
+      && phys_equal acknowledgement.reservations slot.reservations
+      && phys_equal acknowledgement.candidate.state acknowledgement.installed
+    then Ok ()
+    else Error (error Conflict "descendant admission ACK has another exact native owner")
+  in
+  let%map preparation =
+    Descendant_preparation.Acknowledgement_plan.prepare
+      slot.preparation
+      ~acknowledgement:acknowledgement.identity
+  in
+  { Descendant_admission_slot.Acknowledgement_plan.slot
+  ; acknowledgement
+  ; preparation
+  ; acknowledged = Acknowledged acknowledgement.identity
+  }
+;;
+
+let check_descendant_admission_slot_ack
+      t
+      (plan : Descendant_admission_slot.Acknowledgement_plan.t)
+      ~candidate
+  =
+  let open Result.Let_syntax in
+  let%bind () = check_descendant_admission_slot t plan.slot in
+  let%bind () =
+    Descendant_admission_data.Acknowledgement.validate_content plan.acknowledgement
+  in
+  if phys_equal candidate plan.acknowledgement.candidate
+  then Ok ()
+  else Error (error Conflict "descendant admission ACK candidate changed before writer")
+;;
+
+let install_descendant_admission_slot_ack
+      t
+      (plan : Descendant_admission_slot.Acknowledgement_plan.t)
+  =
+  Descendant_preparation.Acknowledgement_plan.install plan.preparation;
+  plan.slot.phase <- plan.acknowledged;
+  t.descendant_admission_slot <- None
+;;
+
+let schedule_descendant_admission_cleanup t (slot : Descendant_admission_slot.t) ~closed =
+  let module Slot = Descendant_admission_slot in
+  let open Result.Let_syntax in
+  let%bind () = descendant_admission_slot_owner t slot in
+  let%bind () =
+    match slot.phase with
+    | (Sealed actual | Released actual) when phys_equal actual closed -> Ok ()
+    | Active | Sealed _ | Released _ | Acknowledged _ ->
+      Error (error Conflict "descendant cleanup requires the same retained child seal")
+  in
+  match slot.cleanup, slot.phase with
+  | Running promise, (Sealed _ | Released _) -> Ok promise
+  | Idle, Released _ ->
+    let promise, resolver = Eio.Promise.create () in
+    Eio.Promise.resolve resolver (Ok ());
+    Ok promise
+  | Idle, Sealed _ ->
+    let promise, resolver = Eio.Promise.create () in
+    let running = Slot.Cleanup.Running promise in
+    let finish result =
+      match Eio.Promise.peek promise with
+      | Some _ -> ()
+      | None ->
+        slot.cleanup <- Idle;
+        Eio.Promise.resolve resolver result
+    in
+    let failed exn =
+      let message =
+        match exn with
+        | Eio.Cancel.Cancelled _ -> "descendant sealed-slot cleanup was cancelled"
+        | _ -> "descendant sealed-slot cleanup raised: " ^ Exn.to_string exn
+      in
+      finish (Error (error Interrupted message))
+    in
+    slot.cleanup <- running;
+    (try
+       Eio.Fiber.fork ~sw:t.sw (fun () ->
+         match
+           (* Scheduling is pure at the original call site. Host RPC starts in
+              the actual Actor-switch fiber after this initial yield. *)
+           Eio.Fiber.yield ();
+           let%bind () = (Slot.host slot).close slot.reservations closed in
+           release_closed_descendant_admission_slot t slot ~closed
+         with
+         | result -> finish result
+         | exception exn ->
+           let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+           failed exn;
+           Exn.raise_with_original_backtrace exn backtrace);
+       Ok promise
+     with
+     | exn ->
+       let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+       failed exn;
+       Exn.raise_with_original_backtrace exn backtrace)
+  | (Idle | Running _), (Active | Acknowledged _) ->
+    Error (error Conflict "descendant cleanup cannot act on an unsealed or admitted slot")
+;;
+
+let retry_descendant_admission_cleanup t =
+  if not (Int.equal t.runtime_source_domain (Stdlib.Domain.self () :> int))
+  then Error (error Conflict "descendant cleanup belongs to another domain")
+  else (
+    match t.descendant_admission_slot with
+    | Some ({ phase = Sealed closed; _ } as slot) ->
+      let%bind.Result promise = schedule_descendant_admission_cleanup t slot ~closed in
+      Eio.Promise.await promise
+    | None | Some { phase = Active | Released _ | Acknowledged _; _ } -> Ok ())
+;;
+
+let retire_descendant_host t =
+  Option.iter t.descendant_host_binding ~f:Descendant_host_data.Binding.close
+;;
+
+let goal_capacity_deferred (deferred : Goal_charge_admission.deferred) =
+  let message =
+    match deferred.reason with
+    | Reserved -> "Goal count capacity is reserved by an unconfirmed descendant admission"
+    | Unknown -> "Goal count capacity requires confirmed descendant accounting"
+  in
+  Agent_protocol.Error.create Conflict ~message ~retryable:true ()
+;;
+
 let initial_run_preparation t = Option.bind t.run_preparation ~f:Preparation_owner.initial
 
 let exclude_effect_deferred t reason =
@@ -4340,7 +6016,63 @@ let install_operation_agent_custody t operation custody =
        { Operation_owner.operation_id = operation.Agent_protocol.Operation.id
        ; admission = create_agent_admission custody
        ; held = None
+       ; descendant_guard = None
        }
+;;
+
+let operation_descendant_guard t operation_id =
+  match t.operation_agent_custody with
+  | Some owner when Agent_protocol.Id.Operation.equal owner.operation_id operation_id ->
+    Ok owner.descendant_guard
+  | None -> Ok None
+  | Some _ -> Error (error Conflict "inherited operation belongs to another owner")
+;;
+
+let check_operation_descendant t operation_id =
+  let%bind.Result guard = operation_descendant_guard t operation_id in
+  Option.value_map guard ~default:(Ok ()) ~f:Operation_descendant_guard.check_current
+;;
+
+let refresh_operation_descendant t operation_id =
+  let open Result.Let_syntax in
+  let%bind guard = operation_descendant_guard t operation_id in
+  let%bind () =
+    Option.value_map guard ~default:(Ok ()) ~f:Operation_descendant_guard.refresh
+  in
+  let%bind current = operation_descendant_guard t operation_id in
+  if Option.equal phys_equal guard current
+  then check_operation_descendant t operation_id
+  else Error (error Conflict "inherited operation owner changed during refresh")
+;;
+
+let descendant_operation_of_execution = function
+  | Inference_operation (operation, _) -> Some operation.Agent_protocol.Operation.id
+  | Inference_invocation execution ->
+    (match execution.owner with
+     | Foreground id -> Some id
+     | Invocation_moderator borrow -> borrow.operation_id
+     | Event_moderator borrow -> borrow.receipt.context.operation_id
+     | Background_job _ -> None)
+  | Inference_moderator borrow -> borrow.operation_id
+  | Inference_event borrow -> borrow.receipt.context.operation_id
+  | Inference_job _
+  | Inference_held_input _
+  | Inference_initialization _
+  | Inference_initialization_job _ -> None
+;;
+
+let check_execution_descendant t execution =
+  Option.value_map
+    (descendant_operation_of_execution execution)
+    ~default:(Ok ())
+    ~f:(check_operation_descendant t)
+;;
+
+let refresh_execution_descendant t execution =
+  Option.value_map
+    (descendant_operation_of_execution execution)
+    ~default:(Ok ())
+    ~f:(refresh_operation_descendant t)
 ;;
 
 let job_scope_current t scope =
@@ -4440,6 +6172,539 @@ let call t ?(priority = Mailbox.Normal) ?command_audit request =
     Mailbox.push t.mailbox ~priority (Pack (command_audit, request, resolver))
   in
   Actor_reply.await promise
+;;
+
+(* One retained actual ACK owns both factual cleanup legs. Expected errors
+   settle the current waiter but never erase that ACK or a positive partial fact.
+   A later explicit eligible call retries the same owner; no timed retry loop. *)
+let schedule_inherited_turn_cleanup
+  : type outcome.
+    t
+    -> outcome Inherited_turn.Acknowledged.t
+    -> ( (unit, Agent_protocol.Error.t) result Eio.Promise.t
+         , Agent_protocol.Error.t )
+         result
+  =
+  fun t acknowledged ->
+  let open Result.Let_syntax in
+  let preparation = acknowledged.native.preparation in
+  let%bind () =
+    if
+      Descendant_preparation.on_domain preparation
+      && phys_equal preparation.issuing_actor t.inference_owner_identity
+      && Descendant_preparation.acknowledged_by
+           preparation
+           ~acknowledgement:acknowledged.native.identity
+    then Ok ()
+    else Error (error Conflict "inherited Turn cleanup requires its actual installed ACK")
+  in
+  let%bind failure =
+    match acknowledged.plan.cancellation with
+    | Requested failure -> Ok failure
+    | Not_requested ->
+      Error (error Conflict "inherited Turn cleanup has no retained cancellation request")
+  in
+  let%bind () =
+    match t.inherited_turn_cleanup with
+    | None ->
+      t.inherited_turn_cleanup <- Some (Inherited_turn.Pack acknowledged);
+      Ok ()
+    | Some (Pack actual) when phys_equal actual.native acknowledged.native -> Ok ()
+    | Some (Pack _) ->
+      Error (error Conflict "another actual inherited Turn ACK still owns cleanup")
+  in
+  Operation_descendant_guard.retire acknowledged.guard;
+  match acknowledged.cleanup_owner with
+  | Running promise -> Ok promise
+  | Idle ->
+    let promise, resolver = Eio.Promise.create () in
+    let finish result =
+      match Eio.Promise.peek promise with
+      | Some _ -> ()
+      | None ->
+        acknowledged.cleanup_owner <- Idle;
+        (match acknowledged.cleanup_progress, t.inherited_turn_cleanup with
+         | Done, Some (Pack actual) when phys_equal actual.native acknowledged.native ->
+           t.inherited_turn_cleanup <- None
+         | (Needs_both | Terminal_done | Confirmed _ | Done), (Some _ | None) -> ());
+        Eio.Promise.resolve resolver result
+    in
+    let failed exn =
+      let message =
+        match exn with
+        | Eio.Cancel.Cancelled _ -> "inherited Turn ACK cleanup was cancelled"
+        | _ -> "inherited Turn ACK cleanup raised: " ^ Exn.to_string exn
+      in
+      finish (Error (error Interrupted message))
+    in
+    acknowledged.cleanup_owner <- Running promise;
+    (try
+       Eio.Fiber.fork ~sw:t.sw (fun () ->
+         match
+           Eio.Fiber.yield ();
+           let terminal =
+             match acknowledged.cleanup_progress with
+             | Needs_both | Confirmed _ ->
+               let result =
+                 call
+                   t
+                   ~priority:Priority
+                   (Inherited_turn (Retire (acknowledged, failure)))
+               in
+               (match result, acknowledged.cleanup_progress with
+                | Ok (), Needs_both -> acknowledged.cleanup_progress <- Terminal_done
+                | Ok (), Confirmed _ -> acknowledged.cleanup_progress <- Done
+                | (Ok () | Error _), (Needs_both | Terminal_done | Confirmed _ | Done) ->
+                  ());
+               result
+             | Terminal_done | Done -> Ok ()
+           in
+           let confirmation =
+             match acknowledged.cleanup_progress with
+             | Needs_both | Terminal_done ->
+               let host = Descendant_admission_slot.host acknowledged.plan.slot in
+               let result = host.confirm acknowledged.native in
+               (match result, acknowledged.cleanup_progress with
+                | Ok confirmation, Needs_both ->
+                  acknowledged.cleanup_progress <- Confirmed confirmation
+                | Ok _, Terminal_done -> acknowledged.cleanup_progress <- Done
+                | (Ok _ | Error _), (Needs_both | Terminal_done | Confirmed _ | Done) ->
+                  ());
+               Result.map result ~f:ignore
+             | Confirmed _ | Done -> Ok ()
+           in
+           let%bind () = terminal in
+           confirmation
+         with
+         | result -> finish result
+         | exception exn ->
+           let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+           failed exn;
+           Exn.raise_with_original_backtrace exn backtrace);
+       Ok promise
+     with
+     | exn ->
+       let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+       failed exn;
+       Exn.raise_with_original_backtrace exn backtrace)
+;;
+
+let retry_inherited_turn_cleanup t =
+  if not (Int.equal t.runtime_source_domain (Stdlib.Domain.self () :> int))
+  then Error (error Conflict "inherited Turn cleanup belongs to another domain")
+  else (
+    match t.inherited_turn_cleanup with
+    | None -> Ok ()
+    | Some (Pack acknowledged) ->
+      let%bind.Result promise = schedule_inherited_turn_cleanup t acknowledged in
+      Eio.Promise.await promise)
+;;
+
+let idle_completion_basis (completion : Idle_completion_data.t) =
+  match completion.phase with
+  | Claimed basis | Completing basis -> Some basis
+  | Fresh | Retired -> None
+;;
+
+let check_idle_completion_identity t (completion : Idle_completion_data.t) =
+  if
+    phys_equal completion.issuing_actor t.inference_owner_identity
+    && Int.equal completion.domain t.runtime_source_domain
+    && Int.equal completion.domain (Stdlib.Domain.self () :> int)
+  then Ok ()
+  else Error (error Conflict "legacy completion belongs to another actual Actor")
+;;
+
+let check_idle_completion_owner t (completion : Idle_completion_data.t) =
+  let open Result.Let_syntax in
+  let%bind () = check_idle_completion_identity t completion in
+  match t.idle_completion with
+  | Some actual when phys_equal actual completion -> Ok ()
+  | None | Some _ -> Error (error Conflict "legacy completion lost its exact claim")
+;;
+
+let check_idle_completion_source t (completion : Idle_completion_data.t) =
+  let open Result.Let_syntax in
+  let%bind () = check_idle_completion_owner t completion in
+  let%bind basis =
+    idle_completion_basis completion
+    |> Result.of_option ~error:(error Conflict "legacy completion has no active claim")
+  in
+  let%bind source = Runtime_builder.moderator_snapshot_observer t.state.moderator in
+  if
+    Int.equal basis.generation t.state.identity.generation
+    && Option.equal Agent_protocol.Invocation.equal_observer basis.source source
+    && Option.equal phys_equal basis.worker t.operation_worker
+  then Ok ()
+  else Error (error Conflict "legacy completion source or exact worker changed")
+;;
+
+let idle_completion_failure (completion : Idle_completion_data.t) =
+  match completion.write with
+  | Some write ->
+    (match Idle_completion_write.diagnostic write with
+     | Some (Returned failure) -> failure
+     | Some (Raised (exn, _)) ->
+       error Internal_error ("legacy completion writer raised: " ^ Exn.to_string exn)
+     | None ->
+       Agent_protocol.Error.create
+         Conflict
+         ~message:"legacy completion has an unresolved actual writer attempt"
+         ~retryable:true
+         ())
+  | None -> error Conflict "legacy completion has no retained writer diagnostic"
+;;
+
+let release_idle_completion t (completion : Idle_completion_data.t) =
+  let open Result.Let_syntax in
+  let%bind () = check_idle_completion_identity t completion in
+  match completion.phase with
+  | Retired | Fresh -> Ok ()
+  | Claimed _ | Completing _ ->
+    let%bind () = check_idle_completion_owner t completion in
+    let%bind () =
+      match completion.write with
+      | Some write ->
+        (match Idle_completion_write.phase write with
+         | Attempted -> Error (idle_completion_failure completion)
+         | Not_attempted | Installed _ -> Ok ())
+      | None -> Ok ()
+    in
+    let%bind () =
+      match completion.suffix with
+      | Some (Operation { phase = Acknowledged | Terminal_acknowledged; _ }) ->
+        Error (error Conflict "legacy operation ACK still owns its actual suffix")
+      | Some (Stop _) ->
+        Error (error Conflict "legacy stopped candidate still owns its cleanup suffix")
+      | Some (Operation { phase = Prepared | Handed_off | Terminated; _ }) | None -> Ok ()
+    in
+    if moderator_is_borrowed t
+    then Error (error Conflict "another callback owns moderator exclusion")
+    else (
+      (match completion.suffix with
+       | Some (Operation suffix) ->
+         (match suffix.phase with
+          | Prepared -> Operation_owner.retire suffix.owner
+          | Acknowledged | Handed_off | Terminal_acknowledged | Terminated -> ())
+       | None | Some (Stop _) -> ());
+      completion.phase <- Retired;
+      t.idle_completion <- None;
+      t.idle_moderator_borrowed <- false;
+      Ok ())
+;;
+
+let prepare_idle_completion_write
+      t
+      (completion : Idle_completion_data.t option)
+      ~kind
+      ~candidate
+      ~attempted
+  =
+  let open Result.Let_syntax in
+  match completion with
+  | None -> Ok None
+  | Some completion ->
+    let%bind () = check_idle_completion_owner t completion in
+    let%bind () =
+      match completion.write with
+      | Some previous ->
+        (match Idle_completion_write.phase previous with
+         | Attempted -> Error (idle_completion_failure completion)
+         | Not_attempted | Installed _ -> Ok ())
+      | None -> Ok ()
+    in
+    let%bind write =
+      Idle_completion_write.capture
+        ~owner:completion.identity
+        ~previous:t.state
+        ~requested:candidate
+        ~kind
+        ~attempted
+    in
+    completion.write <- Some write;
+    (match kind, completion.suffix with
+     | (Start_ordinary_turn | Start_compaction), Some (Operation suffix) ->
+       suffix.native_write <- Some write
+     | (Start_ordinary_turn | Start_compaction), (None | Some (Stop _)) ->
+       invalid_arg "legacy operation scope has no prepared native suffix"
+     | ( ( Reconcile_foreground
+         | Reconcile_terminal
+         | Checkpoint
+         | Suppress_automatic
+         | Stop
+         | Callback_failure
+         | Retire_turn
+         | Retire_compaction )
+       , _ ) -> ());
+    completion.pending_prefix
+    <- (match kind, completion.prefix, completion.action with
+        | Reconcile_foreground, Empty, _ -> Some (Idle_completion_data.Reconciled write)
+        | Reconcile_foreground, Checkpointed checkpoint, _ ->
+          Some (Checkpointed_and_reconciled { checkpoint; reconciliation = write })
+        | Checkpoint, Empty, Some Compaction -> Some (Checkpointed write)
+        | ( ( Reconcile_foreground
+            | Reconcile_terminal
+            | Checkpoint
+            | Suppress_automatic
+            | Stop
+            | Callback_failure
+            | Start_compaction
+            | Start_ordinary_turn
+            | Retire_turn
+            | Retire_compaction )
+          , (Empty | Reconciled _ | Checkpointed _ | Checkpointed_and_reconciled _)
+          , _ ) -> None);
+    Ok (Some (completion, write))
+;;
+
+let select_idle_completion_writer
+      t
+      ((completion, write) : Idle_completion_data.t * Idle_completion_write.t)
+      ~candidate
+      ~selected
+  =
+  let open Result.Let_syntax in
+  let%bind () = check_idle_completion_source t completion in
+  let%bind () =
+    match completion.cancellation with
+    | None -> Ok ()
+    | Some failure ->
+      (match Idle_completion_write.kind write with
+       | Retire_turn | Retire_compaction | Reconcile_terminal | Callback_failure -> Ok ()
+       | Reconcile_foreground
+       | Checkpoint
+       | Suppress_automatic
+       | Stop
+       | Start_compaction
+       | Start_ordinary_turn -> Error failure)
+  in
+  let%bind () =
+    match selected with
+    | Idle_completion_write.Selected.Requested (Start_ordinary_turn | Start_compaction) ->
+      (match completion.suffix, candidate.Session_transition.state.active_operation with
+       | Some (Operation suffix), Some operation
+         when Agent_protocol.Id.Operation.equal suffix.operation.id operation.id
+              && Int.equal suffix.operation.generation operation.generation
+              && Agent_protocol.Operation.equal_kind suffix.operation.kind operation.kind
+              && Option.equal phys_equal suffix.previous_owner t.operation_agent_custody
+         -> Ok ()
+       | _ -> Error (error Conflict "legacy writer lost its actual operation suffix"))
+    | Requested
+        ( Reconcile_foreground
+        | Reconcile_terminal
+        | Checkpoint
+        | Suppress_automatic
+        | Stop
+        | Callback_failure
+        | Retire_turn
+        | Retire_compaction )
+    | Admission_hold _ -> Ok ()
+  in
+  Idle_completion_write.select_actual
+    write
+    ~owner:completion.identity
+    ~state:t.state
+    ~candidate
+    ~selected
+;;
+
+let install_idle_completion_writer
+      t
+      ((completion, write) : Idle_completion_data.t * Idle_completion_write.t)
+      candidate
+  =
+  Idle_completion_write.install
+    write
+    ~owner:completion.Idle_completion_data.identity
+    ~candidate
+    ~state:t.state;
+  Option.iter completion.pending_prefix ~f:(fun prefix -> completion.prefix <- prefix);
+  completion.pending_prefix <- None;
+  match Idle_completion_write.phase write with
+  | Installed acknowledgement ->
+    (match Idle_completion_write.Acknowledgement.selected acknowledgement with
+     | Requested (Start_ordinary_turn | Start_compaction) ->
+       (match completion.suffix with
+        | Some (Operation suffix) ->
+          Option.iter suffix.previous_owner ~f:Operation_owner.retire;
+          t.operation_agent_custody <- suffix.owner_slot;
+          suffix.installed := true;
+          suffix.phase <- Acknowledged
+        | None | Some (Stop _) -> invalid_arg "legacy operation ACK has no actual suffix")
+     | Requested (Retire_turn | Retire_compaction) ->
+       (match completion.suffix with
+        | Some (Operation suffix) -> suffix.phase <- Terminal_acknowledged
+        | None | Some (Stop _) -> invalid_arg "legacy terminal ACK has no actual suffix")
+     | Requested
+         ( Reconcile_foreground
+         | Reconcile_terminal
+         | Checkpoint
+         | Suppress_automatic
+         | Stop
+         | Callback_failure )
+     | Admission_hold _ -> ())
+  | Not_attempted | Attempted ->
+    invalid_arg "legacy completion State ACK was not installed"
+;;
+
+let schedule_idle_completion_retirement t (completion : Idle_completion_data.t) =
+  let open Result.Let_syntax in
+  let%bind () = check_idle_completion_identity t completion in
+  match completion.phase, completion.cleanup with
+  | (Fresh | Retired), _ ->
+    let promise, resolver = Eio.Promise.create () in
+    Eio.Promise.resolve resolver (Ok ());
+    Ok promise
+  | (Claimed _ | Completing _), Running promise -> Ok promise
+  | (Claimed _ | Completing _), Scheduling_failed (failure, _) -> Error failure
+  | (Claimed _ | Completing _), Idle ->
+    let promise, resolver = Eio.Promise.create () in
+    let finished result =
+      match Eio.Promise.peek promise with
+      | Some _ -> ()
+      | None ->
+        (match completion.cleanup with
+         | Running actual when phys_equal actual promise -> completion.cleanup <- Idle
+         | Idle | Running _ | Scheduling_failed _ -> ());
+        Eio.Promise.resolve resolver result
+    in
+    completion.cleanup <- Running promise;
+    (try
+       Eio.Fiber.fork ~sw:t.sw (fun () ->
+         match
+           Eio.Fiber.yield ();
+           Eio.Promise.await completion.exited;
+           call t ~priority:Priority (Idle_completion (Retire_paired completion))
+         with
+         | result -> finished result
+         | exception exn ->
+           let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+           finished
+             (Error (error Interrupted "legacy completion retirement was interrupted"));
+           Exn.raise_with_original_backtrace exn backtrace);
+       Ok promise
+     with
+     | exn ->
+       let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+       let failure =
+         error
+           Interrupted
+           ("legacy completion retirement could not be scheduled: " ^ Exn.to_string exn)
+       in
+       (* This is cleanup setup, possibly called from an original-error finally.
+          Retain its exact diagnostic without replacing that original exit. *)
+       completion.cleanup <- Scheduling_failed (failure, Raised (exn, backtrace));
+       (match Eio.Promise.peek promise with
+        | None -> Eio.Promise.resolve resolver (Error failure)
+        | Some _ -> ());
+       Error failure)
+;;
+
+let drain_idle_completion_retirement t =
+  if not (Int.equal t.runtime_source_domain (Stdlib.Domain.self () :> int))
+  then Error (error Conflict "legacy completion drain belongs to another Actor domain")
+  else (
+    match t.idle_completion with
+    | None -> Ok ()
+    | Some completion ->
+      let open Result.Let_syntax in
+      let%bind () = check_idle_completion_identity t completion in
+      Idle_completion_data.request_cancellation
+        completion
+        (error Interrupted "legacy completion source is retiring");
+      let%bind promise = schedule_idle_completion_retirement t completion in
+      Eio.Promise.await promise)
+;;
+
+let prepare_idle_operation_suffix
+      t
+      (completion : Idle_completion_data.t option)
+      ~operation
+      ~custody
+      ~installed
+      ~kind
+  =
+  match completion with
+  | None -> Ok ()
+  | Some completion ->
+    let%bind.Result () = check_idle_completion_source t completion in
+    let owner : Operation_owner.t =
+      { operation_id = operation.Agent_protocol.Operation.id
+      ; admission = create_agent_admission custody
+      ; held = None
+      ; descendant_guard = None
+      }
+    in
+    let suffix : Idle_completion_data.operation_suffix =
+      { operation
+      ; owner
+      ; owner_slot = Some owner
+      ; worker = t.operation_worker
+      ; installed
+      ; kind
+      ; phase = Prepared
+      ; native_write = None
+      ; previous_owner = t.operation_agent_custody
+      }
+    in
+    completion.suffix <- Some (Operation suffix);
+    Ok ()
+;;
+
+let check_idle_operation_suffix t (completion : Idle_completion_data.t option) operation =
+  match completion with
+  | None -> Ok ()
+  | Some completion ->
+    let open Result.Let_syntax in
+    let%bind () = check_idle_completion_source t completion in
+    let%bind () =
+      match completion.cancellation with
+      | None -> Ok ()
+      | Some failure -> Error failure
+    in
+    (match completion.suffix, t.state.active_operation, t.operation_agent_custody with
+     | Some (Operation suffix), Some actual, Some owner
+       when Idle_completion_data.equal_operation_phase suffix.phase Acknowledged
+            && phys_equal owner suffix.owner
+            && Option.equal phys_equal suffix.worker t.operation_worker
+            && Agent_protocol.Id.Operation.equal
+                 operation.Agent_protocol.Operation.id
+                 actual.id
+            && Agent_protocol.Id.Operation.equal actual.id suffix.operation.id
+            && Int.equal actual.generation suffix.operation.generation
+            && Agent_protocol.Operation.equal_kind actual.kind suffix.operation.kind ->
+       Ok ()
+     | _ ->
+       Error (error Conflict "legacy completion cannot redirect its acknowledged worker"))
+;;
+
+let handoff_idle_operation (completion : Idle_completion_data.t option) =
+  Option.iter completion ~f:(fun completion ->
+    match completion.Idle_completion_data.suffix with
+    | Some (Operation suffix) -> suffix.phase <- Handed_off
+    | None | Some (Stop _) -> invalid_arg "legacy completion has no operation to hand off")
+;;
+
+let drain_descendant_cleanup t =
+  let open Result.Let_syntax in
+  let%bind () = drain_idle_completion_retirement t in
+  let%bind () =
+    if Int.equal t.runtime_source_domain (Stdlib.Domain.self () :> int)
+    then Ok ()
+    else Error (error Conflict "descendant cleanup belongs to another domain")
+  in
+  (* Source retirement owns this explicit cancellation, not a fresh admission or
+     another sender's attempt. The same retained ACK keeps partial facts. *)
+  (match t.inherited_turn_cleanup with
+   | None -> ()
+   | Some (Pack acknowledged) ->
+     Inherited_turn.request_cancellation
+       acknowledged.plan
+       ~failure:(error Interrupted "inherited Turn source is retiring"));
+  let acknowledged = retry_inherited_turn_cleanup t in
+  let sealed = retry_descendant_admission_cleanup t in
+  let%bind () = acknowledged in
+  sealed
 ;;
 
 let publish_durable t events =
@@ -4893,10 +7158,13 @@ let refresh_held_execution t execution =
       ~default:(Ok ())
       ~f:(fun scope -> Runtime_construction.refresh (Existing_goal scope.continuation))
   in
-  match initialization_construction_of_execution t execution with
-  | Some ((Runtime_construction.Existing_goal _ | Delegated_load _) as construction) ->
-    Runtime_construction.refresh construction
-  | Some (Initial _) | None -> Ok ()
+  let%bind () =
+    match initialization_construction_of_execution t execution with
+    | Some ((Runtime_construction.Existing_goal _ | Delegated_load _) as construction) ->
+      Runtime_construction.refresh construction
+    | Some (Initial _) | None -> Ok ()
+  in
+  refresh_execution_descendant t execution
 ;;
 
 (* The supplied key selects an existing physical execution only. The actual
@@ -4921,12 +7189,6 @@ let refresh_held_background_owner t = function
           when Agent_protocol.Id.Invocation.equal id borrow.invocation.context.id ->
           refresh_held_execution t (Inference_moderator borrow)
         | None | Some _ -> Ok ()))
-;;
-
-let inference_port t execution ~graph ~relation ~configuration =
-  let open Result.Let_syntax in
-  let%bind () = refresh_held_execution t execution in
-  call t (Allocate_inference (execution, graph, relation, configuration))
 ;;
 
 let model_job_port t execution =
@@ -5207,6 +7469,7 @@ let install_live_run_agent_custody t =
                   { Operation_owner.operation_id = operation.id
                   ; admission = create_agent_admission (Some (create_agent_custody actor))
                   ; held = None
+                  ; descendant_guard = None
                   }))
      | [] | _ :: _ :: _ -> ())
   | Some _, _, _ | None, None, _ | None, Some _, (Some _ | None) -> ()
@@ -5236,6 +7499,9 @@ let retain_goal_activation_owners t ~retained =
 ;;
 
 let retire_goal_activation t goal_id =
+  List.iter t.descendant_policy_cells ~f:(fun policy ->
+    if Agent_protocol.Id.Goal.equal (Goal_root_policy.goal_id policy) goal_id
+    then Goal_root_policy.retire policy);
   retain_goal_activation_owners t ~retained:(fun association ->
     match association.Activation_association.issuer_policy with
     | Recurrence -> true
@@ -5252,6 +7518,12 @@ let retire_goal_activation t goal_id =
 ;;
 
 let retain_goal_activations ?admission_hold t (current : Session_state.t) =
+  List.iter t.descendant_policy_cells ~f:(fun policy ->
+    Goal_root_policy.retain_candidate
+      policy
+      ~previous:t.state
+      ~candidate:current
+      ~admission_hold);
   let goal_state state id =
     Option.bind state.Session_state.goal_catalog ~f:(fun catalog ->
       Option.map (Goal_catalog.find catalog id) ~f:Agent_protocol.Goal.state)
@@ -5534,6 +7806,121 @@ module Constructor_stop_acknowledgement = struct
   ;;
 end
 
+module Inherited_turn_acknowledgement = struct
+  type actor = t
+
+  type 'outcome plan =
+    { acknowledged : 'outcome Inherited_turn.Acknowledged.t
+    ; acknowledged_phase : 'outcome Inherited_turn.phase
+    ; retained : Inherited_turn.cleanup option
+    ; operation_custody : Operation_owner.t option
+    ; run_authorities : Run_authorities.t option
+    }
+
+  type t = Pack : 'outcome plan -> t
+
+  let prepare (acknowledged : _ Inherited_turn.Acknowledged.t) =
+    Pack
+      { acknowledged
+      ; acknowledged_phase = Acknowledged acknowledged
+      ; retained = Some (Inherited_turn.Pack acknowledged)
+      ; operation_custody = Some acknowledged.owner
+      ; run_authorities =
+          Option.map
+            (Inherited_turn.Source.run acknowledged.plan.source)
+            ~f:(fun source -> source.authorities)
+      }
+  ;;
+
+  let check (Pack { acknowledged; _ }) ~(actor : actor) ~candidate =
+    let plan = acknowledged.Inherited_turn.plan in
+    match plan.phase with
+    | Writer_prepared actual
+      when phys_equal actual acknowledged
+           && phys_equal actor.state plan.before
+           && phys_equal candidate acknowledged.native.candidate
+           && Option.exists actor.inherited_turn_prepared ~f:(fun (Prepared prepared) ->
+             phys_equal prepared.native acknowledged.native
+             && phys_equal prepared.plan.slot plan.slot)
+           && Option.is_none actor.inherited_turn_cleanup ->
+      (match Inherited_turn.Source.run plan.source with
+       | None -> Ok ()
+       | Some source ->
+         let run = Run_admission.run source.admission in
+         if
+           phys_equal actor.run_authorities source.previous_authorities
+           && Run_authorities.is_current source.authorities source.binding ~run_id:run.id
+           && Option.exists candidate.state.run_state ~f:(fun index ->
+             Option.exists (Run_state.find index run.id) ~f:(Agent_protocol.Run.equal run))
+         then Ok ()
+         else Error (error Conflict "inherited Run authority ACK changed before writer"))
+    | Pending | Writer_prepared _ | Acknowledged _ | Closed ->
+      Error (error Conflict "native inherited Turn ACK plan changed before writer")
+  ;;
+
+  let install
+        (Pack
+           { acknowledged
+           ; acknowledged_phase
+           ; retained
+           ; operation_custody
+           ; run_authorities
+           })
+        ~(actor : actor)
+    =
+    Option.iter actor.operation_agent_custody ~f:Operation_owner.retire;
+    actor.operation_agent_custody <- operation_custody;
+    (* Retain every actual ACK until the exact confirmed suffix handoff. The
+       direct caller is not a runtime lease; source retirement must discover
+       this same Starting ACK even if its caller is still waiting. *)
+    actor.inherited_turn_cleanup <- retained;
+    actor.inherited_turn_prepared <- None;
+    Option.iter run_authorities ~f:(fun authorities ->
+      actor.run_authorities <- authorities);
+    acknowledged.plan.phase <- acknowledged_phase;
+    (* Exact Run binding is installed before constructor custody closes. The
+       worker consumes that binding, never the preparation's mutable tracker. *)
+    Option.iter (Inherited_turn.Source.run acknowledged.plan.source) ~f:(fun source ->
+      Option.iter source.preparation_exit ~f:(fun exit ->
+        Run_preparation.Admission_exit.close exit ~owner:actor.run_preparation_owner);
+      match source.preparation, actor.run_preparation with
+      | Some preparation, Some (Initial active) when phys_equal preparation active ->
+        actor.run_preparation <- None
+      | (Some _ | None), (Some _ | None) -> ());
+    (match acknowledged.plan.source with
+     | Held_input source ->
+       Run_preparation.Admission_exit.close
+         source.preparation_exit
+         ~owner:actor.run_preparation_owner;
+       (match actor.run_preparation with
+        | Some (Initial actual)
+          when phys_equal
+                 actual
+                 (Admitted_activation.Continuation.target
+                    source.selection.scope.continuation)
+                   .preparation -> actor.run_preparation <- None
+        | Some _ | None -> ())
+     | Message _ | Managed _ | Run_user _ | History _ | Goal_resume _ -> ());
+    match acknowledged.plan.cancellation with
+    | Not_requested -> ()
+    | Requested _ ->
+      (* Failure to fork cannot abandon the retained genuine delayed ACK. *)
+      Operation_descendant_guard.retire acknowledged.guard;
+      (try
+         ignore
+           (schedule_inherited_turn_cleanup actor acknowledged
+            : ( (unit, Agent_protocol.Error.t) result Eio.Promise.t
+                , Agent_protocol.Error.t )
+                result)
+       with
+       | exn ->
+         (try
+            Eio.traceln "delayed inherited Turn ACK cleanup: %s" (Exn.to_string exn)
+          with
+          | _ -> ()))
+  ;;
+end
+
 module Held_authored_acknowledgement = struct
   type actor = t
 
@@ -5801,39 +8188,37 @@ module Goal_runtime_acknowledgement = struct
     else Error (error Conflict "Goal runtime acknowledgement candidate changed")
   ;;
 
-  let prepare (actor : actor) scope ~candidate =
-    let open Result.Let_syntax in
-    let%bind () = goal_runtime_scope_basis actor scope in
-    let%bind callback_advance =
-      match actor.queued_event_borrow with
-      | Some borrow
-        when Option.exists (goal_runtime_of_borrow borrow) ~f:(phys_equal scope)
-             && borrow.callback_active
-             && not borrow.committed ->
-        (match borrow.run_actions with
-         | None -> Ok None
-         | Some actions ->
-           let find state =
-             Option.bind state.Session_state.run_state ~f:(fun index ->
-               Run_state.find
-                 index
-                 scope.Goal_continuation.continuation.binding.preparation.run.id)
-           in
-           (match find actor.state, find candidate.Session_transition.state with
-            | Some previous, Some next when not (Agent_protocol.Run.equal previous next)
-              ->
-              (match next.lifecycle with
-               | Terminal _ -> Ok None
-               | Admitted | Active | Waiting _ ->
-                 Run_scope.Host.prepare_advance
-                   (Run_action_service.scope actions)
-                   ~previous
-                   ~next
-                   ~execution_id:borrow.receipt.context.id
-                 |> Result.map ~f:Option.some)
-            | _ -> Ok None))
-      | None | Some _ -> Ok None
-    in
+  let prepare_callback_advance (actor : actor) scope ~candidate =
+    match actor.queued_event_borrow with
+    | Some borrow
+      when Option.exists (goal_runtime_of_borrow borrow) ~f:(phys_equal scope)
+           && borrow.callback_active
+           && not borrow.committed ->
+      (match borrow.run_actions with
+       | None -> Ok None
+       | Some actions ->
+         let find state =
+           Option.bind state.Session_state.run_state ~f:(fun index ->
+             Run_state.find
+               index
+               scope.Goal_continuation.continuation.binding.preparation.run.id)
+         in
+         (match find actor.state, find candidate.Session_transition.state with
+          | Some previous, Some next when not (Agent_protocol.Run.equal previous next) ->
+            (match next.lifecycle with
+             | Terminal _ -> Ok None
+             | Admitted | Active | Waiting _ ->
+               Run_scope.Host.prepare_advance
+                 (Run_action_service.scope actions)
+                 ~previous
+                 ~next
+                 ~execution_id:borrow.receipt.context.id
+               |> Result.map ~f:Option.some)
+          | _ -> Ok None))
+    | None | Some _ -> Ok None
+  ;;
+
+  let prepare_after_basis (actor : actor) scope ~candidate ~callback_advance =
     let rec jobs = function
       | Session_delta.Batch deltas -> List.concat_map deltas ~f:jobs
       | Job_changed job -> [ job ]
@@ -5846,6 +8231,52 @@ module Goal_runtime_acknowledgement = struct
       ; jobs = jobs candidate.delta
       ; callback_advance
       }
+  ;;
+
+  let prepare (actor : actor) scope ~candidate =
+    let open Result.Let_syntax in
+    let%bind () = goal_runtime_scope_basis actor scope in
+    let%bind callback_advance = prepare_callback_advance actor scope ~candidate in
+    prepare_after_basis actor scope ~candidate ~callback_advance
+  ;;
+
+  let factual_scope_basis (actor : actor) (scope : Goal_continuation.runtime_scope) ~owner
+    =
+    let preparation = scope.continuation.binding.preparation in
+    if
+      Int.equal preparation.domain (Stdlib.Domain.self () :> int)
+      && phys_equal scope.issuing_actor actor.inference_owner_identity
+      && Run_preparation.Custody.belongs_to
+           (Goal_continuation.custody preparation)
+           ~owner:actor.run_preparation_owner
+      && List.mem scope.graphs owner ~equal:phys_equal
+      && List.mem actor.inference_owners owner ~equal:phys_equal
+      && phys_equal actor.inference_owner_identity (Graph_owner.issuing_actor owner)
+    then Ok ()
+    else Error (error Conflict "factual Goal callback belongs to another actual graph")
+  ;;
+
+  let prepare_factual (actor : actor) scope ~owner ~candidate =
+    let open Result.Let_syntax in
+    let%bind () = factual_scope_basis actor scope ~owner in
+    let%bind callback_advance =
+      match actor.queued_event_borrow with
+      | Some borrow
+        when Option.exists (goal_runtime_of_borrow borrow) ~f:(phys_equal scope) ->
+        (match borrow.run_actions with
+         | Some actions when not (Run_scope.is_open (Run_action_service.scope actions)) ->
+           Ok None
+         | Some _ | None -> prepare_callback_advance actor scope ~candidate)
+      | Some _ | None -> prepare_callback_advance actor scope ~candidate
+    in
+    prepare_after_basis actor scope ~candidate ~callback_advance
+  ;;
+
+  let check_factual t ~(actor : actor) ~owner ~candidate =
+    let%bind.Result () = factual_scope_basis actor t.scope ~owner in
+    if phys_equal t.previous actor.state && phys_equal t.candidate candidate
+    then Ok ()
+    else Error (error Conflict "factual Goal callback candidate changed")
   ;;
 
   let install t =
@@ -5877,6 +8308,7 @@ module Held_operation_acknowledgement = struct
   type t =
     { input_scope : Held_input_scope.t
     ; input : Runtime_input_preparation.Prepared_input.t
+    ; preparation_exit : Run_preparation.Admission_exit.t option
     ; activation : Held_run.Activation.t
     ; held : Held_operation.t
     ; owner : Operation_owner.t
@@ -5896,8 +8328,21 @@ module Held_operation_acknowledgement = struct
       then Ok ()
       else Error (error Conflict "held root acknowledgement owner changed")
     in
-    match t.input_scope.phase, t.held.phase with
-    | Parsed_ready input, Staged
+    let recorded =
+      match t.input_scope.phase, t.preparation_exit with
+      | Parsed_ready input, None -> Some input
+      | Admission_pending (input, actual), Some expected when phys_equal actual expected
+        -> Some input
+      | ( ( Parsing
+          | Parsed_ready _
+          | Admission_pending _
+          | Consumed _
+          | Root_attempt_unconfirmed
+          | Closed )
+        , (Some _ | None) ) -> None
+    in
+    match recorded, t.held.phase with
+    | Some input, Staged
       when Runtime_input_preparation.Prepared_input.equal input t.input
            && phys_equal t.held.proof.controller.association t.activation.association
            && Option.exists actor.operation_worker ~f:(phys_equal t.held.proof.worker)
@@ -5905,7 +8350,7 @@ module Held_operation_acknowledgement = struct
                 actor.run_authorities
                 t.held.proof.binding
                 ~run_id:t.held.proof.run.id -> Ok ()
-    | (Parsing | Parsed_ready _ | Consumed _ | Root_attempt_unconfirmed | Closed), _ ->
+    | (Some _ | None), _ ->
       Error (error Conflict "held root input or physical worker changed")
   ;;
 
@@ -5967,6 +8412,12 @@ module Goal_runtime_operation_acknowledgement = struct
 end
 
 let install_committed_transition_owned
+      ?idle_completion_write
+      ?inherited_turn_acknowledgement
+      ?root_reserve_acknowledgement
+      ?root_close_acknowledgement
+      ?descendant_admission_acknowledgement
+      ?descendant_import_acknowledgement
       ?held_authored_acknowledgement
       ?goal_runtime_acknowledgement
       ?held_operation_acknowledgement
@@ -6008,6 +8459,19 @@ let install_committed_transition_owned
   List.iter explicit_goal_holds ~f:(invalidate_goal_inference_allocations t);
   invalidate_goal_inference_policy ?admission_hold t transition.state;
   t.state <- transition.state;
+  Option.iter idle_completion_write ~f:(fun owned ->
+    install_idle_completion_writer t owned transition);
+  (match descendant_admission_acknowledgement with
+   | None -> ()
+   | Some acknowledgement -> install_descendant_admission_slot_ack t acknowledgement);
+  Option.iter
+    inherited_turn_acknowledgement
+    ~f:(Inherited_turn_acknowledgement.install ~actor:t);
+  Option.iter root_reserve_acknowledgement ~f:Root_reserve_acknowledgement.install;
+  Option.iter root_close_acknowledgement ~f:Root_close_acknowledgement.install;
+  Option.iter
+    descendant_import_acknowledgement
+    ~f:Descendant_import_acknowledgement.install;
   Option.iter
     held_authored_acknowledgement
     ~f:(Held_authored_acknowledgement.install ~actor:t);
@@ -6063,12 +8527,20 @@ let install_committed_transition_owned
   Option.iter queued_claim_acknowledgement ~f:(fun acknowledgement ->
     t.queued_event_borrow <- Some (Queued_claim_acknowledgement.install acknowledgement);
     t.idle_moderator_borrowed <- true);
-  Atomic.set t.event_sequence t.state.counters.event_sequence
+  Atomic.set t.event_sequence t.state.counters.event_sequence;
+  List.iter t.inference_owners ~f:(fun owner ->
+    Graph_owner.retain_joined owner t.state.inference_ledger)
 ;;
 
 (* Initial callers retain their typed adapter; the shared ACK installation owns
    exactly one closed preparation family, never two optional mutable owners. *)
 let install_committed_transition
+      ?idle_completion_write
+      ?inherited_turn_acknowledgement
+      ?root_reserve_acknowledgement
+      ?root_close_acknowledgement
+      ?descendant_admission_acknowledgement
+      ?descendant_import_acknowledgement
       ?held_authored_acknowledgement
       ?goal_runtime_acknowledgement
       ?held_operation_acknowledgement
@@ -6088,6 +8560,12 @@ let install_committed_transition
       transition
   =
   install_committed_transition_owned
+    ?idle_completion_write
+    ?inherited_turn_acknowledgement
+    ?root_reserve_acknowledgement
+    ?root_close_acknowledgement
+    ?descendant_admission_acknowledgement
+    ?descendant_import_acknowledgement
     ?held_authored_acknowledgement
     ?goal_runtime_acknowledgement
     ?held_operation_acknowledgement
@@ -6282,7 +8760,217 @@ let rec deferred_admission_delta (previous : Session_state.t) (delta : Session_d
 
 (* Every actual durable write passes this seam. Only real Turn starts sample
    fresh policy time; ledger/outcome/cleanup writes add no clock callback. *)
+module Owned_inference_mutation = struct
+  type acknowledgement =
+    | Preserve
+    | Acknowledge of Inference_owner.Registration.t * Inference_runtime.Attempt.t
+    | Finish
+
+  module Scope = struct
+    type t =
+      | Input of Held_input_scope.t
+      | Authored of Held_authored_start.t
+      | Initialization of Runtime_constructor_graph.t
+      | Goal_runtime of Goal_continuation.runtime_scope
+      | Registered of Inference_owner.t
+  end
+
+  type t =
+    { scope : Scope.t
+    ; owner : Inference_owner.t
+    ; acknowledgement : acknowledgement
+    }
+end
+
+let input_graph_basis t (scope : Held_input_scope.t) owner =
+  if
+    phys_equal scope.Held_input_scope.issuing_actor t.inference_owner_identity
+    && List.mem scope.graphs owner ~equal:phys_equal
+    && List.mem t.inference_owners owner ~equal:phys_equal
+    && phys_equal t.inference_owner_identity (Graph_owner.issuing_actor owner)
+  then Ok ()
+  else Error (error Conflict "inference graph does not belong to this held input")
+;;
+
+let initialization_graph_basis t (graph : Runtime_constructor_graph.t) =
+  if
+    phys_equal graph.scope.owner t.initialization_owner
+    && List.mem graph.scope.graphs graph.owner ~equal:phys_equal
+    && List.mem t.inference_owners graph.owner ~equal:phys_equal
+    && phys_equal t.inference_owner_identity (Graph_owner.issuing_actor graph.owner)
+    && Option.exists
+         (Initialization_scope.construction graph.scope)
+         ~f:(fun construction ->
+           Preparation_owner.same
+             (Runtime_construction.preparation_owner construction)
+             (Runtime_construction.preparation_owner graph.construction))
+  then Ok ()
+  else Error (error Conflict "constructor graph belongs to another or substituted scope")
+;;
+
+let owned_graph_basis t (mutation : Owned_inference_mutation.t) =
+  match mutation.scope with
+  | Input scope -> input_graph_basis t scope mutation.owner
+  | Registered owner ->
+    let open Result.Let_syntax in
+    let%bind () =
+      if
+        Int.equal t.runtime_source_domain (Stdlib.Domain.self () :> int)
+        && phys_equal owner mutation.owner
+        && phys_equal t.inference_owner_identity (Graph_owner.issuing_actor owner)
+        && List.mem t.inference_owners owner ~equal:phys_equal
+      then Ok ()
+      else Error (error Conflict "factual registration belongs to another graph owner")
+    in
+    let checked = ref (Ok ()) in
+    Graph_owner.iter_retained_registrations owner ~f:(fun registration ->
+      checked
+      := Result.bind !checked ~f:(fun () ->
+           let handle = Inference_owner.Registration.handle registration in
+           if
+             Agent_protocol.Id.Session.equal
+               (Inference_ledger.Handle.session_id handle)
+               t.state.identity.session_id
+             && Int.equal
+                  (Inference_ledger.Handle.generation handle)
+                  (Graph_owner.generation owner)
+             && Option.exists (Graph_owner.qualified_source owner) ~f:(fun source ->
+               Transcript.Source_id.equal
+                 source
+                 (Transcript.Scope.key (Inference_ledger.Handle.scope handle)).source)
+             && Option.value_map
+                  (Inference_owner.Registration.initial_preparation registration)
+                  ~default:true
+                  ~f:(fun preparation ->
+                    Run_preparation.belongs_to preparation ~owner:t.run_preparation_owner)
+           then Ok ()
+           else
+             Error
+               (error Conflict "factual registration source or preparation owner changed")));
+    !checked
+  | Goal_runtime scope ->
+    if
+      Int.equal
+        scope.continuation.binding.preparation.domain
+        (Stdlib.Domain.self () :> int)
+      && phys_equal scope.issuing_actor t.inference_owner_identity
+      && List.mem scope.graphs mutation.owner ~equal:phys_equal
+      && List.mem t.inference_owners mutation.owner ~equal:phys_equal
+      && phys_equal t.inference_owner_identity (Graph_owner.issuing_actor mutation.owner)
+    then Ok ()
+    else Error (error Conflict "graph has another factual Goal runtime owner")
+  | Initialization graph ->
+    if phys_equal graph.owner mutation.owner
+    then initialization_graph_basis t graph
+    else Error (error Conflict "constructor graph owner was substituted")
+  | Authored scope ->
+    if
+      phys_equal scope.issuing_actor t.inference_owner_identity
+      && List.mem scope.graphs mutation.owner ~equal:phys_equal
+      && List.mem t.inference_owners mutation.owner ~equal:phys_equal
+      && phys_equal t.inference_owner_identity (Graph_owner.issuing_actor mutation.owner)
+    then Ok ()
+    else Error (error Conflict "graph does not belong to this held authored startup")
+;;
+
+let owned_graph_preparation (mutation : Owned_inference_mutation.t) =
+  match mutation.scope with
+  | Registered owner ->
+    let selected = ref None in
+    let conflicting = ref false in
+    Graph_owner.iter_retained_registrations owner ~f:(fun registration ->
+      let captured = Inference_owner.Registration.initial_preparation registration in
+      match !selected with
+      | None -> selected := Some captured
+      | Some previous ->
+        if not (Option.equal phys_equal previous captured) then conflicting := true);
+    if !conflicting
+    then None
+    else
+      Option.bind
+        !selected
+        ~f:(Option.map ~f:(fun preparation -> Preparation_owner.Initial preparation))
+  | Goal_runtime scope ->
+    Some (Preparation_owner.Existing_goal scope.continuation.binding.preparation)
+  | Input scope -> Some (Preparation_owner.Initial scope.continuation.target.preparation)
+  | Authored scope ->
+    Some (Preparation_owner.Initial scope.continuation.target.preparation)
+  | Initialization graph -> Initialization_scope.preparation_owner graph.scope
+;;
+
+module Owned_inference_persistence = struct
+  type actor = t
+
+  type t =
+    { issuing_actor : unit ref
+    ; domain : int
+    ; previous : Session_state.t
+    ; candidate : Session_transition.t
+    ; mutation : Owned_inference_mutation.t
+    ; preparation_owner : Preparation_owner.t option
+    ; source_binding : Source_binding.t option
+    }
+
+  let check t ~(actor : actor) ~candidate =
+    let open Result.Let_syntax in
+    let%bind () =
+      if
+        Int.equal t.domain (Stdlib.Domain.self () :> int)
+        && phys_equal t.issuing_actor actor.inference_owner_identity
+        && phys_equal t.previous actor.state
+        && phys_equal t.candidate candidate
+        && Option.equal phys_equal t.source_binding actor.run_source_binding
+      then Ok ()
+      else Error (error Conflict "factual inference candidate owner or basis changed")
+    in
+    let%bind () = owned_graph_basis actor t.mutation in
+    let%bind () =
+      match t.preparation_owner with
+      | None -> Ok ()
+      | Some preparation ->
+        if Option.exists actor.run_preparation ~f:(Preparation_owner.same preparation)
+        then
+          Preparation_owner.check_basis
+            preparation
+            ~owner:actor.run_preparation_owner
+            ~state:actor.state
+        else Error (error Conflict "factual inference preparation was displaced")
+    in
+    let marks ledger =
+      Canonical_usage_fold.Marks.of_ledger ledger
+      |> Result.map_error ~f:(fun e ->
+        error Invalid_state (Sexp.to_string_hum (Canonical_usage_fold.Error.sexp_of_t e)))
+    in
+    let%bind before = marks actor.state.inference_ledger in
+    let%bind after = marks candidate.Session_transition.state.inference_ledger in
+    if
+      Descendant_admission_data.metadata_only_candidate candidate
+      && Canonical_usage_fold.Marks.equal before after
+    then Ok ()
+    else
+      Error
+        (error Invalid_state "factual inference candidate cannot admit canonical work")
+  ;;
+
+  let prepare (actor : actor) ~mutation ~candidate ~preparation_owner =
+    let t =
+      { issuing_actor = actor.inference_owner_identity
+      ; domain = actor.runtime_source_domain
+      ; previous = actor.state
+      ; candidate
+      ; mutation
+      ; preparation_owner
+      ; source_binding = actor.run_source_binding
+      }
+    in
+    Result.map (check t ~actor ~candidate) ~f:(fun () -> t)
+  ;;
+end
+
 let persist_transition
+      ?idle_completion_write
+      ?owned_inference_persistence
+      ?descendant_admission_acknowledgement
       ?run_preparation
       ?admission_hold
       ?commit_attempted
@@ -6294,17 +8982,29 @@ let persist_transition
   let open Result.Let_syntax in
   let revision = t.state.counters.revision in
   let%bind source_binding =
-    match t.run_source_binding with
-    | None -> Ok None
-    | Some binding
-      when Option.exists
-             run_preparation
-             ~f:(phys_equal binding.Source_binding.preparation) ->
-      let%map () = Source_binding.check_current binding in
-      Some binding
-    | Some _ ->
-      close_run_preparation t;
-      Ok None
+    match owned_inference_persistence with
+    | Some proof ->
+      let%bind () =
+        if Option.is_none run_preparation
+        then Ok ()
+        else
+          Error
+            (error Invalid_state "factual inference proof cannot select fresh Run policy")
+      in
+      let%map () = Owned_inference_persistence.check proof ~actor:t ~candidate in
+      None
+    | None ->
+      (match t.run_source_binding with
+       | None -> Ok None
+       | Some binding
+         when Option.exists
+                run_preparation
+                ~f:(phys_equal binding.Source_binding.preparation) ->
+         let%map () = Source_binding.check_current binding in
+         Some binding
+       | Some _ ->
+         close_run_preparation t;
+         Ok None)
   in
   let%bind payloads =
     List.filter_map candidate.events ~f:(fun event ->
@@ -6345,6 +9045,10 @@ let persist_transition
   let%bind () =
     Option.value_map source_binding ~default:(Ok ()) ~f:Source_binding.check_basis
   in
+  let%bind () =
+    Option.value_map owned_inference_persistence ~default:(Ok ()) ~f:(fun proof ->
+      Owned_inference_persistence.check proof ~actor:t ~candidate)
+  in
   (* Source policy precedes the composed final guard. Only pure basis checks
      follow it, and the attempt becomes uncertain only at a real writer call. *)
   let requested = candidate in
@@ -6365,10 +9069,48 @@ let persist_transition
       then exclude_effect_deferred t Admission_attempted
       else if deferred_execution_delta t.state requested.delta
       then exclude_effect_deferred t Ordinary_execution;
+    let%bind () =
+      match idle_completion_write with
+      | None -> Ok ()
+      | Some ((_, write) as owned) ->
+        let selected =
+          if phys_equal candidate requested
+          then
+            Ok
+              (Idle_completion_write.Selected.Requested (Idle_completion_write.kind write))
+          else (
+            match admission_hold with
+            | Some goal -> Ok (Idle_completion_write.Selected.Admission_hold goal)
+            | None ->
+              Error (error Invalid_state "legacy writer selected an unowned candidate"))
+        in
+        let%bind selected = selected in
+        select_idle_completion_writer t owned ~candidate ~selected
+    in
     Option.iter commit_attempted ~f:(fun attempted -> attempted := true);
-    t.persistence.commit ~command_audit ~previous:t.state candidate
+    (* A policy Hold may select a different metadata-only writer. Only the
+       exact requested canonical candidate makes this child occurrence uncertain;
+       the generic writer-attempt flag above retains its existing meaning. *)
+    if phys_equal candidate requested
+    then
+      Option.iter
+        descendant_admission_acknowledgement
+        ~f:(fun (ack : Descendant_admission_slot.Acknowledgement_plan.t) ->
+          ack.slot.preparation.writer_attempted := true);
+    match t.persistence.commit ~command_audit ~previous:t.state candidate with
+    | Ok () -> Ok ()
+    | Error failure as result ->
+      Option.iter idle_completion_write ~f:(fun (_, write) ->
+        Idle_completion_write.retain_failure write failure);
+      result
+    | exception exn ->
+      let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+      Option.iter idle_completion_write ~f:(fun (_, write) ->
+        Idle_completion_write.retain_exception write exn backtrace);
+      Exn.raise_with_original_backtrace exn backtrace
   in
   match admission with
+  | Deferred deferred -> Error (goal_capacity_deferred deferred)
   | Allow ->
     retain_recurrence_activations t candidate.state;
     commit ?admission_hold ~command_audit:t.command_audit candidate
@@ -6388,7 +9130,7 @@ let persist_transition
         in
         retain_recurrence_activations t held.state;
         let%map () = commit ~admission_hold:goal_id ~command_audit:None held in
-        install_committed_transition ~admission_hold:goal_id t held;
+        install_committed_transition ?idle_completion_write ~admission_hold:goal_id t held;
         publish_committed_transition t held
     in
     Error (error Permission_denied "goal policy holds fresh host-turn admission")
@@ -6407,6 +9149,14 @@ let prepare_completion_plan t (transition : Session_transition.t) completion_sam
 ;;
 
 let install
+      ?idle_completion_write
+      ?inherited_turn_acknowledgement
+      ?held_operation_acknowledgement
+      ?goal_operation_acknowledgement
+      ?root_reserve_acknowledgement
+      ?root_close_acknowledgement
+      ?descendant_admission_acknowledgement
+      ?descendant_import_acknowledgement
       ?turn_stage
       ?held_authored_callback_acknowledgement
       ?goal_runtime_acknowledgement
@@ -6481,8 +9231,115 @@ let install
             ~actor:t
             ~candidate:transition)
   in
+  let previous_check = check_before_commit in
+  let%bind () =
+    if
+      Option.is_some descendant_admission_acknowledgement
+      && (not (Descendant_admission_data.metadata_only_candidate transition))
+      && Option.is_none previous_check
+    then
+      Error
+        (error
+           Invalid_state
+           "descendant Turn ACK requires its original final owner check")
+    else Ok ()
+  in
+  let check_before_commit =
+    match
+      ( previous_check
+      , descendant_admission_acknowledgement
+      , root_reserve_acknowledgement
+      , root_close_acknowledgement
+      , descendant_import_acknowledgement )
+    with
+    | None, None, None, None, None -> None
+    | (Some _ | None), (Some _ | None), (Some _ | None), (Some _ | None), (Some _ | None)
+      ->
+      Some
+        (fun () ->
+          let%bind () =
+            Option.value_map previous_check ~default:(Ok ()) ~f:(fun check -> check ())
+          in
+          let%bind () =
+            Option.value_map
+              descendant_admission_acknowledgement
+              ~default:(Ok ())
+              ~f:(fun acknowledgement ->
+                check_descendant_admission_slot_ack
+                  t
+                  acknowledgement
+                  ~candidate:transition)
+          in
+          let%bind () =
+            Option.value_map
+              root_reserve_acknowledgement
+              ~default:(Ok ())
+              ~f:(fun acknowledgement ->
+                Root_reserve_acknowledgement.check_basis
+                  acknowledgement
+                  ~state:t.state
+                  ~candidate:transition)
+          in
+          let%bind () =
+            Option.value_map
+              root_close_acknowledgement
+              ~default:(Ok ())
+              ~f:(fun acknowledgement ->
+                Root_close_acknowledgement.check_basis
+                  acknowledgement
+                  ~state:t.state
+                  ~candidate:transition)
+          in
+          Option.value_map
+            descendant_import_acknowledgement
+            ~default:(Ok ())
+            ~f:(fun acknowledgement ->
+              Descendant_import_acknowledgement.check_basis
+                acknowledgement
+                ~state:t.state
+                ~candidate:transition))
+  in
+  (* An ACK option cannot manufacture the required original Turn guard. *)
+  let check_before_commit =
+    match check_before_commit with
+    | None -> None
+    | Some original ->
+      Some
+        (fun () ->
+          let%bind () = original () in
+          let%bind () =
+            Option.value_map
+              held_operation_acknowledgement
+              ~default:(Ok ())
+              ~f:(fun acknowledgement ->
+                Held_operation_acknowledgement.check
+                  acknowledgement
+                  ~actor:t
+                  ~candidate:transition)
+          in
+          let%bind () =
+            Option.value_map
+              goal_operation_acknowledgement
+              ~default:(Ok ())
+              ~f:(fun acknowledgement ->
+                Goal_runtime_operation_acknowledgement.check
+                  acknowledgement
+                  ~actor:t
+                  ~candidate:transition)
+          in
+          Option.value_map
+            inherited_turn_acknowledgement
+            ~default:(Ok ())
+            ~f:(fun acknowledgement ->
+              Inherited_turn_acknowledgement.check
+                acknowledgement
+                ~actor:t
+                ~candidate:transition))
+  in
   let%bind () =
     persist_transition
+      ?idle_completion_write
+      ?descendant_admission_acknowledgement
       ?run_preparation
       ?admission_hold
       ?commit_attempted
@@ -6496,6 +9353,14 @@ let install
      yield or fail, so it cannot own this denial. Failed saves never reach here;
      automatic admission holds do not supply these control IDs. *)
   install_committed_transition
+    ?idle_completion_write
+    ?held_operation_acknowledgement
+    ?goal_operation_acknowledgement
+    ?inherited_turn_acknowledgement
+    ?root_reserve_acknowledgement
+    ?root_close_acknowledgement
+    ?descendant_admission_acknowledgement
+    ?descendant_import_acknowledgement
     ~explicit_goal_holds
     ?goal_runtime_acknowledgement
     ?queued_claim_acknowledgement
@@ -6564,7 +9429,7 @@ let producer_completion_sample ?completion_sample t ~delta =
     else None
 ;;
 
-let prepare_transition ?run_preparation ?completion_sample t ~delta ~payloads =
+let prepare_transition_basis ?run_preparation ?completion_sample t ~delta =
   let open Result.Let_syntax in
   let%bind () =
     match run_preparation with
@@ -6586,21 +9451,53 @@ let prepare_transition ?run_preparation ?completion_sample t ~delta ~payloads =
       ~now
   in
   let%bind delta = Goal_run_settlement.prepare t.state ~delta in
-  let%bind delta = Recurrence_source.prepare_change t.state ~delta in
-  let%bind prepared = Session_transition.apply ~now t.state ~delta ~payloads in
-  let%map () =
-    match prepared.state.run_state with
-    | None -> Ok ()
-    | Some index ->
-      let%bind additional_bytes =
-        Run_job_capacity.bookkeeping_reserve index ~jobs:prepared.state.jobs
-      in
-      Run_state.validate_encoded_capacity_with_reserve
-        index
-        ~additional_bytes
-        (Run_state.to_jsonaf index)
+  let%map delta = Recurrence_source.prepare_change t.state ~delta in
+  now, delta
+;;
+
+let check_prepared_transition_capacity (prepared : Session_transition.t) =
+  let open Result.Let_syntax in
+  match prepared.state.run_state with
+  | None -> Ok ()
+  | Some index ->
+    let%bind additional_bytes =
+      Run_job_capacity.bookkeeping_reserve index ~jobs:prepared.state.jobs
+    in
+    Run_state.validate_encoded_capacity_with_reserve
+      index
+      ~additional_bytes
+      (Run_state.to_jsonaf index)
+;;
+
+let prepare_transition ?run_preparation ?completion_sample t ~delta ~payloads =
+  let open Result.Let_syntax in
+  let%bind now, delta =
+    prepare_transition_basis ?run_preparation ?completion_sample t ~delta
   in
+  let%bind prepared = Session_transition.apply ~now t.state ~delta ~payloads in
+  let%map () = check_prepared_transition_capacity prepared in
   prepared
+;;
+
+(* Retain the actual inherited edge from the same fully validated candidate.
+   Source settlement and final capacity checks remain shared with ordinary turns. *)
+let prepare_transition_inherited
+      ?run_preparation
+      ?completion_sample
+      t
+      ~inherited_turn
+      ~delta
+      ~payloads
+  =
+  let open Result.Let_syntax in
+  let%bind now, delta =
+    prepare_transition_basis ?run_preparation ?completion_sample t ~delta
+  in
+  let%bind prepared, edge =
+    Session_transition.apply_inherited ~inherited_turn ~now t.state ~delta ~payloads
+  in
+  let%map () = check_prepared_transition_capacity prepared in
+  prepared, edge
 ;;
 
 let goal_runtime_transition
@@ -6685,6 +9582,7 @@ let check_constructor_job_handoff
 ;;
 
 let transition
+      ?idle_completion_step
       ?goal_runtime_scope
       ?check_before_commit
       ?constructor_stop_acknowledgement
@@ -6705,6 +9603,24 @@ let transition
       let completion_sample = producer_completion_sample ?completion_sample t ~delta in
       let%bind transition =
         prepare_transition ?completion_sample ?run_preparation t ~delta ~payloads
+      in
+      let commit_attempted =
+        match idle_completion_step with
+        | None -> commit_attempted
+        | Some _ ->
+          Some (Option.value_or_thunk commit_attempted ~default:(fun () -> ref false))
+      in
+      let%bind idle_completion_write =
+        match idle_completion_step, commit_attempted with
+        | None, _ -> Ok None
+        | Some (completion, kind), Some attempted ->
+          prepare_idle_completion_write
+            t
+            (Some completion)
+            ~kind
+            ~candidate:transition
+            ~attempted
+        | Some _, None -> assert false
       in
       let%bind goal_runtime_acknowledgement =
         match goal_runtime_scope with
@@ -6727,6 +9643,7 @@ let transition
       in
       let%map () =
         install
+          ?idle_completion_write
           ?goal_runtime_acknowledgement
           ?check_before_commit
           ?constructor_stop_acknowledgement
@@ -6740,12 +9657,6 @@ let transition
           transition
       in
       Agent_protocol.Session.(Session_state.summary t.state))
-;;
-
-let require_recurrence_controller t =
-  Result.of_option
-    t.recurrence_controller
-    ~error:(error Invalid_state "recurrence controller lifecycle owner is not installed")
 ;;
 
 let reconcile_recurrences_internal t =
@@ -6784,99 +9695,30 @@ let input_scope_basis t (scope : Held_input_scope.t) =
     ~state:t.state
 ;;
 
-let input_graph_basis t (scope : Held_input_scope.t) owner =
-  if
-    phys_equal scope.Held_input_scope.issuing_actor t.inference_owner_identity
-    && List.mem scope.graphs owner ~equal:phys_equal
-    && List.mem t.inference_owners owner ~equal:phys_equal
-    && phys_equal t.inference_owner_identity (Graph_owner.issuing_actor owner)
-  then Ok ()
-  else Error (error Conflict "inference graph does not belong to this held input")
+let select_factual_graph t owner acknowledgement =
+  let scope =
+    match t.held_authored_start with
+    | Some scope
+      when (match scope.Held_authored_start.phase with
+            | Released -> false
+            | Staged
+            | Starting
+            | Ready
+            | Executing _
+            | Completed _
+            | Attempt_unconfirmed
+            | Closed -> true)
+           && List.mem scope.graphs owner ~equal:phys_equal ->
+      Owned_inference_mutation.Scope.Authored scope
+    | Some _ | None -> Registered owner
+  in
+  { Owned_inference_mutation.scope; owner; acknowledgement }
 ;;
 
-module Owned_inference_mutation = struct
-  type acknowledgement =
-    | Preserve
-    | Acknowledge of Inference_owner.Registration.t * Inference_runtime.Attempt.t
-    | Finish
-
-  module Scope = struct
-    type t =
-      | Input of Held_input_scope.t
-      | Authored of Held_authored_start.t
-      | Initialization of Runtime_constructor_graph.t
-  end
-
-  type t =
-    { scope : Scope.t
-    ; owner : Inference_owner.t
-    ; acknowledgement : acknowledgement
-    }
-end
-
-let initialization_graph_basis t (graph : Runtime_constructor_graph.t) =
-  if
-    phys_equal graph.scope.owner t.initialization_owner
-    && List.mem graph.scope.graphs graph.owner ~equal:phys_equal
-    && List.mem t.inference_owners graph.owner ~equal:phys_equal
-    && phys_equal t.inference_owner_identity (Graph_owner.issuing_actor graph.owner)
-    && Option.exists
-         (Initialization_scope.construction graph.scope)
-         ~f:(fun construction ->
-           Preparation_owner.same
-             (Runtime_construction.preparation_owner construction)
-             (Runtime_construction.preparation_owner graph.construction))
-  then Ok ()
-  else Error (error Conflict "constructor graph belongs to another or substituted scope")
-;;
-
-let owned_graph_basis t (mutation : Owned_inference_mutation.t) =
-  match mutation.scope with
-  | Input scope -> input_graph_basis t scope mutation.owner
-  | Initialization graph ->
-    if phys_equal graph.owner mutation.owner
-    then initialization_graph_basis t graph
-    else Error (error Conflict "constructor graph owner was substituted")
-  | Authored scope ->
-    if
-      phys_equal scope.issuing_actor t.inference_owner_identity
-      && List.mem scope.graphs mutation.owner ~equal:phys_equal
-      && List.mem t.inference_owners mutation.owner ~equal:phys_equal
-      && phys_equal t.inference_owner_identity (Graph_owner.issuing_actor mutation.owner)
-    then Ok ()
-    else Error (error Conflict "graph does not belong to this held authored startup")
-;;
-
-let owned_graph_preparation (mutation : Owned_inference_mutation.t) =
-  match mutation.scope with
-  | Input scope -> Some (Preparation_owner.Initial scope.continuation.target.preparation)
-  | Authored scope ->
-    Some (Preparation_owner.Initial scope.continuation.target.preparation)
-  | Initialization graph -> Initialization_scope.preparation_owner graph.scope
-;;
-
-let select_authored_graph t owner acknowledgement =
-  Option.bind t.held_authored_start ~f:(fun scope ->
-    if
-      (match scope.Held_authored_start.phase with
-       | Released -> false
-       | _ -> true)
-      && List.mem scope.Held_authored_start.graphs owner ~equal:phys_equal
-    then Some Owned_inference_mutation.{ scope = Authored scope; owner; acknowledgement }
-    else None)
-;;
-
-let authored_graph_for_handle t handle =
+let factual_graph_for_handle t handle =
   List.find_map t.inference_owners ~f:(fun owner ->
-    match
-      Graph_owner.registration owner ~ordinal:(Inference_ledger.Handle.ordinal handle)
-    with
-    | Some registration
-      when Inference_ledger.Handle.equal
-             handle
-             (Inference_owner.Registration.handle registration) ->
-      select_authored_graph t owner Owned_inference_mutation.Preserve
-    | Some _ | None -> None)
+    Option.map (Graph_owner.retained_registration owner handle) ~f:(fun _ ->
+      select_factual_graph t owner Owned_inference_mutation.Preserve))
 ;;
 
 let install_input_graph_acknowledgement t (mutation : Owned_inference_mutation.t) =
@@ -6891,6 +9733,10 @@ let install_input_graph_acknowledgement t (mutation : Owned_inference_mutation.t
          not (phys_equal owner mutation.owner));
     (match mutation.scope with
      | Input scope ->
+       scope.graphs
+       <- List.filter scope.graphs ~f:(fun owner -> not (phys_equal owner mutation.owner))
+     | Registered _ -> ()
+     | Goal_runtime scope ->
        scope.graphs
        <- List.filter scope.graphs ~f:(fun owner -> not (phys_equal owner mutation.owner))
      | Authored scope ->
@@ -6965,8 +9811,18 @@ module Held_inference_allocation_acknowledgement = struct
   ;;
 
   let install t =
+    let initial_preparation =
+      match t.scope with
+      | Authored scope -> Some scope.continuation.target.preparation
+      | Goal_runtime _ -> None
+      | Initialization scope ->
+        Option.bind
+          (Initialization_scope.preparation_owner scope)
+          ~f:Preparation_owner.initial
+    in
     Graph_owner.register
       t.owner
+      ~initial_preparation
       ~handle:t.handle
       ~configuration:t.configuration
       ~goal_id:t.goal_id;
@@ -6995,7 +9851,12 @@ let commit_inference_ledger
   let open Result.Let_syntax in
   let%bind () =
     match owned_graph with
-    | Some mutation -> owned_graph_basis t mutation
+    | Some mutation ->
+      let%bind () = owned_graph_basis t mutation in
+      Option.value_map run_preparation ~default:(Ok ()) ~f:(fun preparation ->
+        if Run_preparation.belongs_to preparation ~owner:t.run_preparation_owner
+        then Ok ()
+        else Error (error Conflict "factual preparation belongs to another Actor"))
     | None ->
       (match run_preparation with
        | None -> Ok ()
@@ -7109,7 +9970,11 @@ let commit_inference_ledger
       let%bind candidate = prepare_transition t ~delta ~payloads in
       let%bind goal_runtime_acknowledgement =
         Option.value_map goal_scope ~default:(Ok None) ~f:(fun scope ->
-          Goal_runtime_acknowledgement.prepare t scope ~candidate
+          Goal_runtime_acknowledgement.prepare_factual
+            t
+            scope
+            ~owner:mutation.owner
+            ~candidate
           |> Result.map ~f:Option.some)
       in
       let preparation_owner =
@@ -7121,12 +9986,25 @@ let commit_inference_ledger
                   ~owner:t.run_preparation_owner
                   ~state:t.state))
       in
-      let run_preparation = Option.bind preparation_owner ~f:Preparation_owner.initial in
+      let%bind owned_inference_persistence =
+        Owned_inference_persistence.prepare t ~mutation ~candidate ~preparation_owner
+      in
       let%bind () =
         persist_transition
-          ?run_preparation
+          ~owned_inference_persistence
           ~check_before_commit:(fun () ->
             let%bind () = owned_graph_basis t mutation in
+            let%bind () =
+              Option.value_map
+                goal_runtime_acknowledgement
+                ~default:(Ok ())
+                ~f:(fun acknowledgement ->
+                  Goal_runtime_acknowledgement.check_factual
+                    acknowledgement
+                    ~actor:t
+                    ~owner:mutation.owner
+                    ~candidate)
+            in
             let%bind () =
               match preparation_owner with
               | None -> Ok ()
@@ -7209,6 +10087,80 @@ let inference_registration t owner handle =
   | Some _ | None -> Error (error Conflict "inference handle is not owned by this graph")
 ;;
 
+(* Classify only the actual immutable child Spec and retained origin. Historical
+   absence in a delegated session is never an Unrelated admission. *)
+let inference_requires_descendant_admission t origin_observation =
+  match inherited_turn_required t.state with
+  | Ordinary -> Ok false
+  | Scoped -> Ok true
+  | Need_private_origin ->
+    let open Result.Let_syntax in
+    let%bind observed =
+      Result.of_option
+        origin_observation
+        ~error:
+          (error
+             Permission_denied
+             "delegated inference requires actual private origin observation")
+    in
+    let%map () = check_descendant_origin_observation t observed in
+    false
+;;
+
+let require_ordinary_inference_admission t =
+  let%bind.Result inherited = inference_requires_descendant_admission t None in
+  if inherited
+  then
+    Error
+      (error
+         Permission_denied
+         "inherited inference requires its guard-preserving allocation port")
+  else Ok ()
+;;
+
+let prepare_inherited_attempt
+      t
+      ~owner
+      ~configuration
+      ~before
+      ~after
+      ~handle
+      ~tracking
+      ~original
+  =
+  let module O = Goal_descendant_occurrence in
+  let open Result.Let_syntax in
+  let%bind controller = require_recurrence_controller t in
+  let%bind frame =
+    if Int64.equal t.state.counters.revision Int64.max_value
+    then Error (error Resource_limit "inherited inference session revision is exhausted")
+    else
+      O.Frame.create
+        ~session:(Recurrence_controller.session controller)
+        ~generation:t.state.identity.generation
+        ~candidate_session_revision:(Int64.succ t.state.counters.revision)
+  in
+  let%bind occurrence =
+    O.attempt
+      frame
+      ~ordinal:(Inference_ledger.Handle.ordinal handle)
+      ~operation_id:(Inference_ledger.Handle.operation_id handle)
+      ~invocation_id:(Inference_ledger.Handle.invocation_id handle)
+  in
+  let writer_attempted = ref false in
+  let%map slot = acquire_descendant_admission_slot t ~occurrence ~writer_attempted in
+  { Inherited_attempt.Plan.slot
+  ; owner
+  ; configuration
+  ; before
+  ; after
+  ; handle
+  ; tracking
+  ; original
+  ; acknowledged = None
+  }
+;;
+
 let admit_inference
       ?run_preparation
       t
@@ -7219,6 +10171,7 @@ let admit_inference
       configuration
   =
   let open Result.Let_syntax in
+  let%bind () = require_ordinary_inference_admission t in
   let%bind () = validate_inference_owner t owner in
   let%bind () =
     if
@@ -7248,8 +10201,85 @@ let admit_inference
     |> Result.map_error ~f:inference_error
   in
   let%bind () = commit_inference_ledger ?run_preparation t ledger in
-  Graph_owner.register owner ~handle ~configuration ~goal_id:None;
+  Graph_owner.register
+    owner
+    ~initial_preparation:run_preparation
+    ~handle
+    ~configuration
+    ~goal_id:None;
   Ok handle
+;;
+
+let prepare_legacy_attempt
+      ?origin_observation
+      ?run_preparation
+      t
+      owner
+      relation
+      operation_id
+      invocation_id
+      configuration
+  =
+  let open Result.Let_syntax in
+  let%bind () = validate_inference_owner t owner in
+  let%bind () =
+    if
+      Int.equal (Graph_owner.generation owner) t.state.identity.generation
+      &&
+      match Graph_owner.phase owner with
+      | Open -> true
+      | Sealed | Finished -> false
+    then Ok ()
+    else Error (error Conflict "inference graph excludes new attempts")
+  in
+  let%bind inherited = inference_requires_descendant_admission t origin_observation in
+  let%bind () =
+    if inherited then require_available_descendant_admission_slot t else Ok ()
+  in
+  let before = t.state.inference_ledger in
+  let%bind protected_ordinals =
+    Canonical_usage_update.protected_ordinals
+      before
+      ~accounts:t.state.goal_accounts
+      ~delegated_usage:t.state.delegated_usage
+  in
+  let%bind ledger, handle, tracking =
+    Inference_ledger.admit
+      ~protected_ordinals
+      before
+      ~source:(Graph_owner.source owner)
+      ~relation
+      ~operation_id
+      ~invocation_id
+      ~configuration
+    |> Result.map_error ~f:inference_error
+  in
+  if inherited
+  then (
+    let%map plan =
+      prepare_inherited_attempt
+        t
+        ~owner
+        ~configuration
+        ~before
+        ~after:ledger
+        ~handle
+        ~tracking
+        ~original:(Inherited_attempt.Original.Legacy { preparation = run_preparation })
+    in
+    Inherited_attempt.Prepared.Inherited plan)
+  else (
+    let%map () = commit_inference_ledger ?run_preparation t ledger in
+    Graph_owner.register
+      owner
+      ~initial_preparation:run_preparation
+      ~handle
+      ~configuration
+      ~goal_id:None;
+    Inherited_attempt.Prepared.Ordinary
+      (Inference_allocation.Host.create
+         ~handle
+         ~submission_guard:Inference_runtime.Submission_guard.empty))
 ;;
 
 let validate_inference_attempt registration attempt =
@@ -7279,7 +10309,7 @@ let acknowledge_inference ?owned_graph ?run_preparation t owner handle attempt =
   let owned_graph =
     match owned_graph with
     | Some _ -> owned_graph
-    | None -> select_authored_graph t owner (Acknowledge (registration, attempt))
+    | None -> Some (select_factual_graph t owner (Acknowledge (registration, attempt)))
   in
   (match owned_graph with
    | None -> Inference_owner.Registration.acknowledge registration attempt
@@ -7296,7 +10326,15 @@ let observe_inference ?owned_graph ?run_preparation t handle incoming =
   let owned_graph =
     match owned_graph with
     | Some _ -> owned_graph
-    | None -> authored_graph_for_handle t handle
+    | None -> factual_graph_for_handle t handle
+  in
+  let%bind () =
+    match owned_graph with
+    | None -> Ok ()
+    | Some mutation ->
+      if Option.is_some (Graph_owner.retained_registration mutation.owner handle)
+      then Ok ()
+      else Error (error Conflict "observation has no exact retained graph membership")
   in
   commit_inference_ledger ?owned_graph ?run_preparation t ledger
 ;;
@@ -7324,6 +10362,18 @@ let observe_owned_inference ?owned_graph ?run_preparation t owner incoming =
   with
   | None -> Error (error Conflict "observation has no retained admitted scope")
   | Some row ->
+    let%bind () =
+      if
+        Option.is_some
+          (Graph_owner.retained_registration owner (Inference_ledger.Row.handle row))
+      then Ok ()
+      else Error (error Conflict "observation has no exact retained graph membership")
+    in
+    let owned_graph =
+      match owned_graph with
+      | Some _ -> owned_graph
+      | None -> Some (select_factual_graph t owner Preserve)
+    in
     observe_inference
       ?owned_graph
       ?run_preparation
@@ -7352,7 +10402,7 @@ let complete_inference ?owned_graph ?run_preparation t owner handle completion =
   let owned_graph =
     match owned_graph with
     | Some _ -> owned_graph
-    | None -> select_authored_graph t owner Preserve
+    | None -> Some (select_factual_graph t owner Preserve)
   in
   commit_inference_ledger ?owned_graph ?run_preparation t ledger
 ;;
@@ -7382,25 +10432,25 @@ let interrupt_inference_row ledger handle ~delivery =
 let release_inference ?owned_graph ?run_preparation t owner handle =
   let open Result.Let_syntax in
   let%bind registration = inference_registration t owner handle in
-  Exn.protect
-    ~f:(fun () ->
-      let%bind ledger =
-        interrupt_inference_row
-          t.state.inference_ledger
-          handle
-          ~delivery:
-            (Option.map
-               (Inference_owner.Registration.attempt registration)
-               ~f:Inference_runtime.Attempt.delivery)
-      in
-      let owned_graph =
-        match owned_graph with
-        | Some _ -> owned_graph
-        | None -> select_authored_graph t owner Preserve
-      in
-      commit_inference_ledger ?owned_graph ?run_preparation t ledger)
-    ~finally:(fun () ->
-      Graph_owner.release owner ~ordinal:(Inference_ledger.Handle.ordinal handle))
+  let%bind ledger =
+    interrupt_inference_row
+      t.state.inference_ledger
+      handle
+      ~delivery:
+        (Option.map
+           (Inference_owner.Registration.attempt registration)
+           ~f:Inference_runtime.Attempt.delivery)
+  in
+  let owned_graph =
+    match owned_graph with
+    | Some _ -> owned_graph
+    | None -> Some (select_factual_graph t owner Preserve)
+  in
+  let%map () = commit_inference_ledger ?owned_graph ?run_preparation t ledger in
+  Graph_owner.release
+    owner
+    ~ledger:t.state.inference_ledger
+    ~ordinal:(Inference_ledger.Handle.ordinal handle)
 ;;
 
 let seal_inference_owner t owner =
@@ -7418,31 +10468,32 @@ let finish_inference_owner ?owned_graph ?run_preparation t owner =
     | Sealed -> Ok ()
     | Finished -> Error (error Conflict "inference graph already finished")
   in
-  let rows = Inference_ledger.rows t.state.inference_ledger in
   let%bind ledger =
-    List.fold_result rows ~init:t.state.inference_ledger ~f:(fun ledger row ->
-      let handle = Inference_ledger.Row.handle row in
-      match Graph_owner.qualified_source owner with
-      | Some source
-        when Transcript.Source_id.equal
-               source
-               (Transcript.Scope.key (Inference_ledger.Handle.scope handle)).source ->
-        interrupt_inference_row
-          ledger
-          handle
-          ~delivery:
-            (Graph_owner.registration
-               owner
-               ~ordinal:(Inference_ledger.Handle.ordinal handle)
-             |> Option.bind ~f:(fun registration ->
-               Inference_owner.Registration.attempt registration)
-             |> Option.map ~f:Inference_runtime.Attempt.delivery)
-      | Some _ | None -> Ok ledger)
+    List.fold_result
+      (Inference_ledger.rows t.state.inference_ledger)
+      ~init:t.state.inference_ledger
+      ~f:(fun ledger row ->
+        let handle = Inference_ledger.Row.handle row in
+        match
+          Graph_owner.registration owner ~ordinal:(Inference_ledger.Handle.ordinal handle)
+        with
+        | Some registration
+          when Inference_ledger.Handle.equal
+                 (Inference_owner.Registration.handle registration)
+                 handle ->
+          interrupt_inference_row
+            ledger
+            handle
+            ~delivery:
+              (Option.map
+                 (Inference_owner.Registration.attempt registration)
+                 ~f:Inference_runtime.Attempt.delivery)
+        | Some _ | None -> Ok ledger)
   in
   let owned_graph =
     match owned_graph with
     | Some _ -> owned_graph
-    | None -> select_authored_graph t owner Finish
+    | None -> Some (select_factual_graph t owner Finish)
   in
   let%map () = commit_inference_ledger ?owned_graph ?run_preparation t ledger in
   match owned_graph with
@@ -8141,12 +11192,24 @@ let replace_operation_worker t worker ~intended_manager =
         && (retirement.closing || Option.is_some t.state.active_operation)
       | Some (Ok (Error _) | Error _) | None -> true)
   then Error (error Conflict "cannot replace a retiring runtime")
+  else if Option.is_some t.idle_completion
+  then Error (error Conflict "legacy idle completion still owns its runtime")
   else if moderator_is_borrowed t
   then Error (error Conflict "cannot replace a borrowed moderator runtime")
   else (
     match worker, t.state.active_operation, t.idle_moderator_borrowed with
     | None, Some _, _ -> Error (error Conflict "cannot unload an active runtime")
     | None, None, true -> Error (error Conflict "cannot unload a borrowed moderator")
+    | None, None, false
+      when Option.is_some t.descendant_admission_slot
+           || Option.is_some t.inherited_turn_prepared
+           || Option.is_some t.inherited_turn_cleanup ->
+      Error
+        (Agent_protocol.Error.create
+           Conflict
+           ~message:"cannot unload runtime with outstanding descendant admission cleanup"
+           ~retryable:true
+           ())
     | None, None, false | Some _, _, _ ->
       (match t.lifecycle_agent_custody with
        | Admitted { pending = Initial_pending { admission; startup }; _ }
@@ -8210,6 +11273,7 @@ let require_runtime_admission t =
 ;;
 
 let retire_runtime_worker t ~closing =
+  retire_descendant_host t;
   match t.runtime_retirement with
   | Some retirement ->
     retirement.closing <- retirement.closing || closing;
@@ -9452,6 +12516,232 @@ let validate_initialization_scope_basis t scope =
           ~owner:t.run_preparation_owner
           ~state:t.state
       else Error (error Conflict "initializer preparation is no longer active"))
+;;
+
+let admitted_inference_continuation (selected : Admitted_inference.t) =
+  match selected.startup with
+  | Ordinary | Goal_runtime _ -> None
+  | Initialization (_, Initial continuation) -> Some continuation
+  | Initialization (_, (Existing_goal _ | Delegated_load _)) -> None
+  | Input scope -> Some scope.continuation
+  | Authored scope ->
+    if held_authored_handoff_acknowledged scope then None else Some scope.continuation
+;;
+
+let admitted_goal_construction (selected : Admitted_inference.t) =
+  match selected.startup with
+  | Initialization (_, Existing_goal continuation) ->
+    Some continuation.binding.preparation
+  | Goal_runtime scope ->
+    (match scope.continuation.binding.preparation.runtime_phase with
+     | Handed_off (actual, _) when phys_equal actual scope -> None
+     | _ -> Some scope.continuation.binding.preparation)
+  | Ordinary | Initialization (_, (Initial _ | Delegated_load _)) | Input _ | Authored _
+    -> None
+;;
+
+let admitted_inference_owner t (selected : Admitted_inference.t) =
+  let open Result.Let_syntax in
+  let%bind actual = inference_registration t selected.owner selected.handle in
+  let%bind () =
+    if phys_equal actual selected.registration
+    then Ok ()
+    else Error (error Conflict "admitted inference registration was replaced")
+  in
+  let%bind () =
+    let ledger = t.state.inference_ledger in
+    if
+      Agent_protocol.Id.Session.equal
+        (Inference_ledger.Handle.session_id selected.handle)
+        (Inference_ledger.session_id ledger)
+      && Int.equal
+           (Inference_ledger.Handle.generation selected.handle)
+           (Inference_ledger.generation ledger)
+      &&
+      match
+        ( selected.tracking
+        , Inference_ledger.find
+            ledger
+            ~ordinal:(Inference_ledger.Handle.ordinal selected.handle) )
+      with
+      | Tracked, Some row ->
+        Inference_ledger.Handle.equal (Inference_ledger.Row.handle row) selected.handle
+      | Untracked _, None -> true
+      | Tracked, None | Untracked _, Some _ -> false
+    then Ok ()
+    else Error (error Conflict "admitted inference canonical ledger handle changed")
+  in
+  let%bind () =
+    if Inference_owner.Registration.policy_is_current selected.registration
+    then Ok ()
+    else Error (error Permission_denied "goal inference policy changed")
+  in
+  match selected.startup with
+  | Ordinary -> Ok ()
+  | Goal_runtime scope ->
+    let%bind () = goal_runtime_scope_basis t scope in
+    (match scope.continuation.binding.preparation.runtime_phase with
+     | Handed_off (actual, _) when phys_equal actual scope -> Ok ()
+     | _ -> scope.continuation.binding.preparation.registered_basis ())
+  | Initialization (scope, construction) ->
+    let%bind () = validate_initialization_scope_basis t scope in
+    let%bind () =
+      if
+        Option.exists (Initialization_scope.construction scope) ~f:(fun actual ->
+          Preparation_owner.same
+            (Runtime_construction.preparation_owner actual)
+            (Runtime_construction.preparation_owner construction))
+      then Ok ()
+      else Error (error Conflict "admitted initializer owner changed")
+    in
+    (match construction with
+     | Initial continuation ->
+       if Option.exists t.held_activation ~f:(phys_equal continuation.target)
+       then continuation.target.owned_basis ()
+       else Error (error Conflict "admitted initializer activation changed")
+     | Existing_goal continuation -> continuation.binding.preparation.registered_basis ()
+     | Delegated_load load -> load.preparation.basis ())
+  | Input scope ->
+    let%bind () = Held_input_scope.parsing scope in
+    let%bind () = input_scope_basis t scope in
+    input_graph_basis t scope selected.owner
+  | Authored scope ->
+    if held_authored_handoff_acknowledged scope
+    then Ok ()
+    else held_authored_basis t scope
+;;
+
+let refresh_admitted_inference t selected =
+  let open Result.Let_syntax in
+  let%bind () = admitted_inference_owner t selected in
+  let%bind () =
+    Option.value_map
+      (admitted_inference_continuation selected)
+      ~default:(Ok ())
+      ~f:(fun continuation -> continuation.refresh_admitted_inference ())
+  in
+  let%bind () =
+    Option.value_map
+      (admitted_goal_construction selected)
+      ~default:(Ok ())
+      ~f:(fun preparation -> preparation.registered_refresh ())
+  in
+  admitted_inference_owner t selected
+;;
+
+let observe_inference_origin t =
+  match inherited_turn_required t.state with
+  | Ordinary | Scoped -> Ok None
+  | Need_private_origin ->
+    let open Result.Let_syntax in
+    let%bind captured = call t (Inherited_inference Capture_origin) in
+    let%map observed = observe_descendant_origin_external t captured in
+    Some observed
+;;
+
+let close_unattempted_inherited_attempt t (plan : Inherited_attempt.Plan.t) =
+  match seal_descendant_admission_slot t plan.slot with
+  | Error _ -> ()
+  | Ok closed ->
+    ignore
+      (schedule_descendant_admission_cleanup t plan.slot ~closed
+       : ( (unit, Agent_protocol.Error.t) result Eio.Promise.t
+           , Agent_protocol.Error.t )
+           result)
+;;
+
+let drive_inherited_attempt t (plan : Inherited_attempt.Plan.t) =
+  let open Result.Let_syntax in
+  let slot = plan.slot in
+  let host = Descendant_admission_slot.host slot in
+  let preparation = Descendant_admission_slot.preparation slot in
+  let reservations = Descendant_admission_slot.reservations slot in
+  let transferred = ref false in
+  let cleanup () =
+    if not !transferred
+    then (
+      match plan.acknowledged with
+      | None -> close_unattempted_inherited_attempt t plan
+      | Some acknowledgement ->
+        Eio.Cancel.protect (fun () ->
+          ignore
+            (call t ~priority:Priority (Inherited_inference (Release acknowledgement))
+             : (unit, Agent_protocol.Error.t) result)))
+  in
+  Exn.protect
+    ~finally:(fun () ->
+      try cleanup () with
+      | exn ->
+        (try Eio.traceln "inherited Attempt cleanup failed: %s" (Exn.to_string exn) with
+         | _ -> ()))
+    ~f:(fun () ->
+      let%bind before_writer = host.prepare preparation reservations in
+      (* Reserving this Attempt changes the ancestor State. Refresh the enclosing
+         admitted Turn's views after that write, without re-admitting its budget.
+         The exact original owner and both reservation/currentness checks still
+         run in the finite canonical commit below. *)
+      let%bind () =
+        match plan.original with
+        | Legacy _ -> Ok ()
+        | Runtime { execution; _ } -> refresh_execution_descendant t execution
+      in
+      let%bind committed =
+        Eio.Cancel.protect (fun () ->
+          call t (Inherited_inference (Commit (plan, before_writer))))
+      in
+      match committed with
+      | Attempt_unconfirmed _ ->
+        Error (error Conflict "inherited inference canonical writer remains unconfirmed")
+      | Acknowledged acknowledgement ->
+        let%map confirmation = host.confirm acknowledgement.descendant in
+        let submission_guard =
+          Inference_runtime.Submission_guard.create ~refresh:(fun () ->
+            let refreshed =
+              let%bind () =
+                match acknowledgement.original with
+                | Legacy _ -> Ok ()
+                | Runtime { selected; execution; _ } ->
+                  let%bind selected = !selected in
+                  let%bind () = refresh_admitted_inference t selected in
+                  refresh_execution_descendant t execution
+              in
+              let%bind views =
+                host.refresh_admitted acknowledgement.descendant confirmation
+              in
+              call
+                t
+                (Inherited_inference (Refresh (acknowledgement, confirmation, views)))
+            in
+            match refreshed with
+            | Ok check -> check
+            | Error error -> raise (Inference_allocation.Rejected error))
+        in
+        let allocation =
+          Inference_allocation.Host.create ~handle:plan.handle ~submission_guard
+        in
+        transferred := true;
+        allocation)
+;;
+
+let finish_prepared_inference t = function
+  | Inherited_attempt.Prepared.Ordinary allocation -> Ok allocation
+  | Inherited plan -> drive_inherited_attempt t plan
+;;
+
+let inference_port t execution ~graph ~relation ~configuration =
+  let open Result.Let_syntax in
+  let%bind () = retry_descendant_admission_cleanup t in
+  let%bind () = refresh_held_execution t execution in
+  let%bind origin_observation = observe_inference_origin t in
+  let%bind prepared =
+    Eio.Cancel.protect (fun () ->
+      call
+        t
+        (Inherited_inference
+           (Allocate_runtime
+              (origin_observation, execution, graph, relation, configuration))))
+  in
+  finish_prepared_inference t prepared
 ;;
 
 let validate_initialization_scope_current t scope =
@@ -10914,6 +14204,7 @@ let with_selected_job_custody t owner f =
 
 let claim_invocation t operation_id (invocation : Agent_protocol.Invocation.t) =
   let open Result.Let_syntax in
+  let%bind () = check_operation_descendant t operation_id in
   let%bind () = require_selected_execution t in
   let%bind _ = running_operation t operation_id in
   let%bind () =
@@ -11403,6 +14694,7 @@ let has_pending_permission t =
 let idle_actor_available t =
   runtime_admission_open t
   && (not t.idle_moderator_borrowed)
+  && Option.is_none t.idle_completion
   && Option.is_none t.moderator_borrow
   && Option.is_none t.state.active_operation
   && Agent_protocol.Session.equal_desired_state t.state.lifecycle.desired Running
@@ -16201,7 +19493,7 @@ let compaction_terminal_delta t operation outcome =
   , payloads )
 ;;
 
-let compaction_terminal t operation_id outcome =
+let compaction_terminal ?idle_completion t operation_id outcome =
   match t.state.active_operation with
   | None -> Ok ()
   | Some operation when Agent_protocol.Id.Operation.compare operation.id operation_id <> 0
@@ -16215,13 +19507,28 @@ let compaction_terminal t operation_id outcome =
     in
     let%bind delta, payloads = compaction_terminal_delta t operation outcome in
     let%map _ =
-      match transition t ~delta ~payloads, outcome with
+      match
+        ( transition
+            ?idle_completion_step:
+              (Option.map idle_completion ~f:(fun completion ->
+                 completion, Idle_completion_write.Kind.Retire_compaction))
+            t
+            ~delta
+            ~payloads
+        , outcome )
+      with
       | Ok session, _ -> Ok session
       | Error failure, Compacted _ ->
         let%bind delta, payloads =
           compaction_terminal_delta t operation (Compaction_failed failure)
         in
-        transition t ~delta ~payloads
+        transition
+          ?idle_completion_step:
+            (Option.map idle_completion ~f:(fun completion ->
+               completion, Idle_completion_write.Kind.Retire_compaction))
+          t
+          ~delta
+          ~payloads
       | Error failure, _ -> Error failure
     in
     t.active_cancel <- None
@@ -16353,7 +19660,7 @@ let compaction_allocator t first_sequence reserved_through =
   |> Result.map_error ~f:(fun message -> error Invalid_state message)
 ;;
 
-let reconcile_foreground_invocations t =
+let reconcile_foreground_invocations ?idle_completion ?(terminal = false) t =
   let open Result.Let_syntax in
   let first =
     Int64.max
@@ -16372,6 +19679,12 @@ let reconcile_foreground_invocations t =
   then Ok ()
   else
     transition
+      ?idle_completion_step:
+        (Option.map idle_completion ~f:(fun completion ->
+           ( completion
+           , if terminal
+             then Idle_completion_write.Kind.Reconcile_terminal
+             else Reconcile_foreground )))
       t
       ~delta:
         (Session_delta.Batch
@@ -16400,6 +19713,7 @@ let retain_reconciliation_failure t failure =
 ;;
 
 let start_compaction
+      ?idle_completion
       ?operation
       ?follow_up_authority
       ?agent_custody
@@ -16408,7 +19722,7 @@ let start_compaction
   =
   let open Result.Let_syntax in
   let%bind () = require_runtime_admission t in
-  let%bind () = reconcile_foreground_invocations t in
+  let%bind () = reconcile_foreground_invocations ?idle_completion t in
   let revision = t.state.counters.revision in
   let first_sequence = t.state.conversation.next_history_sequence in
   if Int64.equal first_sequence Int64.max_value
@@ -16432,8 +19746,20 @@ let start_compaction
     let installed = ref false in
     Exn.protect
       ~f:(fun () ->
+        let%bind () =
+          prepare_idle_operation_suffix
+            t
+            idle_completion
+            ~operation
+            ~custody:child
+            ~installed
+            ~kind:(Idle_completion_data.Compaction (allocator, history))
+        in
         let%bind session =
           transition
+            ?idle_completion_step:
+              (Option.map idle_completion ~f:(fun completion ->
+                 completion, Idle_completion_write.Kind.Start_compaction))
             t
             ~check_before_commit:(fun () ->
               match follow_up_authority with
@@ -16464,9 +19790,12 @@ let start_compaction
                   }
               ]
         in
-        install_operation_agent_custody t operation child;
+        let%bind () = check_idle_operation_suffix t idle_completion operation in
+        if Option.is_none idle_completion
+        then install_operation_agent_custody t operation child;
         installed := true;
         launch_compaction t operation allocator history;
+        handoff_idle_operation idle_completion;
         Ok session)
       ~finally:(fun () ->
         if not !installed then Option.iter child ~f:retire_agent_custody))
@@ -16509,6 +19838,37 @@ let history_edit_precondition t revision =
     match t.state.lifecycle.observed with
     | Idle | Stopped -> Ok ()
     | _ -> Error (error Invalid_state "session is not ready for history editing"))
+;;
+
+let history_command_precondition t session_id attachment_id generation revision =
+  let open Result.Let_syntax in
+  let%bind () =
+    if Agent_protocol.Id.Session.equal session_id t.state.identity.session_id
+    then Ok ()
+    else Error (error Invalid_request "history command targets a different session")
+  in
+  let%bind _ = write_attachment t attachment_id in
+  let%bind () =
+    if Int.equal generation t.state.identity.generation
+    then Ok ()
+    else Error (error Conflict "session generation does not match")
+  in
+  let%bind () = history_edit_precondition t revision in
+  if
+    Option.is_some t.moderator_borrow
+    || Option.is_some t.queued_event_borrow
+    || Option.is_some t.initialization_scope
+    || Option.is_some t.runtime_retirement
+    || List.exists t.invocation_executions ~f:(fun execution ->
+      match execution.owner with
+      | Foreground _ | Invocation_moderator _ | Event_moderator _ -> true
+      | Background_job _ -> false)
+  then
+    Error
+      (error
+         Conflict
+         "history cannot change while a foreground or runtime owner is active")
+  else Ok ()
 ;;
 
 let outcome_requests_compaction = function
@@ -16621,7 +19981,7 @@ let foreground_terminal_requests t operation_id outcome =
     follow_up_deltas t plan
 ;;
 
-let worker_terminal t operation_id outcome compaction_custody =
+let worker_terminal ?idle_completion t operation_id outcome compaction_custody =
   match t.state.active_operation with
   | None -> Ok ()
   | Some operation when Agent_protocol.Id.Operation.compare operation.id operation_id <> 0
@@ -16715,6 +20075,9 @@ let worker_terminal t operation_id outcome compaction_custody =
     let%bind job_custody = prepare_terminal_job_custody t jobs in
     let%bind _ =
       transition
+        ?idle_completion_step:
+          (Option.map idle_completion ~f:(fun completion ->
+             completion, Idle_completion_write.Kind.Retire_turn))
         ~completion_sample
         ~job_custody
         t
@@ -16736,18 +20099,21 @@ let worker_terminal t operation_id outcome compaction_custody =
     Option.iter event_borrow ~f:(fun _ -> t.queued_event_borrow <- None);
     t.foreground_moderator <- None;
     t.notification_inputs <- None;
-    t.idle_moderator_borrowed <- moderator_is_borrowed t;
+    t.idle_moderator_borrowed <- Option.is_some idle_completion || moderator_is_borrowed t;
     t.invocation_executions <- independent;
     t.active_cancel <- None;
     (match t.state.lifecycle.desired, t.state.halted with
      | Stopped, _ | _, true -> cancel_independent_moderator t
      | Running, false -> ());
     let%bind () =
-      match reconcile_foreground_invocations t with
+      match reconcile_foreground_invocations ?idle_completion ~terminal:true t with
       | Ok () -> Ok ()
       | Error failure ->
-        let%bind () = retain_reconciliation_failure t failure in
-        Error failure
+        (match idle_completion with
+         | Some _ -> Error failure
+         | None ->
+           let%bind () = retain_reconciliation_failure t failure in
+           Error failure)
     in
     if runtime_admission_open t && outcome_requests_compaction outcome
     then
@@ -16892,12 +20258,16 @@ let request_permission_with_review_internal
   | (false | true), _, _ -> Ok (Eio.Promise.await response)
 ;;
 
-let invocation_agent_actor t execution invocation =
+let check_invocation_effect_owner t execution invocation =
   let open Result.Let_syntax in
   let%bind () =
+    if Int.equal t.runtime_source_domain (Stdlib.Domain.self () :> int)
+    then Ok ()
+    else Error (error Conflict "invocation effect belongs to another Actor domain")
+  in
+  let%bind () =
     if
-      execution.accepts_children
-      && Atomic.get execution.authority_live
+      Atomic.get execution.authority_live
       && List.mem t.invocation_executions execution ~equal:phys_equal
       && Agent_protocol.Invocation.equal execution.dispatched invocation
     then Ok ()
@@ -16944,6 +20314,70 @@ let invocation_agent_actor t execution invocation =
         && Option.for_all borrow.job_scope ~f:(fun scope ->
           Atomic.get scope.authority_live)
   in
+  Ok owner_current
+;;
+
+let check_invocation_effect_current t execution invocation =
+  let open Result.Let_syntax in
+  let%bind owner_current = check_invocation_effect_owner t execution invocation in
+  let%map () = check_execution_descendant t (Inference_invocation execution) in
+  owner_current
+;;
+
+let refresh_invocation_effect_current t execution invocation =
+  let open Result.Let_syntax in
+  let%bind owner_current = check_invocation_effect_owner t execution invocation in
+  let%bind () =
+    if owner_current ()
+    then Ok ()
+    else Error (error Conflict "invocation effect owner expired before refresh")
+  in
+  let%bind () = refresh_execution_descendant t (Inference_invocation execution) in
+  let%bind owner_current = check_invocation_effect_current t execution invocation in
+  if owner_current ()
+  then Ok ()
+  else Error (error Conflict "invocation effect owner expired during refresh")
+;;
+
+let check_moderator_effect_owner t (borrow : moderator_borrow) invocation =
+  let open Result.Let_syntax in
+  let%bind () =
+    if Int.equal t.runtime_source_domain (Stdlib.Domain.self () :> int)
+    then Ok ()
+    else Error (error Conflict "moderator effect belongs to another Actor domain")
+  in
+  let%bind () = validate_moderator_borrow t borrow in
+  if
+    Agent_protocol.Invocation.equal borrow.invocation invocation
+    && Atomic.get borrow.authority_live
+  then Ok ()
+  else Error (error Permission_denied "effect belongs to another or expired moderator")
+;;
+
+let check_moderator_effect_current t borrow invocation =
+  let%bind.Result () = check_moderator_effect_owner t borrow invocation in
+  check_execution_descendant t (Inference_moderator borrow)
+;;
+
+let refresh_moderator_effect_current t borrow invocation =
+  let open Result.Let_syntax in
+  let%bind () = check_moderator_effect_owner t borrow invocation in
+  let%bind () = refresh_execution_descendant t (Inference_moderator borrow) in
+  check_moderator_effect_current t borrow invocation
+;;
+
+let invocation_agent_actor t execution invocation =
+  let open Result.Let_syntax in
+  let%bind owner_current = check_invocation_effect_current t execution invocation in
+  let%bind () =
+    if execution.accepts_children
+    then Ok ()
+    else
+      Error
+        (error
+           Permission_denied
+           "agent authority belongs to another or expired invocation")
+  in
   let%bind actor =
     let%bind custody = execution_agent_custody t execution in
     match custody with
@@ -16956,6 +20390,7 @@ let invocation_agent_actor t execution invocation =
          ~principal:(Operator_authorization.principal actor)
          ~is_current:(fun () ->
            Atomic.get execution.authority_live
+           && Result.is_ok (check_execution_descendant t (Inference_invocation execution))
            && owner_current ()
            && Operator_authorization.is_current actor)))
 ;;
@@ -16984,7 +20419,17 @@ let with_invocation_claim t claim f =
   in
   let capabilities =
     Invocation_capabilities.
-      { borrow_agent_actor =
+      { refresh_effect_current =
+          (fun ~invocation -> refresh_invocation_effect_current t execution invocation)
+      ; check_effect_current =
+          (fun ~invocation ->
+            let%bind owner_current =
+              check_invocation_effect_current t execution invocation
+            in
+            if owner_current ()
+            then Ok ()
+            else Error (error Conflict "invocation effect owner expired"))
+      ; borrow_agent_actor =
           (fun ~invocation ->
             call t (Borrow_invocation_agent_actor (execution, invocation)))
       ; allocate_inference = inference_port t (Inference_invocation execution)
@@ -17084,6 +20529,10 @@ let callback_model_jobs t ~scope =
 ;;
 
 let with_invocation t operation_id ~invocation f =
+  (* A legitimate root metadata writer may have retired the cached observation.
+     Refresh the SAME admitted operation outside the mailbox before its actual
+     Claim repeats the pure currentness check. No new admission is issued. *)
+  let%bind.Result () = refresh_operation_descendant t operation_id in
   with_invocation_claim t (Claim_invocation (operation_id, invocation)) f
 ;;
 
@@ -17221,7 +20670,11 @@ let run_moderator_callback t borrow f =
   in
   let capabilities =
     Invocation_capabilities.
-      { borrow_agent_actor =
+      { refresh_effect_current =
+          (fun ~invocation -> refresh_moderator_effect_current t borrow invocation)
+      ; check_effect_current =
+          (fun ~invocation -> check_moderator_effect_current t borrow invocation)
+      ; borrow_agent_actor =
           (fun ~invocation -> call t (Borrow_moderator_agent_actor (borrow, invocation)))
       ; allocate_inference = inference_port t (Inference_moderator borrow)
       ; model_jobs = model_job_port t (Inference_moderator borrow)
@@ -17964,7 +21417,7 @@ let start_held_operation t held cancelled =
   Ok ()
 ;;
 
-let run_worker_operation ?held t worker input capabilities cancelled =
+let run_worker_operation ?held ?descendant_guard t worker input capabilities cancelled =
   match
     Eio.Fiber.first
       (fun () ->
@@ -17980,7 +21433,27 @@ let run_worker_operation ?held t worker input capabilities cancelled =
                   start_held_operation t held cancelled)
               with
               | Error failure -> `Finished (Operation_worker.Failed failure)
-              | Ok () -> `Finished (Operation_worker.run worker ~sw ~input capabilities))))
+              | Ok () ->
+                let checked =
+                  let open Result.Let_syntax in
+                  let%bind () =
+                    Option.value_map
+                      descendant_guard
+                      ~default:(Ok ())
+                      ~f:Operation_descendant_guard.refresh
+                  in
+                  let%bind () =
+                    check_operation_descendant t input.Operation_worker.Input.operation.id
+                  in
+                  Option.value_map
+                    descendant_guard
+                    ~default:(Ok ())
+                    ~f:Operation_descendant_guard.check_current
+                in
+                (match checked with
+                 | Error failure -> `Finished (Operation_worker.Failed failure)
+                 | Ok () ->
+                   `Finished (Operation_worker.run worker ~sw ~input capabilities)))))
       (fun () ->
          Eio.Promise.await cancelled;
          `Cancelled)
@@ -17989,7 +21462,7 @@ let run_worker_operation ?held t worker input capabilities cancelled =
   | `Cancelled -> Operation_worker.Cancelled { reason = "operation cancelled" }
 ;;
 
-let run_worker ?held t worker operation live history =
+let run_worker ?held ?descendant_guard t worker operation live history =
   let operation_id = operation.Agent_protocol.Operation.id in
   let id_source =
     History_id_source.create
@@ -18020,7 +21493,15 @@ let run_worker ?held t worker operation live history =
     (try
        match call t ~priority:Priority (Worker_ready (operation_id, cancel)) with
        | Error failure -> Operation_worker.Failed failure
-       | Ok () -> run_worker_operation ?held t worker input capabilities cancelled
+       | Ok () ->
+         run_worker_operation
+           ?held
+           ?descendant_guard
+           t
+           worker
+           input
+           capabilities
+           cancelled
      with
      | Eio.Cancel.Cancelled reason ->
        Operation_worker.Cancelled { reason = Exn.to_string reason }
@@ -18045,11 +21526,25 @@ let launch_worker t operation =
       then owner.held
       else None)
   in
+  (* Select synchronously: replacement after this handoff cannot redirect the
+     already accepted operation to another runtime's worker. *)
+  let worker =
+    match held with
+    | Some held -> Some held.proof.worker
+    | None -> t.operation_worker
+  in
+  let descendant_guard =
+    Option.bind t.operation_agent_custody ~f:(fun owner ->
+      if Agent_protocol.Id.Operation.equal owner.operation_id operation_id
+      then owner.descendant_guard
+      else None)
+  in
   let inference_live = Atomic.make true in
   let retire_authority () =
     Atomic.set inference_live false;
     Option.iter custody ~f:retire_agent_admission;
-    Option.iter held ~f:Held_operation.retire
+    Option.iter held ~f:Held_operation.retire;
+    Option.iter descendant_guard ~f:Operation_descendant_guard.retire
   in
   let history =
     let open Result.Let_syntax in
@@ -18069,12 +21564,9 @@ let launch_worker t operation =
       let outcome =
         Exn.protect ~finally:retire_authority ~f:(fun () ->
           let outcome =
-            match
-              match held with
-              | Some held -> Some held.proof.worker
-              | None -> t.operation_worker
-            with
-            | Some worker -> run_worker ?held t worker operation inference_live history
+            match worker with
+            | Some worker ->
+              run_worker ?held ?descendant_guard t worker operation inference_live history
             | None ->
               Operation_worker.Failed
                 (error Invalid_state "session has no foreground operation worker")
@@ -18181,17 +21673,25 @@ let check_turn_custody t custody =
   require_runtime_admission t
 ;;
 
-let submit_idle_message
-      ?original_actor
-      ?run_preparation
-      ?commit_attempted
-      ?(extra_deltas = [])
-      ?(owner = Pending_input_document.Owner.Host_internal)
-      ?(timing = Agent_protocol.Pending_input.Timing.Safe_boundary)
-      ?operation
-      t
-      entry
-  =
+let descendant_reservations = Goal_descendant_admission_custody.descendant_reservations
+
+let check_descendant_before_writer =
+  Goal_descendant_admission_custody.check_descendant_before_writer
+;;
+
+let prepare_descendant_before_writer =
+  Goal_descendant_admission_custody.prepare_descendant_before_writer
+;;
+
+let check_descendant_admitted_views =
+  Goal_descendant_admission_custody.check_descendant_admitted_views
+;;
+
+let descendant_admitted_views =
+  Goal_descendant_admission_custody.descendant_admitted_views
+;;
+
+let prepare_idle_message_input ?original_actor ?operation ~owner ~timing t entry =
   let open Result.Let_syntax in
   let%bind () = require_runtime_admission t in
   let%bind () = reconcile_foreground_invocations t in
@@ -18209,15 +21709,60 @@ let submit_idle_message
     | Some _, Some actor -> Ok (Some (create_agent_custody actor))
     | Some _, None | None, _ -> adopted_agent_custody t entries entry original_actor
   in
-  let accepted = Pending_turn.accepted pending in
-  let deferred_payloads = Pending_turn.deferred_payloads pending in
-  let%bind () =
-    if Option.is_some operation && not accepted
+  let%map () =
+    if Option.is_some operation && not (Pending_turn.accepted pending)
     then
       Error
         (error Pending_input_conflict "run input is blocked by the pending FIFO prefix")
     else Ok ()
   in
+  pending, operation_custody
+;;
+
+let idle_message_turn ?operation ~extra_deltas t pending =
+  let operation =
+    Option.value_or_thunk operation ~default:(fun () ->
+      create_turn_operation t User_submit)
+  in
+  let lifecycle = lifecycle_for_operation t operation.id in
+  let delta =
+    Session_delta.Batch
+      (extra_deltas
+       @ Pending_turn.turn_deltas pending
+       @ [ Session_delta.Active_operation_changed (Some operation)
+         ; Lifecycle_changed lifecycle
+         ])
+  in
+  let payloads =
+    Pending_turn.deferred_payloads pending
+    @ [ Agent_protocol.Event.Durable.Payload.History_appended
+          (Pending_turn.entries pending)
+      ; Operation_started operation
+      ; Session_state_changed
+          { desired_state = lifecycle.desired; observed_state = lifecycle.observed }
+      ]
+  in
+  operation, delta, payloads
+;;
+
+let submit_idle_message
+      ?original_actor
+      ?run_preparation
+      ?commit_attempted
+      ?(extra_deltas = [])
+      ?(owner = Pending_input_document.Owner.Host_internal)
+      ?(timing = Agent_protocol.Pending_input.Timing.Safe_boundary)
+      ?operation
+      t
+      entry
+  =
+  let open Result.Let_syntax in
+  let%bind pending, operation_custody =
+    prepare_idle_message_input ?original_actor ?operation ~owner ~timing t entry
+  in
+  let entries = Pending_turn.entries pending in
+  let accepted = Pending_turn.accepted pending in
+  let deferred_payloads = Pending_turn.deferred_payloads pending in
   if List.is_empty entries
   then (
     let%map session =
@@ -18232,26 +21777,8 @@ let submit_idle_message
     remember_pending_agent_actor t entry original_actor;
     { session; history_id = entry.id; disposition = Deferred; operation_id = None })
   else (
-    let operation =
-      Option.value_or_thunk operation ~default:(fun () ->
-        create_turn_operation t User_submit)
-    in
-    let lifecycle = lifecycle_for_operation t operation.id in
-    let delta =
-      Session_delta.Batch
-        (extra_deltas
-         @ Pending_turn.turn_deltas pending
-         @ [ Session_delta.Active_operation_changed (Some operation)
-           ; Lifecycle_changed lifecycle
-           ])
-    in
-    let payloads =
-      deferred_payloads
-      @ [ Agent_protocol.Event.Durable.Payload.History_appended entries
-        ; Operation_started operation
-        ; Session_state_changed
-            { desired_state = lifecycle.desired; observed_state = lifecycle.observed }
-        ]
+    let operation, delta, payloads =
+      idle_message_turn ?operation ~extra_deltas t pending
     in
     let completion_sample = producer_completion_sample t ~delta in
     let before = t.state in
@@ -18324,6 +21851,1180 @@ let submit_idle_message
     })
 ;;
 
+let close_inherited_run_exit : type outcome. t -> outcome Inherited_turn.Source.t -> unit =
+  fun t source ->
+  let close preparation exit =
+    Option.iter exit ~f:(fun exit ->
+      Run_preparation.Admission_exit.close exit ~owner:t.run_preparation_owner);
+    match preparation, t.run_preparation with
+    | Some preparation, Some (Initial actual) when phys_equal preparation actual ->
+      t.run_preparation <- None
+    | (Some _ | None), (Some _ | None) -> ()
+  in
+  match source with
+  | Inherited_turn.Source.Held_input source ->
+    close
+      (Inherited_turn.Source.preparation (Held_input source))
+      (Some source.preparation_exit)
+  | Message _ | Managed _ | History _ -> ()
+  | Goal_resume source ->
+    Goal_continuation.close source.selection.scope.continuation.binding.preparation
+  | Run_user (source, _) -> close source.preparation source.preparation_exit
+;;
+
+let capture_inherited_turn_plan
+  : type outcome.
+    t
+    -> capture:outcome Inherited_turn.Capture.t
+    -> source:outcome Inherited_turn.Source.t
+    -> commit_attempted:bool ref
+    -> delta:Session_delta.t
+    -> payloads:Agent_protocol.Event.Durable.Payload.t list
+    -> (outcome Inherited_turn.Decision.t, Agent_protocol.Error.t) result
+  =
+  fun t ~capture ~source ~commit_attempted ~delta ~payloads ->
+  let open Result.Let_syntax in
+  let before = t.state in
+  let%bind accounting =
+    Result.of_option
+      before.goal_descendants
+      ~error:(error Permission_denied "inherited Turn accounting disappeared")
+  in
+  let%bind () =
+    if Int64.equal before.counters.revision Int64.max_value
+    then Error (error Conflict "inherited Turn revision is exhausted")
+    else Ok ()
+  in
+  let operation = Inherited_turn.Source.operation source in
+  let%bind frame =
+    Goal_descendant_occurrence.Frame.create
+      ~session:(Goal_descendants.session accounting)
+      ~generation:before.identity.generation
+      ~candidate_session_revision:(Int64.succ before.counters.revision)
+  in
+  let%bind occurrence =
+    Goal_descendant_occurrence.host_turn frame ~operation_id:operation.id
+  in
+  let%bind () = Inherited_turn.Capture.check_waiting capture in
+  let%bind slot =
+    acquire_descendant_admission_slot t ~occurrence ~writer_attempted:(ref false)
+  in
+  let plan =
+    { Inherited_turn.slot
+    ; before
+    ; commit_attempted
+    ; delta
+    ; payloads
+    ; completion_sample = producer_completion_sample t ~delta
+    ; remaining_audit = t.command_audit
+    ; source
+    ; phase = Pending
+    ; cancellation = Not_requested
+    }
+  in
+  let published =
+    let%bind () =
+      Option.value_map (Inherited_turn.Source.run source) ~default:(Ok ()) ~f:(fun run ->
+        Option.value_map run.preparation_exit ~default:(Ok ()) ~f:(fun exit ->
+          Run_preparation.Admission_exit.transfer exit ~owner:t.run_preparation_owner))
+    in
+    let%bind () =
+      match source with
+      | Held_input source ->
+        let%map () =
+          Run_preparation.Admission_exit.transfer
+            source.preparation_exit
+            ~owner:t.run_preparation_owner
+        in
+        source.selection.scope.phase
+        <- Admission_pending (source.selection.input, source.preparation_exit)
+      | Message _ | Managed _ | Run_user _ | History _ | Goal_resume _ -> Ok ()
+    in
+    Inherited_turn.Capture.publish capture plan
+  in
+  match published with
+  | Ok () -> Ok (Inherited_turn.Decision.Pending plan)
+  | Error failure ->
+    (* No yield/root attempt can occur in capture. Release the actual sealed
+       Slot and its same Run exit, not an inference from an attempted writer. *)
+    let%bind closed = seal_descendant_admission_slot t slot in
+    let%bind () = release_closed_descendant_admission_slot t slot ~closed in
+    close_inherited_run_exit t source;
+    Error failure
+;;
+
+let capture_inherited_message
+      ?original_actor
+      t
+      ~capture
+      ~attachment_id
+      ~submitting_principal
+      ~timing
+      entry
+  =
+  let open Result.Let_syntax in
+  let%bind () = require_available_descendant_admission_slot t in
+  let%bind pending, custody =
+    prepare_idle_message_input
+      ?original_actor
+      ~owner:(Submitting_principal submitting_principal)
+      ~timing
+      t
+      entry
+  in
+  if List.is_empty (Pending_turn.entries pending)
+  then (
+    let%map session =
+      transition
+        t
+        ~delta:(Pending_turn.enqueue_delta pending)
+        ~payloads:(Pending_turn.deferred_payloads pending)
+    in
+    remember_pending_agent_actor t entry original_actor;
+    Inherited_turn.Decision.Completed
+      { session; history_id = entry.id; disposition = Deferred; operation_id = None })
+  else (
+    let transferred = ref false in
+    Exn.protect
+      ~finally:(fun () ->
+        if not !transferred then Option.iter custody ~f:retire_agent_custody)
+      ~f:(fun () ->
+        let operation, delta, payloads = idle_message_turn ~extra_deltas:[] t pending in
+        let source =
+          Inherited_turn.Source.Message
+            { attachment_id
+            ; submitting_principal
+            ; operation
+            ; custody
+            ; entry
+            ; original_actor
+            ; accepted = Pending_turn.accepted pending
+            }
+        in
+        let%map decision =
+          capture_inherited_turn_plan
+            t
+            ~capture
+            ~source
+            ~commit_attempted:(ref false)
+            ~delta
+            ~payloads
+        in
+        transferred := true;
+        decision))
+;;
+
+let check_inherited_message_admission t (source : Inherited_turn.Source.message) =
+  let open Result.Let_syntax in
+  let%bind () = check_turn_custody t source.custody in
+  match source.original_actor with
+  | None -> Ok ()
+  | Some actor ->
+    let principal = Operator_authorization.principal actor in
+    if
+      Operator_authorization.is_current actor
+      && Agent_protocol.Principal.has_scope principal Send_messages
+      && Agent_protocol.Id.Principal.equal principal.id source.submitting_principal
+    then Ok ()
+    else
+      Error (error Permission_denied "inherited message original authentication expired")
+;;
+
+let check_inherited_message_source t (source : Inherited_turn.Source.message) =
+  let%bind.Result _ = write_attachment t source.attachment_id in
+  check_inherited_message_admission t source
+;;
+
+let check_inherited_managed_origin = function
+  | Inherited_turn.Managed_origin.Trusted_host -> Ok ()
+  | Native borrowed -> Native_tool_invocation.check_borrowed_effect_current borrowed
+;;
+
+let check_history_input
+  : type outcome.
+    t -> outcome Inherited_turn.History_input.t -> (unit, Agent_protocol.Error.t) result
+  =
+  fun t input ->
+  let open Result.Let_syntax in
+  let%bind () =
+    match input with
+    | Edit { request; _ } ->
+      history_command_precondition
+        t
+        request.session_id
+        request.attachment_id
+        request.expected_generation
+        request.expected_revision
+    | Continue { request; _ } ->
+      history_command_precondition
+        t
+        request.session_id
+        request.attachment_id
+        request.expected_generation
+        request.expected_revision
+  in
+  if
+    Option.exists
+      t.operation_worker
+      ~f:(phys_equal (Inherited_turn.History_input.worker input))
+  then Ok ()
+  else Error (error Conflict "history continuation runtime changed before admission")
+;;
+
+let select_held_input_source ?pending_exit t (scope : Held_input_scope.t) input =
+  let open Result.Let_syntax in
+  let activation = Admitted_activation.Continuation.target scope.continuation in
+  let%bind () = input_scope_basis t scope in
+  let%bind () =
+    match scope.phase, pending_exit with
+    | Parsed_ready recorded, None
+      when Runtime_input_preparation.Prepared_input.equal recorded input -> Ok ()
+    | Admission_pending (recorded, actual), Some expected
+      when phys_equal actual expected
+           && Runtime_input_preparation.Prepared_input.equal recorded input ->
+      Run_preparation.Admission_exit.check actual ~owner:t.run_preparation_owner
+    | ( ( Parsing
+        | Parsed_ready _
+        | Admission_pending _
+        | Consumed _
+        | Root_attempt_unconfirmed
+        | Closed )
+      , (Some _ | None) ) ->
+      Error (error Conflict "held root requires its unconsumed recorded parsed input")
+  in
+  let%bind () =
+    match
+      t.state.lifecycle.desired, t.state.lifecycle.observed, t.state.active_operation
+    with
+    | Running, Idle, None
+      when (not t.idle_moderator_borrowed)
+           && Option.is_none t.state.failure
+           && (not t.state.halted)
+           && List.is_empty scope.graphs -> Ok ()
+    | _ -> Error (error Conflict "held root requires an idle running target")
+  in
+  let%bind () = check_held_effect scope.continuation in
+  let%bind worker =
+    Result.of_option
+      t.operation_worker
+      ~error:(error Invalid_state "held root has no actual foreground worker")
+  in
+  let%bind index =
+    Result.of_option
+      t.state.run_state
+      ~error:(error Conflict "held root Run index disappeared")
+  in
+  let%bind run =
+    Result.of_option
+      (Run_state.find index activation.run.id)
+      ~error:(error Conflict "held root Run disappeared")
+  in
+  let%bind binding =
+    Result.of_option
+      (Run_authorities.find t.run_authorities run.id)
+      ~error:(error Permission_denied "held root lost its actual Run authority")
+  in
+  let%bind () =
+    if phys_equal (Run_authorities.scope binding) activation.scope
+    then Ok ()
+    else Error (error Conflict "held root Run binding was replaced")
+  in
+  let%bind store = require_recurrence_controller t in
+  let%bind () =
+    Activation_association.check_target
+      activation.association
+      ~store
+      ~state:t.state
+      ~run
+      ~admission:activation.admission
+  in
+  let%bind original =
+    Result.of_option
+      (Run_admission.Scope.original_actor activation.scope)
+      ~error:(error Permission_denied "held root requires its genuine original")
+  in
+  let%bind () =
+    Runtime_input_preparation.Prepared_input.validate
+      input
+      ~request:scope.request
+      ~id:scope.id
+  in
+  Ok
+    ({ scope; input; worker; run; binding; original }
+     : Inherited_turn.Held_input_selection.t)
+;;
+
+let check_inherited_held_source t (source : Inherited_turn.Source.held_input) =
+  let open Result.Let_syntax in
+  let expected = source.selection in
+  let%bind current =
+    select_held_input_source
+      ~pending_exit:source.preparation_exit
+      t
+      expected.scope
+      expected.input
+  in
+  if
+    phys_equal current.worker expected.worker
+    && phys_equal current.binding expected.binding
+    && phys_equal current.original expected.original
+    && Agent_protocol.Run.equal current.run expected.run
+  then check_turn_custody t source.custody
+  else Error (error Conflict "held Turn lost its exact selected source")
+;;
+
+let joined_goal_runtime_basis t (scope : Goal_continuation.runtime_scope) =
+  let open Result.Let_syntax in
+  let%bind () = goal_runtime_scope_basis t scope in
+  let%bind () =
+    match scope.callback with
+    | Joined
+      when Option.is_none t.queued_event_borrow
+           && (not (moderator_is_borrowed t))
+           && Option.is_none t.initialization_scope -> Ok ()
+    | Pending | Executing _ | Completed _ | Joined ->
+      Error (error Conflict "Goal lifecycle ownership has not joined")
+  in
+  Run_admission.Scope.check_current
+    (Run_authorities.scope scope.continuation.binding.preparation.binding)
+;;
+
+let check_goal_resume_selection t (selected : Inherited_turn.Goal_resume_selection.t) =
+  let open Result.Let_syntax in
+  let scope = selected.scope in
+  let preparation = scope.continuation.binding.preparation in
+  let%bind () = joined_goal_runtime_basis t scope in
+  let%bind () = check_runtime_construction_effect (Existing_goal scope.continuation) in
+  let%bind current = goal_runtime_run t scope in
+  if
+    Option.is_none t.state.active_operation
+    && Agent_protocol.Run.equal current selected.run
+    && Run_authorities.is_current t.run_authorities preparation.binding ~run_id:current.id
+    && Option.exists
+         (Run_admission.Scope.original_actor (Run_authorities.scope preparation.binding))
+         ~f:(phys_equal selected.original)
+    && Agent_protocol.Goal_episode.matches_run
+         (Run_goal_link.episode preparation.link)
+         current
+  then Ok ()
+  else Error (error Conflict "Goal Resume lost its selected existing Run or source")
+;;
+
+let check_inherited_turn_source
+  : type outcome.
+    ?refresh_policy:bool
+    -> t
+    -> outcome Inherited_turn.Source.t
+    -> (unit, Agent_protocol.Error.t) result
+  =
+  fun ?(refresh_policy = false) t source ->
+  let open Result.Let_syntax in
+  match source with
+  | Message message -> check_inherited_message_source t message
+  | Held_input source -> check_inherited_held_source t source
+  | Goal_resume source -> check_goal_resume_selection t source.selection
+  | History history ->
+    let%bind () = check_history_input t history.input in
+    let%bind () = require_selected_execution t in
+    check_turn_custody t history.custody
+  | Managed managed ->
+    let%bind () = check_turn_custody t managed.custody in
+    check_inherited_managed_origin managed.origin
+  | Run_user (run, _) ->
+    let%bind () = check_turn_custody t run.custody in
+    let%bind () =
+      if refresh_policy
+      then Run_admission.Scope.authorize run.scope t.state
+      else Run_admission.Scope.check_current run.scope
+    in
+    let%bind () =
+      match run.request.caller with
+      | Writer attachment -> write_attachment t attachment |> Result.map ~f:ignore
+      | Headless_command ->
+        Option.value_map
+          run.preparation
+          ~default:(Error (error Permission_denied "Run headless custody disappeared"))
+          ~f:(fun preparation ->
+            if refresh_policy
+            then check_run_preparation t preparation
+            else
+              Run_preparation.check_current
+                preparation
+                ~owner:t.run_preparation_owner
+                ~state:t.state)
+      | Native_goal_start _ ->
+        Error (error Permission_denied "native Start has a distinct owner")
+    in
+    let%bind () =
+      Option.value_map run.preparation ~default:(Ok ()) ~f:(fun preparation ->
+        Run_preparation.check_current
+          preparation
+          ~owner:t.run_preparation_owner
+          ~state:t.state)
+    in
+    Option.value_map run.preparation_exit ~default:(Ok ()) ~f:(fun exit ->
+      Run_preparation.Admission_exit.check exit ~owner:t.run_preparation_owner)
+;;
+
+module Goal_operation_phase = struct
+  type t =
+    | Staged
+    | Installed
+    | Closed
+  [@@deriving equal]
+end
+
+(* Capture the real command original before source closure. Only this private
+   actual-ACK installer transfers it to the existing first-prefix owner. *)
+let goal_resume_operation_controller t (scope : Goal_continuation.runtime_scope) =
+  let open Result.Let_syntax in
+  let preparation = scope.continuation.binding.preparation in
+  let old_scope = Run_authorities.scope preparation.binding in
+  let%bind authorization =
+    Run_preparation.Custody.capture_authorization
+      (Goal_continuation.custody preparation)
+      ~owner:t.run_preparation_owner
+      ~state:t.state
+  in
+  let%bind store = require_recurrence_controller t in
+  let policy = preparation.policy in
+  let association : Activation_association.t =
+    { issuer_policy = Goal policy
+    ; check_target =
+        (fun ~store:current ~state ~run ~admission ->
+          if Recurrence_controller.same_store store current
+          then Goal_activation_policy.check_association policy ~state ~run ~admission
+          else Error (error Conflict "Goal continuation Store changed"))
+    }
+  in
+  let phase = ref Goal_operation_phase.Staged in
+  let current = ref None in
+  let structural () =
+    let%bind () =
+      if Goal_operation_phase.equal !phase Installed
+      then Ok ()
+      else Error (error Conflict "Goal continuation Operation owner is not installed")
+    in
+    let%bind () =
+      Runtime_source_preparation.validate_target scope.continuation.binding.source t.state
+    in
+    let%bind index =
+      Result.of_option
+        t.state.run_state
+        ~error:(error Conflict "Goal Operation Run index is absent")
+    in
+    let%bind run =
+      Result.of_option
+        (Run_state.find index preparation.run.id)
+        ~error:(error Conflict "Goal Operation Run is absent")
+    in
+    let%bind () =
+      if Run_authorities.is_current t.run_authorities preparation.binding ~run_id:run.id
+      then Ok ()
+      else Error (error Permission_denied "Goal Operation lost its original binding")
+    in
+    Activation_association.check_target
+      association
+      ~store
+      ~state:t.state
+      ~run
+      ~admission:preparation.admission
+  in
+  let basis () =
+    let%bind () = structural () in
+    match !current with
+    | Some observed when Recurrence_controller.is_current observed -> Ok ()
+    | Some _ | None ->
+      Error (error Conflict "Goal continuation Operation requires fresh Store custody")
+  in
+  let originals () =
+    let%bind () = Run_admission.Scope.check_current old_scope in
+    Run_preparation.Authorization.check authorization t.state
+  in
+  let policy_check () =
+    let%bind () = structural () in
+    let%bind () = Run_admission.Scope.authorize old_scope t.state in
+    let%bind () = Goal_activation_policy.check_admitted_policy policy ~state:t.state in
+    let%bind () = originals () in
+    structural ()
+  in
+  let refresh () =
+    let%bind () = policy_check () in
+    let%bind observed = Recurrence_controller.observe store t.state in
+    current := Some observed;
+    basis ()
+  in
+  let command_loan = preparation.native_command_loan in
+  preparation.native_command_loan <- None;
+  Ok
+    Activation_controller.Operation.
+      { association
+      ; install =
+          (fun () -> if Goal_operation_phase.equal !phase Staged then phase := Installed)
+      ; close =
+          (fun () ->
+            phase := Closed;
+            Option.iter command_loan ~f:Execution_custody.Admission.retire)
+      ; refresh
+      ; policy =
+          (fun () ->
+            let%bind () = basis () in
+            let%bind () = policy_check () in
+            basis ())
+      ; timing =
+          (fun () ->
+            let%bind () = basis () in
+            let%bind () =
+              Goal_activation_policy.check_deadline
+                policy
+                ~state:t.state
+                ~now:(t.services.now ())
+            in
+            basis ())
+      ; authority =
+          (fun () ->
+            let%bind () = basis () in
+            let%bind () = originals () in
+            basis ())
+      ; basis
+      }
+;;
+
+let prepare_goal_operation_ack
+      ?descendant_guard
+      t
+      (scope : Goal_continuation.runtime_scope)
+      ~operation
+      ~candidate
+  =
+  let open Result.Let_syntax in
+  let continuation = scope.continuation in
+  let preparation = continuation.binding.preparation in
+  let%bind index =
+    Result.of_option
+      t.state.run_state
+      ~error:(error Conflict "Goal Operation Run index is absent")
+  in
+  let%bind run =
+    Result.of_option
+      (Run_state.find index preparation.run.id)
+      ~error:(error Conflict "Goal Operation Run is absent")
+  in
+  let%bind next =
+    Option.bind candidate.Session_transition.state.run_state ~f:(fun index ->
+      Run_state.find index run.id)
+    |> Result.of_option ~error:(error Conflict "Goal Operation candidate lost its Run")
+  in
+  let%bind () =
+    if
+      Agent_protocol.Goal_episode.matches_run
+        (Run_goal_link.episode preparation.link)
+        next
+      && List.exists next.owned_work ~f:(fun work ->
+        match work.Agent_protocol.Run_work.key with
+        | Operation id ->
+          Agent_protocol.Id.Operation.equal id operation.Agent_protocol.Operation.id
+        | Retained _ -> false)
+    then Ok ()
+    else Error (error Conflict "Goal Operation candidate lost its actual ownership")
+  in
+  let%bind handoff =
+    match preparation.cause with
+    | Resume_command _ -> Ok (Goal_runtime_handoff.Resume (Started operation))
+    | Pending_wake { wake; _ } ->
+      (match wake.occurrence with
+       | Subscription_delivery _ ->
+         Ok (Goal_runtime_handoff.Existing_execution (Subscription_turn operation))
+       | Job_completion _ | Delivered_timer _ ->
+         Error (error Invalid_request "queued Goal wake requires an Event claim"))
+    | Claimed_job _ ->
+      Error (error Invalid_request "claimed Goal Job cannot start another Operation")
+  in
+  let old_scope = Run_authorities.scope preparation.binding in
+  let%bind original =
+    Result.of_option
+      (Run_admission.Scope.original_actor old_scope)
+      ~error:(error Permission_denied "Goal continuation has no original Run authority")
+  in
+  let%bind controller = goal_resume_operation_controller t scope in
+  let proof : Held_operation.Proof.t =
+    { scope = old_scope
+    ; run
+    ; admission = preparation.admission
+    ; source = continuation.binding.source
+    ; operation
+    ; worker = scope.worker
+    ; binding = preparation.binding
+    ; controller
+    }
+  in
+  let held : Held_operation.t = { proof; phase = Staged; target_current = None } in
+  let owner : Operation_owner.t =
+    { operation_id = operation.id
+    ; admission = create_agent_admission (Some (create_agent_custody original))
+    ; held = Some held
+    ; descendant_guard
+    }
+  in
+  ({ previous = t.state; candidate; scope; held; owner; handoff }
+   : Goal_runtime_operation_acknowledgement.t)
+  |> Result.return
+;;
+
+let prepare_inherited_held_ack
+      t
+      (source : Inherited_turn.Source.held_input)
+      ~candidate
+      ~guard
+  =
+  let open Result.Let_syntax in
+  let%bind () = check_inherited_held_source t source in
+  let selection = source.selection in
+  let activation = Admitted_activation.Continuation.target selection.scope.continuation in
+  let%bind controller = selection.scope.continuation.controller.transfer () in
+  if not (phys_equal controller.association activation.association)
+  then (
+    controller.close ();
+    Error (error Conflict "held root transferred another admitted association"))
+  else (
+    let proof : Held_operation.Proof.t =
+      { scope = activation.scope
+      ; run = selection.run
+      ; admission = activation.admission
+      ; source = activation.source
+      ; operation = source.operation
+      ; worker = selection.worker
+      ; binding = selection.binding
+      ; controller
+      }
+    in
+    let held : Held_operation.t = { proof; phase = Staged; target_current = None } in
+    let owner : Operation_owner.t =
+      { operation_id = source.operation.id
+      ; admission = create_agent_admission source.custody
+      ; held = Some held
+      ; descendant_guard = Some guard
+      }
+    in
+    let acknowledgement : Held_operation_acknowledgement.t =
+      { input_scope = selection.scope
+      ; input = selection.input
+      ; preparation_exit = Some source.preparation_exit
+      ; activation
+      ; held
+      ; owner
+      ; previous = t.state
+      ; candidate
+      }
+    in
+    Ok acknowledgement)
+;;
+
+let commit_inherited_turn
+  : type outcome.
+    t
+    -> outcome Inherited_turn.t
+    -> before_writer:Descendant_admission_data.Before_writer.t
+    -> (outcome Inherited_turn.Acknowledged.t, Agent_protocol.Error.t) result
+  =
+  fun t plan ~before_writer ->
+  let module R = Descendant_admission_data in
+  let open Result.Let_syntax in
+  let%bind () =
+    match plan.cancellation with
+    | Not_requested -> Ok ()
+    | Requested failure -> Error failure
+  in
+  let%bind () =
+    match plan.phase with
+    | Pending when Option.is_none t.inherited_turn_prepared -> Ok ()
+    | Pending | Writer_prepared _ | Acknowledged _ | Closed ->
+      Error (error Conflict "Turn writer is already prepared or attempted")
+  in
+  let%bind () = check_descendant_admission_slot t plan.slot in
+  let%bind () = check_descendant_before_writer before_writer in
+  let%bind () =
+    if
+      phys_equal
+        before_writer.preparation
+        (Descendant_admission_slot.preparation plan.slot)
+      && phys_equal
+           before_writer.reservations
+           (Descendant_admission_slot.reservations plan.slot)
+    then Ok ()
+    else Error (error Conflict "Turn reservations belong to another physical plan")
+  in
+  let operation = Inherited_turn.Source.operation plan.source in
+  let custody = Inherited_turn.Source.custody plan.source in
+  let preparation_owner = Inherited_turn.Source.preparation plan.source in
+  let%bind () = check_inherited_turn_source ~refresh_policy:true t plan.source in
+  let receipts =
+    List.map before_writer.views ~f:(fun (view : R.Root_before_writer.t) ->
+      Goal_descendant_included.create view.reservation.pending)
+  in
+  let preparation = Descendant_admission_slot.preparation plan.slot in
+  let%bind inherited_turn =
+    Host_turn_tracking.Inherited.create
+      ~occurrence:(Descendant_preparation.occurrence preparation)
+      ~receipts
+  in
+  let%bind candidate, edge =
+    prepare_transition_inherited
+      ?completion_sample:plan.completion_sample
+      ?run_preparation:preparation_owner
+      t
+      ~inherited_turn
+      ~delta:plan.delta
+      ~payloads:plan.payloads
+  in
+  let%bind stage =
+    Turn_admission_staging.capture
+      ~owner:t.run_preparation_owner
+      ~before:plan.before
+      ~candidate
+      ~operation
+      ~remaining_audit:plan.remaining_audit
+      ~commit_attempted:plan.commit_attempted
+      ~plan:plan.source
+  in
+  let staged_owner = ref None in
+  Exn.protect
+    ~finally:(fun () -> Option.iter !staged_owner ~f:Operation_owner.retire)
+    ~f:(fun () ->
+      let guard = Operation_descendant_guard.create_unconfirmed () in
+      let%bind goal_runtime_acknowledgement =
+        match plan.source with
+        | Goal_resume source ->
+          Goal_runtime_acknowledgement.prepare t source.selection.scope ~candidate
+          |> Result.map ~f:Option.some
+        | Message _ | Managed _ | Run_user _ | History _ | Held_input _ -> Ok None
+      in
+      let%bind owner, held_operation_acknowledgement, goal_operation_acknowledgement =
+        match plan.source with
+        | Goal_resume source ->
+          let%map acknowledgement =
+            prepare_goal_operation_ack
+              ~descendant_guard:guard
+              t
+              source.selection.scope
+              ~operation
+              ~candidate
+          in
+          let owner = acknowledgement.Goal_runtime_operation_acknowledgement.owner in
+          staged_owner := Some owner;
+          owner, None, Some acknowledgement
+        | Held_input source ->
+          let%map acknowledgement =
+            prepare_inherited_held_ack t source ~candidate ~guard
+          in
+          let owner = acknowledgement.Held_operation_acknowledgement.owner in
+          staged_owner := Some owner;
+          owner, Some acknowledgement, None
+        | Message _ | Managed _ | Run_user _ | History _ ->
+          let owner =
+            Operation_owner.
+              { operation_id = operation.id
+              ; admission = create_agent_admission custody
+              ; held = None
+              ; descendant_guard = Some guard
+              }
+          in
+          Ok (owner, None, None)
+      in
+      let native =
+        R.Acknowledgement.
+          { preparation
+          ; identity = ref ()
+          ; installed = candidate.state
+          ; candidate
+          ; edge = Host_turn edge
+          ; receipts
+          ; reservations = before_writer.reservations
+          }
+      in
+      let acknowledged =
+        ({ plan
+         ; native
+         ; stage
+         ; owner
+         ; guard
+         ; consumed = false
+         ; cleanup_progress = Needs_both
+         ; cleanup_owner = Idle
+         }
+         : _ Inherited_turn.acknowledged)
+      in
+      let prepared = Some (Inherited_turn.Prepared acknowledged) in
+      plan.phase <- Writer_prepared acknowledged;
+      t.inherited_turn_prepared <- prepared;
+      staged_owner := None;
+      let%bind slot_acknowledgement =
+        prepare_descendant_admission_slot_ack t plan.slot ~acknowledgement:native
+      in
+      t.command_audit <- plan.remaining_audit;
+      let installed =
+        install
+          ?held_operation_acknowledgement
+          ?goal_runtime_acknowledgement
+          ?goal_operation_acknowledgement
+          ~descendant_admission_acknowledgement:slot_acknowledgement
+          ~inherited_turn_acknowledgement:
+            (Inherited_turn_acknowledgement.prepare acknowledged)
+          ~turn_stage:stage
+          ?run_preparation:preparation_owner
+          ~commit_attempted:plan.commit_attempted
+          ?completion_sample:plan.completion_sample
+          ~check_before_commit:(fun () ->
+            let%bind () = check_inherited_turn_source t plan.source in
+            let%bind () = check_descendant_before_writer before_writer in
+            let%bind () = check_descendant_admission_slot t plan.slot in
+            Turn_admission_staging.check_before_writer
+              stage
+              ~owner:t.run_preparation_owner
+              ~state:t.state)
+          t
+          candidate
+      in
+      (* Publication errors do not erase the exact already-installed canonical ACK. *)
+      match plan.phase with
+      | Acknowledged actual when phys_equal actual acknowledged -> Ok acknowledged
+      | Pending | Writer_prepared _ | Closed | Acknowledged _ ->
+        let%bind () = installed in
+        Error (error Conflict "Turn writer returned without the exact canonical ACK"))
+;;
+
+let check_inherited_turn_ack_owner
+  : type outcome.
+    t -> outcome Inherited_turn.Acknowledged.t -> (unit, Agent_protocol.Error.t) result
+  =
+  fun t acknowledged ->
+  let open Result.Let_syntax in
+  let%bind () =
+    match acknowledged.plan.cancellation with
+    | Not_requested -> Ok ()
+    | Requested failure -> Error failure
+  in
+  let%bind () = require_runtime_admission t in
+  let%bind () =
+    check_descendant_host t (Descendant_admission_slot.binding acknowledged.plan.slot)
+  in
+  let%bind () =
+    if
+      Descendant_preparation.acknowledged_by
+        acknowledged.native.preparation
+        ~acknowledgement:acknowledged.native.identity
+      && Option.exists t.operation_agent_custody ~f:(phys_equal acknowledged.owner)
+      && (not t.state.halted)
+      && Option.is_none t.state.failure
+      && Agent_protocol.Session.equal_desired_state t.state.lifecycle.desired Running
+    then Ok ()
+    else Error (error Conflict "inherited Turn lost its acknowledged operation owner")
+  in
+  let%bind () = check_agent_admission acknowledged.owner.admission in
+  let%bind () =
+    match acknowledged.plan.source with
+    | Held_input source ->
+      let selection = source.selection in
+      if
+        Run_authorities.is_current
+          t.run_authorities
+          selection.binding
+          ~run_id:selection.run.id
+      then Run_admission.Scope.check_current (Run_authorities.scope selection.binding)
+      else Error (error Conflict "ACKed held Turn lost its actual Run binding")
+    | Goal_resume source ->
+      let selected = source.selection in
+      let preparation = selected.scope.continuation.binding.preparation in
+      if
+        Run_authorities.is_current
+          t.run_authorities
+          preparation.binding
+          ~run_id:selected.run.id
+        && Option.exists t.operation_worker ~f:(phys_equal selected.scope.worker)
+        && Option.equal phys_equal t.moderator_manager selected.scope.manager
+      then Run_admission.Scope.check_current (Run_authorities.scope preparation.binding)
+      else Error (error Conflict "ACKed Goal Resume lost its actual Run or worker")
+    | Message _ | Managed _ | History _ -> Ok ()
+    | Run_user (source, _) ->
+      let run = Run_admission.run source.admission in
+      if Run_authorities.is_current t.run_authorities source.binding ~run_id:run.id
+      then Run_admission.Scope.check_current (Run_authorities.scope source.binding)
+      else Error (error Conflict "inherited Run lost its actual ACKed source binding")
+  in
+  let operation = Inherited_turn.Source.operation acknowledged.plan.source in
+  let%bind current = current_operation t operation.id in
+  if
+    Int.equal current.generation operation.generation
+    && Agent_protocol.Operation.equal_kind current.kind operation.kind
+    &&
+    match current.state with
+    | Starting | Running -> true
+    | Cancelling | Completed | Failed _ | Cancelled | Interrupted _ -> false
+  then Ok ()
+  else Error (error Conflict "inherited Turn cannot launch a terminated operation")
+;;
+
+let inherited_turn_admitted_guard
+  : type outcome.
+    t
+    -> outcome Inherited_turn.Acknowledged.t
+    -> confirmation:Descendant_admission_data.Confirmation.t
+    -> views:Descendant_admission_data.Admitted_views.t
+    -> (Operation_descendant_guard.admitted, Agent_protocol.Error.t) result
+  =
+  fun t acknowledged ~confirmation ~views ->
+  let module R = Descendant_admission_data in
+  let open Result.Let_syntax in
+  let cache = ref (Some views) in
+  let latest = ref None in
+  let check () =
+    let%bind () = check_inherited_turn_ack_owner t acknowledged in
+    let%bind current =
+      Result.of_option
+        !cache
+        ~error:(error Conflict "inherited Turn admitted root views are unavailable")
+    in
+    if
+      phys_equal
+        current.R.Admitted_views.acknowledgement
+        acknowledged.Inherited_turn.native
+      && phys_equal current.confirmation confirmation
+      && phys_equal confirmation.R.Confirmation.acknowledgement acknowledged.native
+    then check_descendant_admitted_views current
+    else Error (error Conflict "inherited Turn views belong to another canonical ACK")
+  in
+  let%bind () = check () in
+  let refresh () =
+    (* Invalidation precedes even the first yielding host check. Failed/cancelled
+       newer refreshes cannot expose old policy views, and older completion
+       cannot republish after a newer attempt. *)
+    let attempt = ref () in
+    latest := Some attempt;
+    cache := None;
+    let published = ref false in
+    Exn.protect
+      ~finally:(fun () ->
+        if (not !published) && Option.exists !latest ~f:(phys_equal attempt)
+        then (
+          latest := None;
+          cache := None))
+      ~f:(fun () ->
+        let refreshed =
+          let%bind () = check_inherited_turn_ack_owner t acknowledged in
+          let host = Descendant_admission_slot.host acknowledged.plan.slot in
+          let%bind current = host.refresh_admitted acknowledged.native confirmation in
+          let%bind () = check_inherited_turn_ack_owner t acknowledged in
+          let%bind () =
+            if Option.exists !latest ~f:(phys_equal attempt)
+            then Ok ()
+            else Error (error Conflict "inherited Turn root refresh was superseded")
+          in
+          cache := Some current;
+          let%map () = check () in
+          published := true
+        in
+        match refreshed with
+        | Error failure -> raise (Inference_allocation.Rejected failure)
+        | Ok () ->
+          fun () ->
+            (match check () with
+             | Ok () -> ()
+             | Error failure -> raise (Inference_allocation.Rejected failure)))
+  in
+  Ok
+    ({ submission = Inference_runtime.Submission_guard.create ~refresh
+     ; check_current = check
+     }
+     : Operation_descendant_guard.admitted)
+;;
+
+let consume_inherited_turn_suffix
+  : type outcome.
+    t
+    -> outcome Inherited_turn.Acknowledged.t
+    -> (outcome Inherited_turn.Source.t, Agent_protocol.Error.t) result
+  =
+  fun t acknowledged ->
+  let open Result.Let_syntax in
+  if acknowledged.consumed
+  then Error (error Conflict "inherited Turn suffix was already consumed")
+  else (
+    let%bind actual =
+      Turn_admission_staging.acknowledge
+        acknowledged.stage
+        ~owner:t.run_preparation_owner
+        ~state:acknowledged.native.installed
+    in
+    let%map source =
+      Turn_admission_staging.finish
+        actual
+        ~owner:t.run_preparation_owner
+        ~state:acknowledged.native.installed
+    in
+    acknowledged.consumed <- true;
+    source)
+;;
+
+let complete_inherited_turn_handoff t (acknowledged : _ Inherited_turn.Acknowledged.t) =
+  match t.inherited_turn_cleanup with
+  | Some (Pack actual) when phys_equal actual.native acknowledged.native ->
+    t.inherited_turn_cleanup <- None
+  | None | Some (Pack _) -> ()
+;;
+
+let finish_inherited_turn
+  : type outcome.
+    t
+    -> outcome Inherited_turn.Acknowledged.t
+    -> confirmation:Descendant_admission_data.Confirmation.t
+    -> views:Descendant_admission_data.Admitted_views.t
+    -> (outcome, Agent_protocol.Error.t) result
+  =
+  fun t acknowledged ~confirmation ~views ->
+  let open Result.Let_syntax in
+  let%bind () =
+    match acknowledged.plan.source with
+    | History source ->
+      if
+        Option.exists
+          t.operation_worker
+          ~f:(phys_equal (Inherited_turn.History_input.worker source.input))
+      then Ok ()
+      else
+        Error
+          (error Conflict "history continuation runtime changed after acknowledgement")
+    | Goal_resume source ->
+      if
+        Option.exists t.operation_worker ~f:(phys_equal source.selection.scope.worker)
+        && Option.equal phys_equal t.moderator_manager source.selection.scope.manager
+      then Ok ()
+      else Error (error Conflict "Goal Resume runtime changed after acknowledgement")
+    | Message _ | Managed _ | Run_user _ | Held_input _ -> Ok ()
+  in
+  let%bind admitted = inherited_turn_admitted_guard t acknowledged ~confirmation ~views in
+  let%bind () = Operation_descendant_guard.admit acknowledged.guard admitted in
+  let%bind source = consume_inherited_turn_suffix t acknowledged in
+  match source with
+  | Message source ->
+    remember_pending_agent_actor t source.entry source.original_actor;
+    complete_inherited_turn_handoff t acknowledged;
+    launch_worker t source.operation;
+    (Ok
+       { session = Session_state.summary t.state
+       ; history_id = source.entry.id
+       ; disposition = (if source.accepted then Started else Deferred)
+       ; operation_id = Option.some_if source.accepted source.operation.id
+       }
+     : (outcome, Agent_protocol.Error.t) result)
+  | Held_input source ->
+    complete_inherited_turn_handoff t acknowledged;
+    launch_worker t source.operation;
+    let entry = Runtime_input_preparation.Prepared_input.entry source.selection.input in
+    Ok
+      { session = Session_state.summary t.state
+      ; history_id = entry.id
+      ; disposition = Started
+      ; operation_id = Some source.operation.id
+      }
+  | Goal_resume source ->
+    complete_inherited_turn_handoff t acknowledged;
+    let continuation = source.selection.scope.continuation in
+    let operation = Turn_admission.operation source.selection.turn in
+    launch_worker t operation;
+    Ok
+      (Goal_resume_result.Resumed
+         { receipt = Goal_continuation.receipt continuation
+         ; continuation = Started operation
+         })
+  | History source ->
+    complete_inherited_turn_handoff t acknowledged;
+    launch_worker
+      t
+      (Turn_admission.operation (Inherited_turn.History_input.admission source.input));
+    Ok
+      (Inherited_turn.History_input.result
+         source.input
+         ~session:(Session_state.summary t.state))
+  | Managed source ->
+    let%bind receipt =
+      List.find
+        t.state.managed_submissions
+        ~f:(Managed_submission.same_key source.receipt)
+      |> Result.of_option ~error:(error Conflict "ACKed managed receipt disappeared")
+    in
+    let%bind () =
+      if
+        String.equal receipt.request_sha256 source.receipt.request_sha256
+        && Agent_protocol.History.Id.equal receipt.history_id source.entry.id
+      then Ok ()
+      else Error (error Conflict "ACKed managed receipt identity changed")
+    in
+    complete_inherited_turn_handoff t acknowledged;
+    launch_worker t source.operation;
+    Ok receipt
+  | Run_user (source, reply) ->
+    complete_inherited_turn_handoff t acknowledged;
+    launch_worker t source.operation;
+    let receipt = Run_admission.receipt source.admission in
+    Ok (Inherited_turn.Run_reply.of_receipt reply receipt)
+;;
+
+let retire_acknowledged_turn
+  : type outcome.
+    t
+    -> outcome Inherited_turn.Acknowledged.t
+    -> failure:Agent_protocol.Error.t
+    -> (unit, Agent_protocol.Error.t) result
+  =
+  fun t acknowledged ~failure ->
+  Operation_descendant_guard.retire acknowledged.guard;
+  let open Result.Let_syntax in
+  let%bind () =
+    if acknowledged.consumed
+    then Ok ()
+    else Result.map (consume_inherited_turn_suffix t acknowledged) ~f:ignore
+  in
+  (* Factual retirement may follow a lost suffix reply. Cancel only this exact
+     installed worker before terminal cleanup; never a replacement owner, and
+     never wait for its unwind in the Actor mailbox. *)
+  let expected_operation = Inherited_turn.Source.operation acknowledged.plan.source in
+  match t.operation_agent_custody, t.state.active_operation with
+  | Some owner, Some active_operation
+    when phys_equal owner acknowledged.owner
+         && Agent_protocol.Id.Operation.equal active_operation.id expected_operation.id
+         && Int.equal active_operation.generation expected_operation.generation
+         && Agent_protocol.Operation.equal_kind
+              active_operation.kind
+              expected_operation.kind ->
+    Option.iter t.active_cancel ~f:(fun cancel -> cancel ());
+    worker_terminal t expected_operation.id (Operation_worker.Failed failure) None
+  | (Some _ | None), (Some _ | None) -> Ok ()
+;;
+
+let seal_inherited_turn_before_writer
+  : type outcome.
+    t
+    -> outcome Inherited_turn.t
+    -> (Descendant_preparation.Closed_before_writer.t, Agent_protocol.Error.t) result
+  =
+  fun t plan ->
+  let open Result.Let_syntax in
+  let%map closed = seal_descendant_admission_slot t plan.slot in
+  (match plan.phase with
+   | Writer_prepared prepared -> Operation_owner.retire prepared.owner
+   | Pending | Acknowledged _ | Closed -> ());
+  (match plan.source with
+   | Held_input source ->
+     source.selection.scope.phase <- Closed;
+     if Option.exists t.held_input_scope ~f:(phys_equal source.selection.scope)
+     then t.held_input_scope <- None
+   | Message _ | Managed _ | Run_user _ | History _ | Goal_resume _ -> ());
+  plan.phase <- Closed;
+  Option.iter (Inherited_turn.Source.custody plan.source) ~f:retire_agent_custody;
+  close_inherited_run_exit t plan.source;
+  closed
+;;
+
 let submit_deferred_message
       ?original_actor
       ?(extra_deltas = [])
@@ -18338,14 +23039,7 @@ let submit_deferred_message
   { session; history_id = entry.id; disposition = Deferred; operation_id = None }
 ;;
 
-let submit_authorized_message
-      ?original_actor
-      ?(extra_deltas = [])
-      ?(owner = Pending_input_document.Owner.Host_internal)
-      ?(timing = Agent_protocol.Pending_input.Timing.Safe_boundary)
-      t
-      entry
-  =
+let require_submit_ready t =
   let%bind.Result () = require_selected_execution t in
   if not (runtime_admission_open t)
   then Error (error Conflict "session runtime is retiring")
@@ -18356,31 +23050,99 @@ let submit_authorized_message
   else if
     not (Agent_protocol.Session.equal_desired_state t.state.lifecycle.desired Running)
   then Error (error Invalid_state "session is not running")
-  else (
+  else Ok ()
+;;
+
+let submit_authorized_message
+      ?original_actor
+      ?(extra_deltas = [])
+      ?(owner = Pending_input_document.Owner.Host_internal)
+      ?(timing = Agent_protocol.Pending_input.Timing.Safe_boundary)
+      t
+      entry
+  =
+  let%bind.Result () = require_submit_ready t in
+  match
+    t.idle_moderator_borrowed, t.state.active_operation, t.state.lifecycle.observed
+  with
+  | true, _, _ ->
+    submit_deferred_message ?original_actor ~extra_deltas ~owner ~timing t entry
+  | false, Some _, _
+  | false, None, (Running_turn _ | Compacting _ | Waiting_for_permission _) ->
+    submit_deferred_message ?original_actor ~extra_deltas ~owner ~timing t entry
+  | false, None, Idle ->
+    submit_idle_message ?original_actor ~extra_deltas ~owner ~timing t entry
+  | false, None, (Stopped | Queued_for_slot | Starting | Recovering | Stopping | Failed _)
+    -> Error (error Invalid_state "session is not ready to accept a turn")
+;;
+
+let check_message_authentication original_actor ~submitting_principal =
+  match original_actor with
+  | None -> Ok ()
+  | Some actor ->
+    let principal = Operator_authorization.principal actor in
+    if
+      Operator_authorization.is_current actor
+      && Agent_protocol.Principal.has_scope principal Send_messages
+      && Agent_protocol.Id.Principal.equal principal.id submitting_principal
+    then Ok ()
+    else
+      Error
+        (error
+           Permission_denied
+           "message authentication expired or differs from submitter")
+;;
+
+let submit_message
+      ?original_actor
+      t
+      attachment_id
+      submitting_principal
+      timing
+      entry
+      capture
+  =
+  let open Result.Let_syntax in
+  let%bind _ = write_attachment t attachment_id in
+  let%bind () = require_submit_ready t in
+  let idle =
     match
       t.idle_moderator_borrowed, t.state.active_operation, t.state.lifecycle.observed
     with
-    | true, _, _ ->
-      submit_deferred_message ?original_actor ~extra_deltas ~owner ~timing t entry
-    | false, Some _, _
-    | false, None, (Running_turn _ | Compacting _ | Waiting_for_permission _) ->
-      submit_deferred_message ?original_actor ~extra_deltas ~owner ~timing t entry
-    | false, None, Idle ->
-      submit_idle_message ?original_actor ~extra_deltas ~owner ~timing t entry
-    | ( false
-      , None
-      , (Stopped | Queued_for_slot | Starting | Recovering | Stopping | Failed _) ) ->
-      Error (error Invalid_state "session is not ready to accept a turn"))
-;;
-
-let submit_message ?original_actor t attachment_id submitting_principal timing entry =
-  Result.bind (write_attachment t attachment_id) ~f:(fun _ ->
-    submit_authorized_message
+    | false, None, Idle -> true
+    | (true | false), (Some _ | None), _ -> false
+  in
+  let requirement = if idle then inherited_turn_required t.state else Ordinary in
+  match requirement with
+  | Need_private_origin ->
+    let%bind () = Inherited_turn.Capture.check_waiting capture in
+    let%map origin = capture_descendant_origin_observation t in
+    Inherited_turn.Decision.Need_private_origin
+      { origin
+      ; input =
+          Inherited_turn.Input.Message
+            { original_actor; attachment_id; submitting_principal; timing; entry }
+      ; capture
+      ; remaining_audit = t.command_audit
+      }
+  | Scoped ->
+    capture_inherited_message
       ?original_actor
-      ~owner:(Submitting_principal submitting_principal)
-      ~timing
       t
-      entry)
+      ~capture
+      ~attachment_id
+      ~submitting_principal
+      ~timing
+      entry
+  | Ordinary ->
+    Result.map
+      (submit_authorized_message
+         ?original_actor
+         ~owner:(Submitting_principal submitting_principal)
+         ~timing
+         t
+         entry)
+      ~f:(fun submission -> Inherited_turn.Decision.Completed submission)
 ;;
 
 let check_run_caller ?preparation t caller =
@@ -19326,23 +24088,22 @@ let admit_held_recurrence_run_internal t ~binding ~intent ~attempt ~session =
              else Ok (Held_run.Admission.Retained (Held_run.admission held))))
 ;;
 
-let admit_run
-      ?preparation
-      ?commit_attempted
-      t
-      scope
-      (request : Run_admission_request.t)
-      session
-      request_sha256
-      entry
-  =
+module Run_admission_basis = struct
+  type t =
+    | Retained of Agent_protocol.Run_receipt.t
+    | Fresh of Agent_protocol.Operation.t option
+end
+
+let prepare_run_admission_basis t (input : Inherited_turn.Input.run_user) =
   let open Result.Let_syntax in
-  let%bind () = Run_admission.Scope.authorize scope t.state in
+  let request = input.request in
+  let preparation = input.preparation in
+  let%bind () = Run_admission.Scope.authorize input.scope t.state in
   let%bind () =
     if
       Agent_protocol.Id.Session.equal request.session_id t.state.identity.session_id
       && Agent_protocol.Id.Session.equal
-           (Agent_protocol.Session_ref.session_id session)
+           (Agent_protocol.Session_ref.session_id input.session)
            t.state.identity.session_id
     then Ok ()
     else Error (error Invalid_request "run request does not identify this session")
@@ -19351,14 +24112,14 @@ let admit_run
   let%bind retained =
     ordinary_run_receipt
       t
-      ~principal_id:(Run_admission.Scope.principal_id scope)
+      ~principal_id:(Run_admission.Scope.principal_id input.scope)
       ~key:request.key
-      ~request_sha256
+      ~request_sha256:input.request_sha256
   in
   match retained with
   | Some receipt ->
     (match receipt.kind with
-     | Admission -> Ok receipt
+     | Admission -> Ok (Run_admission_basis.Retained receipt)
      | Action | Terminal ->
        Error (error Conflict "run start key belongs to another action"))
   | None ->
@@ -19370,13 +24131,11 @@ let admit_run
         Authored_run_acknowledgement.require_unadmitted t.lifecycle_agent_custody
     in
     let%bind () =
-      match preparation with
-      | None -> Ok ()
-      | Some preparation -> check_run_preparation t preparation
+      Option.value_map preparation ~default:(Ok ()) ~f:(check_run_preparation t)
     in
     let%bind () = require_runtime_admission t in
-    let%bind operation =
-      match request.input, entry with
+    let%map operation =
+      match request.input, input.entry with
       | User_submission _, Some _ ->
         let%bind () = reconcile_foreground_invocations t in
         (match
@@ -19392,144 +24151,956 @@ let admit_run
       | User_submission _, None | Authored_start, Some _ ->
         Error (error Invalid_request "run input does not match its host-prepared history")
     in
-    let%bind admission =
-      let run_id = Agent_protocol.Id.Run.create () in
-      match preparation with
-      | None ->
-        Run_admission.prepare_request
-          t.state
-          ~scope
-          ~request
-          ~session
-          ~run_id
-          ~operation
-          ~request_sha256
-          ~now:(t.services.now ())
-      | Some preparation ->
-        Run_admission.prepare_from_preparation
-          t.state
-          ~preparation
-          ~owner:t.run_preparation_owner
-          ~scope
-          ~session
-          ~run_id
-          ~operation
-          ~now:(t.services.now ())
-    in
-    let run = Run_admission.run admission in
-    let delta = Session_delta.Run_state_changed (Run_admission.index admission) in
-    let%bind () =
-      match operation, entry with
-      | Some operation, Some entry ->
-        let%bind authorities =
-          Run_authorities.add_for_caller
-            t.run_authorities
-            ~run
-            ~scope
-            ~caller:request.caller
-        in
-        let outcome =
-          submit_idle_message
-            ?original_actor:(Run_admission.Scope.original_actor scope)
-            ?run_preparation:preparation
-            ?commit_attempted
-            ~extra_deltas:[ delta ]
-            ~operation
-            ~owner:(Submitting_principal (Run_admission.Scope.principal_id scope))
-            t
-            entry
-          |> Result.map ~f:(fun _ -> ())
-        in
-        (* Preserve the existing user-input authority path. Authored startup
-           installs its separate plan at the FIRST durable lifecycle ACK. *)
-        Option.iter t.state.run_state ~f:(fun index ->
-          match Run_state.find index run.id with
-          | Some committed when Agent_protocol.Run.equal committed run ->
-            t.run_authorities <- authorities
-          | Some _ | None -> ());
-        outcome
-      | None, None ->
-        let%bind acknowledgement =
-          Authored_run_acknowledgement.prepare
-            ~previous:t.state
-            ~authorities:t.run_authorities
-            ~lifecycle:t.lifecycle_agent_custody
-            ~scope
-            ~request
-            ~run
-            ~receipt:(Run_admission.receipt admission)
-        in
-        Exn.protect
-          ~finally:(fun () -> Authored_run_acknowledgement.discard acknowledgement)
-          ~f:(fun () ->
-            start_internal
-              ~authored_run_acknowledgement:acknowledgement
-              ?run_preparation:preparation
-              ?commit_attempted
-              ~extra_deltas:[ delta ]
-              t
-            |> Result.map ~f:(fun _ -> ()))
-      | Some _, None | None, Some _ ->
-        Error (error Invalid_state "run admission lost its prepared owner")
-    in
-    Ok (Run_admission.receipt admission)
+    Run_admission_basis.Fresh operation
 ;;
 
-let submit_managed_message t reference key request_sha256 generation max_receipts entry =
+let prepare_actual_run_admission t (input : Inherited_turn.Input.run_user) operation =
+  let run_id = Agent_protocol.Id.Run.create () in
+  match input.preparation with
+  | None ->
+    Run_admission.prepare_request
+      t.state
+      ~scope:input.scope
+      ~request:input.request
+      ~session:input.session
+      ~run_id
+      ~operation
+      ~request_sha256:input.request_sha256
+      ~now:(t.services.now ())
+  | Some preparation ->
+    Run_admission.prepare_from_preparation
+      t.state
+      ~preparation
+      ~owner:t.run_preparation_owner
+      ~scope:input.scope
+      ~session:input.session
+      ~run_id
+      ~operation
+      ~now:(t.services.now ())
+;;
+
+let capture_turn_origin t ~input ~capture =
+  let open Result.Let_syntax in
+  let%bind () = Inherited_turn.Capture.check_waiting capture in
+  let%map origin = capture_descendant_origin_observation t in
+  Inherited_turn.Decision.Need_private_origin
+    { origin; input; capture; remaining_audit = t.command_audit }
+;;
+
+let checked_turn_requirement ?origin_observation t =
+  let open Result.Let_syntax in
+  match origin_observation with
+  | None -> Ok (inherited_turn_required t.state)
+  | Some observed ->
+    let%map () = check_descendant_origin_observation t observed in
+    Inherited_turn.Origin_requirement.Ordinary
+;;
+
+let capture_inherited_run t ~input ~reply ~capture ~operation admission entry =
+  let open Result.Let_syntax in
+  let%bind () = require_available_descendant_admission_slot t in
+  let original_actor =
+    Run_admission.Scope.original_actor input.Inherited_turn.Input.scope
+  in
+  let%bind pending, custody =
+    prepare_idle_message_input
+      ?original_actor
+      ~operation
+      ~owner:(Submitting_principal (Run_admission.Scope.principal_id input.scope))
+      ~timing:Agent_protocol.Pending_input.Timing.Safe_boundary
+      t
+      entry
+  in
+  let transferred = ref false in
+  Exn.protect
+    ~finally:(fun () ->
+      if not !transferred then Option.iter custody ~f:retire_agent_custody)
+    ~f:(fun () ->
+      let run = Run_admission.run admission in
+      let previous_authorities = t.run_authorities in
+      let%bind authorities =
+        Run_authorities.add_for_caller
+          previous_authorities
+          ~run
+          ~scope:input.scope
+          ~caller:input.request.caller
+      in
+      let%bind binding =
+        Run_authorities.find authorities run.id
+        |> Result.of_option
+             ~error:(error Invalid_state "prepared Run binding disappeared")
+      in
+      let%bind preparation_exit =
+        Option.map input.preparation ~f:(fun preparation ->
+          Run_preparation.Admission_exit.capture
+            preparation
+            ~owner:t.run_preparation_owner)
+        |> Option.value_map ~default:(Ok None) ~f:(Result.map ~f:Option.some)
+      in
+      let operation, delta, payloads =
+        idle_message_turn
+          ~operation
+          ~extra_deltas:[ Run_state_changed (Run_admission.index admission) ]
+          t
+          pending
+      in
+      let source =
+        Inherited_turn.Source.Run_user
+          ( { scope = input.scope
+            ; request = input.request
+            ; admission
+            ; previous_authorities
+            ; authorities
+            ; binding
+            ; preparation = input.preparation
+            ; preparation_exit
+            ; operation
+            ; custody
+            ; entry
+            }
+          , reply )
+      in
+      let%map decision =
+        capture_inherited_turn_plan
+          t
+          ~capture
+          ~source
+          ~commit_attempted:input.attempted
+          ~delta
+          ~payloads
+      in
+      transferred := true;
+      decision)
+;;
+
+let admit_run
+  : type outcome.
+    ?origin_observation:Descendant_origin_observation.Observed.t
+    -> t
+    -> Inherited_turn.Input.run_user
+    -> reply:outcome Inherited_turn.Run_reply.t
+    -> capture:outcome Inherited_turn.Capture.t
+    -> (outcome Inherited_turn.Decision.t, Agent_protocol.Error.t) result
+  =
+  fun ?origin_observation t input ~reply ~capture ->
+  let open Result.Let_syntax in
+  let%bind basis = prepare_run_admission_basis t input in
+  match basis with
+  | Retained receipt ->
+    Ok
+      (Inherited_turn.Decision.Completed
+         (Inherited_turn.Run_reply.of_receipt reply receipt))
+  | Fresh operation ->
+    let%bind requirement =
+      match operation with
+      | None -> Ok Inherited_turn.Origin_requirement.Ordinary
+      | Some _ -> checked_turn_requirement ?origin_observation t
+    in
+    (match requirement with
+     | Need_private_origin ->
+       capture_turn_origin
+         t
+         ~capture
+         ~input:(Inherited_turn.Input.Run_user (input, reply))
+     | Scoped | Ordinary ->
+       let%bind admission = prepare_actual_run_admission t input operation in
+       (match requirement, operation, input.entry with
+        | Scoped, Some operation, Some entry ->
+          capture_inherited_run t ~input ~reply ~capture ~operation admission entry
+        | Ordinary, _, _ ->
+          let run = Run_admission.run admission in
+          let delta = Session_delta.Run_state_changed (Run_admission.index admission) in
+          let%map () =
+            match operation, input.entry with
+            | Some operation, Some entry ->
+              let%bind authorities =
+                Run_authorities.add_for_caller
+                  t.run_authorities
+                  ~run
+                  ~scope:input.scope
+                  ~caller:input.request.caller
+              in
+              let outcome =
+                submit_idle_message
+                  ?original_actor:(Run_admission.Scope.original_actor input.scope)
+                  ?run_preparation:input.preparation
+                  ~commit_attempted:input.attempted
+                  ~extra_deltas:[ delta ]
+                  ~operation
+                  ~owner:
+                    (Submitting_principal (Run_admission.Scope.principal_id input.scope))
+                  t
+                  entry
+                |> Result.map ~f:ignore
+              in
+              (* Existing ordinary path unchanged; governed path installs ATACK. *)
+              Option.iter t.state.run_state ~f:(fun index ->
+                match Run_state.find index run.id with
+                | Some committed when Agent_protocol.Run.equal committed run ->
+                  t.run_authorities <- authorities
+                | Some _ | None -> ());
+              outcome
+            | None, None ->
+              let%bind acknowledgement =
+                Authored_run_acknowledgement.prepare
+                  ~previous:t.state
+                  ~authorities:t.run_authorities
+                  ~lifecycle:t.lifecycle_agent_custody
+                  ~scope:input.scope
+                  ~request:input.request
+                  ~run
+                  ~receipt:(Run_admission.receipt admission)
+              in
+              Exn.protect
+                ~finally:(fun () -> Authored_run_acknowledgement.discard acknowledgement)
+                ~f:(fun () ->
+                  start_internal
+                    ~authored_run_acknowledgement:acknowledgement
+                    ?run_preparation:input.preparation
+                    ~commit_attempted:input.attempted
+                    ~extra_deltas:[ delta ]
+                    t
+                  |> Result.map ~f:ignore)
+            | Some _, None | None, Some _ ->
+              Error (error Invalid_state "run admission lost its prepared owner")
+          in
+          Inherited_turn.Decision.Completed
+            (Inherited_turn.Run_reply.of_receipt reply (Run_admission.receipt admission))
+        | Scoped, (None | Some _), (None | Some _)
+        | Need_private_origin, (None | Some _), (None | Some _) ->
+          Error (error Invalid_state "inherited user Run lost its real Turn")))
+;;
+
+let prepared_run_outcome t (input : Inherited_turn.Input.run_user) failure =
+  match input.preparation with
+  | None -> Run_admission_outcome.Rejected failure
+  | Some preparation ->
+    let retained =
+      ordinary_run_receipt
+        t
+        ~principal_id:(Run_preparation.principal_id preparation)
+        ~key:input.request.key
+        ~request_sha256:input.request_sha256
+    in
+    (match retained with
+     | Ok (Some ({ kind = Admission; _ } as receipt)) ->
+       Run_admission_outcome.Admitted receipt
+     | Ok (Some { kind = Action | Terminal; _ }) | Ok None | Error _ ->
+       if !(input.attempted)
+       then Run_admission_outcome.Uncertain failure
+       else Run_admission_outcome.Rejected failure)
+;;
+
+let close_prepared_run_handler t preparation =
+  let%bind.Result closed =
+    Run_preparation.Admission_exit.close_from_caller
+      preparation
+      ~owner:t.run_preparation_owner
+  in
+  match closed with
+  | Retained_by_admission -> Ok ()
+  | Closed ->
+    (match t.run_preparation with
+     | Some (Initial actual) when phys_equal actual preparation ->
+       t.run_preparation <- None
+     | Some _ | None -> ());
+    Ok ()
+;;
+
+let close_prepared_run_from_caller t preparation =
+  let%bind.Result closed =
+    Run_preparation.Admission_exit.close_from_caller
+      preparation
+      ~owner:t.run_preparation_owner
+  in
+  match closed with
+  | Retained_by_admission -> Ok ()
+  | Closed ->
+    (match t.run_preparation with
+     | Some (Initial actual) when phys_equal actual preparation -> close_run_preparation t
+     | Some _ | None -> ());
+    Ok ()
+;;
+
+let admit_prepared_run ?origin_observation t input ~capture =
+  let open Result.Let_syntax in
+  let%bind preparation =
+    Result.of_option
+      input.Inherited_turn.Input.preparation
+      ~error:(error Conflict "prepared Run input lost actual preparation")
+  in
+  if not (Run_preparation.belongs_to preparation ~owner:t.run_preparation_owner)
+  then
+    Ok
+      (Inherited_turn.Decision.Completed
+         (Run_admission_outcome.Rejected
+            (error Conflict "run preparation belongs to another actor")))
+  else (
+    let awaiting_origin = ref false in
+    Exn.protect
+      ~finally:(fun () ->
+        if not !awaiting_origin
+        then
+          ignore
+            (close_prepared_run_handler t preparation
+             : (unit, Agent_protocol.Error.t) result))
+      ~f:(fun () ->
+        let result =
+          let%bind () = check_run_preparation t preparation in
+          admit_run ?origin_observation t input ~reply:Prepared_outcome ~capture
+        in
+        match result with
+        | Ok (Need_private_origin _ as decision) ->
+          awaiting_origin := true;
+          Ok decision
+        | Ok ((Completed _ | Pending _) as decision) -> Ok decision
+        | Error failure ->
+          Ok (Inherited_turn.Decision.Completed (prepared_run_outcome t input failure))))
+;;
+
+let retained_managed_receipt t candidate =
+  List.find t.state.managed_submissions ~f:(Managed_submission.same_key candidate)
+  |> Result.of_option
+       ~error:(error Invalid_state "managed send did not retain its receipt")
+;;
+
+let capture_inherited_managed t ~capture (input : Inherited_turn.Input.managed) receipt =
+  let open Result.Let_syntax in
+  let%bind () = require_available_descendant_admission_slot t in
+  let%bind () = check_inherited_managed_origin input.origin in
+  let%bind pending, custody =
+    prepare_idle_message_input ~owner:Host_internal ~timing:Safe_boundary t input.entry
+  in
+  if List.is_empty (Pending_turn.entries pending)
+  then (
+    let%bind _ =
+      transition
+        t
+        ~delta:
+          (Batch
+             [ Managed_submission_admitted receipt; Pending_turn.enqueue_delta pending ])
+        ~payloads:(Pending_turn.deferred_payloads pending)
+    in
+    let%map receipt = retained_managed_receipt t receipt in
+    Inherited_turn.Decision.Completed receipt)
+  else (
+    let transferred = ref false in
+    Exn.protect
+      ~finally:(fun () ->
+        if not !transferred then Option.iter custody ~f:retire_agent_custody)
+      ~f:(fun () ->
+        let operation, delta, payloads =
+          idle_message_turn
+            ~extra_deltas:[ Managed_submission_admitted receipt ]
+            t
+            pending
+        in
+        let source =
+          Inherited_turn.Source.Managed
+            { origin = input.origin; receipt; operation; custody; entry = input.entry }
+        in
+        let%map decision =
+          capture_inherited_turn_plan
+            t
+            ~capture
+            ~source
+            ~commit_attempted:(ref false)
+            ~delta
+            ~payloads
+        in
+        transferred := true;
+        decision))
+;;
+
+let submit_managed_message
+      ?origin_observation
+      t
+      (input : Inherited_turn.Input.managed)
+      ~capture
+  =
   let module M = Managed_submission in
   let open Result.Let_syntax in
   let%bind () =
     match t.state.spec.delegation with
     | Some current
-      when Agent_store.Delegation_store.Reference.equal current reference
+      when Agent_store.Delegation_store.Reference.equal current input.reference
            && Agent_protocol.Id.Session.equal
-                reference.child_session_id
+                input.reference.child_session_id
                 t.state.identity.session_id -> Ok ()
-    | _ ->
+    | Some _ | None ->
       Error (error Permission_denied "delegation.send: child relationship does not match")
   in
   let%bind candidate =
     M.create
-      ~reference
-      ~key
-      ~request_sha256
-      ~generation
-      ~history_id:entry.Agent_protocol.History.id
+      ~reference:input.reference
+      ~key:input.key
+      ~request_sha256:input.request_sha256
+      ~generation:input.generation
+      ~history_id:input.entry.id
       ~now:(t.services.now ())
   in
   match List.find t.state.managed_submissions ~f:(M.same_key candidate) with
   | Some receipt ->
-    (match String.equal receipt.request_sha256 request_sha256 with
-     | true -> Ok receipt
-     | false -> Error (error Conflict "managed send key was used for a different request"))
+    if String.equal receipt.request_sha256 input.request_sha256
+    then Ok (Inherited_turn.Decision.Completed receipt)
+    else Error (error Conflict "managed send key was used for a different request")
   | None ->
     let%bind () = require_selected_execution t in
     let%bind () =
       match
-        ( Int.equal generation t.state.identity.generation
-        , entry.role
-        , entry.kind
-        , entry.provenance )
+        ( Int.equal input.generation t.state.identity.generation
+        , input.entry.role
+        , input.entry.kind
+        , input.entry.provenance )
       with
       | true, User, Message, Canonical -> Ok ()
       | _ -> Error (error Conflict "managed message generation or input is invalid")
     in
     let%bind () =
-      match max_receipts with
+      match input.max_receipts with
       | Some maximum
         when maximum < 1 || List.length t.state.managed_submissions >= maximum ->
         Error (error Invalid_state "managed submission receipt capacity reached")
       | None | Some _ -> Ok ()
     in
-    let%bind _ =
-      submit_authorized_message
-        t
-        entry
-        ~extra_deltas:[ Managed_submission_admitted candidate ]
+    let%bind () = require_submit_ready t in
+    let%bind requirement =
+      match
+        t.idle_moderator_borrowed, t.state.active_operation, t.state.lifecycle.observed
+      with
+      | false, None, Idle -> checked_turn_requirement ?origin_observation t
+      | (true | false), (Some _ | None), _ ->
+        Ok Inherited_turn.Origin_requirement.Ordinary
     in
-    List.find t.state.managed_submissions ~f:(M.same_key candidate)
-    |> Result.of_option
-         ~error:(error Invalid_state "managed send did not retain its receipt")
+    (match requirement with
+     | Need_private_origin ->
+       capture_turn_origin t ~capture ~input:(Inherited_turn.Input.Managed input)
+     | Scoped -> capture_inherited_managed t ~capture input candidate
+     | Ordinary ->
+       let%bind _ =
+         submit_authorized_message
+           t
+           input.entry
+           ~extra_deltas:[ Managed_submission_admitted candidate ]
+       in
+       let%map receipt = retained_managed_receipt t candidate in
+       Inherited_turn.Decision.Completed receipt)
+;;
+
+let commit_history_transition t ~delta ~payloads ~admission =
+  let open Result.Let_syntax in
+  let%bind agent_custody =
+    match admission with
+    | None -> Ok None
+    | Some admission ->
+      let%bind () = require_selected_execution t in
+      admission_agent_custody t admission
+  in
+  let before = t.state in
+  let%bind prepared = prepare_transition t ~delta ~payloads in
+  let attempted = ref false in
+  let%bind staged =
+    match admission with
+    | None -> Ok None
+    | Some admission ->
+      Turn_admission_staging.capture
+        ~owner:t.run_preparation_owner
+        ~before
+        ~candidate:prepared
+        ~operation:(Turn_admission.operation admission)
+        ~remaining_audit:t.command_audit
+        ~commit_attempted:attempted
+        ~plan:(admission, agent_custody)
+      |> Result.map ~f:Option.some
+  in
+  Eio.Cancel.protect (fun () ->
+    let%bind () =
+      persist_transition
+        ~commit_attempted:attempted
+        ~check_before_commit:(fun () ->
+          let%bind () = check_turn_custody t agent_custody in
+          Option.value_map staged ~default:(Ok ()) ~f:(fun staged ->
+            Turn_admission_staging.check_before_writer
+              staged
+              ~owner:t.run_preparation_owner
+              ~state:t.state))
+        t
+        prepared
+    in
+    install_committed_transition t prepared;
+    let%map suffix =
+      match staged with
+      | None -> Ok None
+      | Some staged ->
+        let%bind acknowledgement =
+          Turn_admission_staging.acknowledge
+            staged
+            ~owner:t.run_preparation_owner
+            ~state:t.state
+        in
+        Turn_admission_staging.finish
+          acknowledgement
+          ~owner:t.run_preparation_owner
+          ~state:t.state
+        |> Result.map ~f:Option.some
+    in
+    publish_committed_transition t prepared;
+    Option.iter suffix ~f:(fun (admission, agent_custody) ->
+      let operation = Turn_admission.operation admission in
+      if Option.is_none t.operation_agent_custody
+      then install_operation_agent_custody t operation agent_custody;
+      prune_pending_agent_custody t;
+      launch_worker t operation);
+    Session_state.summary t.state)
+;;
+
+let history_continuation_availability t =
+  match t.state.lifecycle.observed, t.operation_worker with
+  | Stopped, _ -> Some Agent_protocol.History_edit.Continuation.Stopped
+  | Idle, Some _ -> None
+  | _ -> Some Agent_protocol.History_edit.Continuation.Runtime_unavailable
+;;
+
+let admit_history_input
+  : type outcome.
+    ?origin_observation:Descendant_origin_observation.Observed.t
+    -> t
+    -> outcome Inherited_turn.History_input.t
+    -> capture:outcome Inherited_turn.Capture.t
+    -> (outcome Inherited_turn.Decision.t, Agent_protocol.Error.t) result
+  =
+  fun ?origin_observation t input ~capture ->
+  let open Result.Let_syntax in
+  let%bind () = check_history_input t input in
+  let%bind requirement = checked_turn_requirement ?origin_observation t in
+  let admission = Inherited_turn.History_input.admission input in
+  match requirement with
+  | Ordinary ->
+    let%map session =
+      commit_history_transition
+        t
+        ~delta:(Inherited_turn.History_input.delta input)
+        ~payloads:(Inherited_turn.History_input.payloads input)
+        ~admission:(Some admission)
+    in
+    Inherited_turn.Decision.Completed (Inherited_turn.History_input.result input ~session)
+  | Need_private_origin ->
+    capture_turn_origin t ~capture ~input:(Inherited_turn.Input.History input)
+  | Scoped ->
+    let%bind () = require_available_descendant_admission_slot t in
+    let%bind () = require_selected_execution t in
+    let%bind custody = admission_agent_custody t admission in
+    let transferred = ref false in
+    Exn.protect
+      ~finally:(fun () ->
+        if not !transferred then Option.iter custody ~f:retire_agent_custody)
+      ~f:(fun () ->
+        let source = Inherited_turn.Source.History { input; custody } in
+        let%map decision =
+          capture_inherited_turn_plan
+            t
+            ~capture
+            ~source
+            ~commit_attempted:(ref false)
+            ~delta:(Inherited_turn.History_input.delta input)
+            ~payloads:(Inherited_turn.History_input.payloads input)
+        in
+        transferred := true;
+        decision)
+;;
+
+let edit_history_internal
+      t
+      (request : Agent_protocol.History_edit.Edit_request.t)
+      ~capture
+  =
+  let open Result.Let_syntax in
+  let%bind () =
+    history_command_precondition
+      t
+      request.session_id
+      request.attachment_id
+      request.expected_generation
+      request.expected_revision
+  in
+  let%bind plan = History_edit.prepare t.state ~edit:request.edit in
+  let continue =
+    Agent_protocol.History_edit.Mode.equal
+      (Agent_protocol.History_edit.mode request.edit)
+      Edit_and_continue
+  in
+  let%bind () =
+    if continue && not (List.is_empty t.state.conversation.deferred_user_entries)
+    then
+      Error
+        (error
+           Pending_input_conflict
+           "edit-and-continue requires an empty pending-input queue")
+    else Ok ()
+  in
+  let%bind archive =
+    t.persistence.archive_reference
+      ~previous:t.state
+      ~kind:Edit
+      (Agent_protocol.Id.Operation.create ())
+  in
+  let continuation =
+    if not continue
+    then History_edit_transition.Save_only
+    else (
+      match history_continuation_availability t with
+      | Some reason -> History_edit_transition.Unavailable reason
+      | None -> History_edit_transition.Start (create_turn_operation t Administrative))
+  in
+  let%bind prepared =
+    History_edit_transition.create t.state ~plan ~edit:request.edit ~archive ~continuation
+  in
+  match History_edit_transition.admission prepared with
+  | None ->
+    let%map session =
+      commit_history_transition
+        t
+        ~delta:(History_edit_transition.delta prepared)
+        ~payloads:(History_edit_transition.payloads prepared)
+        ~admission:None
+    in
+    Inherited_turn.Decision.Completed
+      (Inherited_turn.History_input.edit_result prepared ~session)
+  | Some admission ->
+    let%bind worker =
+      Result.of_option
+        t.operation_worker
+        ~error:(error Conflict "history continuation runtime disappeared")
+    in
+    let input =
+      Inherited_turn.History_input.Edit { request; prepared; admission; worker }
+    in
+    admit_history_input t input ~capture
+;;
+
+let continue_history_internal
+      t
+      (request : Agent_protocol.History_edit.Continue_request.t)
+      ~capture
+  =
+  let open Result.Let_syntax in
+  let%bind () =
+    history_command_precondition
+      t
+      request.session_id
+      request.attachment_id
+      request.expected_generation
+      request.expected_revision
+  in
+  let%bind () =
+    if List.is_empty t.state.conversation.deferred_user_entries
+    then Ok ()
+    else
+      Error
+        (error
+           Pending_input_conflict
+           "history continuation requires an empty pending-input queue")
+  in
+  match history_continuation_availability t with
+  | Some reason ->
+    Ok
+      (Inherited_turn.Decision.Completed
+         ({ session = Session_state.summary t.state
+          ; continuation = Agent_protocol.History_edit.Continuation.Not_started reason
+          }
+          : History_continuation_result.t))
+  | None ->
+    let%bind recovery = History_continuation.prepare t.state ~retiring_history:false in
+    let operation = create_turn_operation t Administrative in
+    let%bind admission =
+      Turn_admission.create
+        t.state
+        ~operation
+        ~notification_wakes:[]
+        ~adopt_deferred:false
+    in
+    let%bind worker =
+      Result.of_option
+        t.operation_worker
+        ~error:(error Conflict "history continuation runtime disappeared")
+    in
+    let input =
+      Inherited_turn.History_input.Continue { request; recovery; admission; worker }
+    in
+    admit_history_input t input ~capture
+;;
+
+let submit_held_run_input_ordinary t (selected : Inherited_turn.Held_input_selection.t) =
+  let open Result.Let_syntax in
+  let scope = selected.scope in
+  let input = selected.input in
+  let activation = Admitted_activation.Continuation.target scope.continuation in
+  let worker = selected.worker in
+  let run = selected.run in
+  let binding = selected.binding in
+  let original = selected.original in
+  let entry = Runtime_input_preparation.Prepared_input.entry input in
+  let%bind enqueue =
+    prepare_pending_inputs t ~owner:Host_internal Safe_boundary [ entry ]
+  in
+  let%bind pending =
+    Pending_turn.prepare
+      t.state
+      ~enqueue
+      ~entry
+      ~runtime_admission_open:(runtime_admission_open t)
+  in
+  let operation = create_turn_operation t User_submit in
+  let%bind handoff =
+    Run_input_handoff.prepare
+      t.state
+      ~run
+      ~request:scope.request
+      ~input
+      ~operation
+      ~pending
+      ~now:operation.started_at
+  in
+  let lifecycle = lifecycle_for_operation t operation.id in
+  let before = t.state in
+  let%bind candidate =
+    prepare_transition
+      ~run_preparation:activation.preparation
+      t
+      ~delta:
+        (Session_delta.Batch
+           ((Run_input_handoff.delta handoff :: Pending_turn.turn_deltas pending)
+            @ [ Active_operation_changed (Some operation); Lifecycle_changed lifecycle ]))
+      ~payloads:
+        (Pending_turn.deferred_payloads pending
+         @ [ History_appended (Pending_turn.entries pending)
+           ; Operation_started operation
+           ; Session_state_changed
+               { desired_state = lifecycle.desired; observed_state = lifecycle.observed }
+           ])
+  in
+  let attempted = ref false in
+  let%bind staged =
+    Turn_admission_staging.capture
+      ~owner:t.run_preparation_owner
+      ~before
+      ~candidate
+      ~operation
+      ~remaining_audit:t.command_audit
+      ~commit_attempted:attempted
+      ~plan:(operation, entry)
+  in
+  let%bind controller = scope.continuation.controller.transfer () in
+  let%bind () =
+    if phys_equal controller.association activation.association
+    then Ok ()
+    else (
+      controller.close ();
+      Error (error Conflict "held root transferred another admitted association"))
+  in
+  let proof : Held_operation.Proof.t =
+    { scope = activation.scope
+    ; run
+    ; admission = activation.admission
+    ; source = activation.source
+    ; operation
+    ; worker
+    ; binding
+    ; controller
+    }
+  in
+  let held : Held_operation.t = { proof; phase = Staged; target_current = None } in
+  let owner : Operation_owner.t =
+    { operation_id = operation.id
+    ; admission = create_agent_admission (Some (create_agent_custody original))
+    ; held = Some held
+    ; descendant_guard = None
+    }
+  in
+  let acknowledgement : Held_operation_acknowledgement.t =
+    { input_scope = scope
+    ; input
+    ; preparation_exit = None
+    ; activation
+    ; held
+    ; owner
+    ; previous = t.state
+    ; candidate
+    }
+  in
+  let persisted =
+    Exn.protect
+      ~finally:(fun () ->
+        if !attempted
+        then (
+          match scope.phase with
+          | Parsed_ready _ -> scope.phase <- Root_attempt_unconfirmed
+          | Parsing | Admission_pending _ | Consumed _ | Root_attempt_unconfirmed | Closed
+            -> ());
+        match held.phase with
+        | Staged ->
+          if !attempted
+          then retire_agent_admission owner.admission
+          else Operation_owner.retire owner
+        | Pending_first_effect | Started | Retired -> ())
+      ~f:(fun () ->
+        let%bind () =
+          persist_transition
+            ~run_preparation:activation.preparation
+            ~commit_attempted:attempted
+            ~check_before_commit:(fun () ->
+              let%bind () = check_held_effect scope.continuation in
+              let%bind () =
+                Held_operation_acknowledgement.check acknowledgement ~actor:t ~candidate
+              in
+              let%bind () = input_scope_basis t scope in
+              let%bind () =
+                Admitted_activation.Continuation.check_basis scope.continuation
+              in
+              Turn_admission_staging.check_before_writer
+                staged
+                ~owner:t.run_preparation_owner
+                ~state:t.state)
+            t
+            candidate
+        in
+        install_committed_transition
+          ~held_operation_acknowledgement:acknowledgement
+          ~run_preparation:activation.preparation
+          t
+          candidate;
+        Turn_admission_staging.acknowledge
+          staged
+          ~owner:t.run_preparation_owner
+          ~state:t.state)
+  in
+  let%bind acknowledgement = persisted in
+  let%bind operation, entry =
+    Turn_admission_staging.finish
+      acknowledgement
+      ~owner:t.run_preparation_owner
+      ~state:t.state
+  in
+  (* A failed publisher preserves the acknowledged proof but starts no worker;
+     existing owner termination/recovery handles that truthful Starting row. *)
+  publish_committed_transition t candidate;
+  launch_worker t operation;
+  Ok
+    { session = Session_state.summary t.state
+    ; history_id = entry.id
+    ; disposition = Started
+    ; operation_id = Some operation.id
+    }
+;;
+
+let check_selected_held_input t (expected : Inherited_turn.Held_input_selection.t) =
+  let open Result.Let_syntax in
+  let%bind current = select_held_input_source t expected.scope expected.input in
+  if
+    phys_equal current.worker expected.worker
+    && phys_equal current.binding expected.binding
+    && phys_equal current.original expected.original
+    && Agent_protocol.Run.equal current.run expected.run
+  then Ok ()
+  else Error (error Conflict "held input selection changed during external origin read")
+;;
+
+let admit_held_input_selection
+      ?origin_observation
+      t
+      (selected : Inherited_turn.Held_input_selection.t)
+      ~capture
+  =
+  let open Result.Let_syntax in
+  let%bind requirement = checked_turn_requirement ?origin_observation t in
+  match requirement with
+  | Ordinary ->
+    let%map result = submit_held_run_input_ordinary t selected in
+    Inherited_turn.Decision.Completed result
+  | Need_private_origin ->
+    capture_turn_origin
+      t
+      ~capture
+      ~input:(Inherited_turn.Input.Held_input_selected selected)
+  | Scoped ->
+    let%bind () = require_available_descendant_admission_slot t in
+    let scope = selected.scope in
+    let input = selected.input in
+    let activation = Admitted_activation.Continuation.target scope.continuation in
+    let entry = Runtime_input_preparation.Prepared_input.entry input in
+    let%bind enqueue =
+      prepare_pending_inputs t ~owner:Host_internal Safe_boundary [ entry ]
+    in
+    let%bind pending =
+      Pending_turn.prepare
+        t.state
+        ~enqueue
+        ~entry
+        ~runtime_admission_open:(runtime_admission_open t)
+    in
+    let operation = create_turn_operation t User_submit in
+    let%bind handoff =
+      Run_input_handoff.prepare
+        t.state
+        ~run:selected.run
+        ~request:scope.request
+        ~input
+        ~operation
+        ~pending
+        ~now:operation.started_at
+    in
+    let%bind preparation_exit =
+      Run_preparation.Admission_exit.capture
+        activation.preparation
+        ~owner:t.run_preparation_owner
+    in
+    let custody = Some (create_agent_custody selected.original) in
+    let transferred = ref false in
+    Exn.protect
+      ~finally:(fun () ->
+        if not !transferred then Option.iter custody ~f:retire_agent_custody)
+      ~f:(fun () ->
+        let lifecycle = lifecycle_for_operation t operation.id in
+        let source =
+          Inherited_turn.Source.Held_input
+            { selection = selected
+            ; pending
+            ; handoff
+            ; operation
+            ; custody
+            ; preparation_exit
+            }
+        in
+        let%map decision =
+          capture_inherited_turn_plan
+            t
+            ~capture
+            ~source
+            ~commit_attempted:(ref false)
+            ~delta:
+              (Session_delta.Batch
+                 ((Run_input_handoff.delta handoff :: Pending_turn.turn_deltas pending)
+                  @ [ Active_operation_changed (Some operation)
+                    ; Lifecycle_changed lifecycle
+                    ]))
+            ~payloads:
+              (Pending_turn.deferred_payloads pending
+               @ [ History_appended (Pending_turn.entries pending)
+                 ; Operation_started operation
+                 ; Session_state_changed
+                     { desired_state = lifecycle.desired
+                     ; observed_state = lifecycle.observed
+                     }
+                 ])
+        in
+        transferred := true;
+        decision)
+;;
+
+let submit_held_run_input_internal t scope input ~capture =
+  let open Result.Let_syntax in
+  let%bind selected = select_held_input_source t scope input in
+  admit_held_input_selection t selected ~capture
 ;;
 
 let find_permission t permission_id =
@@ -21624,6 +27195,7 @@ let captured_callback_run t ~allow_unavailable (scope : Callback_scope.t) =
 
 let execution_basis ?admitted t (origins : execution_origin_lookup) execution =
   let open Result.Let_syntax in
+  let%bind () = check_execution_descendant t execution in
   let initialization_current scope =
     match admitted with
     | Some selected ->
@@ -23157,21 +28729,33 @@ let prepare_native_goal_completion t execution outcome resolved =
        resolved, plan)
 ;;
 
-(* Factual accounting operations require the same live Factory/Actor owner. *)
-let child_accounting_owner t ~source_owner =
+let install_descendant_host_internal t ~source_owner ~expected ~check_ancestry ~host =
   let open Result.Let_syntax in
+  let%bind controller = child_accounting_owner t ~source_owner in
   let%bind () =
-    if
-      (not t.stopped)
-      && Option.is_none (Eio.Promise.peek t.finished)
-      && Option.is_none t.lifecycle_fence
-      && Option.exists
-           t.runtime_source_owner
-           ~f:(Runtime_source_owner.matches source_owner)
+    if phys_equal expected t.state
     then Ok ()
-    else Error (error Conflict "child accounting lost its actual Factory/Actor owner")
+    else Error (error Conflict "descendant source selection State changed before install")
   in
-  require_recurrence_controller t
+  let%bind () =
+    match expected.spec.delegation, check_ancestry with
+    | None, None | Some _, Some _ -> Ok ()
+    | None, Some _ | Some _, None ->
+      Error (error Conflict "descendant binding ancestry differs from actual source")
+  in
+  let binding : Descendant_host_data.Binding.t =
+    { issuing_actor = t.inference_owner_identity
+    ; domain = (Stdlib.Domain.self () :> int)
+    ; source_owner
+    ; controller
+    ; check_ancestry
+    ; host
+    ; closed = false
+    }
+  in
+  retire_descendant_host t;
+  t.descendant_host_binding <- Some binding;
+  Ok binding
 ;;
 
 let child_contributions_changed (state : Session_state.t) incoming =
@@ -23231,18 +28815,980 @@ let observe_child_installation_internal t ~source_owner ~reference =
 (* A native callback already owns admission. This selection adds no permission:
    it ties the DATA ACK to the SAME registered invocation and its real Init,
    existing-Goal or initial callback acknowledgement. Never select ambient Init. *)
-let child_installation_native_execution t borrowed =
-  let module N = Native_tool_invocation in
+let child_native_execution t invocation =
   let module I = Agent_protocol.Invocation in
-  let open Result.Let_syntax in
-  let%bind _ = N.borrowed_capabilities borrowed in
-  let invocation = N.borrowed_invocation borrowed in
   List.find t.invocation_executions ~f:(fun execution ->
     I.equal execution.dispatched invocation
     && execution.accepts_children
     && Atomic.get execution.authority_live)
   |> Result.of_option
        ~error:(error Conflict "child installation lost its native callback owner")
+;;
+
+let child_installation_native_execution t borrowed =
+  let module N = Native_tool_invocation in
+  let open Result.Let_syntax in
+  let%bind _ = N.borrowed_capabilities borrowed in
+  child_native_execution t (N.borrowed_invocation borrowed)
+;;
+
+let child_origin_parent_fingerprint (state : Session_state.t) =
+  (* Persisted moderator identity is consistency DATA here, not evidence of an
+     installed authorized source. Actual native/Factory checks retain that grant. *)
+  let open Result.Let_syntax in
+  let%bind moderator = Moderator_checkpoint.observer state.moderator in
+  Delegation_authority.fingerprint ?moderator state
+;;
+
+let submit_goal_resume_ordinary t (selected : Inherited_turn.Goal_resume_selection.t) =
+  let open Result.Let_syntax in
+  let scope = selected.scope in
+  let continuation = scope.continuation in
+  let preparation = continuation.binding.preparation in
+  let recovery = selected.recovery in
+  let turn = selected.turn in
+  let next = selected.next in
+  let operation = Turn_admission.operation turn in
+  let before = t.state in
+  let%bind candidate =
+    prepare_transition
+      t
+      ~delta:
+        (Batch
+           (History_continuation.deltas recovery
+            @ Turn_admission.deltas turn
+            @ [ Run_state_changed next ]))
+      ~payloads:(History_continuation.payloads recovery @ Turn_admission.payloads turn)
+  in
+  let attempted = ref false in
+  let%bind staged =
+    Turn_admission_staging.capture
+      ~owner:t.run_preparation_owner
+      ~before
+      ~candidate
+      ~operation
+      ~remaining_audit:t.command_audit
+      ~commit_attempted:attempted
+      ~plan:operation
+  in
+  let%bind fact = Goal_runtime_acknowledgement.prepare t scope ~candidate in
+  let%bind ack = prepare_goal_operation_ack t scope ~operation ~candidate in
+  let owner = ack.owner in
+  let installed = ref false in
+  Exn.protect
+    ~finally:(fun () ->
+      if not !installed then Operation_owner.retire owner;
+      if !attempted && not !installed then Goal_continuation.close preparation)
+    ~f:(fun () ->
+      let%bind () =
+        persist_transition
+          ~commit_attempted:attempted
+          ~check_before_commit:(fun () ->
+            let%bind () =
+              check_runtime_construction_effect (Existing_goal continuation)
+            in
+            let%bind () =
+              Goal_runtime_operation_acknowledgement.check ack ~actor:t ~candidate
+            in
+            let%bind () = Goal_runtime_acknowledgement.check fact ~actor:t ~candidate in
+            Turn_admission_staging.check_before_writer
+              staged
+              ~owner:t.run_preparation_owner
+              ~state:t.state)
+          t
+          candidate
+      in
+      install_committed_transition
+        ~goal_runtime_acknowledgement:fact
+        ~goal_operation_acknowledgement:ack
+        t
+        candidate;
+      installed := true;
+      let%bind acknowledgement =
+        Turn_admission_staging.acknowledge
+          staged
+          ~owner:t.run_preparation_owner
+          ~state:t.state
+      in
+      let%bind operation =
+        Turn_admission_staging.finish
+          acknowledgement
+          ~owner:t.run_preparation_owner
+          ~state:t.state
+      in
+      publish_committed_transition t candidate;
+      launch_worker t operation;
+      Ok
+        (Goal_resume_result.Resumed
+           { receipt = Goal_continuation.receipt continuation
+           ; continuation = Started operation
+           }))
+;;
+
+let admit_goal_resume_selection ?origin_observation t selected ~capture =
+  let open Result.Let_syntax in
+  let%bind () = check_goal_resume_selection t selected in
+  let%bind requirement = checked_turn_requirement ?origin_observation t in
+  match requirement with
+  | Ordinary ->
+    let%map result = submit_goal_resume_ordinary t selected in
+    Inherited_turn.Decision.Completed result
+  | Need_private_origin ->
+    capture_turn_origin
+      t
+      ~capture
+      ~input:(Inherited_turn.Input.Goal_resume_selected selected)
+  | Scoped ->
+    let source = Inherited_turn.Source.Goal_resume { selection = selected } in
+    capture_inherited_turn_plan
+      t
+      ~capture
+      ~source
+      ~commit_attempted:(ref false)
+      ~delta:
+        (Session_delta.Batch
+           (History_continuation.deltas selected.recovery
+            @ Turn_admission.deltas selected.turn
+            @ [ Run_state_changed selected.next ]))
+      ~payloads:
+        (History_continuation.payloads selected.recovery
+         @ Turn_admission.payloads selected.turn)
+;;
+
+let submit_observed_turn_origin
+  : type outcome.
+    t
+    -> outcome Inherited_turn.Origin_observation.t
+    -> (outcome Inherited_turn.Decision.t, Agent_protocol.Error.t) result
+  =
+  fun t observed ->
+  let open Result.Let_syntax in
+  let captured = observed.captured in
+  let%bind () = Inherited_turn.Capture.check_waiting captured.capture in
+  let%bind () = check_descendant_origin_observation t observed.origin in
+  t.command_audit <- captured.remaining_audit;
+  ((match captured.input with
+    | Message input ->
+      let%bind () =
+        check_message_authentication
+          input.original_actor
+          ~submitting_principal:input.submitting_principal
+      in
+      let%bind _ = write_attachment t input.attachment_id in
+      let%bind () = require_submit_ready t in
+      let%map result =
+        submit_authorized_message
+          ?original_actor:input.original_actor
+          ~owner:(Submitting_principal input.submitting_principal)
+          ~timing:input.timing
+          t
+          input.entry
+      in
+      Inherited_turn.Decision.Completed result
+    | Held_input_selected selected ->
+      let%bind () = check_selected_held_input t selected in
+      admit_held_input_selection
+        ~origin_observation:observed.origin
+        t
+        selected
+        ~capture:captured.capture
+    | Goal_resume_selected selected ->
+      admit_goal_resume_selection
+        ~origin_observation:observed.origin
+        t
+        selected
+        ~capture:captured.capture
+    | Goal_resume _ ->
+      Error (error Invalid_state "internal Goal origin continuation has unselected input")
+    | Held_input _ ->
+      Error (error Invalid_state "internal held origin continuation has unselected input")
+    | History input ->
+      admit_history_input
+        ~origin_observation:observed.origin
+        t
+        input
+        ~capture:captured.capture
+    | Edit_history _ | Continue_history _ ->
+      Error
+        (error Invalid_state "internal history origin continuation has unprepared input")
+    | Managed input ->
+      submit_managed_message
+        ~origin_observation:observed.origin
+        t
+        input
+        ~capture:captured.capture
+    | Run_user (input, Receipt) ->
+      admit_run
+        ~origin_observation:observed.origin
+        t
+        input
+        ~reply:Receipt
+        ~capture:captured.capture
+    | Run_user (input, Prepared_outcome) ->
+      admit_prepared_run
+        ~origin_observation:observed.origin
+        t
+        input
+        ~capture:captured.capture)
+   : (outcome Inherited_turn.Decision.t, Agent_protocol.Error.t) result)
+;;
+
+(* Called only by the finite capture request. The key principal is factual lower
+   allocation identity; native/ordinary callers derive it from creating_principal.
+   A genuine recurrence permit may supply its retained row principal separately.
+   Actual creator identity, including historical None, is fenced independently. *)
+let prepare_child_origin_internal
+      t
+      ~source_owner
+      ~principal_id
+      ~inherited
+      ~attribution
+      ~refresh_native
+  =
+  let open Result.Let_syntax in
+  let%bind controller = child_accounting_owner t ~source_owner in
+  let session = Recurrence_controller.session controller in
+  let generation = t.state.identity.generation in
+  let stop_epoch = t.state.stop_epoch in
+  let creating_principal = t.state.identity.creating_principal in
+  let%bind fingerprint = child_origin_parent_fingerprint t.state in
+  let check_parent (observed_state : Session_state.t) =
+    let%bind actual = child_accounting_owner t ~source_owner in
+    let%bind () =
+      if
+        phys_equal controller actual
+        && phys_equal observed_state t.state
+        && Agent_protocol.Id.Session.equal
+             (Agent_protocol.Session_ref.session_id session)
+             t.state.identity.session_id
+        && Int.equal generation t.state.identity.generation
+        && Int64.equal stop_epoch t.state.stop_epoch
+        && Option.equal
+             Agent_protocol.Id.Principal.equal
+             creating_principal
+             t.state.identity.creating_principal
+      then Ok ()
+      else Error (error Conflict "child origin parent or lower key identity changed")
+    in
+    let%bind current_fingerprint = child_origin_parent_fingerprint observed_state in
+    if String.equal fingerprint current_fingerprint
+    then Ok ()
+    else Error (error Conflict "child origin parent source or policy changed")
+  in
+  let rec preparation : Child_origin.Preparation.t =
+    { issuing_actor = t.inference_owner_identity
+    ; domain = (Stdlib.Domain.self () :> int)
+    ; session
+    ; generation
+    ; principal_id
+    ; inherited
+    ; attribution
+    ; max_scopes = Goal_descendants.Profile.max_scopes t.services.goal_descendant_profile
+    ; capture_current =
+        (fun attempt ->
+          let%bind observed_basis = capture_child_accounting_basis t ~source_owner in
+          let observed_state = observed_basis.state in
+          let%map () = check_parent observed_state in
+          let rec captured : Child_origin.Captured_refresh.t =
+            { preparation
+            ; attempt
+            ; observe =
+                (fun () ->
+                  (* This closure runs only in the public wrapper, outside the
+                     mailbox and Owner locks. All potentially yielding reads
+                     retain the exact State captured by the finite request. *)
+                  let%bind () = check_parent observed_state in
+                  let%bind check_native_now = refresh_native observed_state in
+                  let observation =
+                    Recurrence_controller.observe controller observed_state
+                  in
+                  (* The Store may reject a stale projection after a concurrent
+                     Actor ACK. Report the changed capture before interpreting
+                     that result; errors against a current basis remain intact. *)
+                  let%bind () = check_parent observed_state in
+                  let%bind current = observation in
+                  let check_current () =
+                    let%bind () = check_native_now () in
+                    let%bind () = check_parent observed_state in
+                    check_child_accounting_basis t observed_basis ~current
+                  in
+                  let%map () = check_current () in
+                  Child_origin.{ captured; check_current })
+            }
+          in
+          captured)
+    ; refresh_current =
+        (fun () -> Error (error Conflict "child origin preparation is not published"))
+    ; refresh_attempt = None
+    ; captured = None
+    ; observed = None
+    ; bound = None
+    }
+  in
+  Ok preparation
+;;
+
+let child_origin_key_principal t =
+  Result.of_option
+    t.state.identity.creating_principal
+    ~error:(error Permission_denied "child origin parent has no durable key principal")
+;;
+
+let prepare_native_child_origin_internal t ~source_owner ~admission ~binding ~ancestry =
+  let module N = Native_tool_invocation in
+  let module Origin = Agent_store.Delegation_goal_origin in
+  let open Result.Let_syntax in
+  let%bind () = N.Admission.check_now admission ~binding in
+  let%bind execution = child_native_execution t (N.Admission.invocation admission) in
+  (* Selection is pure; original authorization is deferred to the external
+     refresh below, rather than invoked while servicing an Actor request. *)
+  let%bind selected = native_child_basis t (Inference_invocation execution) in
+  let%bind controller = child_accounting_owner t ~source_owner in
+  let%bind inherited, refresh_ancestry =
+    child_origin_ancestry t.state ~source_owner ~controller ancestry
+  in
+  let basis = selected.execution in
+  let%bind original_binding =
+    match basis.run with
+    | None -> Ok None
+    | Some run -> Result.map (inference_run_binding_current t run) ~f:Option.some
+  in
+  let original =
+    match original_binding with
+    | None -> N.Admission.actor admission
+    | Some binding -> Run_admission.Scope.original_actor (Run_authorities.scope binding)
+  in
+  let%bind () =
+    if
+      (Option.is_some basis.attribution || not (List.is_empty (Origin.scopes inherited)))
+      && Option.is_none original
+    then Error (error Permission_denied "governed child origin has no actual original")
+    else Ok ()
+  in
+  let%bind () =
+    match basis.attribution with
+    | None -> Ok ()
+    | Some attribution ->
+      if
+        Agent_protocol.Session_ref.equal
+          (Agent_protocol.Goal_episode.session
+             (Goal_work_attribution.episode attribution))
+          (Recurrence_controller.session controller)
+      then Ok ()
+      else Error (error Conflict "child origin local Goal belongs to another owner")
+  in
+  let check_selection () =
+    let%bind () = N.Admission.check_now admission ~binding in
+    let%bind actual = child_native_execution t (N.Admission.invocation admission) in
+    let%bind actual_basis = native_child_basis t (Inference_invocation actual) in
+    let same_run left right =
+      Agent_protocol.Id.Run.equal left.Agent_protocol.Run.id right.Agent_protocol.Run.id
+      && Agent_protocol.Run_source.equal left.source right.source
+      && Agent_protocol.Id.Principal.equal left.principal_id right.principal_id
+      && Agent_protocol.Session_ref.equal left.session right.session
+    in
+    let same_attribution left right =
+      Agent_protocol.Id.Goal.equal
+        (Goal_work_attribution.goal_id left)
+        (Goal_work_attribution.goal_id right)
+      && Agent_protocol.Goal_episode.equal
+           (Goal_work_attribution.episode left)
+           (Goal_work_attribution.episode right)
+    in
+    let%bind () =
+      if
+        phys_equal execution actual
+        && Option.equal same_run basis.run actual_basis.execution.run
+        && Option.equal
+             same_attribution
+             basis.attribution
+             actual_basis.execution.attribution
+        && Option.equal
+             Agent_protocol.Inference_origin.equal
+             selected.classification
+             actual_basis.classification
+        && Option.equal
+             Agent_protocol.Run_work.equal
+             selected.parent_work
+             actual_basis.parent_work
+        &&
+        match basis.run, original_binding with
+        | None, None -> true
+        | Some run, Some binding ->
+          Run_authorities.is_current t.run_authorities binding ~run_id:run.id
+        | None, Some _ | Some _, None -> false
+      then Ok ()
+      else
+        Error (error Conflict "child origin native execution or immutable basis changed")
+    in
+    let%bind () =
+      match original with
+      | None -> Ok ()
+      | Some original ->
+        if Operator_authorization.is_current original
+        then Ok ()
+        else Error (error Permission_denied "child origin original authority expired")
+    in
+    N.Admission.check_now admission ~binding
+  in
+  let refresh_native observed_state =
+    let%bind () = check_selection () in
+    let%bind refreshed =
+      authorized_native_child_basis t (Inference_invocation execution)
+    in
+    let%bind () = refresh_ancestry observed_state in
+    let check_now () =
+      let%bind () = check_selection () in
+      let%bind () = refreshed.check_current () in
+      N.Admission.check_now admission ~binding
+    in
+    let%map () = check_now () in
+    check_now
+  in
+  let%bind principal_id = child_origin_key_principal t in
+  prepare_child_origin_internal
+    t
+    ~source_owner
+    ~principal_id
+    ~inherited
+    ~attribution:basis.attribution
+    ~refresh_native
+;;
+
+let prepare_unrelated_child_origin_internal t ~source_owner =
+  let%bind.Result principal_id = child_origin_key_principal t in
+  prepare_child_origin_internal
+    t
+    ~source_owner
+    ~principal_id
+    ~inherited:Agent_store.Delegation_goal_origin.unrelated
+    ~attribution:None
+    ~refresh_native:(fun (_ : Session_state.t) -> Ok (fun () -> Ok ()))
+;;
+
+let check_child_origin_preparation t (preparation : Child_origin.Preparation.t) =
+  if
+    phys_equal preparation.issuing_actor t.inference_owner_identity
+    && Int.equal preparation.domain (Stdlib.Domain.self () :> int)
+  then Ok ()
+  else Error (error Conflict "child origin preparation belongs to another Actor/domain")
+;;
+
+let capture_child_origin_refresh_internal
+      t
+      (preparation : Child_origin.Preparation.t)
+      attempt
+  =
+  let open Result.Let_syntax in
+  let%bind () = check_child_origin_preparation t preparation in
+  let%bind () =
+    if Option.exists preparation.refresh_attempt ~f:(phys_equal attempt)
+    then Ok ()
+    else Error (error Conflict "child origin refresh attempt was superseded")
+  in
+  let%map captured = preparation.capture_current attempt in
+  preparation.captured <- Some captured;
+  captured
+;;
+
+let consume_child_origin_refresh_internal t (observed : Child_origin.Observed_refresh.t) =
+  let open Result.Let_syntax in
+  let preparation = observed.captured.preparation in
+  let%bind () = check_child_origin_preparation t preparation in
+  let%bind () =
+    if
+      Option.exists preparation.refresh_attempt ~f:(phys_equal observed.captured.attempt)
+      && Option.exists preparation.captured ~f:(phys_equal observed.captured)
+    then Ok ()
+    else Error (error Conflict "child origin refresh was superseded or consumed")
+  in
+  let%map () = observed.check_current () in
+  preparation.captured <- None;
+  preparation.observed <- Some observed
+;;
+
+let bind_child_origin_internal
+      t
+      ~(preparation : Child_origin.Preparation.t)
+      ~key
+      ~child_session_id
+      ~transaction_id
+  =
+  let module D = Agent_store.Delegation_store in
+  let module Origin = Agent_store.Delegation_goal_origin in
+  let open Result.Let_syntax in
+  let%bind () =
+    if
+      phys_equal preparation.issuing_actor t.inference_owner_identity
+      && Int.equal preparation.domain (Stdlib.Domain.self () :> int)
+    then Ok ()
+    else Error (error Conflict "child origin preparation belongs to another Actor/domain")
+  in
+  let%bind () = Child_origin.Preparation.check_current preparation in
+  let%bind () =
+    Agent_store.Delegation_record.validate_key key
+    |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
+  in
+  let%bind () =
+    if
+      Agent_protocol.Id.Session.equal
+        key.parent_session_id
+        (Agent_protocol.Session_ref.session_id preparation.session)
+      && Int.equal key.parent_generation preparation.generation
+      && Agent_protocol.Id.Principal.equal key.principal_id preparation.principal_id
+      && not (Agent_protocol.Id.Session.equal key.parent_session_id child_session_id)
+    then Ok ()
+    else
+      Error (error Conflict "child origin allocation differs from its actual parent key")
+  in
+  match preparation.bound with
+  | Some bound ->
+    if
+      D.Key.equal key bound.key
+      && Agent_protocol.Id.Session.equal child_session_id bound.child_session_id
+      && Agent_protocol.Id.Transaction.equal transaction_id bound.transaction_id
+    then Result.map (Child_origin.Bound.check_current bound) ~f:(fun () -> bound)
+    else Error (error Conflict "child origin preparation is already bound elsewhere")
+  | None ->
+    let%bind scopes =
+      match preparation.attribution with
+      | None -> Ok (Origin.scopes preparation.inherited)
+      | Some attribution ->
+        let%bind branch =
+          Origin.Anchor.create
+            ~parent_session_id:key.parent_session_id
+            ~parent_generation:key.parent_generation
+            ~principal_id:key.principal_id
+            ~key:key.idempotency_key
+            ~child_session_id
+            ~transaction_id
+        in
+        let creator_episode = Goal_work_attribution.episode attribution in
+        let%map scope =
+          Origin.Scope.create
+            ~owner:preparation.session
+            ~goal_id:(Goal_work_attribution.goal_id attribution)
+            ~source:(Agent_protocol.Goal_episode.admission creator_episode).source
+            ~creator_episode
+            ~branch
+        in
+        scope :: Origin.scopes preparation.inherited
+    in
+    let%bind origin =
+      match scopes with
+      | [] -> Ok Origin.unrelated
+      | _ :: _ ->
+        Origin.associated
+          ~max_scopes:preparation.max_scopes
+          (List.sort scopes ~compare:Origin.Scope.compare_root)
+    in
+    let bound : Child_origin.Bound.t =
+      { preparation; key; child_session_id; transaction_id; origin }
+    in
+    let%map () = Child_origin.Bound.check_current bound in
+    preparation.bound <- Some bound;
+    bound
+;;
+
+let install_child_accounting_delta
+      t
+      ~(execution : invocation_execution option)
+      ~(native_preparation : Run_preparation.t option)
+      ~check
+      ~delta
+  =
+  let open Result.Let_syntax in
+  let%bind constructor =
+    match execution with
+    | None -> Ok None
+    | Some execution ->
+      initialization_of_inference_execution t (Inference_invocation execution)
+  in
+  let preparation =
+    match constructor with
+    | Some constructor -> Initialization_scope.initial_preparation constructor
+    | None -> native_preparation
+  in
+  let%bind candidate =
+    prepare_transition ?run_preparation:preparation t ~delta ~payloads:[]
+  in
+  let initialization_acknowledgement =
+    Option.map constructor ~f:(fun scope ->
+      Initialization_scope.Acknowledgement.prepare scope candidate.state)
+  in
+  let%bind goal_runtime_acknowledgement =
+    Option.bind execution ~f:(fun execution ->
+      goal_runtime_of_execution t (Inference_invocation execution))
+    |> Option.value_map ~default:(Ok None) ~f:(fun scope ->
+      Goal_runtime_acknowledgement.prepare t scope ~candidate |> Result.map ~f:Option.some)
+  in
+  let%bind held_authored_callback_acknowledgement =
+    Option.bind execution ~f:(fun execution ->
+      held_authored_of_execution t (Inference_invocation execution))
+    |> Option.value_map ~default:(Ok None) ~f:(fun scope ->
+      Held_authored_callback_acknowledgement.prepare t scope ~candidate)
+  in
+  install
+    ?run_preparation:preparation
+    ?initialization_acknowledgement
+    ?goal_runtime_acknowledgement
+    ?held_authored_callback_acknowledgement
+    ~check_before_commit:(fun () ->
+      let%bind () = check () in
+      Option.value_map
+        initialization_acknowledgement
+        ~default:(Ok ())
+        ~f:Initialization_scope.Acknowledgement.check_basis)
+    t
+    candidate
+;;
+
+(* A missing slot is distinct from a retained Unknown slot. Only a genuine
+   private positive admission may recover the former without an old frontier. *)
+let retained_child_origin_slot (state : Session_state.t) ~reference ~origin =
+  let module D = Agent_store.Delegation_store in
+  let module Origin = Agent_store.Delegation_goal_origin in
+  let open Result.Let_syntax in
+  match state.child_contributions with
+  | None -> Ok false
+  | Some children ->
+    let references = Child_contributions.references children in
+    if List.mem references reference ~equal:D.Reference.equal
+    then (
+      let%bind stored = Child_contributions.origin children ~reference in
+      if Option.exists stored ~f:(Origin.equal origin)
+      then Ok true
+      else
+        Error (error Conflict "retained child frozen origin differs from its parent slot"))
+    else if
+      List.exists references ~f:(fun stored ->
+        D.Key.equal stored.key reference.key
+        || Agent_protocol.Id.Session.equal
+             stored.child_session_id
+             reference.child_session_id)
+    then Error (error Conflict "retained child admission differs from its parent slot")
+    else Ok false
+;;
+
+(* Retained lower records are factual custody, never a fresh birth selection.
+   The finite retained branch relation preserves its original frozen attribution
+   even when the current Goal episode/source has changed. Original execution
+   authority is checked separately; no DATA recovery grants source authority. *)
+let retained_associated_child_update (state : Session_state.t) ~reference ~origin =
+  let module Origin = Agent_store.Delegation_goal_origin in
+  let module G = Goal_descendants in
+  let open Result.Let_syntax in
+  let%bind accounting =
+    Result.of_option
+      state.goal_descendants
+      ~error:(error Conflict "retained associated child has no existing descendant roots")
+  in
+  let%bind children =
+    Result.of_option
+      state.child_contributions
+      ~error:(error Conflict "retained associated child has no child carrier")
+  in
+  match
+    List.find (Origin.scopes origin) ~f:(fun scope ->
+      Agent_protocol.Session_ref.equal (Origin.Scope.owner scope) (G.session accounting))
+  with
+  | None -> G.register_child accounting ~children ~reference ~origin
+  | Some scope ->
+    G.register_retained_branch accounting ~children ~scope ~reference ~origin
+;;
+
+let retained_child_frontier_complete (state : Session_state.t) ~reference ~origin =
+  let module Origin = Agent_store.Delegation_goal_origin in
+  let module G = Goal_descendants in
+  let%map.Result registered = retained_child_origin_slot state ~reference ~origin in
+  registered
+  && (Origin.equal origin Origin.unrelated
+      || Option.exists state.goal_descendants ~f:(fun accounting ->
+        List.for_all (Origin.scopes origin) ~f:(fun scope ->
+          (not
+             (Agent_protocol.Session_ref.equal
+                (Origin.Scope.owner scope)
+                (G.session accounting)))
+          || List.exists
+               (G.branches accounting ~goal_id:(Origin.Scope.goal_id scope))
+               ~f:(fun branch ->
+                 Origin.Scope.equal scope (G.Branch.scope branch)
+                 && Agent_store.Delegation_store.Reference.equal
+                      reference
+                      (G.Branch.reference branch)))))
+;;
+
+let check_retained_child_frontier t ~reference ~origin =
+  let module Origin = Agent_store.Delegation_goal_origin in
+  let open Result.Let_syntax in
+  let%bind _registered = retained_child_origin_slot t.state ~reference ~origin in
+  if Origin.equal origin Origin.unrelated
+  then Ok ()
+  else
+    Result.map (retained_associated_child_update t.state ~reference ~origin) ~f:(fun _ ->
+      ())
+;;
+
+let capture_child_origin_reservation_internal
+      t
+      ~source_owner
+      ~bound
+      ~reference
+      ~native_callback
+  =
+  let module D = Agent_store.Delegation_store in
+  let open Result.Let_syntax in
+  let%bind basis = capture_child_accounting_basis t ~source_owner in
+  let%bind () =
+    if
+      Agent_protocol.Id.Session.equal
+        reference.D.Reference.key.parent_session_id
+        t.state.identity.session_id
+      && Int.equal reference.key.parent_generation t.state.identity.generation
+    then Ok ()
+    else Error (error Conflict "child reservation belongs to another parent generation")
+  in
+  let%bind () =
+    Option.value_map bound ~default:(Ok ()) ~f:(fun (bound : Child_origin.Bound.t) ->
+      if
+        phys_equal bound.preparation.issuing_actor t.inference_owner_identity
+        && Int.equal bound.preparation.domain (Stdlib.Domain.self () :> int)
+        && D.Key.equal bound.key reference.key
+        && Agent_protocol.Id.Session.equal
+             bound.child_session_id
+             reference.child_session_id
+      then Child_origin.Bound.check_current bound
+      else Error (error Conflict "child reservation differs from actual birth custody"))
+  in
+  let%map execution =
+    Option.value_map native_callback ~default:(Ok None) ~f:(fun borrowed ->
+      child_installation_native_execution t borrowed |> Result.map ~f:Option.some)
+  in
+  Child_origin.Captured_reservation.
+    { basis; reference; bound; native_callback; execution }
+;;
+
+(* Wrapper-only Store traversal: never called by a mailbox handler. The actual
+   immutable State/controller came from Capture_reservation, not caller DATA. *)
+let observe_child_origin_reservation_external
+      t
+      (captured : Child_origin.Captured_reservation.t)
+  =
+  let open Result.Let_syntax in
+  let%bind () = check_child_accounting_capture t captured.basis in
+  let native_registration =
+    Option.value_map captured.execution ~default:(Ok None) ~f:(fun execution ->
+      let%map current =
+        authorized_native_child_basis t (Inference_invocation execution)
+      in
+      Some
+        Child_origin.Native_registration.
+          { execution
+          ; preparation = current.selected.execution.preparation
+          ; check_current = current.check_current
+          })
+  in
+  let%bind () = check_child_accounting_capture t captured.basis in
+  let%bind native_registration = native_registration in
+  let record =
+    Recurrence_controller.resolve_delegation captured.basis.controller captured.reference
+  in
+  let%bind () = check_child_accounting_capture t captured.basis in
+  let%bind record = record in
+  (* A concurrent canonical ACK can make Store selection of the captured State
+     fail. Classify that stale capture before interpreting the Store result;
+     unchanged captures retain the original Store error. *)
+  let current =
+    Recurrence_controller.observe captured.basis.controller captured.basis.state
+  in
+  let%bind () = check_child_accounting_capture t captured.basis in
+  let%map current = current in
+  Child_origin.Observed_reservation.{ captured; record; current; native_registration }
+;;
+
+let check_child_origin_reservation_observation
+      t
+      (observed : Child_origin.Observed_reservation.t)
+  =
+  let module D = Agent_store.Delegation_store in
+  let module Origin = Agent_store.Delegation_goal_origin in
+  let open Result.Let_syntax in
+  let captured = observed.captured in
+  let%bind () = check_child_accounting_basis t captured.basis ~current:observed.current in
+  let%bind () =
+    if D.Reference.equal captured.reference (D.reference observed.record)
+    then Ok ()
+    else Error (error Conflict "child reservation lower reference changed")
+  in
+  let record = observed.record in
+  let%bind origin =
+    Result.of_option
+      record.admission.goal_origin
+      ~error:
+        (error Conflict "historical child origin cannot be reclassified during retry")
+  in
+  let%bind () =
+    if
+      Option.is_none record.revocation
+      && Agent_protocol.Id.Prompt_revision.equal
+           record.admission.parent_revision_id
+           t.state.spec.prompt_revision_id
+    then Ok ()
+    else Error (error Conflict "child reservation is revoked or parent source changed")
+  in
+  let%map () =
+    match captured.bound with
+    | None -> check_retained_child_frontier t ~reference:captured.reference ~origin
+    | Some bound ->
+      if
+        Agent_protocol.Id.Transaction.equal
+          bound.transaction_id
+          record.admission.transaction_id
+        && Origin.equal bound.origin origin
+      then Child_origin.Bound.check_current bound
+      else
+        Error (error Conflict "private lower admission differs from actual birth binding")
+  in
+  origin
+;;
+
+let observe_child_origin_reservation_internal t observed =
+  let open Result.Let_syntax in
+  let%map origin = check_child_origin_reservation_observation t observed in
+  let captured = observed.Child_origin.Observed_reservation.captured in
+  Child_origin.Reservation.
+    { issuing_actor = captured.basis.issuing_actor
+    ; domain = captured.basis.domain
+    ; controller = captured.basis.controller
+    ; source_owner = captured.basis.source_owner
+    ; reference = captured.reference
+    ; origin
+    ; bound = captured.bound
+    }
+;;
+
+let register_child_origin_reservation_internal
+      t
+      ~(reservation : Child_origin.Reservation.t)
+      ~(observed : Child_origin.Observed_reservation.t)
+      ~native_callback
+      ~check_parent
+  =
+  let module G = Goal_descendants in
+  let module Origin = Agent_store.Delegation_goal_origin in
+  let open Result.Let_syntax in
+  let source_owner = reservation.source_owner in
+  let%bind controller = child_accounting_owner t ~source_owner in
+  let%bind () =
+    if
+      phys_equal reservation.issuing_actor t.inference_owner_identity
+      && Int.equal reservation.domain (Stdlib.Domain.self () :> int)
+      && Recurrence_controller.same_store controller reservation.controller
+    then Ok ()
+    else Error (error Conflict "child reservation belongs to another Actor/Store")
+  in
+  let check_observation () =
+    let%bind () = check_parent t.state in
+    let%bind origin = check_child_origin_reservation_observation t observed in
+    if
+      Agent_store.Delegation_store.Reference.equal
+        reservation.reference
+        observed.captured.reference
+      && Agent_store.Delegation_goal_origin.equal reservation.origin origin
+      && Option.equal phys_equal reservation.bound observed.captured.bound
+    then Ok ()
+    else
+      Error (error Conflict "child reservation observation differs from original custody")
+  in
+  let%bind () = check_observation () in
+  let execution =
+    Option.map observed.native_registration ~f:(fun native ->
+      native.Child_origin.Native_registration.execution)
+  in
+  let native_preparation =
+    Option.bind observed.native_registration ~f:(fun native ->
+      native.Child_origin.Native_registration.preparation)
+  in
+  let before = t.state in
+  let check () =
+    let%bind () = check_observation () in
+    let%bind () =
+      match native_callback, execution, observed.native_registration with
+      | None, None, None -> Ok ()
+      | Some borrowed, Some selected, Some current ->
+        let%bind actual = child_installation_native_execution t borrowed in
+        if phys_equal selected actual
+        then current.Child_origin.Native_registration.check_current ()
+        else Error (error Conflict "child reservation native owner was replaced")
+      | None, (Some _ | None), (Some _ | None) | Some _, (Some _ | None), (Some _ | None)
+        -> Error (error Conflict "child reservation native selection is incomplete")
+    in
+    if phys_equal before t.state
+    then Ok ()
+    else Error (error Conflict "child reservation parent snapshot changed")
+  in
+  let%bind () = check () in
+  let%bind already_registered =
+    match reservation.bound with
+    | None ->
+      retained_child_frontier_complete
+        before
+        ~reference:reservation.reference
+        ~origin:reservation.origin
+    | Some _ -> Ok false
+  in
+  if already_registered
+  then Ok ()
+  else (
+    let%bind update =
+      match before.goal_descendants, before.child_contributions with
+      | None, children ->
+        if Origin.equal reservation.origin Origin.unrelated
+        then
+          G.register_first_unrelated_child
+            ~host_profile:t.services.goal_descendant_profile
+            ~session:(Recurrence_controller.session controller)
+            ~reference:reservation.reference
+            ~children
+            ~ledger:before.inference_ledger
+        else
+          Error (error Conflict "associated child has no existing descendant component")
+      | Some _, Some _
+        when Option.is_none reservation.bound
+             && not (Origin.equal reservation.origin Origin.unrelated) ->
+        retained_associated_child_update
+          before
+          ~reference:reservation.reference
+          ~origin:reservation.origin
+      | Some accounting, Some children ->
+        let local_scope =
+          List.find (Origin.scopes reservation.origin) ~f:(fun scope ->
+            Agent_protocol.Session_ref.equal
+              (Origin.Scope.owner scope)
+              (G.session accounting))
+        in
+        (match local_scope with
+         | None ->
+           G.register_child
+             accounting
+             ~children
+             ~reference:reservation.reference
+             ~origin:reservation.origin
+         | Some scope ->
+           G.register_branch
+             accounting
+             ~children
+             ~scope
+             ~reference:reservation.reference
+             ~origin:reservation.origin)
+      | Some _, None -> Error (error Conflict "descendant component has no child carrier")
+    in
+    install_child_accounting_delta
+      t
+      ~execution
+      ~native_preparation
+      ~check
+      ~delta:(Session_delta.Goal_descendants_changed update))
 ;;
 
 let register_child_installation_internal
@@ -23328,56 +29874,15 @@ let register_child_installation_internal
   let%bind changed = child_contributions_changed before children in
   if not changed
   then Ok ()
-  else (
-    let%bind constructor =
-      match execution with
-      | None -> Ok None
-      | Some execution ->
-        initialization_of_inference_execution t (Inference_invocation execution)
-    in
-    let preparation =
-      match constructor, native_current with
-      | Some constructor, _ -> Initialization_scope.initial_preparation constructor
-      | None, Some current -> current.selected.execution.preparation
-      | None, None -> None
-    in
-    let%bind candidate =
-      prepare_transition
-        ?run_preparation:preparation
-        t
-        ~delta:(Session_delta.Child_contributions_changed children)
-        ~payloads:[]
-    in
-    let initialization_acknowledgement =
-      Option.map constructor ~f:(fun scope ->
-        Initialization_scope.Acknowledgement.prepare scope candidate.state)
-    in
-    let%bind goal_runtime_acknowledgement =
-      Option.bind execution ~f:(fun execution ->
-        goal_runtime_of_execution t (Inference_invocation execution))
-      |> Option.value_map ~default:(Ok None) ~f:(fun scope ->
-        Goal_runtime_acknowledgement.prepare t scope ~candidate
-        |> Result.map ~f:Option.some)
-    in
-    let%bind held_authored_callback_acknowledgement =
-      Option.bind execution ~f:(fun execution ->
-        held_authored_of_execution t (Inference_invocation execution))
-      |> Option.value_map ~default:(Ok None) ~f:(fun scope ->
-        Held_authored_callback_acknowledgement.prepare t scope ~candidate)
-    in
-    install
-      ?run_preparation:preparation
-      ?initialization_acknowledgement
-      ?goal_runtime_acknowledgement
-      ?held_authored_callback_acknowledgement
-      ~check_before_commit:(fun () ->
-        let%bind () = check () in
-        Option.value_map
-          initialization_acknowledgement
-          ~default:(Ok ())
-          ~f:Initialization_scope.Acknowledgement.check_basis)
+  else
+    install_child_accounting_delta
       t
-      candidate)
+      ~execution
+      ~native_preparation:
+        (Option.bind native_current ~f:(fun current ->
+           current.selected.execution.preparation))
+      ~check
+      ~delta:(Session_delta.Child_contributions_changed children)
 ;;
 
 (* Authorizers are the existing current read policy. As elsewhere in the
@@ -23450,6 +29955,38 @@ let observe_child_usage_internal t ~source_owner ~actor ~authorize ~reference =
     }
 ;;
 
+let plan_child_usage_import (before : Session_state.t) ~children ~snapshot =
+  let open Result.Let_syntax in
+  match snapshot, before.goal_descendants with
+  | None, _ ->
+    Ok
+      ( children
+      , Child_usage_import.Historical_absence
+      , Session_delta.Child_contributions_changed children )
+  | Some snapshot, None ->
+    let%map children, disposition = Child_contributions.replace children ~snapshot in
+    ( children
+    , Child_usage_import.Imported disposition
+    , Session_delta.Child_contributions_changed children )
+  | Some snapshot, Some accounting ->
+    let%bind registered = child_contributions_changed before children in
+    let%map update, disposition =
+      Goal_descendants.import_with_disposition accounting ~children ~snapshot
+    in
+    let next =
+      match Goal_descendants.Update.children update with
+      | Preserve -> children
+      | Replace next -> next
+    in
+    let delta = Session_delta.Goal_descendants_changed update in
+    let delta =
+      if registered
+      then Session_delta.Batch [ Child_contributions_changed children; delta ]
+      else delta
+    in
+    next, Child_usage_import.Imported disposition, delta
+;;
+
 let import_child_usage_internal
       t
       ~source_owner
@@ -23492,12 +30029,8 @@ let import_child_usage_internal
       ~max_children
       ~max_encoded_bytes
   in
-  let%bind children, result =
-    match observation.snapshot with
-    | None -> Ok (children, Child_usage_import.Historical_absence)
-    | Some snapshot ->
-      let%map children, disposition = Child_contributions.replace children ~snapshot in
-      children, Child_usage_import.Imported disposition
+  let%bind children, result, delta =
+    plan_child_usage_import before ~children ~snapshot:observation.snapshot
   in
   let%bind () = child_usage_read t ~source_owner ~actor ~authorize in
   let check () =
@@ -23513,15 +30046,1238 @@ let import_child_usage_internal
   if not changed
   then Ok result
   else (
-    let%map _ =
-      transition
-        ~check_before_commit:check
-        t
-        ~delta:(Session_delta.Child_contributions_changed children)
-        ~payloads:[]
+    let%map _ = transition ~check_before_commit:check t ~delta ~payloads:[] in
+    result)
+;;
+
+(* Birth facts retain actual callback ACK custody without asking whether a
+   fresh Goal count/token admission would now be eligible. *)
+let child_origin_factual_native_registration t borrowed =
+  let open Result.Let_syntax in
+  let%bind execution = child_installation_native_execution t borrowed in
+  let%bind selected = native_child_basis t (Inference_invocation execution) in
+  let check_current () =
+    let%bind actual = child_installation_native_execution t borrowed in
+    if phys_equal actual execution
+    then native_child_basis t (Inference_invocation actual) |> Result.map ~f:ignore
+    else Error (error Conflict "birth usage native callback owner was replaced")
+  in
+  let%map () = check_current () in
+  Child_origin.Native_registration.
+    { execution; preparation = selected.execution.preparation; check_current }
+;;
+
+let capture_child_origin_usage_internal
+      t
+      ~(reservation : Child_origin.Reservation.t)
+      ~native_callback
+  =
+  let open Result.Let_syntax in
+  let%bind basis =
+    capture_child_accounting_basis t ~source_owner:reservation.source_owner
+  in
+  let%bind () =
+    if
+      Int.equal reservation.domain (Stdlib.Domain.self () :> int)
+      && Recurrence_controller.same_store basis.controller reservation.controller
+    then Ok ()
+    else Error (error Conflict "birth usage belongs to another Factory/Store/domain")
+  in
+  let%map native_registration =
+    Option.value_map native_callback ~default:(Ok None) ~f:(fun borrowed ->
+      child_origin_factual_native_registration t borrowed |> Result.map ~f:Option.some)
+  in
+  Child_origin_usage.{ basis; reservation; native_registration }
+;;
+
+let observe_child_origin_usage_external
+      t
+      (captured : Child_origin_usage.captured)
+      ~child_current
+  =
+  let%map.Result record, current =
+    observe_child_accounting_source
+      t
+      captured.basis
+      ~reference:captured.reservation.reference
+  in
+  Child_origin_usage.{ captured; record; current; child_current }
+;;
+
+let check_child_origin_usage_observation t (observed : Child_origin_usage.observed) =
+  let module D = Agent_store.Delegation_store in
+  let module O = Agent_store.Delegation_goal_origin in
+  let open Result.Let_syntax in
+  let captured = observed.captured in
+  let%bind () = check_child_accounting_basis t captured.basis ~current:observed.current in
+  if
+    D.Reference.equal captured.reservation.reference (D.reference observed.record)
+    && Option.exists
+         observed.record.admission.goal_origin
+         ~f:(O.equal captured.reservation.origin)
+  then Ok ()
+  else Error (error Conflict "birth usage private lower identity/origin changed")
+;;
+
+let check_child_origin_usage_source t (observed : Child_origin_usage.observed) =
+  let module D = Agent_store.Delegation_store in
+  let module O = Agent_store.Delegation_goal_origin in
+  let open Result.Let_syntax in
+  let%bind () = check_child_origin_usage_observation t observed in
+  let reference = observed.captured.reservation.reference in
+  if
+    Agent_protocol.Id.Session.equal reference.child_session_id t.state.identity.session_id
+    && Agent_protocol.Id.Prompt_revision.equal
+         reference.revision_id
+         t.state.spec.prompt_revision_id
+    && Option.exists t.state.spec.delegation ~f:(D.Reference.equal reference)
+    && Option.exists t.state.goal_descendants ~f:(fun accounting ->
+      Agent_protocol.Session_ref.equal
+        (Goal_descendants.session accounting)
+        (Recurrence_controller.session observed.captured.basis.controller)
+      && Option.exists
+           (Goal_descendants.origin accounting)
+           ~f:(O.equal observed.captured.reservation.origin))
+    && Option.is_none observed.child_current
+    && Option.is_none observed.captured.native_registration
+  then Ok ()
+  else Error (error Conflict "birth usage differs from actual child Spec/accounting")
+;;
+
+let observe_child_origin_usage_internal t observed ~refresh_read =
+  let open Result.Let_syntax in
+  let%bind () = check_child_origin_usage_source t observed in
+  let%bind snapshot =
+    Child_accounting.snapshot observed.Child_origin_usage.captured.basis.state
+  in
+  let%bind () =
+    if Option.is_some snapshot
+    then Ok ()
+    else Error (error Conflict "known child birth has no actual usage snapshot")
+  in
+  let%map () = check_child_origin_usage_source t observed in
+  let captured = observed.captured in
+  Child_usage_observation.
+    { controller = captured.basis.controller
+    ; source_owner = Runtime_source_owner.identity captured.basis.source_owner
+    ; reference = captured.reservation.reference
+    ; snapshot
+    ; refresh_read
+    }
+;;
+
+let import_child_origin_usage_internal
+      t
+      (observed : Child_origin_usage.observed)
+      ~(observation : Child_usage_observation.t)
+      ~check_parent
+  =
+  let open Result.Let_syntax in
+  let captured = observed.captured in
+  let reservation = captured.reservation in
+  let before = t.state in
+  let check () =
+    let%bind () = check_child_origin_usage_observation t observed in
+    let%bind () = check_parent t.state in
+    let%bind () =
+      if
+        phys_equal reservation.issuing_actor t.inference_owner_identity
+        && Agent_protocol.Id.Session.equal
+             reservation.reference.key.parent_session_id
+             t.state.identity.session_id
+        && Runtime_source_owner.matches
+             captured.basis.source_owner
+             observation.source_owner
+        && Recurrence_controller.same_store
+             captured.basis.controller
+             observation.controller
+        && Agent_store.Delegation_store.Reference.equal
+             reservation.reference
+             observation.reference
+      then Ok ()
+      else Error (error Conflict "birth usage import differs from actual parent/child")
+    in
+    let%bind complete =
+      retained_child_frontier_complete
+        t.state
+        ~reference:reservation.reference
+        ~origin:reservation.origin
+    in
+    let%bind () =
+      if complete
+      then Ok ()
+      else
+        Error (error Conflict "birth usage import has no acknowledged complete frontier")
+    in
+    let%bind () =
+      Option.value_map
+        observed.child_current
+        ~default:
+          (Error (error Conflict "birth usage import has no actual child observation"))
+        ~f:(fun check -> check ())
+    in
+    let%bind () =
+      Option.value_map captured.native_registration ~default:(Ok ()) ~f:(fun native ->
+        native.Child_origin.Native_registration.check_current ())
+    in
+    if phys_equal before t.state
+    then Ok ()
+    else Error (error Conflict "birth usage import parent State changed")
+  in
+  let%bind () = check () in
+  let%bind children =
+    Result.of_option
+      before.child_contributions
+      ~error:(error Conflict "birth usage import has no acknowledged child carrier")
+  in
+  let%bind children, result, delta =
+    plan_child_usage_import before ~children ~snapshot:observation.snapshot
+  in
+  let%bind changed = child_contributions_changed before children in
+  if not changed
+  then Ok result
+  else (
+    let execution =
+      Option.map captured.native_registration ~f:(fun native ->
+        native.Child_origin.Native_registration.execution)
+    in
+    let native_preparation =
+      Option.bind captured.native_registration ~f:(fun native ->
+        native.Child_origin.Native_registration.preparation)
+    in
+    let%map () =
+      install_child_accounting_delta t ~execution ~native_preparation ~check ~delta
     in
     result)
 ;;
+
+let descendant_components (state : Session_state.t) =
+  let open Result.Let_syntax in
+  let%bind accounting =
+    Result.of_option
+      state.goal_descendants
+      ~error:(error Permission_denied "actual descendant component is absent")
+  in
+  let%map children =
+    Result.of_option
+      state.child_contributions
+      ~error:(error Permission_denied "actual descendant child frontier is absent")
+  in
+  accounting, children
+;;
+
+let descendant_route_actor t ~factual (route : Descendant_admission_data.Root_route.t) =
+  let open Result.Let_syntax in
+  let%bind controller = child_accounting_owner t ~source_owner:route.source_owner in
+  if
+    Int.equal route.domain (Stdlib.Domain.self () :> int)
+    && Recurrence_controller.same_store controller route.controller
+    && Agent_protocol.Session_ref.equal
+         (Recurrence_controller.session controller)
+         (Agent_store.Delegation_goal_origin.Scope.owner
+            (Goal_descendant_root_route.scope route.association))
+    && (factual || phys_equal route.root_issuer t.inference_owner_identity)
+  then Ok ()
+  else Error (error Conflict "descendant route differs from its actual root owner")
+;;
+
+let descendant_route_data state (route : Descendant_admission_data.Root_route.t) =
+  let%bind.Result accounting, children = descendant_components state in
+  Goal_descendant_root_route.validate route.association ~accounting ~children
+;;
+
+let descendant_root_account state scope =
+  let open Result.Let_syntax in
+  let id = Agent_store.Delegation_goal_origin.Scope.goal_id scope in
+  let%bind goal =
+    Option.bind state.Session_state.goal_catalog ~f:(fun catalog ->
+      Goal_catalog.find catalog id)
+    |> Result.of_option ~error:(error Invalid_state "actual root Goal is absent")
+  in
+  let%bind document =
+    Option.bind state.goal_accounts ~f:(fun accounts -> Goal_accounts.find accounts id)
+    |> Result.of_option ~error:(error Invalid_state "actual root account is absent")
+  in
+  let%map account =
+    Goal_accounting_document.resolve document ~goal ~ledger:state.inference_ledger
+  in
+  goal, account
+;;
+
+(* Only genuinely new authenticated begin chooses/replaces current cell.
+   Old reservations/refreshes never call this function. Registry is <=max_roots. *)
+let descendant_policy_for_begin t ~goal_id ~now =
+  let existing =
+    List.find t.descendant_policy_cells ~f:(fun policy ->
+      Agent_protocol.Id.Goal.equal (Goal_root_policy.goal_id policy) goal_id)
+  in
+  match existing with
+  | Some policy when Result.is_ok (Goal_root_policy.fresh policy ~state:t.state ~now) ->
+    Ok policy
+  | None | Some _ ->
+    Option.iter existing ~f:Goal_root_policy.retire;
+    let%map.Result policy = Goal_root_policy.create t.state ~goal_id in
+    t.descendant_policy_cells
+    <- policy
+       :: List.filter t.descendant_policy_cells ~f:(fun old ->
+         not (Agent_protocol.Id.Goal.equal (Goal_root_policy.goal_id old) goal_id));
+    policy
+;;
+
+let check_descendant_ack = Goal_descendant_admission_custody.check_descendant_ack
+
+let descendant_confirmation_import =
+  Goal_descendant_admission_custody.descendant_confirmation_import
+;;
+
+let check_descendant_confirmation =
+  Goal_descendant_admission_custody.check_descendant_confirmation
+;;
+
+(* Current admitted ownership/policy is independent of unrelated State progress.
+   It never replaces the reservation's retained cell or redoes fresh capacity. *)
+let check_descendant_admitted_owner
+      t
+      (reservation : Descendant_admission_data.Reservation.t)
+      acknowledgement
+      confirmation
+  =
+  let open Result.Let_syntax in
+  let%bind () = descendant_route_actor t ~factual:false reservation.route in
+  let%bind () = descendant_route_data t.state reservation.route in
+  let%bind () = Descendant_preparation.check_owner reservation.preparation in
+  let%bind () = check_descendant_confirmation reservation acknowledgement confirmation in
+  Goal_root_policy.admitted reservation.policy ~state:t.state ~now:(t.services.now ())
+;;
+
+let check_descendant_admitted_capture_owner
+      t
+      (captured :
+        Descendant_admission_data.Root_admitted.t Descendant_root_request.capture)
+  =
+  let open Result.Let_syntax in
+  let%bind () = check_child_accounting_identity t captured.basis in
+  let%bind () =
+    Recurrence_controller.check_retained_available captured.basis.controller
+  in
+  match captured.operation with
+  | Refresh_admitted (reservation, acknowledgement, confirmation) ->
+    check_descendant_admitted_owner t reservation acknowledgement confirmation
+;;
+
+let descendant_admitted_capture_state t captured =
+  let%map.Result () = check_descendant_admitted_capture_owner t captured in
+  if phys_equal captured.Descendant_root_request.basis.state t.state
+  then Descendant_root_request.Admitted_refresh.Current ()
+  else State_changed
+;;
+
+(* Store errors and private ancestry changes remain failures. Only a successful
+   read whose actual owner/policy is still current can report State_changed. *)
+let observe_descendant_admitted_root
+      t
+      (captured :
+        Descendant_admission_data.Root_admitted.t Descendant_root_request.capture)
+  =
+  let module D = Agent_store.Delegation_store in
+  let module Q = Descendant_root_request in
+  let open Result.Let_syntax in
+  let rec records = function
+    | [] -> Ok (Q.Admitted_refresh.Current ())
+    | expected :: rest ->
+      let%bind () = check_descendant_admitted_capture_owner t captured in
+      let result =
+        Recurrence_controller.resolve_delegation
+          captured.basis.controller
+          (D.reference expected)
+      in
+      let%bind () = check_descendant_admitted_capture_owner t captured in
+      let%bind actual = result in
+      let%bind () =
+        if
+          D.equal_record actual expected
+          && Option.is_none actual.revocation
+          && D.equal_stage actual.stage Linked
+        then Ok ()
+        else Error (error Conflict "descendant actual private ancestry changed")
+      in
+      let%bind status = descendant_admitted_capture_state t captured in
+      (match status with
+       | State_changed -> Ok Q.Admitted_refresh.State_changed
+       | Current () -> records rest)
+  in
+  let%bind status = records captured.records in
+  match status with
+  | State_changed -> Ok Q.Admitted_refresh.State_changed
+  | Current () ->
+    let result =
+      Recurrence_controller.observe captured.basis.controller captured.basis.state
+    in
+    let%bind () = check_descendant_admitted_capture_owner t captured in
+    let%bind current = result in
+    let%bind owner =
+      Recurrence_controller.retain_owner captured.basis.controller current
+    in
+    let%map status = descendant_admitted_capture_state t captured in
+    (match status with
+     | State_changed -> Q.Admitted_refresh.State_changed
+     | Current () -> Q.Admitted_refresh.Current { Q.Admitted_observed.captured; owner })
+;;
+
+let capture_descendant_root
+  : type outcome.
+    t
+    -> outcome Descendant_root_request.operation
+    -> (outcome Descendant_root_request.capture, Agent_protocol.Error.t) result
+  =
+  fun t operation ->
+  let module R = Descendant_admission_data in
+  let module Q = Descendant_root_request in
+  let open Result.Let_syntax in
+  let%bind source_owner, records =
+    match operation with
+    | Bind (source_owner, ancestry, preparation) ->
+      let%bind controller = child_accounting_owner t ~source_owner in
+      let%bind () = Descendant_preparation.check_basis preparation in
+      let%bind () =
+        if
+          Descendant_preparation.issued_by preparation ~source_owner
+          && Descendant_preparation.same_store preparation ~controller
+          && Delegation_authority.Checked_ancestry.issued_by ancestry ~source_owner
+        then Ok ()
+        else
+          Error
+            (error Conflict "descendant preparation/ancestry has foreign issuer or Store")
+      in
+      let records = Delegation_authority.Checked_ancestry.records ancestry in
+      let%bind () =
+        match records with
+        | leaf :: _
+          when Descendant_preparation.matches_delegation
+                 preparation
+                 (Agent_store.Delegation_store.reference leaf)
+               && Option.exists leaf.admission.goal_origin ~f:(fun origin ->
+                 Agent_store.Delegation_goal_origin.equal origin preparation.origin) ->
+          Ok ()
+        | [] | _ :: _ ->
+          Error
+            (error
+               Conflict
+               "descendant routes require exact complete actual child origin")
+      in
+      Ok (source_owner, records)
+    | Begin (route, reservations) ->
+      let preparation = R.Reservation_set.preparation reservations in
+      let%bind () =
+        R.Reservation_set.check_next reservations ~scope:(R.Root_route.scope route)
+      in
+      let%bind () = descendant_route_actor t ~factual:false route in
+      let%bind () = Descendant_preparation.check_basis preparation in
+      if phys_equal route.preparation preparation
+      then Ok (route.source_owner, route.records)
+      else Error (error Conflict "descendant route belongs to another preparation")
+    | Commit attempt ->
+      let%bind () = descendant_route_actor t ~factual:false attempt.route in
+      let%bind () = Descendant_preparation.check_basis attempt.preparation in
+      if phys_equal attempt.basis.state t.state
+      then Ok (attempt.route.source_owner, attempt.route.records)
+      else Error (error Conflict "root reserve original basis changed")
+    | Reconcile attempt ->
+      let%map () = descendant_route_actor t ~factual:true attempt.route in
+      attempt.route.source_owner, attempt.route.records
+    | Refresh_reserved reservation ->
+      let%bind () = descendant_route_actor t ~factual:false reservation.route in
+      let%map () = Descendant_preparation.check_basis reservation.preparation in
+      reservation.route.source_owner, reservation.route.records
+    | Close (reservation, closed) ->
+      let%bind () = descendant_route_actor t ~factual:true reservation.route in
+      if
+        Descendant_preparation.Closed_before_writer.belongs_to
+          closed
+          ~preparation:reservation.preparation
+      then Ok (reservation.route.source_owner, reservation.route.records)
+      else Error (error Conflict "root close has another physical child seal")
+    | Import (source_owner, observation) ->
+      let%bind controller = child_accounting_owner t ~source_owner in
+      if
+        Runtime_source_owner.matches
+          source_owner
+          observation.Child_usage_observation.source_owner
+        && Recurrence_controller.same_store controller observation.controller
+        && Agent_protocol.Id.Session.equal
+             observation.reference.key.parent_session_id
+             t.state.identity.session_id
+      then Ok (source_owner, [])
+      else Error (error Conflict "root import has another Factory/Store/parent")
+    | Refresh_admitted (reservation, acknowledgement, confirmation) ->
+      let%map () =
+        check_descendant_admitted_owner t reservation acknowledgement confirmation
+      in
+      reservation.route.source_owner, reservation.route.records
+  in
+  let%map basis = capture_child_accounting_basis t ~source_owner in
+  Q.{ basis; records; operation }
+;;
+
+(* Outer phase only, after capture reply. No Actor/Owner/Registry lock held. *)
+let observe_descendant_root
+  : type outcome.
+    t
+    -> outcome Descendant_root_request.capture
+    -> (outcome Descendant_root_request.observed, Agent_protocol.Error.t) result
+  =
+  fun t captured ->
+  let module D = Agent_store.Delegation_store in
+  let open Result.Let_syntax in
+  let%bind () = check_child_accounting_capture t captured.basis in
+  let factual = Descendant_root_request.factual captured.operation in
+  let%bind () =
+    List.fold_result captured.records ~init:() ~f:(fun () expected ->
+      let result =
+        Recurrence_controller.resolve_delegation
+          captured.basis.controller
+          (D.reference expected)
+      in
+      let%bind () = check_child_accounting_capture t captured.basis in
+      let%bind actual = result in
+      if
+        if factual
+        then D.Reference.equal (D.reference actual) (D.reference expected)
+        else
+          D.equal_record actual expected
+          && Option.is_none actual.revocation
+          && D.equal_stage actual.stage Linked
+      then Ok ()
+      else Error (error Conflict "descendant actual private ancestry changed"))
+  in
+  let%bind child_current =
+    match captured.operation with
+    | Import (_, observation) ->
+      let result = observation.Child_usage_observation.refresh_read () in
+      let%bind () = check_child_accounting_capture t captured.basis in
+      let%bind current = result in
+      let result =
+        Recurrence_controller.resolve_delegation
+          captured.basis.controller
+          observation.reference
+      in
+      let%bind () = check_child_accounting_capture t captured.basis in
+      let%bind record = result in
+      let%bind children =
+        Result.of_option
+          captured.basis.state.child_contributions
+          ~error:(error Conflict "root import has no acknowledged child frontier")
+      in
+      let%bind origin =
+        Child_contributions.origin children ~reference:observation.reference
+      in
+      if
+        Option.equal
+          Agent_store.Delegation_goal_origin.equal
+          origin
+          record.admission.goal_origin
+      then Ok (Some current)
+      else
+        Error (error Conflict "root import lower origin differs from retained frontier")
+    | Bind _
+    | Begin _
+    | Commit _
+    | Reconcile _
+    | Refresh_reserved _
+    | Refresh_admitted _
+    | Close _ -> Ok None
+  in
+  let result =
+    Recurrence_controller.observe captured.basis.controller captured.basis.state
+  in
+  let%bind () = check_child_accounting_capture t captured.basis in
+  let%bind current = result in
+  let%map () = check_child_accounting_basis t captured.basis ~current in
+  Descendant_root_request.{ captured; current; child_current }
+;;
+
+let descendant_observed_check t (observed : _ Descendant_root_request.observed) =
+  check_child_accounting_basis t observed.captured.basis ~current:observed.current
+;;
+
+let descendant_pending state (route : Descendant_admission_data.Root_route.t) =
+  let%bind.Result accounting, _ = descendant_components state in
+  let scope = Goal_descendant_root_route.scope route.association in
+  Goal_descendants.branches
+    accounting
+    ~goal_id:(Agent_store.Delegation_goal_origin.Scope.goal_id scope)
+  |> List.find ~f:(fun branch ->
+    Agent_store.Delegation_goal_origin.Scope.equal
+      (Goal_descendants.Branch.scope branch)
+      scope)
+  |> Result.of_option ~error:(error Conflict "actual descendant branch is absent")
+  |> Result.map ~f:Goal_descendants.Branch.pending
+;;
+
+let descendant_exact_pending state (reservation : Descendant_admission_data.Reservation.t)
+  =
+  let%bind.Result actual = descendant_pending state reservation.route in
+  if Option.exists actual ~f:(Goal_descendant_pending.equal reservation.pending)
+  then Ok ()
+  else Error (error Conflict "actual root pending differs from reservation ACK")
+;;
+
+let descendant_hold t observed attempt reason =
+  let module R = Descendant_admission_data in
+  let open Result.Let_syntax in
+  let goal_id =
+    Agent_store.Delegation_goal_origin.Scope.goal_id
+      (R.Root_route.scope attempt.R.Reservation_attempt.route)
+  in
+  let%bind delta = Goal_charge_admission.hold_delta t.state ~goal_id ~reason in
+  let%bind () =
+    match delta with
+    | None -> Ok ()
+    | Some delta ->
+      let%bind candidate = prepare_transition t ~delta ~payloads:[] in
+      install
+        ~admission_hold:goal_id
+        ~check_before_commit:(fun () ->
+          let%bind () = descendant_observed_check t observed in
+          let%bind () = Descendant_preparation.check_basis attempt.preparation in
+          Goal_root_policy.fresh attempt.policy ~state:t.state ~now:(t.services.now ())
+          |> Result.map ~f:ignore)
+        t
+        candidate
+  in
+  Error (error Permission_denied "current root Goal policy holds descendant admission")
+;;
+
+let descendant_reservation_from_pending
+      (attempt : Descendant_admission_data.Reservation_attempt.t)
+      pending
+  =
+  let reservation : Descendant_admission_data.Reservation.t =
+    { attempt_identity = attempt.identity
+    ; route = attempt.route
+    ; preparation = attempt.preparation
+    ; policy = attempt.policy
+    ; pending
+    ; closed = None
+    }
+  in
+  attempt.planned_pending <- Some pending;
+  attempt.acknowledged <- Some reservation;
+  reservation
+;;
+
+let commit_descendant_reservation
+      t
+      observed
+      (attempt : Descendant_admission_data.Reservation_attempt.t)
+  =
+  let module R = Descendant_admission_data in
+  let module G = Agent_protocol.Goal in
+  let open Result.Let_syntax in
+  match R.Reservation_attempt.outcome attempt with
+  | Acknowledged reservation -> Ok (R.Reserve_result.Reserved reservation)
+  | Attempt_unconfirmed -> Ok (R.Reserve_result.Attempt_unconfirmed attempt)
+  | Not_attempted ->
+    let%bind () = descendant_observed_check t observed in
+    let%bind () = Descendant_preparation.check_basis attempt.preparation in
+    let%bind () = descendant_route_actor t ~factual:false attempt.route in
+    let%bind () = descendant_route_data t.state attempt.route in
+    let%bind () =
+      if phys_equal attempt.basis.state t.state
+      then Ok ()
+      else Error (error Conflict "root reservation original basis changed")
+    in
+    let%bind policy =
+      Goal_root_policy.fresh attempt.policy ~state:t.state ~now:(t.services.now ())
+    in
+    (match policy with
+     | Hold reason -> descendant_hold t observed attempt reason
+     | Allow ->
+       let scope = R.Root_route.scope attempt.route in
+       let%bind goal, account = descendant_root_account t.state scope in
+       let occurrence = Descendant_preparation.occurrence attempt.preparation in
+       let dimension = Goal_descendant_occurrence.dimension occurrence in
+       let local_count, ceiling, count_reason =
+         match dimension with
+         | Attempt ->
+           ( Goal_accounting.admitted_attempts account
+           , G.Budget.admitted_attempts (G.budget goal)
+           , G.Budget.Dimension.Admitted_attempts )
+         | Host_turn ->
+           ( Goal_accounting.admitted_turns account
+           , G.Budget.admitted_turns (G.budget goal)
+           , G.Budget.Dimension.Admitted_turns )
+       in
+       let%bind accounting, children = descendant_components t.state in
+       let%bind reserved =
+         Goal_descendants.reserve
+           accounting
+           ~children
+           ~scope
+           ~occurrence
+           ~local_count
+           ~ceiling
+       in
+       (match reserved with
+        | Blocked Exhausted ->
+          descendant_hold t observed attempt (Budget_gate count_reason)
+        | Blocked ((Reserved | Unknown) as availability) ->
+          Ok (R.Reserve_result.Blocked availability)
+        | Blocked Available ->
+          Error (error Invalid_state "root reserve returned blocked Available")
+        | Already_pending _ ->
+          (* DATA equality cannot authenticate the physical producer owning an
+             earlier pending. Same-attempt ACK/reconciliation use their retained
+             native cells; a fresh attempt cannot adopt or later close it. *)
+          Ok (R.Reserve_result.Blocked Goal_descendants.Availability.Reserved)
+        | Reserved (update, _) ->
+          let%bind candidate =
+            prepare_transition
+              t
+              ~delta:(Session_delta.Goal_descendants_changed update)
+              ~payloads:[]
+          in
+          let%bind acknowledgement =
+            Root_reserve_acknowledgement.prepare attempt ~previous:t.state ~candidate
+          in
+          let final () =
+            let%bind () = descendant_observed_check t observed in
+            let%bind () = Descendant_preparation.check_basis attempt.preparation in
+            let%bind () =
+              Root_reserve_acknowledgement.check_basis
+                acknowledgement
+                ~state:t.state
+                ~candidate
+            in
+            let%bind decision =
+              Goal_root_policy.fresh
+                attempt.policy
+                ~state:t.state
+                ~now:(t.services.now ())
+            in
+            match decision with
+            | Allow -> descendant_observed_check t observed
+            | Hold _ ->
+              Error
+                (error
+                   Permission_denied
+                   "root fresh policy changed before reserve writer")
+          in
+          let result =
+            install
+              ~root_reserve_acknowledgement:acknowledgement
+              ~commit_attempted:attempt.writer_attempted
+              ~check_before_commit:final
+              t
+              candidate
+          in
+          (match R.Reservation_attempt.outcome attempt with
+           | Acknowledged reservation -> Ok (R.Reserve_result.Reserved reservation)
+           | Attempt_unconfirmed -> Ok (R.Reserve_result.Attempt_unconfirmed attempt)
+           | Not_attempted ->
+             Result.bind result ~f:(fun () ->
+               Error (error Invalid_state "root writer returned without reservation ACK")))))
+;;
+
+let reconcile_descendant_reservation
+      t
+      observed
+      (attempt : Descendant_admission_data.Reservation_attempt.t)
+  =
+  let module R = Descendant_admission_data in
+  let open Result.Let_syntax in
+  let%bind () = descendant_observed_check t observed in
+  let%bind () = descendant_route_actor t ~factual:true attempt.route in
+  let%bind () = descendant_route_data t.state attempt.route in
+  match R.Reservation_attempt.outcome attempt with
+  | Acknowledged reservation -> Ok (R.Reserve_result.Reserved reservation)
+  | Not_attempted ->
+    Error
+      (error Conflict "unattempted root request has no durable reservation to reconcile")
+  | Attempt_unconfirmed ->
+    let%bind actual = descendant_pending t.state attempt.route in
+    (match attempt.planned_pending, actual with
+     | Some planned, Some actual when Goal_descendant_pending.equal planned actual ->
+       Ok (R.Reserve_result.Reserved (descendant_reservation_from_pending attempt actual))
+     | None, _ | Some _, _ -> Ok (R.Reserve_result.Attempt_unconfirmed attempt))
+;;
+
+(* Authenticate retained ACK custody without old owner liveness, policy or
+   source callbacks. A reconstructed actual Actor may observe the same durable
+   source under its genuine current Factory/Store/controller. *)
+let descendant_usage_source
+      (basis : Child_accounting_basis.t)
+      (source : Descendant_usage.Source.t)
+  =
+  let open Result.Let_syntax in
+  let%bind installed, controller, source_owner =
+    match source with
+    | Descendant_usage.Source.Acknowledged acknowledgement ->
+      let%bind () = check_descendant_ack acknowledgement in
+      let preparation = acknowledgement.preparation in
+      let%map () =
+        if
+          Agent_protocol.Session_ref.equal
+            preparation.session
+            (Recurrence_controller.session preparation.controller)
+          && Agent_protocol.Session_ref.equal
+               preparation.session
+               (Goal_descendant_occurrence.Frame.session
+                  (Goal_descendant_occurrence.frame preparation.occurrence))
+          && Option.equal
+               Agent_store.Delegation_store.Reference.equal
+               preparation.before.spec.delegation
+               acknowledgement.installed.spec.delegation
+          && Option.exists
+               acknowledgement.installed.goal_descendants
+               ~f:(fun accounting ->
+                 Option.exists
+                   (Goal_descendants.origin accounting)
+                   ~f:(Agent_store.Delegation_goal_origin.equal preparation.origin))
+        then Ok ()
+        else Error (error Conflict "factual child ACK differs from its original source")
+      in
+      acknowledgement.installed, preparation.controller, preparation.source_owner
+    | Imported acknowledgement ->
+      Ok
+        ( acknowledgement.installed
+        , acknowledgement.controller
+        , acknowledgement.source_owner )
+  in
+  let%bind () =
+    if
+      Runtime_source_owner.matches basis.Child_accounting_basis.source_owner source_owner
+      && Recurrence_controller.same_store basis.controller controller
+      && Agent_protocol.Session_ref.equal
+           (Recurrence_controller.session basis.controller)
+           (Recurrence_controller.session controller)
+      && Agent_protocol.Id.Session.equal
+           installed.identity.session_id
+           basis.state.identity.session_id
+    then Ok ()
+    else Error (error Conflict "factual ACK source has another Factory/Store/session")
+  in
+  let%bind reference =
+    Result.of_option
+      installed.spec.delegation
+      ~error:(error Conflict "factual ACK source has no own delegation reference")
+  in
+  let%bind accounting =
+    Result.of_option
+      installed.goal_descendants
+      ~error:(error Conflict "factual ACK source has no descendant accounting")
+  in
+  let%bind origin =
+    Result.of_option
+      (Goal_descendants.origin accounting)
+      ~error:(error Conflict "factual ACK source has historical Unknown origin")
+  in
+  (* Reset_generation preserves accounting. The old ACK proves a durable
+     occurrence, not fresh generation eligibility; current snapshot/Included
+     receipt validation decides what can actually confirm after a reset. *)
+  let%map () =
+    if
+      Agent_protocol.Session_ref.equal
+        (Goal_descendants.session accounting)
+        (Recurrence_controller.session controller)
+      && Agent_protocol.Id.Session.equal
+           reference.child_session_id
+           installed.identity.session_id
+    then Ok ()
+    else
+      Error (error Conflict "factual ACK source differs from its full accounting session")
+  in
+  reference, origin
+;;
+
+let capture_descendant_usage_internal t ~source_owner ~source =
+  let open Result.Let_syntax in
+  let%bind basis = capture_child_accounting_basis t ~source_owner in
+  let%map reference, origin = descendant_usage_source basis source in
+  Descendant_usage.{ basis; source; reference; origin }
+;;
+
+let observe_descendant_usage_external t (captured : Descendant_usage.captured) =
+  let%map.Result record, current =
+    observe_child_accounting_source t captured.basis ~reference:captured.reference
+  in
+  Descendant_usage.{ captured; record; current }
+;;
+
+let check_descendant_usage_source t (observed : Descendant_usage.observed) =
+  let module D = Agent_store.Delegation_store in
+  let module O = Agent_store.Delegation_goal_origin in
+  let open Result.Let_syntax in
+  let captured = observed.captured in
+  let%bind () = check_child_accounting_basis t captured.basis ~current:observed.current in
+  let%bind reference, origin = descendant_usage_source captured.basis captured.source in
+  if
+    D.Reference.equal reference captured.reference
+    && O.equal origin captured.origin
+    && D.Reference.equal reference (D.reference observed.record)
+    && Option.exists observed.record.admission.goal_origin ~f:(O.equal origin)
+    && Agent_protocol.Id.Session.equal
+         reference.child_session_id
+         t.state.identity.session_id
+    && Agent_protocol.Id.Prompt_revision.equal
+         reference.revision_id
+         t.state.spec.prompt_revision_id
+    && Option.exists t.state.spec.delegation ~f:(D.Reference.equal reference)
+    && Option.exists t.state.goal_descendants ~f:(fun accounting ->
+      Agent_protocol.Session_ref.equal
+        (Goal_descendants.session accounting)
+        (Recurrence_controller.session captured.basis.controller)
+      && Option.exists (Goal_descendants.origin accounting) ~f:(O.equal origin))
+  then Ok ()
+  else
+    Error
+      (error Conflict "factual ACK source private reference/origin/accounting changed")
+;;
+
+let observe_descendant_usage_internal
+      t
+      (observed : Descendant_usage.observed)
+      ~refresh_read
+  =
+  let open Result.Let_syntax in
+  let%bind () = check_descendant_usage_source t observed in
+  let%bind snapshot = Child_accounting.snapshot observed.captured.basis.state in
+  let%bind () =
+    if
+      Option.exists snapshot ~f:(fun snapshot ->
+        Agent_store.Delegation_store.Reference.equal
+          (Child_usage_snapshot.reference snapshot)
+          observed.captured.reference)
+    then Ok ()
+    else
+      Error (error Conflict "factual ACK source has no exact initialized usage snapshot")
+  in
+  let%map () = check_descendant_usage_source t observed in
+  let captured = observed.captured in
+  Child_usage_observation.
+    { controller = captured.basis.controller
+    ; source_owner = Runtime_source_owner.identity captured.basis.source_owner
+    ; reference = captured.reference
+    ; snapshot
+    ; refresh_read
+    }
+;;
+
+let refresh_descendant_reserved
+      t
+      observed
+      (reservation : Descendant_admission_data.Reservation.t)
+  =
+  let open Result.Let_syntax in
+  let check () =
+    let%bind () = descendant_observed_check t observed in
+    let%bind () = descendant_route_actor t ~factual:false reservation.route in
+    let%bind () = Descendant_preparation.check_basis reservation.preparation in
+    let%bind () = descendant_exact_pending t.state reservation in
+    let%bind policy =
+      Goal_root_policy.fresh reservation.policy ~state:t.state ~now:(t.services.now ())
+    in
+    let%bind () =
+      match policy with
+      | Allow -> Ok ()
+      | Hold _ ->
+        Error (error Permission_denied "reserved root fresh policy currently holds work")
+    in
+    descendant_observed_check t observed
+  in
+  let%map () = check () in
+  Descendant_admission_data.Root_before_writer.{ reservation; check_current = check }
+;;
+
+let refresh_descendant_admitted
+      t
+      (observed : Descendant_root_request.Admitted_observed.t)
+      (reservation : Descendant_admission_data.Reservation.t)
+      acknowledgement
+      confirmation
+  =
+  let open Result.Let_syntax in
+  let check () =
+    let%bind () = check_child_accounting_identity t observed.captured.basis in
+    let%bind () =
+      check_descendant_admitted_owner t reservation acknowledgement confirmation
+    in
+    if Recurrence_controller.Retained_owner.is_current observed.owner
+    then Ok ()
+    else Error (error Conflict "child accounting Store observation changed")
+  in
+  let%map () = check () in
+  Descendant_admission_data.Root_admitted.
+    { reservation; acknowledgement; confirmation; check_current = check }
+;;
+
+let close_descendant_before_writer t observed reservation closed =
+  let open Result.Let_syntax in
+  let check () =
+    let%bind () = descendant_observed_check t observed in
+    let%bind () =
+      descendant_route_actor
+        t
+        ~factual:true
+        reservation.Descendant_admission_data.Reservation.route
+    in
+    let%bind () = descendant_route_data t.state reservation.route in
+    if
+      Descendant_preparation.Closed_before_writer.belongs_to
+        closed
+        ~preparation:reservation.preparation
+    then Ok ()
+    else Error (error Conflict "factual pending close has another physical child seal")
+  in
+  let%bind () = check () in
+  let%bind accounting, children = descendant_components t.state in
+  let%bind update =
+    Goal_descendants.close_before_writer accounting ~children ~pending:reservation.pending
+  in
+  let%bind candidate =
+    prepare_transition
+      t
+      ~delta:(Session_delta.Goal_descendants_changed update)
+      ~payloads:[]
+  in
+  let%bind acknowledgement =
+    Root_close_acknowledgement.prepare reservation ~closed ~previous:t.state ~candidate
+  in
+  let result =
+    install
+      ~root_close_acknowledgement:acknowledgement
+      ~check_before_commit:check
+      t
+      candidate
+  in
+  let%bind known = Root_close_acknowledgement.acknowledged reservation ~closed in
+  if known then Ok () else result
+;;
+
+(* Exact current carrier plus retained local terminal heads is positive native
+   re-observation. Duplicate/Stale disposition alone never constructs this ACK.
+   An older snapshot unequal to the actual retained slot cannot confirm. *)
+let descendant_import_receipts state (observation : Child_usage_observation.t) =
+  let module S = Child_usage_snapshot in
+  let module GD = Goal_descendants in
+  let module O = Agent_store.Delegation_goal_origin in
+  let open Result.Let_syntax in
+  let%bind accounting, children = descendant_components state in
+  let%bind snapshot =
+    Result.of_option
+      observation.snapshot
+      ~error:(error Conflict "historical absence cannot confirm descendant usage")
+  in
+  let%bind retained =
+    Child_contributions.snapshot children ~reference:observation.reference
+  in
+  let%bind () =
+    if
+      Option.exists retained ~f:(fun actual ->
+        String.equal (S.digest actual) (S.digest snapshot))
+    then Ok ()
+    else
+      Error (error Conflict "factual import is not the exact retained child observation")
+  in
+  let%map scopes =
+    Result.of_option
+      (S.goal_scopes snapshot)
+      ~error:(error Conflict "historical scoped absence cannot confirm descendant usage")
+  in
+  List.filter_map scopes ~f:(fun projected ->
+    let scope = S.Goal_scope.scope projected in
+    Option.bind (S.Goal_scope.included projected) ~f:(fun receipt ->
+      if
+        List.exists
+          (GD.branches accounting ~goal_id:(O.Scope.goal_id scope))
+          ~f:(fun branch ->
+            O.Scope.equal (GD.Branch.scope branch) scope
+            &&
+            match GD.Branch.last branch with
+            | Some (Included actual) -> Goal_descendant_included.equal actual receipt
+            | Some (No_writer_closed _) | None -> false)
+      then Some receipt
+      else None))
+;;
+
+let import_descendant_usage t observed source_owner observation =
+  let module R = Descendant_admission_data in
+  let open Result.Let_syntax in
+  let before = t.state in
+  let check () =
+    let%bind () = descendant_observed_check t observed in
+    let%bind _ = child_accounting_owner t ~source_owner in
+    let%bind () =
+      Option.value_map
+        observed.Descendant_root_request.child_current
+        ~default:(Error (error Conflict "factual import has no actual child read guard"))
+        ~f:(fun check -> check ())
+    in
+    if
+      Runtime_source_owner.matches
+        source_owner
+        observation.Child_usage_observation.source_owner
+      && Recurrence_controller.same_store
+           observed.captured.basis.controller
+           observation.controller
+      && phys_equal before t.state
+    then Ok ()
+    else Error (error Conflict "factual import physical Factory/Store/basis changed")
+  in
+  let%bind () = check () in
+  let%bind _, children = descendant_components before in
+  let%bind next_children, _, delta =
+    plan_child_usage_import before ~children ~snapshot:observation.snapshot
+  in
+  let%bind changed = child_contributions_changed before next_children in
+  let make installed =
+    let%map receipts = descendant_import_receipts installed observation in
+    R.Import_acknowledgement.
+      { issuing_actor = t.inference_owner_identity
+      ; controller = observed.captured.basis.controller
+      ; source_owner = Runtime_source_owner.identity source_owner
+      ; observation
+      ; installed
+      ; included = receipts
+      }
+  in
+  if not changed
+  then (
+    let%bind () = check () in
+    make before)
+  else (
+    let%bind candidate = prepare_transition t ~delta ~payloads:[] in
+    let%bind acknowledgement = make candidate.state in
+    let installed = ref None in
+    let acknowledgement =
+      Descendant_import_acknowledgement.
+        { previous = before
+        ; candidate
+        ; acknowledgement = Some acknowledgement
+        ; installed
+        }
+    in
+    let result =
+      install
+        ~descendant_import_acknowledgement:acknowledgement
+        ~check_before_commit:check
+        t
+        candidate
+    in
+    match !installed with
+    | Some acknowledgement -> Ok acknowledgement
+    | None ->
+      Result.bind result ~f:(fun () ->
+        Error (error Invalid_state "factual import writer returned without ACK")))
+;;
+
+let consume_descendant_root
+  : type outcome.
+    t
+    -> outcome Descendant_root_request.observed
+    -> (outcome, Agent_protocol.Error.t) result
+  =
+  fun t observed ->
+  let module R = Descendant_admission_data in
+  let open Result.Let_syntax in
+  let%bind () = descendant_observed_check t observed in
+  let captured = observed.captured in
+  ((match captured.operation with
+    | Bind (_, _, preparation) ->
+      let%bind () = Descendant_preparation.check_basis preparation in
+      let%bind accounting, children = descendant_components t.state in
+      let%map associations =
+        Goal_descendant_root_route.select
+          ~session:(Recurrence_controller.session captured.basis.controller)
+          ~scopes:(Descendant_preparation.scopes preparation)
+          ~records:captured.records
+          ~accounting
+          ~children
+      in
+      List.map associations ~f:(fun association ->
+        R.Root_route.
+          { association
+          ; controller = captured.basis.controller
+          ; root_issuer = t.inference_owner_identity
+          ; source_owner = captured.basis.source_owner
+          ; domain = captured.basis.domain
+          ; preparation
+          ; records = captured.records
+          })
+    | Begin (route, reservations) ->
+      let preparation = R.Reservation_set.preparation reservations in
+      let%bind () =
+        R.Reservation_set.check_next reservations ~scope:(R.Root_route.scope route)
+      in
+      let%bind () = descendant_route_actor t ~factual:false route in
+      let%bind () = descendant_route_data t.state route in
+      let%bind () = Descendant_preparation.check_basis preparation in
+      let%bind policy =
+        descendant_policy_for_begin
+          t
+          ~goal_id:
+            (Agent_store.Delegation_goal_origin.Scope.goal_id (R.Root_route.scope route))
+          ~now:(t.services.now ())
+      in
+      let attempt =
+        R.Reservation_attempt.
+          { identity = ref ()
+          ; basis = captured.basis
+          ; route
+          ; preparation
+          ; policy
+          ; writer_attempted = ref false
+          ; planned_pending = None
+          ; acknowledged = None
+          }
+      in
+      let%map () = R.Reservation_set.retain_next reservations attempt in
+      attempt
+    | Commit attempt -> commit_descendant_reservation t observed attempt
+    | Reconcile attempt -> reconcile_descendant_reservation t observed attempt
+    | Refresh_reserved reservation -> refresh_descendant_reserved t observed reservation
+    | Close (reservation, closed) ->
+      close_descendant_before_writer t observed reservation closed
+    | Import (source_owner, observation) ->
+      import_descendant_usage t observed source_owner observation
+    | Refresh_admitted (reservation, acknowledgement, confirmation) ->
+      let%bind owner =
+        Recurrence_controller.retain_owner
+          observed.captured.basis.controller
+          observed.current
+      in
+      let retained =
+        { Descendant_root_request.Admitted_observed.captured = observed.captured; owner }
+      in
+      refresh_descendant_admitted t retained reservation acknowledgement confirmation)
+   : (outcome, Agent_protocol.Error.t) result)
+;;
+
+let consume_descendant_admitted_root
+      t
+      (observed : Descendant_root_request.Admitted_observed.t)
+  =
+  let open Result.Let_syntax in
+  let%bind () = check_descendant_admitted_capture_owner t observed.captured in
+  let%bind () =
+    if Recurrence_controller.Retained_owner.is_current observed.owner
+    then Ok ()
+    else Error (error Conflict "retained child accounting Store owner changed")
+  in
+  let%bind status = descendant_admitted_capture_state t observed.captured in
+  match status with
+  | Descendant_root_request.Admitted_refresh.State_changed ->
+    Ok Descendant_root_request.Admitted_refresh.State_changed
+  | Current () ->
+    (match observed.captured.operation with
+     | Refresh_admitted (reservation, acknowledgement, confirmation) ->
+       let%map view =
+         refresh_descendant_admitted t observed reservation acknowledgement confirmation
+       in
+       Descendant_root_request.Admitted_refresh.Current view)
+;;
+
+let descendant_confirmation = Goal_descendant_admission_custody.descendant_confirmation
 
 let finish_invocation t execution outcome requests commit_starts authoring_reference =
   let open Result.Let_syntax in
@@ -23955,117 +31711,6 @@ let admitted_inference_startup ?constructor ?goal_runtime t execution =
             ~f:(fun scope -> Goal_runtime scope)))
 ;;
 
-let admitted_inference_continuation (selected : Admitted_inference.t) =
-  match selected.startup with
-  | Ordinary | Goal_runtime _ -> None
-  | Initialization (_, Initial continuation) -> Some continuation
-  | Initialization (_, (Existing_goal _ | Delegated_load _)) -> None
-  | Input scope -> Some scope.continuation
-  | Authored scope ->
-    if held_authored_handoff_acknowledged scope then None else Some scope.continuation
-;;
-
-let admitted_goal_construction (selected : Admitted_inference.t) =
-  match selected.startup with
-  | Initialization (_, Existing_goal continuation) ->
-    Some continuation.binding.preparation
-  | Goal_runtime scope ->
-    (match scope.continuation.binding.preparation.runtime_phase with
-     | Handed_off (actual, _) when phys_equal actual scope -> None
-     | _ -> Some scope.continuation.binding.preparation)
-  | Ordinary | Initialization (_, (Initial _ | Delegated_load _)) | Input _ | Authored _
-    -> None
-;;
-
-let admitted_inference_owner t (selected : Admitted_inference.t) =
-  let open Result.Let_syntax in
-  let%bind actual = inference_registration t selected.owner selected.handle in
-  let%bind () =
-    if phys_equal actual selected.registration
-    then Ok ()
-    else Error (error Conflict "admitted inference registration was replaced")
-  in
-  let%bind () =
-    let ledger = t.state.inference_ledger in
-    if
-      Agent_protocol.Id.Session.equal
-        (Inference_ledger.Handle.session_id selected.handle)
-        (Inference_ledger.session_id ledger)
-      && Int.equal
-           (Inference_ledger.Handle.generation selected.handle)
-           (Inference_ledger.generation ledger)
-      &&
-      match
-        ( selected.tracking
-        , Inference_ledger.find
-            ledger
-            ~ordinal:(Inference_ledger.Handle.ordinal selected.handle) )
-      with
-      | Tracked, Some row ->
-        Inference_ledger.Handle.equal (Inference_ledger.Row.handle row) selected.handle
-      | Untracked _, None -> true
-      | Tracked, None | Untracked _, Some _ -> false
-    then Ok ()
-    else Error (error Conflict "admitted inference canonical ledger handle changed")
-  in
-  let%bind () =
-    if Inference_owner.Registration.policy_is_current selected.registration
-    then Ok ()
-    else Error (error Permission_denied "goal inference policy changed")
-  in
-  match selected.startup with
-  | Ordinary -> Ok ()
-  | Goal_runtime scope ->
-    let%bind () = goal_runtime_scope_basis t scope in
-    (match scope.continuation.binding.preparation.runtime_phase with
-     | Handed_off (actual, _) when phys_equal actual scope -> Ok ()
-     | _ -> scope.continuation.binding.preparation.registered_basis ())
-  | Initialization (scope, construction) ->
-    let%bind () = validate_initialization_scope_basis t scope in
-    let%bind () =
-      if
-        Option.exists (Initialization_scope.construction scope) ~f:(fun actual ->
-          Preparation_owner.same
-            (Runtime_construction.preparation_owner actual)
-            (Runtime_construction.preparation_owner construction))
-      then Ok ()
-      else Error (error Conflict "admitted initializer owner changed")
-    in
-    (match construction with
-     | Initial continuation ->
-       if Option.exists t.held_activation ~f:(phys_equal continuation.target)
-       then continuation.target.owned_basis ()
-       else Error (error Conflict "admitted initializer activation changed")
-     | Existing_goal continuation -> continuation.binding.preparation.registered_basis ()
-     | Delegated_load load -> load.preparation.basis ())
-  | Input scope ->
-    let%bind () = Held_input_scope.parsing scope in
-    let%bind () = input_scope_basis t scope in
-    input_graph_basis t scope selected.owner
-  | Authored scope ->
-    if held_authored_handoff_acknowledged scope
-    then Ok ()
-    else held_authored_basis t scope
-;;
-
-let refresh_admitted_inference t selected =
-  let open Result.Let_syntax in
-  let%bind () = admitted_inference_owner t selected in
-  let%bind () =
-    Option.value_map
-      (admitted_inference_continuation selected)
-      ~default:(Ok ())
-      ~f:(fun continuation -> continuation.refresh_admitted_inference ())
-  in
-  let%bind () =
-    Option.value_map
-      (admitted_goal_construction selected)
-      ~default:(Ok ())
-      ~f:(fun preparation -> preparation.registered_refresh ())
-  in
-  admitted_inference_owner t selected
-;;
-
 let check_inference_allocation
       t
       (selected : Admitted_inference.t)
@@ -24178,7 +31823,40 @@ let check_inference_allocation
   check_basis ()
 ;;
 
-let allocate_inference t execution owner relation configuration =
+let apply_inference_hold
+      t
+      ~(basis : inference_basis)
+      ~constructor
+      ~goal_runtime
+      ~goal_id
+      ~delta
+  =
+  let open Result.Let_syntax in
+  match delta with
+  | None -> Ok ()
+  | Some delta ->
+    (match constructor with
+     | Some scope ->
+       initialization_transition ~admission_hold:goal_id t scope ~delta ~payloads:[]
+     | None when Option.is_some goal_runtime ->
+       goal_runtime_transition
+         ~admission_hold:goal_id
+         t
+         (Option.value_exn goal_runtime)
+         ~delta
+         ~payloads:[]
+       |> Result.map ~f:ignore
+     | None ->
+       transition
+         ?run_preparation:basis.preparation
+         ~admission_hold:goal_id
+         t
+         ~delta
+         ~payloads:[]
+       |> Result.map ~f:ignore)
+;;
+
+let prepare_runtime_attempt ?origin_observation t execution owner relation configuration =
   let open Result.Let_syntax in
   let%bind () =
     match execution with
@@ -24236,33 +31914,18 @@ let allocate_inference t execution owner relation configuration =
       ~dimension:Attempt
   in
   match decision with
+  | Deferred deferred -> Error (goal_capacity_deferred deferred)
   | Held { goal_id; reason = _; delta } ->
     let%bind () =
-      match delta with
-      | None -> Ok ()
-      | Some delta ->
-        (match constructor with
-         | Some scope ->
-           initialization_transition ~admission_hold:goal_id t scope ~delta ~payloads:[]
-         | None when Option.is_some goal_runtime ->
-           goal_runtime_transition
-             ~admission_hold:goal_id
-             t
-             (Option.value_exn goal_runtime)
-             ~delta
-             ~payloads:[]
-           |> Result.map ~f:ignore
-         | None ->
-           transition
-             ?run_preparation:basis.preparation
-             ~admission_hold:goal_id
-             t
-             ~delta
-             ~payloads:[]
-           |> Result.map ~f:ignore)
+      apply_inference_hold t ~basis ~constructor ~goal_runtime ~goal_id ~delta
     in
     Error (error Permission_denied "goal policy holds fresh inference admission")
   | (Unbound | Ready _) as decision ->
+    let%bind inherited = inference_requires_descendant_admission t origin_observation in
+    let%bind () =
+      if inherited then require_available_descendant_admission_slot t else Ok ()
+    in
+    let before = t.state.inference_ledger in
     let%bind protected_ordinals =
       Canonical_usage_update.protected_ordinals
         t.state.inference_ledger
@@ -24288,7 +31951,7 @@ let allocate_inference t execution owner relation configuration =
           ( Goal_charge_admission.goal_id ready
           , Goal_accounting.Admission.Attempt
               { episode = Goal_charge_admission.episode ready; handle; tracking } )
-      | Held _ -> assert false
+      | Held _ | Deferred _ -> assert false
     in
     let allocation_scope =
       (* Only the shared admitted constructor opens an immutable Init graph.
@@ -24314,81 +31977,422 @@ let allocate_inference t execution owner relation configuration =
         ; goal_id = Option.map admission ~f:fst
         })
     in
-    let%bind () =
-      commit_inference_ledger
-        ?allocation_acknowledgement
-        ?run_preparation:basis.preparation
-        ?admission
-        ?check_before_commit:
-          (match goal_constructor with
-           | Some (scope, construction) ->
-             Some
-               (fun () ->
-                 let%bind () = check_runtime_construction_effect construction in
-                 let%bind () = current.check_current () in
-                 let%bind () = validate_initialization_scope_basis t scope in
-                 Runtime_construction.check_basis construction)
-           | None ->
-             (match goal_runtime, execution with
-              | Some scope, _ ->
-                Some
-                  (fun () ->
-                    let%bind () =
-                      check_runtime_construction_effect (Existing_goal scope.continuation)
-                    in
-                    let%bind () = current.check_current () in
-                    goal_runtime_scope_basis t scope)
-              | None, Inference_held_input scope ->
-                Some
-                  (fun () ->
-                    let%bind () = check_held_effect scope.continuation in
-                    let%bind () = Held_input_scope.parsing scope in
-                    input_graph_basis t scope owner)
-              | ( None
-                , ( Inference_initialization _
-                  | Inference_initialization_job _
-                  | Inference_operation _
-                  | Inference_invocation _
-                  | Inference_moderator _
-                  | Inference_event _
-                  | Inference_job _ ) ) -> held_startup_effect t basis.preparation))
-        t
-        ledger
+    let original_check =
+      match goal_constructor with
+      | Some (scope, construction) ->
+        Some
+          (fun () ->
+            let%bind () = check_runtime_construction_effect construction in
+            let%bind () = current.check_current () in
+            let%bind () = validate_initialization_scope_basis t scope in
+            Runtime_construction.check_basis construction)
+      | None ->
+        (match goal_runtime, execution with
+         | Some scope, _ ->
+           Some
+             (fun () ->
+               let%bind () =
+                 check_runtime_construction_effect (Existing_goal scope.continuation)
+               in
+               let%bind () = current.check_current () in
+               goal_runtime_scope_basis t scope)
+         | None, Inference_held_input scope ->
+           Some
+             (fun () ->
+               let%bind () = check_held_effect scope.continuation in
+               let%bind () = Held_input_scope.parsing scope in
+               input_graph_basis t scope owner)
+         | ( None
+           , ( Inference_initialization _
+             | Inference_initialization_job _
+             | Inference_operation _
+             | Inference_invocation _
+             | Inference_moderator _
+             | Inference_event _
+             | Inference_job _ ) ) -> held_startup_effect t basis.preparation)
     in
-    (match allocation_acknowledgement with
-     | Some _ -> ()
-     | None ->
-       Graph_owner.register
-         owner
-         ~handle
-         ~configuration
-         ~goal_id:(Option.map admission ~f:fst));
-    (* Capture the SAME actual registration and startup scope now. A failed
+    if inherited
+    then (
+      let check_before () =
+        let%bind () = current.check_current () in
+        Option.value_map original_check ~default:(Ok ()) ~f:(fun check -> check ())
+      in
+      let original =
+        Inherited_attempt.Original.Runtime
+          { execution
+          ; basis
+          ; startup = admitted_inference_startup ?constructor ?goal_runtime t execution
+          ; check_before
+          ; admission
+          }
+      in
+      let%map plan =
+        prepare_inherited_attempt
+          t
+          ~owner
+          ~configuration
+          ~before
+          ~after:ledger
+          ~handle
+          ~tracking
+          ~original
+      in
+      Inherited_attempt.Prepared.Inherited plan)
+    else (
+      let%bind () =
+        commit_inference_ledger
+          ?allocation_acknowledgement
+          ?run_preparation:basis.preparation
+          ?admission
+          ?check_before_commit:original_check
+          t
+          ledger
+      in
+      (match allocation_acknowledgement with
+       | Some _ -> ()
+       | None ->
+         Graph_owner.register
+           owner
+           ~initial_preparation:basis.preparation
+           ~handle
+           ~configuration
+           ~goal_id:(Option.map admission ~f:fst));
+      (* Capture the SAME actual registration and startup scope now. A failed
        invariant check is deferred to submission so graph tracking receives the
        acknowledged handle and can release it through its normal finalizer. *)
-    let selected =
-      let%map registration = inference_registration t owner handle in
-      { Admitted_inference.execution
-      ; owner
-      ; registration
-      ; handle
-      ; tracking
-      ; basis
-      ; startup = admitted_inference_startup ?constructor ?goal_runtime t execution
+      let selected =
+        let%map registration = inference_registration t owner handle in
+        { Admitted_inference.execution
+        ; owner
+        ; registration
+        ; handle
+        ; tracking
+        ; basis
+        ; startup = admitted_inference_startup ?constructor ?goal_runtime t execution
+        }
+      in
+      let submission_guard =
+        Inference_runtime.Submission_guard.create ~refresh:(fun () ->
+          let refreshed =
+            let%bind selected = selected in
+            let%bind () = refresh_admitted_inference t selected in
+            call t (Refresh_inference selected)
+          in
+          match refreshed with
+          | Ok check -> check
+          | Error error -> raise (Inference_allocation.Rejected error))
+      in
+      Ok
+        (Inherited_attempt.Prepared.Ordinary
+           (Inference_allocation.Host.create ~handle ~submission_guard)))
+;;
+
+let inherited_attempt_preparation (plan : Inherited_attempt.Plan.t) =
+  match plan.original with
+  | Legacy { preparation } -> preparation
+  | Runtime { basis; _ } -> basis.preparation
+;;
+
+let inherited_attempt_original_check t (plan : Inherited_attempt.Plan.t) =
+  let open Result.Let_syntax in
+  let%bind () = validate_inference_owner t plan.owner in
+  let%bind () =
+    if
+      Int.equal (Graph_owner.generation plan.owner) t.state.identity.generation
+      &&
+      match Graph_owner.phase plan.owner with
+      | Open -> true
+      | Sealed | Finished -> false
+    then Ok ()
+    else Error (error Conflict "inherited inference graph excludes a fresh attempt")
+  in
+  match plan.original with
+  | Legacy { preparation } ->
+    let%bind () = require_selected_or_held_execution t preparation in
+    Option.value_map preparation ~default:(Ok ()) ~f:(check_run_preparation t)
+  | Runtime { check_before; _ } -> check_before ()
+;;
+
+let inherited_attempt_goal_decision t (plan : Inherited_attempt.Plan.t) =
+  match plan.original with
+  | Legacy _ -> Ok None
+  | Runtime { basis; _ } ->
+    Goal_charge_admission.prepare
+      t.state
+      ~attribution:basis.attribution
+      ~now:(t.services.now ())
+      ~dimension:Attempt
+    |> Result.map ~f:Option.some
+;;
+
+let validate_inherited_attempt_goal
+      (plan : Inherited_attempt.Plan.t)
+      (decision : Goal_charge_admission.decision option)
+  =
+  match plan.original, decision with
+  | Legacy _, None -> Ok ()
+  | Runtime { admission = None; _ }, Some Unbound -> Ok ()
+  | ( Runtime
+        { admission = Some (goal_id, Goal_accounting.Admission.Attempt { episode; _ })
+        ; _
+        }
+    , Some (Ready ready) )
+    when Agent_protocol.Id.Goal.equal goal_id (Goal_charge_admission.goal_id ready)
+         && Agent_protocol.Goal_episode.equal
+              episode
+              (Goal_charge_admission.episode ready) -> Ok ()
+  | Runtime _, Some (Deferred deferred) -> Error (goal_capacity_deferred deferred)
+  | Runtime _, Some (Held _) ->
+    Error (error Permission_denied "goal policy holds fresh inference admission")
+  | Legacy _, Some _ | Runtime _, None | Runtime _, Some (Unbound | Ready _) ->
+    Error (error Conflict "inherited inference Goal admission changed before writer")
+;;
+
+let check_inherited_attempt_goal t plan =
+  let%bind.Result decision = inherited_attempt_goal_decision t plan in
+  validate_inherited_attempt_goal plan decision
+;;
+
+let prepare_inherited_attempt_goal t (plan : Inherited_attempt.Plan.t) =
+  let open Result.Let_syntax in
+  let%bind decision = inherited_attempt_goal_decision t plan in
+  let%bind () =
+    match plan.original, decision with
+    | Runtime { basis; startup; _ }, Some (Held { goal_id; delta; reason = _ }) ->
+      let constructor, goal_runtime =
+        match startup with
+        | Initialization (scope, _) -> Some scope, None
+        | Goal_runtime scope -> None, Some scope
+        | Ordinary | Input _ | Authored _ -> None, None
+      in
+      apply_inference_hold t ~basis ~constructor ~goal_runtime ~goal_id ~delta
+    | (Legacy _ | Runtime _), (None | Some (Unbound | Ready _ | Deferred _)) -> Ok ()
+    | Legacy _, Some (Held _) ->
+      Error (error Invalid_state "legacy inference has no bound Goal hold")
+  in
+  validate_inherited_attempt_goal plan decision
+;;
+
+let commit_inherited_attempt t (plan : Inherited_attempt.Plan.t) roots =
+  let module R = Descendant_admission_data in
+  let module A = Inherited_attempt in
+  let open Result.Let_syntax in
+  let preparation = Descendant_admission_slot.preparation plan.slot in
+  match plan.acknowledged with
+  | Some acknowledgement ->
+    let%map () = descendant_admission_slot_owner t plan.slot in
+    A.Committed.Acknowledged acknowledgement
+  | None when !(preparation.writer_attempted) ->
+    let%map () = descendant_admission_slot_owner t plan.slot in
+    A.Committed.Attempt_unconfirmed plan
+  | None ->
+    let%bind () = check_descendant_admission_slot t plan.slot in
+    let%bind () = inherited_attempt_original_check t plan in
+    let%bind () = prepare_inherited_attempt_goal t plan in
+    let%bind () = check_descendant_before_writer roots in
+    let%bind () =
+      if
+        phys_equal roots.R.Before_writer.preparation preparation
+        && phys_equal
+             roots.reservations
+             (Descendant_admission_slot.reservations plan.slot)
+        && phys_equal plan.before t.state.inference_ledger
+      then Ok ()
+      else Error (error Conflict "inherited inference changed its exact prewriter basis")
+    in
+    let admission =
+      match plan.original with
+      | Legacy _ -> None
+      | Runtime { admission; _ } -> admission
+    in
+    let%bind accounting =
+      Canonical_usage_update.prepare
+        plan.before
+        ~accounts:t.state.goal_accounts
+        ~catalog:t.state.goal_catalog
+        ~after:plan.after
+        ~delegated_usage:t.state.delegated_usage
+        ~admission
+    in
+    let%bind descendants, children = descendant_components t.state in
+    let%bind reservations = descendant_reservations roots.reservations in
+    let receipts =
+      List.map reservations ~f:(fun (reservation : R.Reservation.t) ->
+        Goal_descendant_included.create reservation.pending)
+    in
+    let canonical = Goal_descendants.Canonical.Attempt (plan.handle, plan.tracking) in
+    let%bind included =
+      Goal_descendants.record_included
+        descendants
+        ~children
+        ~before:plan.before
+        ~after:plan.after
+        ~canonical
+        ~occurrence:(Descendant_preparation.occurrence preparation)
+        ~receipts
+    in
+    let accounting_deltas =
+      if Canonical_usage_update.accounts_changed accounting
+      then
+        [ Session_delta.Goal_accounts_changed
+            (Option.value_exn (Canonical_usage_update.accounts accounting))
+        ]
+      else []
+    in
+    let delta =
+      Session_delta.Batch
+        ((Session_delta.inference_ledger_update
+            plan.after
+            ~delegated_usage:(Canonical_usage_update.delegated_usage accounting)
+          :: accounting_deltas)
+         @ [ Goal_descendants_changed included ])
+    in
+    let run_preparation = inherited_attempt_preparation plan in
+    let%bind candidate =
+      prepare_transition
+        ?run_preparation
+        t
+        ~delta
+        ~payloads:
+          [ Agent_protocol.Event.Durable.Payload.Session_updated
+              (Session_state.summary { t.state with inference_ledger = plan.after })
+          ]
+    in
+    let descendant =
+      { R.Acknowledgement.preparation
+      ; identity = ref ()
+      ; installed = candidate.state
+      ; candidate
+      ; edge = Attempt { before = plan.before; after = plan.after; canonical }
+      ; receipts
+      ; reservations = roots.reservations
       }
     in
-    let submission_guard =
-      Inference_runtime.Submission_guard.create ~refresh:(fun () ->
-        let refreshed =
-          let%bind selected = selected in
-          let%bind () = refresh_admitted_inference t selected in
-          call t (Refresh_inference selected)
-        in
-        match refreshed with
-        | Ok check -> check
-        | Error error -> raise (Inference_allocation.Rejected error))
+    let%bind slot_acknowledgement =
+      prepare_descendant_admission_slot_ack t plan.slot ~acknowledgement:descendant
     in
-    Ok (Inference_allocation.Host.create ~handle ~submission_guard)
+    let scope =
+      match plan.original with
+      | Legacy _ -> None
+      | Runtime { startup; _ } ->
+        (match startup with
+         | Initialization (scope, _) ->
+           Some (Held_inference_allocation_acknowledgement.Scope.Initialization scope)
+         | Goal_runtime scope -> Some (Goal_runtime scope)
+         | Authored scope -> Some (Authored scope)
+         | Ordinary | Input _ -> None)
+    in
+    let allocation_acknowledgement =
+      Option.map scope ~f:(fun scope ->
+        { Held_inference_allocation_acknowledgement.scope
+        ; owner = plan.owner
+        ; ledger = plan.after
+        ; handle = plan.handle
+        ; configuration = plan.configuration
+        ; goal_id = Option.map admission ~f:fst
+        })
+    in
+    let initialization_acknowledgement =
+      match scope with
+      | Some (Initialization scope) ->
+        Some (Initialization_scope.Acknowledgement.prepare scope candidate.state)
+      | Some (Authored _ | Goal_runtime _) | None -> None
+    in
+    let%bind goal_runtime_acknowledgement =
+      match scope with
+      | Some (Goal_runtime scope) ->
+        Goal_runtime_acknowledgement.prepare t scope ~candidate
+        |> Result.map ~f:Option.some
+      | Some (Authored _ | Initialization _) | None -> Ok None
+    in
+    let selected =
+      ref
+        (Error (error Invalid_state "inherited inference registration is not installed"))
+    in
+    let registration =
+      ref
+        (Error
+           (error Invalid_state "inherited inference graph registration is not installed"))
+    in
+    let original =
+      match plan.original with
+      | Legacy { preparation } ->
+        A.Acknowledgement.Original.Legacy { preparation; registration }
+      | Runtime { execution; basis; startup; _ } ->
+        Runtime { execution; basis; startup; selected }
+    in
+    let acknowledgement =
+      { A.Acknowledgement.descendant
+      ; slot = plan.slot
+      ; owner = plan.owner
+      ; handle = plan.handle
+      ; original
+      }
+    in
+    let acknowledged = Some acknowledgement in
+    let final_check () =
+      let%bind () = inherited_attempt_original_check t plan in
+      let%bind () = check_inherited_attempt_goal t plan in
+      let%bind () = check_descendant_before_writer roots in
+      let%bind () =
+        check_descendant_admission_slot_ack t slot_acknowledgement ~candidate
+      in
+      let%bind () =
+        Option.value_map allocation_acknowledgement ~default:(Ok ()) ~f:(fun ack ->
+          Held_inference_allocation_acknowledgement.check ack ~actor:t ~ledger:plan.after)
+      in
+      let%bind () =
+        Option.value_map
+          initialization_acknowledgement
+          ~default:(Ok ())
+          ~f:Initialization_scope.Acknowledgement.check_basis
+      in
+      Option.value_map goal_runtime_acknowledgement ~default:(Ok ()) ~f:(fun ack ->
+        Goal_runtime_acknowledgement.check ack ~actor:t ~candidate)
+    in
+    let generic_attempted = ref false in
+    let%bind () =
+      persist_transition
+        ~descendant_admission_acknowledgement:slot_acknowledgement
+        ?run_preparation
+        ~commit_attempted:generic_attempted
+        ~check_before_commit:final_check
+        t
+        candidate
+    in
+    install_committed_transition
+      ~descendant_admission_acknowledgement:slot_acknowledgement
+      ?goal_runtime_acknowledgement
+      ?run_preparation
+      ?initialization_acknowledgement
+      t
+      candidate;
+    plan.acknowledged <- acknowledged;
+    (match allocation_acknowledgement with
+     | Some ack -> Held_inference_allocation_acknowledgement.install ack
+     | None ->
+       Graph_owner.register
+         plan.owner
+         ~initial_preparation:run_preparation
+         ~handle:plan.handle
+         ~configuration:plan.configuration
+         ~goal_id:(Option.map admission ~f:fst));
+    registration := inference_registration t plan.owner plan.handle;
+    (match plan.original with
+     | Legacy _ -> ()
+     | Runtime { execution; basis; startup; _ } ->
+       selected
+       := let%map registration = !registration in
+          { Admitted_inference.execution
+          ; owner = plan.owner
+          ; registration
+          ; handle = plan.handle
+          ; tracking = plan.tracking
+          ; basis
+          ; startup
+          });
+    publish_committed_transition t candidate;
+    Ok (A.Committed.Acknowledged acknowledgement)
 ;;
 
 let refresh_inference t (selected : Admitted_inference.t) =
@@ -24404,6 +32408,169 @@ let refresh_inference t (selected : Admitted_inference.t) =
     match check_inference_allocation t selected current with
     | Ok () -> ()
     | Error error -> raise (Inference_allocation.Rejected error)
+;;
+
+let check_inherited_attempt_ack_owner t (ack : Inherited_attempt.Acknowledgement.t) =
+  let open Result.Let_syntax in
+  let%bind () = descendant_admission_slot_owner t ack.slot in
+  let%bind () = check_descendant_ack ack.descendant in
+  if
+    phys_equal ack.descendant.preparation (Descendant_admission_slot.preparation ack.slot)
+    && phys_equal
+         ack.descendant.reservations
+         (Descendant_admission_slot.reservations ack.slot)
+  then Ok ()
+  else Error (error Conflict "inherited inference ACK has another actual slot owner")
+;;
+
+let check_legacy_admitted_inference
+      t
+      (ack : Inherited_attempt.Acknowledgement.t)
+      ~preparation
+      ~registration
+  =
+  let open Result.Let_syntax in
+  let%bind () = check_inherited_attempt_ack_owner t ack in
+  let%bind captured = !registration in
+  let%bind current = inference_registration t ack.owner ack.handle in
+  let%bind () =
+    if
+      phys_equal current captured
+      && Inference_owner.Registration.policy_is_current captured
+    then Ok ()
+    else Error (error Conflict "inherited legacy inference registration changed")
+  in
+  Option.value_map preparation ~default:(Ok ()) ~f:(check_run_preparation t)
+;;
+
+let refresh_inherited_inference
+      t
+      (ack : Inherited_attempt.Acknowledgement.t)
+      confirmation
+      views
+  =
+  let module R = Descendant_admission_data in
+  let open Result.Let_syntax in
+  let%bind () = check_inherited_attempt_ack_owner t ack in
+  let%bind () =
+    if
+      phys_equal confirmation.R.Confirmation.acknowledgement ack.descendant
+      && phys_equal views.R.Admitted_views.acknowledgement ack.descendant
+      && phys_equal views.confirmation confirmation
+    then Ok ()
+    else Error (error Conflict "inherited inference views have another actual ACK")
+  in
+  let%bind original =
+    match ack.original with
+    | Legacy { preparation; registration } ->
+      let%map () = check_legacy_admitted_inference t ack ~preparation ~registration in
+      fun () ->
+        (match check_legacy_admitted_inference t ack ~preparation ~registration with
+         | Ok () -> ()
+         | Error error -> raise (Inference_allocation.Rejected error))
+    | Runtime { selected; _ } ->
+      let%bind selected = !selected in
+      refresh_inference t selected
+  in
+  let check () =
+    let%bind () = check_descendant_host t (Descendant_admission_slot.binding ack.slot) in
+    let%bind () = check_descendant_admitted_views views in
+    match ack.original with
+    | Legacy _ -> Ok ()
+    | Runtime { execution; _ } -> check_execution_descendant t execution
+  in
+  let%map () = check () in
+  fun () ->
+    original ();
+    match check () with
+    | Ok () -> ()
+    | Error error -> raise (Inference_allocation.Rejected error)
+;;
+
+let release_inherited_inference t (ack : Inherited_attempt.Acknowledgement.t) =
+  let open Result.Let_syntax in
+  let%bind () = check_inherited_attempt_ack_owner t ack in
+  match ack.original with
+  | Legacy { preparation = None; _ } -> release_inference t ack.owner ack.handle
+  | Legacy { preparation = Some _; _ } ->
+    release_inference
+      ~owned_graph:
+        { Owned_inference_mutation.scope = Registered ack.owner
+        ; owner = ack.owner
+        ; acknowledgement = Preserve
+        }
+      t
+      ack.owner
+      ack.handle
+  | Runtime { basis; startup; _ } ->
+    let owned_graph =
+      match startup with
+      | Initialization (scope, construction) ->
+        let graph : Runtime_constructor_graph.t =
+          { scope; construction; owner = ack.owner }
+        in
+        Some
+          { Owned_inference_mutation.scope = Initialization graph
+          ; owner = ack.owner
+          ; acknowledgement = Preserve
+          }
+      | Input scope ->
+        Some
+          { Owned_inference_mutation.scope = Input scope
+          ; owner = ack.owner
+          ; acknowledgement = Preserve
+          }
+      | Authored scope ->
+        Some
+          { Owned_inference_mutation.scope = Authored scope
+          ; owner = ack.owner
+          ; acknowledgement = Preserve
+          }
+      | Goal_runtime scope ->
+        Some
+          { Owned_inference_mutation.scope = Goal_runtime scope
+          ; owner = ack.owner
+          ; acknowledgement = Preserve
+          }
+      | Ordinary -> None
+    in
+    release_inference
+      ?owned_graph
+      ?run_preparation:basis.preparation
+      t
+      ack.owner
+      ack.handle
+;;
+
+let handle_inherited_inference_request
+  : type a. t -> a Inherited_attempt.Request.t -> (a, Agent_protocol.Error.t) result
+  =
+  fun t -> function
+  | Capture_origin -> capture_descendant_origin_observation t
+  | Allocate_runtime (origin_observation, execution, owner, relation, configuration) ->
+    prepare_runtime_attempt ?origin_observation t execution owner relation configuration
+  | Prepare_legacy
+      ( origin_observation
+      , run_preparation
+      , owner
+      , relation
+      , operation_id
+      , invocation_id
+      , configuration ) ->
+    let%bind.Result () = require_selected_or_held_execution t run_preparation in
+    prepare_legacy_attempt
+      ?origin_observation
+      ?run_preparation
+      t
+      owner
+      relation
+      operation_id
+      invocation_id
+      configuration
+  | Commit (plan, roots) -> commit_inherited_attempt t plan roots
+  | Refresh (ack, confirmation, views) ->
+    refresh_inherited_inference t ack confirmation views
+  | Release ack -> release_inherited_inference t ack
 ;;
 
 let capture_initialization_recipe_target t scope job_id generation attempt target limits =
@@ -26182,210 +34349,8 @@ let drain_payloads (drain : Runtime_builder.moderator_drain) =
   List.map drain.Runtime_builder.notifications ~f:notification_payload
 ;;
 
-module Goal_operation_phase = struct
-  type t =
-    | Staged
-    | Installed
-    | Closed
-  [@@deriving equal]
-end
-
-(* Capture the real command original before source closure. Only this private
-   actual-ACK installer transfers it to the existing first-prefix owner. *)
-let goal_resume_operation_controller t (scope : Goal_continuation.runtime_scope) =
-  let open Result.Let_syntax in
-  let preparation = scope.continuation.binding.preparation in
-  let old_scope = Run_authorities.scope preparation.binding in
-  let%bind authorization =
-    Run_preparation.Custody.capture_authorization
-      (Goal_continuation.custody preparation)
-      ~owner:t.run_preparation_owner
-      ~state:t.state
-  in
-  let%bind store = require_recurrence_controller t in
-  let policy = preparation.policy in
-  let association : Activation_association.t =
-    { issuer_policy = Goal policy
-    ; check_target =
-        (fun ~store:current ~state ~run ~admission ->
-          if Recurrence_controller.same_store store current
-          then Goal_activation_policy.check_association policy ~state ~run ~admission
-          else Error (error Conflict "Goal continuation Store changed"))
-    }
-  in
-  let phase = ref Goal_operation_phase.Staged in
-  let current = ref None in
-  let structural () =
-    let%bind () =
-      if Goal_operation_phase.equal !phase Installed
-      then Ok ()
-      else Error (error Conflict "Goal continuation Operation owner is not installed")
-    in
-    let%bind () =
-      Runtime_source_preparation.validate_target scope.continuation.binding.source t.state
-    in
-    let%bind index =
-      Result.of_option
-        t.state.run_state
-        ~error:(error Conflict "Goal Operation Run index is absent")
-    in
-    let%bind run =
-      Result.of_option
-        (Run_state.find index preparation.run.id)
-        ~error:(error Conflict "Goal Operation Run is absent")
-    in
-    let%bind () =
-      if Run_authorities.is_current t.run_authorities preparation.binding ~run_id:run.id
-      then Ok ()
-      else Error (error Permission_denied "Goal Operation lost its original binding")
-    in
-    Activation_association.check_target
-      association
-      ~store
-      ~state:t.state
-      ~run
-      ~admission:preparation.admission
-  in
-  let basis () =
-    let%bind () = structural () in
-    match !current with
-    | Some observed when Recurrence_controller.is_current observed -> Ok ()
-    | Some _ | None ->
-      Error (error Conflict "Goal continuation Operation requires fresh Store custody")
-  in
-  let originals () =
-    let%bind () = Run_admission.Scope.check_current old_scope in
-    Run_preparation.Authorization.check authorization t.state
-  in
-  let policy_check () =
-    let%bind () = structural () in
-    let%bind () = Run_admission.Scope.authorize old_scope t.state in
-    let%bind () = Goal_activation_policy.check_admitted_policy policy ~state:t.state in
-    let%bind () = originals () in
-    structural ()
-  in
-  let refresh () =
-    let%bind () = policy_check () in
-    let%bind observed = Recurrence_controller.observe store t.state in
-    current := Some observed;
-    basis ()
-  in
-  let command_loan = preparation.native_command_loan in
-  preparation.native_command_loan <- None;
-  Ok
-    Activation_controller.Operation.
-      { association
-      ; install =
-          (fun () -> if Goal_operation_phase.equal !phase Staged then phase := Installed)
-      ; close =
-          (fun () ->
-            phase := Closed;
-            Option.iter command_loan ~f:Execution_custody.Admission.retire)
-      ; refresh
-      ; policy =
-          (fun () ->
-            let%bind () = basis () in
-            let%bind () = policy_check () in
-            basis ())
-      ; timing =
-          (fun () ->
-            let%bind () = basis () in
-            let%bind () =
-              Goal_activation_policy.check_deadline
-                policy
-                ~state:t.state
-                ~now:(t.services.now ())
-            in
-            basis ())
-      ; authority =
-          (fun () ->
-            let%bind () = basis () in
-            let%bind () = originals () in
-            basis ())
-      ; basis
-      }
-;;
-
-let prepare_goal_operation_ack
-      t
-      (scope : Goal_continuation.runtime_scope)
-      ~operation
-      ~candidate
-  =
-  let open Result.Let_syntax in
-  let continuation = scope.continuation in
-  let preparation = continuation.binding.preparation in
-  let%bind index =
-    Result.of_option
-      t.state.run_state
-      ~error:(error Conflict "Goal Operation Run index is absent")
-  in
-  let%bind run =
-    Result.of_option
-      (Run_state.find index preparation.run.id)
-      ~error:(error Conflict "Goal Operation Run is absent")
-  in
-  let%bind next =
-    Option.bind candidate.Session_transition.state.run_state ~f:(fun index ->
-      Run_state.find index run.id)
-    |> Result.of_option ~error:(error Conflict "Goal Operation candidate lost its Run")
-  in
-  let%bind () =
-    if
-      Agent_protocol.Goal_episode.matches_run
-        (Run_goal_link.episode preparation.link)
-        next
-      && List.exists next.owned_work ~f:(fun work ->
-        match work.Agent_protocol.Run_work.key with
-        | Operation id ->
-          Agent_protocol.Id.Operation.equal id operation.Agent_protocol.Operation.id
-        | Retained _ -> false)
-    then Ok ()
-    else Error (error Conflict "Goal Operation candidate lost its actual ownership")
-  in
-  let%bind handoff =
-    match preparation.cause with
-    | Resume_command _ -> Ok (Goal_runtime_handoff.Resume (Started operation))
-    | Pending_wake { wake; _ } ->
-      (match wake.occurrence with
-       | Subscription_delivery _ ->
-         Ok (Goal_runtime_handoff.Existing_execution (Subscription_turn operation))
-       | Job_completion _ | Delivered_timer _ ->
-         Error (error Invalid_request "queued Goal wake requires an Event claim"))
-    | Claimed_job _ ->
-      Error (error Invalid_request "claimed Goal Job cannot start another Operation")
-  in
-  let%bind controller = goal_resume_operation_controller t scope in
-  let old_scope = Run_authorities.scope preparation.binding in
-  let%bind original =
-    Result.of_option
-      (Run_admission.Scope.original_actor old_scope)
-      ~error:(error Permission_denied "Goal continuation has no original Run authority")
-  in
-  let proof : Held_operation.Proof.t =
-    { scope = old_scope
-    ; run
-    ; admission = preparation.admission
-    ; source = continuation.binding.source
-    ; operation
-    ; worker = scope.worker
-    ; binding = preparation.binding
-    ; controller
-    }
-  in
-  let held : Held_operation.t = { proof; phase = Staged; target_current = None } in
-  let owner : Operation_owner.t =
-    { operation_id = operation.id
-    ; admission = create_agent_admission (Some (create_agent_custody original))
-    ; held = Some held
-    }
-  in
-  ({ previous = t.state; candidate; scope; held; owner; handoff }
-   : Goal_runtime_operation_acknowledgement.t)
-  |> Result.return
-;;
-
 let start_idle_turn_unchecked
+      ?idle_completion
       ?goal_runtime_scope
       ?continuation_custody
       ?follow_up_authority
@@ -26400,7 +34365,7 @@ let start_idle_turn_unchecked
   let open Result.Let_syntax in
   let%bind () = require_selected_execution t in
   let%bind () = require_runtime_admission t in
-  let%bind () = reconcile_foreground_invocations t in
+  let%bind () = reconcile_foreground_invocations ?idle_completion t in
   let operation = create_turn_operation t reason in
   let%bind admission =
     let retention = Pending_disposition.Retention.default in
@@ -26494,6 +34459,23 @@ let start_idle_turn_unchecked
           ~commit_attempted:attempted
           ~plan:(operation, agent_custody)
       in
+      let%bind () =
+        prepare_idle_operation_suffix
+          t
+          idle_completion
+          ~operation
+          ~custody:agent_custody
+          ~installed
+          ~kind:(Idle_completion_data.Turn staged)
+      in
+      let%bind idle_completion_write =
+        prepare_idle_completion_write
+          t
+          idle_completion
+          ~kind:Idle_completion_write.Kind.Start_ordinary_turn
+          ~candidate
+          ~attempted
+      in
       let checked_final () =
         let%bind () = final_check () in
         Turn_admission_staging.check_before_writer
@@ -26505,6 +34487,7 @@ let start_idle_turn_unchecked
         match goal_runtime_scope with
         | None ->
           install
+            ?idle_completion_write
             ~turn_stage:staged
             ?completion_sample
             ~commit_attempted:attempted
@@ -26571,113 +34554,17 @@ let start_idle_turn_unchecked
           ~owner:t.run_preparation_owner
           ~state:t.state
       in
+      let%bind () = check_idle_operation_suffix t idle_completion operation in
       if Option.is_none t.operation_agent_custody
       then (
         install_operation_agent_custody t operation agent_custody;
         installed := true);
       prune_pending_agent_custody t;
       launch_worker t operation;
+      handoff_idle_operation idle_completion;
       Ok ())
     ~finally:(fun () ->
       if not !installed then Option.iter agent_custody ~f:retire_agent_custody)
-;;
-
-let commit_history_transition t ~delta ~payloads ~admission =
-  let open Result.Let_syntax in
-  let%bind agent_custody =
-    match admission with
-    | None -> Ok None
-    | Some admission ->
-      let%bind () = require_selected_execution t in
-      admission_agent_custody t admission
-  in
-  let before = t.state in
-  let%bind prepared = prepare_transition t ~delta ~payloads in
-  let attempted = ref false in
-  let%bind staged =
-    match admission with
-    | None -> Ok None
-    | Some admission ->
-      Turn_admission_staging.capture
-        ~owner:t.run_preparation_owner
-        ~before
-        ~candidate:prepared
-        ~operation:(Turn_admission.operation admission)
-        ~remaining_audit:t.command_audit
-        ~commit_attempted:attempted
-        ~plan:(admission, agent_custody)
-      |> Result.map ~f:Option.some
-  in
-  Eio.Cancel.protect (fun () ->
-    let%bind () =
-      persist_transition
-        ~commit_attempted:attempted
-        ~check_before_commit:(fun () ->
-          let%bind () = check_turn_custody t agent_custody in
-          Option.value_map staged ~default:(Ok ()) ~f:(fun staged ->
-            Turn_admission_staging.check_before_writer
-              staged
-              ~owner:t.run_preparation_owner
-              ~state:t.state))
-        t
-        prepared
-    in
-    install_committed_transition t prepared;
-    let%map suffix =
-      match staged with
-      | None -> Ok None
-      | Some staged ->
-        let%bind acknowledgement =
-          Turn_admission_staging.acknowledge
-            staged
-            ~owner:t.run_preparation_owner
-            ~state:t.state
-        in
-        Turn_admission_staging.finish
-          acknowledgement
-          ~owner:t.run_preparation_owner
-          ~state:t.state
-        |> Result.map ~f:Option.some
-    in
-    publish_committed_transition t prepared;
-    Option.iter suffix ~f:(fun (admission, agent_custody) ->
-      let operation = Turn_admission.operation admission in
-      if Option.is_none t.operation_agent_custody
-      then install_operation_agent_custody t operation agent_custody;
-      prune_pending_agent_custody t;
-      launch_worker t operation);
-    Session_state.summary t.state)
-;;
-
-let history_command_precondition t session_id attachment_id generation revision =
-  let open Result.Let_syntax in
-  let%bind () =
-    if Agent_protocol.Id.Session.equal session_id t.state.identity.session_id
-    then Ok ()
-    else Error (error Invalid_request "history command targets a different session")
-  in
-  let%bind _ = write_attachment t attachment_id in
-  let%bind () =
-    if Int.equal generation t.state.identity.generation
-    then Ok ()
-    else Error (error Conflict "session generation does not match")
-  in
-  let%bind () = history_edit_precondition t revision in
-  if
-    Option.is_some t.moderator_borrow
-    || Option.is_some t.queued_event_borrow
-    || Option.is_some t.initialization_scope
-    || Option.is_some t.runtime_retirement
-    || List.exists t.invocation_executions ~f:(fun execution ->
-      match execution.owner with
-      | Foreground _ | Invocation_moderator _ | Event_moderator _ -> true
-      | Background_job _ -> false)
-  then
-    Error
-      (error
-         Conflict
-         "history cannot change while a foreground or runtime owner is active")
-  else Ok ()
 ;;
 
 let control_pending_internal
@@ -26807,125 +34694,6 @@ let delete_history_internal t attachment_id revision history_id =
     ~admission:None
 ;;
 
-let history_continuation_availability t =
-  match t.state.lifecycle.observed, t.operation_worker with
-  | Stopped, _ -> Some Agent_protocol.History_edit.Continuation.Stopped
-  | Idle, Some _ -> None
-  | _ -> Some Agent_protocol.History_edit.Continuation.Runtime_unavailable
-;;
-
-let edit_history_internal t (request : Agent_protocol.History_edit.Edit_request.t) =
-  let open Result.Let_syntax in
-  let%bind () =
-    history_command_precondition
-      t
-      request.session_id
-      request.attachment_id
-      request.expected_generation
-      request.expected_revision
-  in
-  let%bind plan = History_edit.prepare t.state ~edit:request.edit in
-  let continue =
-    Agent_protocol.History_edit.Mode.equal
-      (Agent_protocol.History_edit.mode request.edit)
-      Edit_and_continue
-  in
-  let%bind () =
-    if continue && not (List.is_empty t.state.conversation.deferred_user_entries)
-    then
-      Error
-        (error
-           Pending_input_conflict
-           "edit-and-continue requires an empty pending-input queue")
-    else Ok ()
-  in
-  let%bind archive =
-    t.persistence.archive_reference
-      ~previous:t.state
-      ~kind:Edit
-      (Agent_protocol.Id.Operation.create ())
-  in
-  let continuation =
-    if not continue
-    then History_edit_transition.Save_only
-    else (
-      match history_continuation_availability t with
-      | Some reason -> History_edit_transition.Unavailable reason
-      | None -> History_edit_transition.Start (create_turn_operation t Administrative))
-  in
-  let%bind prepared =
-    History_edit_transition.create t.state ~plan ~edit:request.edit ~archive ~continuation
-  in
-  let%map session =
-    commit_history_transition
-      t
-      ~delta:(History_edit_transition.delta prepared)
-      ~payloads:(History_edit_transition.payloads prepared)
-      ~admission:(History_edit_transition.admission prepared)
-  in
-  let edited = History_edit_transition.edited_entry prepared in
-  ({ session
-   ; history_id = edited.id
-   ; content_revision = edited.content_revision
-   ; archived_revision = History_edit_transition.archived_revision prepared
-   ; continuation = History_edit_transition.continuation prepared
-   }
-   : History_edit_result.t)
-;;
-
-let continue_history_internal t (request : Agent_protocol.History_edit.Continue_request.t)
-  =
-  let open Result.Let_syntax in
-  let%bind () =
-    history_command_precondition
-      t
-      request.session_id
-      request.attachment_id
-      request.expected_generation
-      request.expected_revision
-  in
-  let%bind () =
-    if List.is_empty t.state.conversation.deferred_user_entries
-    then Ok ()
-    else
-      Error
-        (error
-           Pending_input_conflict
-           "history continuation requires an empty pending-input queue")
-  in
-  match history_continuation_availability t with
-  | Some reason ->
-    Ok
-      ({ session = Session_state.summary t.state
-       ; continuation = Agent_protocol.History_edit.Continuation.Not_started reason
-       }
-       : History_continuation_result.t)
-  | None ->
-    let%bind recovery = History_continuation.prepare t.state ~retiring_history:false in
-    let operation = create_turn_operation t Administrative in
-    let%bind admission =
-      Turn_admission.create
-        t.state
-        ~operation
-        ~notification_wakes:[]
-        ~adopt_deferred:false
-    in
-    let delta =
-      Session_delta.Batch
-        (History_continuation.deltas recovery @ Turn_admission.deltas admission)
-    in
-    let payloads =
-      History_continuation.payloads recovery @ Turn_admission.payloads admission
-    in
-    let%map session =
-      commit_history_transition t ~delta ~payloads ~admission:(Some admission)
-    in
-    ({ session
-     ; continuation = Agent_protocol.History_edit.Continuation.Started operation.id
-     }
-     : History_continuation_result.t)
-;;
-
 let suppress_follow_up_deltas t deltas ~reason =
   let open Result.Let_syntax in
   List.map deltas ~f:(function
@@ -26955,6 +34723,7 @@ let suppress_follow_up_deltas t deltas ~reason =
 ;;
 
 let start_idle_turn
+      ?idle_completion
       ?goal_runtime_scope
       ?continuation_custody
       ?follow_up_authority
@@ -26986,6 +34755,7 @@ let start_idle_turn
   match decision with
   | Allow_automatic_turn ->
     start_idle_turn_unchecked
+      ?idle_completion
       ?goal_runtime_scope
       ?continuation_custody
       ?follow_up_authority
@@ -27008,6 +34778,9 @@ let start_idle_turn
       |> Result.all
     in
     transition
+      ?idle_completion_step:
+        (Option.map idle_completion ~f:(fun completion ->
+           completion, Idle_completion_write.Kind.Suppress_automatic))
       t
       ~delta:
         (Session_delta.Batch
@@ -27022,6 +34795,7 @@ let start_idle_turn
 ;;
 
 let stop_from_idle_moderator
+      ?idle_completion
       ?(extra_deltas : Session_delta.t list = [])
       t
       (drain : Runtime_builder.moderator_drain)
@@ -27081,8 +34855,13 @@ let stop_from_idle_moderator
           { desired_state = lifecycle.desired; observed_state = lifecycle.observed }
       ]
   in
+  Option.iter idle_completion ~f:(fun completion ->
+    completion.Idle_completion_data.suffix <- Some (Stop (jobs, permissions)));
   let%map _ =
     transition
+      ?idle_completion_step:
+        (Option.map idle_completion ~f:(fun completion ->
+           completion, Idle_completion_write.Kind.Stop))
       ~retire_legacy_custody:()
       ~job_custody
       t
@@ -27096,7 +34875,9 @@ let stop_from_idle_moderator
       ~payloads
   in
   cancel_job_scopes t jobs;
-  resolve_cleaned_permission_waiters t permissions
+  resolve_cleaned_permission_waiters t permissions;
+  Option.iter idle_completion ~f:(fun completion ->
+    completion.Idle_completion_data.suffix <- None)
 ;;
 
 let deliver_idle_notifications_internal
@@ -27290,31 +35071,57 @@ let apply_observation_follow_up t =
     resume_deferred || not (List.is_empty extra_deltas)
 ;;
 
-let checkpoint_idle_moderator t (drain : Runtime_builder.moderator_drain) =
+let checkpoint_idle_moderator ?idle_completion t (drain : Runtime_builder.moderator_drain)
+  =
   transition
+    ?idle_completion_step:
+      (Option.map idle_completion ~f:(fun completion ->
+         completion, Idle_completion_write.Kind.Checkpoint))
     t
     ~delta:(Session_delta.Moderator_changed drain.Runtime_builder.moderator_snapshot)
     ~payloads:(drain_payloads drain)
   |> Result.map ~f:(fun _ -> ())
 ;;
 
-let complete_running_idle_moderator t (drain : Runtime_builder.moderator_drain) =
+let complete_running_idle_moderator
+      ?idle_completion
+      t
+      (drain : Runtime_builder.moderator_drain)
+  =
   let open Result.Let_syntax in
   let requests = drain.Runtime_builder.runtime_requests in
   let%bind eligible = eligible_pending t Idle_start in
+  Option.iter idle_completion ~f:(fun completion ->
+    completion.Idle_completion_data.action
+    <- Some
+         (match eligible with
+          | _ :: _ -> Turn
+          | [] when Chat_response.Runtime_semantics.request_compaction requests ->
+            Compaction
+          | [] when Chat_response.Runtime_semantics.request_turn requests -> Turn
+          | [] -> Checkpoint));
   match eligible with
-  | _ :: _ -> start_idle_turn t drain ~reason:User_submit ~adopt_deferred:true
+  | _ :: _ ->
+    start_idle_turn ?idle_completion t drain ~reason:User_submit ~adopt_deferred:true
   | [] when Chat_response.Runtime_semantics.request_compaction requests ->
     let open Result.Let_syntax in
-    let%bind () = checkpoint_idle_moderator t drain in
-    Result.map (start_compaction t) ~f:(fun _ -> ())
+    let%bind () = checkpoint_idle_moderator ?idle_completion t drain in
+    Result.map (start_compaction ?idle_completion t) ~f:(fun _ -> ())
   | [] when Chat_response.Runtime_semantics.request_turn requests ->
-    start_idle_turn t drain ~reason:Moderator_request ~adopt_deferred:false
-  | [] -> checkpoint_idle_moderator t drain
+    start_idle_turn
+      ?idle_completion
+      t
+      drain
+      ~reason:Moderator_request
+      ~adopt_deferred:false
+  | [] -> checkpoint_idle_moderator ?idle_completion t drain
 ;;
 
 let complete_idle_moderator t (drain : Runtime_builder.moderator_drain) =
-  if (not t.idle_moderator_borrowed) || moderator_is_borrowed t
+  if
+    Option.is_some t.idle_completion
+    || (not t.idle_moderator_borrowed)
+    || moderator_is_borrowed t
   then Error (error Conflict "session moderator is not borrowed for idle work")
   else (
     let result =
@@ -27332,7 +35139,7 @@ let complete_idle_moderator t (drain : Runtime_builder.moderator_drain) =
 ;;
 
 let fail_idle_moderator t failure =
-  if moderator_is_borrowed t
+  if Option.is_some t.idle_completion || moderator_is_borrowed t
   then Error (error Conflict "observation callback owns the idle moderator")
   else (
     t.idle_moderator_borrowed <- false;
@@ -27352,6 +35159,270 @@ let fail_idle_moderator t failure =
             { desired_state = lifecycle.desired; observed_state = lifecycle.observed }
         ]
     |> Result.map ~f:(fun _ -> ()))
+;;
+
+let claim_paired_idle_completion t (completion : Idle_completion_data.t) =
+  let open Result.Let_syntax in
+  let%bind () = check_idle_completion_identity t completion in
+  let%bind () =
+    match
+      completion.phase, completion.cancellation, Eio.Promise.peek completion.exited
+    with
+    | Fresh, None, None -> Ok ()
+    | (Fresh | Claimed _ | Completing _ | Retired), _, _ ->
+      Error (error Conflict "legacy capture is already closed or claimed")
+  in
+  let%bind source = Runtime_builder.moderator_snapshot_observer t.state.moderator in
+  let basis : Idle_completion_data.basis =
+    { generation = t.state.identity.generation; source; worker = t.operation_worker }
+  in
+  let slot = Some completion in
+  let%map history = claim_idle_moderator t in
+  match history with
+  | None -> None
+  | Some _ ->
+    completion.phase <- Claimed basis;
+    t.idle_completion <- slot;
+    history
+;;
+
+let remember_idle_completion_result t (completion : Idle_completion_data.t) result =
+  completion.Idle_completion_data.outcome <- Some result;
+  (match result with
+   | Ok () -> ()
+   | Error failure ->
+     Option.iter completion.write ~f:(fun write ->
+       Idle_completion_write.retain_failure write failure);
+     Idle_completion_data.request_cancellation completion failure);
+  let released = release_idle_completion t completion in
+  match result, released with
+  | Ok (), Ok () -> Ok ()
+  | Error failure, (Ok () | Error _) -> Error failure
+  | Ok (), Error failure ->
+    Idle_completion_data.request_cancellation completion failure;
+    completion.outcome <- Some (Error failure);
+    Error failure
+;;
+
+let capture_paired_idle_completion
+      t
+      (completion : Idle_completion_data.t)
+      (drain : Runtime_builder.moderator_drain)
+  =
+  let open Result.Let_syntax in
+  let%bind () = check_idle_completion_owner t completion in
+  let%bind basis =
+    match completion.phase with
+    | Claimed basis -> Ok basis
+    | Fresh | Completing _ | Retired ->
+      Error (error Conflict "legacy callback result was already captured")
+  in
+  completion.phase <- Completing basis;
+  completion.drain <- Some drain;
+  match
+    let result =
+      match Chat_response.Runtime_semantics.should_end_session drain.runtime_requests with
+      | Some reason ->
+        completion.action <- Some Stop;
+        stop_from_idle_moderator ~idle_completion:completion t drain reason
+      | None
+        when runtime_admission_open t
+             && Agent_protocol.Session.equal_desired_state
+                  t.state.lifecycle.desired
+                  Running ->
+        complete_running_idle_moderator ~idle_completion:completion t drain
+      | None ->
+        completion.action <- Some Checkpoint;
+        checkpoint_idle_moderator ~idle_completion:completion t drain
+    in
+    remember_idle_completion_result t completion result
+  with
+  | result -> result
+  | exception exn ->
+    let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+    Option.iter completion.write ~f:(fun write ->
+      Idle_completion_write.retain_exception write exn backtrace);
+    Idle_completion_data.request_cancellation
+      completion
+      (error Interrupted "legacy completion raised before its handoff");
+    Exn.raise_with_original_backtrace exn backtrace
+;;
+
+let fail_paired_idle_completion t (completion : Idle_completion_data.t) failure =
+  let open Result.Let_syntax in
+  let%bind () = check_idle_completion_owner t completion in
+  let%bind basis =
+    match completion.phase with
+    | Claimed basis -> Ok basis
+    | Fresh | Completing _ | Retired ->
+      Error (error Conflict "legacy callback failure followed capture")
+  in
+  completion.phase <- Completing basis;
+  completion.action <- Some Callback_failure;
+  let lifecycle =
+    Session_state.Lifecycle.
+      { desired = t.state.lifecycle.desired; observed = Failed failure }
+  in
+  let result =
+    transition
+      ~idle_completion_step:(completion, Idle_completion_write.Kind.Callback_failure)
+      t
+      ~delta:
+        (Session_delta.Batch
+           [ Failure_changed (Some failure); Lifecycle_changed lifecycle ])
+      ~payloads:
+        [ Agent_protocol.Event.Durable.Payload.Session_state_changed
+            { desired_state = lifecycle.desired; observed_state = lifecycle.observed }
+        ]
+    |> Result.map ~f:ignore
+  in
+  completion.outcome <- Some (Error failure);
+  match result with
+  | Ok () -> release_idle_completion t completion
+  | Error diagnostic ->
+    Option.iter completion.write ~f:(fun write ->
+      Idle_completion_write.retain_failure write diagnostic);
+    Idle_completion_data.request_cancellation completion failure;
+    Error diagnostic
+;;
+
+let idle_operation_matches suffix (actual : Agent_protocol.Operation.t) =
+  Agent_protocol.Id.Operation.equal suffix.Idle_completion_data.operation.id actual.id
+  && Int.equal suffix.operation.generation actual.generation
+  && Agent_protocol.Operation.equal_kind suffix.operation.kind actual.kind
+;;
+
+let retire_paired_idle_completion t (completion : Idle_completion_data.t) =
+  let open Result.Let_syntax in
+  let%bind () = check_idle_completion_identity t completion in
+  match completion.phase with
+  | Fresh | Retired -> Ok ()
+  | Claimed _ | Completing _ ->
+    let%bind () = check_idle_completion_owner t completion in
+    let%bind () =
+      match Eio.Promise.peek completion.exited with
+      | Some () -> Ok ()
+      | None -> Error (error Conflict "legacy callback has not left its actual capture")
+    in
+    let%bind () =
+      match completion.write with
+      | Some write ->
+        (match Idle_completion_write.phase write with
+         | Attempted -> Error (idle_completion_failure completion)
+         | Installed _ | Not_attempted -> Ok ())
+      | None -> Ok ()
+    in
+    let%bind () =
+      match completion.suffix with
+      | None -> Ok ()
+      | Some (Stop (jobs, permissions)) ->
+        (match completion.write with
+         | Some write ->
+           (match Idle_completion_write.phase write with
+            | Installed _ ->
+              cancel_job_scopes t jobs;
+              resolve_cleaned_permission_waiters t permissions;
+              completion.suffix <- None;
+              Ok ()
+            | Not_attempted ->
+              completion.suffix <- None;
+              Ok ()
+            | Attempted -> Error (idle_completion_failure completion))
+         | None ->
+           completion.suffix <- None;
+           Ok ())
+      | Some (Operation suffix) ->
+        (match suffix.phase with
+         | Prepared | Handed_off | Terminated -> Ok ()
+         | Terminal_acknowledged -> Error (idle_completion_failure completion)
+         | Acknowledged ->
+           let%bind () =
+             match suffix.native_write with
+             | Some write ->
+               (match Idle_completion_write.phase write with
+                | Installed acknowledgement ->
+                  (match
+                     Idle_completion_write.Acknowledgement.selected acknowledgement
+                   with
+                   | Requested (Start_ordinary_turn | Start_compaction) -> Ok ()
+                   | Requested _ | Admission_hold _ ->
+                     Error (error Conflict "legacy operation lacks its actual native ACK"))
+                | Attempted | Not_attempted ->
+                  Error (error Conflict "legacy operation writer is not acknowledged"))
+             | None ->
+               Error (error Conflict "legacy operation has no actual writer owner")
+           in
+           let%bind () =
+             match t.state.active_operation, t.operation_agent_custody with
+             | Some actual, Some owner
+               when idle_operation_matches suffix actual && phys_equal suffix.owner owner
+               -> Ok ()
+             | _ ->
+               Error
+                 (error
+                    Conflict
+                    "legacy operation retirement lost its exact acknowledged owner")
+           in
+           let failure =
+             Option.value
+               completion.cancellation
+               ~default:(error Interrupted "legacy completion source retired")
+           in
+           let%bind () =
+             match
+               with_runtime_terminal t suffix.operation.id (fun () ->
+                 match suffix.kind with
+                 | Turn _ ->
+                   worker_terminal
+                     ~idle_completion:completion
+                     t
+                     suffix.operation.id
+                     (Failed failure)
+                     None
+                 | Compaction _ ->
+                   compaction_terminal
+                     ~idle_completion:completion
+                     t
+                     suffix.operation.id
+                     (Compaction_cancelled failure.message))
+             with
+             | Ok () -> Ok ()
+             | Error diagnostic ->
+               Option.iter completion.write ~f:(fun write ->
+                 Idle_completion_write.retain_failure write diagnostic);
+               Error diagnostic
+             | exception exn ->
+               let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+               Option.iter completion.write ~f:(fun write ->
+                 Idle_completion_write.retain_exception write exn backtrace);
+               Exn.raise_with_original_backtrace exn backtrace
+           in
+           (match suffix.phase with
+            | Terminal_acknowledged ->
+              suffix.phase <- Terminated;
+              Ok ()
+            | Prepared | Acknowledged | Handed_off | Terminated ->
+              Error (error Conflict "legacy operation terminal has no actual State ACK")))
+    in
+    release_idle_completion t completion
+;;
+
+let handle_idle_completion_request
+  : type outcome.
+    t
+    -> outcome Idle_completion_data.Request.t
+    -> (outcome, Agent_protocol.Error.t) result
+  =
+  fun t request ->
+  match request with
+  | Claim -> claim_idle_moderator t
+  | Complete drain -> complete_idle_moderator t drain
+  | Fail failure -> fail_idle_moderator t failure
+  | Claim_paired completion -> claim_paired_idle_completion t completion
+  | Capture_paired (completion, drain) ->
+    capture_paired_idle_completion t completion drain
+  | Fail_paired (completion, failure) -> fail_paired_idle_completion t completion failure
+  | Retire_paired completion -> retire_paired_idle_completion t completion
 ;;
 
 let lease_generation t = Int64.(t.state.counters.owner_lease_generation + 1L)
@@ -27728,6 +35799,12 @@ let enable_automatic_turn_budget ?check_before_commit ?run_preparation t policy 
 ;;
 
 let lifecycle_request_allowed : type a. a request -> bool = function
+  | Idle_completion request ->
+    (match request with
+     | Claim | Claim_paired _ -> false
+     | Complete _ | Fail _ | Capture_paired _ | Fail_paired _ | Retire_paired _ -> true)
+  | Inherited_turn request -> Inherited_turn.Request.lifecycle_allowed request
+  | Descendant_root request -> Descendant_root_request.lifecycle_allowed request
   | Native_goal (Close_scope _ | Rollback _ | Finish_start_dispatch _) -> true
   | Native_goal
       ( Start_receipt _
@@ -27761,9 +35838,8 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Observe_owned_inference _
   | Complete_inference _
   | Release_inference _
-  | Seal_inference_owner _
-  | Finish_inference_owner _
-  | Close_run_preparation _
+  | Inherited_inference (Release _)
+  | Seal_inference_owner _ | Finish_inference_owner _ | Close_run_preparation _
   | Held_startup (Effect_deferred (Exclude | Close _))
   | Held_startup
       (Input_graph
@@ -27858,8 +35934,6 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Complete_schedule _
   | Fail_schedule _
   | Skip_schedule _
-  | Complete_idle_moderator _
-  | Fail_idle_moderator _
   | Expire_permission _
   | Detach _
   | Owner_expired _
@@ -27896,11 +35970,13 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Held_startup (Authored_resource _)
   | Held_startup (Input_graph (Open _))
   | Held_startup (Begin_input _)
-  | Held_startup (Submit_input _)
   | Held_startup (Ready_input _)
-  | Open_inference_owner _
-  | Admit_inference _
-  | Allocate_inference _
+  | Open_inference_owner _ | Admit_inference _
+  | Inherited_inference Capture_origin
+  | Inherited_inference (Prepare_legacy _)
+  | Inherited_inference (Allocate_runtime _)
+  | Inherited_inference (Commit _)
+  | Inherited_inference (Refresh _)
   | Admit_model_job _
   | Refresh_inference _
   | Reconcile_inference_recovery
@@ -27980,7 +36056,6 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Add_run_constructor_schedule _
   | Reserve_run_history_block _
   | Checkpoint_run_moderator _
-  | Admit_prepared_run _
   | Begin_run_preparation _
   | Begin_headless_run_preparation _
   | Bind_run_source _
@@ -28003,7 +36078,6 @@ let lifecycle_request_allowed : type a. a request -> bool = function
          | Install _
          | Begin_resume _
          | Claim_resume _
-         | Continue_goal _
          | Resource _ ))
   | Complete_initialization _
   | Checkpoint_runtime_construction _
@@ -28040,14 +36114,9 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Stop_managed _
   | Append_history _
   | Defer_history _
-  | Submit_message _
   | Control_pending _
-  | Admit_run _
-  | Submit_managed_message _
   | Compact _
   | Delete_history _
-  | Edit_history _
-  | Continue_history _
   | Adopt_deferred
   | Reserve_history_block _
   | Prepare_authoring_input _
@@ -28086,7 +36155,6 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Retry_schedule _
   | Prepare_ingress_submission _
   | Commit_ingress_submission _
-  | Claim_idle_moderator
   | Apply_observation_follow_up
   | Attach _
   | Renew_owner _ -> false
@@ -28507,6 +36575,18 @@ let begin_lifecycle t attachment_id expected_generation expected_revision =
   if Option.is_some t.lifecycle_fence
   then Error (error Conflict "session lifecycle change is already reserved")
   else if
+    Option.is_some t.idle_completion
+    || Option.is_some t.descendant_admission_slot
+    || Option.is_some t.inherited_turn_prepared
+    || Option.is_some t.inherited_turn_cleanup
+  then
+    Error
+      (Agent_protocol.Error.create
+         Conflict
+         ~message:"session descendant admission cleanup is still outstanding"
+         ~retryable:true
+         ())
+  else if
     (not (Int.equal t.state.identity.generation expected_generation))
     || not (Int64.equal t.state.counters.revision expected_revision)
   then Error (error Conflict "session lifecycle canonical anchor changed")
@@ -28561,6 +36641,54 @@ let refresh_recurrence_creation t permit =
     }
   in
   Ok checked
+;;
+
+let prepare_recurrence_child_origin_internal
+      t
+      ~source_owner
+      ~(permit : Recurrence_creation.t)
+  =
+  let open Result.Let_syntax in
+  let%bind () =
+    if phys_equal permit.owner t.recurrence_creation_owner
+    then Ok ()
+    else Error (error Conflict "recurrence origin permit belongs to another Actor")
+  in
+  let%bind controller = child_accounting_owner t ~source_owner in
+  let row = Recurrence_creation.reservation permit in
+  let refresh_native (observed_state : Session_state.t) =
+    (* Executed solely by publish/refresh wrapper outside mailbox/Owner locks. *)
+    let%bind prepared =
+      Recurrence_creation_admission.prepare
+        observed_state
+        ~controller
+        ~actor:permit.actor
+        ~authorize:permit.authorize
+        ~occurrence:(Recurrence_child_reservation.occurrence row)
+        ~expected_control_revision:(Recurrence_child_reservation.control_revision row)
+    in
+    let check_current () =
+      let%bind () =
+        if phys_equal observed_state t.state
+        then Ok ()
+        else Error (error Conflict "recurrence origin parent snapshot changed")
+      in
+      let%bind () = check_recurrence_creation_admission t prepared in
+      match Recurrence_creation_admission.reservation prepared with
+      | Some actual when Recurrence_child_reservation.equal actual row -> Ok ()
+      | None | Some _ ->
+        Error (error Conflict "recurrence origin lost exact protected row")
+    in
+    let%map () = check_current () in
+    check_current
+  in
+  prepare_child_origin_internal
+    t
+    ~source_owner
+    ~principal_id:(Recurrence_child_reservation.principal_id row)
+    ~inherited:Agent_store.Delegation_goal_origin.unrelated
+    ~attribution:None
+    ~refresh_native
 ;;
 
 let observe_recurrence_run_internal t ~actor ~authorize ~intent ~attempt =
@@ -32987,228 +41115,30 @@ let ready_held_input_internal t (scope : Held_input_scope.t) input =
 let close_held_input_internal t (scope : Held_input_scope.t) =
   if not (phys_equal scope.issuing_actor t.inference_owner_identity)
   then Error (error Conflict "held input belongs to another actor")
+  else if
+    Run_preparation.Admission_exit.is_retained
+      (Admitted_activation.Continuation.target scope.continuation).preparation
+  then Ok ()
   else (
     match scope.phase with
     | Consumed _ when Option.is_none t.held_input_scope -> Ok ()
-    | Parsing | Parsed_ready _ | Consumed _ | Root_attempt_unconfirmed | Closed ->
+    | Parsing
+    | Parsed_ready _
+    | Admission_pending _
+    | Consumed _
+    | Root_attempt_unconfirmed
+    | Closed ->
       if not (Option.exists t.held_input_scope ~f:(phys_equal scope))
       then Error (error Conflict "held input was displaced before scope exit")
       else (
         (match scope.phase with
          | Parsing | Parsed_ready _ -> scope.phase <- Closed
-         | Consumed _ | Root_attempt_unconfirmed | Closed -> ());
+         | Admission_pending _ | Consumed _ | Root_attempt_unconfirmed | Closed -> ());
         if List.is_empty scope.graphs
         then (
           t.held_input_scope <- None;
           Ok ())
         else Error (error Conflict "held input graph did not join before scope exit")))
-;;
-
-let submit_held_run_input_internal t (scope : Held_input_scope.t) input =
-  let open Result.Let_syntax in
-  let activation = Admitted_activation.Continuation.target scope.continuation in
-  let%bind () = input_scope_basis t scope in
-  let%bind () =
-    match scope.phase with
-    | Parsed_ready recorded
-      when Runtime_input_preparation.Prepared_input.equal recorded input -> Ok ()
-    | Parsing | Parsed_ready _ | Consumed _ | Root_attempt_unconfirmed | Closed ->
-      Error (error Conflict "held root requires its unconsumed recorded parsed input")
-  in
-  let%bind () =
-    match
-      t.state.lifecycle.desired, t.state.lifecycle.observed, t.state.active_operation
-    with
-    | Running, Idle, None
-      when (not t.idle_moderator_borrowed)
-           && Option.is_none t.state.failure
-           && (not t.state.halted)
-           && List.is_empty scope.graphs -> Ok ()
-    | _ -> Error (error Conflict "held root requires an idle running target")
-  in
-  let%bind () = check_held_effect scope.continuation in
-  let%bind worker =
-    Result.of_option
-      t.operation_worker
-      ~error:(error Invalid_state "held root has no actual foreground worker")
-  in
-  let%bind index =
-    Result.of_option
-      t.state.run_state
-      ~error:(error Conflict "held root Run index disappeared")
-  in
-  let%bind run =
-    Result.of_option
-      (Run_state.find index activation.run.id)
-      ~error:(error Conflict "held root Run disappeared")
-  in
-  let%bind binding =
-    Result.of_option
-      (Run_authorities.find t.run_authorities run.id)
-      ~error:(error Permission_denied "held root lost its actual Run authority")
-  in
-  let%bind () =
-    if phys_equal (Run_authorities.scope binding) activation.scope
-    then Ok ()
-    else Error (error Conflict "held root Run binding was replaced")
-  in
-  let%bind store = require_recurrence_controller t in
-  let%bind () =
-    Activation_association.check_target
-      activation.association
-      ~store
-      ~state:t.state
-      ~run
-      ~admission:activation.admission
-  in
-  let%bind original =
-    Result.of_option
-      (Run_admission.Scope.original_actor activation.scope)
-      ~error:(error Permission_denied "held root requires its genuine original")
-  in
-  let entry = Runtime_input_preparation.Prepared_input.entry input in
-  let%bind () =
-    Runtime_input_preparation.Prepared_input.validate
-      input
-      ~request:scope.request
-      ~id:scope.id
-  in
-  let%bind enqueue =
-    prepare_pending_inputs t ~owner:Host_internal Safe_boundary [ entry ]
-  in
-  let%bind pending =
-    Pending_turn.prepare
-      t.state
-      ~enqueue
-      ~entry
-      ~runtime_admission_open:(runtime_admission_open t)
-  in
-  let operation = create_turn_operation t User_submit in
-  let%bind handoff =
-    Run_input_handoff.prepare
-      t.state
-      ~run
-      ~request:scope.request
-      ~input
-      ~operation
-      ~pending
-      ~now:operation.started_at
-  in
-  let lifecycle = lifecycle_for_operation t operation.id in
-  let before = t.state in
-  let%bind candidate =
-    prepare_transition
-      ~run_preparation:activation.preparation
-      t
-      ~delta:
-        (Session_delta.Batch
-           ((Run_input_handoff.delta handoff :: Pending_turn.turn_deltas pending)
-            @ [ Active_operation_changed (Some operation); Lifecycle_changed lifecycle ]))
-      ~payloads:
-        (Pending_turn.deferred_payloads pending
-         @ [ History_appended (Pending_turn.entries pending)
-           ; Operation_started operation
-           ; Session_state_changed
-               { desired_state = lifecycle.desired; observed_state = lifecycle.observed }
-           ])
-  in
-  let%bind controller = scope.continuation.controller.transfer () in
-  let%bind () =
-    if phys_equal controller.association activation.association
-    then Ok ()
-    else Error (error Conflict "held root transferred another admitted association")
-  in
-  let proof : Held_operation.Proof.t =
-    { scope = activation.scope
-    ; run
-    ; admission = activation.admission
-    ; source = activation.source
-    ; operation
-    ; worker
-    ; binding
-    ; controller
-    }
-  in
-  let held : Held_operation.t = { proof; phase = Staged; target_current = None } in
-  let owner : Operation_owner.t =
-    { operation_id = operation.id
-    ; admission = create_agent_admission (Some (create_agent_custody original))
-    ; held = Some held
-    }
-  in
-  let acknowledgement : Held_operation_acknowledgement.t =
-    { input_scope = scope; input; activation; held; owner; previous = t.state; candidate }
-  in
-  let attempted = ref false in
-  let%bind staged =
-    Turn_admission_staging.capture
-      ~owner:t.run_preparation_owner
-      ~before
-      ~candidate
-      ~operation
-      ~remaining_audit:t.command_audit
-      ~commit_attempted:attempted
-      ~plan:(operation, entry)
-  in
-  let persisted =
-    Exn.protect
-      ~finally:(fun () ->
-        if !attempted
-        then (
-          match scope.phase with
-          | Parsed_ready _ -> scope.phase <- Root_attempt_unconfirmed
-          | Parsing | Consumed _ | Root_attempt_unconfirmed | Closed -> ());
-        match held.phase with
-        | Staged -> retire_agent_admission owner.admission
-        | Pending_first_effect | Started | Retired -> ())
-      ~f:(fun () ->
-        let%bind () =
-          persist_transition
-            ~run_preparation:activation.preparation
-            ~commit_attempted:attempted
-            ~check_before_commit:(fun () ->
-              let%bind () = check_held_effect scope.continuation in
-              let%bind () =
-                Held_operation_acknowledgement.check acknowledgement ~actor:t ~candidate
-              in
-              let%bind () = input_scope_basis t scope in
-              let%bind () =
-                Admitted_activation.Continuation.check_basis scope.continuation
-              in
-              Turn_admission_staging.check_before_writer
-                staged
-                ~owner:t.run_preparation_owner
-                ~state:t.state)
-            t
-            candidate
-        in
-        install_committed_transition
-          ~held_operation_acknowledgement:acknowledgement
-          ~run_preparation:activation.preparation
-          t
-          candidate;
-        Turn_admission_staging.acknowledge
-          staged
-          ~owner:t.run_preparation_owner
-          ~state:t.state)
-  in
-  let%bind acknowledgement = persisted in
-  let%bind operation, entry =
-    Turn_admission_staging.finish
-      acknowledgement
-      ~owner:t.run_preparation_owner
-      ~state:t.state
-  in
-  (* A failed publisher preserves the acknowledged proof but starts no worker;
-     existing owner termination/recovery handles that truthful Starting row. *)
-  publish_committed_transition t candidate;
-  launch_worker t operation;
-  Ok
-    { session = Session_state.summary t.state
-    ; history_id = entry.id
-    ; disposition = Started
-    ; operation_id = Some operation.id
-    }
 ;;
 
 let end_held_activation_internal t (activation : Held_run.Activation.t) =
@@ -33232,6 +41162,7 @@ let end_held_activation_internal t (activation : Held_run.Activation.t) =
   | None -> Ok ()
   | Some other when not (phys_equal activation other) ->
     Error (error Conflict "another held startup owner replaced this cleanup")
+  | Some _ when Run_preparation.Admission_exit.is_retained activation.preparation -> Ok ()
   | Some _
     when match !(activation.phase) with
          | Handed_off _ -> true
@@ -34143,22 +42074,6 @@ let finish_goal_resume_callback_internal t scope =
        None)
 ;;
 
-let joined_goal_runtime_basis t (scope : Goal_continuation.runtime_scope) =
-  let open Result.Let_syntax in
-  let%bind () = goal_runtime_scope_basis t scope in
-  let%bind () =
-    match scope.callback with
-    | Joined
-      when Option.is_none t.queued_event_borrow
-           && (not (moderator_is_borrowed t))
-           && Option.is_none t.initialization_scope -> Ok ()
-    | Pending | Executing _ | Completed _ | Joined ->
-      Error (error Conflict "Goal lifecycle ownership has not joined")
-  in
-  Run_admission.Scope.check_current
-    (Run_authorities.scope scope.continuation.binding.preparation.binding)
-;;
-
 (* Shared actual aggregate writer for a joined existing-Goal lifecycle. A Finish
    intent alone is not terminal evidence; only the real completion candidate and
    terminal receipt can install a settlement/handoff. *)
@@ -34224,13 +42139,14 @@ let finalize_goal_runtime_settlement t scope index run =
     Ok (Some settlement)
 ;;
 
-let continue_goal_episode_internal t continuation =
+let continue_goal_episode_internal t continuation ~capture =
   let open Result.Let_syntax in
   let preparation = continuation.Goal_continuation.binding.preparation in
   let failed error =
     Ok
-      (Goal_resume_result.Resume_failed
-         { receipt = Goal_continuation.receipt continuation; error })
+      (Inherited_turn.Decision.Completed
+         (Goal_resume_result.Resume_failed
+            { receipt = Goal_continuation.receipt continuation; error }))
   in
   let proceed_execution () =
     let%bind scope = select_goal_runtime t continuation in
@@ -34260,8 +42176,9 @@ let continue_goal_episode_internal t continuation =
     match preparation.runtime_phase with
     | Handed_off (actual, Resume result) when phys_equal actual scope ->
       Ok
-        (Goal_resume_result.Resumed
-           { receipt = Goal_continuation.receipt continuation; continuation = result })
+        (Inherited_turn.Decision.Completed
+           (Goal_resume_result.Resumed
+              { receipt = Goal_continuation.receipt continuation; continuation = result }))
     | _ ->
       let%bind () =
         if
@@ -34278,24 +42195,27 @@ let continue_goal_episode_internal t continuation =
          let result = Goal_resume_result.Continuation.Settled settlement in
          preparation.runtime_phase <- Handed_off (scope, Resume result);
          preparation.resume_outcome <- Some result;
-         Goal_resume_result.Resumed
-           { receipt = Goal_continuation.receipt continuation; continuation = result }
+         Inherited_turn.Decision.Completed
+           (Goal_resume_result.Resumed
+              { receipt = Goal_continuation.receipt continuation; continuation = result })
        | Waiting wake ->
          let%map () = check_runtime_construction_effect (Existing_goal continuation) in
          let result = Goal_resume_result.Continuation.Waiting wake in
          preparation.runtime_phase <- Handed_off (scope, Resume result);
          preparation.resume_outcome <- Some result;
-         Goal_resume_result.Resumed
-           { receipt = Goal_continuation.receipt continuation; continuation = result }
+         Inherited_turn.Decision.Completed
+           (Goal_resume_result.Resumed
+              { receipt = Goal_continuation.receipt continuation; continuation = result })
        | Admitted | Active ->
          let%bind settlement = finalize_goal_runtime_settlement t scope index run in
          (match settlement with
           | Some settlement ->
             Ok
-              (Goal_resume_result.Resumed
-                 { receipt = Goal_continuation.receipt continuation
-                 ; continuation = Goal_resume_result.Continuation.Settled settlement
-                 })
+              (Inherited_turn.Decision.Completed
+                 (Goal_resume_result.Resumed
+                    { receipt = Goal_continuation.receipt continuation
+                    ; continuation = Goal_resume_result.Continuation.Settled settlement
+                    }))
           | None ->
             let pending_finish =
               List.exists (Run_state.intents index) ~f:(fun intent ->
@@ -34340,92 +42260,19 @@ let continue_goal_episode_internal t continuation =
                   ~operation_id:None
                   ~now:operation.started_at
               in
-              let before = t.state in
-              let%bind candidate =
-                prepare_transition
-                  t
-                  ~delta:
-                    (Batch
-                       (History_continuation.deltas recovery
-                        @ Turn_admission.deltas turn
-                        @ [ Run_state_changed next ]))
-                  ~payloads:
-                    (History_continuation.payloads recovery @ Turn_admission.payloads turn)
+              let%bind original =
+                Result.of_option
+                  (Run_admission.Scope.original_actor
+                     (Run_authorities.scope preparation.binding))
+                  ~error:
+                    (error
+                       Permission_denied
+                       "Goal continuation has no original Run authority")
               in
-              let%bind ack = prepare_goal_operation_ack t scope ~operation ~candidate in
-              let controller =
-                ack.Goal_runtime_operation_acknowledgement.held.proof.controller
+              let selected : Inherited_turn.Goal_resume_selection.t =
+                { scope; run; recovery; turn; next; original }
               in
-              let owner = ack.owner in
-              let%bind fact = Goal_runtime_acknowledgement.prepare t scope ~candidate in
-              let attempted = ref false in
-              let%bind staged =
-                Turn_admission_staging.capture
-                  ~owner:t.run_preparation_owner
-                  ~before
-                  ~candidate
-                  ~operation
-                  ~remaining_audit:t.command_audit
-                  ~commit_attempted:attempted
-                  ~plan:operation
-              in
-              let installed = ref false in
-              Exn.protect
-                ~finally:(fun () ->
-                  if not !installed
-                  then (
-                    retire_agent_admission owner.admission;
-                    controller.close ());
-                  if !attempted && not !installed then Goal_continuation.close preparation)
-                ~f:(fun () ->
-                  let%bind () =
-                    persist_transition
-                      ~commit_attempted:attempted
-                      ~check_before_commit:(fun () ->
-                        let%bind () =
-                          check_runtime_construction_effect (Existing_goal continuation)
-                        in
-                        let%bind () =
-                          Goal_runtime_operation_acknowledgement.check
-                            ack
-                            ~actor:t
-                            ~candidate
-                        in
-                        let%bind () =
-                          Goal_runtime_acknowledgement.check fact ~actor:t ~candidate
-                        in
-                        Turn_admission_staging.check_before_writer
-                          staged
-                          ~owner:t.run_preparation_owner
-                          ~state:t.state)
-                      t
-                      candidate
-                  in
-                  install_committed_transition
-                    ~goal_runtime_acknowledgement:fact
-                    ~goal_operation_acknowledgement:ack
-                    t
-                    candidate;
-                  installed := true;
-                  let%bind acknowledgement =
-                    Turn_admission_staging.acknowledge
-                      staged
-                      ~owner:t.run_preparation_owner
-                      ~state:t.state
-                  in
-                  let%bind operation =
-                    Turn_admission_staging.finish
-                      acknowledgement
-                      ~owner:t.run_preparation_owner
-                      ~state:t.state
-                  in
-                  publish_committed_transition t candidate;
-                  launch_worker t operation;
-                  Ok
-                    (Goal_resume_result.Resumed
-                       { receipt = Goal_continuation.receipt continuation
-                       ; continuation = Started operation
-                       })))))
+              admit_goal_resume_selection t selected ~capture)))
   in
   let proceed () =
     let handed_off =
@@ -34447,8 +42294,9 @@ let continue_goal_episode_internal t continuation =
           Goal_resume_result.Continuation.Settled settlement
       in
       preparation.resume_outcome <- Some outcome;
-      Goal_resume_result.Resumed
-        { receipt = Goal_continuation.receipt continuation; continuation = outcome }
+      Inherited_turn.Decision.Completed
+        (Goal_resume_result.Resumed
+           { receipt = Goal_continuation.receipt continuation; continuation = outcome })
   in
   match proceed () with
   | Ok result -> Ok result
@@ -35129,6 +42977,9 @@ let observe_recurrence_child t reservation =
    owner exit. This does not persist, invoke callbacks, cancel/join work or claim
    rollback of already committed effects. *)
 let retire_execution_custody t =
+  retire_descendant_host t;
+  List.iter t.descendant_policy_cells ~f:Goal_root_policy.retire;
+  t.descendant_policy_cells <- [];
   close_recurrence_activations t;
   Legacy_queue_custody.retire t.legacy_queue_custody;
   t.legacy_queue_custody <- Legacy_queue_custody.empty;
@@ -35170,7 +43021,8 @@ let exclude_ordinary_deferred_ingress : type a. t -> a request -> unit =
   fun t request ->
   match request with
   | Admit_inference _
-  | Allocate_inference _
+  | Inherited_inference (Prepare_legacy _)
+  | Inherited_inference (Allocate_runtime _)
   | Admit_model_job _
   | Begin_initialization _
   | Begin_run_initialization _
@@ -35185,6 +43037,15 @@ let exclude_ordinary_deferred_ingress : type a. t -> a request -> unit =
   | Capture_initialization_recipe_target _ -> exclude_effect_deferred t Ordinary_execution
   | Held_startup (Begin_held_activation _ | Begin_input _ | Begin_authored _) ->
     exclude_effect_deferred t Activation_consumed
+  | Inherited_inference Capture_origin
+  | Inherited_inference (Commit _)
+  | Inherited_inference (Refresh _)
+  | Inherited_inference (Release _) -> ()
+  | Descendant_root _ ->
+    (* These ports already carry the genuine child Preparation or factual ACK.
+       They do not issue an ordinary execution/resource/input capability in the
+       root Actor and must not retire an unrelated deferred root construction. *)
+    ()
   | Goal_request request ->
     (match request with
      | Initialization_completion _ | Read _ | Apply _ -> ())
@@ -35344,6 +43205,46 @@ let handle_child_accounting_request
   =
   fun t request ->
   match request with
+  | Prepare_native_origin (source_owner, admission, binding, ancestry) ->
+    prepare_native_child_origin_internal t ~source_owner ~admission ~binding ~ancestry
+  | Prepare_unrelated_origin source_owner ->
+    prepare_unrelated_child_origin_internal t ~source_owner
+  | Install_descendant_host (source_owner, expected, check_ancestry, host) ->
+    install_descendant_host_internal t ~source_owner ~expected ~check_ancestry ~host
+  | Capture_origin_refresh (preparation, attempt) ->
+    capture_child_origin_refresh_internal t preparation attempt
+  | Consume_origin_refresh observed -> consume_child_origin_refresh_internal t observed
+  | Bind_origin (preparation, key, child_session_id, transaction_id) ->
+    bind_child_origin_internal t ~preparation ~key ~child_session_id ~transaction_id
+  | Prepare_recurrence_origin (source_owner, permit) ->
+    prepare_recurrence_child_origin_internal t ~source_owner ~permit
+  | Capture_reservation (source_owner, bound, reference, native_callback) ->
+    capture_child_origin_reservation_internal
+      t
+      ~source_owner
+      ~bound
+      ~reference
+      ~native_callback
+  | Observe_reservation observed -> observe_child_origin_reservation_internal t observed
+  | Register_reservation (reservation, observed, native_callback, check_parent) ->
+    register_child_origin_reservation_internal
+      t
+      ~reservation
+      ~observed
+      ~native_callback
+      ~check_parent
+  | Capture_descendant_usage (source_owner, source) ->
+    capture_descendant_usage_internal t ~source_owner ~source
+  | Observe_descendant_usage (observed, refresh_read) ->
+    observe_descendant_usage_internal t observed ~refresh_read
+  | Capture_origin_usage reservation ->
+    capture_child_origin_usage_internal t ~reservation ~native_callback:None
+  | Observe_origin_usage (observed, refresh_read) ->
+    observe_child_origin_usage_internal t observed ~refresh_read
+  | Capture_origin_import (reservation, native_callback) ->
+    capture_child_origin_usage_internal t ~reservation ~native_callback
+  | Import_origin_usage (observed, observation, check_parent) ->
+    import_child_origin_usage_internal t observed ~observation ~check_parent
   | Observe_installation (source_owner, reference) ->
     observe_child_installation_internal t ~source_owner ~reference
   | Register_installation
@@ -35867,18 +43768,7 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
       invocation_agent_actor t execution invocation
     | Borrow_moderator_agent_actor (borrow, invocation) ->
       let open Result.Let_syntax in
-      let%bind () = validate_moderator_borrow t borrow in
-      let%bind () =
-        if
-          Agent_protocol.Invocation.equal borrow.invocation invocation
-          && Atomic.get borrow.authority_live
-        then Ok ()
-        else
-          Error
-            (error
-               Permission_denied
-               "agent authority belongs to another or expired moderator")
-      in
+      let%bind () = check_moderator_effect_current t borrow invocation in
       let%bind custody = moderator_agent_custody t borrow in
       (match custody with
        | None -> Ok None
@@ -35888,7 +43778,7 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
              (Operator_authorization.guarded
                 ~principal:(Operator_authorization.principal actor)
                 ~is_current:(fun () ->
-                  Atomic.get borrow.authority_live
+                  Result.is_ok (check_moderator_effect_current t borrow invocation)
                   && Operator_authorization.is_current actor))))
     | Begin_run_initialization (purpose, preparation, expected) ->
       let open Result.Let_syntax in
@@ -36472,26 +44362,48 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
            (error Permission_denied "delegation.stop: child relationship does not match"))
     | Defer_history (attachment_id, entries) ->
       with_writer t attachment_id (fun () -> defer_history t entries)
-    | Submit_message (original_actor, attachment_id, submitting_principal, timing, entry)
-      ->
-      let open Result.Let_syntax in
-      let%bind () =
-        match original_actor with
-        | None -> Ok ()
-        | Some actor ->
-          let principal = Operator_authorization.principal actor in
-          if
-            Operator_authorization.is_current actor
-            && Agent_protocol.Principal.has_scope principal Send_messages
-            && Agent_protocol.Id.Principal.equal principal.id submitting_principal
-          then Ok ()
-          else
-            Error
-              (error
-                 Permission_denied
-                 "message authentication expired or differs from submitter")
-      in
-      submit_message ?original_actor t attachment_id submitting_principal timing entry
+    | Inherited_turn request ->
+      (match request with
+       | Submit_message
+           (original_actor, attachment_id, submitting_principal, timing, entry, capture)
+         ->
+         let open Result.Let_syntax in
+         let%bind () =
+           check_message_authentication original_actor ~submitting_principal
+         in
+         submit_message
+           ?original_actor
+           t
+           attachment_id
+           submitting_principal
+           timing
+           entry
+           capture
+       | Submit_goal_resume (continuation, capture) ->
+         continue_goal_episode_internal t continuation ~capture
+       | Submit_held_input (scope, input, capture) ->
+         submit_held_run_input_internal t scope input ~capture
+       | Edit_history (request, capture) -> edit_history_internal t request ~capture
+       | Continue_history (request, capture) ->
+         continue_history_internal t request ~capture
+       | Submit_managed (input, capture) -> submit_managed_message t input ~capture
+       | Admit_run (input, Receipt, capture) -> admit_run t input ~reply:Receipt ~capture
+       | Admit_run (input, Prepared_outcome, capture) ->
+         admit_prepared_run t input ~capture
+       | Resolve_prepared_outcome (input, failure) ->
+         (match input.preparation with
+          | Some preparation
+            when Run_preparation.belongs_to preparation ~owner:t.run_preparation_owner ->
+            Ok (prepared_run_outcome t input failure)
+          | Some _ | None ->
+            Error (error Conflict "prepared outcome belongs to another actor"))
+       | Submit_observed_origin observed -> submit_observed_turn_origin t observed
+       | Commit (plan, before_writer) -> commit_inherited_turn t plan ~before_writer
+       | Finish (acknowledged, confirmation, views) ->
+         finish_inherited_turn t acknowledged ~confirmation ~views
+       | Retire (acknowledged, failure) ->
+         with_runtime_terminal t acknowledged.owner.operation_id (fun () ->
+           retire_acknowledged_turn t acknowledged ~failure))
     | Control_pending (principal, project, request, replacement) ->
       control_pending_internal t principal project request replacement
     | Capture_run_constructor_model_source
@@ -36550,53 +44462,6 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
       reserve_history_block ~run_preparation:preparation t count
     | Checkpoint_run_moderator (preparation, moderator, moderator_manager) ->
       checkpoint_run_moderator t preparation moderator moderator_manager
-    | Admit_prepared_run (preparation, scope, session, entry) ->
-      if not (Run_preparation.belongs_to preparation ~owner:t.run_preparation_owner)
-      then
-        Ok
-          (Run_admission_outcome.Rejected
-             (error Conflict "run preparation belongs to another actor"))
-      else
-        Exn.protect
-          ~finally:(fun () ->
-            Run_preparation.close preparation;
-            match t.run_preparation with
-            | Some (Initial active) when phys_equal active preparation ->
-              t.run_preparation <- None
-            | Some _ | None -> ())
-          ~f:(fun () ->
-            let attempted = ref false in
-            let result =
-              let open Result.Let_syntax in
-              let%bind () = check_run_preparation t preparation in
-              admit_run
-                ~preparation
-                ~commit_attempted:attempted
-                t
-                scope
-                (Run_preparation.request preparation)
-                session
-                (Run_preparation.request_sha256 preparation)
-                entry
-            in
-            match result with
-            | Ok receipt -> Ok (Run_admission_outcome.Admitted receipt)
-            | Error failure ->
-              let retained =
-                ordinary_run_receipt
-                  t
-                  ~principal_id:(Run_preparation.principal_id preparation)
-                  ~key:(Run_preparation.request preparation).key
-                  ~request_sha256:(Run_preparation.request_sha256 preparation)
-              in
-              (match retained with
-               | Ok (Some ({ kind = Admission; _ } as receipt)) ->
-                 Ok (Run_admission_outcome.Admitted receipt)
-               | Ok (Some { kind = Action | Terminal; _ }) | Ok None | Error _ ->
-                 Ok
-                   (if !attempted
-                    then Run_admission_outcome.Uncertain failure
-                    else Run_admission_outcome.Rejected failure)))
     | Begin_run_preparation
         (original_actor, authorize, principal_id, request, request_sha256) ->
       begin_run_preparation_internal
@@ -36673,7 +44538,6 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
          held_authored_resource_internal t continuation owner
        | Begin_input continuation -> begin_held_input_internal t continuation
        | Ready_input (scope, input) -> ready_held_input_internal t scope input
-       | Submit_input (scope, input) -> submit_held_run_input_internal t scope input
        | Close_input scope -> close_held_input_internal t scope
        | End_held_activation activation -> end_held_activation_internal t activation
        | Enable_turn_budget (continuation, policy) ->
@@ -36716,22 +44580,12 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
           | Claim_resume (scope, id, snapshot, event) ->
             claim_goal_resume_event t scope id snapshot event
           | Finish_resume scope -> finish_goal_resume_callback_internal t scope
-          | Continue_goal continuation -> continue_goal_episode_internal t continuation
           | Resource (construction, owner) ->
             runtime_construction_resource_internal t construction owner
           | End construction -> end_runtime_construction_internal t construction))
     | Admit_held_recurrence_run (binding, intent, attempt, session) ->
       admit_held_recurrence_run_internal t ~binding ~intent ~attempt ~session
-    | Close_run_preparation preparation ->
-      if not (Run_preparation.belongs_to preparation ~owner:t.run_preparation_owner)
-      then Error (error Conflict "run preparation belongs to another actor")
-      else (
-        Run_preparation.close preparation;
-        (match t.run_preparation with
-         | Some (Initial active) when phys_equal active preparation ->
-           close_run_preparation t
-         | Some _ | None -> ());
-        Ok ())
+    | Close_run_preparation preparation -> close_prepared_run_from_caller t preparation
     | Run_start_receipt (authorize, principal_id, request, request_sha256) ->
       let open Result.Let_syntax in
       let%bind () = authorize t.state in
@@ -36749,23 +44603,11 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
        | Some ({ kind = Admission; _ } as receipt) -> Ok (Some receipt)
        | Some { kind = Action | Terminal; _ } ->
          Error (error Conflict "run start key belongs to another action"))
-    | Admit_run (scope, request, session, request_sha256, entry) ->
-      admit_run
-        t
-        scope
-        (Run_admission_request.of_writer request)
-        session
-        request_sha256
-        entry
-    | Submit_managed_message (reference, key, fingerprint, generation, maximum, entry) ->
-      submit_managed_message t reference key fingerprint generation maximum entry
     | Compact (original_actor, attachment_id, expected_revision) ->
       let%bind.Result () = require_selected_execution t in
       compact_internal t original_actor attachment_id expected_revision
     | Delete_history (attachment_id, revision, history_id) ->
       delete_history_internal t attachment_id revision history_id
-    | Edit_history request -> edit_history_internal t request
-    | Continue_history request -> continue_history_internal t request
     | Adopt_deferred -> adopt_deferred t
     | Reserve_history_block count -> reserve_history_block t count
     | Commit_worker_entry (operation_id, entry) ->
@@ -36923,15 +44765,17 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
     | Fail_schedule (schedule_id, generation, failure) ->
       fail_schedule t schedule_id generation failure
     | Skip_schedule (schedule_id, generation) -> skip_schedule t schedule_id generation
-    | Claim_idle_moderator -> claim_idle_moderator t
+    | Idle_completion request -> handle_idle_completion_request t request
     | Apply_observation_follow_up -> apply_observation_follow_up t
-    | Complete_idle_moderator drain -> complete_idle_moderator t drain
-    | Fail_idle_moderator failure -> fail_idle_moderator t failure
     | Attach (mode, subscribe, principal_id, reclaim_token) ->
       attach t mode subscribe principal_id reclaim_token
     | Detach attachment_id -> detach t attachment_id
     | Renew_owner (attachment_id, generation) -> renew_owner t attachment_id generation
     | Owner_expired generation -> owner_expired t generation
+    | Descendant_root (Capture operation) -> capture_descendant_root t operation
+    | Descendant_root (Consume observed) -> consume_descendant_root t observed
+    | Descendant_root (Consume_admitted observed) ->
+      consume_descendant_admitted_root t observed
     | Child_accounting request -> handle_child_accounting_request t request
     | Checkpoint persist -> persist t.state
     | Quiescent_checkpoint inspect ->
@@ -36974,8 +44818,7 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
         operation_id
         invocation_id
         configuration
-    | Allocate_inference (execution, owner, relation, configuration) ->
-      allocate_inference t execution owner relation configuration
+    | Inherited_inference request -> handle_inherited_inference_request t request
     | Admit_model_job (execution, job) -> admit_model_job t execution job
     | Refresh_inference selected -> refresh_inference t selected
     | Acknowledge_inference (run_preparation, owner, handle, attempt) ->
@@ -37112,6 +44955,12 @@ let create_internal
     ; recurrence_creation_owner = ref ()
     ; recurrence_activation_owner = Activation_custody.Owner.create ()
     ; recurrence_activations = []
+    ; descendant_policy_cells = []
+    ; descendant_host_binding = None
+    ; descendant_admission_slot = None
+    ; idle_completion = None
+    ; inherited_turn_prepared = None
+    ; inherited_turn_cleanup = None
     ; configuration_update_owner = Configuration_update.Owner.create ()
     ; configuration_capture = Configuration_capture.create ()
     ; operation_worker
@@ -37371,6 +45220,34 @@ let admit_inference t ~owner ~relation ~operation_id ~invocation_id ~configurati
     (Admit_inference (None, owner, relation, operation_id, invocation_id, configuration))
 ;;
 
+let admit_inference_allocation
+      t
+      ~owner
+      ~relation
+      ~operation_id
+      ~invocation_id
+      ~configuration
+  =
+  let open Result.Let_syntax in
+  let%bind () = retry_descendant_admission_cleanup t in
+  let%bind origin_observation = observe_inference_origin t in
+  let%bind prepared =
+    Eio.Cancel.protect (fun () ->
+      call
+        t
+        (Inherited_inference
+           (Prepare_legacy
+              ( origin_observation
+              , None
+              , owner
+              , relation
+              , operation_id
+              , invocation_id
+              , configuration ))))
+  in
+  finish_prepared_inference t prepared
+;;
+
 let acknowledge_inference t ~owner ~handle attempt =
   call t (Acknowledge_inference (None, owner, handle, attempt))
 ;;
@@ -37439,6 +45316,35 @@ module Constructor_mutations = struct
       t
       (Admit_inference
          (Some preparation, owner, relation, operation_id, invocation_id, configuration))
+  ;;
+
+  let admit_inference_allocation
+        t
+        ~preparation
+        ~owner
+        ~relation
+        ~operation_id
+        ~invocation_id
+        ~configuration
+    =
+    let open Result.Let_syntax in
+    let%bind () = retry_descendant_admission_cleanup t in
+    let%bind origin_observation = observe_inference_origin t in
+    let%bind prepared =
+      Eio.Cancel.protect (fun () ->
+        call
+          t
+          (Inherited_inference
+             (Prepare_legacy
+                ( origin_observation
+                , Some preparation
+                , owner
+                , relation
+                , operation_id
+                , invocation_id
+                , configuration ))))
+    in
+    finish_prepared_inference t prepared
   ;;
 
   let acknowledge_inference t ~preparation ~owner ~handle attempt =
@@ -37707,6 +45613,263 @@ let defer_history t ~attachment_id entries =
   call t (Defer_history (attachment_id, entries))
 ;;
 
+let close_unattempted_inherited_turn t (plan : _ Inherited_turn.t) =
+  match seal_inherited_turn_before_writer t plan with
+  | Error _ -> () (* actual canonical writer unknown: retain Slot/Set *)
+  | Ok closed ->
+    ignore
+      (schedule_descendant_admission_cleanup t plan.slot ~closed
+       : ( (unit, Agent_protocol.Error.t) result Eio.Promise.t
+           , Agent_protocol.Error.t )
+           result)
+;;
+
+let refresh_inherited_turn_source
+  : type outcome. outcome Inherited_turn.Source.t -> (unit, Agent_protocol.Error.t) result
+  = function
+  | Held_input source ->
+    Admitted_activation.Continuation.refresh source.selection.scope.continuation
+  | Goal_resume source ->
+    Runtime_construction.refresh (Existing_goal source.selection.scope.continuation)
+  | Message _ | Run_user _ | History _ -> Ok ()
+  | Managed { origin = Trusted_host; _ } -> Ok ()
+  | Managed { origin = Native borrowed; _ } ->
+    Native_tool_invocation.refresh_borrowed_effect_current borrowed
+;;
+
+let drive_inherited_turn
+  : type outcome.
+    t -> outcome Inherited_turn.t -> (outcome, Agent_protocol.Error.t) result
+  =
+  fun t plan ->
+  let open Result.Let_syntax in
+  let slot = plan.slot in
+  let host = Descendant_admission_slot.host slot in
+  let preparation = Descendant_admission_slot.preparation slot in
+  let reservations = Descendant_admission_slot.reservations slot in
+  let finished = ref false in
+  let failure = ref None in
+  let cleanup () =
+    if not !finished
+    then (
+      let primary =
+        Option.value_or_thunk !failure ~default:(fun () ->
+          error Conflict "inherited Turn caller cancelled before completion")
+      in
+      (* Publish before phase inspection: an already-attempted Pending writer
+         may install its real ACK only after this caller has disappeared. *)
+      Inherited_turn.request_cancellation plan ~failure:primary;
+      match plan.phase with
+      | Acknowledged acknowledged ->
+        ignore
+          (schedule_inherited_turn_cleanup t acknowledged
+           : ( (unit, Agent_protocol.Error.t) result Eio.Promise.t
+               , Agent_protocol.Error.t )
+               result)
+      | Pending | Writer_prepared _ | Closed -> close_unattempted_inherited_turn t plan)
+  in
+  Exn.protect
+    ~finally:(fun () ->
+      try cleanup () with
+      | cleanup ->
+        (try Eio.traceln "inherited Turn cleanup failed: %s" (Exn.to_string cleanup) with
+         | _ -> ()))
+    ~f:(fun () ->
+      let result =
+        let%bind () = refresh_inherited_turn_source plan.source in
+        let%bind before_writer = host.prepare preparation reservations in
+        let%bind () = refresh_inherited_turn_source plan.source in
+        let%bind acknowledged = call t (Inherited_turn (Commit (plan, before_writer))) in
+        let%bind confirmation = host.confirm acknowledged.native in
+        acknowledged.cleanup_progress <- Confirmed confirmation;
+        let%bind views = host.refresh_admitted acknowledged.native confirmation in
+        let%map result =
+          call t (Inherited_turn (Finish (acknowledged, confirmation, views)))
+        in
+        finished := true;
+        result
+      in
+      (match result with
+       | Ok _ -> ()
+       | Error primary -> failure := Some primary);
+      result)
+;;
+
+(* This read-only hint schedules cleanup only for an input that may need a fresh
+   Turn. Actual source authorization, receipt lookup and writer admission remain
+   in the mailbox handler; a raced fresh input can still hit the Slot fence. *)
+let should_retry_turn_cleanup : type outcome. t -> outcome Inherited_turn.Input.t -> bool =
+  fun t input ->
+  match input with
+  | Held_input _ | Held_input_selected _ | Goal_resume _ | Goal_resume_selected _ -> false
+  | Message _ -> true
+  | Edit_history request ->
+    Agent_protocol.History_edit.Mode.equal
+      (Agent_protocol.History_edit.mode request.edit)
+      Edit_and_continue
+    && Option.is_some t.operation_worker
+    && List.is_empty t.state.conversation.deferred_user_entries
+  | Continue_history _ ->
+    Option.is_some t.operation_worker
+    && List.is_empty t.state.conversation.deferred_user_entries
+  | History _ -> false
+  | Managed source ->
+    not
+      (List.exists t.state.managed_submissions ~f:(fun (receipt : Managed_submission.t) ->
+         Agent_store.Delegation_store.Reference.equal receipt.reference source.reference
+         && Agent_protocol.Idempotency_key.equal receipt.key source.key))
+  | Run_user (source, _) ->
+    (match source.request.input, source.entry with
+     | Authored_start, (None | Some _) | User_submission _, None -> false
+     | User_submission _, Some _ ->
+       (match
+          ordinary_run_receipt
+            t
+            ~principal_id:(Run_admission.Scope.principal_id source.scope)
+            ~key:source.request.key
+            ~request_sha256:source.request_sha256
+        with
+        | Ok None -> true
+        | Ok (Some _) | Error _ -> false))
+;;
+
+let submit_turn_input
+  : type outcome.
+    t
+    -> ?command_audit:Document_schema.Document.t
+    -> outcome Inherited_turn.Input.t
+    -> (outcome, Agent_protocol.Error.t) result
+  =
+  fun t ?command_audit input ->
+  (* Read-only scheduling selection, never an admission check. Busy/deferred
+     messages do not wait for root closure. A race to Idle is revalidated by the
+     actual handler and may return the precise retryable Slot conflict. *)
+  let%bind.Result () =
+    match
+      t.idle_moderator_borrowed, t.state.active_operation, t.state.lifecycle.observed
+    with
+    | false, None, Idle when should_retry_turn_cleanup t input ->
+      (match inherited_turn_required t.state with
+       | Scoped ->
+         let%bind.Result () = retry_inherited_turn_cleanup t in
+         retry_descendant_admission_cleanup t
+       | Ordinary | Need_private_origin -> Ok ())
+    | (true | false), (Some _ | None), _ -> Ok ()
+  in
+  let capture : outcome Inherited_turn.Capture.t = Inherited_turn.Capture.create () in
+  Exn.protect
+    ~finally:(fun () ->
+      match Inherited_turn.Capture.cancel capture with
+      | None -> ()
+      | Some plan ->
+        (try close_unattempted_inherited_turn t plan with
+         | cleanup ->
+           (try
+              Eio.traceln
+                "inherited Turn capture cleanup failed: %s"
+                (Exn.to_string cleanup)
+            with
+            | _ -> ())))
+    ~f:(fun () ->
+      let initial : (outcome Inherited_turn.Decision.t, Agent_protocol.Error.t) result =
+        match input with
+        | Inherited_turn.Input.Message source ->
+          call
+            t
+            ?command_audit
+            (Inherited_turn
+               (Submit_message
+                  ( source.original_actor
+                  , source.attachment_id
+                  , source.submitting_principal
+                  , source.timing
+                  , source.entry
+                  , capture )))
+        | Held_input (scope, input) ->
+          Eio.Cancel.protect (fun () ->
+            call
+              t
+              ?command_audit
+              (Inherited_turn (Submit_held_input (scope, input, capture))))
+        | Goal_resume continuation ->
+          Eio.Cancel.protect (fun () ->
+            call
+              t
+              ?command_audit
+              (Inherited_turn (Submit_goal_resume (continuation, capture))))
+        | Goal_resume_selected _ ->
+          Error
+            (error Invalid_state "internal selected Goal Resume requires observed origin")
+        | Held_input_selected _ ->
+          Error
+            (error Invalid_state "internal selected held input requires observed origin")
+        | Edit_history request ->
+          call t ?command_audit (Inherited_turn (Edit_history (request, capture)))
+        | Continue_history request ->
+          call t ?command_audit (Inherited_turn (Continue_history (request, capture)))
+        | History _ ->
+          Error
+            (error
+               Invalid_state
+               "internal prepared history requires its observed origin continuation")
+        | Managed source ->
+          (* Preserve old managed ordinary finite-call cancellation protection;
+             no root RPC runs inside this initial request or mask. *)
+          Eio.Cancel.protect (fun () ->
+            call t ?command_audit (Inherited_turn (Submit_managed (source, capture))))
+        | Run_user (source, reply) ->
+          call t ?command_audit (Inherited_turn (Admit_run (source, reply, capture)))
+      in
+      let%bind.Result decision = initial in
+      let%bind.Result decision =
+        match decision with
+        | Inherited_turn.Decision.Need_private_origin captured ->
+          let%bind.Result origin = observe_descendant_origin_external t captured.origin in
+          let%bind.Result () = Inherited_turn.Capture.check_waiting captured.capture in
+          let resume () =
+            call t (Inherited_turn (Submit_observed_origin { captured; origin }))
+          in
+          (* A historical KnownUnrelated observation can resume an ordinary
+             finite writer. Preserve that source's original handoff mask;
+             external origin observation and inherited root waits stay outside. *)
+          (match captured.input with
+           | Held_input_selected _ | Goal_resume_selected _ -> Eio.Cancel.protect resume
+           | Managed _ -> Eio.Cancel.protect resume
+           | Message _
+           | Run_user _
+           | Edit_history _
+           | Continue_history _
+           | History _
+           | Held_input _
+           | Goal_resume _ -> resume ())
+        | Completed _ | Pending _ -> Ok decision
+      in
+      match decision with
+      | Inherited_turn.Decision.Completed result -> Ok result
+      | Need_private_origin _ ->
+        Error (error Conflict "Turn origin continuation did not settle")
+      | Pending plan ->
+        let%bind.Result () = Inherited_turn.Capture.transfer capture plan in
+        (* No yield between ownership transfer and driver's finalizer. *)
+        drive_inherited_turn t plan)
+;;
+
+let submit_message_call
+      t
+      ?command_audit
+      ~original_actor
+      ~attachment_id
+      ~submitting_principal
+      ~timing
+      entry
+  =
+  submit_turn_input
+    t
+    ?command_audit
+    (Inherited_turn.Input.Message
+       { original_actor; attachment_id; submitting_principal; timing; entry })
+;;
+
 let submit_message
       t
       ?(timing = Agent_protocol.Pending_input.Timing.Safe_boundary)
@@ -37714,7 +45877,13 @@ let submit_message
       ~attachment_id
       entry
   =
-  call t (Submit_message (None, attachment_id, submitting_principal, timing, entry))
+  submit_message_call
+    t
+    ~original_actor:None
+    ~attachment_id
+    ~submitting_principal
+    ~timing
+    entry
 ;;
 
 let enable_run_constructor_turn_budget t ~preparation policy =
@@ -37788,7 +45957,45 @@ let checkpoint_run_moderator ?moderator_manager t ~preparation moderator =
 ;;
 
 let admit_prepared_run t ~command_audit ~preparation ~scope ~session ~entry =
-  call t ?command_audit (Admit_prepared_run (preparation, scope, session, entry))
+  let input : Inherited_turn.Input.run_user =
+    { scope
+    ; session
+    ; entry
+    ; preparation = Some preparation
+    ; attempted = ref false
+    ; request = Run_preparation.request preparation
+    ; request_sha256 = Run_preparation.request_sha256 preparation
+    }
+  in
+  Exn.protect
+    ~finally:(fun () ->
+      (* The original handler finally cannot span the external private-origin
+         observation. Retain the same caller exit here; a transferred uncertain
+         canonical writer is deliberately not closed by this finite request. *)
+      try
+        Eio.Cancel.protect (fun () ->
+          ignore
+            (call t ~priority:Priority (Close_run_preparation preparation)
+             : (unit, Agent_protocol.Error.t) result))
+      with
+      | cleanup ->
+        (try
+           Eio.traceln "prepared Run caller exit failed: %s" (Exn.to_string cleanup)
+         with
+         | _ -> ()))
+    ~f:(fun () ->
+      match
+        submit_turn_input
+          t
+          ?command_audit
+          (Inherited_turn.Input.Run_user (input, Prepared_outcome))
+      with
+      | Ok outcome -> Ok outcome
+      | Error failure ->
+        call
+          t
+          ~priority:Priority
+          (Inherited_turn (Resolve_prepared_outcome (input, failure))))
 ;;
 
 let begin_run_preparation t ~authorize ~principal_id ~request ~request_sha256 =
@@ -37863,8 +46070,22 @@ let run_start_receipt t ~authorize ~principal_id ~request ~request_sha256 =
   call t (Run_start_receipt (authorize, principal_id, request, request_sha256))
 ;;
 
+let admit_run_call ?command_audit t ~scope ~request ~session ~request_sha256 ~entry =
+  let input : Inherited_turn.Input.run_user =
+    { scope
+    ; request = Run_admission_request.of_writer request
+    ; session
+    ; request_sha256
+    ; preparation = None
+    ; attempted = ref false
+    ; entry
+    }
+  in
+  submit_turn_input t ?command_audit (Inherited_turn.Input.Run_user (input, Receipt))
+;;
+
 let admit_run t ~scope ~request ~session ~request_sha256 ~entry =
-  call t (Admit_run (scope, request, session, request_sha256, entry))
+  admit_run_call t ~scope ~request ~session ~request_sha256 ~entry
 ;;
 
 let admit_run_with_command_audit
@@ -37876,7 +46097,23 @@ let admit_run_with_command_audit
       ~request_sha256
       ~entry
   =
-  call t ~command_audit (Admit_run (scope, request, session, request_sha256, entry))
+  admit_run_call t ~command_audit ~scope ~request ~session ~request_sha256 ~entry
+;;
+
+let submit_managed_message_call
+      t
+      ~origin
+      ~reference
+      ~key
+      ~request_sha256
+      ~generation
+      ~max_receipts
+      entry
+  =
+  let input : Inherited_turn.Input.managed =
+    { origin; reference; key; request_sha256; generation; max_receipts; entry }
+  in
+  submit_turn_input t (Inherited_turn.Input.Managed input)
 ;;
 
 let submit_managed_message
@@ -37888,11 +46125,36 @@ let submit_managed_message
       ~max_receipts
       entry
   =
-  Eio.Cancel.protect (fun () ->
-    call
+  submit_managed_message_call
+    t
+    ~origin:Trusted_host
+    ~reference
+    ~key
+    ~request_sha256
+    ~generation
+    ~max_receipts
+    entry
+;;
+
+let submit_managed_message_native
       t
-      (Submit_managed_message
-         (reference, key, request_sha256, generation, max_receipts, entry)))
+      ~borrowed
+      ~reference
+      ~key
+      ~request_sha256
+      ~generation
+      ~max_receipts
+      entry
+  =
+  submit_managed_message_call
+    t
+    ~origin:(Native borrowed)
+    ~reference
+    ~key
+    ~request_sha256
+    ~generation
+    ~max_receipts
+    entry
 ;;
 
 let submit_message_authenticated
@@ -37903,7 +46165,13 @@ let submit_message_authenticated
       entry
   =
   let submitting_principal = (Operator_authorization.principal actor).id in
-  call t (Submit_message (Some actor, attachment_id, submitting_principal, timing, entry))
+  submit_message_call
+    t
+    ~original_actor:(Some actor)
+    ~attachment_id
+    ~submitting_principal
+    ~timing
+    entry
 ;;
 
 let submit_message_authenticated_with_command_audit
@@ -37915,10 +46183,14 @@ let submit_message_authenticated_with_command_audit
       entry
   =
   let submitting_principal = (Operator_authorization.principal actor).id in
-  call
+  submit_message_call
     t
     ~command_audit
-    (Submit_message (Some actor, attachment_id, submitting_principal, timing, entry))
+    ~original_actor:(Some actor)
+    ~attachment_id
+    ~submitting_principal
+    ~timing
+    entry
 ;;
 
 let submit_message_with_command_audit
@@ -37929,10 +46201,14 @@ let submit_message_with_command_audit
       ~attachment_id
       entry
   =
-  call
+  submit_message_call
     t
     ~command_audit
-    (Submit_message (None, attachment_id, submitting_principal, timing, entry))
+    ~original_actor:None
+    ~attachment_id
+    ~submitting_principal
+    ~timing
+    entry
 ;;
 
 let cancel_pending t ?command_audit ~principal ~project request =
@@ -38441,7 +46717,93 @@ let skip_schedule t ~schedule_id ~generation =
   call t (Skip_schedule (schedule_id, generation))
 ;;
 
-let claim_idle_moderator t = call t Claim_idle_moderator
+module Idle_moderator_completion = struct
+  type actor = t
+
+  type t =
+    { actor : actor
+    ; completion : Idle_completion_data.t
+    }
+
+  let create (actor : actor) =
+    let exited, exit = Eio.Promise.create () in
+    let completion : Idle_completion_data.t =
+      { issuing_actor = actor.inference_owner_identity
+      ; identity = ref ()
+      ; domain = actor.runtime_source_domain
+      ; exited
+      ; exit
+      ; phase = Fresh
+      ; action = None
+      ; prefix = Empty
+      ; pending_prefix = None
+      ; write = None
+      ; suffix = None
+      ; drain = None
+      ; outcome = None
+      ; cancellation = None
+      ; cleanup = Idle
+      }
+    in
+    { actor; completion }
+  ;;
+
+  let check (t : t) = check_idle_completion_identity t.actor t.completion
+
+  let claim t =
+    let%bind.Result () = check t in
+    call t.actor (Idle_completion (Claim_paired t.completion))
+  ;;
+
+  let capture t drain =
+    let%bind.Result () = check t in
+    call
+      t.actor
+      ~priority:Priority
+      (Idle_completion (Capture_paired (t.completion, drain)))
+  ;;
+
+  let fail_callback t ~failure =
+    let%bind.Result () = check t in
+    call
+      t.actor
+      ~priority:Priority
+      (Idle_completion (Fail_paired (t.completion, failure)))
+  ;;
+
+  let leave_capture t =
+    match check t with
+    | Error _ -> ()
+    | Ok () ->
+      (match Eio.Promise.peek t.completion.exited with
+       | None -> Eio.Promise.resolve t.completion.exit ()
+       | Some () -> ())
+  ;;
+
+  let finish t =
+    let%bind.Result () = check t in
+    match t.completion.outcome with
+    | Some result -> result
+    | None -> Error (error Conflict "legacy callback has no captured outcome")
+  ;;
+
+  let cancel t ~failure =
+    match check t with
+    | Error _ -> ()
+    | Ok () ->
+      Idle_completion_data.request_cancellation t.completion failure;
+      (match schedule_idle_completion_retirement t.actor t.completion with
+       | Ok _ | Error _ -> ())
+  ;;
+
+  let join_retirement t =
+    let%bind.Result () = check t in
+    let%bind.Result promise = schedule_idle_completion_retirement t.actor t.completion in
+    Eio.Promise.await promise
+  ;;
+end
+
+let claim_idle_moderator t = call t (Idle_completion Claim)
 let apply_observation_follow_up t = call t Apply_observation_follow_up
 let apply_moderator_follow_up t = call t Apply_observation_follow_up
 
@@ -38450,11 +46812,11 @@ let invocation_granted t ~tool_name ~identity_digest =
 ;;
 
 let complete_idle_moderator t drain =
-  call t ~priority:Priority (Complete_idle_moderator drain)
+  call t ~priority:Priority (Idle_completion (Complete drain))
 ;;
 
 let fail_idle_moderator t failure =
-  call t ~priority:Priority (Fail_idle_moderator failure)
+  call t ~priority:Priority (Idle_completion (Fail failure))
 ;;
 
 let attach_with_snapshot t ~principal_id ~reclaim_token ~mode ~subscribe =
@@ -38548,10 +46910,12 @@ let update_organization t ?command_audit ~principal request =
   call t ?command_audit (Update_organization (principal, request))
 ;;
 
-let edit_history t ?command_audit request = call t ?command_audit (Edit_history request)
+let edit_history t ?command_audit request =
+  submit_turn_input t ?command_audit (Inherited_turn.Input.Edit_history request)
+;;
 
 let continue_history t ?command_audit request =
-  call t ?command_audit (Continue_history request)
+  submit_turn_input t ?command_audit (Inherited_turn.Input.Continue_history request)
 ;;
 
 let begin_lifecycle t ~attachment_id ~expected_generation ~expected_revision =
@@ -38623,6 +46987,390 @@ let recurrence_call t ?(priority = Mailbox.Normal) request =
       (fun () ->
          Eio.Promise.await t.finished;
          unavailable ())
+;;
+
+(* Call only from outer driver/Factory; all actual private Store observations
+   finish before the finite consume request enters the Actor. No cancellation
+   mask encloses the remote operation. Host already owns each attempt/set. *)
+let descendant_root_call t operation =
+  let open Result.Let_syntax in
+  let%bind captured = recurrence_call t (Descendant_root (Capture operation)) in
+  let%bind observed = observe_descendant_root t captured in
+  recurrence_call t (Descendant_root (Consume observed))
+;;
+
+(* Exactly one read-only recapture is allowed. Errors, policy/authority changes,
+   Store failures and cancellation are never retry signals. *)
+let refresh_descendant_admitted_root t ~reservation ~acknowledgement ~confirmation =
+  let module Q = Descendant_root_request in
+  let open Result.Let_syntax in
+  let attempt () =
+    let%bind captured =
+      recurrence_call
+        t
+        (Descendant_root
+           (Capture (Refresh_admitted (reservation, acknowledgement, confirmation))))
+    in
+    let%bind observed = observe_descendant_admitted_root t captured in
+    match observed with
+    | Q.Admitted_refresh.State_changed -> Ok Q.Admitted_refresh.State_changed
+    | Current observed -> recurrence_call t (Descendant_root (Consume_admitted observed))
+  in
+  let%bind first = attempt () in
+  match first with
+  | Q.Admitted_refresh.Current view -> Ok view
+  | State_changed ->
+    Eio.Fiber.yield ();
+    let%bind second = attempt () in
+    (match second with
+     | Current view -> Ok view
+     | State_changed ->
+       Error
+         (Agent_protocol.Error.create
+            Conflict
+            ~message:"admitted root observation changed during both bounded attempts"
+            ~retryable:true
+            ()))
+;;
+
+let refresh_descendant_usage t ~source_owner ~source =
+  let open Result.Let_syntax in
+  let%bind captured =
+    recurrence_call t (Child_accounting (Capture_descendant_usage (source_owner, source)))
+  in
+  let%bind observed = observe_descendant_usage_external t captured in
+  let check () = check_descendant_usage_source t observed in
+  let%map () = check () in
+  observed, check
+;;
+
+let observe_descendant_usage t ~source_owner ~source =
+  let open Result.Let_syntax in
+  let refresh_read () =
+    let%map _, check = refresh_descendant_usage t ~source_owner ~source in
+    check
+  in
+  let%bind observed, _ = refresh_descendant_usage t ~source_owner ~source in
+  recurrence_call t (Child_accounting (Observe_descendant_usage (observed, refresh_read)))
+;;
+
+module Descendant_admission = struct
+  module R = Descendant_admission_data
+  module Preparation = R.Preparation
+  module Root_route = R.Root_route
+  module Reservation = R.Reservation
+  module Reservation_attempt = R.Reservation_attempt
+  module Reservation_set = R.Reservation_set
+  module Reserve_result = R.Reserve_result
+  module Root_before_writer = R.Root_before_writer
+  module Closed_before_writer = Descendant_preparation.Closed_before_writer
+
+  module Before_writer = struct
+    include R.Before_writer
+
+    let check_current = check_descendant_before_writer
+  end
+
+  module Acknowledgement = struct
+    include R.Acknowledgement
+
+    let reservations t = t.reservations
+  end
+
+  module Import_acknowledgement = R.Import_acknowledgement
+
+  let observe_acknowledged_usage t ~source_owner ~acknowledgement =
+    observe_descendant_usage
+      t
+      ~source_owner
+      ~source:(Descendant_usage.Source.Acknowledged acknowledgement)
+  ;;
+
+  let observe_imported_usage t ~source_owner ~acknowledgement =
+    observe_descendant_usage
+      t
+      ~source_owner
+      ~source:(Descendant_usage.Source.Imported acknowledgement)
+  ;;
+
+  module Confirmation = R.Confirmation
+  module Root_admitted = R.Root_admitted
+
+  module Admitted_views = struct
+    include R.Admitted_views
+
+    let check_current = check_descendant_admitted_views
+  end
+
+  let bind_root_routes t ~source_owner ~ancestry ~preparation =
+    descendant_root_call t (Bind (source_owner, ancestry, preparation))
+  ;;
+
+  let begin_reservation t ~route ~reservations =
+    descendant_root_call t (Begin (route, reservations))
+  ;;
+
+  let commit_reservation t ~attempt =
+    (* Physically attempted/unknown never re-enters Capture, planner or writer,
+       even if current State/child owner changed while publication was pending. *)
+    if
+      not
+        (Int.equal
+           attempt.R.Reservation_attempt.basis.domain
+           (Stdlib.Domain.self () :> int))
+    then Error (error Conflict "root attempt belongs to another domain")
+    else (
+      match Reservation_attempt.outcome attempt with
+      | Acknowledged reservation -> Ok (Reserve_result.Reserved reservation)
+      | Attempt_unconfirmed -> Ok (Reserve_result.Attempt_unconfirmed attempt)
+      | Not_attempted -> descendant_root_call t (Commit attempt))
+  ;;
+
+  let reconcile_reservation t ~attempt = descendant_root_call t (Reconcile attempt)
+
+  let refresh_reserved t ~reservation =
+    descendant_root_call t (Refresh_reserved reservation)
+  ;;
+
+  let prepare_before_writer = prepare_descendant_before_writer
+
+  let close_before_writer t ~reservation ~closed =
+    let open Result.Let_syntax in
+    let%bind known = Root_close_acknowledgement.acknowledged reservation ~closed in
+    if known
+    then Ok ()
+    else (
+      let result = descendant_root_call t (Close (reservation, closed)) in
+      let%bind known = Root_close_acknowledgement.acknowledged reservation ~closed in
+      if known then Ok () else result)
+  ;;
+
+  let import_usage t ~source_owner ~observation =
+    descendant_root_call t (Import (source_owner, observation))
+  ;;
+
+  let confirmation = descendant_confirmation
+
+  let refresh_admitted_root t ~reservation ~acknowledgement ~confirmation =
+    refresh_descendant_admitted_root t ~reservation ~acknowledgement ~confirmation
+  ;;
+
+  let admitted_views = descendant_admitted_views
+end
+
+module Descendant_host = Descendant_host_data
+
+let install_descendant_host t ~source_owner ~expected ~check_ancestry ~host =
+  (* Only finite local ownership transfer is protected. The Factory retains the
+     returned exact binding before any cancellation/build/Store await. *)
+  Eio.Cancel.protect (fun () ->
+    recurrence_call
+      t
+      (Child_accounting
+         (Install_descendant_host (source_owner, expected, check_ancestry, host))))
+;;
+
+(* Closed refresh protocol: only capture/consume enter the Actor; private Store
+   reads and original authorization run in the caller without Owner locks. *)
+let refresh_child_origin_preparation t (preparation : Child_origin.Preparation.t) =
+  let open Result.Let_syntax in
+  let%bind () = check_child_origin_preparation t preparation in
+  (* Invalidate before the first mailbox wait too. Attempt identity orders even
+     captures whose callers cancel while queued; no older completion can renew
+     the cache after a newer failed/cancelled refresh. *)
+  let attempt = ref () in
+  preparation.refresh_attempt <- Some attempt;
+  preparation.observed <- None;
+  preparation.captured <- None;
+  let consumed = ref false in
+  Exn.protect
+    ~f:(fun () ->
+      let%bind captured =
+        recurrence_call
+          t
+          (Child_accounting (Capture_origin_refresh (preparation, attempt)))
+      in
+      let%bind observed = Child_origin.Captured_refresh.observe captured in
+      let%map () =
+        recurrence_call t (Child_accounting (Consume_origin_refresh observed))
+      in
+      consumed := true)
+    ~finally:(fun () ->
+      (* A cancelled queued Consume must not publish after its caller exits.
+         Cleanup is pure and scoped to this exact attempt, so an older failure
+         cannot clear a newer refresh's successful observation. *)
+      if
+        (not !consumed)
+        && Option.exists preparation.refresh_attempt ~f:(phys_equal attempt)
+      then (
+        preparation.refresh_attempt <- None;
+        preparation.captured <- None;
+        preparation.observed <- None))
+;;
+
+let publish_child_origin_preparation t (preparation : Child_origin.Preparation.t) =
+  let open Result.Let_syntax in
+  let%bind () = check_child_origin_preparation t preparation in
+  (* Installed once before publishing this otherwise private preparation. It is
+     never accepted from a caller and always routes back to this actual Actor. *)
+  preparation.refresh_current
+  <- (fun () -> refresh_child_origin_preparation t preparation);
+  let%map () = Child_origin.Preparation.refresh_current preparation in
+  preparation
+;;
+
+let prepare_native_child_origin t ~source_owner ~admission ~binding ~ancestry =
+  let%bind.Result preparation =
+    recurrence_call
+      t
+      (Child_accounting
+         (Prepare_native_origin (source_owner, admission, binding, ancestry)))
+  in
+  publish_child_origin_preparation t preparation
+;;
+
+let prepare_unrelated_child_origin t ~source_owner =
+  let%bind.Result preparation =
+    recurrence_call t (Child_accounting (Prepare_unrelated_origin source_owner))
+  in
+  publish_child_origin_preparation t preparation
+;;
+
+let bind_child_origin t ~preparation ~key ~child_session_id ~transaction_id =
+  let open Result.Let_syntax in
+  let%bind () = check_child_origin_preparation t preparation in
+  let%bind () = Child_origin.Preparation.refresh_current preparation in
+  recurrence_call
+    t
+    (Child_accounting (Bind_origin (preparation, key, child_session_id, transaction_id)))
+;;
+
+let bind_recurrence_child_origin t ~source_owner ~permit =
+  let open Result.Let_syntax in
+  let%bind preparation =
+    recurrence_call
+      t
+      (Child_accounting (Prepare_recurrence_origin (source_owner, permit)))
+  in
+  let%bind preparation = publish_child_origin_preparation t preparation in
+  let row = Recurrence_creation.reservation permit in
+  let%bind key = Recurrence_child_reservation.delegation_key row in
+  recurrence_call
+    t
+    (Child_accounting
+       (Bind_origin
+          ( preparation
+          , key
+          , Recurrence_child_reservation.child_session_id row
+          , Recurrence_child_reservation.transaction_id row )))
+;;
+
+let refresh_child_origin_reservation_observation
+      t
+      ~source_owner
+      ~bound
+      ~reference
+      ~native_callback
+  =
+  let open Result.Let_syntax in
+  let%bind () =
+    Option.value_map bound ~default:(Ok ()) ~f:Child_origin.Bound.refresh_current
+  in
+  let%bind captured =
+    recurrence_call
+      t
+      (Child_accounting
+         (Capture_reservation (source_owner, bound, reference, native_callback)))
+  in
+  observe_child_origin_reservation_external t captured
+;;
+
+let observe_child_origin_reservation t ~source_owner ~bound ~reference =
+  let open Result.Let_syntax in
+  let%bind observed =
+    refresh_child_origin_reservation_observation
+      t
+      ~source_owner
+      ~bound:(Some bound)
+      ~reference
+      ~native_callback:None
+  in
+  recurrence_call t (Child_accounting (Observe_reservation observed))
+;;
+
+let observe_retained_child_origin_reservation t ~source_owner ~reference =
+  let open Result.Let_syntax in
+  let%bind observed =
+    refresh_child_origin_reservation_observation
+      t
+      ~source_owner
+      ~bound:None
+      ~reference
+      ~native_callback:None
+  in
+  recurrence_call t (Child_accounting (Observe_reservation observed))
+;;
+
+let register_child_origin_reservation
+      t
+      ~(reservation : Child_origin.Reservation.t)
+      ~native_callback
+      ~check_parent
+  =
+  let open Result.Let_syntax in
+  let%bind observed =
+    refresh_child_origin_reservation_observation
+      t
+      ~source_owner:reservation.source_owner
+      ~bound:reservation.bound
+      ~reference:reservation.reference
+      ~native_callback
+  in
+  recurrence_call
+    t
+    (Child_accounting
+       (Register_reservation (reservation, observed, native_callback, check_parent)))
+;;
+
+let refresh_child_origin_usage t ~reservation =
+  let open Result.Let_syntax in
+  let%bind captured =
+    recurrence_call t (Child_accounting (Capture_origin_usage reservation))
+  in
+  let%bind observed =
+    observe_child_origin_usage_external t captured ~child_current:None
+  in
+  let check () = check_child_origin_usage_source t observed in
+  let%map () = check () in
+  observed, check
+;;
+
+let observe_child_origin_usage t ~reservation =
+  let open Result.Let_syntax in
+  let refresh_read () =
+    let%map _, check = refresh_child_origin_usage t ~reservation in
+    check
+  in
+  let%bind observed, _ = refresh_child_origin_usage t ~reservation in
+  recurrence_call t (Child_accounting (Observe_origin_usage (observed, refresh_read)))
+;;
+
+let import_child_origin_usage t ~reservation ~observation ~native_callback ~check_parent =
+  let open Result.Let_syntax in
+  let%bind captured =
+    recurrence_call
+      t
+      (Child_accounting (Capture_origin_import (reservation, native_callback)))
+  in
+  let child_observation = observation.Child_usage_observation.refresh_read () in
+  let%bind () = check_child_accounting_capture t captured.basis in
+  let%bind child_current = child_observation in
+  let%bind observed =
+    observe_child_origin_usage_external t captured ~child_current:(Some child_current)
+  in
+  recurrence_call
+    t
+    (Child_accounting (Import_origin_usage (observed, observation, check_parent)))
 ;;
 
 let observe_child_installation t ~source_owner ~reference =
@@ -38976,12 +47724,24 @@ let submit_held_run_input t ~scope ~input =
     match scope.phase with
     | Parsed_ready recorded
       when Runtime_input_preparation.Prepared_input.equal recorded input -> Ok ()
-    | Parsing | Parsed_ready _ | Consumed _ | Root_attempt_unconfirmed | Closed ->
+    | Parsing
+    | Parsed_ready _
+    | Admission_pending _
+    | Consumed _
+    | Root_attempt_unconfirmed
+    | Closed ->
       Error
         (error Conflict "held root input has already been submitted or is unavailable")
   in
   let%bind () = Admitted_activation.Continuation.refresh scope.continuation in
-  Eio.Cancel.protect (fun () -> call t (Held_startup (Submit_input (scope, input))))
+  let%bind () =
+    match inherited_turn_required t.state with
+    | Scoped ->
+      let%bind () = retry_inherited_turn_cleanup t in
+      retry_descendant_admission_cleanup t
+    | Ordinary | Need_private_origin -> Ok ()
+  in
+  submit_turn_input t (Inherited_turn.Input.Held_input (scope, input))
 ;;
 
 let held_authored_resource t ~continuation ~owner =
@@ -39067,7 +47827,7 @@ let with_held_input t ~continuation ~prepare f =
   let cleanup () =
     (match scope.phase with
      | Parsing | Parsed_ready _ -> scope.phase <- Closed
-     | Consumed _ | Root_attempt_unconfirmed | Closed -> ());
+     | Admission_pending _ | Consumed _ | Root_attempt_unconfirmed | Closed -> ());
     Eio.Cancel.protect (fun () -> call t (Held_startup (Close_input scope)))
   in
   let run () =
@@ -39189,8 +47949,12 @@ let continue_goal_episode t ~continuation =
     | Some _, _ | None, (Retired _ | Handed_off _) -> Ok ()
     | None, _ -> Runtime_construction.refresh (Existing_goal continuation)
   in
-  Eio.Cancel.protect (fun () ->
-    call t (Held_startup (Construction (Continue_goal continuation))))
+  match submit_turn_input t (Inherited_turn.Input.Goal_resume continuation) with
+  | Ok result -> Ok result
+  | Error error ->
+    Ok
+      (Goal_resume_result.Resume_failed
+         { receipt = Goal_continuation.receipt continuation; error })
 ;;
 
 let runtime_construction_resource t ~construction ~owner =

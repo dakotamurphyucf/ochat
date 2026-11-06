@@ -68,12 +68,24 @@ let%expect_test "original authentication follows real native owners and cannot e
              worker_actor := Some operation_actor;
              current operation_actor;
              let exact_borrow = ref None in
+             let exact_effect_check = ref None in
+             let exact_effect_refresh = ref None in
+             let retained_effect_checks = ref [] in
              let forwarded_allocations = ref 0 in
              let escaped_allocator = ref None in
              let allocator_probe = ref None in
              let execute ~invocation f =
                caps.with_invocation ~invocation (fun ~dispatched ~capabilities ->
                  exact_borrow := Some capabilities.borrow_agent_actor;
+                 exact_effect_check := Some capabilities.check_effect_current;
+                 exact_effect_refresh := Some capabilities.refresh_effect_current;
+                 capabilities.refresh_effect_current ~invocation:dispatched |> protocol_ok;
+                 capabilities.check_effect_current ~invocation:dispatched |> protocol_ok;
+                 retained_effect_checks
+                 := ( dispatched
+                    , capabilities.check_effect_current
+                    , capabilities.refresh_effect_current )
+                    :: !retained_effect_checks;
                  let capabilities =
                    { capabilities with
                      allocate_inference =
@@ -87,6 +99,7 @@ let%expect_test "original authentication follows real native owners and cannot e
              (on_call
               := fun () ->
                    let scope = N.borrow () |> protocol_ok in
+                   N.refresh_borrowed_effect_current scope |> protocol_ok;
                    let parent = N.borrowed_invocation scope in
                    let parent_actor = N.borrowed_agent_actor scope |> require_actor in
                    returned_actor := Some parent_actor;
@@ -112,7 +125,11 @@ let%expect_test "original authentication follows real native owners and cannot e
                      |> protocol_ok
                    in
                    let parent_borrow = Option.value_exn !exact_borrow in
+                   let parent_effect_check = Option.value_exn !exact_effect_check in
+                   let parent_effect_refresh = Option.value_exn !exact_effect_refresh in
+                   parent_effect_check ~invocation:parent |> protocol_ok;
                    let child_actor = ref None in
+                   let child_effect_check = ref None in
                    N.execute_borrowed
                      scope
                      ~invocation:child
@@ -120,6 +137,25 @@ let%expect_test "original authentication follows real native owners and cannot e
                         (* Both physical invocations are live. Equal principal and
                        concurrent lifetime do not authorize cross-association. *)
                         assert (Result.is_error (parent_borrow ~invocation:dispatched));
+                        assert (
+                          Result.is_error (parent_effect_check ~invocation:dispatched));
+                        assert (
+                          Result.is_error (parent_effect_refresh ~invocation:dispatched));
+                        assert (
+                          Result.is_error
+                            (capabilities.refresh_effect_current ~invocation:parent));
+                        capabilities.refresh_effect_current ~invocation:dispatched
+                        |> protocol_ok;
+                        assert (
+                          Result.is_error
+                            (capabilities.check_effect_current ~invocation:parent));
+                        capabilities.check_effect_current ~invocation:dispatched
+                        |> protocol_ok;
+                        child_effect_check
+                        := Some
+                             ( dispatched
+                             , capabilities.check_effect_current
+                             , capabilities.refresh_effect_current );
                         assert (
                           Result.is_error
                             (capabilities.borrow_agent_actor ~invocation:parent));
@@ -133,6 +169,13 @@ let%expect_test "original authentication follows real native owners and cannot e
                    |> protocol_ok
                    |> ignore;
                    expired (Option.value_exn !child_actor);
+                   let child, check_child, refresh_child =
+                     Option.value_exn !child_effect_check
+                   in
+                   assert (Result.is_error (check_child ~invocation:child));
+                   assert (Result.is_error (refresh_child ~invocation:child));
+                   parent_effect_refresh ~invocation:parent |> protocol_ok;
+                   parent_effect_check ~invocation:parent |> protocol_ok;
                    current parent_actor;
                    if [%equal: [ `Success | `Failed_save ]] mode `Failed_save
                    then reject := true);
@@ -262,6 +305,13 @@ let%expect_test "original authentication follows real native owners and cannot e
               | `Failed_save, Error _ -> ()
               | `Success, Error _ | `Failed_save, Ok _ -> failwith "wrong save outcome");
              expired (Option.value_exn !returned_actor);
+             (* Actual invocation retirement, including a rejected terminal save,
+                invalidates the negative checker while the operation still lives. *)
+             List.iter !retained_effect_checks ~f:(fun (invocation, check, refresh) ->
+               assert (Result.is_error (check ~invocation));
+               assert (Result.is_error (refresh ~invocation)));
+             let borrowed, _ = Option.value_exn !escaped_allocator in
+             assert (Result.is_error (N.refresh_borrowed_effect_current borrowed));
              current operation_actor;
              Eio.Promise.resolve entered_u ();
              Eio.Promise.await release;

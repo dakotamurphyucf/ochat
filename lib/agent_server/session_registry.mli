@@ -136,6 +136,19 @@ val add
     runtime lease. Mutations and indexed loads remain serialized. *)
 val find : t -> Agent_protocol.Id.Session.t -> entry option
 
+(** Negative factual-ownership check for a genuine retained ACK/Set caller.
+    Requires this Registry's SAME loaded Actor/runtime/Handle tuple and current
+    retained Handle. Global closing does not invalidate historical facts. Pending
+    cleanup is permitted ONLY for Cleanup_owner.Entry with this exact tuple;
+    foreign Entry, Handle, Fence and Recovery cleanup remain excluded. Recovery
+    exposes owns_actor/handle but no actual runtime identity, so those projections
+    do not prove complete custody here. Supplies no execution, lifecycle, Store
+    write or source authority; actual opaque native proofs remain mandatory.
+    Runs on the creating Eio domain without entering the registry mutex; retained
+    Handle observation and identity/list comparisons are nonyielding. Call outside
+    Actor mailbox and ownership-state/registry locks. *)
+val check_retained_factual_owner : t -> entry -> (unit, Agent_protocol.Error.t) result
+
 (** Lock-free shutdown observation for dependency cleanup callbacks. *)
 val is_closing : t -> bool
 
@@ -180,8 +193,10 @@ val unload_inactive : t -> index_entries:Agent_store.Session_index.Entry.t list 
 
 (** Reject new registration/loading/read lifetimes, drain admitted reservations
     and readers outside the global mutex before the loaded graph snapshot, then
-    join all runtime dependency cleanup while
-    keeping loaded lookups and actors alive, then close actors and their stores.
+    join all runtime dependency cleanup while keeping loaded lookups and actors
+    alive. Retained failed Entry owners join that same graph, once per actual
+    owner; none of their resource-close callbacks run before every runtime joins.
+    Only then close actors and their stores.
     A failed runtime cleanup retains the loaded graph for a shutdown retry.
     After runtime joins, each entry remains retained until its own close succeeds;
     successful closure detaches only that same owner. Concurrent shutdown calls

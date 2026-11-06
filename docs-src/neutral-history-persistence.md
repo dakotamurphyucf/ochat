@@ -515,8 +515,27 @@ anchor. Their bounded, strictly ordered root vector uses stable owner/Goal
 identities for preservation. A populated origin requires
 `delegation.goal-origin.v1`; missing semantics, explicit null and conflicting
 replay origins reject. The lower decoder does not authenticate ancestry or
-issue execution authority. Runtime binding and descendant admission remain
-separate work.
+issue execution authority. Runtime binding and descendant admission validate
+execution authority independently.
+
+A captured recurrence Artifact retains its defining root, parsed source, script
+startup and manifest authorization. Factory binds it to the same real private
+delegation authority and parent-resource lease used for delegated execution;
+Artifact grammar does not make it an ordinary root session. Before graph or
+native-resource preparation, the captured origin must match the actual immutable
+lower Reference independently of mutable publication stage. Compiler and retained
+plan-restoration polls remain cancellation-only under their existing wall and work
+limits; they do not repeatedly read private ancestry. The same original constructor
+and captured-source authority are checked before preparation, after restoration
+before resource construction, at effect gates and before handing off the completed
+runtime. A denied final handoff closes that exact local runtime and retires its
+binding; it does not publish a replacement or claim cleanup succeeded on error.
+Preparation, service/native effects, legacy callbacks and workers retain current ancestry,
+capability pins, source policy and revocation checks. Captured metadata and
+source restoration alone grant none of these permissions. Authored-tool captures
+continue to use their existing specialist source family. The Artifact's original
+source-read lease stays bound to its own captured receipt and current catalog
+selection; the parent-resource lease does not substitute the parent's source root.
 
 The session carrier writes `session.state` version 12 (native schema 27) and
 `session.delta` version 8 for this accounting. Populated descendant components,

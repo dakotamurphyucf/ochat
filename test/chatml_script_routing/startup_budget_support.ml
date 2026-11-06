@@ -4,9 +4,17 @@ module Clock = struct
   type t =
     { nanoseconds : int64 Atomic.t
     ; mutable changed : unit Eio.Promise.t * unit Eio.Promise.u
+    ; sleeping : unit Eio.Promise.t * unit Eio.Promise.u
     }
 
-  let create () = { nanoseconds = Atomic.make 0L; changed = Eio.Promise.create () }
+  let create () =
+    { nanoseconds = Atomic.make 0L
+    ; changed = Eio.Promise.create ()
+    ; sleeping = Eio.Promise.create ()
+    }
+  ;;
+
+  let await_sleeping t = Eio.Promise.await (fst t.sleeping)
   let now t = Mtime.of_uint64_ns (Atomic.get t.nanoseconds)
 
   let advance t ~seconds =
@@ -22,6 +30,9 @@ module Clock = struct
     then Eio.Fiber.yield ()
     else (
       let changed, _ = t.changed in
+      (* Resolving does not yield: the advancing host fiber cannot resume until
+         this timer has registered its Promise wait below. *)
+      ignore (Eio.Promise.try_resolve (snd t.sleeping) ());
       Eio.Promise.await changed;
       sleep_until t deadline)
   ;;

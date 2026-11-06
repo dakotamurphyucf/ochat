@@ -216,7 +216,9 @@
     lib/agent_session/script_notification_service.ml %{dep:../agent_session/script_notification_service.ml}
     lib/agent_session/script_schedule_service.ml %{dep:../agent_session/script_schedule_service.ml}
     lib/agent_session/script_subscription_service.ml %{dep:../agent_session/script_subscription_service.ml}
+    lib/agent_session/goal_descendant_admission_custody.ml %{dep:../agent_session/goal_descendant_admission_custody.ml}
     lib/agent_session/session_actor.ml %{dep:../agent_session/session_actor.ml}
+    lib/agent_session/idle_completion_write.ml %{dep:../agent_session/idle_completion_write.ml}
     lib/agent_session/initial_lifecycle_startup.ml %{dep:../agent_session/initial_lifecycle_startup.ml}
     lib/agent_session/preparation_tracking.ml %{dep:../agent_session/preparation_tracking.ml}
     lib/agent_session/turn_admission_staging.ml %{dep:../agent_session/turn_admission_staging.ml}

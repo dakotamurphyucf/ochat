@@ -158,6 +158,8 @@ let%expect_test "deferred resource close failure releases ownership without pois
     let release, release_u = Eio.Promise.create () in
     let old_closes = ref 0 in
     let fresh_closes = ref 0 in
+    let builds = ref 0 in
+    let old_succeeds = ref false in
     let owner =
       Owner.create
         ~actor
@@ -166,9 +168,10 @@ let%expect_test "deferred resource close failure releases ownership without pois
              (Runtime_lease_tests.runtime
                 ~close:(fun () ->
                   Int.incr old_closes;
-                  failwith "deferred resource close failed")
+                  if not !old_succeeds then failwith "deferred resource close failed")
                 ()))
         ~build:(fun () ->
+          Int.incr builds;
           Ok (Runtime_lease_tests.runtime ~close:(fun () -> Int.incr fresh_closes) ()))
     in
     let borrower =
@@ -182,15 +185,41 @@ let%expect_test "deferred resource close failure releases ownership without pois
     Eio.Promise.await ready;
     Owner.unload_and_wait owner |> protocol_ok;
     Owner.ensure_loaded owner |> protocol_ok;
+    let current =
+      Owner.with_loaded_runtime owner (fun runtime -> Ok runtime) |> protocol_ok
+    in
     Eio.Promise.resolve release_u ();
     (match Eio.Promise.await_exn borrower with
      | Error (Failure message) ->
        [%test_eq: string] "deferred resource close failed" message
      | _ -> failwith "deferred close failure was lost");
-    Owner.with_background_runtime owner (fun _ -> Ok ()) |> protocol_ok;
-    Owner.close_and_wait owner;
-    [%test_eq: int] 1 !old_closes;
+    (* The separate current runtime was admitted while the old resource was
+       still borrowed. Its unchanged execution checks remain authoritative. *)
+    Owner.with_background_runtime owner (fun runtime ->
+      assert (phys_equal current runtime);
+      Ok ())
+    |> protocol_ok;
+    [%test_eq: int] 1 !builds;
+    [%test_eq: int] 0 !fresh_closes;
+    (match Result.try_with (fun () -> Owner.unload_and_wait owner |> protocol_ok) with
+     | Error (Failure message) ->
+       [%test_eq: string] "deferred resource close failed" message
+     | Error exn -> raise exn
+     | Ok () -> failwith "old failed resource was forgotten");
     [%test_eq: int] 1 !fresh_closes;
+    [%test_eq: int] 2 !old_closes;
+    assert (not (Owner.is_loaded owner));
+    (match Owner.ensure_loaded owner with
+     | Error { code = Conflict; retryable = true; _ } -> ()
+     | Ok () | Error _ -> failwith "pending cleanup admitted a replacement runtime");
+    [%test_eq: int] 1 !builds;
+    old_succeeds := true;
+    Owner.unload_and_wait owner |> protocol_ok;
+    Owner.ensure_loaded owner |> protocol_ok;
+    [%test_eq: int] 2 !builds;
+    Owner.close_and_wait owner;
+    [%test_eq: int] 3 !old_closes;
+    [%test_eq: int] 2 !fresh_closes;
     print_endline "last borrower reports close failure; fresh owner remains usable");
   [%expect {| last borrower reports close failure; fresh owner remains usable |}]
 ;;

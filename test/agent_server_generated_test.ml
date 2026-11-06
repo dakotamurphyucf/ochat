@@ -975,13 +975,119 @@ let%expect_test
           in
           create, prepare
         in
-        let create_child daemon parent_id =
+        let create_child daemon parent_id ~fresh =
           let create, prepare = child_creation daemon parent_id in
           let created = create ~display_name:None (prepare ()) |> protocol_ok in
           let state = A.state created.actor |> protocol_ok in
           assert (P.Session.equal_desired_state state.lifecycle.desired Running);
           assert (not state.pending_initial_start);
+          (* Host management never inherits ambient native Goal attribution. Its
+             real lower admission, parent slot and unpublished child agree. *)
+          let origin = Agent_store.Delegation_goal_origin.unrelated in
+          let reference = Option.value_exn state.spec.delegation in
+          let record =
+            D.resolve (S.delegations (Daemon.store daemon)) reference |> store_ok
+          in
+          assert (
+            Option.equal
+              Agent_store.Delegation_goal_origin.equal
+              record.admission.goal_origin
+              (Some origin));
+          let accounting = Option.value_exn state.goal_descendants in
+          assert (
+            Option.equal
+              Agent_store.Delegation_goal_origin.equal
+              (Agent_session.Goal_descendants.origin accounting)
+              (Some origin));
+          let parent =
+            Agent_server.Session_registry.find (Daemon.registry daemon) parent_id
+            |> Option.value_exn
+          in
+          let parent_before_replay = A.state parent.actor |> protocol_ok in
+          let children = Option.value_exn parent_before_replay.child_contributions in
+          assert (
+            Option.equal
+              Agent_store.Delegation_goal_origin.equal
+              (Agent_session.Child_contributions.origin children ~reference |> protocol_ok)
+              (Some origin));
+          let initial_snapshot =
+            Agent_session.Child_contributions.snapshot children ~reference
+            |> protocol_ok
+            |> Option.value_exn
+          in
+          if fresh
+          then
+            assert (
+              Agent_session.Child_usage_snapshot.Partition.equal
+                (Agent_session.Child_usage_snapshot.own initial_snapshot)
+                Agent_session.Child_usage_snapshot.Partition.empty)
+          else (
+            let retained_snapshot =
+              Agent_session.Child_accounting.snapshot state
+              |> protocol_ok
+              |> Option.value_exn
+            in
+            assert (
+              String.equal
+                (Agent_session.Child_usage_snapshot.digest initial_snapshot)
+                (Agent_session.Child_usage_snapshot.digest retained_snapshot)));
+          assert (
+            Option.value_map
+              (Agent_session.Child_usage_snapshot.goal_scopes initial_snapshot)
+              ~default:false
+              ~f:List.is_empty);
+          (* Fresh activation advances past the pre-Init snapshot; recovery may
+             have already imported the current one. Derive the exact expected
+             disposition and carrier from these actual acknowledged projections. *)
+          let replay_basis = A.state created.actor |> protocol_ok in
+          let replay_snapshot =
+            Agent_session.Child_accounting.snapshot replay_basis
+            |> protocol_ok
+            |> Option.value_exn
+          in
+          let expected_children, disposition =
+            Agent_session.Child_contributions.replace children ~snapshot:replay_snapshot
+            |> protocol_ok
+          in
+          let expected_disposition =
+            let previous_revision =
+              Agent_session.Child_usage_snapshot.revision initial_snapshot
+            in
+            let replay_revision =
+              Agent_session.Child_usage_snapshot.revision replay_snapshot
+            in
+            if Int64.equal replay_revision previous_revision
+            then Agent_session.Child_contributions.Duplicate
+            else (
+              assert (Int64.(replay_revision > previous_revision));
+              Replaced)
+          in
+          assert (
+            Agent_session.Child_contributions.equal_disposition
+              disposition
+              expected_disposition);
           let repeated = create ~display_name:None (prepare ()) |> protocol_ok in
+          let parent_after_replay = A.state parent.actor |> protocol_ok in
+          let replay_children =
+            Option.value_exn parent_after_replay.child_contributions
+          in
+          assert (
+            List.equal
+              D.Reference.equal
+              (Agent_session.Child_contributions.references children)
+              (Agent_session.Child_contributions.references replay_children));
+          assert (
+            Option.equal
+              Agent_store.Delegation_goal_origin.equal
+              (Agent_session.Child_contributions.origin replay_children ~reference
+               |> protocol_ok)
+              (Some origin));
+          assert (
+            Document_schema.Json.equal
+              (Agent_session.Child_contributions.to_jsonaf expected_children
+               |> protocol_ok)
+              (Agent_session.Child_contributions.to_jsonaf replay_children |> protocol_ok));
+          assert (phys_equal created.actor repeated.actor);
           assert (
             P.Id.Session.equal
               state.identity.session_id
@@ -1039,7 +1145,7 @@ let%expect_test
                     initialize client;
                     let parent, _ = create_session ~start_immediately:true client in
                     let make_child parent_id =
-                      let id = create_child daemon parent_id in
+                      let id = create_child daemon parent_id ~fresh:true in
                       let handle =
                         H.attach
                           ~sw
@@ -1091,8 +1197,10 @@ let%expect_test
             Exn.protect
               ~finally:(fun () -> Daemon.shutdown daemon |> protocol_ok)
               ~f:(fun () ->
-                assert (P.Id.Session.equal child_id (create_child daemon root_id));
-                assert (P.Id.Session.equal leaf_id (create_child daemon child_id));
+                assert (
+                  P.Id.Session.equal child_id (create_child daemon root_id ~fresh:false));
+                assert (
+                  P.Id.Session.equal leaf_id (create_child daemon child_id ~fresh:false));
                 List.iter [ root_id; child_id; leaf_id ] ~f:(fun id ->
                   let entry =
                     Agent_server.Session_registry.find (Daemon.registry daemon) id

@@ -1,16 +1,72 @@
 open! Core
 
+module Inherited = struct
+  type t =
+    { occurrence : Goal_descendant_occurrence.t
+    ; receipts : Goal_descendant_included.t list
+    }
+
+  let create ~occurrence ~receipts =
+    let open Result.Let_syntax in
+    let invalid message = Error (Agent_protocol.Error.invalid_request message) in
+    let%bind () =
+      match Goal_descendant_occurrence.kind occurrence with
+      | Host_turn _ -> Ok ()
+      | Attempt _ -> invalid "inherited Turn input requires a Host_turn occurrence"
+    in
+    let%bind () =
+      if List.is_empty receipts
+      then invalid "inherited Turn input requires nonempty receipts"
+      else Ok ()
+    in
+    let%map _ =
+      List.fold_result receipts ~init:None ~f:(fun previous included ->
+        let pending = Goal_descendant_included.pending included in
+        let scope = Goal_descendant_pending.scope pending in
+        if
+          not
+            (Goal_descendant_occurrence.equal
+               occurrence
+               (Goal_descendant_pending.occurrence pending))
+        then invalid "inherited Turn receipt names a different occurrence"
+        else (
+          match previous with
+          | None -> Ok (Some scope)
+          | Some previous ->
+            if Agent_store.Delegation_goal_origin.Scope.compare_root previous scope < 0
+            then Ok (Some scope)
+            else invalid "inherited Turn receipts are not strictly root-ordered"))
+    in
+    { occurrence; receipts }
+  ;;
+end
+
+module Inherited_edge = struct
+  type t =
+    { before : Inference_ledger.t
+    ; after : Inference_ledger.t
+    ; canonical : Goal_descendants.Canonical.t
+    }
+
+  let before t = t.before
+  let after t = t.after
+  let canonical t = t.canonical
+end
+
 module Ledger_state = struct
   type t =
     { ledger : Inference_ledger.t
     ; accounts : Goal_accounts.t option
     ; delegated_usage : Delegated_usage.t option
+    ; descendants : Goal_descendants.t option
+    ; children : Child_contributions.t option
+    ; inherited_edge : Inherited_edge.t option
     ; accounts_changed : bool
     ; changes_rev : Session_delta.t list
     }
 end
 
-let apply ~previous state delta payloads =
+let apply_internal ?inherited_turn ~previous state delta payloads =
   let open Result.Let_syntax in
   let ledger_error _ =
     Agent_protocol.Error.create
@@ -55,7 +111,8 @@ let apply ~previous state delta payloads =
               Session_delta.Goal_accounts_changed accounts))
        else [])
     in
-    { Ledger_state.ledger = after
+    { current with
+      Ledger_state.ledger = after
     ; accounts
     ; delegated_usage
     ; accounts_changed = current.accounts_changed || accounts_changed
@@ -83,6 +140,20 @@ let apply ~previous state delta payloads =
         exact_active
         && not (actual_operation operation previous.Session_state.active_operation)
       then (
+        let%bind () =
+          match inherited_turn with
+          | None -> Ok ()
+          | Some inherited ->
+            if Option.is_some current.inherited_edge
+            then invalid "inherited Turn input was already consumed"
+            else (
+              match Goal_descendant_occurrence.kind inherited.Inherited.occurrence with
+              | Attempt _ -> invalid "inherited Turn input is not a Host_turn"
+              | Host_turn { operation_id } ->
+                if Agent_protocol.Id.Operation.equal operation_id operation.id
+                then Ok ()
+                else invalid "inherited Turn input names another operation")
+        in
         let%bind after, handle, tracking =
           Inference_ledger.admit_turn ledger operation |> Result.map_error ~f:ledger_error
         in
@@ -102,7 +173,43 @@ let apply ~previous state delta payloads =
                 ; tracking
                 } ))
         in
-        reconcile current after ~admission)
+        let%bind reconciled = reconcile current after ~admission in
+        match inherited_turn with
+        | None -> Ok reconciled
+        | Some inherited ->
+          let%bind accounting, children =
+            match current.descendants, current.children with
+            | Some accounting, Some children -> Ok (accounting, children)
+            | None, (None | Some _) | Some _, None ->
+              invalid "inherited Turn input lacks actual descendant accounting"
+          in
+          (* This is the genuine immediate admission edge, not the transaction's
+             original ledger or a flattened final projection. Earlier canonical
+             leaves/receipts and each terminal edge retain their own progression. *)
+          let canonical =
+            Goal_descendants.Canonical.Host_turn (operation, handle, tracking)
+          in
+          let%map update =
+            Goal_descendants.record_included
+              accounting
+              ~children
+              ~before:ledger
+              ~after
+              ~canonical
+              ~occurrence:inherited.occurrence
+              ~receipts:inherited.receipts
+          in
+          let children =
+            match Goal_descendants.Update.children update with
+            | Preserve -> current.children
+            | Replace children -> Some children
+          in
+          { reconciled with
+            descendants = Some (Goal_descendants.Update.accounting update)
+          ; children
+          ; inherited_edge = Some { Inherited_edge.before = ledger; after; canonical }
+          ; changes_rev = Goal_descendants_changed update :: reconciled.changes_rev
+          })
       else invalid "host turn start lacks actual operation admission"
   in
   let finished ({ Ledger_state.ledger; _ } as current) payload operation =
@@ -151,13 +258,16 @@ let apply ~previous state delta payloads =
           in
           reconcile current after ~admission:None)
   in
-  let%map final =
+  let%bind final =
     List.fold_result
       payloads
       ~init:
         { Ledger_state.ledger = state.Session_state.inference_ledger
         ; accounts = state.goal_accounts
         ; delegated_usage = state.delegated_usage
+        ; descendants = state.goal_descendants
+        ; children = state.child_contributions
+        ; inherited_edge = None
         ; accounts_changed = false
         ; changes_rev = []
         }
@@ -171,9 +281,20 @@ let apply ~previous state delta payloads =
         | Operation_interrupted operation -> finished ledger payload operation
         | _ -> Ok ledger)
   in
+  let%map () =
+    match inherited_turn with
+    | None -> Ok ()
+    | Some _ ->
+      if Option.is_some final.inherited_edge
+      then Ok ()
+      else invalid "inherited Turn input lacks one actual matching Turn start"
+  in
   let { Ledger_state.ledger = inference_ledger
       ; accounts = goal_accounts
       ; delegated_usage
+      ; descendants = goal_descendants
+      ; children = child_contributions
+      ; inherited_edge
       ; accounts_changed
       ; changes_rev
       }
@@ -185,12 +306,42 @@ let apply ~previous state delta payloads =
     && Int64.equal
          (Inference_ledger.revision inference_ledger)
          (Inference_ledger.revision state.inference_ledger)
-  then state, delta
+  then state, delta, inherited_edge
   else (
-    let state = { state with inference_ledger; goal_accounts; delegated_usage } in
+    let state =
+      { state with
+        inference_ledger
+      ; goal_accounts
+      ; delegated_usage
+      ; goal_descendants
+      ; child_contributions
+      }
+    in
     (* Retain each actual edge. Collapsing a finish and later retirement into
        one before/after leaf would erase the row needed by the cumulative fold.
        Session_transition runs replacement reconciliation before this phase. *)
     let delta = Session_delta.Batch (delta :: List.rev changes_rev) in
-    state, delta)
+    state, delta, inherited_edge)
+;;
+
+let apply ?inherited_turn ~previous state delta payloads =
+  let%map.Result state, delta, _ =
+    apply_internal ?inherited_turn ~previous state delta payloads
+  in
+  state, delta
+;;
+
+let apply_inherited ~inherited_turn ~previous state delta payloads =
+  let open Result.Let_syntax in
+  let%bind state, delta, edge =
+    apply_internal ~inherited_turn ~previous state delta payloads
+  in
+  let%map edge =
+    Result.of_option
+      edge
+      ~error:
+        (Agent_protocol.Error.invalid_request
+           "inherited Turn input lacks one actual matching Turn edge")
+  in
+  state, delta, edge
 ;;

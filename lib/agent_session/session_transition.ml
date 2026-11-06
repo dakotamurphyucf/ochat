@@ -74,7 +74,7 @@ let validate_session_updates state payloads =
     | _ -> Ok ())
 ;;
 
-let apply ~now state ~delta ~payloads =
+let apply_internal ?inherited_turn ~now state ~delta ~payloads =
   let open Result.Let_syntax in
   let previous = state in
   let replacement = Session_replacement_delta.classify delta in
@@ -125,7 +125,17 @@ let apply ~now state ~delta ~payloads =
   in
   (* Complete supported Created reconciliation before adding sequential canonical
      host-turn edges. Their actual order must survive the document writer. *)
-  let%bind state, delta = Host_turn_tracking.apply ~previous state delta payloads in
+  let%bind state, delta, inherited_edge =
+    match inherited_turn with
+    | None ->
+      let%map state, delta = Host_turn_tracking.apply ~previous state delta payloads in
+      state, delta, None
+    | Some inherited_turn ->
+      let%map state, delta, edge =
+        Host_turn_tracking.apply_inherited ~inherited_turn ~previous state delta payloads
+      in
+      state, delta, Some edge
+  in
   let%bind () = Session_delta.validate_goal_accounts delta ~previous ~next:state in
   let%bind () = Session_delta.validate_goal_descendants delta ~previous ~next:state in
   let payloads = projected_payloads ~previous state payloads in
@@ -227,7 +237,29 @@ let apply ~now state ~delta ~payloads =
       |> Result.all
     else Ok events
   in
-  { state; delta; events }
+  { state; delta; events }, inherited_edge
+;;
+
+let apply ?inherited_turn ~now state ~delta ~payloads =
+  let%map.Result transition, _ =
+    apply_internal ?inherited_turn ~now state ~delta ~payloads
+  in
+  transition
+;;
+
+let apply_inherited ~inherited_turn ~now state ~delta ~payloads =
+  let open Result.Let_syntax in
+  let%bind transition, edge =
+    apply_internal ~inherited_turn ~now state ~delta ~payloads
+  in
+  let%map edge =
+    Result.of_option
+      edge
+      ~error:
+        (Agent_protocol.Error.invalid_request
+           "inherited transition lacks its actual Turn edge")
+  in
+  transition, edge
 ;;
 
 let lifecycle ~now state ~desired ~observed =

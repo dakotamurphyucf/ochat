@@ -73,11 +73,7 @@ let check_new_episode_eligibility t ~state ~now =
   let open Result.Let_syntax in
   let%bind goal = current t state in
   let%bind accounting = account goal state in
-  Goal_admission_policy.check_activation
-    goal
-    ~accounting
-    ~ledger:state.inference_ledger
-    ~now
+  Goal_charge_admission.check_activation state ~goal ~accounting ~now
 ;;
 
 let check_admitted_policy t ~state =

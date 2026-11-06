@@ -403,6 +403,13 @@ type t =
   ; check_execution : (unit -> (unit, Agent_protocol.Error.t) result) option
     (** Delegated authority gate for owner-managed work, including idle callbacks.
         This does not authorize disclosure of retained history or replace leases. *)
+  ; check_ancestry :
+      (unit -> (Delegation_authority.Checked_ancestry.t, Agent_protocol.Error.t) result)
+        option
+    (** Same actual delegated authority used by check_execution, under this
+        runtime's real resource lease. May yield; invoke outside Actor mailboxes
+        and Owner/Registry locks. None for ordinary/root constructors, never
+        evidence that a delegated Spec has no inherited governance. *)
   ; ancestor_capabilities :
       (Agent_protocol.Id.Session.t
        -> (Chat_response.Tool_capability.t, Agent_protocol.Error.t) result)
@@ -660,6 +667,51 @@ type inherited_managed =
   { delegation : Chat_response.Managed_tool_registry.delegation
   ; current : unit -> Chat_response.Tool_capability.t
   }
+
+(** Build a captured Artifact with its defining root grammar and actual private
+    delegation authority. The captured origin must match that authority's actual
+    immutable admission. Native/resource preparation, services, legacy callbacks,
+    worker and effect checkpoints retain the same authority. The caller must keep
+    the actual parent-resource lease for the runtime lifetime; its own original
+    Artifact source-read lease remains separate. Captured metadata alone grants
+    no execution. *)
+val build_captured_artifact
+  :  captured:Captured_recurrence_source.t
+  -> authority:Delegation_authority.t
+  -> construction_checkpoint:(unit -> (unit, Agent_protocol.Error.t) result) option
+  -> startup:Chat_response.Startup_compilation.t option
+  -> legacy_construction:legacy_construction option
+  -> agent_source:Captured_agent_runner.Source_binding.t option
+  -> script_preparation:Script_preparation.t option
+  -> native_registrations:Chat_response.Agent_runtime.native_registration list
+  -> services:extension_services option
+  -> sw:Eio.Switch.t
+  -> env:Eio_unix.Stdenv.base
+  -> inference_context:Inference_runtime.Context.t
+  -> inference_identity:Chat_response.Neutral_turn.Identity.t
+  -> bind_inference_identity:
+       (Inference_allocation.Port.t -> Chat_response.Neutral_turn.Identity.t)
+  -> on_inference_attempt:(Inference_runtime.Attempt.t -> unit)
+  -> on_inference_completion:(Inference_client.Completion.t -> unit)
+  -> on_inference_observation:(Inference.Observation.t -> unit)
+  -> paths:Runtime_paths.t
+  -> storage_paths:Runtime_paths.t
+  -> session_id:Agent_protocol.Id.Session.t
+  -> history_namespace:string
+  -> next_history_sequence:int
+  -> existing_history:History_entry.t list option
+  -> existing_moderator_snapshot:Jsonaf.t option
+  -> moderator_reservation_size:int
+  -> manifest_authorizer:Shell_runtime.Manifest_authorizer.t
+  -> approval_provider:Shell_runtime.Approval_broker.provider
+  -> approval_store:Shell_access.Approval.store
+  -> permission_profile:Permission_policy.t
+  -> review_permission:
+       (Permission_policy.invocation
+        -> (Permission_reviewer.Decision.t, Permission_reviewer.Error.t) result)
+  -> schedule_services:schedule_services
+  -> job_services:job_services
+  -> (t, Agent_protocol.Error.t) result
 
 (** Construct a generated child through the same worker, moderator, invocation,
     notification and background services. Verify the immutable generated tree,

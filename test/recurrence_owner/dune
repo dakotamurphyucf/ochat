@@ -1,3 +1,4 @@
+(copy_files ../agent_server_e2e/support/crash_fault_io.ml)
 (copy_files ../agent_session/fixtures.ml)
 
 (library

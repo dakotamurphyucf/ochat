@@ -315,6 +315,21 @@ module Lifecycle : sig
     val is_current : t -> Handle.t -> bool
   end
 
+  module Retained_owner : sig
+    (** Actual lifecycle ownership retained from one successful exact Current.
+        Ordinary metadata/projection progress does not invalidate it. Actual
+        lifecycle mutation, uncertainty, close or loss of locks does. This is
+        not a full-projection CAS, execution grant or scalar revision witness. *)
+    type t
+
+    (** Pure domain-owned check: same physical Handle and lifecycle-authority
+        epoch, actual daemon/session locks, live store owner, no metadata/
+        lifecycle uncertainty and no sticky projection publication failure.
+        Pending canonical projection alone is not failure; a concrete canonical
+        writer availability check remains separately mandatory for execution. *)
+    val is_current : t -> Handle.t -> bool
+  end
+
   module Installed : sig
     (** Acknowledged authority AND checked exact full index projection. Replays
         whose outcome is older than current state do not construct this witness.
@@ -341,6 +356,19 @@ end
 (** Pure capability identity, including retired/closed Handles. Does not assert
     availability or grant IO permission; retained cleanup uses it to bind owner. *)
 val owns_handle : t -> Handle.t -> bool
+
+(** Pure negative availability only, no permission or witness. Checks actual
+    Store/Handle ownership, locks, existing uncertainty and publication health. *)
+val retained_lifecycle_available : t -> Handle.t -> bool
+
+(** Pure checked conversion from a still-current exact observation. Never
+    reconstruct from metadata, a revision, JSON or an arbitrary availability
+    predicate. Caller must separately bind the SAME actual canonical writer. *)
+val retain_lifecycle_owner
+  :  t
+  -> Handle.t
+  -> Lifecycle.Current.t
+  -> (Lifecycle.Retained_owner.t, Store_error.t) result
 
 val read_lifecycle : t -> Handle.t -> (Lifecycle.Observation.t, Store_error.t) Result.t
 

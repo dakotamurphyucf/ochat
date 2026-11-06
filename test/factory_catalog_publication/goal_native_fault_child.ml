@@ -8,12 +8,7 @@ module Fault = Goal_native_fault_support
 
 (* Only this crash fixture performs a hard process exit. Production cleanup is
    unchanged: a poisoned terminal checkpoint is not called a successful join. *)
-let () =
-  let test_root =
-    match Array.to_list (Sys.get_argv ()) with
-    | [ _; root ] -> root
-    | _ -> failwith "native fault child requires its parent-owned test root"
-  in
+let native_complete test_root =
   let fault = Fault.create Native_complete in
   with_callback
     ~test_root
@@ -80,4 +75,17 @@ let () =
        in
        Eio.Flow.copy_string (Jsonaf.to_string report ^ "\n") (Eio.Stdenv.stdout env);
        Core_unix.exit_immediately 73)
+;;
+
+let () =
+  match Array.to_list (Sys.get_argv ()) with
+  | [ _; root ] -> native_complete root
+  | [ _; root; "held-goal-unknown" ] -> Descendant_held_input_fault_tests.run_child root
+  | [ _; root; "goal-resume-unknown" ] ->
+    Descendant_goal_resume_fault_tests.run_child root
+  | [ _; root; "legacy-idle-checkpoint-unknown" ] ->
+    Legacy_idle_completion_fault_tests.run_child root
+  | [ _; root; "legacy-idle-compaction-unknown" ] ->
+    Legacy_idle_completion_fault_tests.run_compaction_child root
+  | _ -> failwith "native fault child requires its parent-owned root and closed mode"
 ;;

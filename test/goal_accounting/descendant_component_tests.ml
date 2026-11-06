@@ -279,6 +279,190 @@ let snapshot reference scope included delegated current revision =
   |> protocol
 ;;
 
+(* Existing historical parent, with actual canonical work and unknown earlier
+   history. Its previous child inventory and future fields are not birth DATA. *)
+let first_unrelated_fixture () =
+  let before =
+    L.create
+      ~session_id:sid
+      ~generation:0
+      ~before_tracking_unknown:true
+      ~limits:L.Limits.default
+    |> ledger
+    |> admit
+    |> fun (ledger, _, _) -> ledger
+  in
+  let old_reference = reference "first_unrelated_old" in
+  let historical =
+    make_children ~inventory:Historical_children_unknown ()
+    |> fun children -> C.register children ~reference:old_reference |> protocol
+  in
+  let raw = C.to_jsonaf historical |> protocol in
+  let payload = member raw "payload" in
+  let slots =
+    match member payload "children" with
+    | `Array [ old ] -> `Array [ set old "future_slot" (`String "retain old slot") ]
+    | _ -> failwith "expected historical slot"
+  in
+  let historical =
+    set raw "payload" (set payload "children" slots)
+    |> fun raw ->
+    set raw "future_children" (`String "retain inventory") |> C.of_jsonaf |> protocol
+  in
+  let host_profile = profile ~branches:8 ~child_bytes:(2 * 1024 * 1024) () in
+  let new_reference = reference "first_unrelated_new" in
+  let update =
+    GD.register_first_unrelated_child
+      ~host_profile
+      ~session
+      ~reference:new_reference
+      ~children:(Some historical)
+      ~ledger:before
+    |> protocol
+  in
+  before, historical, old_reference, new_reference, host_profile, update
+;;
+
+let%expect_test
+    "historical first Unrelated child preserves facts without root or origin retrofit"
+  =
+  let before, historical, old_reference, new_reference, host_profile, update =
+    first_unrelated_fixture ()
+  in
+  let replay ?(after = before) ?(previous = None) candidate =
+    check previous candidate ~before ~after ~children:historical
+  in
+  let rejects message result =
+    match result with
+    | Ok _ -> failwith ("expected rejection: " ^ message)
+    | Error (error : P.Error.t) ->
+      assert (String.is_substring error.message ~substring:message)
+  in
+  replay (update_restore (update_json update)) |> protocol;
+  let accounting = GD.Update.accounting update in
+  let children = updated_children historical update in
+  assert (Option.is_none (GD.origin accounting));
+  assert (List.is_empty (GD.roots accounting));
+  assert (List.is_empty (GD.local_included accounting));
+  [%test_eq: int] (GD.Profile.max_branches (GD.profile accounting)) 4;
+  [%test_eq: int]
+    (GD.Profile.child_max_encoded_bytes (GD.profile accounting))
+    (1024 * 1024);
+  assert (P.Inference_query.Summary.coverage (L.summary before)).before_tracking_unknown;
+  [%test_eq: int] (List.length (L.rows before)) 1;
+  context
+    accounting
+    ~ledger:before
+    ~children
+    ~catalog:None
+    ~accounts:None
+    ~delegation:None
+  |> protocol;
+  assert (C.Inventory.equal (C.inventory children) Historical_children_unknown);
+  assert (Option.is_none (C.origin children ~reference:old_reference |> protocol));
+  assert (
+    Option.equal
+      Origin.equal
+      (Some Origin.unrelated)
+      (C.origin children ~reference:new_reference |> protocol));
+  let raw = C.to_jsonaf children |> protocol in
+  assert (D.Json.equal (member raw "future_children") (`String "retain inventory"));
+  let slots =
+    match member (member raw "payload") "children" with
+    | `Array slots -> slots
+    | _ -> failwith "expected slots"
+  in
+  let old_slot =
+    List.find_exn slots ~f:(fun slot ->
+      D.Json.equal
+        (member slot "child_session_id")
+        (P.Id.Session.to_json old_reference.child_session_id))
+  in
+  assert (D.Json.equal (member old_slot "future_slot") (`String "retain old slot"));
+  rejects
+    "requires absent descendant accounting"
+    (replay ~previous:(Some accounting) update);
+  let after, _, _ = admit before in
+  rejects "cannot change the canonical ledger" (replay ~after update);
+  let register ?(session = session) ?(ledger = before) children reference =
+    GD.register_first_unrelated_child ~host_profile ~session ~reference ~children ~ledger
+  in
+  rejects "must register a new child slot" (register (Some historical) old_reference);
+  rejects "must register a new child slot" (register (Some children) new_reference);
+  let later =
+    L.create
+      ~session_id:sid
+      ~generation:1
+      ~before_tracking_unknown:true
+      ~limits:L.Limits.default
+    |> ledger
+  in
+  rejects
+    "actual parent session/generation"
+    (register ~ledger:later (Some historical) new_reference);
+  let foreign_session = child_session new_reference in
+  assert (
+    Result.is_error (register ~session:foreign_session (Some historical) new_reference));
+  let associated =
+    C.register_with_origin
+      historical
+      ~reference:new_reference
+      ~origin:(origin (scope new_reference))
+    |> protocol
+  in
+  let forged =
+    set
+      (update_json update)
+      "children"
+      (`Object [ "kind", `String "replace"; "value", C.to_jsonaf associated |> protocol ])
+    |> update_restore
+  in
+  rejects "paired child candidate differs" (replay forged);
+  let own = own_json accounting in
+  let relabelled =
+    set
+      own
+      "payload"
+      (set (member own "payload") "origin" (Origin.to_json Origin.unrelated))
+    |> own_restore
+  in
+  rejects
+    "closed Update"
+    (replay
+       (set (update_json update) "accounting" (own_json relabelled) |> update_restore));
+  let omitted =
+    set
+      (update_json update)
+      "children"
+      (`Object [ "kind", `String "replace"; "value", remove raw "future_children" ])
+    |> update_restore
+  in
+  rejects "omitted preserved child data" (replay omitted);
+  let without_children = register None new_reference |> protocol in
+  GD.validate_transition
+    None
+    ~update:without_children
+    ~before_ledger:before
+    ~after_ledger:before
+    ~before_session_revision:0L
+    ~after_session_revision:1L
+    ~before_children:None
+    ~creation:None
+    ~catalog:None
+    ~accounts:None
+  |> protocol;
+  let missing_children =
+    match GD.Update.children without_children with
+    | Replace children -> children
+    | Preserve -> failwith "absent children require paired replacement"
+  in
+  assert (C.Inventory.equal (C.inventory missing_children) Historical_children_unknown);
+  print_endline
+    "nonzero Unknown history and old slots retained; only new Unrelated slot admitted";
+  [%expect
+    {| nonzero Unknown history and old slots retained; only new Unrelated slot admitted |}]
+;;
+
 let%expect_test
     "historical Create preserves uncertainty, captured profile, and complete replay basis"
   =
@@ -431,6 +615,99 @@ let%expect_test
     |> fun document -> Agent_session.Goal_document.update document changed |> domain
   in
   let later_catalog = Catalog.advance_existing catalog ~goal:document |> protocol in
+  (* A durable lower admission may be older than the current source/episode when
+     reserve succeeded but the parent frontier ACK was lost. This is DATA replay
+     of that original attribution, not execution permission after adoption. *)
+  assert (
+    Result.is_error
+      (check
+         (Some initial)
+         update
+         ~before
+         ~after:before
+         ~children:historical
+         ~catalog:(Some later_catalog)
+         ~accounts:(Some accounts)));
+  let recovered =
+    GD.register_retained_branch
+      initial
+      ~children:historical
+      ~scope
+      ~reference
+      ~origin:(origin scope)
+    |> protocol
+    |> update_json
+    |> update_restore
+  in
+  let replay_recovered update ~after =
+    check
+      (Some initial)
+      update
+      ~before
+      ~after
+      ~children:historical
+      ~catalog:(Some later_catalog)
+      ~accounts:(Some accounts)
+  in
+  replay_recovered recovered ~after:before |> protocol;
+  assert (
+    D.Json.equal
+      (own_json (GD.Update.accounting recovered))
+      (own_json (GD.Update.accounting update)));
+  let recovered_children = updated_children historical recovered in
+  assert (
+    D.Json.equal
+      (C.to_jsonaf recovered_children |> protocol)
+      (C.to_jsonaf (updated_children historical update) |> protocol));
+  let branch =
+    GD.branches (GD.Update.accounting recovered) ~goal_id:(G.id held) |> List.hd_exn
+  in
+  assert (Origin.Scope.equal scope (GD.Branch.scope branch));
+  assert (DS.Reference.equal reference (GD.Branch.reference branch));
+  [%test_eq: int64] (GD.Branch.confirmed_prefix branch) 0L;
+  [%test_eq: int64] (GD.Branch.last_nonce branch) 0L;
+  assert (Option.is_none (GD.Branch.pending branch));
+  assert (Option.is_none (GD.origin (GD.Update.accounting recovered)));
+  let after, _, _ = admit before in
+  assert (Result.is_error (replay_recovered recovered ~after));
+  let unknown_slot = C.register historical ~reference |> protocol in
+  assert (
+    Result.is_error
+      (GD.register_retained_branch
+         initial
+         ~children:unknown_slot
+         ~scope
+         ~reference
+         ~origin:(origin scope)));
+  let wire = update_json recovered in
+  let dropped =
+    set wire "accounting" (remove (member wire "accounting") "future_accounting")
+    |> update_restore
+  in
+  assert (Result.is_error (replay_recovered dropped ~after:before));
+  let module Cursor = Agent_session.Goal_descendants_ordered in
+  let original : Cursor.Projection.t =
+    { ledger = before
+    ; accounting = Some initial
+    ; children = Some historical
+    ; catalog = Some later_catalog
+    ; accounts = Some accounts
+    ; delegation = None
+    ; active_operation = None
+    ; invocations = []
+    ; moderator_executions = []
+    }
+  in
+  let cursor = Cursor.begin_ ~session_id:sid ~session_revision:3L original |> protocol in
+  let cursor =
+    Cursor.advance cursor (Update { update = recovered; creation = None }) |> protocol
+  in
+  let incoming = Cursor.current cursor in
+  Cursor.check cursor ~incoming |> protocol;
+  assert (Result.is_error (Cursor.validate_checkpoint ~before:original ~incoming));
+  let direct = Cursor.begin_ ~session_id:sid ~session_revision:3L original |> protocol in
+  assert (Result.is_error (Cursor.advance direct (Replacement incoming)));
+  assert (Result.is_error (Cursor.advance direct (Ordinary_children recovered_children)));
   let registered = GD.Update.accounting update in
   let actual_children = updated_children historical update in
   let retained =

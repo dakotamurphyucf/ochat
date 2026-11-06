@@ -248,6 +248,7 @@ let create_actor
     A.Recurrence_controller.create
       t.store
       ~handle:t.handle
+      ~writer:t.writer
       ~entry_projection:(fun state ->
         before_observe ();
         index_projection state)

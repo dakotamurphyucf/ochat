@@ -45,6 +45,8 @@ let create ?(sync_directory = Durable_file.sync_directory) ~env ~marker_path () 
   }
 ;;
 
+let is_available t = not t.live_failure
+
 let marker ~env ~marker_path =
   try
     match Eio.Path.kind ~follow:false Eio.Path.(Eio.Stdenv.fs env / marker_path) with

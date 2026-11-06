@@ -8,6 +8,8 @@ type boundary =
   | Before_rename
   | After_rename
   | Before_directory_sync
+  | Before_stat
+  | Before_open_in
 
 let wrap_file (Eio.Resource.T (file, handler)) ~boundary ~reached ~path =
   let module Original = (val Eio.Resource.get handler Eio.File.Pi.Write) in
@@ -58,6 +60,13 @@ let wrap_directory
   let module Directory = struct
     include Original
 
+    let stat directory ~follow path =
+      (match boundary with
+       | Before_stat when matches path -> reached path
+       | _ -> ());
+      Original.stat directory ~follow path
+    ;;
+
     let open_out directory ~sw ~append ~create path =
       let file = Original.open_out directory ~sw ~append ~create path in
       if matches path
@@ -70,6 +79,9 @@ let wrap_directory
     ;;
 
     let open_in directory ~sw path =
+      (match boundary with
+       | Before_open_in when matches path -> reached path
+       | _ -> ());
       let opened = Original.open_in directory ~sw path in
       if matches path
       then (

@@ -1372,6 +1372,112 @@ let assert_saved_child env child =
       (T.state_document restored |> store_ok |> D.Document.json))
 ;;
 
+(* Actual Factory runtime and private Store record. These source reads create no
+   Turn or receipt; the existing startup oracle separately proves native/Model
+   execution. Lower revocation, not input-actor retirement, is the negative cut. *)
+let assert_captured_artifact_authority env daemon parent child ~original ~counters =
+  let before = state child in
+  let parent_before = state parent in
+  assert (P.Session.equal_desired_state parent_before.lifecycle.desired Running);
+  assert (Operator_authorization.is_current original);
+  let reference = Option.value_exn before.spec.delegation in
+  let ledger = S.delegations (Daemon.store daemon) in
+  let record = Ledger.resolve ledger reference |> store_ok in
+  assert (Ledger.equal_stage Linked record.stage);
+  assert (Option.is_none record.revocation);
+  let origin = A.Recurrence_child_origin.of_record record |> protocol_ok in
+  (match A.Recurrence_child_origin.source_kind origin with
+   | Artifact -> ()
+   | Authored_tool _ -> failwith "expected captured Artifact family");
+  assert (A.Recurrence_child_origin.matches_record origin record);
+  let artifacts =
+    Artifact.open_existing
+      ~env
+      ~root:
+        (Agent_store.Data_root.prompt_artifacts_path (S.data_root (Daemon.store daemon)))
+    |> store_ok
+  in
+  let artifact = Artifact.load artifacts before.spec.prompt_revision_id |> store_ok in
+  let receipt = Option.value_exn artifact.source_receipt in
+  let parent_receipt =
+    Owner.with_background_runtime parent.runtime (fun runtime ->
+      Ok (Option.value_exn (A.Prompt_source_lease.receipt runtime.source_lease)))
+    |> protocol_ok
+  in
+  assert (not (Agent_store.Prompt_source_receipt.equal receipt parent_receipt));
+  let baseline = !(counters.constructions), !(counters.providers) in
+  Owner.with_background_runtime child.runtime (fun runtime ->
+    assert (
+      Option.equal
+        Agent_store.Prompt_source_receipt.equal
+        (A.Prompt_source_lease.receipt runtime.source_lease)
+        (Some receipt));
+    assert (
+      not
+        (Option.equal
+           Agent_store.Prompt_source_receipt.equal
+           (A.Prompt_source_lease.receipt runtime.source_lease)
+           (Some parent_receipt)));
+    let check_execution = Option.value_exn runtime.check_execution in
+    let check_ancestry = Option.value_exn runtime.check_ancestry in
+    check_execution () |> protocol_ok;
+    let ancestry = check_ancestry () |> protocol_ok in
+    let leaf = A.Delegation_authority.Checked_ancestry.records ancestry |> List.hd_exn in
+    assert (Ledger.Reference.equal (Ledger.reference leaf) reference);
+    assert (A.Recurrence_child_origin.matches_record origin leaf);
+    let id =
+      History_entry.Id.create ~namespace:"574-captured-artifact-read" ~sequence:0
+      |> Result.ok_or_failwith
+    in
+    let captured_root = Filename.basename artifact.root_relative_path in
+    let captured_text = "Actual recurrence constructor Model fixture." in
+    assert (String.is_substring artifact.root_chatmd ~substring:captured_text);
+    let read () =
+      runtime.parse_user_content
+        ~id
+        { kind = Chatmd
+        ; text = sprintf {|<user><doc src=%S local/></user>|} captured_root
+        ; attachments = []
+        }
+    in
+    let content =
+      read ()
+      |> protocol_ok
+      |> Openai.Responses_history.item_exn
+      |> Res.Item.jsonaf_of_t
+      |> Jsonaf.to_string
+    in
+    assert (String.is_substring content ~substring:captured_text);
+    let revoked = Ledger.revoke ledger record Authority_changed |> store_ok in
+    assert (
+      Option.equal Ledger.equal_revocation revoked.revocation (Some Authority_changed));
+    assert (Ledger.Reference.equal reference (Ledger.reference revoked));
+    assert (A.Recurrence_child_origin.matches_record origin revoked);
+    List.iter
+      [ (fun () -> check_execution ())
+      ; (fun () -> Result.map (check_ancestry ()) ~f:ignore)
+      ]
+      ~f:(fun check ->
+        match check () with
+        | Error error -> [%test_eq: P.Error.code] Permission_denied error.code
+        | Ok () -> failwith "revoked lower record still authorized captured effects");
+    (match read () with
+     | Error _ -> ()
+     | Ok _ -> failwith "captured source read bypassed actual lower revocation");
+    assert (Operator_authorization.is_current original);
+    Ok ())
+  |> protocol_ok;
+  [%test_eq: int * int] baseline (!(counters.constructions), !(counters.providers));
+  assert (
+    Jsonaf.exactly_equal
+      (T.state_document before |> store_ok |> D.Document.json)
+      (T.state_document (state child) |> store_ok |> D.Document.json));
+  assert (
+    Jsonaf.exactly_equal
+      (T.state_document parent_before |> store_ok |> D.Document.json)
+      (T.state_document (state parent) |> store_ok |> D.Document.json))
+;;
+
 let%test_unit "held authored startup completes real cold Factory runtimes once" =
   List.iter
     Authored_case.[ Legacy_empty; Legacy_children; V1_children ]
@@ -1814,6 +1920,16 @@ let on_event ctx state event = Task.pure(state)
                                   (T.state_document (state child)
                                    |> store_ok
                                    |> D.Document.json)));
+                           (match case with
+                            | Legacy_children ->
+                              assert_captured_artifact_authority
+                                env
+                                daemon
+                                parent
+                                child
+                                ~original
+                                ~counters
+                            | Legacy_empty | V1_children -> ());
                            assert_saved_child env child)))))
       with
       | exn ->

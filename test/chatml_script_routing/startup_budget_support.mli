@@ -6,6 +6,12 @@ module Clock : sig
   type t
 
   val create : unit -> t
+
+  (** Host-domain barrier for the first actual future-deadline timer wait.
+      It advances no time. The signal and wait registration do not yield between
+      them, so the observing host may advance immediately after this returns. *)
+  val await_sleeping : t -> unit
+
   val advance : t -> seconds:float -> unit
   val resource : t -> Eio.Time.Mono.ty Eio.Resource.t
 end

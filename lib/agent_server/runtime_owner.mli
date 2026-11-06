@@ -226,6 +226,10 @@ val ensure_loaded_authenticated
   -> actor:Operator_authorization.t
   -> (unit, Agent_protocol.Error.t) result
 
+(** Finite detachment refuses active or borrowed execution and every outstanding
+    descendant Slot/ACK before mutating the runtime. Does not cancel work or wait
+    on remote roots to make an ordinary unload eligible. Use the strong close or
+    stop retirement path for explicit cancellation and retained factual drain. *)
 val unload : t -> (unit, Agent_protocol.Error.t) result
 
 (** Begin and join dependency cancellation after a durable stop request, even
@@ -771,7 +775,12 @@ val deliver_schedule
     cancellation of the caller still propagates. Later polling and administration
     remain usable. Runtime installation and each callback's ownership transfer
     retain protected lifecycle boundaries; owned legacy batches remain cancellable
-    between and during handlers. Normal v1 declaration admission
+    between and during handlers. The standalone aggregate legacy fallback keeps
+    its finite claim/drain/capture block cancellation-protected. Its exact
+    Actor-owned completion retains uncertain metadata writes and acknowledged
+    operation cleanup; errors do not invoke an unscoped failure transition.
+    Retirement joins callback exit outside the owner mutex before resources
+    close. Normal v1 declaration admission
     remains separate; this does not enable public features. *)
 val drain_idle_moderator : t -> (bool, Agent_protocol.Error.t) result
 
@@ -869,12 +878,23 @@ val deliver_run_job_completion
     if no callback or foreground operation owns the runtime. An active foreground
     operation is cancelled; [close_and_wait] must join its terminal checkpoint
     before resources or the actor are retired. An in-progress unload retains control
-    of retirement. The actor must remain running through cleanup. *)
+    of retirement. The actor must remain running through cleanup.
+
+    Failed close retains the exact retired resource for explicit unload/close
+    retry. It is never returned as loaded again. Unborrowed pending cleanup
+    blocks constructing another runtime or replacing its source; a separate
+    already-loaded current runtime retains its original execution checks. A positive retry removes that resource only
+    after its close closure returns successfully. Errors remain errors, including
+    an unavailable canonical writer that requires recovery.
+*)
 val close : t -> unit
 
 (** Close and join foreground/dependency/background cleanup before shutting down the actor or
     its persistence writer. Concurrent accepted-stop cleanup is joined. A typed
-    dependency failure raises [Cleanup_failed], retaining resources for retry;
+    dependency failure raises [Cleanup_failed], retaining resources for retry.
+    Retained aggregate legacy completion must also retire successfully; an
+    uncertain write or unresolved acknowledged cleanup prevents raw close and
+    remains an error rather than replaying the callback or persistence writer;
     other exceptions retain their original backtrace. Call from the external
     session lifecycle, never a retained callback (which would await itself). *)
 val close_and_wait : t -> unit
@@ -964,7 +984,11 @@ val with_goal_resume_source_reported
     episode, account or input is admitted. Primary errors/cancellation preserve
     their outcome; the enclosing Factory report retains actual receipt facts.
     Runtime adoption requires the Actor's immutable actual final outcome,
-    including a validated Wait/Settlement, never a caller success flag. *)
+    including a validated Wait/Settlement, never a caller success flag. A fresh
+    continuation Turn retains the SAME joined runtime through cancellable
+    ancestor admission and exact native acknowledgement. Uncertain writers keep
+    the Actor's actual prepared owner; retirement must join its factual cleanup
+    before disposing the runtime and reports failure if that cannot be proven. *)
 val resume_goal_episode
   :  t
   -> prepared:Prepared_goal_continuation.t

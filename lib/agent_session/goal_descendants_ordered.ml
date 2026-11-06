@@ -89,7 +89,8 @@ let validate_ordinary_children = C.validate_ordinary_update
 let validate_known_accounting previous incoming =
   match previous, incoming with
   | None, None -> Ok ()
-  | None, Some _ -> invalid "descendant accounting requires an actual ordered creation"
+  | None, Some _ ->
+    invalid "descendant accounting requires an explicit ordered registration"
   | Some _, None -> invalid "descendant accounting cannot be discarded"
   | Some previous, Some incoming ->
     let open Result.Let_syntax in
@@ -319,8 +320,13 @@ let update t update ~creation =
          edge.before, edge.after, Some { edge with consumed = true }
        | Some _ | None ->
          invalid "local inclusion lacks an unconsumed actual admission edge")
-    | Register_child _ | Register_branch _ | Reserve _ | Import _ | Close_before_writer _
-      -> Ok (t.current.ledger, t.current.ledger, t.edge)
+    | Register_first_unrelated_child _
+    | Register_child _
+    | Register_branch _
+    | Register_retained_branch _
+    | Reserve _
+    | Import _
+    | Close_before_writer _ -> Ok (t.current.ledger, t.current.ledger, t.edge)
   in
   let%bind () =
     A.validate_transition
@@ -339,8 +345,10 @@ let update t update ~creation =
     match A.Update.reason update with
     | Record_included _ -> Some revision
     | Register_new_root _
+    | Register_first_unrelated_child _
     | Register_child _
     | Register_branch _
+    | Register_retained_branch _
     | Reserve _
     | Import _
     | Close_before_writer _ -> t.required_publication_revision

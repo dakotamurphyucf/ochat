@@ -84,7 +84,7 @@ let with_fixture ?(lifetime = D.Admission.Owned) ?(reject_transition = fun _ -> 
                 ; parent_revision_id = prompt_revision_id
                 ; parent_stop_epoch = None
                 ; authored_tool = None
-                ; goal_origin = None
+                ; goal_origin = Some Agent_store.Delegation_goal_origin.unrelated
                 ; captured_recurrence = None
                 ; authority_sha256 = digest "parent authority"
                 ; capability_pins = []
@@ -118,6 +118,9 @@ let with_fixture ?(lifetime = D.Admission.Owned) ?(reject_transition = fun _ -> 
                 }
             ; lifecycle = { desired = Running; observed = Idle }
             }
+          in
+          let state =
+            initialize_new_unrelated_child state ~server_id:(S.server_id store)
           in
           State.validate state |> protocol_ok;
           let reject = ref false in

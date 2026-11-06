@@ -12,6 +12,8 @@ module Cut = struct
     | Automatic_hold
     | Explicit_same_hold
     | Explicit_hold_before_sync
+    | Source_revoked
+    | Source_revoked_settlement_failure
   [@@deriving sexp_of]
 end
 
@@ -65,9 +67,18 @@ module Fault = struct
     { mutable selected : A.Goal_command.t option
     ; mutable candidate : A.Goal_catalog.t option
     ; mutable hits : int
+    ; mutable settlement : (Transcript.Scope.t * Observation.Observation_id.t) option
+    ; mutable settlement_candidate : Ledger.t option
     }
 
-  let create () = { selected = None; candidate = None; hits = 0 }
+  let create () =
+    { selected = None
+    ; candidate = None
+    ; hits = 0
+    ; settlement = None
+    ; settlement_candidate = None
+    }
+  ;;
 
   let receipt catalog request =
     A.Goal_catalog.receipt
@@ -76,6 +87,52 @@ module Fault = struct
       ~key:request.A.Goal_command.key
       ~request_sha256:(A.Goal_command.digest request |> protocol_ok)
     |> protocol_ok
+  ;;
+
+  let settlement_reached t env path =
+    match t.settlement with
+    | None -> ()
+    | Some (scope, accounting_id) ->
+      let scan =
+        Eio.Path.load Eio.Path.(Eio.Stdenv.fs env / path)
+        |> Agent_store.Journal_segment.scan_contents ~max_payload_length:(64 * 1024 * 1024)
+        |> Existing.store_ok
+      in
+      (match List.last scan.entries with
+       | Some frame when Int.equal (Agent_store.Frame.flags frame.frame) 0 ->
+         let transaction =
+           Agent_store.Transaction.decode (Agent_store.Frame.payload frame.frame)
+           |> Existing.store_ok
+         in
+         let delta =
+           A.Session_delta_document.decode
+             ~limits:Document_schema.Limits.default
+             transaction.delta
+           |> document_ok
+           |> A.Session_delta_document.value
+         in
+         List.iter (atoms delta) ~f:(function
+           | Inference_ledger_changed ledger
+           | Delegated_inference_ledger_changed (ledger, _) ->
+             (match
+                List.find (Ledger.rows ledger) ~f:(fun row ->
+                  let handle = Ledger.Row.handle row in
+                  Transcript.Scope.equal scope (Ledger.Handle.scope handle)
+                  && Observation.Observation_id.equal
+                       accounting_id
+                       (Ledger.Handle.accounting_id handle))
+              with
+              | Some row ->
+                (match Observation.Attempt_record.state (Ledger.Row.record row) with
+                 | Interrupted { delivery = Possibly_submitted; _ } ->
+                   t.settlement <- None;
+                   t.settlement_candidate <- Some ledger;
+                   t.hits <- t.hits + 1;
+                   raise (Core_unix.Unix_error (EIO, "566 factual settlement sync", path))
+                 | Prepared | Running | Terminal _ | Interrupted _ -> ())
+              | None -> ())
+           | _ -> ())
+       | Some _ | None -> ())
   ;;
 
   let reached t env path =
@@ -126,6 +183,7 @@ let assert_metadata_same (before : Agent_store.Session_metadata.t) after =
 ;;
 
 exception Observed_explicit_hold_failure of P.Error.t
+exception Observed_settlement_failure
 
 let row current scope accounting_id =
   Ledger.rows current.A.Session_state.inference_ledger
@@ -138,6 +196,18 @@ let row current scope accounting_id =
 let run (cut : Cut.t) =
   let fault = Fault.create () in
   let primary = ref None in
+  let source_authorized = ref true in
+  let authorize current =
+    if !source_authorized
+    then authorize current
+    else
+      Error
+        (P.Error.create
+           Permission_denied
+           ~message:"566 original source revoked"
+           ~retryable:false
+           ())
+  in
   let providers = ref 0 in
   let admitted_hook = ref (fun ~scope:_ ~accounting_id:_ -> ()) in
   let attempt_hook = ref (fun (_ : Inference_runtime.Attempt.t) -> ()) in
@@ -177,7 +247,9 @@ let run (cut : Cut.t) =
            ~matches:(fun path ->
              String.is_substring path ~substring:"/journal/"
              && String.is_suffix path ~suffix:".log")
-           ~reached:(Fault.reached fault env))
+           ~reached:(fun path ->
+             Fault.reached fault env path;
+             Fault.settlement_reached fault env path))
        ~prompt_text:prompt
        ~sources:
          [ ( "guard-input.chatmd"
@@ -365,6 +437,18 @@ let run (cut : Cut.t) =
                           | Prepared | Terminal _ | Interrupted _ ->
                             failwith "actual attempt ACK did not retain Running");
                     None
+                  | Source_revoked | Source_revoked_settlement_failure ->
+                    source_authorized := false;
+                    [%test_eq: P.Error.code]
+                      Permission_denied
+                      (execution.checkpoint () |> rejected).code;
+                    (match cut with
+                     | Source_revoked_settlement_failure ->
+                       fault.settlement <- Some (scope, accounting_id)
+                     | Source_revoked -> ()
+                     | Automatic_hold | Explicit_same_hold | Explicit_hold_before_sync ->
+                       assert false);
+                    None
                   | Explicit_same_hold ->
                     command
                       daemon
@@ -459,6 +543,46 @@ let run (cut : Cut.t) =
                       (Option.value_exn !admission)
                       (P.Goal_episode.admission episode));
                   raise (Observed_explicit_hold_failure failure)
+                | None
+                  when match cut with
+                       | Source_revoked_settlement_failure -> true
+                       | _ -> false ->
+                  let joined =
+                    match Eio.Promise.await_exn work with
+                    | result -> Ok result
+                    | exception exn -> Error exn
+                  in
+                  (match joined with
+                   | Error _ -> ()
+                   | Ok (Error error) ->
+                     [%test_eq: P.Error.code] Persistence_error error.code
+                   | Ok (Ok outcome) ->
+                     let attempt = Deferred_source_tests.attempted outcome in
+                     Factory.Deferred_run_attempt.result attempt |> rejected |> ignore;
+                     assert (
+                       Option.is_none (Factory.Deferred_run_attempt.no_effects attempt)));
+                  [%test_eq: int] 1 fault.hits;
+                  [%test_eq: int] 0 !providers;
+                  assert (Option.is_some fault.settlement_candidate);
+                  let current = state entry in
+                  let saved = row current scope accounting_id in
+                  assert (Ledger.Handle.equal handle (Ledger.Row.handle saved));
+                  (match Observation.Attempt_record.state (Ledger.Row.record saved) with
+                   | Running -> ()
+                   | Prepared | Terminal _ | Interrupted _ ->
+                     failwith "failed settlement changed confirmed facts");
+                  [%test_eq: int64]
+                    1L
+                    (A.Goal_accounting.admitted_attempts (Goal.accounting current));
+                  [%test_eq: int64]
+                    0L
+                    (A.Goal_accounting.admitted_turns (Goal.accounting current));
+                  (* The real writer is unavailable after this physical failure.
+                     This assertion requests no replay from its uncertain head. *)
+                  assert (Result.is_error (Actor.reconcile_inference_recovery entry.actor));
+                  (* Preserve this observed physical failure over cleanup's
+                     expected refusal to claim that the uncertain writer joined. *)
+                  raise Observed_settlement_failure
                 | None ->
                   let attempt =
                     Eio.Promise.await_exn work
@@ -490,17 +614,31 @@ let run (cut : Cut.t) =
                        Inference.Event.Terminal.equal_outcome
                          Completed
                          (Inference.Event.Terminal.outcome terminal))
-                   | Explicit_same_hold, Interrupted _ -> [%test_eq: int] 0 !providers
+                   | ( (Explicit_same_hold | Source_revoked)
+                     , Interrupted { delivery = Possibly_submitted; _ } ) ->
+                     (* The real Attempt enters its backend with conservative
+                        delivery before the adapter's final submission guard.
+                        Factual Running ACKs remain valid after revocation; do
+                        not turn the rejected guard into a delivery downgrade. *)
+                     [%test_eq: int] 0 !providers
                    | _, _ ->
-                     raise_s [%sexp "unexpected guarded parser outcome", (cut : Cut.t)])))))
+                     raise_s
+                       [%sexp
+                         "unexpected guarded parser outcome"
+                       , (cut : Cut.t)
+                       , (!providers : int)
+                       , (Observation.Attempt_record.to_json (Ledger.Row.record saved)
+                          : Jsonaf.t)])))))
    with
    | () -> assert (Option.is_none !primary)
+   | exception Observed_settlement_failure -> ()
    | exception Observed_explicit_hold_failure failure ->
      assert_error (Option.value_exn !primary) failure;
      [%test_eq: P.Error.code] Persistence_error failure.code);
   match cut with
-  | Automatic_hold | Explicit_same_hold -> [%test_eq: int] 0 fault.hits
-  | Explicit_hold_before_sync -> [%test_eq: int] 1 fault.hits
+  | Automatic_hold | Explicit_same_hold | Source_revoked -> [%test_eq: int] 0 fault.hits
+  | Explicit_hold_before_sync | Source_revoked_settlement_failure ->
+    [%test_eq: int] 1 fault.hits
 ;;
 
 let%expect_test
@@ -516,4 +654,13 @@ let%expect_test
     "same admitted parser handle submits once; fresh work and explicit hold stay fenced";
   [%expect
     {| same admitted parser handle submits once; fresh work and explicit hold stay fenced |}]
+;;
+
+let%expect_test "retained Goal source settles facts after original authority is revoked" =
+  List.iter [ Cut.Source_revoked; Source_revoked_settlement_failure ] ~f:run;
+  print_endline
+    "revoked source cannot submit; factual ACKs settle or retain the failed physical \
+     writer";
+  [%expect
+    {| revoked source cannot submit; factual ACKs settle or retain the failed physical writer |}]
 ;;

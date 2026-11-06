@@ -4,6 +4,8 @@ module S = Agent_store.Session_store
 module Archive = Agent_store.Session_archive_record
 module Persistence = A.Session_persistence
 
+exception Projection_publication_failure
+
 (* This complete projection intentionally uses only a no-job/no-schedule fixture.
    Actual store issuance still checks its full canonical metadata/index equality. *)
 let index_entry (state : A.Session_state.t) =
@@ -180,6 +182,20 @@ let%expect_test
      recovery"
   =
   with_actor_workspace (fun env workspace_instance ->
+    let fail_projection = ref false in
+    let index_temporary_prefix = ref None in
+    let env =
+      Crash_fault_io.wrap
+        env
+        ~boundary:Before_rename
+        ~matches:(fun path ->
+          !fail_projection
+          && Option.exists !index_temporary_prefix ~f:(fun prefix ->
+            String.is_prefix path ~prefix))
+        ~reached:(fun _ ->
+          fail_projection := false;
+          raise Projection_publication_failure)
+    in
     Eio.Switch.run (fun sw ->
       let initial = initial_with_source env workspace_instance in
       let root =
@@ -207,6 +223,11 @@ let%expect_test
               ~entry:(index_entry initial))
         |> store_ok
       in
+      index_temporary_prefix
+      := Some
+           (Filename.concat
+              (Agent_store.Data_root.indexes_path (S.data_root store))
+              "sessions.snapshot.tmp-");
       Exn.protect
         ~finally:(fun () ->
           S.close_session store handle |> store_ok;
@@ -288,10 +309,21 @@ let%expect_test
               Agent_store.Commit_writer.close writer)
             ~f:(fun () ->
               let controller =
-                A.Recurrence_controller.create store ~handle ~entry_projection:index_entry
+                A.Recurrence_controller.create
+                  store
+                  ~handle
+                  ~writer
+                  ~entry_projection:index_entry
                 |> protocol_ok
               in
               A.Session_actor.set_recurrence_controller actor controller |> protocol_ok;
+              let initial_current =
+                A.Recurrence_controller.observe controller initial |> protocol_ok
+              in
+              let initial_retained =
+                A.Recurrence_controller.retain_owner controller initial_current
+                |> protocol_ok
+              in
               let current = ref true in
               let proof =
                 Operator_authorization.guarded ~principal ~is_current:(fun () -> !current)
@@ -318,8 +350,14 @@ let%expect_test
               assert (
                 Option.is_none (state ()).recurrence_catalog
                 && Option.is_none (state ()).run_state);
+              assert (A.Recurrence_controller.is_current initial_current);
+              assert (A.Recurrence_controller.Retained_owner.is_current initial_retained);
               reject := false;
               let receipt = call command |> protocol_ok in
+              (* Actual canonical commit and metadata publication invalidate the
+                 exact projection, but not retained lifecycle ownership. *)
+              assert (not (A.Recurrence_controller.is_current initial_current));
+              assert (A.Recurrence_controller.Retained_owner.is_current initial_retained);
               let frontier = (state ()).counters.transaction_sequence in
               assert (
                 A.Recurrence_command_receipt.equal receipt (call command |> protocol_ok));
@@ -404,7 +442,10 @@ let%expect_test
               call (request (catalog ()) "safe-no-source" (Pause (id "actual")))
               |> protocol_ok
               |> ignore;
+              assert (A.Recurrence_controller.Retained_owner.is_current initial_retained);
               publish_lifecycle store handle (state ()) Archive "archive";
+              assert (
+                not (A.Recurrence_controller.Retained_owner.is_current initial_retained));
               S.read_lifecycle store handle
               |> store_ok
               |> S.Lifecycle.Observation.value
@@ -418,6 +459,13 @@ let%expect_test
               let recovery_state = state () in
               let recovery_catalog = catalog () in
               A.Session_actor.shutdown actor;
+              let archived_current =
+                A.Recurrence_controller.observe controller recovery_state |> protocol_ok
+              in
+              let archived_retained =
+                A.Recurrence_controller.retain_owner controller archived_current
+                |> protocol_ok
+              in
               let observed = S.read_lifecycle store handle |> store_ok in
               let original_receipt =
                 S.Lifecycle.Observation.value observed |> Archive.receipts |> List.hd_exn
@@ -458,6 +506,8 @@ let%expect_test
               assert (
                 Result.is_error (S.check_lifecycle_observation store handle observed));
               S.check_lifecycle_observation store handle reconciled |> store_ok;
+              assert (
+                not (A.Recurrence_controller.Retained_owner.is_current archived_retained));
               assert (
                 List.for_all
                   (S.Lifecycle.Observation.value reconciled |> Archive.receipts)
@@ -551,6 +601,9 @@ let%expect_test
                   (C.entries (Option.value_exn transition.state.recurrence_catalog))
                   ~f:(fun entry ->
                     E.equal_control (E.control entry) (Retired Lifecycle_changed)));
+              let repaired_retained =
+                A.Recurrence_controller.retain_owner controller repaired |> protocol_ok
+              in
               publish_lifecycle store handle transition.state Restore "restore";
               publish_lifecycle store handle transition.state Resume "resume";
               assert (not (A.Recurrence_controller.is_current repaired));
@@ -558,6 +611,13 @@ let%expect_test
                 A.Recurrence_controller.observe controller transition.state |> protocol_ok
               in
               assert (A.Recurrence_controller.automatic now_current);
+              assert (
+                not (A.Recurrence_controller.Retained_owner.is_current repaired_retained));
+              assert (
+                not (A.Recurrence_controller.Retained_owner.is_current initial_retained));
+              let resumed_retained =
+                A.Recurrence_controller.retain_owner controller now_current |> protocol_ok
+              in
               let catalog = Option.value_exn transition.state.recurrence_catalog in
               assert (
                 Result.is_error
@@ -569,6 +629,36 @@ let%expect_test
                         ~lifecycle:(A.Recurrence_controller.revision now_current)
                         "no-resurrection"
                         (Enable (id "actual")))));
+              (* Replaying a genuine earlier committed transaction is a definite
+                 sequence rejection inside the actual writer worker. It makes
+                 that worker Unavailable before replying and appends no frame. *)
+              let before_rejection = Agent_store.Journal.scan journal |> store_ok in
+              let original_transaction =
+                List.find_exn before_rejection.entries ~f:(fun entry ->
+                  Int.equal (Agent_store.Frame.flags entry.frame) 0)
+                |> fun (entry : Agent_store.Journal.entry) ->
+                Agent_store.Transaction.decode (Agent_store.Frame.payload entry.frame)
+                |> store_ok
+              in
+              assert (Agent_store.Commit_writer.is_available writer);
+              assert (
+                Result.is_error
+                  (Agent_store.Commit_writer.commit
+                     writer
+                     ~durability:Flush
+                     original_transaction));
+              assert (not (Agent_store.Commit_writer.is_available writer));
+              assert (
+                not (A.Recurrence_controller.Retained_owner.is_current resumed_retained));
+              assert (A.Recurrence_controller.is_current now_current);
+              let after_rejection = Agent_store.Journal.scan journal |> store_ok in
+              assert (
+                List.equal
+                  String.equal
+                  (List.map before_rejection.entries ~f:(fun entry ->
+                     Agent_store.Frame.payload entry.frame))
+                  (List.map after_rejection.entries ~f:(fun entry ->
+                     Agent_store.Frame.payload entry.frame)));
               Agent_store.Commit_writer.close writer;
               let journal =
                 Agent_store.Journal.open_existing
@@ -621,7 +711,133 @@ let%expect_test
                 A.Recurrence_command_receipt.equal
                   receipt
                   (List.hd_exn
-                     (C.receipts (Option.value_exn restored.recurrence_catalog))))))));
+                     (C.receipts (Option.value_exn restored.recurrence_catalog))));
+              (* Reopen the genuine physical head. No new writer derives its
+                 counters from caller guesses or the failed worker. *)
+              let head = List.last_exn transactions in
+              let reopened_writer =
+                Agent_store.Commit_writer.create
+                  ~sw
+                  ~journal
+                  ~session_id
+                  ~next_transaction_sequence:(Int64.succ head.transaction_sequence)
+                  ~previous_transaction_hash:(Some (Agent_store.Transaction.hash head))
+                  ~queue_capacity:8
+                |> store_ok
+              in
+              Exn.protect
+                ~finally:(fun () -> Agent_store.Commit_writer.close reopened_writer)
+                ~f:(fun () ->
+                  let reopened_controller =
+                    A.Recurrence_controller.create
+                      store
+                      ~handle
+                      ~writer:reopened_writer
+                      ~entry_projection:index_entry
+                    |> protocol_ok
+                  in
+                  let observed =
+                    A.Recurrence_controller.observe reopened_controller transition.state
+                    |> protocol_ok
+                  in
+                  let retained =
+                    A.Recurrence_controller.retain_owner reopened_controller observed
+                    |> protocol_ok
+                  in
+                  assert (A.Recurrence_controller.Retained_owner.is_current retained);
+                  assert (
+                    not
+                      (A.Recurrence_controller.Retained_owner.is_current resumed_retained));
+                  let exact =
+                    S.current_lifecycle
+                      store
+                      handle
+                      ~current_entry:(index_entry transition.state)
+                    |> store_ok
+                  in
+                  let store_retained =
+                    S.retain_lifecycle_owner store handle exact |> store_ok
+                  in
+                  Agent_store.Commit_writer.close reopened_writer;
+                  assert (not (A.Recurrence_controller.Retained_owner.is_current retained));
+                  assert (S.Lifecycle.Retained_owner.is_current store_retained handle);
+                  S.close_session store handle |> store_ok;
+                  assert (
+                    not (S.Lifecycle.Retained_owner.is_current store_retained handle));
+                  let reopened_handle =
+                    S.open_session
+                      store
+                      ~sw
+                      ~actor_lock_nonce:"retained-reopen"
+                      session_id
+                    |> store_ok
+                  in
+                  Exn.protect
+                    ~finally:(fun () -> S.close_session store reopened_handle |> store_ok)
+                    ~f:(fun () ->
+                      let exact =
+                        S.current_lifecycle
+                          store
+                          reopened_handle
+                          ~current_entry:(index_entry transition.state)
+                        |> store_ok
+                      in
+                      let retained =
+                        S.retain_lifecycle_owner store reopened_handle exact |> store_ok
+                      in
+                      assert (
+                        S.Lifecycle.Retained_owner.is_current retained reopened_handle);
+                      assert (
+                        not
+                          (S.Lifecycle.Retained_owner.is_current
+                             store_retained
+                             reopened_handle));
+                      (* Fault after the real metadata authority and index
+                         temporary bytes. The requested index is unchanged, so
+                         the existing refresh proves its old complete bytes;
+                         later success must not erase projection live_failure. *)
+                      fail_projection := true;
+                      let failed =
+                        try
+                          S.write_metadata
+                            ~entry:(index_entry transition.state)
+                            store
+                            reopened_handle
+                            (metadata transition.state)
+                          |> store_ok;
+                          false
+                        with
+                        | Projection_publication_failure -> true
+                      in
+                      assert (failed && not !fail_projection);
+                      S.Handle.metadata_checked reopened_handle |> store_ok |> ignore;
+                      Agent_store.Session_index.availability (S.session_index store)
+                      |> store_ok;
+                      assert (
+                        not
+                          (S.Lifecycle.Retained_owner.is_current retained reopened_handle));
+                      S.write_metadata
+                        ~entry:(index_entry transition.state)
+                        store
+                        reopened_handle
+                        (metadata transition.state)
+                      |> store_ok;
+                      S.Handle.metadata_checked reopened_handle |> store_ok |> ignore;
+                      assert (
+                        not
+                          (S.Lifecycle.Retained_owner.is_current retained reopened_handle));
+                      assert (not (S.retained_lifecycle_available store reopened_handle));
+                      let after_failure =
+                        S.current_lifecycle
+                          store
+                          reopened_handle
+                          ~current_entry:(index_entry transition.state)
+                        |> store_ok
+                      in
+                      assert (S.Lifecycle.Current.is_current after_failure reopened_handle);
+                      assert (
+                        Result.is_error
+                          (S.retain_lifecycle_owner store reopened_handle after_failure))))))));
   print_endline
     "real Current and Observation separated; failure/replay/Stop audits preserved; \
      pending repair and archive/resume never launch or resurrect";

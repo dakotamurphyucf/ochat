@@ -227,6 +227,9 @@ type t =
   ; moderator_activation : moderator_activation option
   ; automatic_turn_policy : Chat_response.Runtime_semantics.policy option
   ; check_execution : (unit -> (unit, Agent_protocol.Error.t) result) option
+  ; check_ancestry :
+      (unit -> (Delegation_authority.Checked_ancestry.t, Agent_protocol.Error.t) result)
+        option
   ; ancestor_capabilities :
       (Agent_protocol.Id.Session.t
        -> (Chat_response.Tool_capability.t, Agent_protocol.Error.t) result)
@@ -416,6 +419,7 @@ let requires_agent_source_runner elements =
 ;;
 
 let create_agent_runtime
+      ~checkpoint
       ~invocation
       ~agent_source_runner
       ~startup
@@ -439,6 +443,7 @@ let create_agent_runtime
     Agent_runtime.create
       ?agent_source_runner
       ~startup
+      ~checkpoint
       ~compilation_limits
       ?programs
       ~moderator_surface:(Script_preparation.Invocation.moderator_surface invocation)
@@ -459,6 +464,7 @@ let create_agent_runtime
     Agent_runtime.prepare_extensions
       ?agent_source_runner
       ~startup
+      ~checkpoint
       ~compilation_limits
       ?programs
       ~moderator_surface:(Script_preparation.Invocation.moderator_surface invocation)
@@ -484,6 +490,7 @@ let build_native_registrations = Extensibility_native_tools.registrations
 let declares_native = Extensibility_native_tools.declares
 
 let create_authored_resources
+      ~checkpoint
       ~startup
       ~agent_source
       ~script_preparation
@@ -509,7 +516,7 @@ let create_authored_resources
     revision
     ~env
     ~invocation
-    ~checkpoint:Eio.Fiber.check
+    ~checkpoint
     ~f:(fun startup ~compilation_limits ~programs ->
       let elements = Prompt_revision.elements revision in
       let open Result.Let_syntax in
@@ -608,6 +615,7 @@ let create_authored_resources
       in
       let%bind native, definition, managed =
         create_agent_runtime
+          ~checkpoint
           ~invocation
           ~agent_source_runner
           ~startup
@@ -693,6 +701,7 @@ let prepare_resources_internal
   in
   let%bind host = host ~env ~paths ~session_id ~elements in
   create_authored_resources
+    ~checkpoint:Eio.Fiber.check
     ~startup
     ~agent_source
     ~script_preparation
@@ -1783,6 +1792,11 @@ type source =
       ; root_invocation :
           Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.t
       }
+  | Captured_artifact of
+      { captured : Captured_recurrence_source.t
+      ; script_preparation : Script_preparation.t option
+      ; authority : Delegation_authority.t
+      }
   | Authored_child of
       { revision : Prompt_revision.t
       ; prepared : authored_resources
@@ -1796,6 +1810,19 @@ type source =
       ; inherited_managed : inherited_managed option
       ; authority : Delegation_authority.t
       }
+
+let source_authority = function
+  | Authored _ -> None
+  | Captured_artifact { authority; _ }
+  | Authored_child { authority; _ }
+  | Generated { authority; _ } -> Some authority
+;;
+
+let require_authority authority =
+  match Delegation_authority.check_execution authority with
+  | Ok () -> ()
+  | Error error -> raise (Chat_response.Ctx.Effect_rejected error)
+;;
 
 let guarded_services authority (services : extension_services) =
   let checked f =
@@ -1876,6 +1903,17 @@ let build_with_services
   let%bind () =
     match source with
     | Authored _ -> Ok ()
+    | Captured_artifact { captured; authority; _ } ->
+      let artifact =
+        Prompt_revision.artifact (Captured_recurrence_source.revision captured)
+      in
+      Delegation_authority.check_captured_artifact_preparation
+        authority
+        ~origin:(Captured_recurrence_source.origin captured)
+        ~session_id
+        ~revision_id:artifact.revision_id
+        ~manifest_sha256:artifact.manifest_sha256
+        ~permission_profile
     | Authored_child { revision; prepared; code; authority } ->
       let artifact = Prompt_revision.artifact revision in
       let%bind () =
@@ -1937,10 +1975,9 @@ let build_with_services
         ~permission_profile
   in
   let extension_services =
-    match source, extension_services with
-    | (Generated { authority; _ } | Authored_child { authority; _ }), Some services ->
-      Some (guarded_services authority services)
-    | _, services -> services
+    match source_authority source, extension_services with
+    | Some authority, Some services -> Some (guarded_services authority services)
+    | (None | Some _), services -> services
   in
   let extension_services =
     match source, extension_services with
@@ -1975,7 +2012,7 @@ let build_with_services
       let host =
         Some
           (match source with
-           | Authored _ -> host
+           | Authored _ | Captured_artifact _ -> host
            | Generated _ | Authored_child _ ->
              Chat_response.Authoring_validation.for_delegated host)
       in
@@ -1993,7 +2030,13 @@ let build_with_services
   in
   let elements, artifact, materialized_tree, delegated =
     match source with
-    | Authored { revision; script_preparation = _ } ->
+    | Captured_artifact { captured; _ } ->
+      let revision = Captured_recurrence_source.revision captured in
+      ( Prompt_revision.elements revision
+      , Prompt_revision.artifact revision
+      , Prompt_revision.materialized_tree revision
+      , false )
+    | Authored { revision; _ } ->
       ( Prompt_revision.elements revision
       , Prompt_revision.artifact revision
       , Prompt_revision.materialized_tree revision
@@ -2033,6 +2076,13 @@ let build_with_services
       cache
   in
   let ctx =
+    match source with
+    | Captured_artifact { authority; _ } ->
+      Chat_response.Ctx.with_effect_checkpoint ctx ~check:(fun () ->
+        require_authority authority)
+    | Authored _ | Authored_child _ | Generated _ -> ctx
+  in
+  let ctx =
     Option.value_map
       (Option.bind extension_services ~f:(fun services -> services.initial_agent_guidance))
       ~default:ctx
@@ -2062,10 +2112,27 @@ let build_with_services
           ~definition
       in
       resources.native, resources.definition, resources.managed, resources.authoring
-    | Authored { revision; script_preparation; root_invocation } ->
+    | (Authored _ | Captured_artifact _) as source ->
+      let revision, script_preparation, root_invocation =
+        match source with
+        | Authored { revision; script_preparation; root_invocation } ->
+          revision, script_preparation, root_invocation
+        | Captured_artifact { captured; script_preparation; _ } ->
+          ( Captured_recurrence_source.revision captured
+          , script_preparation
+          , Recurrence_child_origin.root_invocation
+              (Captured_recurrence_source.origin captured) )
+        | Authored_child _ | Generated _ -> assert false
+      in
+      let checkpoint () =
+        Eio.Fiber.check ();
+        Option.iter (source_authority source) ~f:require_authority
+      in
+      checkpoint ();
       let%bind host = host ~env ~paths ~session_id ~elements in
       let%map resources =
         create_authored_resources
+          ~checkpoint
           ~startup
           ~agent_source
           ~script_preparation
@@ -2094,7 +2161,7 @@ let build_with_services
   let%bind () = check_construction construction_checkpoint in
   let%bind authoring =
     match source with
-    | Authored _ | Authored_child _ -> Ok authoring
+    | Authored _ | Captured_artifact _ | Authored_child _ -> Ok authoring
     | Generated { definition; _ } ->
       let%bind host =
         Authoring_runtime.configure_host
@@ -2145,7 +2212,7 @@ let build_with_services
   let inherited =
     match source with
     | Generated { inherited_managed; _ } -> inherited_managed
-    | Authored _ | Authored_child _ -> None
+    | Authored _ | Captured_artifact _ | Authored_child _ -> None
   in
   let standalone_definition =
     match inherited with
@@ -2255,6 +2322,14 @@ let build_with_services
       Option.map legacy_construction ~f:(fun host -> host.script_tools agent_runtime)
   in
   let base_script_tools =
+    match source_authority source, extension_services, base_script_tools with
+    | Some authority, None, Some tools ->
+      Some
+        (Script_tool_calls.with_authorization_guard tools ~check:(fun () ->
+           Delegation_authority.check_execution authority))
+    | (None | Some _), (None | Some _), tools -> tools
+  in
+  let base_script_tools =
     Option.map base_script_tools ~f:(fun tools ->
       Script_tool_calls.with_inference_identity_binding
         tools
@@ -2311,7 +2386,7 @@ let build_with_services
         | Some definition, Some services, Some (moderator, _)
           when (match source with
                 | Generated _ -> false
-                | Authored _ | Authored_child _ -> true)
+                | Authored _ | Captured_artifact _ | Authored_child _ -> true)
                && Option.is_some (Manager.extension_definition moderator.manager) ->
           Script_tool_calls.with_moderator_dispatch
             tools_service
@@ -2728,10 +2803,12 @@ let build_with_services
       }
   in
   let check_execution =
-    match source with
-    | Authored _ -> None
-    | Generated { authority; _ } | Authored_child { authority; _ } ->
-      Some (fun () -> Delegation_authority.check_execution authority)
+    Option.map (source_authority source) ~f:(fun authority () ->
+      Delegation_authority.check_execution authority)
+  in
+  let check_ancestry =
+    Option.map (source_authority source) ~f:(fun authority () ->
+      Delegation_authority.check_ancestry authority)
   in
   let worker =
     match check_execution with
@@ -2743,9 +2820,7 @@ let build_with_services
         | Ok () -> Operation_worker.run worker ~sw ~input capabilities)
   in
   let activity =
-    match source with
-    | Authored _ -> None
-    | Generated _ | Authored_child _ -> Some (Runtime_activity.create ~sw)
+    Option.map (source_authority source) ~f:(fun _ -> Runtime_activity.create ~sw)
   in
   let with_activity f =
     match activity with
@@ -2967,6 +3042,7 @@ let build_with_services
          | _ -> None)
     ; moderator_activation
     ; check_execution
+    ; check_ancestry
     ; ancestor_capabilities = None
     ; activity
     ; native_runtime =
@@ -3089,6 +3165,54 @@ let build_with_extensions
     ~storage_paths
     ~source:(Authored { revision; script_preparation; root_invocation })
     ~extension_services:(Some services)
+;;
+
+let build_captured_artifact
+      ~captured
+      ~authority
+      ~construction_checkpoint
+      ~startup
+      ~legacy_construction
+      ~agent_source
+      ~script_preparation
+      ~native_registrations
+      ~services
+      ~sw
+      ~env
+      ~inference_context
+      ~inference_identity
+      ~bind_inference_identity
+      ~on_inference_attempt
+      ~on_inference_completion
+      ~on_inference_observation
+      ~paths
+      ~storage_paths
+  =
+  let construction_checkpoint =
+    Some
+      (fun () ->
+        let open Result.Let_syntax in
+        let%bind () = check_construction construction_checkpoint in
+        Delegation_authority.check_execution authority)
+  in
+  build_with_services
+    ~construction_checkpoint
+    ~legacy_construction
+    ~startup
+    ~agent_source
+    ~native_registrations
+    ~sw
+    ~env
+    ~inference_context
+    ~inference_identity
+    ~bind_inference_identity
+    ~on_inference_attempt
+    ~on_inference_completion
+    ~on_inference_observation
+    ~paths
+    ~storage_paths
+    ~source:(Captured_artifact { captured; script_preparation; authority })
+    ~extension_services:services
 ;;
 
 let build_generated

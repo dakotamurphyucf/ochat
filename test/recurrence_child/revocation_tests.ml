@@ -163,10 +163,11 @@ let on_event ctx state event = Task.pure(state)
                        (Frontier.child_associations
                           (Entry.frontier (entry parent) |> protocol_ok)));
                    let after = state parent in
-                   [%test_eq: int64] before.counters.revision after.counters.revision;
-                   [%test_eq: int64]
-                     before.counters.transaction_sequence
-                     after.counters.transaction_sequence)))
+                   Unrelated_birth_facts.check
+                     Registered_unobserved
+                     ~before
+                     ~after
+                     ~record:lower)))
         with
         | Registry.Cleanup_failed failure ->
           (* Keep a new cleanup failure actionable without accepting or hiding it. *)
