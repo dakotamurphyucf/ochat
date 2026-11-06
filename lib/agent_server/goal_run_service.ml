@@ -7,6 +7,14 @@ module Factory = Session_factory
 module Activation_result = struct
   type t =
     | Activated of P.Run_receipt.t
+    | Controlled of
+        { admission : P.Run_receipt.t
+        ; control : Actor.Goal_callback_control.t
+        }
+    | Settled of
+        { admission : P.Run_receipt.t
+        ; settlement : P.Goal_episode.Settlement.t
+        }
     | Retained of P.Run_receipt.t
     | Admission_uncertain of P.Error.t
     | Activation_failed of
@@ -18,6 +26,14 @@ end
 module Callback_success = struct
   type t =
     | Activated of P.Run_receipt.t
+    | Controlled of
+        { admission : P.Run_receipt.t
+        ; control : Actor.Goal_callback_control.t
+        }
+    | Settled of
+        { admission : P.Run_receipt.t
+        ; settlement : P.Goal_episode.Settlement.t
+        }
     | Retained of P.Run_receipt.t
 end
 
@@ -38,6 +54,10 @@ module Attempt = struct
     match Factory.Deferred_run_attempt.result t.actual with
     | Ok (Callback_success.Activated admission) ->
       Ok (Activation_result.Activated admission)
+    | Ok (Controlled { admission; control }) ->
+      Ok (Activation_result.Controlled { admission; control })
+    | Ok (Settled { admission; settlement }) ->
+      Ok (Activation_result.Settled { admission; settlement })
     | Ok (Retained admission) -> Ok (Activation_result.Retained admission)
     | Error error ->
       (match t.fact with
@@ -117,13 +137,13 @@ let activate context prepared activation =
   let checked = Actor.Goal_activation.checked activation in
   match (A.Goal_activation_request.request context.Context.request).input with
   | Authored_start ->
-    Runtime_owner.start_held_authored_runtime
+    Runtime_owner.start_held_authored_runtime_result
       context.entry.runtime
       ~prepared
       ~held
       ~checked
   | User_submission _ ->
-    Runtime_owner.with_held_input_runtime
+    Runtime_owner.with_held_input_runtime_result
       context.entry.runtime
       ~prepared
       ~held
@@ -162,8 +182,15 @@ let admit_selected context fact prepared =
     fact
     := Admission_fact.Known
          (Actor.Held_run.admission (Actor.Goal_activation.held activation));
-    let%map admission = activate context prepared activation in
-    Callback_success.Activated admission
+    let admission = Actor.Held_run.admission (Actor.Goal_activation.held activation) in
+    let%map result = activate context prepared activation in
+    (match result with
+     | Runtime_owner.Construction_result.Built admission ->
+       Callback_success.Activated admission
+     | Callback_completed (Actor.Goal_callback_completion.Controlled control) ->
+       Callback_success.Controlled { admission; control }
+     | Callback_completed (Settled settlement) ->
+       Callback_success.Settled { admission; settlement })
 ;;
 
 let start_episode service ~entry ~actor ~session ~request =

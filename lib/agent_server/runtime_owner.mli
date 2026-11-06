@@ -98,6 +98,17 @@ val source_lane_idle : t -> bool
     owner's Eio domain; no Actor request, callback, mutation or authority grant. *)
 val belongs_to_actor : t -> Agent_session.Session_actor.t -> bool
 
+(** Shared constructor outcome. Callback completion carries factual closed data
+    instead of a runtime value and skips every runtime consumer. *)
+module Construction_result : sig
+  (** Factual callback completion, never runtime installation, execution
+      permission or handoff. Callback_completed skips the supplied runtime consumer;
+      its closed data distinguishes control from genuine terminal settlement. *)
+  type 'a t =
+    | Built of 'a
+    | Callback_completed of Agent_session.Session_actor.Goal_callback_completion.t
+end
+
 (** Existing Factory constructor for a source that has already passed actual
     retained-artifact verification. Its opaque context selects the exact initial
     admitted continuation or existing Goal episode owner; neither is coerced into
@@ -107,7 +118,9 @@ val belongs_to_actor : t -> Agent_session.Session_actor.t -> bool
 type deferred_builder =
   source:Agent_session.Runtime_builder.Source.t
   -> construction:Agent_session.Session_actor.Runtime_construction.t
-  -> (Agent_session.Runtime_builder.t, Agent_protocol.Error.t) result
+  -> ( Agent_session.Runtime_builder.t Construction_result.t
+       , Agent_protocol.Error.t )
+       result
 
 (** Actual factory constructor retaining an explicitly supplied original actor
     through initialization. The proof option is supplied only by authenticated
@@ -540,6 +553,16 @@ val with_held_input_runtime
   -> (Held_input_runtime.t -> ('a, Agent_protocol.Error.t) result)
   -> ('a, Agent_protocol.Error.t) result
 
+(** Consumed Goal form of the same construction bracket. An actual control
+    skips runtime/input execution and remains separate from the admission. *)
+val with_held_input_runtime_result
+  :  t
+  -> prepared:Prepared.t
+  -> held:Agent_session.Session_actor.Held_run.t
+  -> checked:Agent_session.Session_actor.Admitted_activation.Checked.t
+  -> (Held_input_runtime.t -> ('a, Agent_protocol.Error.t) result)
+  -> ('a Construction_result.t, Agent_protocol.Error.t) result
+
 (** Complete the same held authored Run using its actual runtime startup.
     Already acknowledged legacy initialization is not replayed. A pending v1
     startup uses the Actor's exact lifecycle claim and joins before aggregate
@@ -553,6 +576,15 @@ val start_held_authored_runtime
   -> held:Agent_session.Session_actor.Held_run.t
   -> checked:Agent_session.Session_actor.Admitted_activation.Checked.t
   -> (Agent_protocol.Run_receipt.t, Agent_protocol.Error.t) result
+
+(** Consumed Goal form of the same construction bracket. An actual control
+    skips runtime/input execution and remains separate from the admission. *)
+val start_held_authored_runtime_result
+  :  t
+  -> prepared:Prepared.t
+  -> held:Agent_session.Session_actor.Held_run.t
+  -> checked:Agent_session.Session_actor.Admitted_activation.Checked.t
+  -> (Agent_protocol.Run_receipt.t Construction_result.t, Agent_protocol.Error.t) result
 
 (** Cancellable auxiliary inference lifetime without loading a runtime. A loaded
     runtime is retained and its selected execution supplied; otherwise f receives
@@ -999,7 +1031,7 @@ val with_goal_job_runtime
   -> prepared:Prepared_goal_execution.t
   -> execution:Agent_session.Session_actor.Goal_execution_runtime.t
   -> (Agent_session.Runtime_builder.t -> ('a, Agent_protocol.Error.t) result)
-  -> ('a, Agent_protocol.Error.t) result
+  -> ('a Construction_result.t, Agent_protocol.Error.t) result
 
 module Loaded_job_runtime : sig
   type 'a t =

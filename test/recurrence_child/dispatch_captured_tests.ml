@@ -150,7 +150,7 @@ let on_event ctx state event = Task.pure(state)
                          ~root_file:child_prompt
                      in
                      with_planner env sw daemon parent (fun () ->
-                       ready_nominal parent target |> ignore);
+                       ready_nominal parent ~clock:(Eio.Stdenv.clock env) target |> ignore);
                      let frontier =
                        Entry.frontier
                          (Catalog.find

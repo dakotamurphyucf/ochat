@@ -212,9 +212,24 @@ only actual matching terminal evidence closes the objective. The authenticated
 `Goal_run_service` now consumes the association planner through the actual Factory
 and runtime owner. Loaded input and cold resume exercise canonical inference and
 host-turn accounting; actual worker completion versus cancellation qualifies the
-achievement boundary. Same-episode resume and selective continuation controls,
-configurable native/tool wrappers and their complete composed qualification remain
-integration work. The [episode and settlement contract](../lib/agent_session/goal_runs.doc.md)
+achievement boundary. Same-episode Resume and selective controls retain actual
+callback outcomes, including an acknowledged Hold/Abandon that stops construction.
+This `Controlled` result preserves the real admission or Resume receipt without
+claiming runtime installation, delivery adoption or execution. Pre-install control
+preserves the constructor's Pending or existing Ready state. An installed v1
+lifecycle can control after genuine initialization has committed Ready; resource
+retirement preserves that durable history. Actual terminal settlement has
+precedence for initial activation too: `Settled` carries the actual Admission and
+terminal episode receipt without claiming installation or startup handoff. The
+shared constructor reports closed callback completion separately from `Built`;
+already claimed Jobs use their normal non-execution failure completion. Legacy
+Pending initialization over a retained moderator checkpoint joins `Session_resume`;
+the installed v1 authored path joins its genuine `Session_start`. A first Goal
+cannot be attached before the fresh legacy callback installs its actual source.
+The remaining fresh startup integration must join native Create inside that
+callback to native Start after callback release. Published source metadata cannot
+replace actual installation. Public checked helpers and the complete authored
+integration remain separate work. The [episode and settlement contract](../lib/agent_session/goal_runs.doc.md)
 details these boundaries. The
 [metadata command contract](../lib/agent_session/goal_catalog.doc.md) specifies the
 16-goal/256-receipt finite retention policy, source/reset/recovery holds and complete

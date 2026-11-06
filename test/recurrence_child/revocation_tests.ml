@@ -108,6 +108,7 @@ let on_event ctx state event = Task.pure(state)
                    let selected =
                      reserve
                        parent
+                       ~clock:(Eio.Stdenv.clock wrapped)
                        (target ?revision_id wrapped daemon parent ~root_file:prompt)
                    in
                    let row = Actor.Recurrence_creation.reservation selected in

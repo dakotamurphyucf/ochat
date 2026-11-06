@@ -82,9 +82,10 @@ process-local binding from stored IDs.
 
 A completed resume reports the actual outcome: `Started` identifies the admitted
 Administrative turn, `Waiting` retains the callback's chosen wake, and `Settled`
-identifies the original episode's terminal settlement. In particular, a cold
-callback that waits or finishes its Goal does not receive an extra continuation
-turn. All paths retain the same Run, Admission, episode and cumulative account.
+identifies the original episode's terminal settlement. `Controlled` retains the
+exact acknowledged Hold or Abandon from this actual lifecycle callback. It does
+not report execution or delivery adoption. A cold callback that waits, finishes
+or controls its Goal receives no extra continuation turn. All paths retain the same Run, Admission, episode and cumulative account.
 Any new admitted turn or inference is charged through that existing account.
 An owned timer created by the resume callback records that Run's source and
 origin alongside its actual callback ownership. These are retained provenance;
@@ -104,7 +105,7 @@ Callers should distinguish these results when presenting a resume command:
 | `Rejected` | The command was rejected before its first write. Correct the reported condition before issuing a new command. |
 | `Uncertain` | The command's acknowledgement is unknown. Reconcile durable state; do not infer that no work happened. |
 | `Resume_failed` | The command was acknowledged, but a later step failed. Keep its receipt and show the error; completed effects are not rolled back. |
-| `Resumed` | The continuation actually started, waited, or settled as reported. `Started` does not mean the Goal has been achieved. |
+| `Resumed` | The actual continuation started, waited, settled, or acknowledged control as reported. `Controlled` grants no execution permission; `Started` does not mean the Goal has been achieved. |
 | `Retained` | This exact command already has a receipt. The reply is historical data and does not report a new continuation. |
 
 An exact retry keeps the original key, source and revision intent. Changing the
@@ -273,4 +274,79 @@ The existing private callback Plan applies selected Goal edits and selective Run
 
 Fresh explicit Hold retirement occurs only after the actual final checks, immediately before the yielding writer. Same-valued Hold is still a new explicit control. A failed save cannot revive the prior pending activation; known ACK also invalidates registered fresh-allocation views before publication. Automatic accounting holds remain distinct and preserve the exact already-admitted last allocation. Writer ACK installation records only factual completion after the accepted control revokes fresh custody.
 
-This backend does not yet provide the separate intentional cold-construction completion outcome: a callback may acknowledge control before a fresh constructor/runtime handoff subsequently becomes unavailable. A known Goal receipt remains factual; an unavailable handoff is not execution Started, Waiting, achievement, or an installed runtime. That lifecycle integration and the public native registry/checked helper packaging are separately retained work. The backend adds no new executor, implicit permission or metadata Resume enable path.
+An intentional Hold or Abandon can end the same constructor's permission to
+continue. The actual joined Init, initial authored lifecycle or existing-Goal
+lifecycle retains one opaque `Goal_callback_control` only after the callback's
+writer acknowledges the fresh command. It binds the exact owner, source, Run,
+episode and final committed candidate. Hold followed by Progress retains the Hold
+receipt and validates the later final Goal projection. A retained receipt replay,
+Create alone, unrelated metadata control or failed/unknown writer cannot supply
+this completion fact.
+
+The shared runtime constructor returns `Built` with its real value or
+`Callback_completed` with closed `Controlled` or `Settled` result data. Goal activation reports
+`Controlled { admission; control }` using its actual earlier Admission. Existing
+episode Resume keeps its actual Resume receipt with a `Controlled` continuation.
+The fact exposes its accepted disposition and an optional exact passive Wait as
+data; it does not authorize another effect. Validated actual terminal settlement
+takes precedence over control for initial activation, Resume and wake completion.
+Initial activation reports `Settled { admission; settlement }` with its real
+Admission and independently validated terminal episode receipt. It does not claim
+runtime installation or startup handoff. An accepted Finish alone is insufficient:
+the actual aggregate writer must acknowledge completion of all admitted work.
+Abandon
+alone never claims that the Run or its admitted work is terminal.
+
+For control during pre-install Init, construction stops before effect flush,
+initialization completion or runtime installation. A legacy constructor whose
+initialization was Pending keeps that Pending state; a Scoped Init over existing
+Ready history keeps that history. Its real partial runtime and Init owner join
+cleanup before a successful result escapes. An installed v1 lifecycle can instead
+acknowledge control after its genuine Ready commit. The runtime then retires while
+that committed Ready history remains truthful. Control fabricates neither an
+installation nor a rollback of completed initialization.
+
+A legacy Pending constructor over retained history restores its actual moderator
+checkpoint and runs `Session_resume`; a first Goal episode may supply a user input
+that control then prevents from being submitted. The installed v1 authored path
+instead joins its genuine `Session_start` after physical preparation has committed
+Ready. These are distinct actual lifecycle boundaries.
+
+Goal metadata requires an actually installed moderator source. A fresh legacy
+Pending session cannot attach its first Goal before its genuine callback has
+installed that source. The remaining fresh startup integration must join native
+Create inside that callback to native Start after its release. Source installation
+already belongs to the actual callback claim; a saved or published source
+description cannot replace it.
+
+While durable desired state remains Stopped before initial input handoff, native
+Goal metadata is permitted only for the actual callback of the admitted initial
+Goal constructor. The Actor checks its exact event borrow, current constructor
+scope, joined callback ownership and held Run after the existing original, source
+and effect checks. The actual initial Run retains its issued family's association:
+a Goal constructor validates its immutable Goal link, episode and exact Admission;
+a recurrence constructor validates its reciprocal occurrence origin. The callback
+and its native children retain that genuine Run attribution for accounting and
+completion. Ordinary, unbound and delegated stopped callbacks remain denied.
+An explicit Stop still revokes the actual callback, including a Stop that leaves
+the durable desired state unchanged.
+
+Callback, publication and cancellation exceptions remain observable; cleanup
+failure replaces only a successful callback outcome. Factual currentness checks
+inspect the actual source, Store observation and candidate without re-enabling a Held
+Goal or renewing closed execution custody.
+
+A pending wake's `Controlled` result is separate from `Handed_off`: the old wake
+is not delivered and no queue, Delivery or turn acknowledgement is fabricated.
+An already claimed Job keeps its actual claim and completes through the existing
+failed-to-obtain-runtime path, reporting non-execution failure rather than success,
+requeue or a refund. Actual admitted independent work and cumulative accounting
+remain owned by their existing completion paths. Known control closes the exact
+local execution owner without the generic no-handoff Run interruption.
+
+Ordinary delegated loading still consumes the same constructor. Its real Scoped
+Init or deferred Installed_resume route does not acquire a Goal lifecycle owner
+from stored source or Goal metadata. The existing source-stage cleanup and
+administration cancellation remain authoritative. The public checked-helper and
+Start/Resume packaging remain separate integration work; no new executor or
+metadata permission issuer is added.

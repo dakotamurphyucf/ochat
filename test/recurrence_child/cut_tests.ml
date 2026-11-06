@@ -118,7 +118,10 @@ let on_event ctx state event = Task.pure(state)
                 start_parent_settled wrapped sw connection parent;
                 with_planner wrapped sw daemon parent (fun () ->
                   let permit =
-                    reserve parent (target wrapped daemon parent ~root_file:prompt)
+                    reserve
+                      parent
+                      ~clock:(Eio.Stdenv.clock wrapped)
+                      (target wrapped daemon parent ~root_file:prompt)
                   in
                   let row = Actor.Recurrence_creation.reservation permit in
                   expected := Some (created.id, row);

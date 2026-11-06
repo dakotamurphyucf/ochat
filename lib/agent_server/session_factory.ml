@@ -6236,6 +6236,12 @@ let selected_runtime_source t source =
       }
 ;;
 
+let ordinary_runtime_construction = function
+  | Runtime_owner.Construction_result.Built runtime -> Ok runtime
+  | Callback_completed _ ->
+    Error (unavailable Invalid_state "Goal control reached ordinary runtime construction")
+;;
+
 let build_runtime_for_actor ?run_preparation ?original_actor ?deferred t handle actor =
   let open Result.Let_syntax in
   let check_deferred () =
@@ -6436,46 +6442,57 @@ let build_runtime_for_actor ?run_preparation ?original_actor ?deferred t handle 
     let finish () =
       let%bind () = check_deferred () in
       let%bind moderator = runtime.start_moderator () in
-      let%bind () = check_deferred () in
-      let current_constructor = Constructor_owner.current constructor_preparation in
-      let%bind () =
-        flush_pending_schedules ?run_preparation:current_constructor actor !schedules
+      let%bind completion =
+        Option.value_map scope ~default:(Ok None) ~f:(fun scope ->
+          Agent_session.Session_actor.initialization_goal_completion actor ~scope)
       in
-      let%bind () = flush_pending_jobs ?run_preparation:current_constructor actor !jobs in
-      let%bind () =
-        match pending with
-        | None ->
-          (match scope with
-           | Some scope ->
-             Agent_session.Session_actor.checkpoint_runtime_construction
-               ?moderator_manager:runtime.moderator_manager
-               actor
-               ~scope
-               moderator
-             |> Result.map ~f:ignore
-           | None ->
-             install_moderator_if_changed
-               ?run_preparation:current_constructor
-               ?moderator_manager:runtime.moderator_manager
-               actor
-               moderator)
-        | Some fresh_history ->
-          let candidate =
-            prepared_state expected runtime (ref shell) (ref []) (ref []) ~fresh_history
-          in
-          let candidate = { candidate with moderator } in
-          (match scope with
-           | None ->
-             Error (unavailable Conflict "Pending initialization has no host scope")
-           | Some scope ->
-             Agent_session.Session_actor.complete_initialization
-               ?moderator_manager:runtime.moderator_manager
-               actor
-               ~scope
-               ~candidate
-             |> Result.map ~f:ignore)
-      in
-      Ok runtime
+      match completion with
+      | Some completion ->
+        Eio.Cancel.protect runtime.close;
+        Ok (Runtime_owner.Construction_result.Callback_completed completion)
+      | None ->
+        let%bind () = check_deferred () in
+        let current_constructor = Constructor_owner.current constructor_preparation in
+        let%bind () =
+          flush_pending_schedules ?run_preparation:current_constructor actor !schedules
+        in
+        let%bind () =
+          flush_pending_jobs ?run_preparation:current_constructor actor !jobs
+        in
+        let%bind () =
+          match pending with
+          | None ->
+            (match scope with
+             | Some scope ->
+               Agent_session.Session_actor.checkpoint_runtime_construction
+                 ?moderator_manager:runtime.moderator_manager
+                 actor
+                 ~scope
+                 moderator
+               |> Result.map ~f:ignore
+             | None ->
+               install_moderator_if_changed
+                 ?run_preparation:current_constructor
+                 ?moderator_manager:runtime.moderator_manager
+                 actor
+                 moderator)
+          | Some fresh_history ->
+            let candidate =
+              prepared_state expected runtime (ref shell) (ref []) (ref []) ~fresh_history
+            in
+            let candidate = { candidate with moderator } in
+            (match scope with
+             | None ->
+               Error (unavailable Conflict "Pending initialization has no host scope")
+             | Some scope ->
+               Agent_session.Session_actor.complete_initialization
+                 ?moderator_manager:runtime.moderator_manager
+                 actor
+                 ~scope
+                 ~candidate
+               |> Result.map ~f:ignore)
+        in
+        Ok (Runtime_owner.Construction_result.Built runtime)
     in
     match finish () with
     | Ok _ as result -> result
@@ -6508,43 +6525,61 @@ let build_runtime_for_actor ?run_preparation ?original_actor ?deferred t handle 
         with
         | _ -> ())
   in
-  Exn.protect
-    ~f:(fun () ->
-      match initialize () with
-      | Ok _ as result -> result
+  let cleanup_error = ref None in
+  let cleanup_exception = ref None in
+  let record_cleanup f =
+    try
+      match f () with
+      | Ok () -> ()
       | Error failure ->
-        record_failure failure;
-        Error failure
-      | exception exn ->
-        let backtrace = Stdlib.Printexc.get_raw_backtrace () in
-        record_failure (unavailable Invalid_state "runtime initialization failed");
-        Exn.raise_with_original_backtrace exn backtrace)
-    ~finally:(fun () ->
-      let current_constructor = Constructor_owner.current constructor_preparation in
-      Constructor_owner.clear constructor_preparation;
-      initialization_scope := None;
-      (* End before the runtime escapes. Residual exact synchronous attempts are
+        if Option.is_none !cleanup_error then cleanup_error := Some failure
+    with
+    | exn ->
+      if Option.is_none !cleanup_exception
+      then cleanup_exception := Some (exn, Stdlib.Printexc.get_raw_backtrace ())
+  in
+  let result =
+    Exn.protect
+      ~f:(fun () ->
+        match initialize () with
+        | Ok _ as result -> result
+        | Error failure ->
+          record_failure failure;
+          Error failure
+        | exception exn ->
+          let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+          record_failure (unavailable Invalid_state "runtime initialization failed");
+          Exn.raise_with_original_backtrace exn backtrace)
+      ~finally:(fun () ->
+        let current_constructor = Constructor_owner.current constructor_preparation in
+        Constructor_owner.clear constructor_preparation;
+        initialization_scope := None;
+        (* End before the runtime escapes. Residual exact synchronous attempts are
          interrupted on failed preparation/cancellation; queued async work is
          preserved. Cleanup never replaces the original constructor outcome. *)
-      Eio.Cancel.protect (fun () ->
-        Option.iter scope ~f:(fun scope ->
-          (try
-             ignore
-               (Agent_session.Session_actor.end_initialization actor ~scope
-                : (unit, Agent_protocol.Error.t) result)
-           with
-           | _ -> ());
-          List.iter !initialization_jobs ~f:(fun job ->
-            try
-              ignore
-                (interrupt_constructor_job
-                   actor
-                   ~run_preparation:current_constructor
-                   job
-                   ~reason:"runtime initialization scope ended"
-                 : (Agent_protocol.Job.t, Agent_protocol.Error.t) result)
-            with
-            | _ -> ()))))
+        Eio.Cancel.protect (fun () ->
+          Option.iter scope ~f:(fun scope ->
+            record_cleanup (fun () ->
+              Agent_session.Session_actor.end_initialization actor ~scope);
+            List.iter !initialization_jobs ~f:(fun job ->
+              try
+                ignore
+                  (interrupt_constructor_job
+                     actor
+                     ~run_preparation:current_constructor
+                     job
+                     ~reason:"runtime initialization scope ended"
+                   : (Agent_protocol.Job.t, Agent_protocol.Error.t) result)
+              with
+              | _ -> ()))))
+  in
+  match result with
+  | Ok (Runtime_owner.Construction_result.Callback_completed _ as completed) ->
+    (match !cleanup_exception, !cleanup_error with
+     | Some (exn, backtrace), _ -> Exn.raise_with_original_backtrace exn backtrace
+     | None, Some failure -> Error failure
+     | None, None -> Ok completed)
+  | Ok (Built _) | Error _ -> result
 ;;
 
 let collect_results t handle journal persistence durable_events services runtime actor () =
@@ -6862,7 +6897,8 @@ let create_loaded_entry
         ~actor
         ~initial:(Some runtime)
         ~build:(fun ~original_actor run_preparation ->
-          build_runtime_for_actor ?run_preparation ?original_actor t handle actor)
+          build_runtime_for_actor ?run_preparation ?original_actor t handle actor
+          |> Result.bind ~f:ordinary_runtime_construction)
         ~build_deferred:(fun ~source ~construction ->
           build_runtime_for_actor ~deferred:(source, construction) t handle actor)
         ~delegated_load:(delegated_runtime_driver t handle actor runtime_owner state)
@@ -7070,7 +7106,8 @@ let create_unloaded_entry
         ~actor
         ~initial:None
         ~build:(fun ~original_actor run_preparation ->
-          build_runtime_for_actor ?run_preparation ?original_actor t handle actor)
+          build_runtime_for_actor ?run_preparation ?original_actor t handle actor
+          |> Result.bind ~f:ordinary_runtime_construction)
         ~build_deferred:(fun ~source ~construction ->
           build_runtime_for_actor ~deferred:(source, construction) t handle actor)
         ~delegated_load:(delegated_runtime_driver t handle actor runtime_owner state)
@@ -12527,7 +12564,6 @@ let goal_metadata_service t (profile : Agent_session.Permission_policy.t) actor_
            state.spec.permission_profile_digest
       && (not state.halted)
       && Option.is_none state.failure
-      && (not (P.Session.equal_desired_state state.lifecycle.desired Stopped))
       && not
            (Option.exists state.active_operation ~f:(fun operation ->
               match operation.P.Operation.state with
@@ -13452,7 +13488,7 @@ let with_goal_job_runtime t (entry : Session_registry.entry) ~owner f =
   in
   let%bind reused = Runtime_owner.with_loaded_goal_job_runtime entry.runtime ~owner f in
   match reused with
-  | Reused result -> Ok result
+  | Reused result -> Ok (Runtime_owner.Construction_result.Built result)
   | No_runtime ->
     let%bind decision =
       with_goal_execution_source
@@ -13506,12 +13542,21 @@ let execute_background_job t (entry : Session_registry.entry) job =
          | Ordinary ->
            Runtime_owner.execute_background_job_in_scope entry.runtime ~execution ~request
          | Goal ->
-           with_goal_job_runtime t entry ~owner:execution.runtime_owner (fun runtime ->
-             Runtime_owner.execute_background_job_runtime
-               entry.runtime
-               ~runtime
-               ~execution
-               ~request))
+           let%bind result =
+             with_goal_job_runtime t entry ~owner:execution.runtime_owner (fun runtime ->
+               Runtime_owner.execute_background_job_runtime
+                 entry.runtime
+                 ~runtime
+                 ~execution
+                 ~request)
+           in
+           (match result with
+            | Runtime_owner.Construction_result.Built outcome -> Ok outcome
+            | Callback_completed _ ->
+              Error
+                (unavailable
+                   Invalid_state
+                   "Goal callback completed construction before Job execution")))
 ;;
 
 module Goal_wake_result = struct
@@ -13519,6 +13564,7 @@ module Goal_wake_result = struct
     | No_work
     | Suspended_goal of Agent_session.Goal_execution_selection.Suspension.t
     | Handed_off of Agent_session.Session_actor.Goal_execution_runtime.Wake_result.t
+    | Controlled of Agent_session.Session_actor.Goal_callback_control.t
 end
 
 let deliver_goal_wake t (entry : Session_registry.entry) ~wake =
@@ -13543,7 +13589,10 @@ let deliver_goal_wake t (entry : Session_registry.entry) ~wake =
   match decision with
   | No_work -> Goal_wake_result.No_work
   | Suspended_goal suspension -> Suspended_goal suspension
-  | Fresh result -> Handed_off result
+  | Fresh
+      (Agent_session.Session_actor.Goal_execution_runtime.Wake_result.Controlled control)
+    -> Controlled control
+  | Fresh ((Queued _ | Started _ | Waiting _ | Settled _) as result) -> Handed_off result
 ;;
 
 let drain_idle_moderator t (entry : Session_registry.entry) =
@@ -13565,5 +13614,5 @@ let drain_idle_moderator t (entry : Session_registry.entry) =
     let%map result = deliver_goal_wake t entry ~wake in
     (match result with
      | No_work | Suspended_goal _ -> false
-     | Handed_off _ -> true)
+     | Handed_off _ | Controlled _ -> true)
 ;;

@@ -20,9 +20,19 @@ module Activation_result : sig
   (** These are result data, never execution permission. [Activated] acknowledges
       input or authored startup handoff, not Goal achievement or Run completion.
       [Activation_failed] retains known admission after a later failure; it does
-      not promise rollback, no effects, a still-held Run or a fresh admission. *)
+      not promise rollback, no effects, a still-held Run or a fresh admission.
+      Settled retains the actual Admission and independently validated terminal
+      episode receipt; it does not claim constructor installation or handoff. *)
   type t =
     | Activated of Agent_protocol.Run_receipt.t
+    | Controlled of
+        { admission : Agent_protocol.Run_receipt.t
+        ; control : Agent_session.Session_actor.Goal_callback_control.t
+        }
+    | Settled of
+        { admission : Agent_protocol.Run_receipt.t
+        ; settlement : Agent_protocol.Goal_episode.Settlement.t
+        }
     | Retained of Agent_protocol.Run_receipt.t
     | Admission_uncertain of Agent_protocol.Error.t
     | Activation_failed of

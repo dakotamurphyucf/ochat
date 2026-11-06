@@ -265,10 +265,29 @@ module Scope_outcome = struct
   ;;
 end
 
+module Construction_result = struct
+  type 'a t =
+    | Built of 'a
+    | Callback_completed of Agent_session.Session_actor.Goal_callback_completion.t
+end
+
+let ordinary_construction_result = function
+  | Construction_result.Built value -> Ok value
+  | Callback_completed _ ->
+    Error
+      (Agent_protocol.Error.create
+         Invalid_state
+         ~message:"Goal callback completion reached an ordinary runtime adapter"
+         ~retryable:false
+         ())
+;;
+
 type deferred_builder =
   source:Agent_session.Runtime_builder.Source.t
   -> construction:Agent_session.Session_actor.Runtime_construction.t
-  -> (Agent_session.Runtime_builder.t, Agent_protocol.Error.t) result
+  -> ( Agent_session.Runtime_builder.t Construction_result.t
+       , Agent_protocol.Error.t )
+       result
 
 type builder =
   | Ordinary of (unit -> (Agent_session.Runtime_builder.t, Agent_protocol.Error.t) result)
@@ -2009,11 +2028,11 @@ let with_runtime_construction_internal (type a) t (request : a Runtime_request.t
             active, context)
         in
         Eio.Fiber.check ();
-        let%bind runtime =
+        let%bind built =
           match stage.runtime with
           | Some runtime ->
             residency := Some (Held_runtime_residency.Reused runtime);
-            Ok runtime
+            Ok (Construction_result.Built runtime)
           | None ->
             let%bind () = check_effect context in
             let%bind () =
@@ -2035,17 +2054,24 @@ let with_runtime_construction_internal (type a) t (request : a Runtime_request.t
                let result =
                  build ~source:(Runtime_request.source request) ~construction:context
                in
-               Result.iter result ~f:(fun runtime ->
-                 residency := Some (Held_runtime_residency.Local runtime));
+               Result.iter result ~f:(function
+                 | Construction_result.Built runtime ->
+                   residency := Some (Held_runtime_residency.Local runtime)
+                 | Callback_completed _ -> ());
                result)
         in
-        let%bind () =
-          match runtime.Agent_session.Runtime_builder.check_execution with
-          | None -> Ok ()
-          | Some check -> check ()
-        in
-        let%bind () = check_effect context in
-        f runtime active context residency
+        match built with
+        | Construction_result.Callback_completed completion ->
+          let%map () = consumed_basis context in
+          Construction_result.Callback_completed completion
+        | Built runtime ->
+          let%bind () =
+            match runtime.Agent_session.Runtime_builder.check_execution with
+            | None -> Ok ()
+            | Some check -> check ()
+          in
+          let%bind () = check_effect context in
+          f runtime active context residency
       in
       (match result with
        | Error _ -> ()
@@ -2076,7 +2102,10 @@ let with_held_runtime t ~prepared ~held ~checked f =
     ~prepared
     ~held
     ~checked
-    (fun runtime continuation _construction _residency -> f runtime continuation)
+    (fun runtime continuation _construction _residency ->
+       Result.map (f runtime continuation) ~f:(fun value ->
+         Construction_result.Built value))
+  |> Result.bind ~f:ordinary_construction_result
 ;;
 
 let with_held_recurrence_runtime t ~prepared ~held ~checked f =
@@ -2175,7 +2204,8 @@ let load_delegated_runtime t ~prepared ~retention =
         | Release_if_stopped, Running ->
           residency := Some (Held_runtime_residency.Ordinary_installed runtime)
         | Release_if_stopped, Stopped -> ());
-       summary)
+       Construction_result.Built summary)
+  |> Result.bind ~f:ordinary_construction_result
 ;;
 
 let run_delegated_driver ?admission t ~custody ~retention =
@@ -2669,7 +2699,30 @@ module Held_input_runtime = struct
   ;;
 end
 
-let with_held_input_runtime t ~prepared ~held ~checked f =
+(* Factual source-stage/resource association after an installed lifecycle. The
+   pre-install basis intentionally expects stage.runtime and cannot be reused
+   after this exact install. This check performs no fresh execution refresh. *)
+let installed_control_source_basis t request ~runtime ~construction =
+  let stage = Runtime_request.stage request in
+  if
+    Int.equal stage.domain (Stdlib.Domain.self () :> int)
+    && (not (t.closed || stage.closed))
+    && Option.is_none t.unloading
+    && Option.equal phys_equal t.foreground_retirement stage.foreground_retirement
+    && Option.exists t.prepared_source ~f:(phys_equal stage)
+    && Option.exists t.runtime ~f:(phys_equal runtime)
+    && Option.exists stage.continuation ~f:(phys_equal construction)
+  then Ok ()
+  else
+    Error
+      (Agent_protocol.Error.create
+         Conflict
+         ~message:"controlled installed runtime source owner was displaced"
+         ~retryable:false
+         ())
+;;
+
+let with_held_input_runtime_result t ~prepared ~held ~checked f =
   with_held_runtime_internal
     t
     ~prepared
@@ -2691,10 +2744,16 @@ let with_held_input_runtime t ~prepared ~held ~checked f =
        in
        Exn.protect
          ~finally:(fun () -> input_runtime.phase <- Closed)
-         ~f:(fun () -> f input_runtime))
+         ~f:(fun () ->
+           Result.map (f input_runtime) ~f:(fun value -> Construction_result.Built value)))
 ;;
 
-let start_held_authored_runtime t ~prepared ~held ~checked =
+let with_held_input_runtime t ~prepared ~held ~checked f =
+  with_held_input_runtime_result t ~prepared ~held ~checked f
+  |> Result.bind ~f:ordinary_construction_result
+;;
+
+let start_held_authored_runtime_result t ~prepared ~held ~checked =
   with_held_runtime_internal
     t
     ~prepared
@@ -2722,9 +2781,31 @@ let start_held_authored_runtime t ~prepared ~held ~checked =
            ~continuation
            ~startup
        in
-       Result.iter result ~f:(fun _ ->
-         residency := Some (Held_runtime_residency.Handed_off runtime));
-       result)
+       let completed completion =
+         let%map () =
+           installed_control_source_basis
+             t
+             (Runtime_request.Initial { prepared; held; checked })
+             ~runtime
+             ~construction
+         in
+         Construction_result.Callback_completed completion
+       in
+       Result.bind result ~f:(function
+         | Agent_session.Session_actor.Held_authored_result.Started admission ->
+           residency := Some (Held_runtime_residency.Handed_off runtime);
+           Ok (Construction_result.Built admission)
+         | Controlled control ->
+           completed
+             (Agent_session.Session_actor.Goal_callback_completion.Controlled control)
+         | Settled settlement ->
+           completed
+             (Agent_session.Session_actor.Goal_callback_completion.Settled settlement)))
+;;
+
+let start_held_authored_runtime t ~prepared ~held ~checked =
+  start_held_authored_runtime_result t ~prepared ~held ~checked
+  |> Result.bind ~f:ordinary_construction_result
 ;;
 
 let with_joined_existing_goal_runtime
@@ -2760,31 +2841,50 @@ let with_joined_existing_goal_runtime
          install_runtime_for_request t request ~runtime ~construction ~residency
        in
        Eio.Fiber.check ();
-       let%bind () =
+       let%bind control =
          match resume with
-         | None -> Ok ()
+         | None -> Ok None
          | Some resume -> run_resume active resume
        in
-       let result = f runtime active construction in
-       if Construction.handoff_acknowledged construction
-       then residency := Some (Held_runtime_residency.Handed_off runtime);
-       result)
+       match control with
+       | Some control ->
+         let%map () = installed_control_source_basis t request ~runtime ~construction in
+         Construction_result.Callback_completed
+           (Agent_session.Session_actor.Goal_callback_completion.Controlled control)
+       | None ->
+         let result = f runtime active construction in
+         if Construction.handoff_acknowledged construction
+         then residency := Some (Held_runtime_residency.Handed_off runtime);
+         Result.map result ~f:(fun value -> Construction_result.Built value))
 ;;
 
 let resume_goal_episode t ~prepared ~continuation =
   let module Actor = Agent_session.Session_actor in
-  with_joined_existing_goal_runtime
-    t
-    (Runtime_request.Existing_goal { prepared; continuation })
-    ~run_resume:(fun continuation resume ->
-      Actor.run_goal_runtime_resume t.actor ~continuation ~resume)
-    (fun _runtime continuation _construction ->
-       (* A joined lifecycle may really Wait or settle. A command receipt alone
+  let open Result.Let_syntax in
+  let%bind result =
+    with_joined_existing_goal_runtime
+      t
+      (Runtime_request.Existing_goal { prepared; continuation })
+      ~run_resume:(fun continuation resume ->
+        Actor.run_goal_runtime_resume t.actor ~continuation ~resume)
+      (fun _runtime continuation _construction ->
+         (* A joined lifecycle may really Wait or settle. A command receipt alone
          does not permit another Operation; preserve its actual final decision. *)
-       Result.bind (Actor.continue_goal_episode t.actor ~continuation) ~f:(function
-         | (Actor.Goal_resume_result.Resumed _ | Retained _) as result -> Ok result
-         | Resume_failed { receipt = _; error } | Rejected error | Uncertain error ->
-           Error error))
+         Result.bind (Actor.continue_goal_episode t.actor ~continuation) ~f:(function
+           | (Actor.Goal_resume_result.Resumed _ | Retained _) as result -> Ok result
+           | Resume_failed { receipt = _; error } | Rejected error | Uncertain error ->
+             Error error))
+  in
+  match result with
+  | Construction_result.Built result -> Ok result
+  | Callback_completed (Actor.Goal_callback_completion.Controlled _) ->
+    Actor.continue_goal_episode t.actor ~continuation
+  | Callback_completed (Settled settlement) ->
+    Ok
+      (Actor.Goal_resume_result.Resumed
+         { receipt = Actor.Goal_continuation.receipt continuation
+         ; continuation = Settled settlement
+         })
 ;;
 
 let with_goal_job_runtime t ~prepared ~execution f =
@@ -4222,20 +4322,25 @@ let run_goal_wake_runtime t ~prepared ~execution ~notification_policy ~max_notif
     | Claimed_job ->
       Error (Agent_protocol.Error.invalid_request "claimed Job is not a wake")
   in
-  with_joined_existing_goal_runtime
-    t
-    (Runtime_request.Existing_goal_execution { prepared; execution })
-    ~run_resume:(fun execution resume ->
-      Actor.run_goal_execution_runtime_resume t.actor ~execution ~resume)
-    (fun runtime execution _construction ->
-       Eio.Mutex.use_ro t.moderator_work_mutex (fun () ->
-         with_activity runtime (fun () ->
-           Goal_wake_consumer.run
-             t
-             runtime
-             execution
-             ~notification_policy
-             ~max_notifications)))
+  let%bind result =
+    with_joined_existing_goal_runtime
+      t
+      (Runtime_request.Existing_goal_execution { prepared; execution })
+      ~run_resume:(fun execution resume ->
+        Actor.run_goal_execution_runtime_resume t.actor ~execution ~resume)
+      (fun runtime execution _construction ->
+         Eio.Mutex.use_ro t.moderator_work_mutex (fun () ->
+           with_activity runtime (fun () ->
+             Goal_wake_consumer.run
+               t
+               runtime
+               execution
+               ~notification_policy
+               ~max_notifications)))
+  in
+  match result with
+  | Construction_result.Built result -> Ok result
+  | Callback_completed _ -> Actor.finish_goal_wake_runtime t.actor ~execution
 ;;
 
 let close t =

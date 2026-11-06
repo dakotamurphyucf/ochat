@@ -224,7 +224,9 @@ let%expect_test
                           Host.existing_target controller ~target:parent |> denied;
                           let linked = ref None in
                           let create_child parent target =
-                            let nominal = ready_nominal parent target in
+                            let nominal =
+                              ready_nominal parent ~clock:(Eio.Stdenv.clock env) target
+                            in
                             let before = state parent in
                             let before_frames = frames env parent in
                             let loaded =

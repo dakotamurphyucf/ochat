@@ -382,6 +382,12 @@ let exercise scenario =
                                 Ok (fresh_denial ~sw entry selected services policy)))
                       |> protocol_ok
                     in
+                    let rejection =
+                      match rejection with
+                      | Owner.Construction_result.Built rejection -> rejection
+                      | Callback_completed _ ->
+                        failwith "loaded Job unexpectedly completed its callback"
+                    in
                     let retained = state entry in
                     assert (A.Goal_accounting.equal account (Goal.accounting retained));
                     assert (
@@ -416,7 +422,8 @@ let exercise scenario =
                            Ok ())
                       |> function
                       | Error error -> error
-                      | Ok () -> failwith "expired Job scope entered loaded runtime"
+                      | Ok (Owner.Construction_result.Built () | Callback_completed _) ->
+                        failwith "expired Job scope entered loaded runtime"
                     in
                     [%test_eq: int] 2 !authorizations;
                     assert !crossed_deadline;

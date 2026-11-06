@@ -330,8 +330,8 @@ let cold_target
   target, observer
 ;;
 
-let create_cold_child daemon parent captured =
-  let permit = reserve parent captured in
+let create_cold_child daemon ~clock parent captured =
+  let permit = reserve parent ~clock captured in
   let child =
     Factory.create_recurrence_child (Daemon.factory daemon) ~parent ~permit |> protocol_ok
   in
@@ -358,7 +358,11 @@ let with_cold_occurrence
   let captured, target_observer =
     cold_target ~catalog_target ~mode env daemon parent ~root_file
   in
-  let create_child = Option.value create_child ~default:(create_cold_child daemon) in
+  let create_child =
+    Option.value
+      create_child
+      ~default:(create_cold_child daemon ~clock:(Eio.Stdenv.clock env))
+  in
   let permit, linked = create_child parent captured in
   let reservation = Actor.Recurrence_creation.reservation permit in
   let target_session = Factory.Recurrence_child.session linked in

@@ -61,6 +61,29 @@ let on_event ctx state event = match event with
 </script>|}
 ;;
 
+(* Only this scenario selects real native control on its SECOND cold resume.
+   Existing Complete/Stop/claim-failure scripts and assertions stay unchanged. *)
+let control_prompt =
+  prompt
+  |> Goal_control_completion_tests.replace_prompt
+       ~pattern:"<script id=\"goal_wake\""
+       ~with_:(Goal_control_completion_tests.native_tools ^ "\n<script id=\"goal_wake\"")
+  |> Goal_control_completion_tests.replace_prompt
+       ~pattern:"let initial_state = 0\n"
+       ~with_:
+         ("let initial_state = 0\n"
+          ^ Goal_control_completion_tests.native_functions
+          ^ "\n")
+  |> Goal_control_completion_tests.replace_prompt
+       ~pattern:"  else Task.pure(state)\n| `Internal_event"
+       ~with_:
+         {|  else
+    let* before = call("goal_get", get_input) in
+    let* held = call("goal_hold", control(before, "hold")) in
+    Task.pure(state + 1)
+| `Internal_event|}
+;;
+
 let write_context env root run finish =
   Eio.Path.save
     ~create:(`Or_truncate 0o600)
@@ -139,6 +162,7 @@ let with_due_clocks (env : Eio_unix.Stdenv.base) advance : Eio_unix.Stdenv.base 
 module Scenario = struct
   type t =
     | Complete
+    | Cold_control
     | Stop
     | Claim_failure of Fault.Cut.t
 end
@@ -184,7 +208,7 @@ let run (scenario : Scenario.t) =
       let wrapped = with_due_clocks env advance in
       recovery_env := Some wrapped;
       match scenario with
-      | Complete | Stop -> wrapped
+      | Complete | Cold_control | Stop -> wrapped
       | Claim_failure cut ->
         Crash_fault_io.wrap
           wrapped
@@ -195,9 +219,12 @@ let run (scenario : Scenario.t) =
           ~reached:(Fault.State.reached fault env))
     ~max_root_agents:
       (match scenario with
-       | Complete | Claim_failure _ -> 1
+       | Complete | Cold_control | Claim_failure _ -> 1
        | Stop -> 2)
-    ~prompt_text:prompt
+    ~prompt_text:
+      (match scenario with
+       | Cold_control -> control_prompt
+       | Complete | Stop | Claim_failure _ -> prompt)
     ~qualify_chatml_extensions:true
     ~sources:[ context_file, "{}\n" ]
     ~policy
@@ -262,8 +289,10 @@ let run (scenario : Scenario.t) =
                          |> protocol_ok
                        with
                        | Resumed { receipt; continuation = Waiting wake } -> receipt, wake
-                       | Resumed { continuation = Started _ | Settled _; _ } | Retained _
-                         -> failwith "setup did not write its actual passive Wait"
+                       | Resumed
+                           { continuation = Started _ | Settled _ | Controlled _; _ }
+                       | Retained _ ->
+                         failwith "setup did not write its actual passive Wait"
                        | Resume_failed { error; _ } | Rejected error | Uncertain error ->
                          raise_s [%sexp "setup resume failed", (error : P.Error.t)]
                      in
@@ -309,7 +338,7 @@ let run (scenario : Scenario.t) =
                      (* Advance both actual due-clock inputs. The fixture timeout
                       uses the original environment; no producer row is edited. *)
                      (match scenario with
-                      | Complete -> ()
+                      | Complete | Cold_control -> ()
                       | Stop -> construction_armed := true
                       | Claim_failure _ ->
                         fault.selected <- Some { state = cold; admission; wake });
@@ -537,6 +566,66 @@ let run (scenario : Scenario.t) =
                           inside its worker. Preserve its actual selected I/O cause
                           through the poisoned fixture's outer cleanup. *)
                        raise (Fault.Observed_claim_fault (Option.value_exn fault.failure))
+                     | Cold_control ->
+                       let rec await_control () =
+                         let current = Resume.checkpoint entry in
+                         match G.state (Goal.goal current) with
+                         | Open (Held (Needs_input reason))
+                           when G.Reason.equal reason Goal_control_completion_tests.reason
+                                && Owner.source_lane_idle entry.runtime
+                                && Resume.callbacks_complete current -> current
+                         | Open (Enabled | Held _) | Closed _ ->
+                           Eio.Fiber.yield ();
+                           await_control ()
+                       in
+                       let final = await_control () in
+                       assert (P.Run_wake.equal wake (waiting final admission));
+                       assert (
+                         Jsonaf.exactly_equal
+                           (P.Schedule.Storage.to_json pending_timer)
+                           (P.Schedule.Storage.to_json (one_schedule final)));
+                       assert (
+                         List.equal P.Delivery.equal cold.deliveries final.deliveries);
+                       assert (Option.is_none final.active_operation);
+                       assert (
+                         not
+                           (List.exists final.moderator_executions ~f:(fun execution ->
+                              P.Moderator_execution.equal_phase
+                                Internal_event
+                                execution.context.phase)));
+                       assert (
+                         A.Goal_accounting.equal
+                           (Goal.accounting cold)
+                           (Goal.accounting final));
+                       [%test_eq: int] 1 !(counters.providers);
+                       Resume.assert_episode cold final admission;
+                       let retained = Resume.run final admission in
+                       assert (
+                         List.equal
+                           P.Run_work.Terminal.equal
+                           (Resume.run cold admission).terminal_work
+                           retained.terminal_work);
+                       let rec select_suspended () =
+                         match
+                           Factory.deliver_goal_wake (Daemon.factory daemon) entry ~wake
+                         with
+                         | Ok (Suspended_goal _) -> ()
+                         | Error error
+                           when P.Error.equal_code error.code Conflict && error.retryable
+                           ->
+                           Eio.Fiber.yield ();
+                           select_suspended ()
+                         | Error error -> raise_s [%sexp (error : P.Error.t)]
+                         | Ok (No_work | Handed_off _ | Controlled _) ->
+                           failwith
+                             "exact pending wake was consumed or adopted by control"
+                       in
+                       let before_recheck = Resume.checkpoint entry in
+                       select_suspended ();
+                       Existing.assert_same before_recheck entry;
+                       print_endline
+                         "real cold callback control leaves exact Wait/timer pending; no \
+                          producer/delivery/queued callback ACK"
                      | Complete ->
                        let rec await_timer () =
                          let current = Resume.checkpoint entry in
@@ -635,7 +724,7 @@ let run (scenario : Scenario.t) =
                            reject_replay ()
                          | Error error -> raise_s [%sexp (error : P.Error.t)]
                          | Ok No_work -> ()
-                         | Ok (Suspended_goal _ | Handed_off _) ->
+                         | Ok (Suspended_goal _ | Handed_off _ | Controlled _) ->
                            failwith "old wake replayed"
                        in
                        reject_replay ();
@@ -693,4 +782,10 @@ let%expect_test "failed Goal queued-claim ACK never transfers effects across rec
     Before_sync
     After_sync
     |}]
+;;
+
+let%expect_test "cold Goal callback control cannot acknowledge its pending timer wake" =
+  run Cold_control;
+  [%expect
+    {| real cold callback control leaves exact Wait/timer pending; no producer/delivery/queued callback ACK |}]
 ;;

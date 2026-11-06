@@ -193,7 +193,32 @@ let reserve_occurrence ?(actor = proof) parent occurrence =
   |> protocol_ok
 ;;
 
-let ready_nominal parent target =
+let await_ready_nominal parent ~clock =
+  (* The live daemon is the sole due planner. A manual sweep here can race
+     its separately acquired Begin/Finish/Release ownership. Observe the actual
+     committed frontier; this wait neither prepares nor reserves an occurrence. *)
+  Eio.Time.with_timeout_exn clock 10. (fun () ->
+    let rec await_nominal () =
+      let recurrence = entry parent in
+      let definition = A.Recurrence_definition.key (Entry.current recurrence) in
+      let nominal =
+        Frontier.ready (Entry.frontier recurrence |> protocol_ok)
+        |> List.find ~f:(fun nominal ->
+          A.Recurrence_identity.Definition.equal
+            (A.Recurrence_identity.Occurrence.definition
+               (A.Recurrence_nominal.key nominal))
+            definition)
+      in
+      match nominal with
+      | Some nominal -> nominal
+      | None ->
+        Eio.Time.sleep clock 0.01;
+        await_nominal ()
+    in
+    await_nominal ())
+;;
+
+let ready_nominal parent ~clock target =
   let period =
     Recurrence_rules.Rule.Period.create_ms 600_000L
     |> Result.map_error ~f:(fun error ->
@@ -212,13 +237,11 @@ let ready_nominal parent target =
     (Create (recurrence_id, { schedule; target; policy = A.Recurrence_policy.default }))
   |> ignore;
   command parent "enable-captured" (Enable recurrence_id) |> ignore;
-  Actor.sweep_recurrences parent.actor |> protocol_ok;
-  let recurrence = entry parent in
-  Frontier.ready (Entry.frontier recurrence |> protocol_ok) |> List.hd_exn
+  await_ready_nominal parent ~clock
 ;;
 
-let reserve parent target =
-  let nominal = ready_nominal parent target in
+let reserve parent ~clock target =
+  let nominal = ready_nominal parent ~clock target in
   reserve_occurrence parent (A.Recurrence_nominal.key nominal)
 ;;
 
