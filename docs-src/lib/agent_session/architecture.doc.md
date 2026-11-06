@@ -13,6 +13,16 @@ after a successful commit leaves that commit intact: an exceptional reply is not
 rollback evidence or permission to replay the request. Ordinary `shutdown`
 retains its existing cleanup and return behavior.
 
+Ordinary Turn admission uses typed preparation, acknowledged installation and
+suffix stages within the same Actor request. The existing command audit, input
+ownership, writer-attempt marker, acknowledgement and worker ordering stay in
+that handler. `Turn_admission_staging` records those phases; it does not certify a
+Store write. `Preparation_tracking` shares actual revision, closure and constructor
+subset checks without granting execution authority. `Run_preparation` keeps its
+required original principal. Ordinary delegated loading has separate
+`Delegated_runtime_load` custody and still requires the actual Factory/Actor/Store
+association, current source, selection and initialization checks.
+
 `Administration` constructs detached reset/rebuild/upgrade candidates. Commit
 prepared candidates through `Session_actor.commit_administration`, which rechecks
 authority/revision/lifecycle and retains the previous state before replacement.
@@ -43,6 +53,7 @@ resource ownership, return types and cancellation/error behavior.
 | `authored_source_preparation` | [contract](../../../lib/agent_session/authored_source_preparation.mli) | [source](../../../lib/agent_session/authored_source_preparation.ml) |
 | `chatmd_export` | [contract](../../../lib/agent_session/chatmd_export.mli) | [source](../../../lib/agent_session/chatmd_export.ml) |
 | `compaction_archive` | [contract](../../../lib/agent_session/compaction_archive.mli) | [source](../../../lib/agent_session/compaction_archive.ml) |
+| `delegated_runtime_load` | [contract](../../../lib/agent_session/delegated_runtime_load.mli) | [source](../../../lib/agent_session/delegated_runtime_load.ml) |
 | `durable_event_log` | [contract](../../../lib/agent_session/durable_event_log.mli) | [source](../../../lib/agent_session/durable_event_log.ml) |
 | `history_codec` | [contract](../../../lib/agent_session/history_codec.mli) | [source](../../../lib/agent_session/history_codec.ml) |
 | `history_id_source` | [contract](../../../lib/agent_session/history_id_source.mli) | [source](../../../lib/agent_session/history_id_source.ml) |
@@ -52,6 +63,7 @@ resource ownership, return types and cancellation/error behavior.
 | `operation_worker` | [contract](../../../lib/agent_session/operation_worker.mli) | [source](../../../lib/agent_session/operation_worker.ml) |
 | `permission_policy` | [contract](../../../lib/agent_session/permission_policy.mli) | [source](../../../lib/agent_session/permission_policy.ml) |
 | `permission_reviewer` | [contract](../../../lib/agent_session/permission_reviewer.mli) | [source](../../../lib/agent_session/permission_reviewer.ml) |
+| `preparation_tracking` | [contract](../../../lib/agent_session/preparation_tracking.mli) | [source](../../../lib/agent_session/preparation_tracking.ml) |
 | `prompt_catalog` | [contract](../../../lib/agent_session/prompt_catalog.mli) | [source](../../../lib/agent_session/prompt_catalog.ml) |
 | `prompt_definition` | [contract](../../../lib/agent_session/prompt_definition.mli) | [source](../../../lib/agent_session/prompt_definition.ml) |
 | `prompt_revision` | [contract](../../../lib/agent_session/prompt_revision.mli) | [source](../../../lib/agent_session/prompt_revision.ml) |
@@ -70,6 +82,7 @@ resource ownership, return types and cancellation/error behavior.
 | `session_transition` | [contract](../../../lib/agent_session/session_transition.mli) | [source](../../../lib/agent_session/session_transition.ml) |
 | `start_queue` | [contract](../../../lib/agent_session/start_queue.mli) | [source](../../../lib/agent_session/start_queue.ml) |
 | `subscriber` | [contract](../../../lib/agent_session/subscriber.mli) | [source](../../../lib/agent_session/subscriber.ml) |
+| `turn_admission_staging` | [contract](../../../lib/agent_session/turn_admission_staging.mli) | [source](../../../lib/agent_session/turn_admission_staging.ml) |
 | `turn_worker` | [contract](../../../lib/agent_session/turn_worker.mli) | [source](../../../lib/agent_session/turn_worker.ml) |
 | `workspace_catalog` | [contract](../../../lib/agent_session/workspace_catalog.mli) | [source](../../../lib/agent_session/workspace_catalog.ml) |
 | `workspace_cleanup` | [contract](../../../lib/agent_session/workspace_cleanup.mli) | [source](../../../lib/agent_session/workspace_cleanup.ml) |

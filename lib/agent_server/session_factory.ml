@@ -9,16 +9,23 @@ module Constructor_owner = struct
   type t =
     | Ordinary of Agent_session.Run_preparation.t option ref
     | Admitted of Agent_session.Session_actor.Runtime_construction.t option ref
+    | Installed_resume of
+        { construction : Agent_session.Session_actor.Runtime_construction.t option ref
+        ; preparation : Agent_session.Run_preparation.t option ref
+        }
 
   let current = function
     | Ordinary preparation -> Option.map !preparation ~f:(fun value -> Initial value)
-    | Admitted construction ->
+    | Admitted construction | Installed_resume { construction; _ } ->
       Option.map !construction ~f:(fun value -> Runtime_construction value)
   ;;
 
   let clear = function
     | Ordinary preparation -> preparation := None
     | Admitted construction -> construction := None
+    | Installed_resume { construction; preparation } ->
+      construction := None;
+      preparation := None
   ;;
 end
 
@@ -2748,6 +2755,8 @@ let create_graph_tracking ?run_preparation t actor_ref =
   | None -> Graph_tracking.create actor ~source ~upstream
   | Some (Constructor_owner.Ordinary preparation) ->
     Graph_tracking.create ~run_preparation:preparation actor ~source ~upstream
+  | Some (Installed_resume { preparation; _ }) ->
+    Graph_tracking.create ~run_preparation:preparation actor ~source ~upstream
   | Some (Admitted construction) ->
     let%bind construction =
       Result.of_option
@@ -2991,9 +3000,25 @@ let restore_authored_code t ~artifacts ~source record =
   |> Result.map ~f:Agent_session.Prompt_child_source.revision
 ;;
 
-let with_selected_source
+(* Only actual Factory allocation/entry paths construct this private tuple.
+   It is association DATA; source binding and selected execution remain checked
+   by the authentic Actor/Owner receivers. Pre-publication children use the same
+   owned Handle/Actor/Owner instead of inventing a temporary registry entry. *)
+module Source_target = struct
+  type t =
+    { actor : Agent_session.Session_actor.t
+    ; runtime : Runtime_owner.t
+    ; store_handle : Agent_store.Session_store.Handle.t option
+    }
+
+  let of_entry (entry : Session_registry.entry) =
+    { actor = entry.actor; runtime = entry.runtime; store_handle = entry.store_handle }
+  ;;
+end
+
+let with_selected_source_target
       t
-      (entry : Session_registry.entry)
+      (entry : Source_target.t)
       ~with_parent
       ~with_source
       ~check_selected
@@ -3013,6 +3038,16 @@ let with_selected_source
     then Ok ()
     else
       Error (unavailable Permission_denied "source staging has a foreign session store")
+  in
+  let%bind () =
+    if
+      Runtime_owner.belongs_to_actor entry.runtime entry.actor
+      && Option.exists
+           (A.Session_actor.runtime_source_owner_identity entry.actor)
+           ~f:(A.Runtime_source_owner.matches t.runtime_source_owner)
+    then Ok ()
+    else
+      Error (unavailable Conflict "source target differs from its actual Factory owner")
   in
   let%bind _ =
     Store.Handle.metadata_checked handle |> Result.map_error ~f:protocol_of_store
@@ -3198,6 +3233,61 @@ let with_selected_source
          ~captured:(Some retained)
          (A.Prompt_revision.artifact (A.Captured_recurrence_source.revision retained)))
   | Generated_artifact { artifact; _ } -> with_delegated ~captured:None artifact
+;;
+
+let with_selected_source t entry ~with_parent ~with_source ~check_selected f =
+  with_selected_source_target
+    t
+    (Source_target.of_entry entry)
+    ~with_parent
+    ~with_source
+    ~check_selected
+    f
+;;
+
+let delegated_runtime_driver
+      t
+      handle
+      actor
+      runtime_owner
+      (state : Agent_session.Session_state.t)
+  =
+  match state.spec.delegation with
+  | None -> None
+  | Some _ ->
+    Some
+      (fun ~source ~retention ->
+        let open Result.Let_syntax in
+        let%bind runtime =
+          Result.of_option
+            !runtime_owner
+            ~error:(unavailable Conflict "delegated runtime driver lost its actual Owner")
+        in
+        let target : Source_target.t = { actor; runtime; store_handle = Some handle } in
+        with_selected_source_target
+          t
+          target
+          ~with_parent:(fun parent f ->
+            Runtime_owner.with_loaded_source_capabilities_reported
+              parent
+              ~source_owner:t.runtime_source_owner
+              f
+            |> Runtime_owner.Scope_outcome.resume)
+          ~with_source:(fun selected f ->
+            match Agent_session.Runtime_builder.Source.selection selected with
+            | Captured _ ->
+              Error
+                (unavailable
+                   Invalid_state
+                   "captured recurrence child requires reciprocal occurrence Run \
+                    admission")
+            | Authored _ | Authored_child _ | Generated _ ->
+              Result.bind
+                (Runtime_owner.Delegated_load_source.prepare source ~source:selected)
+                ~f)
+          ~check_selected:Runtime_owner.Prepared_delegated_load.check_basis
+          (fun prepared ->
+             Runtime_owner.load_delegated_runtime runtime ~prepared ~retention))
 ;;
 
 let with_selected_run_source t entry ~with_parent ~with_source f =
@@ -5044,6 +5134,12 @@ let prepare_runtime_at_paths
                  ~inherited_managed
                  ~authority)
           | `Authored (prepared, revision) ->
+            let reject_missing_history () =
+              Error
+                (unavailable
+                   Invalid_state
+                   "authored child requires admitted stored history")
+            in
             let%bind () =
               match
                 ( existing_history
@@ -5058,11 +5154,23 @@ let prepare_runtime_at_paths
                 , Pending { fresh_history = true }
                 , Some (Runtime_construction _)
                 , Some _ ) -> Ok ()
-              | None, _, _, _, _ ->
-                Error
-                  (unavailable
-                     Invalid_state
-                     "authored child requires admitted stored history")
+              | ( None
+                , None
+                , Pending { fresh_history = true }
+                , Some (Runtime_construction construction)
+                , Some _ ) ->
+                let module Construction = Agent_session.Session_actor.Runtime_construction
+                in
+                (match Construction.initialization construction with
+                 | Installed_resume -> reject_missing_history ()
+                 | Scoped ->
+                   (match
+                      Agent_session.Runtime_source_preparation.selection
+                        (Construction.source construction)
+                    with
+                    | Authored_child _ -> Ok ()
+                    | Authored _ | Captured _ | Generated _ -> reject_missing_history ()))
+              | None, _, _, _, _ -> reject_missing_history ()
             in
             let%map code =
               prepare_authored_code
@@ -6215,12 +6323,21 @@ let build_runtime_for_actor ?run_preparation ?original_actor ?deferred t handle 
     in
     match deferred with
     | Some (_, construction) ->
-      Agent_session.Session_actor.begin_runtime_initialization
-        actor
-        ~construction
-        ~purpose
-        ~expected
-      |> Result.map ~f:Option.some
+      (match
+         Agent_session.Session_actor.Runtime_construction.initialization construction
+       with
+       | Scoped ->
+         Agent_session.Session_actor.begin_runtime_initialization
+           actor
+           ~construction
+           ~purpose
+           ~expected
+         |> Result.map ~f:Option.some
+       | Installed_resume ->
+         (match pending with
+          | None -> Ok None
+          | Some _ ->
+            Error (unavailable Conflict "Pending child cannot use installed resume")))
     | None ->
       (match pending, original_actor, run_preparation with
        | None, None, None -> Ok None
@@ -6249,7 +6366,19 @@ let build_runtime_for_actor ?run_preparation ?original_actor ?deferred t handle 
   let constructor_preparation =
     match deferred with
     | None -> Constructor_owner.Ordinary (ref run_preparation)
-    | Some (_, construction) -> Admitted (ref (Some construction))
+    | Some (_, construction) ->
+      (match
+         Agent_session.Session_actor.Runtime_construction.initialization construction
+       with
+       | Scoped -> Admitted (ref (Some construction))
+       | Installed_resume ->
+         Installed_resume
+           { construction = ref (Some construction)
+           ; preparation =
+               ref
+                 (Agent_session.Session_actor.Runtime_construction.initial_preparation
+                    construction)
+           })
   in
   let initialization_jobs = ref [] in
   let actor_ref = ref (Some actor) in
@@ -6736,6 +6865,7 @@ let create_loaded_entry
           build_runtime_for_actor ?run_preparation ?original_actor t handle actor)
         ~build_deferred:(fun ~source ~construction ->
           build_runtime_for_actor ~deferred:(source, construction) t handle actor)
+        ~delegated_load:(delegated_runtime_driver t handle actor runtime_owner state)
     in
     runtime_owner := Some runtime;
     let finish () =
@@ -6943,6 +7073,7 @@ let create_unloaded_entry
           build_runtime_for_actor ?run_preparation ?original_actor t handle actor)
         ~build_deferred:(fun ~source ~construction ->
           build_runtime_for_actor ~deferred:(source, construction) t handle actor)
+        ~delegated_load:(delegated_runtime_driver t handle actor runtime_owner state)
     in
     runtime_owner := Some runtime;
     Session_recovery_owner.adopt_runtime_exn owner runtime;

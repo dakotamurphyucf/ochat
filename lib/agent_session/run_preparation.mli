@@ -4,11 +4,7 @@ open! Core
     authority. The actor keeps its [Owner.t] private; callers cannot construct a
     preparation for that owner from session IDs, revisions or receipt data.
     All operations run in that actor's serialized mailbox. *)
-module Owner : sig
-  type t
-
-  val create : unit -> t
-end
+module Owner = Preparation_tracking.Owner
 
 type t
 
@@ -98,6 +94,10 @@ module Custody : sig
       request, Run binding, source selection or deferred eligibility. The same
       issuing Actor serializes every operation. No constructor is exposed. *)
   type t
+
+  (** Shared factual revision/subset cell only. No principal or authorization is
+      projected. The Actor must retain the actual custody's separate guards. *)
+  val tracking : t -> Preparation_tracking.t
 
   val belongs_to : t -> owner:Owner.t -> bool
   val principal_id : t -> Agent_protocol.Id.Principal.t

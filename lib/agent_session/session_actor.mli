@@ -3528,15 +3528,85 @@ val end_goal_execution_runtime_preparation
   -> preparation:Goal_execution_runtime.Preparation.t
   -> (unit, Agent_protocol.Error.t) result
 
+module Delegated_load : sig
+  module Custody = Delegated_runtime_load.Custody
+
+  module Preparation : sig
+    type t
+
+    (** Same-domain monotone local revocation, no callback/RPC. Factual end after
+        owned joins remains mandatory, including cancellation before binding. *)
+    val close : t -> unit
+  end
+
+  module Source_binding : sig
+    type t
+
+    val source : t -> Runtime_source_preparation.t
+    val check_basis : t -> (unit, Agent_protocol.Error.t) result
+    val close : t -> unit
+  end
+
+  type t
+
+  (** Exact SAME preparation/source association; data does not establish Init,
+      installed-callback permission, selected execution, or parent authority. *)
+  val check_source_binding
+    :  t
+    -> binding:Source_binding.t
+    -> (unit, Agent_protocol.Error.t) result
+end
+
+(** After actual Owner source-stage reservation only. The actual Factory source
+    issuer must match this Actor; state must retain its genuine delegated-child
+    reference and ordinary execution selection. No saved creator or Goal/Run is
+    inferred. Prepared_run remains SAME actual caller-owned preparation. *)
+val begin_delegated_load_preparation
+  :  t
+  -> source_owner:Runtime_source_owner.t
+  -> custody:Delegated_load.Custody.t
+  -> (Delegated_load.Preparation.t, Agent_protocol.Error.t) result
+
+val bind_delegated_load_source
+  :  t
+  -> preparation:Delegated_load.Preparation.t
+  -> source:Runtime_source_preparation.t
+  -> (Delegated_load.Source_binding.t, Agent_protocol.Error.t) result
+
+val prepare_delegated_load
+  :  t
+  -> binding:Delegated_load.Source_binding.t
+  -> (Delegated_load.t, Agent_protocol.Error.t) result
+
+(** After source/parent/resource joins. Revokes only this load view; never closes
+    a borrowed initial preparation's caller-owned finalizer. No NoEffects proof. *)
+val end_delegated_load_preparation
+  :  t
+  -> preparation:Delegated_load.Preparation.t
+  -> (unit, Agent_protocol.Error.t) result
+
 module Runtime_construction : sig
   (** Closed private selection of the SAME Initial admitted continuation or
-      Existing_goal Ready owner. No new custody, Run, binding or permission. *)
+      Existing_goal Ready owner or genuine ordinary delegated-load source.
+      No new Run, binding, admission or permission. *)
   type t
 
   val of_admitted : Admitted_activation.Continuation.t -> t
   val of_goal : Goal_continuation.t -> t
   val of_existing_goal_execution : Goal_execution_runtime.t -> t
-  val custody : t -> Run_preparation.Custody.t
+  val of_delegated_load : Delegated_load.t -> t
+
+  module Initialization : sig
+    type t =
+      | Scoped
+      | Installed_resume
+  end
+
+  (** Actual Actor-selected route DATA. An ordinary load never makes a Ready
+      initializer eligible by merely supplying a context. *)
+  val initialization : t -> Initialization.t
+
+  val initial_preparation : t -> Run_preparation.t option
   val source : t -> Runtime_source_preparation.t
 
   (** Local irreversible fresh-use revocation, same domain, no RPC/policy/clock.
@@ -3545,7 +3615,9 @@ module Runtime_construction : sig
   val close : t -> unit
 
   (** Historical final adoption ACK fact only: same physical runtime additionally
-      required by Owner. Covers actual Started, Waiting and Settled outcomes. *)
+      required by Owner. Covers actual Started, Waiting and Settled outcomes.
+      Ordinary delegated installation is always false and does not promote
+      execution selection. *)
   val handoff_acknowledged : t -> bool
 
   (** Refresh Store outside mailbox/Owner mutex. Final pure stages are repeated

@@ -1,6 +1,7 @@
 open! Core
 
-(** Process-local issuer retained privately by the actual Factory. It grants no
+(** Process-local issuer retained privately by the actual Factory and its
+    Factory-owned delegated runtime driver. It grants no
     execution, source selection or Store authority. Fixed source completion uses
     it only after actually acquired target and parent resources successfully join.
     Factual child accounting also uses the private issuer to authenticate the

@@ -152,7 +152,12 @@ let%expect_test
     "real legacy recovery resumes once; unavailable original stays unavailable"
   =
   with_recovered Resume_then_halt (fun _env recovered before providers ->
+    (* This actual legacy Installed_resume is still pending after the Factory
+       source stage has cleared. Its callback claims the ordinary installed
+       owner, rather than retaining a constructor or joining its own stage. *)
+    assert (Owner.source_lane_idle recovered.runtime);
     assert (Owner.drain_idle_moderator recovered.runtime |> protocol_ok);
+    assert (Owner.source_lane_idle recovered.runtime);
     let completed = state recovered in
     assert_original before completed;
     (match receipts completed Session_resume with
@@ -167,6 +172,7 @@ let%expect_test
        it under this new Operation before reaching any provider. *)
     Owner.unload_and_wait recovered.runtime |> protocol_ok;
     Owner.ensure_loaded recovered.runtime |> protocol_ok;
+    assert (Owner.source_lane_idle recovered.runtime);
     let resumed = activation recovered in
     assert (resumed.pending ());
     let writer, _ =

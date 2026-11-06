@@ -3969,6 +3969,62 @@ the whole runtime, verify context bindings and sibling isolation, and check late
 requests and owner cleanup. Generated runtime/actor tests also exercise the scope
 with real inherited file tools and fake provider turns.
 
+### Ordinary delegated runtime loading
+
+An ordinary generated or authored child uses its actual Factory-owned runtime
+owner and selected immutable source. Factory verifies the exact child Actor and
+Store Handle, retains the parent resource loan and rechecks the current delegation
+and source. An identifier, saved creator principal or captured source document
+cannot replace those checks. A supplied original remains the same live original;
+a genuine Run preparation retains its existing required principal and custody.
+Loading supplies no new Goal, Run or ancestor-control grant.
+
+The Owner reserves one exclusive source stage before construction. Source
+verification, parent loans, native setup and yielding execution-authority checks
+run outside the Owner mutex. The same stage excludes competing construction and
+remains registered through callback/resource cleanup and Actor preparation
+closure. Loaded resources stay protected by their actual cancellation lease while
+authority is checked outside the mutex; cancellation and physical ownership are
+checked again before exposing them to the caller.
+
+Pending initialization and eligible authenticated Ready initialization use the
+existing Init scope and shared constructor. Fresh Pending authored-child
+construction may allocate initial history only under its actual source-bound
+`Runtime_construction` selecting `Authored_child`, the `Scoped` initialization
+route and admitted Init scope. Existing authored reconstruction otherwise requires
+canonical stored history; source-kind data alone grants no authority. The separate
+captured Held construction retains its existing occurrence and Init admission.
+Generated and authored delegated children support extensibility-v1 lifecycle
+moderators. Their constructor prepares and checkpoints the Manager; it does not
+run the v1 `Session_start` or
+`Session_resume` lifecycle event. That activation runs separately after installation
+through the actual Owner callback port and Actor event admission. A Ready child
+loaded without an original retains this installed callback route without acquiring
+an Init scope. Genuine legacy `Installed_resume` remains an ordinary authored-root
+behavior: its deferred callback acquires ordinary callback custody after runtime
+installation. Installing an ordinary runtime records no activation handoff.
+Captured recurrence children retain their separate occurrence admission: ordinary
+loading rejects their captured source even if an original or Run preparation is
+supplied. Their authorized Held construction still uses the same constructor
+through its actual admitted source and activation owner.
+
+Delegated administrative rebuilds reserve the same source stage before committing
+and releasing the Owner mutex. There is one command commit and audit. After Init,
+the Owner reads the actual desired state: a stopped runtime is retired before the
+stage completes; a running runtime may remain loaded. Public unload waits outside
+the mutex for that administrative stage to finish, then performs the full ordinary
+dependency and runtime retirement. Explicit close instead cancels the same pending
+administrative source lease so a blocked source wait can unwind; it joins that
+cleanup before finishing retirement. Ordinary source waits remain cancellable by
+Stop. A stage-completion signal is only a local join point: it does not erase a
+cleanup failure, certify a journal acknowledgement or prove absence of effects.
+A known command admission survives a later error or cancellation; neither an
+exceptional reply nor failed cleanup permits replaying the command as unattempted.
+If initialization is cancelled after that admission, receipt reconciliation retains
+its accepted transaction sequence while the final command result remains pending.
+Expected cancellation releases the shared command-receipt lock before propagating,
+so subsequent independent mutations remain available.
+
 ### Executable generated factory loads and recovery
 
 The host also has a resource-only construction path:
@@ -4067,7 +4123,9 @@ retry. The existing actor-only parent-cancellation callback remains separate;
 calling the same child's runtime owner from that callback would still deadlock.
 Permanent close also joins the dependency barrier. For an owner with inherited
 dependencies, `close` excludes new admissions; `close_and_wait` performs or joins
-cleanup before cancelling leases and retiring resources. A background callback can
+cleanup before cancelling ordinary resource leases and retiring resources. The
+pending administrative source lease described above is cancelled early so its
+construction can release the stage that retirement must join. A background callback can
 request close without waiting on itself. Typed cleanup failures remain observable
 and retain resources for retry, even after admission has permanently closed.
 

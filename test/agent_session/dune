@@ -9,6 +9,7 @@
   run_state_tests
   run_replacement_tests
   run_admission_tests
+  turn_admission_staging_tests
   run_schedule_settlement_tests
   run_producer_settlement_tests
   headless_run_tests

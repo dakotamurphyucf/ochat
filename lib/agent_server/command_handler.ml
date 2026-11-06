@@ -616,7 +616,10 @@ let store_outcome t key digest result =
 ;;
 
 let with_idempotency_owner t context command identity ~prepare ~complete =
-  Eio.Mutex.use_rw ~protect:true t.idempotency_mutex (fun () ->
+  (* A locally cancelled post-commit source suffix is an expected command
+     outcome. Release the shared receipt mutex before preserving that exception,
+     keeping its actual acknowledgement and later mutation admission usable. *)
+  let run () =
     let open Result.Let_syntax in
     let principal = Connection_context.principal context in
     let key = idempotency_key principal command identity in
@@ -642,7 +645,17 @@ let with_idempotency_owner t context command identity ~prepare ~complete =
         |> Agent_store.Idempotency_store.Command_audit.encode
         |> Result.map_error ~f:persistence_error
       in
-      complete ~key ~digest (execute (Some command_audit)))
+      complete ~key ~digest (execute (Some command_audit))
+  in
+  match
+    Eio.Mutex.use_rw ~protect:true t.idempotency_mutex (fun () ->
+      match run () with
+      | result -> Ok result
+      | exception (Eio.Cancel.Cancelled _ as exn) ->
+        Error (exn, Stdlib.Printexc.get_raw_backtrace ()))
+  with
+  | Ok result -> result
+  | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
 ;;
 
 let handle_idempotent t context command identity ~prepare =

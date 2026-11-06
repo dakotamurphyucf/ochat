@@ -122,13 +122,70 @@ val create_with_authenticated_run_unload
         -> (Agent_session.Runtime_builder.t, Agent_protocol.Error.t) result)
   -> t
 
+module Prepared_delegated_load : sig
+  type t
+
+  val binding : t -> Agent_session.Session_actor.Delegated_load.Source_binding.t
+  val check_basis : t -> (unit, Agent_protocol.Error.t) result
+end
+
+module Delegated_load_source : sig
+  (** Actual same-stage Factory source selection. No caller-created handle,
+      public issuer getter, replacement or deserialization. *)
+  type t
+
+  val prepare
+    :  t
+    -> source:Agent_session.Runtime_builder.Source.t
+    -> (Prepared_delegated_load.t, Agent_protocol.Error.t) result
+end
+
+module Delegated_load_retention : sig
+  type t =
+    | Keep_loaded
+    | Release_if_stopped
+end
+
+(** Concrete Factory-owned driver consuming the already-reserved SAME source
+    stage, never reserving a second stage. Runs outside Owner mutex. Returned
+    summary is factual post-Init state, not execution or activation authority. *)
+type delegated_loader =
+  source:Delegated_load_source.t
+  -> retention:Delegated_load_retention.t
+  -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
+
+(** Same source-stage lease and cleanup as admitted construction. Capture the
+    actual Actor preparation before pending cancellation; close its binding
+    before releasing the lease; join acquired resources before factual end and
+    stage clear. No NoEffects evidence or callback permission is issued. *)
+val with_delegated_load_source_reported
+  :  t
+  -> source_owner:Agent_session.Runtime_source_owner.t
+  -> custody:Agent_session.Session_actor.Delegated_load.Custody.t
+  -> (Delegated_load_source.t -> ('a, Agent_protocol.Error.t) result)
+  -> 'a Scope_outcome.t
+
+(** Consume genuine ordinary child load custody through the SAME deferred
+    constructor/Init/graph/install core. Ready/no-original reconstruction retains
+    actual Installed_resume callback custody after this stage joins. Ordinary
+    installation never contributes activation-handoff history. Conditional
+    release samples actual desired state after Init, captures its summary before
+    cleanup and joins stopped retirement before source-stage clear. *)
+val load_delegated_runtime
+  :  t
+  -> prepared:Prepared_delegated_load.t
+  -> retention:Delegated_load_retention.t
+  -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
+
 (** The actual verified-source Factory supplies this additional cold constructor
     and its hidden issuer key. This owner captures its own immutable issuer
     association, independently of its Actor. Ordinary constructors have no such
     association; copying an Actor or its read-only identity cannot authenticate a
-    second runtime owner. Ordinary loading retains the existing authenticated
-    builder. Deferred loading is available only through the exact consumed
-    prepared/held lifetime below. No issuer getter or replacement exists. *)
+    second runtime owner. The Factory-owned delegated runtime driver privately
+    retains the SAME supplied issuer. Some delegated_load is supplied only for
+    genuine delegated children; no saved creator or new Goal/Run is inferred.
+    Ordinary loading of other owners retains its existing authenticated builder.
+    No issuer getter or replacement exists. *)
 val create_with_deferred_run_unload
   :  source_owner:Agent_session.Runtime_source_owner.t
   -> before_unload:(closing:bool -> (unit, Agent_protocol.Error.t) result)
@@ -139,6 +196,7 @@ val create_with_deferred_run_unload
         -> Agent_session.Run_preparation.t option
         -> (Agent_session.Runtime_builder.t, Agent_protocol.Error.t) result)
   -> build_deferred:deferred_builder
+  -> delegated_load:delegated_loader option
   -> t
 
 val ensure_loaded : t -> (unit, Agent_protocol.Error.t) result

@@ -2,10 +2,16 @@
 
 Validated catalogs, instance authentication/authorization, principal projection, dispatcher, daemon/embedded ownership, schedulers and maintenance. Starting a daemon core does not bind listeners.
 
-`Session_factory.prepare_administration` prepares runtime state without a live
-actor, using private cache/response storage and a cancelled-and-joined child
-switch. `Runtime_owner.with_administration` serializes preparation/commit against
-runtime loading and retires the old runtime only after successful commit.
+`Session_factory.prepare_administration` validates the detached candidate's source,
+workspace and runtime configuration before the live commit. It does not run its
+initializer. `Runtime_owner.reinitialize_administration` serializes validation,
+old-runtime retirement, the actual administrative commit and post-commit
+initialization. Delegated construction retains one exclusive source stage across
+the commit and initialization while source and parent-resource waits run outside
+the Owner mutex. The original command acknowledgement remains factual if later
+initialization or cleanup fails. See
+[ordinary delegated loading](../../agent-server/extensibility-foundations.md#ordinary-delegated-runtime-loading)
+for source custody, cancellation and retirement ordering.
 `Principal_projection` filters nested administrative replacement snapshots on
 both live and replay delivery, including for security readers without grant
 visibility. See [initializer restrictions](../../agent-server/operations.md#reset-rebuild-and-upgrade-initializers).

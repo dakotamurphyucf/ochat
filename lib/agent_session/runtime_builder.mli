@@ -715,10 +715,13 @@ val build_generated
     moderator manager, retaining the specialist's preadmitted private resources.
     Verifies both captured trees, exact source identity and the guard's live
     private registry before initialization. The host must retain the preparation
-    switch and provide actual-caller policy/approval services. Ordinary authored
-    selection requires canonical stored history. [existing_history = None] is
-    reserved for a genuinely fresh captured authored child under its actual held
-    Run and initialization owner, checked by the Factory before this constructor.
+    switch and provide actual-caller policy/approval services. Authored
+    reconstruction requires canonical stored history, except for genuinely fresh
+    Pending initialization admitted by the Factory. [existing_history = None]
+    requires either the captured child's actual held Run and initialization owner,
+    or an ordinary child's actual source-bound [Runtime_construction] selecting
+    [Authored_child], its [Scoped] initialization route and admitted Init scope.
+    Source-kind data alone grants no construction or initialization authority.
     The same build/initial-history allocator consumes the option; no synthetic
     stored history or second initialization path is introduced. This path never
     reconstructs tools or implicitly executes prompt content while allocating

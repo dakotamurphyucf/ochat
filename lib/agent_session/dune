@@ -244,6 +244,8 @@
   run_command_authorization
   run_admission
   run_input_handoff
+  preparation_tracking
+  delegated_runtime_load
   run_preparation
   runtime_source_owner
   run_admission_outcome
@@ -318,6 +320,7 @@
   history_edit
   history_deletion
   turn_admission
+  turn_admission_staging
   history_continuation
   history_edit_transition
   history_retirement

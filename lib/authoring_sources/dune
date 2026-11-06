@@ -216,6 +216,9 @@
     lib/agent_session/script_schedule_service.ml %{dep:../agent_session/script_schedule_service.ml}
     lib/agent_session/script_subscription_service.ml %{dep:../agent_session/script_subscription_service.ml}
     lib/agent_session/session_actor.ml %{dep:../agent_session/session_actor.ml}
+    lib/agent_session/preparation_tracking.ml %{dep:../agent_session/preparation_tracking.ml}
+    lib/agent_session/turn_admission_staging.ml %{dep:../agent_session/turn_admission_staging.ml}
+    lib/agent_session/delegated_runtime_load.ml %{dep:../agent_session/delegated_runtime_load.ml}
     lib/agent_session/pending_turn.ml %{dep:../agent_session/pending_turn.ml}
     lib/agent_session/run_input_handoff.ml %{dep:../agent_session/run_input_handoff.ml}
     lib/agent_session/recurrence_activation_custody.ml %{dep:../agent_session/recurrence_activation_custody.ml}
