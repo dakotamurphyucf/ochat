@@ -72,6 +72,9 @@
   goal_edit
   goal_resume_request
   goal_native_resume_intent
+  goal_native_request_codec
+  goal_native_create_request
+  goal_native_control_request
   host_invocation
   completion_contract
   completion_projection
@@ -167,6 +170,7 @@
   stream_error
   inference_query)
  (private_modules
+  goal_native_request_codec
   developer_repl_wire_common
   developer_repl_wire_result
   developer_repl_wire_task

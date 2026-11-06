@@ -13,6 +13,15 @@ val prepare_hold
   -> delta:Session_delta.t
   -> (Session_delta.t, Agent_protocol.Error.t) result
 
+(** Same selective future-execution retirement for a fresh Abandon. Does not
+    cancel admitted Run work, alter accounting or manufacture terminal evidence.
+    Retained commands bypass this function. *)
+val prepare_abandon
+  :  Session_state.t
+  -> goal_id:Agent_protocol.Id.Goal.t
+  -> delta:Session_delta.t
+  -> (Session_delta.t, Agent_protocol.Error.t) result
+
 (** Stop safety planning, independent of user command receipt capacity. Enabled
     Goals become Held Operator_pause once; existing holds and closed Goals retain
     their metadata. All open Goals' future executable requests are retired.

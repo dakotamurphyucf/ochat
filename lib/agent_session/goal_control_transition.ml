@@ -207,7 +207,11 @@ let retirement_changes (state : Session_state.t) selected ~reason =
     Option.to_list run @ List.filter_opt invocations @ List.filter_opt events)
 ;;
 
-let prepare_hold (state : Session_state.t) ~goal_id ~delta =
+type control =
+  | Hold
+  | Abandon
+
+let prepare_control (state : Session_state.t) ~goal_id ~delta ~control =
   let open Result.Let_syntax in
   let%bind previous =
     Result.of_option
@@ -224,20 +228,31 @@ let prepare_hold (state : Session_state.t) ~goal_id ~delta =
   in
   let%bind () = G.validate_update previous ~incoming in
   let%bind () =
-    match G.state incoming with
-    | Open (Held _) -> Ok ()
-    | Open Enabled | Closed _ ->
-      invalid "Goal control requires an actual fresh Hold candidate"
+    match control, G.state incoming with
+    | Hold, Open (Held _) | Abandon, Closed (Abandoned _) -> Ok ()
+    | Hold, (Open Enabled | Closed _) | Abandon, (Open _ | Closed (Achieved _)) ->
+      invalid "Goal control requires its exact fresh metadata candidate"
   in
   let%map changes =
     retirement_changes
       candidate
       (Set.singleton (module Goal_id) goal_id)
-      ~reason:"Goal held by operator"
+      ~reason:
+        (match control with
+         | Hold -> "Goal held"
+         | Abandon -> "Goal abandoned")
   in
   match changes with
   | [] -> delta
   | changes -> Session_delta.Batch (delta :: changes)
+;;
+
+let prepare_hold state ~goal_id ~delta =
+  prepare_control state ~goal_id ~delta ~control:Hold
+;;
+
+let prepare_abandon state ~goal_id ~delta =
+  prepare_control state ~goal_id ~delta ~control:Abandon
 ;;
 
 let prepare_stop (state : Session_state.t) =

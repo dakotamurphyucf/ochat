@@ -6,6 +6,9 @@ module C = Chat_response.Tool_capability
 module Effect = struct
   type t =
     | Get
+    | Create
+    | Hold
+    | Abandon
     | Objective
     | Progress
     | Resume
@@ -13,6 +16,9 @@ module Effect = struct
 
   let name = function
     | Get -> "goal_get"
+    | Create -> "goal_create"
+    | Hold -> "goal_hold"
+    | Abandon -> "goal_abandon"
     | Objective -> "goal_objective"
     | Progress -> "goal_progress"
     | Resume -> "goal_resume"
@@ -58,7 +64,7 @@ let check_now t (state : Session_state.t) ~effect_kind =
   let scope =
     match effect_kind with
     | Effect.Get -> P.Scope.View_session_transcript
-    | Objective | Progress | Resume -> Send_messages
+    | Create | Hold | Abandon | Objective | Progress | Resume -> Send_messages
   in
   if
     Effect.equal t.effect_kind effect_kind

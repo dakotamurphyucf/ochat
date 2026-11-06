@@ -4448,6 +4448,26 @@ val reconcile_goal_wake_authority
     they cannot fall back to an immediate writer when the route is absent. The
     returned [unit] is speculative: only the native result and selected parent
     checkpoint ACK can make it durable. No Run permission is returned. *)
+val stage_native_goal_create
+  :  t
+  -> admission:Goal_native_admission.t
+  -> authorize:
+       (Operator_authorization.t
+        -> Session_state.t
+        -> (unit, Agent_protocol.Error.t) result)
+  -> request:Agent_protocol.Goal_native_create_request.t
+  -> (unit, Agent_protocol.Error.t) result
+
+val stage_native_goal_control
+  :  t
+  -> admission:Goal_native_admission.t
+  -> authorize:
+       (Operator_authorization.t
+        -> Session_state.t
+        -> (unit, Agent_protocol.Error.t) result)
+  -> request:Agent_protocol.Goal_native_control_request.t
+  -> (unit, Agent_protocol.Error.t) result
+
 val stage_native_goal_edit
   :  t
   -> admission:Goal_native_admission.t

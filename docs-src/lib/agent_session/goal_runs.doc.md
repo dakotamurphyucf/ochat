@@ -260,3 +260,17 @@ invalidate the first execution prefix. Status IDs and decoded receipts grant no
 execution permission. New Invocation children require the understood native
 Resume semantics marker in both session snapshots and delta documents;
 historical absence retains its previous wire representation.
+
+## Native creation and safe controls in the callback checkpoint
+
+A trusted selected native adapter may stage a new Goal, a Needs_input Hold, or abandonment in its actual callback transaction. It captures the genuine native Admission for its exact Create/Hold/Abandon effect and passes the immutable typed request to the Actor. The Actor derives the real principal and session and repeats current original, native binding, source and host-policy checks. A tool name, Goal ID, stored receipt or projected state grants no authority.
+
+Create freezes generation, full installed source, catalog revision, Goal ID, objective, budget and retry key. Generation zero is valid. It has no existing Goal revision or supplied creator. Acceptance creates one held Source_review Goal with its empty stable account in the same canonical transaction. The budget adds Goal ceilings without relaxing runtime, provider or host limits; creation does not enable work or reset another account. First episode activation remains a separate genuine admission.
+
+Safe native controls freeze generation, Goal/catalog revisions, key and a validated reason. Hold exposes only Needs_input; it cannot impersonate an operator pause or an automatic accounting/source gate. Abandon changes the objective disposition without claiming the Run or its admitted work is terminal. The current original and host write policy still authorize each command. Receipts are immutable metadata DATA, and exact retained replay does not repeat retirement.
+
+The existing private callback Plan applies selected Goal edits and selective Run-index retirement in order. A following Progress or Goal.finish action therefore sees the same projected Goal/catalog state, while actual original/source/owner checks continue against the real Actor. A fresh same-Goal Hold/Abandon combined with Continue or a new turn request rejects the entire callback checkpoint. Passive Wait, an explicit Run-owned Finish, unrelated owners and already-admitted work retain their actual contracts. Achievement still uses the checked Goal.finish Run action and real aggregate evidence.
+
+Fresh explicit Hold retirement occurs only after the actual final checks, immediately before the yielding writer. Same-valued Hold is still a new explicit control. A failed save cannot revive the prior pending activation; known ACK also invalidates registered fresh-allocation views before publication. Automatic accounting holds remain distinct and preserve the exact already-admitted last allocation. Writer ACK installation records only factual completion after the accepted control revokes fresh custody.
+
+This backend does not yet provide the separate intentional cold-construction completion outcome: a callback may acknowledge control before a fresh constructor/runtime handoff subsequently becomes unavailable. A known Goal receipt remains factual; an unavailable handoff is not execution Started, Waiting, achievement, or an installed runtime. That lifecycle integration and the public native registry/checked helper packaging are separately retained work. The backend adds no new executor, implicit permission or metadata Resume enable path.

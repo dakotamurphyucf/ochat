@@ -270,19 +270,36 @@ module Plan = struct
     ; projected : Session_state.t
     ; deltas : Session_delta.t list
     ; resumes : Entry.t list
+    ; fresh_holds : P.Id.Goal.t list
+    ; controlled_goals : P.Id.Goal.t list
     }
 
   let state t = t.projected
   let deltas t = t.deltas
   let resumes t = t.resumes
+  let fresh_holds t = t.fresh_holds
+
+  let check_scheduling t ~run_id ~action ~request_turn =
+    let controlled =
+      Option.bind run_id ~f:(fun run_id ->
+        Option.bind t.projected.run_state ~f:(fun index ->
+          Run_state.goal_link index run_id))
+      |> Option.exists ~f:(fun link ->
+        List.mem t.controlled_goals (Run_goal_link.goal_id link) ~equal:P.Id.Goal.equal)
+    in
+    match controlled, action, request_turn with
+    | true, _, true | true, Some P.Run_action.Continue, false ->
+      conflict "native Goal control conflicts with its own new execution request"
+    | true, (None | Some (Wait _ | Finish _)), false | false, _, _ -> Ok ()
+  ;;
 
   let prepare entries ~(state : Session_state.t) ~session ~now =
     let open Result.Let_syntax in
-    let%bind projected, deltas, resumes =
+    let%bind projected, deltas, resumes, fresh_holds, controlled_goals =
       List.fold_result
         entries
-        ~init:(state, [], [])
-        ~f:(fun (state, deltas, resumes) entry ->
+        ~init:(state, [], [], [], [])
+        ~f:(fun (state, deltas, resumes, fresh_holds, controlled_goals) entry ->
           let%bind () = Entry.check entry state in
           let%bind actor = Entry.actor entry in
           match Entry.value entry with
@@ -297,10 +314,28 @@ module Plan = struct
                 ~now
             in
             (match prepared.delta with
-             | None -> Ok (state, deltas, resumes)
+             | None -> Ok (state, deltas, resumes, fresh_holds, controlled_goals)
              | Some delta ->
+               let%bind delta, fresh_holds, controlled_goals =
+                 match request.Goal_command.mutation with
+                 | Hold (goal_id, _) ->
+                   let%map delta =
+                     Goal_control_transition.prepare_hold state ~goal_id ~delta
+                   in
+                   delta, goal_id :: fresh_holds, goal_id :: controlled_goals
+                 | Abandon (goal_id, _) ->
+                   let%map delta =
+                     Goal_control_transition.prepare_abandon state ~goal_id ~delta
+                   in
+                   delta, fresh_holds, goal_id :: controlled_goals
+                 | Create _
+                 | Revise_objective _
+                 | Record_progress _
+                 | Change_budget _
+                 | Adopt_source _ -> Ok (delta, fresh_holds, controlled_goals)
+               in
                let%map state = Session_delta.apply state delta in
-               state, delta :: deltas, resumes)
+               state, delta :: deltas, resumes, fresh_holds, controlled_goals)
           | Resume intent ->
             let request = P.Goal_native_resume_intent.request intent in
             let%bind goal =
@@ -315,7 +350,7 @@ module Plan = struct
                 denied "native Goal Resume cannot clear an operator pause"
               | Open (Enabled | Held _) | Closed _ -> Ok ()
             in
-            Ok (state, deltas, entry :: resumes))
+            Ok (state, deltas, entry :: resumes, fresh_holds, controlled_goals))
     in
     Ok
       { revision = state.counters.revision
@@ -325,6 +360,8 @@ module Plan = struct
       ; projected
       ; deltas = List.rev deltas
       ; resumes = List.rev resumes
+      ; fresh_holds = List.rev fresh_holds
+      ; controlled_goals = List.rev controlled_goals
       }
   ;;
 

@@ -1,6 +1,9 @@
 module Effect : sig
   type t =
     | Get
+    | Create
+    | Hold
+    | Abandon
     | Objective
     | Progress
     | Resume

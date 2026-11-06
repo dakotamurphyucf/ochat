@@ -76,5 +76,19 @@ module Plan : sig
   val state : t -> Session_state.t
   val deltas : t -> Session_delta.t list
   val resumes : t -> Entry.t list
+
+  (** Selected fresh controls only; retained receipt replay has no control effect.
+      IDs are planning DATA, consumed by the same Actor's actual writer boundary. *)
+  val fresh_holds : t -> Agent_protocol.Id.Goal.t list
+
+  (** Reject a new Continue/turn request for the exact Goal controlled in this
+      plan. Passive Wait/Finish and unrelated Run owners remain unchanged. *)
+  val check_scheduling
+    :  t
+    -> run_id:Agent_protocol.Id.Run.t option
+    -> action:Agent_protocol.Run_action.t option
+    -> request_turn:bool
+    -> (unit, Agent_protocol.Error.t) result
+
   val check : t -> Session_state.t -> (unit, Agent_protocol.Error.t) result
 end

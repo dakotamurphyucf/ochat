@@ -2481,6 +2481,12 @@ module Native_goal_request = struct
     | Observe_dispatch :
         Goal_native_resume.Selection.t * Agent_protocol.Error.t option
         -> unit t
+    | Stage_create :
+        Goal_native_admission.t * authorize * Agent_protocol.Goal_native_create_request.t
+        -> int option t
+    | Stage_control :
+        Goal_native_admission.t * authorize * Agent_protocol.Goal_native_control_request.t
+        -> int option t
     | Stage_edit :
         Goal_native_admission.t * authorize * Agent_protocol.Goal_edit.t
         -> int option t
@@ -5425,6 +5431,7 @@ let install_committed_transition_owned
       ?initialization_acknowledgement
       ?constructor_stop_acknowledgement
       ?admission_hold
+      ?(explicit_goal_holds = [])
       t
       (transition : Session_transition.t)
   =
@@ -5448,6 +5455,7 @@ let install_committed_transition_owned
    | None, (Some _ | None) -> ());
   Option.iter goal_runtime_acknowledgement ~f:Goal_runtime_acknowledgement.install;
   t.command_audit <- None;
+  List.iter explicit_goal_holds ~f:(invalidate_goal_inference_allocations t);
   invalidate_goal_inference_policy ?admission_hold t transition.state;
   t.state <- transition.state;
   Option.iter
@@ -5525,6 +5533,7 @@ let install_committed_transition
       ?initialization_acknowledgement
       ?constructor_stop_acknowledgement
       ?admission_hold
+      ?(explicit_goal_holds = [])
       t
       transition
   =
@@ -5542,6 +5551,7 @@ let install_committed_transition
     ?initialization_acknowledgement
     ?constructor_stop_acknowledgement
     ?admission_hold
+    ~explicit_goal_holds
     ~preparation_owner:
       (match goal_runtime_acknowledgement, initialization_acknowledgement with
        | Some acknowledgement, _ ->
@@ -5726,6 +5736,7 @@ let persist_transition
       ?admission_hold
       ?commit_attempted
       ?check_before_commit
+      ?(explicit_goal_holds = [])
       t
       (candidate : Session_transition.t)
   =
@@ -5790,6 +5801,10 @@ let persist_transition
     (* Retire live Goal prefixes before a yielding control writer. A failed save
        cannot make a previously revoked checked view executable again. *)
     retain_goal_activations ?admission_hold t candidate.Session_transition.state;
+    (* Selected fresh controls retire only here, after all original/source/ACK
+       checks. Same-valued Hold must not close its own callback before those
+       checks, and a failed writer must never revive this prefix. *)
+    List.iter explicit_goal_holds ~f:(retire_goal_activation t);
     if Option.is_some t.effect_deferred
     then
       if
@@ -5920,6 +5935,7 @@ let install
       ?admission_hold
       ?commit_attempted
       ?check_before_commit
+      ~explicit_goal_holds
       t
       transition
   in
@@ -5927,8 +5943,8 @@ let install
      writer ACK, including a Hold equal to an automatic hold. Publication can
      yield or fail, so it cannot own this denial. Failed saves never reach here;
      automatic admission holds do not supply these control IDs. *)
-  List.iter explicit_goal_holds ~f:(invalidate_goal_inference_allocations t);
   install_committed_transition
+    ~explicit_goal_holds
     ?goal_runtime_acknowledgement
     ?queued_claim_acknowledgement
     ?authored_run_acknowledgement
@@ -11964,6 +11980,15 @@ module Native_goal_plan = struct
     ; accepted : (Agent_protocol.Invocation.t * Goal_native_actions.Entry.t) list
     }
 
+  let fresh_holds t =
+    Option.value_map t.plan ~default:[] ~f:Goal_native_actions.Plan.fresh_holds
+  ;;
+
+  let check_scheduling t ~run_id ~action ~request_turn =
+    Option.value_map t.plan ~default:(Ok ()) ~f:(fun plan ->
+      Goal_native_actions.Plan.check_scheduling plan ~run_id ~action ~request_turn)
+  ;;
+
   let deltas t =
     Option.value_map t.plan ~default:[] ~f:Goal_native_actions.Plan.deltas
     @ List.map t.accepted ~f:(fun (invocation, _) ->
@@ -12082,7 +12107,7 @@ let install_native_goal_plan t (plan : Native_goal_plan.t) =
 ;;
 
 let prepared_run_delta
-      ?goal_state
+      ?goal_plan
       t
       (borrow : queued_event_borrow)
       completed
@@ -12090,14 +12115,33 @@ let prepared_run_delta
       job_deltas
   =
   let open Result.Let_syntax in
+  let planning_state =
+    Option.value_map goal_plan ~default:t.state ~f:Goal_native_actions.Plan.state
+  in
+  let check_scheduling run_id action =
+    Option.value_map goal_plan ~default:(Ok ()) ~f:(fun plan ->
+      Goal_native_actions.Plan.check_scheduling
+        plan
+        ~run_id
+        ~action
+        ~request_turn:requests.Agent_protocol.Invocation.request_turn)
+  in
   match borrow.run_actions with
-  | None -> Ok Prepared_run_delta.empty
+  | None ->
+    let%bind run =
+      if Option.is_some goal_plan then selected_event_run t borrow else Ok None
+    in
+    let%map () =
+      check_scheduling (Option.map run ~f:(fun run -> run.Agent_protocol.Run.id)) None
+    in
+    Prepared_run_delta.empty
   | Some owner ->
     let scope = Run_action_service.scope owner in
     let%bind () = check_run_authority t scope in
     let%bind action =
       Run_action_service.prepared owner |> Result.map_error ~f:(error Conflict)
     in
+    let%bind () = check_scheduling (Some (Run_scope.run_id scope)) action in
     let%bind _ =
       Run_action_service.compose_requests owner ~action ~requests
       |> Result.map_error ~f:(error Conflict)
@@ -12152,16 +12196,16 @@ let prepared_run_delta
     else (
       let%bind work_delta =
         Session_delta.capture_new_model_jobs
-          t.state
+          planning_state
           (Session_delta.Batch (job_deltas @ [ Moderator_execution_changed completed ]))
       in
-      let%bind work_state = Session_delta.apply t.state work_delta in
+      let%bind work_state = Session_delta.apply planning_state work_delta in
       let now, completion_sample = completion_clock_pair t in
       let%bind prepared =
         Run_transition.prepare
           ?lifecycle_selection:(lifecycle_selection borrow run)
           ?startup_run:(pending_held_startup_run t)
-          t.state
+          planning_state
           ~scope
           ~executing:borrow.receipt
           ~work_delta
@@ -12195,11 +12239,7 @@ let prepared_run_delta
         match goal_finish with
         | None -> Ok []
         | Some intent ->
-          Goal_run_transition.prepare_request
-            (Option.value goal_state ~default:t.state)
-            ~scope
-            ~prepared
-            ~intent
+          Goal_run_transition.prepare_request planning_state ~scope ~prepared ~intent
       in
       Prepared_run_delta.
         { deltas = Run_transition.delta prepared :: goal_deltas
@@ -12336,17 +12376,7 @@ let commit_queued_event t borrow snapshot requests decision notifications =
   let%bind job_deltas, job_payloads = staged_work_changes t owner in
   let%bind native_goals = prepare_callback_native_goals t borrow.native_goals in
   let%bind run_change =
-    prepared_run_delta
-      ~goal_state:
-        (Option.value_map
-           native_goals.plan
-           ~default:t.state
-           ~f:Goal_native_actions.Plan.state)
-      t
-      borrow
-      completed
-      requests
-      job_deltas
+    prepared_run_delta ?goal_plan:native_goals.plan t borrow completed requests job_deltas
   in
   let%bind staged =
     match legacy_scope, queue_plan with
@@ -12497,6 +12527,7 @@ let commit_queued_event t borrow snapshot requests decision notifications =
              let%bind () = check_native_goal_plan t native_goals in
              let%bind () =
                persist_transition
+                 ~explicit_goal_holds:(Native_goal_plan.fresh_holds native_goals)
                  ?run_preparation
                  ~check_before_commit:(fun () ->
                    let%bind () =
@@ -12520,6 +12551,7 @@ let commit_queued_event t borrow snapshot requests decision notifications =
                  prepared
              in
              install_committed_transition
+               ~explicit_goal_holds:(Native_goal_plan.fresh_holds native_goals)
                ?goal_runtime_acknowledgement
                ?run_preparation
                ~job_custody
@@ -21086,8 +21118,20 @@ let child_parent t execution =
 
 (* The returned callback runs only after the exact Job/Run transaction ACK.
    Failed or uncertain saves leave the callback scope at its prior revision. *)
-let staged_child_run_delta t execution ~basis ~classification ~parent_work job_deltas =
+let staged_child_run_delta
+      ?planning_state
+      t
+      execution
+      ~basis
+      ~classification
+      ~parent_work
+      job_deltas
+  =
   let open Result.Let_syntax in
+  (* A native control may retire a pending intent in the same checkpoint.
+     Only pure child projection uses this immutable Plan state. The captured
+     execution and every original/currentness callback still select actual t. *)
+  let planning_state = Option.value planning_state ~default:t.state in
   let jobs =
     List.filter_map job_deltas ~f:(function
       | Session_delta.Job_changed job -> Some job
@@ -21109,14 +21153,14 @@ let staged_child_run_delta t execution ~basis ~classification ~parent_work job_d
   | _, Some run ->
     let%bind children = List.map jobs ~f:Run_job_occurrence.work |> Result.all in
     let%bind work_delta =
-      Session_delta.capture_new_model_jobs t.state (Session_delta.Batch job_deltas)
+      Session_delta.capture_new_model_jobs planning_state (Session_delta.Batch job_deltas)
     in
-    let%bind work_state = Session_delta.apply t.state work_delta in
+    let%bind work_state = Session_delta.apply planning_state work_delta in
     (match held_initialization_of_execution t execution with
      | Some (_, selected) when Agent_protocol.Run.equal selected run ->
        let%map delta =
          Run_child_work.prepare_initialization
-           t.state
+           planning_state
            ~run
            ~work_state
            ~children:jobs
@@ -21134,7 +21178,7 @@ let staged_child_run_delta t execution ~basis ~classification ~parent_work job_d
         | Parent_work parent ->
           let%map delta =
             Run_child_work.prepare
-              t.state
+              planning_state
               ~run
               ~parent
               ~work_state
@@ -21145,7 +21189,7 @@ let staged_child_run_delta t execution ~basis ~classification ~parent_work job_d
         | Parent_observation borrow ->
           let%map delta =
             Run_child_work.prepare_observation
-              t.state
+              planning_state
               ~run
               ~observing:borrow.invocation
               ~work_state
@@ -21159,7 +21203,7 @@ let staged_child_run_delta t execution ~basis ~classification ~parent_work job_d
              let%bind _ = callback_agent_actor t ~scope in
              let%map delta =
                Run_child_work.prepare_callback
-                 t.state
+                 planning_state
                  ~run
                  ~executing:borrow.receipt
                  ~work_state
@@ -21179,7 +21223,7 @@ let staged_child_run_delta t execution ~basis ~classification ~parent_work job_d
              let%bind prepared =
                Run_transition.add_owned_work
                  ?lifecycle_selection:(lifecycle_selection borrow (Some run))
-                 t.state
+                 planning_state
                  ~scope
                  ~executing:borrow.receipt
                  ~work_delta
@@ -21197,7 +21241,7 @@ let staged_child_run_delta t execution ~basis ~classification ~parent_work job_d
              , fun () -> Run_scope.Host.acknowledge_advance advance ))))
 ;;
 
-let prepare_selected_child_run t execution job_deltas =
+let prepare_selected_child_run ?goal_plan t execution job_deltas =
   let open Result.Let_syntax in
   if
     not
@@ -21221,6 +21265,7 @@ let prepare_selected_child_run t execution job_deltas =
     in
     let%bind deltas, acknowledge =
       staged_child_run_delta
+        ?planning_state:(Option.map goal_plan ~f:Goal_native_actions.Plan.state)
         t
         execution
         ~basis:current.selected.execution
@@ -21749,6 +21794,22 @@ let stage_native_goal t admission authorize ~effect_kind make =
       Ok ticket)
 ;;
 
+let stage_native_goal_command t admission authorize ~effect_kind make_request =
+  stage_native_goal t admission authorize ~effect_kind (fun state actor session ->
+    let open Result.Let_syntax in
+    let%bind request = make_request () in
+    let%map _ =
+      Goal_command_admission.prepare
+        state
+        ~actor
+        ~authorize:(authorize actor)
+        ~session
+        ~request
+        ~now:(t.services.now ())
+    in
+    Goal_native_actions.Value.Edit request)
+;;
+
 let stage_native_goal_edit t admission authorize edit =
   let effect_kind, mutation =
     match Agent_protocol.Goal_edit.mutation edit with
@@ -21761,30 +21822,56 @@ let stage_native_goal_edit t admission authorize edit =
       , Goal_command.Mutation.Record_progress
           (Agent_protocol.Goal_edit.goal_id edit, progress) )
   in
-  stage_native_goal t admission authorize ~effect_kind (fun state actor session ->
-    let open Result.Let_syntax in
-    let%bind request =
-      Goal_command.create
-        ~session_id:t.state.identity.session_id
-        ~generation:(Agent_protocol.Goal_edit.generation edit)
-        ~source:(Some (Agent_protocol.Goal_edit.source edit))
-        ~expected_catalog_revision:
-          (Agent_protocol.Goal_edit.expected_catalog_revision edit)
-        ~expected_goal_revision:
-          (Some (Agent_protocol.Goal_edit.expected_goal_revision edit))
-        ~key:(Agent_protocol.Goal_edit.key edit)
-        ~mutation
-    in
-    let%map _ =
-      Goal_command_admission.prepare
-        state
-        ~actor
-        ~authorize:(authorize actor)
-        ~session
-        ~request
-        ~now:(t.services.now ())
-    in
-    Goal_native_actions.Value.Edit request)
+  stage_native_goal_command t admission authorize ~effect_kind (fun () ->
+    Goal_command.create
+      ~session_id:t.state.identity.session_id
+      ~generation:(Agent_protocol.Goal_edit.generation edit)
+      ~source:(Some (Agent_protocol.Goal_edit.source edit))
+      ~expected_catalog_revision:(Agent_protocol.Goal_edit.expected_catalog_revision edit)
+      ~expected_goal_revision:
+        (Some (Agent_protocol.Goal_edit.expected_goal_revision edit))
+      ~key:(Agent_protocol.Goal_edit.key edit)
+      ~mutation)
+;;
+
+let stage_native_goal_create t admission authorize request =
+  let module R = Agent_protocol.Goal_native_create_request in
+  stage_native_goal_command t admission authorize ~effect_kind:Create (fun () ->
+    Goal_command.create
+      ~session_id:t.state.identity.session_id
+      ~generation:(R.generation request)
+      ~source:(Some (R.source request))
+      ~expected_catalog_revision:(R.expected_catalog_revision request)
+      ~expected_goal_revision:None
+      ~key:(R.key request)
+      ~mutation:
+        (Create
+           { id = R.goal_id request
+           ; objective = R.objective request
+           ; budget = R.budget request
+           }))
+;;
+
+let stage_native_goal_control t admission authorize request =
+  let module R = Agent_protocol.Goal_native_control_request in
+  let effect_kind, mutation =
+    match R.mutation request with
+    | Hold reason ->
+      ( Goal_native_admission.Effect.Hold
+      , Goal_command.Mutation.Hold (R.goal_id request, Needs_input reason) )
+    | Abandon reason ->
+      ( Goal_native_admission.Effect.Abandon
+      , Goal_command.Mutation.Abandon (R.goal_id request, reason) )
+  in
+  stage_native_goal_command t admission authorize ~effect_kind (fun () ->
+    Goal_command.create
+      ~session_id:t.state.identity.session_id
+      ~generation:(R.generation request)
+      ~source:None
+      ~expected_catalog_revision:(R.expected_catalog_revision request)
+      ~expected_goal_revision:(Some (R.expected_goal_revision request))
+      ~key:(R.key request)
+      ~mutation)
 ;;
 
 let stage_native_goal_resume t admission authorize request =
@@ -21817,6 +21904,18 @@ let stage_native_goal_resume t admission authorize request =
       | Open (Enabled | Held _) | Closed _ -> Ok ()
     in
     Goal_native_actions.Value.Resume intent)
+;;
+
+let native_goal_run_id (invocation : Agent_protocol.Invocation.t) =
+  match invocation.inference_origin with
+  | Some (Run id) -> Some id
+  | None | Some Unbound -> None
+;;
+
+let pending_native_goal_turn = function
+  | Agent_protocol.Invocation.Pending_follow_up requests
+  | Compaction_accepted_follow_up requests -> requests.request_turn
+  | Applied_follow_up _ | Discarded_follow_up _ -> false
 ;;
 
 let prepare_native_goal_completion t execution outcome resolved =
@@ -22324,12 +22423,25 @@ let finish_invocation t execution outcome requests commit_starts authoring_refer
   let%bind resolved, native_goals =
     prepare_native_goal_completion t execution outcome resolved
   in
+  let%bind () =
+    Native_goal_plan.check_scheduling
+      native_goals
+      ~run_id:(native_goal_run_id resolved)
+      ~action:None
+      ~request_turn:
+        (Option.exists requests ~f:(fun requests ->
+           requests.Agent_protocol.Invocation.request_turn))
+  in
   let permissions, permission_deltas, permission_payloads =
     cleanup_invocation_permissions t [ execution.dispatched.context.id ]
   in
   let%bind job_deltas, job_payloads = staged_work_changes t owner in
   let%bind run_deltas, check_run, acknowledge_run =
-    prepare_selected_child_run t (Inference_invocation execution) job_deltas
+    prepare_selected_child_run
+      ?goal_plan:native_goals.plan
+      t
+      (Inference_invocation execution)
+      job_deltas
   in
   (* Completing the selected result retains negative expiry evidence. New work
      and proof borrows separately check the Admission; this is not a renewal. *)
@@ -22413,6 +22525,7 @@ let finish_invocation t execution outcome requests commit_starts authoring_refer
            in
            let%bind () =
              persist_transition
+               ~explicit_goal_holds:(Native_goal_plan.fresh_holds native_goals)
                ?run_preparation
                ~check_before_commit:(fun () ->
                  let%bind () =
@@ -22427,6 +22540,7 @@ let finish_invocation t execution outcome requests commit_starts authoring_refer
                prepared
            in
            install_committed_transition
+             ~explicit_goal_holds:(Native_goal_plan.fresh_holds native_goals)
              ?goal_runtime_acknowledgement
              ~job_custody
              ?run_preparation
@@ -22524,9 +22638,31 @@ let commit_moderator_invocation t borrow (resolved : Agent_protocol.Invocation.t
    | Invocation, Resolved (Cancelled _) -> abort_staged_work t ~owner
    | _ -> ());
   let%bind native_goals = prepare_callback_native_goals t borrow.native_goals in
+  let%bind () =
+    let request_turn =
+      match borrow.kind with
+      | Invocation ->
+        Option.exists resolved.handler_intent ~f:(fun intent ->
+          pending_native_goal_turn intent.Agent_protocol.Invocation.follow_up)
+      | Observation ->
+        Option.exists resolved.observation ~f:(fun observation ->
+          Option.exists
+            observation.Agent_protocol.Invocation.follow_up
+            ~f:pending_native_goal_turn)
+    in
+    Native_goal_plan.check_scheduling
+      native_goals
+      ~run_id:(native_goal_run_id resolved)
+      ~action:None
+      ~request_turn
+  in
   let%bind job_deltas, job_payloads = staged_work_changes t owner in
   let%bind run_deltas, check_run, acknowledge_run =
-    prepare_selected_child_run t (Inference_moderator borrow) job_deltas
+    prepare_selected_child_run
+      ?goal_plan:native_goals.plan
+      t
+      (Inference_moderator borrow)
+      job_deltas
   in
   let%bind parent = moderator_settlement_parent t borrow in
   let custody = settlement_custody parent in
@@ -22574,11 +22710,16 @@ let commit_moderator_invocation t borrow (resolved : Agent_protocol.Invocation.t
            let%bind () = check_run () in
            let%bind () =
              persist_transition
+               ~explicit_goal_holds:(Native_goal_plan.fresh_holds native_goals)
                ~check_before_commit:(fun () -> check_native_goal_plan t native_goals)
                t
                prepared
            in
-           install_committed_transition ~job_custody t prepared;
+           install_committed_transition
+             ~explicit_goal_holds:(Native_goal_plan.fresh_holds native_goals)
+             ~job_custody
+             t
+             prepared;
            borrow.committed <- true;
            acknowledge ();
            install_native_goal_plan t native_goals;
@@ -26305,6 +26446,8 @@ let lifecycle_request_allowed : type a. a request -> bool = function
       | Select_resume
       | Begin_resume _
       | Observe_dispatch _
+      | Stage_create _
+      | Stage_control _
       | Stage_edit _
       | Stage_resume _
       | Read _
@@ -32823,6 +32966,10 @@ let native_goal_request
   | Begin_resume selection -> begin_native_goal_resume_preparation_internal t selection
   | Observe_dispatch (selection, outcome) ->
     observe_native_goal_dispatch_internal t selection outcome
+  | Stage_create (admission, authorize, request) ->
+    stage_native_goal_create t admission authorize request
+  | Stage_control (admission, authorize, request) ->
+    stage_native_goal_control t admission authorize request
   | Stage_edit (admission, authorize, edit) ->
     stage_native_goal_edit t admission authorize edit
   | Stage_resume (admission, authorize, request) ->
@@ -32861,6 +33008,18 @@ let deliver_native_goal_receipt = function
   | None -> Ok ()
   | Some receipt ->
     Chat_response.Goal_native_scope.emit receipt |> Result.map_error ~f:(error Conflict)
+;;
+
+let stage_native_goal_create t ~admission ~authorize ~request =
+  Result.bind
+    (call t (Native_goal (Stage_create (admission, authorize, request))))
+    ~f:deliver_native_goal_receipt
+;;
+
+let stage_native_goal_control t ~admission ~authorize ~request =
+  Result.bind
+    (call t (Native_goal (Stage_control (admission, authorize, request))))
+    ~f:deliver_native_goal_receipt
 ;;
 
 let stage_native_goal_edit t ~admission ~authorize ~edit =
@@ -33937,27 +34096,20 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
             match request.Goal_command.mutation with
             | Hold (goal_id, _) ->
               Goal_control_transition.prepare_hold t.state ~goal_id ~delta
+            | Abandon (goal_id, _) ->
+              Goal_control_transition.prepare_abandon t.state ~goal_id ~delta
             | Create _
             | Revise_objective _
             | Record_progress _
             | Change_budget _
-            | Adopt_source _
-            | Abandon _ -> Ok delta
+            | Adopt_source _ -> Ok delta
           in
           let%bind transition = prepare_transition t ~delta ~payloads:[] in
           let%bind () = Goal_command_admission.check_write actor ~authorize t.state in
           let check_before_commit =
             match request.Goal_command.mutation with
-            | Hold (id, _) ->
-              Some
-                (fun () ->
-                  let%map () =
-                    Goal_command_admission.check_write actor ~authorize t.state
-                  in
-                  (* A fresh explicit Hold revokes pending startup even when its
-                   public value equals an automatic hold. Failed saves cannot
-                   revive that exact live cell; retained commands never enter. *)
-                  retire_goal_activation t id)
+            | Hold (_, _) ->
+              Some (fun () -> Goal_command_admission.check_write actor ~authorize t.state)
             | Create _
             | Revise_objective _
             | Record_progress _
