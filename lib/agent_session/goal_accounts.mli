@@ -42,3 +42,46 @@ val validate_transition
   -> previous_catalog:Goal_catalog.t option
   -> catalog:Goal_catalog.t option
   -> (unit, Agent_protocol.Error.t) result
+
+(** Ordered validation DATA only; no actor/source authority. *)
+module Ordered_bootstrap : sig
+  type accounts = t
+  type t
+
+  (** Capture immutable transaction-origin accounting and before-ledger. The
+      catalog is the actual previously accepted prefix, not a supplied Goal.
+      Does not bootstrap any partition or validate a historical snapshot anew. *)
+  val begin_
+    :  previous:accounts option
+    -> before:Inference_ledger.t
+    -> catalog:Goal_catalog.t option
+    -> t
+
+  type step =
+    | Catalog of Goal_catalog.t
+    | Accounts of accounts
+    | Replacement of
+        { catalog : Goal_catalog.t option
+        ; accounts : accounts option
+        }
+
+  (** Consume actual ordered leaf projections. Catalog edges retain the existing
+      exact Goal_catalog validation. Accounts records a genuinely new partition
+      only against that then-current catalog and Child.create's exact immutable
+      before-ledger bootstrap. Replacement is one endpoint edge, never inferred
+      sequential creation, and does not reset already captured evidence.
+      Existing partitions retain original-to-final Stored validation. *)
+  val advance : t -> step -> (t, Agent_protocol.Error.t) result
+
+  (** Same final checks as validate_transition, with the narrow additional
+      captured creation Goal for each genuinely new partition. Incoming new
+      Stored accounting must still equal the original before-ledger bootstrap;
+      all original global admission, old Stored/retirement and adoption checks
+      remain. Never falls back to a fabricated Held projection. *)
+  val check
+    :  t
+    -> incoming:accounts option
+    -> after:Inference_ledger.t
+    -> catalog:Goal_catalog.t option
+    -> (unit, Agent_protocol.Error.t) result
+end

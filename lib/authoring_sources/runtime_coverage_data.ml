@@ -702,7 +702,7 @@ let implementation_sources =
   ; ( "lib/context_compaction/compactor.ml"
     , "7b11eae5ce4d929bf1ab4702111d03f70fe97cfe8543135c73782c2b92391ff0" )
   ; ( "lib/agent_session/session_transition.ml"
-    , "143bf616e843fa53c9cdf97ec2ed19e7f41ef96870125714bbbe83fddfb33949" )
+    , "a7829d20bf80e6e3df3e096c5212201b49a0b37f3fb1b0380f459bb7559797c3" )
   ; ( "lib/agent_session/instruction_clear_capacity.ml"
     , "baa952a408f74f0795059df9e7f6bb3c677957c1866c6d2b20cb83fc7a475e0e" )
   ; ( "lib/agent_session/session_terminal_journal.ml"

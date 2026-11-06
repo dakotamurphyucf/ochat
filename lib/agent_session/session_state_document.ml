@@ -1040,6 +1040,7 @@ end
 type t =
   { carrier : S.t D.Extension_carrier.t
   ; original : Original.t option
+  ; ordered_goal_accounts : Goal_accounts.Ordered_bootstrap.t option
   }
 
 let value t = D.Extension_carrier.value t.carrier
@@ -1049,7 +1050,10 @@ let with_value t value =
 ;;
 
 let authored value =
-  { carrier = D.Extension_carrier.of_authored_value value; original = None }
+  { carrier = D.Extension_carrier.of_authored_value value
+  ; original = None
+  ; ordered_goal_accounts = None
+  }
 ;;
 
 let validate_run_capacity_only (state : S.t) document =
@@ -1191,6 +1195,7 @@ let decoded ?evidence carrier ~limits =
   let%bind () = validate_run_capacity state template ~limits in
   let%map presence = Session_state_presence.of_document template ~limits in
   { carrier
+  ; ordered_goal_accounts = None
   ; original =
       Some
         { template
@@ -1835,19 +1840,9 @@ let validate_recurrence_carrier t =
     validate_recurrence_update previous (value t).recurrence_catalog
 ;;
 
-let validate_accounts_update (previous : S.t) (incoming : S.t) =
+let validate_accounts_preservation previous incoming =
   let open Result.Let_syntax in
-  let%bind () =
-    Goal_accounts.validate_transition
-      ~previous:previous.goal_accounts
-      ~incoming:incoming.goal_accounts
-      ~before:previous.inference_ledger
-      ~after:incoming.inference_ledger
-      ~previous_catalog:previous.goal_catalog
-      ~catalog:incoming.goal_catalog
-    |> X.document_result
-  in
-  match previous.goal_accounts, incoming.goal_accounts with
+  match previous, incoming with
   | Some old, Some candidate ->
     let%bind merged = Goal_accounts.adopt old ~incoming:candidate |> X.document_result in
     let%bind merged = Goal_accounts.to_jsonaf merged |> X.document_result in
@@ -1862,40 +1857,80 @@ let validate_accounts_update (previous : S.t) (incoming : S.t) =
          { path = [ "goal_accounts" ]; reason = "accounting cannot be discarded" })
 ;;
 
+let validate_accounts_update (previous : S.t) (incoming : S.t) =
+  let open Result.Let_syntax in
+  let%bind () =
+    Goal_accounts.validate_transition
+      ~previous:previous.goal_accounts
+      ~incoming:incoming.goal_accounts
+      ~before:previous.inference_ledger
+      ~after:incoming.inference_ledger
+      ~previous_catalog:previous.goal_catalog
+      ~catalog:incoming.goal_catalog
+    |> X.document_result
+  in
+  validate_accounts_preservation previous.goal_accounts incoming.goal_accounts
+;;
+
 let validate_accounts_carrier t ~limits =
-  match t.original with
-  | None -> Ok ()
-  | Some original ->
+  match t.ordered_goal_accounts with
+  | Some ordered ->
     let open Result.Let_syntax in
-    let payload = D.Document.payload original.template in
-    let%bind goal_accounts =
-      match D.Json.field payload ~name:"goal_accounts" with
-      | Absent | Null -> Ok None
-      | Value raw ->
-        Goal_accounts.of_jsonaf raw |> X.document_result |> Result.map ~f:Option.some
+    let current = value t in
+    let%bind () =
+      Goal_accounts.Ordered_bootstrap.check
+        ordered
+        ~incoming:current.goal_accounts
+        ~after:current.inference_ledger
+        ~catalog:current.goal_catalog
+      |> X.document_result
     in
-    (match goal_accounts, (value t).goal_accounts with
-     | None, None -> Ok ()
-     | _ ->
-       let%bind goal_catalog =
-         match D.Json.field payload ~name:"goal_catalog" with
+    (match t.original with
+     | None -> Ok ()
+     | Some original ->
+       let%bind previous =
+         match
+           D.Json.field (D.Document.payload original.template) ~name:"goal_accounts"
+         with
          | Absent | Null -> Ok None
          | Value raw ->
-           Goal_catalog.of_jsonaf raw |> X.document_result |> Result.map ~f:Option.some
+           Goal_accounts.of_jsonaf raw |> X.document_result |> Result.map ~f:Option.some
        in
-       let%bind inference_ledger =
-         match D.Json.field payload ~name:"inference_ledger" with
-         | Value raw -> ledger_of_jsonaf ~limits raw |> X.document_result
-         | Absent | Null ->
-           Error
-             (D.Error.Invalid_field
-                { path = [ "inference_ledger" ]
-                ; reason = "missing original canonical ledger"
-                })
+       validate_accounts_preservation previous current.goal_accounts)
+  | None ->
+    (match t.original with
+     | None -> Ok ()
+     | Some original ->
+       let open Result.Let_syntax in
+       let payload = D.Document.payload original.template in
+       let%bind goal_accounts =
+         match D.Json.field payload ~name:"goal_accounts" with
+         | Absent | Null -> Ok None
+         | Value raw ->
+           Goal_accounts.of_jsonaf raw |> X.document_result |> Result.map ~f:Option.some
        in
-       validate_accounts_update
-         { (value t) with goal_accounts; goal_catalog; inference_ledger }
-         (value t))
+       (match goal_accounts, (value t).goal_accounts with
+        | None, None -> Ok ()
+        | _ ->
+          let%bind goal_catalog =
+            match D.Json.field payload ~name:"goal_catalog" with
+            | Absent | Null -> Ok None
+            | Value raw ->
+              Goal_catalog.of_jsonaf raw |> X.document_result |> Result.map ~f:Option.some
+          in
+          let%bind inference_ledger =
+            match D.Json.field payload ~name:"inference_ledger" with
+            | Value raw -> ledger_of_jsonaf ~limits raw |> X.document_result
+            | Absent | Null ->
+              Error
+                (D.Error.Invalid_field
+                   { path = [ "inference_ledger" ]
+                   ; reason = "missing original canonical ledger"
+                   })
+          in
+          validate_accounts_update
+            { (value t) with goal_accounts; goal_catalog; inference_ledger }
+            (value t)))
 ;;
 
 let validate_delegated_update ~before ~previous ~after ~incoming =
@@ -2031,6 +2066,8 @@ let adopt previous ~limits incoming =
       (value previous).recurrence_catalog
       (value incoming).recurrence_catalog
   in
+  let%bind () = validate_accounts_carrier previous ~limits in
+  let%bind () = validate_accounts_carrier incoming ~limits in
   let%bind () = validate_accounts_update (value previous) (value incoming) in
   let%bind () =
     validate_delegated_update
@@ -2142,7 +2179,10 @@ let retire_canonical_entries t ~retained_ids ~initial_count ~limits =
       ~document
       ~limits
   in
-  { carrier = D.Extension_carrier.with_value carrier state; original = t.original }
+  { carrier = D.Extension_carrier.with_value carrier state
+  ; original = t.original
+  ; ordered_goal_accounts = t.ordered_goal_accounts
+  }
 ;;
 
 let retire_canonical_suffix t ~retained_ids ~limits =
@@ -2338,7 +2378,7 @@ let transfer_pending_internal
     then Ok ()
     else Error (invalid "pending custody transfer differs from pure candidate")
   in
-  Ok incoming
+  Ok { incoming with ordered_goal_accounts = t.ordered_goal_accounts }
 ;;
 
 let transfer_pending t ~plan ~archive ~expiry_archive ~limits =
@@ -2388,7 +2428,9 @@ module Admitted = struct
            actual merged template so encode cannot discard Created extensions,
            then retain the receiver's exact already-admitted native custody. *)
         let%map captured = decoded ~limits carrier in
-        with_value captured (value previous)
+        { (with_value captured (value previous)) with
+          ordered_goal_accounts = previous.ordered_goal_accounts
+        }
     in
     let%map document = encode state_document ~limits in
     { state_document; document }
@@ -2401,6 +2443,41 @@ module Transaction = struct
 
   let value t = value t.staged
   let with_value t state = { staged = with_value t.staged state }
+
+  let continue_after_history t ~admitted ~(next : S.t) ~limits =
+    let open Result.Let_syntax in
+    let invalid reason = Error (D.Error.Invalid_field { path = []; reason }) in
+    let%bind () =
+      match t.staged.ordered_goal_accounts, admitted.ordered_goal_accounts with
+      | Some expected, Some actual when phys_equal expected actual -> Ok ()
+      | Some _, Some _ | Some _, None | None, Some _ | None, None ->
+        invalid "history continuation lost its actual transaction accounting custody"
+    in
+    (* Identity here is the SAME issued private validation cursor, not a
+       substitute for semantic state comparison or an execution permission. *)
+    let incoming = value { staged = admitted } in
+    let current = value t in
+    let%bind exact_next = equal_values incoming ~limits next in
+    let%bind unchanged_accounting =
+      equal_values
+        current
+        ~limits
+        { current with
+          goal_catalog = incoming.goal_catalog
+        ; goal_accounts = incoming.goal_accounts
+        ; inference_ledger = incoming.inference_ledger
+        }
+    in
+    let%bind () =
+      if exact_next && unchanged_accounting
+      then Ok ()
+      else
+        invalid
+          "history continuation changed its exact candidate or accounting projection"
+    in
+    let%map _ = encode admitted ~limits in
+    { staged = admitted }
+  ;;
 
   let update_canonical_usage t ~ledger ~delegated_usage =
     let open Result.Let_syntax in
@@ -2430,16 +2507,54 @@ module Transaction = struct
     Ok { staged = { staged with original } }
   ;;
 
+  let advance_goal_accounting t step =
+    match t.staged.ordered_goal_accounts with
+    | Some ordered ->
+      Goal_accounts.Ordered_bootstrap.advance ordered step
+      |> X.document_result
+      |> Result.map ~f:Option.some
+    | None ->
+      Error
+        (D.Error.Invalid_field
+           { path = [ "goal_accounts" ]; reason = "ordered accounting basis is absent" })
+  ;;
+
   let update_goal_catalog t incoming =
     let open Result.Let_syntax in
     let%bind () = validate_goal_carrier t.staged in
     let%bind () = validate_goal_update (value t).goal_catalog (Some incoming) in
+    let%bind ordered_goal_accounts = advance_goal_accounting t (Catalog incoming) in
     let staged = with_value t { (value t) with goal_catalog = Some incoming } in
     let original =
       Option.map staged.staged.original ~f:(fun original ->
         { original with goal_catalog = Some incoming })
     in
-    Ok { staged = { staged.staged with original } }
+    Ok { staged = { staged.staged with original; ordered_goal_accounts } }
+  ;;
+
+  let update_goal_accounts t incoming =
+    let open Result.Let_syntax in
+    let current = value t in
+    let%bind accounts =
+      Goal_accounts.adopt
+        (Option.value current.goal_accounts ~default:Goal_accounts.empty)
+        ~incoming
+      |> X.document_result
+    in
+    let%bind ordered_goal_accounts = advance_goal_accounting t (Accounts accounts) in
+    let staged = with_value t { current with goal_accounts = Some accounts } in
+    Ok { staged = { staged.staged with ordered_goal_accounts } }
+  ;;
+
+  let replace_goal_accounting t (incoming : S.t) =
+    let open Result.Let_syntax in
+    let%bind ordered_goal_accounts =
+      advance_goal_accounting
+        t
+        (Replacement
+           { catalog = incoming.goal_catalog; accounts = incoming.goal_accounts })
+    in
+    Ok { staged = { t.staged with ordered_goal_accounts } }
   ;;
 
   let prefix_codec ~capture ~limits ~presence =
@@ -2539,6 +2654,7 @@ module Transaction = struct
     let%bind () = validate_run_capacity state document ~limits in
     let%map presence = Session_state_presence.of_document document ~limits in
     { carrier = D.Extension_carrier.with_value carrier state
+    ; ordered_goal_accounts = None
     ; original =
         Some
           { template = document
@@ -2557,9 +2673,19 @@ module Transaction = struct
 
   let begin_ document ~limits =
     let open Result.Let_syntax in
+    (* A public with_value cannot turn an unvalidated account into a baseline. *)
+    let%bind () = validate_accounts_carrier document ~limits in
     let%bind () = S.validate (value { staged = document }) |> X.document_result in
     let%map _ = encode_prefix document ~limits in
-    { staged = document }
+    let current = value { staged = document } in
+    let ordered_goal_accounts =
+      Some
+        (Goal_accounts.Ordered_bootstrap.begin_
+           ~previous:current.goal_accounts
+           ~before:current.inference_ledger
+           ~catalog:current.goal_catalog)
+    in
+    { staged = { document with ordered_goal_accounts } }
   ;;
 
   let checkpoint t ~limits =

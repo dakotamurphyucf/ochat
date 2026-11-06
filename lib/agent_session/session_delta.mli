@@ -123,3 +123,14 @@ val capture_new_model_jobs
 (** Existing bounded default for native transition admission. Durable owners may
     impose smaller limits; the actual whole-state publication validates again. *)
 val native_limits : Document_schema.Limits.t
+
+(** Ordered structural evidence only. Traverses
+    actual Batch ordering; no execution, authorization, ledger construction or
+    second state-application pipeline. Called after ordinary apply validated the
+    exact native delta. All non-account/catalog leaves are exhaustive no-ops for
+    this narrow evidence collection; final actual next ledger still bounds it. *)
+val validate_goal_accounts
+  :  t
+  -> previous:Session_state.t
+  -> next:Session_state.t
+  -> (unit, Agent_protocol.Error.t) result

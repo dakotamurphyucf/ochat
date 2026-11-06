@@ -322,7 +322,15 @@ let validate_global_admissions previous incoming ~before ~after =
   else invalid "attributed account admissions exceed canonical progress"
 ;;
 
-let validate_transition ~previous ~incoming ~before ~after ~previous_catalog ~catalog =
+let validate_transition_with_bootstrap
+      ~bootstrap_goal
+      ~previous
+      ~incoming
+      ~before
+      ~after
+      ~previous_catalog
+      ~catalog
+  =
   let open Result.Let_syntax in
   match previous, incoming with
   | None, None -> Ok ()
@@ -346,10 +354,13 @@ let validate_transition ~previous ~incoming ~before ~after ~previous_catalog ~ca
             ~error:(P.Error.invalid_request "new accounting has no goal")
         in
         let bootstrap_goal =
-          Option.value
-            (Option.bind previous_catalog ~f:(fun goals ->
-               Goal_catalog.find goals (id child)))
-            ~default:current_goal
+          match bootstrap_goal (id child) with
+          | Some captured -> captured
+          | None ->
+            Option.value
+              (Option.bind previous_catalog ~f:(fun goals ->
+                 Goal_catalog.find goals (id child)))
+              ~default:current_goal
         in
         (* Check the Goal's durable episode, not a bounded retained link list.
            A missing previous catalog is not evidence that the goal is new. *)
@@ -358,3 +369,140 @@ let validate_transition ~previous ~incoming ~before ~after ~previous_catalog ~ca
         then Ok ()
         else invalid "new partition differs from actual before-ledger bootstrap")
 ;;
+
+let validate_transition ~previous ~incoming ~before ~after ~previous_catalog ~catalog =
+  validate_transition_with_bootstrap
+    ~bootstrap_goal:(fun _ -> None)
+    ~previous
+    ~incoming
+    ~before
+    ~after
+    ~previous_catalog
+    ~catalog
+;;
+
+module Ordered_bootstrap = struct
+  type accounts = t
+
+  type t =
+    { previous : accounts option
+    ; before : Inference_ledger.t
+    ; previous_catalog : Goal_catalog.t option
+    ; catalog : Goal_catalog.t option
+    ; accounts : accounts option
+    ; captured : P.Goal.t list
+    }
+
+  let begin_ ~previous ~before ~catalog =
+    { previous
+    ; before
+    ; previous_catalog = catalog
+    ; catalog
+    ; accounts = previous
+    ; captured = []
+    }
+  ;;
+
+  type step =
+    | Catalog of Goal_catalog.t
+    | Accounts of accounts
+    | Replacement of
+        { catalog : Goal_catalog.t option
+        ; accounts : accounts option
+        }
+
+  let catalog_edge previous incoming =
+    match previous, incoming with
+    | None, None -> Ok ()
+    | None, Some incoming -> Goal_catalog.validate_transition Goal_catalog.empty ~incoming
+    | Some previous, Some incoming -> Goal_catalog.validate_transition previous ~incoming
+    | Some _, None -> invalid "ordered replacement discarded durable Goals"
+  ;;
+
+  let account_edge previous incoming ~adopt_incoming =
+    match previous, incoming with
+    | None, None -> Ok None
+    | Some _, None -> invalid "ordered replacement discarded durable accounting"
+    | (None | Some _), Some incoming ->
+      let%map.Result merged = adopt (Option.value previous ~default:empty) ~incoming in
+      Some (if adopt_incoming then merged else incoming)
+  ;;
+
+  let capture_new t accounts =
+    List.fold_result
+      (Option.value_map accounts ~default:[] ~f:documents)
+      ~init:t.captured
+      ~f:(fun captured child ->
+        if
+          Option.exists t.previous ~f:(fun previous ->
+            Option.is_some (find previous (id child)))
+          || List.exists captured ~f:(fun goal ->
+            P.Id.Goal.equal (P.Goal.id goal) (id child))
+        then Ok captured
+        else
+          let open Result.Let_syntax in
+          let%bind goal =
+            Result.of_option
+              (Option.bind t.catalog ~f:(fun catalog ->
+                 Goal_catalog.find catalog (id child)))
+              ~error:
+                (P.Error.invalid_request
+                   "new accounting lacks its actual ordered Goal prefix")
+          in
+          let%bind bootstrap = Child.create goal ~ledger:t.before in
+          if S.equal (Child.stored bootstrap) (Child.stored child)
+          then Ok (goal :: captured)
+          else invalid "new partition differs from actual before-ledger bootstrap")
+  ;;
+
+  let advance t = function
+    | Catalog catalog ->
+      let%map.Result () = catalog_edge t.catalog (Some catalog) in
+      { t with catalog = Some catalog }
+    | Accounts incoming ->
+      let open Result.Let_syntax in
+      let%bind accounts = account_edge t.accounts (Some incoming) ~adopt_incoming:true in
+      let%map captured = capture_new t accounts in
+      { t with accounts; captured }
+    | Replacement { catalog; accounts } ->
+      let open Result.Let_syntax in
+      let%bind () = catalog_edge t.catalog catalog in
+      let%bind accounts = account_edge t.accounts accounts ~adopt_incoming:false in
+      let candidate = { t with catalog; accounts } in
+      let%map captured = capture_new candidate accounts in
+      { candidate with captured }
+  ;;
+
+  let equal_projection previous incoming ~to_json =
+    match previous, incoming with
+    | None, None -> Ok true
+    | None, Some _ | Some _, None -> Ok false
+    | Some previous, Some incoming ->
+      let open Result.Let_syntax in
+      let%bind previous = to_json previous in
+      let%map incoming = to_json incoming in
+      D.Json.equal previous incoming
+  ;;
+
+  let check t ~incoming ~after ~catalog =
+    let open Result.Let_syntax in
+    let%bind same_accounts = equal_projection t.accounts incoming ~to_json:to_jsonaf in
+    let%bind same_catalog =
+      equal_projection t.catalog catalog ~to_json:Goal_catalog.to_jsonaf
+    in
+    let%bind () =
+      if same_accounts && same_catalog
+      then Ok ()
+      else invalid "ordered Goal accounting projection differs from actual final state"
+    in
+    validate_transition_with_bootstrap
+      ~bootstrap_goal:(fun id ->
+        List.find t.captured ~f:(fun goal -> P.Id.Goal.equal (P.Goal.id goal) id))
+      ~previous:t.previous
+      ~incoming
+      ~before:t.before
+      ~after
+      ~previous_catalog:t.previous_catalog
+      ~catalog
+  ;;
+end

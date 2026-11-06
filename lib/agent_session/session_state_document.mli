@@ -213,6 +213,18 @@ module Transaction : sig
   val value : t -> Session_state.t
   val with_value : t -> Session_state.t -> t
 
+  (** Continue the SAME transaction after actual History_retirement admission.
+      Requires the identical issued private accounting cursor, exact pure next
+      value and unchanged catalog/account/ledger projection; it cannot rebase or
+      import another snapshot's evidence. History/archive custody is checked by
+      the actual history owner before this call. *)
+  val continue_after_history
+    :  t
+    -> admitted:document
+    -> next:Session_state.t
+    -> limits:Document_schema.Limits.t
+    -> (t, Document_schema.Error.t) result
+
   (** Validate one actual canonical edge and its paired own partition, then
       advance the private accepted ledger/usage basis. The original complete
       carrier template and all other prefix custody stay unchanged.
@@ -229,6 +241,18 @@ module Transaction : sig
       [with_value] alone never advances this basis. Complete state, cross-record
       evidence and capacity validation remain required at checkpoint/finish. *)
   val update_goal_catalog : t -> Goal_catalog.t -> (t, Document_schema.Error.t) result
+
+  (** Actual ordered account leaf. New partitions retain only their genuine
+      earlier Goal prefix; original global ledger/account bounds are unchanged.
+      Generic with_value cannot record this evidence. *)
+  val update_goal_accounts : t -> Goal_accounts.t -> (t, Document_schema.Error.t) result
+
+  (** One actual Created replacement edge, not inferred sequential creation or
+      a fresh accounting baseline. Existing captured receiver evidence survives. *)
+  val replace_goal_accounting
+    :  t
+    -> Session_state.t
+    -> (t, Document_schema.Error.t) result
 
   (** Archive/retirement checkpoint validates current prefix completely; it cannot
       archive or expose an inconsistent native prefix. *)

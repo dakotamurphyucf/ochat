@@ -126,15 +126,7 @@ let apply ~now state ~delta ~payloads =
   (* Complete supported Created reconciliation before adding sequential canonical
      host-turn edges. Their actual order must survive the document writer. *)
   let%bind state, delta = Host_turn_tracking.apply ~previous state delta payloads in
-  let%bind () =
-    Goal_accounts.validate_transition
-      ~previous:previous.goal_accounts
-      ~incoming:state.goal_accounts
-      ~before:previous.inference_ledger
-      ~after:state.inference_ledger
-      ~previous_catalog:previous.goal_catalog
-      ~catalog:state.goal_catalog
-  in
+  let%bind () = Session_delta.validate_goal_accounts delta ~previous ~next:state in
   let payloads = projected_payloads ~previous state payloads in
   let instruction_status state =
     Instruction_selection.summary

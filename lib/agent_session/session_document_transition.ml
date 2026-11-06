@@ -30,10 +30,23 @@ let admit_encoded previous ~delta ~(next : Session_state.t) ~limits =
         ~expiry_archive:None
         ~limits
     | Goal_catalog_changed incoming -> Transaction.update_goal_catalog carrier incoming
+    | Goal_accounts_changed incoming -> Transaction.update_goal_accounts carrier incoming
+    | Created _ as delta ->
+      let open Result.Let_syntax in
+      let%bind state =
+        Session_delta.apply ~limits (Transaction.value carrier) delta |> X.document_result
+      in
+      let%bind carrier = Transaction.replace_goal_accounting carrier state in
+      let%map carrier =
+        Transaction.update_canonical_usage
+          carrier
+          ~ledger:state.inference_ledger
+          ~delegated_usage:state.delegated_usage
+      in
+      Transaction.with_value carrier state
     | ( Inference_ledger_changed _
       | Delegated_inference_ledger_changed _
-      | Reset_generation _
-      | Created _ ) as delta ->
+      | Reset_generation _ ) as delta ->
       let open Result.Let_syntax in
       let%bind state =
         Session_delta.apply ~limits (Transaction.value carrier) delta |> X.document_result
@@ -54,7 +67,6 @@ let admit_encoded previous ~delta ~(next : Session_state.t) ~limits =
       | Workspace_changed _
       | Canonical_entries_appended _
       | Instruction_selection_changed _
-      | Goal_accounts_changed _
       | Child_contributions_changed _
       | Recurrence_catalog_changed _
       | Run_state_changed _
@@ -111,7 +123,7 @@ let admit_encoded previous ~delta ~(next : Session_state.t) ~limits =
         Session_delta.apply ~limits (Transaction.value carrier) delta |> X.document_result
       in
       let%bind admitted = History_retirement.admit previous ~delta ~next:state ~limits in
-      Transaction.begin_ admitted ~limits
+      Transaction.continue_after_history carrier ~admitted ~next:state ~limits
   in
   let open Result.Let_syntax in
   let%bind previous = Transaction.begin_ previous ~limits in

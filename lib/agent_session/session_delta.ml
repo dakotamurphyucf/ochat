@@ -1505,3 +1505,90 @@ let capture_new_model_jobs ?(limits = native_limits) state delta =
   let%map _, delta = prepare state delta in
   delta
 ;;
+
+let validate_goal_accounts delta ~(previous : Session_state.t) ~(next : Session_state.t) =
+  let module B = Goal_accounts.Ordered_bootstrap in
+  let rec observe cursor = function
+    | Batch changes -> List.fold_result changes ~init:cursor ~f:observe
+    | Goal_catalog_changed catalog -> B.advance cursor (Catalog catalog)
+    | Goal_accounts_changed accounts -> B.advance cursor (Accounts accounts)
+    | Created state ->
+      B.advance
+        cursor
+        (Replacement { catalog = state.goal_catalog; accounts = state.goal_accounts })
+    | Lifecycle_changed _
+    | Metadata_changed _
+    | Organization_changed _
+    | Initial_start_consumed
+    | Stop_epoch_changed _
+    | Parent_stop_epoch_changed _
+    | Workspace_changed _
+    | Canonical_entries_appended _
+    | Canonical_history_replaced _
+    | Authoring_references_forgotten _
+    | Authoring_publication_changed _
+    | Initial_prompt_count_changed _
+    | Deferred_entries_enqueued _
+    | Deferred_entries_adopted
+    | Pending_inputs_changed _
+    | Active_operation_changed _
+    | Automatic_turn_budget_enabled _
+    | Automatic_turn_pauses_changed _
+    | Attachment_added _
+    | Attachment_removed _
+    | Permission_changed _
+    | Grant_changed _
+    | Inference_target_captured _
+    | Configuration_revision_changed _
+    | Inference_target_changed _
+    | Model_job_target_captured _
+    | Model_job_recipe_target_captured _
+    | Model_job_target_restored _
+    | Inference_ledger_changed _
+    | Delegated_inference_ledger_changed _
+    | Child_contributions_changed _
+    | Job_changed _
+    | Schedule_changed _
+    | Invocation_changed _
+    | Managed_submission_admitted _
+    | Managed_submission_changed _
+    | Managed_stop_admitted _
+    | Invocation_reconciled _
+    | Moderator_execution_changed _
+    | Moderator_execution_reconciled _
+    | Subscription_changed _
+    | Subscription_expired _
+    | Subscription_cancelled _
+    | Delivery_changed _
+    | Ingress_changed _
+    | Delivery_committed _
+    | Delivery_wake_changed _
+    | Instruction_selection_changed _
+    | Recurrence_catalog_changed _
+    | Run_state_changed _
+    | Moderator_changed _
+    | Shell_changed _
+    | History_block_reserved _
+    | Compaction_generation_changed _
+    | Compaction_archived _
+    | History_deleted _
+    | History_edited _
+    | Owner_lease_generation_changed _
+    | Failure_changed _
+    | Halt_changed _
+    | Reset_generation _ -> Ok cursor
+  in
+  let open Result.Let_syntax in
+  let cursor =
+    B.begin_
+      ~previous:previous.goal_accounts
+      ~before:previous.inference_ledger
+      ~catalog:previous.goal_catalog
+  in
+  let%bind cursor = observe cursor delta in
+  B.check
+    cursor
+    ~incoming:next.goal_accounts
+    ~after:next.inference_ledger
+    ~catalog:next.goal_catalog
+;;
