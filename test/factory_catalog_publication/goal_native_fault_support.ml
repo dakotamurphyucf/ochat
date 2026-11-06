@@ -38,8 +38,10 @@ let matches t selection delta =
   Goal_admission_fault_tests.atoms delta
   |> List.exists ~f:(function
     | A.Session_delta.Invocation_changed invocation ->
-      (match t.cut, invocation.P.Invocation.status, invocation.native_goal_resume with
-       | Native_complete, Resolved (Complete _), Some intent ->
+      (match t.cut, invocation.P.Invocation.status, invocation.native_goal_action with
+       | ( Native_complete
+         , Resolved (Complete _)
+         , Some (P.Goal_native_action_intent.Resume intent) ) ->
          request_equal selection intent
          &&
            (match Intent.phase intent with

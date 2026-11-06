@@ -122,6 +122,10 @@ let decode_text_exn effect_kind text =
   let limits =
     match effect_kind with
     | A.Effect.Get -> get_limits
+    | Start ->
+      (* This private decoder is reached only by the metadata registrations below.
+         Native Start registration owns its complete input limits separately. *)
+      invalid_arg "native Goal Start has no metadata registration"
     | Create | Hold | Abandon | Objective | Progress | Resume -> mutation_limits
   in
   Document_schema.Json.decode ~limits text
@@ -260,7 +264,7 @@ let control effect_kind kind =
       let matches =
         match effect_kind, P.Goal_native_control_request.mutation request with
         | A.Effect.Hold, Hold _ | Abandon, Abandon _ -> true
-        | ( (Get | Create | Hold | Abandon | Objective | Progress | Resume)
+        | ( (Get | Create | Hold | Abandon | Objective | Progress | Start | Resume)
           , (Hold _ | Abandon _) ) -> false
       in
       let%bind () =
@@ -293,7 +297,7 @@ let edit effect_kind kind =
       let matches =
         match effect_kind, P.Goal_edit.mutation request with
         | A.Effect.Objective, Revise_objective _ | Progress, Record_progress _ -> true
-        | ( (Get | Create | Hold | Abandon | Objective | Progress | Resume)
+        | ( (Get | Create | Hold | Abandon | Objective | Progress | Start | Resume)
           , (Revise_objective _ | Record_progress _) ) -> false
       in
       let%bind () =

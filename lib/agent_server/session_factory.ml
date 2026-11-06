@@ -3351,7 +3351,17 @@ module Deferred_parent_cleanup = struct
   ;;
 end
 
-let with_deferred_run_source t entry ~actor ~authorize ~with_source_stage f =
+module Deferred_observation = struct
+  type t =
+    | Operator of
+        { actor : Operator_authorization.t
+        ; authorize :
+            Agent_session.Session_state.t -> (unit, Agent_protocol.Error.t) result
+        }
+    | Native_goal_start of Agent_session.Session_actor.Goal_native_start.Selection.t
+end
+
+let with_deferred_run_source t entry ~observation ~with_source_stage f =
   let module A = Agent_session in
   let module Scope = Runtime_owner.Scope_outcome in
   let module Deferred = Runtime_owner.Deferred_source in
@@ -3403,6 +3413,21 @@ let with_deferred_run_source t entry ~actor ~authorize ~with_source_stage f =
         capture (fun () ->
           A.Session_actor.close_effect_deferred_preparation entry.actor preparation))
     in
+    let closed =
+      match Scope.Cleanup.status (Scope.cleanup outcome), closed, observation with
+      | Joined, Ok (Ok completion), Deferred_observation.Native_goal_start selection
+        when Deferred_parent_cleanup.succeeded !parent_cleanup ->
+        Eio.Cancel.protect (fun () ->
+          capture (fun () ->
+            let%map () =
+              A.Session_actor.finish_native_goal_start_dispatch
+                entry.actor
+                ~selection
+                ~completion
+            in
+            completion))
+      | (Never_acquired | Joined | Failed _), _, _ -> closed
+    in
     let completion =
       lazy
         (Eio.Cancel.protect (fun () ->
@@ -3441,12 +3466,19 @@ let with_deferred_run_source t entry ~actor ~authorize ~with_source_stage f =
       | Some (_, (Error _ | Ok (Error _))) | None -> None
     in
     let no_effects () =
-      let%bind completion =
-        match Lazy.force completion with
-        | Ok result -> result
-        | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
-      in
-      A.Session_actor.observe_no_run_effects entry.actor ~actor ~authorize ~completion
+      match observation with
+      | Deferred_observation.Native_goal_start _ ->
+        (* Joined native closure above does not request an operator NEXT/retry
+           capability or evaluate its separate eligibility calculation. *)
+        Ok None
+      | Operator { actor; authorize } ->
+        let%bind completion =
+          match Lazy.force completion with
+          | Ok result -> result
+          | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
+        in
+        A.Session_actor.observe_no_run_effects entry.actor ~actor ~authorize ~completion
+        |> Result.map ~f:Option.some
     in
     let finish result =
       (* Even a raised/cancelled body has already factually closed its issued
@@ -3465,7 +3497,7 @@ let with_deferred_run_source t entry ~actor ~authorize ~with_source_stage f =
           (* Failure to close as prewriter custody is never interpreted as ACK.
              The Actor independently rejects every pending/unconfirmed lineage. *)
           (match Eio.Cancel.protect (fun () -> capture no_effects) with
-           | Ok observation -> Result.ok observation
+           | Ok observation -> Option.join (Result.ok observation)
            | Error (exn, backtrace) ->
              (match result with
               | Error _ -> None
@@ -3496,8 +3528,7 @@ let with_effect_deferred_run_source t entry ~actor ~authorize ~request f =
   with_deferred_run_source
     t
     entry
-    ~actor
-    ~authorize
+    ~observation:(Deferred_observation.Operator { actor; authorize })
     ~with_source_stage:
       (Runtime_owner.with_effect_deferred_source_reported
          entry.Session_registry.runtime
@@ -3533,8 +3564,7 @@ let with_recurrence_retry_run_source
   with_deferred_run_source
     t
     entry
-    ~actor
-    ~authorize
+    ~observation:(Deferred_observation.Operator { actor; authorize })
     ~with_source_stage:
       (Runtime_owner.with_recurrence_retry_source_reported
          entry.Session_registry.runtime
@@ -3553,8 +3583,7 @@ let resume_recurrence_retry_run_source t entry ~retry ~actor ~authorize f =
   with_deferred_run_source
     t
     entry
-    ~actor
-    ~authorize
+    ~observation:(Deferred_observation.Operator { actor; authorize })
     ~with_source_stage:
       (Runtime_owner.resume_recurrence_retry_source_reported
          entry.Session_registry.runtime
@@ -12600,6 +12629,9 @@ let goal_metadata_service t (profile : Agent_session.Permission_policy.t) actor_
     ~create_goal:(fun ~admission ~request ->
       with_actor Create admission (fun actor authorize ->
         Actor.stage_native_goal_create actor ~admission ~authorize ~request))
+    ~start:(fun ~admission ~request ->
+      with_actor Start admission (fun actor authorize ->
+        Actor.stage_native_goal_start actor ~admission ~authorize ~request))
     ~control:(fun ~admission ~request ->
       let effect_kind =
         match P.Goal_native_control_request.mutation request with
@@ -13410,6 +13442,24 @@ let with_goal_resume_source_reported t entry ~actor ~authorize ~session ~request
     ~session
     ~issuer:(Goal_resume_issuer.Operator { actor; authorize; request })
     f
+;;
+
+let with_native_goal_start_source t ~entry ~selection f =
+  let open Result.Let_syntax in
+  let session =
+    Agent_session.Session_actor.Goal_native_start.Selection.session selection
+  in
+  let%bind () = check_registered_entry t entry ~session in
+  with_deferred_run_source
+    t
+    entry
+    ~observation:(Deferred_observation.Native_goal_start selection)
+    ~with_source_stage:
+      (Runtime_owner.with_native_goal_start_source_reported
+         entry.Session_registry.runtime
+         ~source_owner:t.runtime_source_owner
+         ~selection)
+    (fun source -> f (Runtime_owner.Deferred_source.preparation source))
 ;;
 
 let with_native_goal_resume_source_reported t entry ~selection f =

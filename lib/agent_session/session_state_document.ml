@@ -1,6 +1,6 @@
 open! Core
 
-let current_version = 10
+let current_version = 11
 
 module P = Agent_protocol
 module X = Persistence_codec
@@ -1096,6 +1096,12 @@ let validate_run_capacity (state : S.t) document ~limits =
   let%bind () = validate_raw_queue_capacity document in
   let%bind () = validate_run_capacity_only state document in
   let%bind limits =
+    let%bind growth =
+      Native_goal_action_capacity.growth ~invocations:state.invocations document ~limits
+    in
+    Capacity_growth.remaining_limits growth limits |> X.document_result
+  in
+  let%bind limits =
     match state.instruction_selection with
     | None -> Ok limits
     | Some selection ->
@@ -1575,11 +1581,32 @@ let upgrade document ~limits =
                  name, if String.equal name "spec" then spec else value)))
       | _ -> F.invalid "payload" "must be an object")
   in
+  let%bind native_goal_action_step =
+    D.Conversion.Step.of_function
+      ~kind:"session.state"
+      ~from_version:10
+      ~f:(fun payload ->
+        let module F = Agent_store.Document_fields in
+        let%bind invocations = F.required payload "invocations" F.array in
+        let%bind invocations =
+          List.map invocations ~f:P.Native_goal_action_conversion.invocation_record
+          |> Result.all
+        in
+        match payload with
+        | `Object fields ->
+          Ok
+            (`Object
+                (List.map fields ~f:(fun (name, value) ->
+                   ( name
+                   , if String.equal name "invocations" then `Array invocations else value
+                   ))))
+        | _ -> F.invalid "payload" "must be an object")
+  in
   let%bind conversion =
     D.Conversion.create
       ~limits
-      ~targets:[ "session.state", 10 ]
-      ~max_steps:9
+      ~targets:[ "session.state", 11 ]
+      ~max_steps:10
       ~max_operations:100_000
       ~steps:
         [ step
@@ -1591,6 +1618,7 @@ let upgrade document ~limits =
         ; run_step
         ; pending_input_step
         ; root_invocation_step
+        ; native_goal_action_step
         ]
   in
   D.Conversion.upgrade conversion document

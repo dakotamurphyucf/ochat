@@ -986,9 +986,20 @@ val set_operation_worker
     any queued constructor checkpoints; legacy omission remains unbound.
     [moderator_manager] retains the exact installed compiled resource for callback
     ownership checks. It requires a runtime worker and is cleared by worker-only
-    replacement, removal or retirement. It never grants source authority by itself. *)
+    replacement, removal or retirement. It never grants source authority by itself.
+    [initial_startup] names only this authenticated ordinary first extension startup,
+    with actual Ready/Running source, no Run/held/Init owner and no prior lifecycle
+    claim. Its exact worker/Manager is admitted at physical install into the single
+    pending lifecycle slot. Callback claim consumes it once and drops the runtime
+    binding; resource replacement/removal, Stop, source loss and Actor closure retire
+    it. Existing lifecycle custody cannot be overwritten. Omission keeps existing
+    behavior; invalid supplied startup rejects rather than creating an ambient
+    runtime original. Full native currentness/capability/host policy still applies
+    at each effect. Construction errors before installation retire the speculative
+    admission, including raised exceptions. *)
 val set_runtime_worker
   :  ?actor:Operator_authorization.t
+  -> ?initial_startup:Runtime_builder.Authored_start.t
   -> ?moderator_manager:Chat_response.Moderator_manager.t
   -> t
   -> worker:Operation_worker.t option
@@ -4668,6 +4679,106 @@ module Goal_native_resume : sig
     val invocation_id : t -> Agent_protocol.Id.Invocation.t
   end
 end
+
+(** Actual retained native initial-episode selection and factual status. No
+    decoder restores a Selection, original loan or source reservation. *)
+module Goal_native_start : sig
+  module Selection : sig
+    type t
+
+    val request : t -> Agent_protocol.Goal_native_start_request.t
+    val session : t -> Agent_protocol.Session_ref.t
+    val invocation_id : t -> Agent_protocol.Id.Invocation.t
+  end
+
+  module Status : sig
+    type t =
+      | Staged of Agent_protocol.Goal_native_start_intent.t
+      | Accepted of Agent_protocol.Goal_native_start_intent.t
+      | Interrupted_before_dispatch of Agent_protocol.Goal_native_start_intent.t
+      | Dispatching of Agent_protocol.Goal_native_start_intent.t
+      | Unknown of Agent_protocol.Goal_native_start_intent.t
+      | Discarded of Agent_protocol.Goal_native_start_intent.t
+      | Rejected of Agent_protocol.Goal_native_start_intent.t
+      | Admitted of
+          { intent : Agent_protocol.Goal_native_start_intent.t
+          ; admission : Agent_protocol.Run_receipt.t
+          ; failure : Agent_protocol.Error.t option
+          }
+  end
+end
+
+module Goal_native_action : sig
+  module Selection : sig
+    type t =
+      | Start of Goal_native_start.Selection.t
+      | Resume of Goal_native_resume.Selection.t
+  end
+end
+
+(** The single retained action slot; selection does not claim dispatch or reserve
+    a source. Missing host leaves accepted DATA pending. *)
+val select_native_goal_action
+  :  t
+  -> (Goal_native_action.Selection.t option, Agent_protocol.Error.t) result
+
+(** Actual Owner source reservation must precede this call. Claim ACK precedes
+    consuming the same Entry original exactly once into private initial custody.
+    Native command CAS/digest remain frozen; session preparation CAS is pinned once. *)
+val begin_native_goal_start_preparation
+  :  t
+  -> selection:Goal_native_start.Selection.t
+  -> (Run_preparation.Deferred.Decision.t, Agent_protocol.Error.t) result
+
+(** Historical factual lookup, even after the original episode changes. This
+    neither requires fresh execution custody nor installs any Run authority. *)
+val native_goal_start_receipt
+  :  t
+  -> selection:Goal_native_start.Selection.t
+  -> (Agent_protocol.Run_receipt.t option, Agent_protocol.Error.t) result
+
+val native_goal_start_status
+  :  t
+  -> admission:Goal_native_admission.t
+  -> authorize:
+       (Operator_authorization.t
+        -> Session_state.t
+        -> (unit, Agent_protocol.Error.t) result)
+  -> invocation_id:Agent_protocol.Id.Invocation.t
+  -> (Goal_native_start.Status.t, Agent_protocol.Error.t) result
+
+(** Actual Factory calls this after successful target/parent source joins and
+    factual Deferred closure, including exceptional/cancelled primary outcomes.
+    Validates the exact private owner/physical preparation. No phase rewrite,
+    eligibility or no-effects grant. Retires terminal/unadmitted original only;
+    a real admitted nonterminal Run retains the same original independently of
+    closed preparation. Failure never replaces an existing primary failure. *)
+val finish_native_goal_start_dispatch
+  :  t
+  -> selection:Goal_native_start.Selection.t
+  -> completion:Run_preparation.Closed_attempt.t
+  -> (unit, Agent_protocol.Error.t) result
+
+(** Observe joined normal dispatch result. An actual Admitted association is
+    factual even after terminal/source cleanup removed its live custody slot;
+    this validates its immutable historical Run/link and never restores a loan.
+    Fresh/claimed mutations still require the exact live slot. Actual admission
+    is never rewritten by activation failure; unknown cannot become Rejected. *)
+val observe_native_goal_start_dispatch
+  :  t
+  -> selection:Goal_native_start.Selection.t
+  -> failure:Agent_protocol.Error.t option
+  -> (unit, Agent_protocol.Error.t) result
+
+val stage_native_goal_start
+  :  t
+  -> admission:Goal_native_admission.t
+  -> authorize:
+       (Operator_authorization.t
+        -> Session_state.t
+        -> (unit, Agent_protocol.Error.t) result)
+  -> request:Agent_protocol.Goal_native_start_request.t
+  -> (unit, Agent_protocol.Error.t) result
 
 val select_native_goal_resume
   :  t

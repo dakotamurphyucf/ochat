@@ -6,6 +6,7 @@ module Effect : sig
     | Abandon
     | Objective
     | Progress
+    | Start
     | Resume
   [@@deriving equal, enumerate]
 

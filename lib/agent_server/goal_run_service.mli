@@ -125,3 +125,14 @@ val resume_native_episode
   -> entry:Session_registry.entry
   -> selection:Agent_session.Session_actor.Goal_native_resume.Selection.t
   -> (Resume_result.t, Agent_protocol.Error.t) result
+
+(** Start a first or later Goal episode from the exact selected callback command.
+    Historical receipt lookup precedes source acquisition, even while busy.
+    Fresh execution consumes the same retained original after source reservation;
+    known admission survives activation or cleanup failure. Recovery DATA alone
+    cannot recreate a selection or run the command again. *)
+val start_native_episode
+  :  Session_factory.t
+  -> entry:Session_registry.entry
+  -> selection:Agent_session.Session_actor.Goal_native_start.Selection.t
+  -> (Outcome.t, Agent_protocol.Error.t) result

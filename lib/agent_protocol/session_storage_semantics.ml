@@ -5,6 +5,7 @@ let supported_children =
   [ Schedule_provenance.persistence_semantics
   ; recurrence_run_origin
   ; Goal_native_resume_intent.persistence_semantics
+  ; Goal_native_start_intent.persistence_semantics
   ; delegated_usage
   ]
 ;;

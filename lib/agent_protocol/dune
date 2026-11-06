@@ -72,6 +72,10 @@
   goal_edit
   goal_resume_request
   goal_native_resume_intent
+  goal_native_start_request
+  goal_native_start_intent
+  goal_native_action_intent
+  native_goal_action_conversion
   goal_native_request_codec
   goal_native_create_request
   goal_native_control_request
@@ -115,6 +119,7 @@
   run
   run_action
   run_receipt
+  run_input
   run_start
   run_query
   goal_text

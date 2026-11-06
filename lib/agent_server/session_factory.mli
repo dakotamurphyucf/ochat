@@ -237,6 +237,19 @@ val with_effect_deferred_run_source
       -> ('a, Agent_protocol.Error.t) result)
   -> ('a Deferred_run_attempt.Outcome.t, Agent_protocol.Error.t) result
 
+(** Consume a selected native initial Goal command through the same source,
+    preparation and joined cleanup as headless admission. The Actor owns its
+    original; no caller-supplied operator or mutable revision is accepted.
+    Native attempts do not issue a NEXT/retry observation. *)
+val with_native_goal_start_source
+  :  t
+  -> entry:Session_registry.entry
+  -> selection:Agent_session.Session_actor.Goal_native_start.Selection.t
+  -> (Agent_session.Run_preparation.Deferred.t
+      -> Runtime_owner.Prepared.t
+      -> ('a, Agent_protocol.Error.t) result)
+  -> ('a Deferred_run_attempt.Outcome.t, Agent_protocol.Error.t) result
+
 (** Consume the exact old observation into one retry under the same authenticated
     target source reservation and retained-source verification as initial
     issuance. The callback receives its actual retry and Prepared; target

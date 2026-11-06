@@ -4,6 +4,7 @@
 module Value : sig
   type t =
     | Edit of Goal_command.t
+    | Start of Agent_protocol.Goal_native_start_intent.t
     | Resume of Agent_protocol.Goal_native_resume_intent.t
 end
 
@@ -84,7 +85,9 @@ module Plan : sig
 
   val state : t -> Session_state.t
   val deltas : t -> Session_delta.t list
-  val resumes : t -> Entry.t list
+
+  (** Selected Start/Resume entries in actual callback order. *)
+  val dispatches : t -> Entry.t list
 
   (** Selected fresh controls only; retained receipt replay has no control effect.
       IDs are planning DATA, consumed by the same Actor's actual writer boundary. *)

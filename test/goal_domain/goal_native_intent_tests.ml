@@ -110,7 +110,7 @@ let%expect_test
   let plain = P.Invocation.create context |> ok in
   let plain_wire = P.Invocation.to_json plain in
   assert (
-    not (List.Assoc.mem (fields plain_wire) "native_goal_resume" ~equal:String.equal));
+    not (List.Assoc.mem (fields plain_wire) "native_goal_action" ~equal:String.equal));
   assert (
     Jsonaf.exactly_equal
       plain_wire
@@ -126,33 +126,56 @@ let%expect_test
       (Complete `Null)
     |> ok
   in
-  let staged = P.Invocation.record_native_goal_resume resolved intent |> ok in
+  let staged =
+    P.Invocation.record_native_goal_action
+      resolved
+      (P.Goal_native_action_intent.Resume intent)
+    |> ok
+  in
   assert (
     P.Invocation.equal staged (P.Invocation.of_json (P.Invocation.to_json staged) |> ok));
   assert (
     Result.is_error
       (P.Invocation.of_json
-         (replace (P.Invocation.to_json staged) "native_goal_resume" `Null)));
+         (replace (P.Invocation.to_json staged) "native_goal_action" `Null)));
   (* Local carrier law only: these decoded values supply no native admission.
      A validated phase change may retain the same successful outcome; it cannot
      rewrite that outcome, context, child identity or history. *)
   let accepted_intent =
     Intent.accept intent ~now:(timestamp "2026-11-01T00:00:00Z") |> ok
   in
-  let accepted = P.Invocation.record_native_goal_resume staged accepted_intent |> ok in
+  let accepted =
+    P.Invocation.record_native_goal_action
+      staged
+      (P.Goal_native_action_intent.Resume accepted_intent)
+    |> ok
+  in
   let claimed_intent =
     Intent.claim accepted_intent ~now:(timestamp "2026-11-01T00:00:01Z") |> ok
   in
-  let claimed = P.Invocation.record_native_goal_resume accepted claimed_intent |> ok in
+  let claimed =
+    P.Invocation.record_native_goal_action
+      accepted
+      (P.Goal_native_action_intent.Resume claimed_intent)
+    |> ok
+  in
   let rejected_intent =
     Intent.reject claimed_intent (P.Error.invalid_request "current command denied") |> ok
   in
-  let rejected = P.Invocation.record_native_goal_resume claimed rejected_intent |> ok in
+  let rejected =
+    P.Invocation.record_native_goal_action
+      claimed
+      (P.Goal_native_action_intent.Resume rejected_intent)
+    |> ok
+  in
   let discarded_intent =
     Intent.discard accepted_intent ~reason:"callback retired" |> ok
   in
   let discarded =
-    P.Invocation.record_native_goal_resume accepted discarded_intent |> ok
+    P.Invocation.record_native_goal_action
+      accepted
+      (P.Goal_native_action_intent.Resume discarded_intent)
+    |> ok
   in
   List.iter
     [ staged, accepted; accepted, claimed; claimed, rejected; accepted, discarded ]
@@ -188,7 +211,9 @@ let%expect_test
     [ altered "status" altered_status
     ; altered "context" altered_context
     ; resolved
-    ; altered "native_goal_resume" (Intent.to_json foreign_intent)
+    ; altered
+        "native_goal_action"
+        (P.Goal_native_action_intent.to_json (Resume foreign_intent))
     ; staged
     ; accepted
     ]

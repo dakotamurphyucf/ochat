@@ -7,6 +7,7 @@ let conflict message = Error (P.Error.create Conflict ~message ~retryable:false 
 module Value = struct
   type t =
     | Edit of Goal_command.t
+    | Start of P.Goal_native_start_intent.t
     | Resume of P.Goal_native_resume_intent.t
 end
 
@@ -215,18 +216,18 @@ let prepare t tickets =
        close t;
        failure
      | Ok selected ->
-       let resumes =
+       let dispatches =
          List.count tickets ~f:(fun ticket ->
            match (Map.find_exn t.entries ticket).Entry.value with
-           | Resume _ -> true
+           | Start _ | Resume _ -> true
            | Edit _ -> false)
        in
        let%bind () =
-         if resumes <= 1
+         if dispatches <= 1
          then Ok ()
          else (
            close t;
-           conflict "callback cannot select multiple Goal Resume commands")
+           conflict "callback cannot select multiple native Goal commands")
        in
        Map.iteri t.entries ~f:(fun ~key ~data ->
          if Set.mem selected key then data.Entry.phase <- Selected else Entry.discard data);
@@ -276,7 +277,7 @@ module Plan = struct
     ; entries : Entry.t list
     ; projected : Session_state.t
     ; deltas : Session_delta.t list
-    ; resumes : Entry.t list
+    ; dispatches : Entry.t list
     ; fresh_holds : P.Id.Goal.t list
     ; controlled_goals : P.Id.Goal.t list
     ; fresh_controls : Fresh_control.t list
@@ -284,7 +285,7 @@ module Plan = struct
 
   let state t = t.projected
   let deltas t = t.deltas
-  let resumes t = t.resumes
+  let dispatches t = t.dispatches
   let fresh_holds t = t.fresh_holds
   let fresh_controls t = t.fresh_controls
 
@@ -304,13 +305,13 @@ module Plan = struct
 
   let prepare entries ~(state : Session_state.t) ~session ~now =
     let open Result.Let_syntax in
-    let%bind projected, deltas, resumes, fresh_holds, controlled_goals, fresh_controls =
+    let%bind projected, deltas, dispatches, fresh_holds, controlled_goals, fresh_controls =
       List.fold_result
         entries
         ~init:(state, [], [], [], [], [])
         ~f:
           (fun
-            (state, deltas, resumes, fresh_holds, controlled_goals, fresh_controls)
+            (state, deltas, dispatches, fresh_holds, controlled_goals, fresh_controls)
             entry
           ->
           let%bind () = Entry.check entry state in
@@ -328,7 +329,8 @@ module Plan = struct
             in
             (match prepared.delta with
              | None ->
-               Ok (state, deltas, resumes, fresh_holds, controlled_goals, fresh_controls)
+               Ok
+                 (state, deltas, dispatches, fresh_holds, controlled_goals, fresh_controls)
              | Some delta ->
                let%bind delta, fresh_holds, controlled_goals =
                  match request.Goal_command.mutation with
@@ -372,10 +374,24 @@ module Plan = struct
                let%map state = Session_delta.apply state delta in
                ( state
                , delta :: deltas
-               , resumes
+               , dispatches
                , fresh_holds
                , controlled_goals
                , fresh_controls ))
+          | Start intent ->
+            let%map () =
+              Goal_native_start_association.check_request
+                (P.Goal_native_start_intent.request intent)
+                ~state
+                ~session
+                ~principal_id:(Operator_authorization.principal actor).id
+            in
+            ( state
+            , deltas
+            , entry :: dispatches
+            , fresh_holds
+            , controlled_goals
+            , fresh_controls )
           | Resume intent ->
             let request = P.Goal_native_resume_intent.request intent in
             let%bind goal =
@@ -393,7 +409,7 @@ module Plan = struct
             Ok
               ( state
               , deltas
-              , entry :: resumes
+              , entry :: dispatches
               , fresh_holds
               , controlled_goals
               , fresh_controls ))
@@ -405,7 +421,7 @@ module Plan = struct
       ; entries
       ; projected
       ; deltas = List.rev deltas
-      ; resumes = List.rev resumes
+      ; dispatches = List.rev dispatches
       ; fresh_holds = List.rev fresh_holds
       ; controlled_goals = List.rev controlled_goals
       ; fresh_controls = List.rev fresh_controls

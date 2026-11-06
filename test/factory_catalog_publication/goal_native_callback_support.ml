@@ -22,8 +22,8 @@ let on_event ctx state event = match ctx.session_meta with
 | `String(encoded) ->
   let envelope = Json.parse(encoded) in
   let mode = match field(envelope, "mode") with | `String(value) -> value | _ -> "" in
-  let name = match mode with | "status" -> "goal_get" | "progress" -> "goal_progress" | "progress-rollback" -> "goal_progress" | "progress-finish" -> "goal_progress" | "hold-wrong-effect" -> "goal_progress" | "hold-wrong-effect-catch" -> "goal_progress" | "create" -> "goal_create" | "create-rollback" -> "goal_create" | "hold" -> "goal_hold" | "hold-denied-catch" -> "goal_hold" | "hold-progress" -> "goal_hold" | "hold-turn" -> "goal_hold" | "hold-continue" -> "goal_hold" | "abandon" -> "goal_abandon" | _ -> "goal_resume" in
-  let rollback = match mode with | "progress-rollback" -> true | "resume-rollback" -> true | "resume-catch" -> true | "create-rollback" -> true | _ -> false in
+  let name = match mode with | "status" -> "goal_get" | "progress" -> "goal_progress" | "progress-rollback" -> "goal_progress" | "progress-finish" -> "goal_progress" | "hold-wrong-effect" -> "goal_progress" | "hold-wrong-effect-catch" -> "goal_progress" | "create" -> "goal_create" | "create-rollback" -> "goal_create" | "start" -> "goal_start" | "start-catch" -> "goal_start" | "start-resume" -> "goal_start" | "hold" -> "goal_hold" | "hold-denied-catch" -> "goal_hold" | "hold-progress" -> "goal_hold" | "hold-turn" -> "goal_hold" | "hold-continue" -> "goal_hold" | "abandon" -> "goal_abandon" | _ -> "goal_resume" in
+  let rollback = match mode with | "progress-rollback" -> true | "resume-rollback" -> true | "resume-catch" -> true | "create-rollback" -> true | "start-catch" -> true | _ -> false in
   let action = Task.bind(Tool.call(name, `Object([])), fun result ->
     match result with
     | `Error(message) -> Task.fail(message)
@@ -33,11 +33,14 @@ let on_event ctx state event = match ctx.session_meta with
       else if mode == "hold-turn" then Task.map(Runtime.request_turn(), fun ignored -> state + 1)
       else if mode == "hold-continue" then %s
       else if rollback then Task.fail("intentional parent rollback")
+      else if mode == "start-resume" then
+        Task.bind(Tool.call("goal_resume", `Object([])), fun result -> match result with | `Ok(_) -> Task.pure(state + 1) | `Error(message) -> Task.fail(message))
       else if mode == "multiple" then
         Task.bind(Tool.call(name, `Object([])), fun ignored -> Task.pure(state + 1))
       else Task.pure(state + 1)) in
   let caught = match mode with
   | "resume-catch" -> true
+  | "start-catch" -> true
   | "hold-denied-catch" -> true
   | "hold-wrong-effect-catch" -> true
   | _ -> false in
@@ -66,6 +69,8 @@ let effect_name mode =
   then Hold
   else if String.equal mode "abandon"
   then Abandon
+  else if List.mem [ "start"; "start-catch"; "start-resume" ] mode ~equal:String.equal
+  then Start
   else Resume
 ;;
 

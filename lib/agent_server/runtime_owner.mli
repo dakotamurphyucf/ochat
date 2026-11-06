@@ -451,6 +451,17 @@ val with_effect_deferred_source_reported
   -> (Deferred_source.t -> ('a, Agent_protocol.Error.t) result)
   -> 'a Deferred_source.Report.t
 
+(** Reserve the existing source stage before the selected callback command's
+    durable claim and initial preparation. The Actor consumes that same retained
+    original once; no operator is reconstructed from command data. The report
+    retains the actual preparation through cancellation for joined Factory cleanup. *)
+val with_native_goal_start_source_reported
+  :  t
+  -> source_owner:Agent_session.Runtime_source_owner.t
+  -> selection:Agent_session.Session_actor.Goal_native_start.Selection.t
+  -> (Deferred_source.t -> ('a, Agent_protocol.Error.t) result)
+  -> 'a Deferred_source.Report.t
+
 (** Reserve the same exclusive source stage before consuming the exact old
     observation into one actual retry and its next Deferred. Source binding and
     all finalizers use the same one-shot stage as initial issuance. The Factory

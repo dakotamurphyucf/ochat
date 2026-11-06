@@ -23,6 +23,7 @@ type t =
   | Goal_abandon
   | Goal_objective
   | Goal_progress
+  | Goal_start
   | Recurrence_create
   | Recurrence_list
   | Recurrence_get
@@ -55,6 +56,7 @@ let name = function
   | Goal_abandon -> Goal_native_admission.Effect.name Abandon
   | Goal_objective -> Goal_native_admission.Effect.name Objective
   | Goal_progress -> Goal_native_admission.Effect.name Progress
+  | Goal_start -> Goal_native_admission.Effect.name Start
   | Recurrence_create -> Recurrence_native_admission.Effect.name Create
   | Recurrence_list -> Recurrence_native_admission.Effect.name List
   | Recurrence_get -> Recurrence_native_admission.Effect.name Get
@@ -103,6 +105,7 @@ let registration ~env ~one_off_policy ~authoring_validation_host kind =
   | Goal_abandon, _ -> Goal_native_metadata_tool.abandon |> present
   | Goal_objective, _ -> Goal_native_metadata_tool.objective |> present
   | Goal_progress, _ -> Goal_native_metadata_tool.progress |> present
+  | Goal_start, _ -> Goal_native_start_tool.registration |> present
   | Recurrence_create, _ -> Recurrence_native_tool.registration Create |> present
   | Recurrence_list, _ -> Recurrence_native_tool.registration List |> present
   | Recurrence_get, _ -> Recurrence_native_tool.registration Get |> present

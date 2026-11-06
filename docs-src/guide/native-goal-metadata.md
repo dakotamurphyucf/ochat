@@ -1,10 +1,11 @@
-# Selected native Goal metadata and controls
+# Selected native Goal tools
 
 Select only the native tools that the authored workflow needs:
 
 ```xml
 <tool name="goal_get"/>
 <tool name="goal_create"/>
+<tool name="goal_start"/>
 <tool name="goal_objective"/>
 <tool name="goal_progress"/>
 <tool name="goal_hold"/>
@@ -75,9 +76,98 @@ Goal budget codec. Each budget field is required, even when null.
 Create stages a new Goal held for source review with its actual creator/source
 and stable account. It does not enable execution or create a Workflow Run.
 Changing objective or progress preserves that Goal and its accumulated account.
-These six controls do not supply episode Start or Resume. Achievement uses the
-separately selected checked orchestration `Goal.finish` action and its actual
-owned-work settlement rules.
+Starting an episode requires the separately selected `goal_start` tool.
+Achievement uses the checked extensibility-v1 orchestration `Goal.finish` action
+and its actual owned-work settlement rules.
+
+## Start a new episode
+
+After Create, call Get again to obtain the projected Goal and catalog revisions.
+Then call `goal_start` with those exact values, the observed source, a new stable
+key, and the input for the first turn. For example:
+
+```json
+{
+  "kind": "goal_start_episode_v1",
+  "generation": "0",
+  "source": {
+    "script_id": "controller",
+    "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "generation": 0,
+    "installation_epoch": "1"
+  },
+  "goal_id": "goal_release_notes",
+  "expected_goal_revision": "0",
+  "expected_catalog_revision": "1",
+  "key": "start-release-notes-v1",
+  "input": {
+    "kind": "user_submission",
+    "content": {
+      "kind": "plain_text",
+      "text": "Prepare the release notes using the accepted changes.",
+      "attachments": []
+    }
+  }
+}
+```
+
+The IDs, source, generation and revisions above are illustrative: copy the actual
+Get result. Do not supply a session ID, principal, Run ID or session revision.
+OChat derives those from the actual callback and admission owner.
+
+The tool returns `{"staged":true,"effect":"goal_start"}`. This means the request
+was staged; it does not mean execution has begun. The callback must commit and
+release its source before the execution-enabled schedule host can admit the Run.
+If that host is absent or disabled, the accepted request remains pending.
+Start stages an execution intent; a following Get still reports the projected
+Goal metadata and account, not a newly enabled Goal or admitted Run. The actual
+admission updates the Goal, Run and Start Invocation together.
+
+Start creates a first episode or a new episode after the preceding Run has
+actually terminated. It preserves the Goal's account and cannot clear an operator
+pause, adopt changed source, or resume a live episode. A later edit or control
+within the same callback may invalidate the request's frozen revisions.
+
+For Create followed by Start inside `Session_start`, use `user_submission` as
+shown above. That startup callback has already been consumed; Start does not
+replay it. The alternate input `{"kind":"authored_start"}` requires a genuine
+unconsumed startup. Full input uses the ordinary Run input codec, including its
+attachment and size limits. The complete encoded input is bounded to 1 MiB
+and depth 64, including JSON escaping and attachments. The strict Start request
+adds at most 4096 envelope bytes and one depth level; it does not accept unknown
+request fields. This uses the full input profile rather than the smaller metadata
+request bound.
+
+Call the following local function inside the actual callback after Create. It
+reads the projection again and constructs the Start request directly; `goal_id`,
+`input` and `key` are the intended Goal ID, typed input JSON and stable key shown
+above. The `call` helper unwraps the real `Tool.call` result:
+
+```chatml
+let field value key = match Json.get_field(value, key) with
+| `Some(value) -> value
+| _ -> `Null
+let call name input = Task.bind(Tool.call(name, input), fun result -> match result with
+| `Ok(value) -> Task.pure(value)
+| `Error(message) -> Task.fail(message))
+let stage_created_goal goal_id input key =
+  let* current = call("goal_get", `Object([{key = "goal_id"; value = goal_id}])) in
+  let* goal = match field(current, "goals") with
+  | `Array(rows) ->
+    if Array.length(rows) == 1 then Task.pure(field(rows[0], "goal"))
+    else Task.fail("Expected the created Goal")
+  | _ -> Task.fail("Missing Goal projection") in
+  call("goal_start", `Object([
+    {key = "kind"; value = `String("goal_start_episode_v1")},
+    {key = "generation"; value = field(current, "generation")},
+    {key = "source"; value = field(current, "source")},
+    {key = "goal_id"; value = goal_id},
+    {key = "expected_goal_revision"; value = field(goal, "revision")},
+    {key = "expected_catalog_revision"; value = field(current, "catalog_revision")},
+    {key = "input"; value = input},
+    {key = "key"; value = key}
+  ]))
+```
 
 ## Edit or control the observed Goal
 
@@ -107,7 +197,9 @@ match result with
 Every successful mutation result is `{"staged":true,"effect":"goal_hold"}`
 with the matching selected tool name. It reports local staging, not a durable
 command ACK. Subsequent Get calls in that same transaction see its validated
-projection. Only the actual callback commit accepts the command receipts.
+projection. Only the actual callback commit accepts metadata command receipts
+and the Start Invocation. A Start Admission receipt is a later, separate fact;
+the local staged result and Accepted Invocation do not supply it.
 `Task.catch` rollback removes speculative mutations and their receipts. An
 uncaught callback failure does not publish those native changes; its genuine
 callback/Run failure handling remains separate.
