@@ -377,6 +377,41 @@ end
     Prepared/Running using honest conservative delivery before fresh constructors. *)
 val reconcile_inference_recovery : t -> (unit, Agent_protocol.Error.t) Result.t
 
+module Goal_callback_control : sig
+  module Disposition : sig
+    type t =
+      | Held of Agent_protocol.Goal.Reason.t
+      | Abandoned of Agent_protocol.Goal.Reason.t
+    [@@deriving equal, sexp_of]
+  end
+
+  (** Factual same-checkpoint native control ACK, never execution permission.
+      Issued only by the actual joined Init or installed lifecycle owner. *)
+  type t
+
+  val receipt : t -> Goal_command_receipt.t
+  val disposition : t -> Disposition.t
+
+  (** Exact retained passive Wait DATA; no delivery or execution authority. *)
+  val waiting : t -> Agent_protocol.Run_wake.t option
+end
+
+module Goal_callback_completion : sig
+  (** Closed factual completion after the actual lifecycle joins. A real terminal
+      settlement has precedence over its earlier control ACK. Neither variant
+      grants execution, installation, delivery or startup handoff. *)
+  type t =
+    | Controlled of Goal_callback_control.t
+    | Settled of Agent_protocol.Goal_episode.Settlement.t
+end
+
+module Held_authored_result : sig
+  type t =
+    | Started of Agent_protocol.Run_receipt.t
+    | Controlled of Goal_callback_control.t
+    | Settled of Agent_protocol.Goal_episode.Settlement.t
+end
+
 module Initialization_scope : sig
   module Purpose : sig
     type t =
@@ -1090,6 +1125,18 @@ val begin_run_initialization
   -> preparation:Run_preparation.t
   -> expected:Session_state.t
   -> (Initialization_scope.t, Agent_protocol.Error.t) result
+
+(** Consume the exact joined Init's known control. Before returning, release
+    its callback startup hold through the canonical aggregate planner for an
+    already accepted Finish; a validated terminal receipt returns Settled.
+    Closed construction may retain the control fact, but this grants no fresh
+    execution. Failed/unknown writer and foreign source/candidate reject. Actual
+    callback/publication exceptions propagate. None still requires every normal
+    fresh guard. No pending work or passive Wait is converted into settlement. *)
+val initialization_goal_completion
+  :  t
+  -> scope:Initialization_scope.t
+  -> (Goal_callback_completion.t option, Agent_protocol.Error.t) result
 
 (** Retire the issuing actor's scope idempotently, without a durable write. Wrong
     actors reject. The host must call this under cancellation protection on every
@@ -2686,8 +2733,12 @@ val with_legacy_callback
 (** Claim this actual constructor's one Session_start or Session_resume from
     its exact active Manager callback. The same Pending/Ready scope, immutable
     control basis and original admission fence every effect. Claim/source/metadata
-    and receipt commit together; old queue rows remain unavailable. A rejected
-    claim ACK leaves the one-shot phase unchanged; executed failure is not replayed.
+    and receipt commit together; old queue rows remain unavailable. An initial
+    Run retains its actual issued family: immutable Goal episode/link/Admission
+    or reciprocal recurrence occurrence. The callback and native children keep
+    that genuine Run attribution; metadata cannot supply an absent owner.
+    A rejected claim ACK leaves the one-shot phase unchanged; executed failure
+    is not replayed.
     True means checkpoint and cleanup completed; this owner never claims a raw
     Queue_head or lends permission from stored metadata. Actual host routing is a
     separate consumer of this CPS interface. *)
@@ -3474,6 +3525,7 @@ module Goal_execution_runtime : sig
       | Started of Agent_protocol.Operation.t
       | Waiting of Agent_protocol.Run_wake.t
       | Settled of Agent_protocol.Goal_episode.Settlement.t
+      | Controlled of Goal_callback_control.t
   end
 end
 
@@ -3660,7 +3712,7 @@ val run_goal_runtime_resume
   :  t
   -> continuation:Goal_continuation.t
   -> resume:Runtime_builder.Runtime_resume.t
-  -> (unit, Agent_protocol.Error.t) result
+  -> (Goal_callback_control.t option, Agent_protocol.Error.t) result
 
 module Goal_resume_result : sig
   module Continuation : sig
@@ -3668,6 +3720,7 @@ module Goal_resume_result : sig
       | Started of Agent_protocol.Operation.t
       | Waiting of Agent_protocol.Run_wake.t
       | Settled of Agent_protocol.Goal_episode.Settlement.t
+      | Controlled of Goal_callback_control.t
   end
 
   type t =
@@ -4297,14 +4350,17 @@ val held_authored_resource
     owner. Acknowledged legacy startup is never replayed. A real v1 Session_start
     is joined through this exact owner and original custody, then the shared Run
     aggregate is settled without the startup hold. Only the actual final ACK
-    installs immutable handoff proof and returns the original Admission. Reached
+    installs immutable handoff proof and returns Started with the original
+    Admission. A terminal callback returns Settled with real evidence; an exact
+    native control returns Controlled without inventing
+    startup handoff; it grants no further effect. Reached
     writer errors/exceptions consume the startup attempt; factual cleanup does
     not reauthorize expired effects or imply rollback. *)
 val start_held_authored_run
   :  t
   -> continuation:Admitted_activation.Continuation.t
   -> startup:Runtime_builder.Authored_start.t
-  -> (Agent_protocol.Run_receipt.t, Agent_protocol.Error.t) result
+  -> (Held_authored_result.t, Agent_protocol.Error.t) result
 
 (** First owned startup write: final policy refresh has occurred outside the
     mailbox; the real writer repeats clock/original and joint pure bases. Own ACK
@@ -4407,7 +4463,7 @@ val run_goal_execution_runtime_resume
   :  t
   -> execution:Goal_execution_runtime.t
   -> resume:Runtime_builder.Runtime_resume.t
-  -> (unit, Agent_protocol.Error.t) result
+  -> (Goal_callback_control.t option, Agent_protocol.Error.t) result
 
 (** After real resource install and joined cold lifecycle (or loaded reuse), bind
     the SAME still-active acknowledged Job scope to that SAME installed worker/
@@ -4519,7 +4575,13 @@ val reconcile_goal_wake_authority
     Actor. Callback invocations stage only into their actual lexical transaction;
     they cannot fall back to an immediate writer when the route is absent. The
     returned [unit] is speculative: only the native result and selected parent
-    checkpoint ACK can make it durable. No Run permission is returned. *)
+    checkpoint ACK can make it durable. No Run permission is returned.
+
+    Before initial input handoff, a stopped session permits native Goal metadata
+    only through the exact current event borrow and joined Init callback of its
+    admitted initial Goal constructor. Original/source/effect currentness and
+    explicit Stop revocation still apply. Ordinary, unbound and delegated stopped
+    callbacks remain denied. *)
 val stage_native_goal_create
   :  t
   -> admission:Goal_native_admission.t
@@ -4574,7 +4636,7 @@ val native_goal_state
 module Goal_native_resume : sig
   module Detail : sig
     type t =
-      | Actor_handoff of Goal_resume_result.Continuation.t
+      | Actor_outcome of Goal_resume_result.Continuation.t
       | Unavailable
   end
 
@@ -4630,7 +4692,7 @@ val native_goal_resume_receipt
 (** Current authenticated native reader may inspect historical command facts.
     A receipt is checked against its stored original principal/request and actual
     immutable episode/admission link; it need not be the current Goal episode.
-    Accepted/Claimed are durable facts; positive Actor_handoff comes only from the
+    Accepted/Claimed are durable facts; positive Actor_outcome comes only from the
     same preparation's actual acknowledged phase, never caller success DATA.
     Joined host detail is not certified here. Negative host detail is process-local.
     Recovery never restores custody from this projection. *)

@@ -346,7 +346,8 @@ let%expect_test
                let operation =
                  match result with
                  | Resumed { continuation = Started operation; _ } -> operation
-                 | Resumed { continuation = Waiting _ | Settled _; _ } | Retained _ ->
+                 | Resumed { continuation = Waiting _ | Settled _ | Controlled _; _ }
+                 | Retained _ ->
                    failwith "actual loaded Goal did not start its same-Run Operation"
                  | Resume_failed { error; _ } | Rejected error | Uncertain error ->
                    raise_s [%sexp (error : P.Error.t)]

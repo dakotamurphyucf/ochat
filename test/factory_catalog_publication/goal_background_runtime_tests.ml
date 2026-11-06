@@ -591,7 +591,7 @@ let run (residency : Residency.t) =
                                reject_replay ()
                              | Error error -> raise_s [%sexp (error : P.Error.t)]
                              | Ok No_work -> ()
-                             | Ok (Suspended_goal _ | Handed_off _) ->
+                             | Ok (Suspended_goal _ | Handed_off _ | Controlled _) ->
                                failwith "completed Job wake replayed its callback"
                            in
                            reject_replay ();

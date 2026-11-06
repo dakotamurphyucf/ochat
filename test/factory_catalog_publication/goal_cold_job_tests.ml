@@ -120,6 +120,12 @@ let%expect_test "claimed Goal Model Job constructs cold under its same actual ow
                               ~payload)))
              |> protocol_ok
            in
+           let outcome =
+             match outcome with
+             | Owner.Construction_result.Built outcome -> outcome
+             | Callback_completed _ ->
+               failwith "ordinary cold Model unexpectedly completed its callback"
+           in
            (match outcome with
             | Runtime.Model_succeeded _ -> ()
             | Model_failed message -> failwithf "actual cold Model failed: %s" message ());

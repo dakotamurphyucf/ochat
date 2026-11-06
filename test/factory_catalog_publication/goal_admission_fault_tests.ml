@@ -278,7 +278,7 @@ let fault_case boundary ~recover =
           let failure =
             match Service.Attempt.result attempt |> protocol_ok with
             | Admission_uncertain error -> error
-            | Activated _ | Retained _ | Activation_failed _ ->
+            | Activated _ | Retained _ | Activation_failed _ | Controlled _ | Settled _ ->
               failwith "failed admission write was not classified uncertain"
           in
           [%test_eq: P.Error.code] Persistence_error failure.code;

@@ -261,6 +261,13 @@ let selected t =
   | Open | Closed -> conflict "Goal callback selection is not prepared"
 ;;
 
+module Fresh_control = struct
+  type t =
+    { receipt : Goal_command_receipt.t
+    ; mutation : P.Goal_native_control_request.Mutation.t
+    }
+end
+
 module Plan = struct
   type t =
     { revision : int64
@@ -272,12 +279,14 @@ module Plan = struct
     ; resumes : Entry.t list
     ; fresh_holds : P.Id.Goal.t list
     ; controlled_goals : P.Id.Goal.t list
+    ; fresh_controls : Fresh_control.t list
     }
 
   let state t = t.projected
   let deltas t = t.deltas
   let resumes t = t.resumes
   let fresh_holds t = t.fresh_holds
+  let fresh_controls t = t.fresh_controls
 
   let check_scheduling t ~run_id ~action ~request_turn =
     let controlled =
@@ -295,11 +304,15 @@ module Plan = struct
 
   let prepare entries ~(state : Session_state.t) ~session ~now =
     let open Result.Let_syntax in
-    let%bind projected, deltas, resumes, fresh_holds, controlled_goals =
+    let%bind projected, deltas, resumes, fresh_holds, controlled_goals, fresh_controls =
       List.fold_result
         entries
-        ~init:(state, [], [], [], [])
-        ~f:(fun (state, deltas, resumes, fresh_holds, controlled_goals) entry ->
+        ~init:(state, [], [], [], [], [])
+        ~f:
+          (fun
+            (state, deltas, resumes, fresh_holds, controlled_goals, fresh_controls)
+            entry
+          ->
           let%bind () = Entry.check entry state in
           let%bind actor = Entry.actor entry in
           match Entry.value entry with
@@ -314,7 +327,8 @@ module Plan = struct
                 ~now
             in
             (match prepared.delta with
-             | None -> Ok (state, deltas, resumes, fresh_holds, controlled_goals)
+             | None ->
+               Ok (state, deltas, resumes, fresh_holds, controlled_goals, fresh_controls)
              | Some delta ->
                let%bind delta, fresh_holds, controlled_goals =
                  match request.Goal_command.mutation with
@@ -334,8 +348,34 @@ module Plan = struct
                  | Change_budget _
                  | Adopt_source _ -> Ok (delta, fresh_holds, controlled_goals)
                in
+               let fresh_controls =
+                 match request.Goal_command.mutation with
+                 | Hold (_, Needs_input reason) ->
+                   { Fresh_control.receipt = prepared.receipt; mutation = Hold reason }
+                   :: fresh_controls
+                 | Abandon (_, reason) ->
+                   { Fresh_control.receipt = prepared.receipt; mutation = Abandon reason }
+                   :: fresh_controls
+                 | Hold
+                     ( _
+                     , ( Operator_pause
+                       | Budget_gate _
+                       | Usage_uncertain _
+                       | Deadline_reached
+                       | Source_review ) )
+                 | Create _
+                 | Revise_objective _
+                 | Record_progress _
+                 | Change_budget _
+                 | Adopt_source _ -> fresh_controls
+               in
                let%map state = Session_delta.apply state delta in
-               state, delta :: deltas, resumes, fresh_holds, controlled_goals)
+               ( state
+               , delta :: deltas
+               , resumes
+               , fresh_holds
+               , controlled_goals
+               , fresh_controls ))
           | Resume intent ->
             let request = P.Goal_native_resume_intent.request intent in
             let%bind goal =
@@ -350,7 +390,13 @@ module Plan = struct
                 denied "native Goal Resume cannot clear an operator pause"
               | Open (Enabled | Held _) | Closed _ -> Ok ()
             in
-            Ok (state, deltas, entry :: resumes, fresh_holds, controlled_goals))
+            Ok
+              ( state
+              , deltas
+              , entry :: resumes
+              , fresh_holds
+              , controlled_goals
+              , fresh_controls ))
     in
     Ok
       { revision = state.counters.revision
@@ -362,6 +408,7 @@ module Plan = struct
       ; resumes = List.rev resumes
       ; fresh_holds = List.rev fresh_holds
       ; controlled_goals = List.rev controlled_goals
+      ; fresh_controls = List.rev fresh_controls
       }
   ;;
 

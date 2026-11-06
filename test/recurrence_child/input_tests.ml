@@ -165,7 +165,7 @@ let require_completed row =
 
 (* The controller and target are separate actual registered Factory sessions.
    Only the target's continuously owned preparation supplies its original. *)
-let with_loaded_held daemon controller target ~original f =
+let with_loaded_held daemon ~clock controller target ~original f =
   let before = state target in
   let source = A.Recurrence_source.installed before |> protocol_ok in
   let session =
@@ -182,7 +182,7 @@ let with_loaded_held daemon controller target ~original f =
     |> protocol_ok
   in
   assert (P.Run.Mode.equal (Target.run_mode selected |> protocol_ok) Single_turn);
-  let nominal = ready_nominal controller selected in
+  let nominal = ready_nominal controller ~clock selected in
   let recurrence = entry controller in
   (* The Ready row includes its retained disposition/carrier. Projecting and
      re-encoding only the nominal would erase those factual fields. *)
@@ -843,6 +843,7 @@ let run (cut : Cut.t) =
                          match
                            with_loaded_held
                              daemon
+                             ~clock:(Eio.Stdenv.clock daemon_env)
                              controller
                              target
                              ~original

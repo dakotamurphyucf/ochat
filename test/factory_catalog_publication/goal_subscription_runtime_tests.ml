@@ -426,7 +426,8 @@ let%expect_test
                    with
                    | Resumed { continuation = Waiting actual; _ } ->
                      assert (P.Run_wake.equal wake actual)
-                   | Resumed { continuation = Started _ | Settled _; _ } | Retained _ ->
+                   | Resumed { continuation = Started _ | Settled _ | Controlled _; _ }
+                   | Retained _ ->
                      failwith "passive public Resume started or reconstructed work"
                    | Resume_failed { error; _ } | Rejected error | Uncertain error ->
                      raise_s [%sexp "passive Resume failed", (error : P.Error.t)]);
@@ -591,7 +592,7 @@ let%expect_test
                      |> protocol_ok
                    with
                    | No_work -> ()
-                   | Suspended_goal _ | Handed_off _ ->
+                   | Suspended_goal _ | Handed_off _ | Controlled _ ->
                      failwith "subscription replayed its accepted wake");
                   Existing.assert_same stable entry;
                   [%test_eq: int] 4 !(counters.providers);

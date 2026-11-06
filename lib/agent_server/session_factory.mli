@@ -903,7 +903,7 @@ val with_goal_job_runtime
   -> Session_registry.entry
   -> owner:Agent_session.Session_actor.Job_runtime_owner.t
   -> (Agent_session.Runtime_builder.t -> ('a, Agent_protocol.Error.t) result)
-  -> ('a, Agent_protocol.Error.t) result
+  -> ('a Runtime_owner.Construction_result.t, Agent_protocol.Error.t) result
 
 (** Discover one persistence-enabled specialist from this Factory's genuine
     registered entry and its ALREADY loaded/realized authored resources.
@@ -952,6 +952,7 @@ module Goal_wake_result : sig
     | No_work
     | Suspended_goal of Agent_session.Goal_execution_selection.Suspension.t
     | Handed_off of Agent_session.Session_actor.Goal_execution_runtime.Wake_result.t
+    | Controlled of Agent_session.Session_actor.Goal_callback_control.t
 end
 
 (** Actual registered same Factory/Store/Actor/Owner entry. Uses SAME authenticated

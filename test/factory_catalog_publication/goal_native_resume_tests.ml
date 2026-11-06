@@ -219,7 +219,7 @@ let%expect_test
              in
              (match status entry runtime resumed_operation invocation.context.id with
               | Native.Status.Acknowledged
-                  { receipt; detail = Actor_handoff (Started actual); failure = None; _ }
+                  { receipt; detail = Actor_outcome (Started actual); failure = None; _ }
                 ->
                 assert (P.Id.Operation.equal actual.id resumed_operation.id);
                 assert (

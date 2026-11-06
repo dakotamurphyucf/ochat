@@ -390,7 +390,7 @@ let replace_parent_source env root sw daemon connection parent old_target =
        assert (not (List.mem public "read_file" ~equal:String.equal)))
 ;;
 
-let ready_input_attempt daemon parent child source =
+let ready_input_attempt daemon parent ~clock child source =
   let prior = Entry.current (entry parent) in
   let schedule =
     match A.Recurrence_definition.schedule prior with
@@ -418,7 +418,7 @@ let ready_input_attempt daemon parent child source =
        (recurrence_id, { schedule; target; policy = A.Recurrence_definition.policy prior }))
   |> ignore;
   command parent "546-ready-enable" (Enable recurrence_id) |> ignore;
-  Actor.sweep_recurrences parent.actor |> protocol_ok;
+  await_ready_nominal parent ~clock |> ignore;
   let recurrence = entry parent in
   let definition = Entry.current recurrence in
   let frontier = Entry.frontier recurrence |> protocol_ok in
@@ -589,7 +589,9 @@ let initialized_restart
             retained.reconciliation |> protocol_ok |> ignore);
          [%test_eq: int * int] counts (!constructions, !providers);
          assert (not (Owner.is_loaded child.runtime));
-         let intent, attempt = ready_input_attempt daemon parent child source in
+         let intent, attempt =
+           ready_input_attempt daemon parent ~clock:(Eio.Stdenv.clock env) child source
+         in
          (* The original child remains tied to the historical Fresh definition,
             while this NEW Existing-session occurrence owns its NEW Run. *)
          A.Recurrence_child_origin.validate_definition origin original_definition
@@ -786,7 +788,7 @@ let run env (cut : Cut.t) =
               assert (List.is_empty (state parent).invocations);
               let artifact = captured_artifact target in
               with_planner env sw daemon parent (fun () ->
-                let permit = reserve parent target in
+                let permit = reserve parent ~clock:(Eio.Stdenv.clock env) target in
                 let reservation = Actor.Recurrence_creation.reservation permit in
                 let linked =
                   Factory.create_recurrence_child (Daemon.factory daemon) ~parent ~permit

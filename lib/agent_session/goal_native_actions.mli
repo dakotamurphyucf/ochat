@@ -63,6 +63,15 @@ val recorded : t -> (Entry.t list, Agent_protocol.Error.t) result
 val selected : t -> (Entry.t list, Agent_protocol.Error.t) result
 val close : t -> unit
 
+module Fresh_control : sig
+  (** Immutable planning DATA only. A receipt belongs to the same successful
+      command preparation and nonempty delta. It grants no callback ACK. *)
+  type t = private
+    { receipt : Goal_command_receipt.t
+    ; mutation : Agent_protocol.Goal_native_control_request.Mutation.t
+    }
+end
+
 module Plan : sig
   type t
 
@@ -80,6 +89,10 @@ module Plan : sig
   (** Selected fresh controls only; retained receipt replay has no control effect.
       IDs are planning DATA, consumed by the same Actor's actual writer boundary. *)
   val fresh_holds : t -> Agent_protocol.Id.Goal.t list
+
+  (** Fresh Hold/Abandon receipts in actual selection order, excluding replay.
+      [state] is the final projection, including edits after these controls. *)
+  val fresh_controls : t -> Fresh_control.t list
 
   (** Reject a new Continue/turn request for the exact Goal controlled in this
       plan. Passive Wait/Finish and unrelated Run owners remain unchanged. *)

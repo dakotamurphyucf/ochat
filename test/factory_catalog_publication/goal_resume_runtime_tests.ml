@@ -318,7 +318,7 @@ let await_turns ?providers ?(observe = ignore) env entry counters ~completed =
 
 let started = function
   | Result.Resumed { receipt; continuation = Started operation } -> receipt, operation
-  | Resumed { continuation = Waiting _ | Settled _; _ } | Retained _ ->
+  | Resumed { continuation = Waiting _ | Settled _ | Controlled _; _ } | Retained _ ->
     failwith "live Goal did not start an actual continuation"
   | Resume_failed { error; _ } | Rejected error | Uncertain error ->
     raise_s [%sexp "Goal resume failed", (error : P.Error.t)]
@@ -424,7 +424,7 @@ let start_episode daemon entry old_original session before =
   |> Goal.activated
 ;;
 
-let with_cold_episode surface decision f =
+let with_cold_episode ?prompt_text surface decision f =
   let counters : counters =
     { inference_ports = ref 0; providers = ref 0; transcripts = ref [] }
   in
@@ -480,7 +480,8 @@ let with_cold_episode surface decision f =
     }
   in
   Creation_tests.with_daemon
-    ~prompt_text:(prompt surface decision)
+    ~prompt_text:
+      (Option.value_or_thunk prompt_text ~default:(fun () -> prompt surface decision))
     ~qualify_chatml_extensions:true
     ~sources:
       [ resume_context_file, "{}\n"
@@ -1023,7 +1024,8 @@ let%expect_test
               | Resumed { receipt; continuation = Waiting actual } ->
                 assert (P.Run_wake.equal wake actual);
                 receipt
-              | Resumed { continuation = Started _ | Settled _; _ } | Retained _ ->
+              | Resumed { continuation = Started _ | Settled _ | Controlled _; _ }
+              | Retained _ ->
                 failwith "already-Waiting resume reconstructed or executed a runtime"
               | Resume_failed { error; _ } | Rejected error | Uncertain error ->
                 raise_s [%sexp "passive Goal resume failed", (error : P.Error.t)]

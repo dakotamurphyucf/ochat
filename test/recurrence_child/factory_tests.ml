@@ -137,7 +137,7 @@ let on_event ctx state event = Task.pure(state)
                        Target.fresh_definition_json captured |> protocol_ok
                      in
                      Eio.Path.unlink Eio.Path.(Eio.Stdenv.fs env / prompt);
-                     let permit = reserve parent captured in
+                     let permit = reserve parent ~clock:(Eio.Stdenv.clock env) captured in
                      let row = Actor.Recurrence_creation.reservation permit in
                      let create () =
                        Factory.create_recurrence_child

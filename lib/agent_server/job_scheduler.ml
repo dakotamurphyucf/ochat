@@ -269,11 +269,17 @@ let run_model_job t entry job =
                entry
                ~owner:services.runtime_owner
                run
-           | Ordinary -> Runtime_owner.with_background_runtime entry.runtime run)
+           | Ordinary ->
+             Result.map
+               (Runtime_owner.with_background_runtime entry.runtime run)
+               ~f:(fun result -> Runtime_owner.Construction_result.Built result))
     in
     let outcome =
       match outcome with
-      | Ok outcome -> outcome
+      | Ok (Runtime_owner.Construction_result.Built outcome) -> outcome
+      | Ok (Callback_completed _) ->
+        Agent_session.Runtime_builder.Model_failed
+          "Goal callback completed construction before Model execution"
       | Error error -> Agent_session.Runtime_builder.Model_failed error.message
     in
     complete entry job outcome

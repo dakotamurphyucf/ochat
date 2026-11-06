@@ -96,7 +96,9 @@ let activated = function
        admission
      | Admission_uncertain error | Activation_failed { error; _ } ->
        raise_s [%sexp "Goal activation failed", (error : P.Error.t)]
-     | Retained _ -> failwith "fresh Goal episode returned retained DATA")
+     | Retained _ -> failwith "fresh Goal episode returned retained DATA"
+     | Controlled _ | Settled _ ->
+       failwith "ordinary Goal startup unexpectedly completed its callback")
 ;;
 
 let await_input env entry counters =
