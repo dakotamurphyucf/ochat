@@ -81,5 +81,7 @@ let () =
   match Array.to_list (Sys.get_argv ()) with
   | [ _; root ] -> native_complete root
   | [ _; root; "held-goal-unknown" ] -> Descendant_held_input_fault_tests.run_child root
+  | [ _; root; "goal-resume-unknown" ] ->
+    Descendant_goal_resume_fault_tests.run_child root
   | _ -> failwith "native fault child requires its parent-owned root and closed mode"
 ;;

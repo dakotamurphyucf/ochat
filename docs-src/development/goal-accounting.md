@@ -521,3 +521,16 @@ not evidence that the original live resources closed successfully.
 An irreversible local no-writer seal retires execution and the staged controller;
 the exact Slot, host and prepared factual owner remain until every root close is
 acknowledged. Retiring execution does not itself release ancestor reservations.
+
+Explicit Goal Resume uses the same inherited Turn admission after its actual
+existing runtime lifecycle has joined. Only a live same-episode continuation
+captures an Administrative Turn and its real Run work; the original Run,
+episode, account, source and command receipt are retained. The exact selected
+worker and source remain pinned across ancestor waits. The existing Goal runtime
+and Operation acknowledgements compose with the canonical Included update at
+one State installation, and launch follows actual ancestor confirmation on that
+same worker. A prepared controller is not an acknowledgement: an uncertain writer
+retains the exact prepared owner for factual cleanup and recovery. Waiting,
+settlement, controlled and retained outcomes reserve no Turn and keep their
+actual metadata results and failure classification. No new input, Run, lifecycle
+callback replay or fresh count decision is inferred from a command receipt.

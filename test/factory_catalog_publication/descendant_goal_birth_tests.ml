@@ -16,7 +16,7 @@ let on_event ctx state event = Task.pure(state + 1)
 </script>|}
 ;;
 
-let creation_request sources =
+let creation_request ?(tools = []) sources =
   `Object
     [ "version", `Number "1"
     ; "root_file", `String "child.chatmd"
@@ -24,13 +24,13 @@ let creation_request sources =
       , `Array
           (List.map sources ~f:(fun (path, text) ->
              `Object [ "path", `String path; "text", `String text ])) )
-    ; "tools", `Array []
+    ; "tools", `Array (List.map tools ~f:(fun name -> `String name))
     ; "start_immediately", `False
     ; "idempotency_key", `String "554-native-goal-birth"
     ]
 ;;
 
-let create_response sources =
+let create_response ?tools sources =
   let open Openai.Responses.Response_stream in
   let call arguments status : Item.t =
     Function_call
@@ -42,7 +42,7 @@ let create_response sources =
       ; status
       }
   in
-  let arguments = Jsonaf.to_string (creation_request sources) in
+  let arguments = Jsonaf.to_string (creation_request ?tools sources) in
   [ Output_item_added
       { item = call "" None; output_index = 0; type_ = "response.output_item.added" }
   ; Function_call_arguments_done
@@ -92,6 +92,7 @@ let with_native_goal_child
       ?test_root
       ?timeout
       ?(parent_extra_tools = [])
+      ?(inherited_tools = [])
       ?(wrap_env = Fn.id)
       ?budget
       ?(child_sources = [ "child.chatmd", child_source ])
@@ -116,12 +117,13 @@ let with_native_goal_child
                   | '>' -> "&gt;"
                   | char -> String.of_char char)
               in
-              sprintf "<tool name=\"%s\"/>" escaped)))
+              sprintf "<tool name=\"%s\"/>" escaped))
+       ^ String.concat (List.map inherited_tools ~f:snd))
     ~post_stream:(fun inputs ->
       if !first
       then (
         first := false;
-        create_response child_sources)
+        create_response ~tools:(List.map inherited_tools ~f:fst) child_sources)
       else post_creation_stream inputs)
     (fun env sw _root daemon _policy parent _runtime _revision counters ->
        let within phase f =

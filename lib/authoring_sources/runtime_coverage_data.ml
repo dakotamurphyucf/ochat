@@ -1007,7 +1007,7 @@ let implementation_sources =
   ; ( "lib/agent_session/initial_lifecycle_startup.ml"
     , "34befd9d623fc41ffc0e0013960277ff03d4cde6d0f2febf6f0149dd91f074eb" )
   ; ( "lib/agent_session/session_actor.ml"
-    , "c152e8c62e1757f63a7fb3e001d787d655d472a3ecd62e5a3a58c4bb0f6a8a0f" )
+    , "2a5308125a8fffdc4808964237180ab15c79a811096a64e573c442ac9b50bfed" )
   ; ( "lib/agent_session/goal_descendant_admission_custody.ml"
     , "eaaf482d96347053fe7627c876e3b169e1949f9a539a081669ad7502c9b603cd" )
   ; ( "lib/agent_session/job_custody.ml"

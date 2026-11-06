@@ -976,7 +976,11 @@ val with_goal_resume_source_reported
     episode, account or input is admitted. Primary errors/cancellation preserve
     their outcome; the enclosing Factory report retains actual receipt facts.
     Runtime adoption requires the Actor's immutable actual final outcome,
-    including a validated Wait/Settlement, never a caller success flag. *)
+    including a validated Wait/Settlement, never a caller success flag. A fresh
+    continuation Turn retains the SAME joined runtime through cancellable
+    ancestor admission and exact native acknowledgement. Uncertain writers keep
+    the Actor's actual prepared owner; retirement must join its factual cleanup
+    before disposing the runtime and reports failure if that cannot be proven. *)
 val resume_goal_episode
   :  t
   -> prepared:Prepared_goal_continuation.t

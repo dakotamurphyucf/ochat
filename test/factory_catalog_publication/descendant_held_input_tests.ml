@@ -80,7 +80,7 @@ module Probe = struct
     ; mutable failure : (exn * Stdlib.Printexc.raw_backtrace) option
     }
 
-  let create ~consumer ~parent ~child ~scope ~reference =
+  let create ?(attempt_ceiling = 3L) ~consumer ~parent ~child ~scope ~reference () =
     let parent_attempts_before =
       A.Goal_accounting.admitted_attempts (Goal.accounting (state parent))
     in
@@ -91,7 +91,10 @@ module Probe = struct
     ; scope
     ; reference
     ; accounting =
-        Birth.Provider_probe.create
+        Birth.Provider_probe.create_with_counts
+          ~turns:1L
+          ~attempts:1L
+          ~attempt_ceiling
           ~parent
           ~child
           ~scope
@@ -319,7 +322,7 @@ let successful consumer =
        [%test_eq: int64] 0L initial.turn;
        [%test_eq: int64] 0L initial.attempt;
        [%test_eq: int] 2 !(counters.providers);
-       let checked = Probe.create ~consumer ~parent ~child ~scope ~reference in
+       let checked = Probe.create ~consumer ~parent ~child ~scope ~reference () in
        probe := Some checked;
        let assert_replay call check =
          Actor.with_moderator_checkpoint child.actor (fun () -> Ok ()) |> protocol_ok;

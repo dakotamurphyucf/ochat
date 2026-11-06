@@ -3833,6 +3833,13 @@ end
     from original episode + actual Run + exact terminal receipt. Only live
     Admitted/Active with no pending Finish attaches a new Administrative Operation
     from retained history. No parser, User input, Continue intent or second Run.
+    The exact joined source, Run work and selected worker are captured before
+    cancellable ancestor admission outside the Actor. The real Goal controller
+    installs once at the same State ACK as inherited Included accounting; launch
+    waits for actual ancestor confirmation and the SAME selected worker. A
+    prepared or uncertain writer is not an ACK and retains its actual owner for
+    factual cleanup/recovery. Waiting, Settled, Controlled and retained outcomes
+    reserve no Turn; their genuine metadata writers keep their existing results.
     Known command ACK remains in every post-ACK failure. *)
 val continue_goal_episode
   :  t

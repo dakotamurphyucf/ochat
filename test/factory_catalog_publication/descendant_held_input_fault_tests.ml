@@ -333,7 +333,18 @@ let run_child test_root =
        Core_unix.exit_immediately 73)
 ;;
 
-let child_report env root =
+module Mode = struct
+  type t =
+    | Held
+    | Goal_resume
+
+  let argument = function
+    | Held -> "held-goal-unknown"
+    | Goal_resume -> "goal-resume-unknown"
+  ;;
+end
+
+let child_report ?(mode = Mode.Held) env root =
   Eio.Switch.run (fun sw ->
     let manager = Eio.Stdenv.process_mgr env in
     let output, sink = Eio.Process.pipe ~sw manager in
@@ -345,7 +356,7 @@ let child_report env root =
         ~env:[| "PATH=/usr/bin:/bin" |]
         ~stdout:sink
         ~stderr:errors
-        [ "./goal_native_fault_child.exe"; root; "held-goal-unknown" ]
+        [ "./goal_native_fault_child.exe"; root; Mode.argument mode ]
     in
     Eio.Flow.close sink;
     Eio.Flow.close errors;
