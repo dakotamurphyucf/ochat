@@ -2934,6 +2934,58 @@ val with_idle_moderator_observation_tools
       -> (unit, Agent_protocol.Error.t) result)
   -> (bool, Agent_protocol.Error.t) result
 
+(** Process-local owner for the aggregate legacy moderator callback. Create
+    before entering the host's finite cancellation-protected claim/drain/capture
+    block. A successful claim is retained by the Actor before the reply; this
+    value grants no source, Run or child-creation permission. Other moderator
+    families keep their existing borrow protocols. All operations belong to the
+    actual Actor domain. Result-returning operations reject a foreign domain;
+    [cancel] and [leave_capture] do nothing before touching the cell when called
+    from a foreign domain: neither cancellation nor capture-exit proof is then
+    installed. *)
+module Idle_moderator_completion : sig
+  type actor = t
+  type t
+
+  val create : actor -> t
+  val claim : t -> (History_entry.t list option, Agent_protocol.Error.t) result
+
+  (** Capture the actual callback drain exactly once and consume it through the
+      existing ordinary completion path. Retains each real selected writer and
+      State ACK, including no-Turn metadata, Goal Hold and compaction prefixes.
+      An attempted write without an installed ACK remains uncertain; no callback
+      replay or global failure rewrite is performed. *)
+  val capture
+    :  t
+    -> Runtime_builder.moderator_drain
+    -> (unit, Agent_protocol.Error.t) result
+
+  (** Actual callback-returned error before capture. Failure metadata has its
+      own real attempted/ACK outcome and cannot erase an uncertain completion. *)
+  val fail_callback
+    :  t
+    -> failure:Agent_protocol.Error.t
+    -> (unit, Agent_protocol.Error.t) result
+
+  (** Non-yielding one-shot exit signal in the finite host block's finally.
+      Does not release the claim or assert that a writer was unattempted. *)
+  val leave_capture : t -> unit
+
+  (** Read the same captured completion result after leaving the finite block. *)
+  val finish : t -> (unit, Agent_protocol.Error.t) result
+
+  (** First-wins negative cancellation, followed by Actor-owned factual cleanup.
+      No RPC is made synchronously. Cleanup never retries an uncertain writer.
+      Fiber-setup failure is retained on the same owner and cannot replace the
+      original callback error or cancellation; [join_retirement] reports it. *)
+  val cancel : t -> failure:Agent_protocol.Error.t -> unit
+
+  (** Join the same retirement outside mailbox and Owner state locks. A failed
+      or unknown writer retains the exact owner and primary diagnostic; source
+      close must propagate the failure and retain its resources. *)
+  val join_retirement : t -> (unit, Agent_protocol.Error.t) result
+end
+
 (** [claim_idle_moderator] acquires the process-local exclusive moderator
     borrow only when the running session is idle and unblocked. *)
 val claim_idle_moderator

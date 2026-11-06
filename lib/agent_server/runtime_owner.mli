@@ -775,7 +775,12 @@ val deliver_schedule
     cancellation of the caller still propagates. Later polling and administration
     remain usable. Runtime installation and each callback's ownership transfer
     retain protected lifecycle boundaries; owned legacy batches remain cancellable
-    between and during handlers. Normal v1 declaration admission
+    between and during handlers. The standalone aggregate legacy fallback keeps
+    its finite claim/drain/capture block cancellation-protected. Its exact
+    Actor-owned completion retains uncertain metadata writes and acknowledged
+    operation cleanup; errors do not invoke an unscoped failure transition.
+    Retirement joins callback exit outside the owner mutex before resources
+    close. Normal v1 declaration admission
     remains separate; this does not enable public features. *)
 val drain_idle_moderator : t -> (bool, Agent_protocol.Error.t) result
 
@@ -886,7 +891,10 @@ val close : t -> unit
 
 (** Close and join foreground/dependency/background cleanup before shutting down the actor or
     its persistence writer. Concurrent accepted-stop cleanup is joined. A typed
-    dependency failure raises [Cleanup_failed], retaining resources for retry;
+    dependency failure raises [Cleanup_failed], retaining resources for retry.
+    Retained aggregate legacy completion must also retire successfully; an
+    uncertain write or unresolved acknowledged cleanup prevents raw close and
+    remains an error rather than replaying the callback or persistence writer;
     other exceptions retain their original backtrace. Call from the external
     session lifecycle, never a retained callback (which would await itself). *)
 val close_and_wait : t -> unit

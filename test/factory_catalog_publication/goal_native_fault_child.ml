@@ -83,5 +83,9 @@ let () =
   | [ _; root; "held-goal-unknown" ] -> Descendant_held_input_fault_tests.run_child root
   | [ _; root; "goal-resume-unknown" ] ->
     Descendant_goal_resume_fault_tests.run_child root
+  | [ _; root; "legacy-idle-checkpoint-unknown" ] ->
+    Legacy_idle_completion_fault_tests.run_child root
+  | [ _; root; "legacy-idle-compaction-unknown" ] ->
+    Legacy_idle_completion_fault_tests.run_compaction_child root
   | _ -> failwith "native fault child requires its parent-owned root and closed mode"
 ;;

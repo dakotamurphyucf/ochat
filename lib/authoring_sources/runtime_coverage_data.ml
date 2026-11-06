@@ -536,6 +536,8 @@ let moderator_features =
       ; "lib/agent_session/legacy_callback_runtime.ml"
       ; "lib/agent_session/constructor_permission_checkpoint.ml"
       ; "lib/agent_session/session_actor.ml"
+      ; "lib/agent_session/idle_completion_write.ml"
+      ; "lib/agent_server/runtime_owner.ml"
       ; "lib/agent_session/goal_descendant_admission_custody.ml"
       ; "lib/agent_session/execution_custody.ml"
       ; "lib/agent_session/legacy_queue_custody.ml"
@@ -879,7 +881,7 @@ let implementation_sources =
   ; ( "lib/agent_session/delegated_runtime_load.ml"
     , "c202fb7653c63d810965bf80d65b60bc91067f544ffb886a4539fc67e0d0e859" )
   ; ( "lib/agent_server/runtime_owner.ml"
-    , "c097e94324d1d4e8682ea5b24c94a1ded5505f030bdf37c4a0123a50d530d68a" )
+    , "7cf95ef75f2be3aebda799e77d9c0cc621296019f9c3dd521512e705a10e2550" )
   ; ( "lib/agent_session/managed_submission_tracking.ml"
     , "6c8804b2d0c2033631b965769af63c5240afeb6dabff72695c818dc1a68baed8" )
   ; ( "lib/agent_server/managed_output_cursor.ml"
@@ -1007,7 +1009,9 @@ let implementation_sources =
   ; ( "lib/agent_session/initial_lifecycle_startup.ml"
     , "34befd9d623fc41ffc0e0013960277ff03d4cde6d0f2febf6f0149dd91f074eb" )
   ; ( "lib/agent_session/session_actor.ml"
-    , "2a5308125a8fffdc4808964237180ab15c79a811096a64e573c442ac9b50bfed" )
+    , "182bcea50b519851323d351056b935eb5d7a4fac5676fa53bed7f5f625416324" )
+  ; ( "lib/agent_session/idle_completion_write.ml"
+    , "d427fa80c4346b64f3f9bf4d5025ad2218403278816ade76ff17ba1adaa426d9" )
   ; ( "lib/agent_session/goal_descendant_admission_custody.ml"
     , "eaaf482d96347053fe7627c876e3b169e1949f9a539a081669ad7502c9b603cd" )
   ; ( "lib/agent_session/job_custody.ml"

@@ -3279,19 +3279,6 @@ let deliver_schedule t (schedule : Agent_protocol.Schedule.t) =
       |> Result.map ~f:ignore))
 ;;
 
-let fail_idle_moderator t failure =
-  ignore
-    (Agent_session.Session_actor.fail_idle_moderator t.actor failure
-     : (unit, Agent_protocol.Error.t) result);
-  Error failure
-;;
-
-let complete_idle_moderator t drain =
-  match Agent_session.Session_actor.complete_idle_moderator t.actor drain with
-  | Ok () -> Ok drain.Agent_session.Runtime_builder.remaining_events
-  | Error failure -> fail_idle_moderator t failure
-;;
-
 let idle_callback_limit t =
   let open Result.Let_syntax in
   let%map state = Agent_session.Session_actor.state t.actor in
@@ -3308,13 +3295,62 @@ let idle_callback_limit t =
 ;;
 
 let drain_loaded_legacy_events t runtime =
-  match Agent_session.Session_actor.claim_idle_moderator t.actor with
-  | Error _ as failure -> failure
-  | Ok None -> Ok false
-  | Ok (Some history) ->
-    (match runtime.Agent_session.Runtime_builder.drain_internal_events history with
-     | Ok drain -> complete_idle_moderator t drain
-     | Error failure -> fail_idle_moderator t failure)
+  let module Completion = Agent_session.Session_actor.Idle_moderator_completion in
+  let completion = Completion.create t.actor in
+  let finished = ref false in
+  Exn.protect
+    ~f:(fun () ->
+      let result =
+        Eio.Cancel.protect (fun () ->
+          Exn.protect
+            ~f:(fun () ->
+              let open Result.Let_syntax in
+              let%bind history = Completion.claim completion in
+              match history with
+              | None -> Ok None
+              | Some history ->
+                (match
+                   runtime.Agent_session.Runtime_builder.drain_internal_events history
+                 with
+                 | Ok drain ->
+                   let%map () = Completion.capture completion drain in
+                   Some drain.remaining_events
+                 | Error failure ->
+                   (* The callback error remains primary. Its failure-metadata
+                      writer diagnostic stays with the same Actor-owned claim. *)
+                   ignore
+                     (Completion.fail_callback completion ~failure
+                      : (unit, Agent_protocol.Error.t) result);
+                   Error failure))
+            ~finally:(fun () -> Completion.leave_capture completion))
+      in
+      match result with
+      | Ok None ->
+        finished := true;
+        Ok false
+      | Ok (Some remaining_events) ->
+        let%map.Result () = Completion.finish completion in
+        finished := true;
+        remaining_events
+      | Error failure ->
+        Completion.cancel completion ~failure;
+        (* Outside the original finite callback mask and Owner state lock.
+           Failure retains the exact owner; source close joins it again rather
+           than invoking global idle failure or replaying a writer. *)
+        ignore
+          (Completion.join_retirement completion : (unit, Agent_protocol.Error.t) result);
+        Error failure)
+    ~finally:(fun () ->
+      if not !finished
+      then
+        Completion.cancel
+          completion
+          ~failure:
+            (Agent_protocol.Error.create
+               Interrupted
+               ~message:"legacy idle callback left before its handoff"
+               ~retryable:true
+               ()))
 ;;
 
 let drain_loaded_queued_events
@@ -3466,7 +3502,7 @@ let drain_loaded_idle_moderator t runtime =
             Agent_session.Session_actor.apply_moderator_follow_up t.actor
           in
           more || applied
-        | None -> Eio.Cancel.protect (fun () -> drain_loaded_legacy_events t runtime))
+        | None -> drain_loaded_legacy_events t runtime)
      | None -> Ok false)
 ;;
 

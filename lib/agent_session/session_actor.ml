@@ -4071,6 +4071,106 @@ module Goal_request = struct
         -> Goal_command_receipt.t t
 end
 
+module Idle_completion_data = struct
+  module Write = Idle_completion_write
+
+  type action =
+    | Checkpoint
+    | Stop
+    | Callback_failure
+    | Compaction
+    | Turn
+
+  type basis =
+    { generation : int
+    ; source : Agent_protocol.Invocation.observer option
+    ; worker : Operation_worker.t option
+    }
+
+  type prefix =
+    | Empty
+    | Reconciled of Write.t
+    | Checkpointed of Write.t
+    | Checkpointed_and_reconciled of
+        { checkpoint : Write.t
+        ; reconciliation : Write.t
+        }
+
+  type operation_kind =
+    | Turn of (Agent_protocol.Operation.t * agent_custody option) Turn_admission_staging.t
+    | Compaction of History_entry.Allocator.t * History_entry.t list
+
+  type operation_phase =
+    | Prepared
+    | Acknowledged
+    | Handed_off
+    | Terminal_acknowledged
+    | Terminated
+  [@@deriving equal]
+
+  type operation_suffix =
+    { operation : Agent_protocol.Operation.t
+    ; owner : Operation_owner.t
+    ; owner_slot : Operation_owner.t option
+    ; worker : Operation_worker.t option
+    ; installed : bool ref
+    ; kind : operation_kind
+    ; mutable phase : operation_phase
+    ; mutable native_write : Write.t option
+    ; previous_owner : Operation_owner.t option
+    }
+
+  type suffix =
+    | Operation of operation_suffix
+    | Stop of Agent_protocol.Job.t list * Agent_protocol.Permission.t list
+
+  type phase =
+    | Fresh
+    | Claimed of basis
+    | Completing of basis
+    | Retired
+
+  type cleanup =
+    | Idle
+    | Running of (unit, Agent_protocol.Error.t) result Eio.Promise.t
+    | Scheduling_failed of Agent_protocol.Error.t * Write.Diagnostic.t
+
+  type t =
+    { issuing_actor : unit ref
+    ; identity : unit ref
+    ; domain : int
+    ; exited : unit Eio.Promise.t
+    ; exit : unit Eio.Promise.u
+    ; mutable phase : phase
+    ; mutable action : action option
+    ; mutable prefix : prefix
+    ; mutable pending_prefix : prefix option
+    ; mutable write : Write.t option
+    ; mutable suffix : suffix option
+    ; mutable drain : Runtime_builder.moderator_drain option
+    ; mutable outcome : (unit, Agent_protocol.Error.t) result option
+    ; mutable cancellation : Agent_protocol.Error.t option
+    ; mutable cleanup : cleanup
+    }
+
+  let request_cancellation t failure =
+    if Option.is_none t.cancellation then t.cancellation <- Some failure
+  ;;
+
+  type completion = t
+
+  module Request = struct
+    type _ t =
+      | Claim : History_entry.t list option t
+      | Complete : Runtime_builder.moderator_drain -> unit t
+      | Fail : Agent_protocol.Error.t -> unit t
+      | Claim_paired : completion -> History_entry.t list option t
+      | Capture_paired : completion * Runtime_builder.moderator_drain -> unit t
+      | Fail_paired : completion * Agent_protocol.Error.t -> unit t
+      | Retire_paired : completion -> unit t
+  end
+end
+
 type _ request =
   | Goal_request : 'a Goal_request.t -> 'a request
   | Descendant_root : 'a Descendant_root_request.t -> 'a request
@@ -4872,10 +4972,8 @@ type _ request =
   | Skip_schedule :
       Agent_protocol.Id.Schedule.t * int
       -> Agent_protocol.Schedule.t request
-  | Claim_idle_moderator : History_entry.t list option request
+  | Idle_completion : 'a Idle_completion_data.Request.t -> 'a request
   | Apply_observation_follow_up : bool request
-  | Complete_idle_moderator : Runtime_builder.moderator_drain -> unit request
-  | Fail_idle_moderator : Agent_protocol.Error.t -> unit request
   | Expire_permission :
       Agent_protocol.Id.Permission.t * int * Agent_protocol.Permission.choice
       -> unit request
@@ -4940,6 +5038,7 @@ type t =
   ; mutable recurrence_activations : Activation_custody.t list
   ; mutable descendant_policy_cells : Goal_root_policy.t list
   ; mutable descendant_host_binding : Descendant_host_data.Binding.t option
+  ; mutable idle_completion : Idle_completion_data.t option
   ; mutable inherited_turn_prepared : Inherited_turn.prepared option
   ; mutable inherited_turn_cleanup : Inherited_turn.cleanup option
   ; mutable descendant_admission_slot : Descendant_admission_slot.t option
@@ -6201,8 +6300,394 @@ let retry_inherited_turn_cleanup t =
       Eio.Promise.await promise)
 ;;
 
+let idle_completion_basis (completion : Idle_completion_data.t) =
+  match completion.phase with
+  | Claimed basis | Completing basis -> Some basis
+  | Fresh | Retired -> None
+;;
+
+let check_idle_completion_identity t (completion : Idle_completion_data.t) =
+  if
+    phys_equal completion.issuing_actor t.inference_owner_identity
+    && Int.equal completion.domain t.runtime_source_domain
+    && Int.equal completion.domain (Stdlib.Domain.self () :> int)
+  then Ok ()
+  else Error (error Conflict "legacy completion belongs to another actual Actor")
+;;
+
+let check_idle_completion_owner t (completion : Idle_completion_data.t) =
+  let open Result.Let_syntax in
+  let%bind () = check_idle_completion_identity t completion in
+  match t.idle_completion with
+  | Some actual when phys_equal actual completion -> Ok ()
+  | None | Some _ -> Error (error Conflict "legacy completion lost its exact claim")
+;;
+
+let check_idle_completion_source t (completion : Idle_completion_data.t) =
+  let open Result.Let_syntax in
+  let%bind () = check_idle_completion_owner t completion in
+  let%bind basis =
+    idle_completion_basis completion
+    |> Result.of_option ~error:(error Conflict "legacy completion has no active claim")
+  in
+  let%bind source = Runtime_builder.moderator_snapshot_observer t.state.moderator in
+  if
+    Int.equal basis.generation t.state.identity.generation
+    && Option.equal Agent_protocol.Invocation.equal_observer basis.source source
+    && Option.equal phys_equal basis.worker t.operation_worker
+  then Ok ()
+  else Error (error Conflict "legacy completion source or exact worker changed")
+;;
+
+let idle_completion_failure (completion : Idle_completion_data.t) =
+  match completion.write with
+  | Some write ->
+    (match Idle_completion_write.diagnostic write with
+     | Some (Returned failure) -> failure
+     | Some (Raised (exn, _)) ->
+       error Internal_error ("legacy completion writer raised: " ^ Exn.to_string exn)
+     | None ->
+       Agent_protocol.Error.create
+         Conflict
+         ~message:"legacy completion has an unresolved actual writer attempt"
+         ~retryable:true
+         ())
+  | None -> error Conflict "legacy completion has no retained writer diagnostic"
+;;
+
+let release_idle_completion t (completion : Idle_completion_data.t) =
+  let open Result.Let_syntax in
+  let%bind () = check_idle_completion_identity t completion in
+  match completion.phase with
+  | Retired | Fresh -> Ok ()
+  | Claimed _ | Completing _ ->
+    let%bind () = check_idle_completion_owner t completion in
+    let%bind () =
+      match completion.write with
+      | Some write ->
+        (match Idle_completion_write.phase write with
+         | Attempted -> Error (idle_completion_failure completion)
+         | Not_attempted | Installed _ -> Ok ())
+      | None -> Ok ()
+    in
+    let%bind () =
+      match completion.suffix with
+      | Some (Operation { phase = Acknowledged | Terminal_acknowledged; _ }) ->
+        Error (error Conflict "legacy operation ACK still owns its actual suffix")
+      | Some (Stop _) ->
+        Error (error Conflict "legacy stopped candidate still owns its cleanup suffix")
+      | Some (Operation { phase = Prepared | Handed_off | Terminated; _ }) | None -> Ok ()
+    in
+    if moderator_is_borrowed t
+    then Error (error Conflict "another callback owns moderator exclusion")
+    else (
+      (match completion.suffix with
+       | Some (Operation suffix) ->
+         (match suffix.phase with
+          | Prepared -> Operation_owner.retire suffix.owner
+          | Acknowledged | Handed_off | Terminal_acknowledged | Terminated -> ())
+       | None | Some (Stop _) -> ());
+      completion.phase <- Retired;
+      t.idle_completion <- None;
+      t.idle_moderator_borrowed <- false;
+      Ok ())
+;;
+
+let prepare_idle_completion_write
+      t
+      (completion : Idle_completion_data.t option)
+      ~kind
+      ~candidate
+      ~attempted
+  =
+  let open Result.Let_syntax in
+  match completion with
+  | None -> Ok None
+  | Some completion ->
+    let%bind () = check_idle_completion_owner t completion in
+    let%bind () =
+      match completion.write with
+      | Some previous ->
+        (match Idle_completion_write.phase previous with
+         | Attempted -> Error (idle_completion_failure completion)
+         | Not_attempted | Installed _ -> Ok ())
+      | None -> Ok ()
+    in
+    let%bind write =
+      Idle_completion_write.capture
+        ~owner:completion.identity
+        ~previous:t.state
+        ~requested:candidate
+        ~kind
+        ~attempted
+    in
+    completion.write <- Some write;
+    (match kind, completion.suffix with
+     | (Start_ordinary_turn | Start_compaction), Some (Operation suffix) ->
+       suffix.native_write <- Some write
+     | (Start_ordinary_turn | Start_compaction), (None | Some (Stop _)) ->
+       invalid_arg "legacy operation scope has no prepared native suffix"
+     | ( ( Reconcile_foreground
+         | Reconcile_terminal
+         | Checkpoint
+         | Suppress_automatic
+         | Stop
+         | Callback_failure
+         | Retire_turn
+         | Retire_compaction )
+       , _ ) -> ());
+    completion.pending_prefix
+    <- (match kind, completion.prefix, completion.action with
+        | Reconcile_foreground, Empty, _ -> Some (Idle_completion_data.Reconciled write)
+        | Reconcile_foreground, Checkpointed checkpoint, _ ->
+          Some (Checkpointed_and_reconciled { checkpoint; reconciliation = write })
+        | Checkpoint, Empty, Some Compaction -> Some (Checkpointed write)
+        | ( ( Reconcile_foreground
+            | Reconcile_terminal
+            | Checkpoint
+            | Suppress_automatic
+            | Stop
+            | Callback_failure
+            | Start_compaction
+            | Start_ordinary_turn
+            | Retire_turn
+            | Retire_compaction )
+          , (Empty | Reconciled _ | Checkpointed _ | Checkpointed_and_reconciled _)
+          , _ ) -> None);
+    Ok (Some (completion, write))
+;;
+
+let select_idle_completion_writer
+      t
+      ((completion, write) : Idle_completion_data.t * Idle_completion_write.t)
+      ~candidate
+      ~selected
+  =
+  let open Result.Let_syntax in
+  let%bind () = check_idle_completion_source t completion in
+  let%bind () =
+    match completion.cancellation with
+    | None -> Ok ()
+    | Some failure ->
+      (match Idle_completion_write.kind write with
+       | Retire_turn | Retire_compaction | Reconcile_terminal | Callback_failure -> Ok ()
+       | Reconcile_foreground
+       | Checkpoint
+       | Suppress_automatic
+       | Stop
+       | Start_compaction
+       | Start_ordinary_turn -> Error failure)
+  in
+  let%bind () =
+    match selected with
+    | Idle_completion_write.Selected.Requested (Start_ordinary_turn | Start_compaction) ->
+      (match completion.suffix, candidate.Session_transition.state.active_operation with
+       | Some (Operation suffix), Some operation
+         when Agent_protocol.Id.Operation.equal suffix.operation.id operation.id
+              && Int.equal suffix.operation.generation operation.generation
+              && Agent_protocol.Operation.equal_kind suffix.operation.kind operation.kind
+              && Option.equal phys_equal suffix.previous_owner t.operation_agent_custody
+         -> Ok ()
+       | _ -> Error (error Conflict "legacy writer lost its actual operation suffix"))
+    | Requested
+        ( Reconcile_foreground
+        | Reconcile_terminal
+        | Checkpoint
+        | Suppress_automatic
+        | Stop
+        | Callback_failure
+        | Retire_turn
+        | Retire_compaction )
+    | Admission_hold _ -> Ok ()
+  in
+  Idle_completion_write.select_actual
+    write
+    ~owner:completion.identity
+    ~state:t.state
+    ~candidate
+    ~selected
+;;
+
+let install_idle_completion_writer
+      t
+      ((completion, write) : Idle_completion_data.t * Idle_completion_write.t)
+      candidate
+  =
+  Idle_completion_write.install
+    write
+    ~owner:completion.Idle_completion_data.identity
+    ~candidate
+    ~state:t.state;
+  Option.iter completion.pending_prefix ~f:(fun prefix -> completion.prefix <- prefix);
+  completion.pending_prefix <- None;
+  match Idle_completion_write.phase write with
+  | Installed acknowledgement ->
+    (match Idle_completion_write.Acknowledgement.selected acknowledgement with
+     | Requested (Start_ordinary_turn | Start_compaction) ->
+       (match completion.suffix with
+        | Some (Operation suffix) ->
+          Option.iter suffix.previous_owner ~f:Operation_owner.retire;
+          t.operation_agent_custody <- suffix.owner_slot;
+          suffix.installed := true;
+          suffix.phase <- Acknowledged
+        | None | Some (Stop _) -> invalid_arg "legacy operation ACK has no actual suffix")
+     | Requested (Retire_turn | Retire_compaction) ->
+       (match completion.suffix with
+        | Some (Operation suffix) -> suffix.phase <- Terminal_acknowledged
+        | None | Some (Stop _) -> invalid_arg "legacy terminal ACK has no actual suffix")
+     | Requested
+         ( Reconcile_foreground
+         | Reconcile_terminal
+         | Checkpoint
+         | Suppress_automatic
+         | Stop
+         | Callback_failure )
+     | Admission_hold _ -> ())
+  | Not_attempted | Attempted ->
+    invalid_arg "legacy completion State ACK was not installed"
+;;
+
+let schedule_idle_completion_retirement t (completion : Idle_completion_data.t) =
+  let open Result.Let_syntax in
+  let%bind () = check_idle_completion_identity t completion in
+  match completion.phase, completion.cleanup with
+  | (Fresh | Retired), _ ->
+    let promise, resolver = Eio.Promise.create () in
+    Eio.Promise.resolve resolver (Ok ());
+    Ok promise
+  | (Claimed _ | Completing _), Running promise -> Ok promise
+  | (Claimed _ | Completing _), Scheduling_failed (failure, _) -> Error failure
+  | (Claimed _ | Completing _), Idle ->
+    let promise, resolver = Eio.Promise.create () in
+    let finished result =
+      match Eio.Promise.peek promise with
+      | Some _ -> ()
+      | None ->
+        (match completion.cleanup with
+         | Running actual when phys_equal actual promise -> completion.cleanup <- Idle
+         | Idle | Running _ | Scheduling_failed _ -> ());
+        Eio.Promise.resolve resolver result
+    in
+    completion.cleanup <- Running promise;
+    (try
+       Eio.Fiber.fork ~sw:t.sw (fun () ->
+         match
+           Eio.Fiber.yield ();
+           Eio.Promise.await completion.exited;
+           call t ~priority:Priority (Idle_completion (Retire_paired completion))
+         with
+         | result -> finished result
+         | exception exn ->
+           let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+           finished
+             (Error (error Interrupted "legacy completion retirement was interrupted"));
+           Exn.raise_with_original_backtrace exn backtrace);
+       Ok promise
+     with
+     | exn ->
+       let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+       let failure =
+         error
+           Interrupted
+           ("legacy completion retirement could not be scheduled: " ^ Exn.to_string exn)
+       in
+       (* This is cleanup setup, possibly called from an original-error finally.
+          Retain its exact diagnostic without replacing that original exit. *)
+       completion.cleanup <- Scheduling_failed (failure, Raised (exn, backtrace));
+       (match Eio.Promise.peek promise with
+        | None -> Eio.Promise.resolve resolver (Error failure)
+        | Some _ -> ());
+       Error failure)
+;;
+
+let drain_idle_completion_retirement t =
+  if not (Int.equal t.runtime_source_domain (Stdlib.Domain.self () :> int))
+  then Error (error Conflict "legacy completion drain belongs to another Actor domain")
+  else (
+    match t.idle_completion with
+    | None -> Ok ()
+    | Some completion ->
+      let open Result.Let_syntax in
+      let%bind () = check_idle_completion_identity t completion in
+      Idle_completion_data.request_cancellation
+        completion
+        (error Interrupted "legacy completion source is retiring");
+      let%bind promise = schedule_idle_completion_retirement t completion in
+      Eio.Promise.await promise)
+;;
+
+let prepare_idle_operation_suffix
+      t
+      (completion : Idle_completion_data.t option)
+      ~operation
+      ~custody
+      ~installed
+      ~kind
+  =
+  match completion with
+  | None -> Ok ()
+  | Some completion ->
+    let%bind.Result () = check_idle_completion_source t completion in
+    let owner : Operation_owner.t =
+      { operation_id = operation.Agent_protocol.Operation.id
+      ; admission = create_agent_admission custody
+      ; held = None
+      ; descendant_guard = None
+      }
+    in
+    let suffix : Idle_completion_data.operation_suffix =
+      { operation
+      ; owner
+      ; owner_slot = Some owner
+      ; worker = t.operation_worker
+      ; installed
+      ; kind
+      ; phase = Prepared
+      ; native_write = None
+      ; previous_owner = t.operation_agent_custody
+      }
+    in
+    completion.suffix <- Some (Operation suffix);
+    Ok ()
+;;
+
+let check_idle_operation_suffix t (completion : Idle_completion_data.t option) operation =
+  match completion with
+  | None -> Ok ()
+  | Some completion ->
+    let open Result.Let_syntax in
+    let%bind () = check_idle_completion_source t completion in
+    let%bind () =
+      match completion.cancellation with
+      | None -> Ok ()
+      | Some failure -> Error failure
+    in
+    (match completion.suffix, t.state.active_operation, t.operation_agent_custody with
+     | Some (Operation suffix), Some actual, Some owner
+       when Idle_completion_data.equal_operation_phase suffix.phase Acknowledged
+            && phys_equal owner suffix.owner
+            && Option.equal phys_equal suffix.worker t.operation_worker
+            && Agent_protocol.Id.Operation.equal
+                 operation.Agent_protocol.Operation.id
+                 actual.id
+            && Agent_protocol.Id.Operation.equal actual.id suffix.operation.id
+            && Int.equal actual.generation suffix.operation.generation
+            && Agent_protocol.Operation.equal_kind actual.kind suffix.operation.kind ->
+       Ok ()
+     | _ ->
+       Error (error Conflict "legacy completion cannot redirect its acknowledged worker"))
+;;
+
+let handoff_idle_operation (completion : Idle_completion_data.t option) =
+  Option.iter completion ~f:(fun completion ->
+    match completion.Idle_completion_data.suffix with
+    | Some (Operation suffix) -> suffix.phase <- Handed_off
+    | None | Some (Stop _) -> invalid_arg "legacy completion has no operation to hand off")
+;;
+
 let drain_descendant_cleanup t =
   let open Result.Let_syntax in
+  let%bind () = drain_idle_completion_retirement t in
   let%bind () =
     if Int.equal t.runtime_source_domain (Stdlib.Domain.self () :> int)
     then Ok ()
@@ -7927,6 +8412,7 @@ module Goal_runtime_operation_acknowledgement = struct
 end
 
 let install_committed_transition_owned
+      ?idle_completion_write
       ?inherited_turn_acknowledgement
       ?root_reserve_acknowledgement
       ?root_close_acknowledgement
@@ -7973,6 +8459,8 @@ let install_committed_transition_owned
   List.iter explicit_goal_holds ~f:(invalidate_goal_inference_allocations t);
   invalidate_goal_inference_policy ?admission_hold t transition.state;
   t.state <- transition.state;
+  Option.iter idle_completion_write ~f:(fun owned ->
+    install_idle_completion_writer t owned transition);
   (match descendant_admission_acknowledgement with
    | None -> ()
    | Some acknowledgement -> install_descendant_admission_slot_ack t acknowledgement);
@@ -8047,6 +8535,7 @@ let install_committed_transition_owned
 (* Initial callers retain their typed adapter; the shared ACK installation owns
    exactly one closed preparation family, never two optional mutable owners. *)
 let install_committed_transition
+      ?idle_completion_write
       ?inherited_turn_acknowledgement
       ?root_reserve_acknowledgement
       ?root_close_acknowledgement
@@ -8071,6 +8560,7 @@ let install_committed_transition
       transition
   =
   install_committed_transition_owned
+    ?idle_completion_write
     ?inherited_turn_acknowledgement
     ?root_reserve_acknowledgement
     ?root_close_acknowledgement
@@ -8478,6 +8968,7 @@ module Owned_inference_persistence = struct
 end
 
 let persist_transition
+      ?idle_completion_write
       ?owned_inference_persistence
       ?descendant_admission_acknowledgement
       ?run_preparation
@@ -8578,6 +9069,24 @@ let persist_transition
       then exclude_effect_deferred t Admission_attempted
       else if deferred_execution_delta t.state requested.delta
       then exclude_effect_deferred t Ordinary_execution;
+    let%bind () =
+      match idle_completion_write with
+      | None -> Ok ()
+      | Some ((_, write) as owned) ->
+        let selected =
+          if phys_equal candidate requested
+          then
+            Ok
+              (Idle_completion_write.Selected.Requested (Idle_completion_write.kind write))
+          else (
+            match admission_hold with
+            | Some goal -> Ok (Idle_completion_write.Selected.Admission_hold goal)
+            | None ->
+              Error (error Invalid_state "legacy writer selected an unowned candidate"))
+        in
+        let%bind selected = selected in
+        select_idle_completion_writer t owned ~candidate ~selected
+    in
     Option.iter commit_attempted ~f:(fun attempted -> attempted := true);
     (* A policy Hold may select a different metadata-only writer. Only the
        exact requested canonical candidate makes this child occurrence uncertain;
@@ -8588,7 +9097,17 @@ let persist_transition
         descendant_admission_acknowledgement
         ~f:(fun (ack : Descendant_admission_slot.Acknowledgement_plan.t) ->
           ack.slot.preparation.writer_attempted := true);
-    t.persistence.commit ~command_audit ~previous:t.state candidate
+    match t.persistence.commit ~command_audit ~previous:t.state candidate with
+    | Ok () -> Ok ()
+    | Error failure as result ->
+      Option.iter idle_completion_write ~f:(fun (_, write) ->
+        Idle_completion_write.retain_failure write failure);
+      result
+    | exception exn ->
+      let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+      Option.iter idle_completion_write ~f:(fun (_, write) ->
+        Idle_completion_write.retain_exception write exn backtrace);
+      Exn.raise_with_original_backtrace exn backtrace
   in
   match admission with
   | Deferred deferred -> Error (goal_capacity_deferred deferred)
@@ -8611,7 +9130,7 @@ let persist_transition
         in
         retain_recurrence_activations t held.state;
         let%map () = commit ~admission_hold:goal_id ~command_audit:None held in
-        install_committed_transition ~admission_hold:goal_id t held;
+        install_committed_transition ?idle_completion_write ~admission_hold:goal_id t held;
         publish_committed_transition t held
     in
     Error (error Permission_denied "goal policy holds fresh host-turn admission")
@@ -8630,6 +9149,7 @@ let prepare_completion_plan t (transition : Session_transition.t) completion_sam
 ;;
 
 let install
+      ?idle_completion_write
       ?inherited_turn_acknowledgement
       ?held_operation_acknowledgement
       ?goal_operation_acknowledgement
@@ -8818,6 +9338,7 @@ let install
   in
   let%bind () =
     persist_transition
+      ?idle_completion_write
       ?descendant_admission_acknowledgement
       ?run_preparation
       ?admission_hold
@@ -8832,6 +9353,7 @@ let install
      yield or fail, so it cannot own this denial. Failed saves never reach here;
      automatic admission holds do not supply these control IDs. *)
   install_committed_transition
+    ?idle_completion_write
     ?held_operation_acknowledgement
     ?goal_operation_acknowledgement
     ?inherited_turn_acknowledgement
@@ -9060,6 +9582,7 @@ let check_constructor_job_handoff
 ;;
 
 let transition
+      ?idle_completion_step
       ?goal_runtime_scope
       ?check_before_commit
       ?constructor_stop_acknowledgement
@@ -9080,6 +9603,24 @@ let transition
       let completion_sample = producer_completion_sample ?completion_sample t ~delta in
       let%bind transition =
         prepare_transition ?completion_sample ?run_preparation t ~delta ~payloads
+      in
+      let commit_attempted =
+        match idle_completion_step with
+        | None -> commit_attempted
+        | Some _ ->
+          Some (Option.value_or_thunk commit_attempted ~default:(fun () -> ref false))
+      in
+      let%bind idle_completion_write =
+        match idle_completion_step, commit_attempted with
+        | None, _ -> Ok None
+        | Some (completion, kind), Some attempted ->
+          prepare_idle_completion_write
+            t
+            (Some completion)
+            ~kind
+            ~candidate:transition
+            ~attempted
+        | Some _, None -> assert false
       in
       let%bind goal_runtime_acknowledgement =
         match goal_runtime_scope with
@@ -9102,6 +9643,7 @@ let transition
       in
       let%map () =
         install
+          ?idle_completion_write
           ?goal_runtime_acknowledgement
           ?check_before_commit
           ?constructor_stop_acknowledgement
@@ -10650,6 +11192,8 @@ let replace_operation_worker t worker ~intended_manager =
         && (retirement.closing || Option.is_some t.state.active_operation)
       | Some (Ok (Error _) | Error _) | None -> true)
   then Error (error Conflict "cannot replace a retiring runtime")
+  else if Option.is_some t.idle_completion
+  then Error (error Conflict "legacy idle completion still owns its runtime")
   else if moderator_is_borrowed t
   then Error (error Conflict "cannot replace a borrowed moderator runtime")
   else (
@@ -14150,6 +14694,7 @@ let has_pending_permission t =
 let idle_actor_available t =
   runtime_admission_open t
   && (not t.idle_moderator_borrowed)
+  && Option.is_none t.idle_completion
   && Option.is_none t.moderator_borrow
   && Option.is_none t.state.active_operation
   && Agent_protocol.Session.equal_desired_state t.state.lifecycle.desired Running
@@ -18948,7 +19493,7 @@ let compaction_terminal_delta t operation outcome =
   , payloads )
 ;;
 
-let compaction_terminal t operation_id outcome =
+let compaction_terminal ?idle_completion t operation_id outcome =
   match t.state.active_operation with
   | None -> Ok ()
   | Some operation when Agent_protocol.Id.Operation.compare operation.id operation_id <> 0
@@ -18962,13 +19507,28 @@ let compaction_terminal t operation_id outcome =
     in
     let%bind delta, payloads = compaction_terminal_delta t operation outcome in
     let%map _ =
-      match transition t ~delta ~payloads, outcome with
+      match
+        ( transition
+            ?idle_completion_step:
+              (Option.map idle_completion ~f:(fun completion ->
+                 completion, Idle_completion_write.Kind.Retire_compaction))
+            t
+            ~delta
+            ~payloads
+        , outcome )
+      with
       | Ok session, _ -> Ok session
       | Error failure, Compacted _ ->
         let%bind delta, payloads =
           compaction_terminal_delta t operation (Compaction_failed failure)
         in
-        transition t ~delta ~payloads
+        transition
+          ?idle_completion_step:
+            (Option.map idle_completion ~f:(fun completion ->
+               completion, Idle_completion_write.Kind.Retire_compaction))
+          t
+          ~delta
+          ~payloads
       | Error failure, _ -> Error failure
     in
     t.active_cancel <- None
@@ -19100,7 +19660,7 @@ let compaction_allocator t first_sequence reserved_through =
   |> Result.map_error ~f:(fun message -> error Invalid_state message)
 ;;
 
-let reconcile_foreground_invocations t =
+let reconcile_foreground_invocations ?idle_completion ?(terminal = false) t =
   let open Result.Let_syntax in
   let first =
     Int64.max
@@ -19119,6 +19679,12 @@ let reconcile_foreground_invocations t =
   then Ok ()
   else
     transition
+      ?idle_completion_step:
+        (Option.map idle_completion ~f:(fun completion ->
+           ( completion
+           , if terminal
+             then Idle_completion_write.Kind.Reconcile_terminal
+             else Reconcile_foreground )))
       t
       ~delta:
         (Session_delta.Batch
@@ -19147,6 +19713,7 @@ let retain_reconciliation_failure t failure =
 ;;
 
 let start_compaction
+      ?idle_completion
       ?operation
       ?follow_up_authority
       ?agent_custody
@@ -19155,7 +19722,7 @@ let start_compaction
   =
   let open Result.Let_syntax in
   let%bind () = require_runtime_admission t in
-  let%bind () = reconcile_foreground_invocations t in
+  let%bind () = reconcile_foreground_invocations ?idle_completion t in
   let revision = t.state.counters.revision in
   let first_sequence = t.state.conversation.next_history_sequence in
   if Int64.equal first_sequence Int64.max_value
@@ -19179,8 +19746,20 @@ let start_compaction
     let installed = ref false in
     Exn.protect
       ~f:(fun () ->
+        let%bind () =
+          prepare_idle_operation_suffix
+            t
+            idle_completion
+            ~operation
+            ~custody:child
+            ~installed
+            ~kind:(Idle_completion_data.Compaction (allocator, history))
+        in
         let%bind session =
           transition
+            ?idle_completion_step:
+              (Option.map idle_completion ~f:(fun completion ->
+                 completion, Idle_completion_write.Kind.Start_compaction))
             t
             ~check_before_commit:(fun () ->
               match follow_up_authority with
@@ -19211,9 +19790,12 @@ let start_compaction
                   }
               ]
         in
-        install_operation_agent_custody t operation child;
+        let%bind () = check_idle_operation_suffix t idle_completion operation in
+        if Option.is_none idle_completion
+        then install_operation_agent_custody t operation child;
         installed := true;
         launch_compaction t operation allocator history;
+        handoff_idle_operation idle_completion;
         Ok session)
       ~finally:(fun () ->
         if not !installed then Option.iter child ~f:retire_agent_custody))
@@ -19399,7 +19981,7 @@ let foreground_terminal_requests t operation_id outcome =
     follow_up_deltas t plan
 ;;
 
-let worker_terminal t operation_id outcome compaction_custody =
+let worker_terminal ?idle_completion t operation_id outcome compaction_custody =
   match t.state.active_operation with
   | None -> Ok ()
   | Some operation when Agent_protocol.Id.Operation.compare operation.id operation_id <> 0
@@ -19493,6 +20075,9 @@ let worker_terminal t operation_id outcome compaction_custody =
     let%bind job_custody = prepare_terminal_job_custody t jobs in
     let%bind _ =
       transition
+        ?idle_completion_step:
+          (Option.map idle_completion ~f:(fun completion ->
+             completion, Idle_completion_write.Kind.Retire_turn))
         ~completion_sample
         ~job_custody
         t
@@ -19514,18 +20099,21 @@ let worker_terminal t operation_id outcome compaction_custody =
     Option.iter event_borrow ~f:(fun _ -> t.queued_event_borrow <- None);
     t.foreground_moderator <- None;
     t.notification_inputs <- None;
-    t.idle_moderator_borrowed <- moderator_is_borrowed t;
+    t.idle_moderator_borrowed <- Option.is_some idle_completion || moderator_is_borrowed t;
     t.invocation_executions <- independent;
     t.active_cancel <- None;
     (match t.state.lifecycle.desired, t.state.halted with
      | Stopped, _ | _, true -> cancel_independent_moderator t
      | Running, false -> ());
     let%bind () =
-      match reconcile_foreground_invocations t with
+      match reconcile_foreground_invocations ?idle_completion ~terminal:true t with
       | Ok () -> Ok ()
       | Error failure ->
-        let%bind () = retain_reconciliation_failure t failure in
-        Error failure
+        (match idle_completion with
+         | Some _ -> Error failure
+         | None ->
+           let%bind () = retain_reconciliation_failure t failure in
+           Error failure)
     in
     if runtime_admission_open t && outcome_requests_compaction outcome
     then
@@ -33762,6 +34350,7 @@ let drain_payloads (drain : Runtime_builder.moderator_drain) =
 ;;
 
 let start_idle_turn_unchecked
+      ?idle_completion
       ?goal_runtime_scope
       ?continuation_custody
       ?follow_up_authority
@@ -33776,7 +34365,7 @@ let start_idle_turn_unchecked
   let open Result.Let_syntax in
   let%bind () = require_selected_execution t in
   let%bind () = require_runtime_admission t in
-  let%bind () = reconcile_foreground_invocations t in
+  let%bind () = reconcile_foreground_invocations ?idle_completion t in
   let operation = create_turn_operation t reason in
   let%bind admission =
     let retention = Pending_disposition.Retention.default in
@@ -33870,6 +34459,23 @@ let start_idle_turn_unchecked
           ~commit_attempted:attempted
           ~plan:(operation, agent_custody)
       in
+      let%bind () =
+        prepare_idle_operation_suffix
+          t
+          idle_completion
+          ~operation
+          ~custody:agent_custody
+          ~installed
+          ~kind:(Idle_completion_data.Turn staged)
+      in
+      let%bind idle_completion_write =
+        prepare_idle_completion_write
+          t
+          idle_completion
+          ~kind:Idle_completion_write.Kind.Start_ordinary_turn
+          ~candidate
+          ~attempted
+      in
       let checked_final () =
         let%bind () = final_check () in
         Turn_admission_staging.check_before_writer
@@ -33881,6 +34487,7 @@ let start_idle_turn_unchecked
         match goal_runtime_scope with
         | None ->
           install
+            ?idle_completion_write
             ~turn_stage:staged
             ?completion_sample
             ~commit_attempted:attempted
@@ -33947,12 +34554,14 @@ let start_idle_turn_unchecked
           ~owner:t.run_preparation_owner
           ~state:t.state
       in
+      let%bind () = check_idle_operation_suffix t idle_completion operation in
       if Option.is_none t.operation_agent_custody
       then (
         install_operation_agent_custody t operation agent_custody;
         installed := true);
       prune_pending_agent_custody t;
       launch_worker t operation;
+      handoff_idle_operation idle_completion;
       Ok ())
     ~finally:(fun () ->
       if not !installed then Option.iter agent_custody ~f:retire_agent_custody)
@@ -34114,6 +34723,7 @@ let suppress_follow_up_deltas t deltas ~reason =
 ;;
 
 let start_idle_turn
+      ?idle_completion
       ?goal_runtime_scope
       ?continuation_custody
       ?follow_up_authority
@@ -34145,6 +34755,7 @@ let start_idle_turn
   match decision with
   | Allow_automatic_turn ->
     start_idle_turn_unchecked
+      ?idle_completion
       ?goal_runtime_scope
       ?continuation_custody
       ?follow_up_authority
@@ -34167,6 +34778,9 @@ let start_idle_turn
       |> Result.all
     in
     transition
+      ?idle_completion_step:
+        (Option.map idle_completion ~f:(fun completion ->
+           completion, Idle_completion_write.Kind.Suppress_automatic))
       t
       ~delta:
         (Session_delta.Batch
@@ -34181,6 +34795,7 @@ let start_idle_turn
 ;;
 
 let stop_from_idle_moderator
+      ?idle_completion
       ?(extra_deltas : Session_delta.t list = [])
       t
       (drain : Runtime_builder.moderator_drain)
@@ -34240,8 +34855,13 @@ let stop_from_idle_moderator
           { desired_state = lifecycle.desired; observed_state = lifecycle.observed }
       ]
   in
+  Option.iter idle_completion ~f:(fun completion ->
+    completion.Idle_completion_data.suffix <- Some (Stop (jobs, permissions)));
   let%map _ =
     transition
+      ?idle_completion_step:
+        (Option.map idle_completion ~f:(fun completion ->
+           completion, Idle_completion_write.Kind.Stop))
       ~retire_legacy_custody:()
       ~job_custody
       t
@@ -34255,7 +34875,9 @@ let stop_from_idle_moderator
       ~payloads
   in
   cancel_job_scopes t jobs;
-  resolve_cleaned_permission_waiters t permissions
+  resolve_cleaned_permission_waiters t permissions;
+  Option.iter idle_completion ~f:(fun completion ->
+    completion.Idle_completion_data.suffix <- None)
 ;;
 
 let deliver_idle_notifications_internal
@@ -34449,31 +35071,57 @@ let apply_observation_follow_up t =
     resume_deferred || not (List.is_empty extra_deltas)
 ;;
 
-let checkpoint_idle_moderator t (drain : Runtime_builder.moderator_drain) =
+let checkpoint_idle_moderator ?idle_completion t (drain : Runtime_builder.moderator_drain)
+  =
   transition
+    ?idle_completion_step:
+      (Option.map idle_completion ~f:(fun completion ->
+         completion, Idle_completion_write.Kind.Checkpoint))
     t
     ~delta:(Session_delta.Moderator_changed drain.Runtime_builder.moderator_snapshot)
     ~payloads:(drain_payloads drain)
   |> Result.map ~f:(fun _ -> ())
 ;;
 
-let complete_running_idle_moderator t (drain : Runtime_builder.moderator_drain) =
+let complete_running_idle_moderator
+      ?idle_completion
+      t
+      (drain : Runtime_builder.moderator_drain)
+  =
   let open Result.Let_syntax in
   let requests = drain.Runtime_builder.runtime_requests in
   let%bind eligible = eligible_pending t Idle_start in
+  Option.iter idle_completion ~f:(fun completion ->
+    completion.Idle_completion_data.action
+    <- Some
+         (match eligible with
+          | _ :: _ -> Turn
+          | [] when Chat_response.Runtime_semantics.request_compaction requests ->
+            Compaction
+          | [] when Chat_response.Runtime_semantics.request_turn requests -> Turn
+          | [] -> Checkpoint));
   match eligible with
-  | _ :: _ -> start_idle_turn t drain ~reason:User_submit ~adopt_deferred:true
+  | _ :: _ ->
+    start_idle_turn ?idle_completion t drain ~reason:User_submit ~adopt_deferred:true
   | [] when Chat_response.Runtime_semantics.request_compaction requests ->
     let open Result.Let_syntax in
-    let%bind () = checkpoint_idle_moderator t drain in
-    Result.map (start_compaction t) ~f:(fun _ -> ())
+    let%bind () = checkpoint_idle_moderator ?idle_completion t drain in
+    Result.map (start_compaction ?idle_completion t) ~f:(fun _ -> ())
   | [] when Chat_response.Runtime_semantics.request_turn requests ->
-    start_idle_turn t drain ~reason:Moderator_request ~adopt_deferred:false
-  | [] -> checkpoint_idle_moderator t drain
+    start_idle_turn
+      ?idle_completion
+      t
+      drain
+      ~reason:Moderator_request
+      ~adopt_deferred:false
+  | [] -> checkpoint_idle_moderator ?idle_completion t drain
 ;;
 
 let complete_idle_moderator t (drain : Runtime_builder.moderator_drain) =
-  if (not t.idle_moderator_borrowed) || moderator_is_borrowed t
+  if
+    Option.is_some t.idle_completion
+    || (not t.idle_moderator_borrowed)
+    || moderator_is_borrowed t
   then Error (error Conflict "session moderator is not borrowed for idle work")
   else (
     let result =
@@ -34491,7 +35139,7 @@ let complete_idle_moderator t (drain : Runtime_builder.moderator_drain) =
 ;;
 
 let fail_idle_moderator t failure =
-  if moderator_is_borrowed t
+  if Option.is_some t.idle_completion || moderator_is_borrowed t
   then Error (error Conflict "observation callback owns the idle moderator")
   else (
     t.idle_moderator_borrowed <- false;
@@ -34511,6 +35159,270 @@ let fail_idle_moderator t failure =
             { desired_state = lifecycle.desired; observed_state = lifecycle.observed }
         ]
     |> Result.map ~f:(fun _ -> ()))
+;;
+
+let claim_paired_idle_completion t (completion : Idle_completion_data.t) =
+  let open Result.Let_syntax in
+  let%bind () = check_idle_completion_identity t completion in
+  let%bind () =
+    match
+      completion.phase, completion.cancellation, Eio.Promise.peek completion.exited
+    with
+    | Fresh, None, None -> Ok ()
+    | (Fresh | Claimed _ | Completing _ | Retired), _, _ ->
+      Error (error Conflict "legacy capture is already closed or claimed")
+  in
+  let%bind source = Runtime_builder.moderator_snapshot_observer t.state.moderator in
+  let basis : Idle_completion_data.basis =
+    { generation = t.state.identity.generation; source; worker = t.operation_worker }
+  in
+  let slot = Some completion in
+  let%map history = claim_idle_moderator t in
+  match history with
+  | None -> None
+  | Some _ ->
+    completion.phase <- Claimed basis;
+    t.idle_completion <- slot;
+    history
+;;
+
+let remember_idle_completion_result t (completion : Idle_completion_data.t) result =
+  completion.Idle_completion_data.outcome <- Some result;
+  (match result with
+   | Ok () -> ()
+   | Error failure ->
+     Option.iter completion.write ~f:(fun write ->
+       Idle_completion_write.retain_failure write failure);
+     Idle_completion_data.request_cancellation completion failure);
+  let released = release_idle_completion t completion in
+  match result, released with
+  | Ok (), Ok () -> Ok ()
+  | Error failure, (Ok () | Error _) -> Error failure
+  | Ok (), Error failure ->
+    Idle_completion_data.request_cancellation completion failure;
+    completion.outcome <- Some (Error failure);
+    Error failure
+;;
+
+let capture_paired_idle_completion
+      t
+      (completion : Idle_completion_data.t)
+      (drain : Runtime_builder.moderator_drain)
+  =
+  let open Result.Let_syntax in
+  let%bind () = check_idle_completion_owner t completion in
+  let%bind basis =
+    match completion.phase with
+    | Claimed basis -> Ok basis
+    | Fresh | Completing _ | Retired ->
+      Error (error Conflict "legacy callback result was already captured")
+  in
+  completion.phase <- Completing basis;
+  completion.drain <- Some drain;
+  match
+    let result =
+      match Chat_response.Runtime_semantics.should_end_session drain.runtime_requests with
+      | Some reason ->
+        completion.action <- Some Stop;
+        stop_from_idle_moderator ~idle_completion:completion t drain reason
+      | None
+        when runtime_admission_open t
+             && Agent_protocol.Session.equal_desired_state
+                  t.state.lifecycle.desired
+                  Running ->
+        complete_running_idle_moderator ~idle_completion:completion t drain
+      | None ->
+        completion.action <- Some Checkpoint;
+        checkpoint_idle_moderator ~idle_completion:completion t drain
+    in
+    remember_idle_completion_result t completion result
+  with
+  | result -> result
+  | exception exn ->
+    let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+    Option.iter completion.write ~f:(fun write ->
+      Idle_completion_write.retain_exception write exn backtrace);
+    Idle_completion_data.request_cancellation
+      completion
+      (error Interrupted "legacy completion raised before its handoff");
+    Exn.raise_with_original_backtrace exn backtrace
+;;
+
+let fail_paired_idle_completion t (completion : Idle_completion_data.t) failure =
+  let open Result.Let_syntax in
+  let%bind () = check_idle_completion_owner t completion in
+  let%bind basis =
+    match completion.phase with
+    | Claimed basis -> Ok basis
+    | Fresh | Completing _ | Retired ->
+      Error (error Conflict "legacy callback failure followed capture")
+  in
+  completion.phase <- Completing basis;
+  completion.action <- Some Callback_failure;
+  let lifecycle =
+    Session_state.Lifecycle.
+      { desired = t.state.lifecycle.desired; observed = Failed failure }
+  in
+  let result =
+    transition
+      ~idle_completion_step:(completion, Idle_completion_write.Kind.Callback_failure)
+      t
+      ~delta:
+        (Session_delta.Batch
+           [ Failure_changed (Some failure); Lifecycle_changed lifecycle ])
+      ~payloads:
+        [ Agent_protocol.Event.Durable.Payload.Session_state_changed
+            { desired_state = lifecycle.desired; observed_state = lifecycle.observed }
+        ]
+    |> Result.map ~f:ignore
+  in
+  completion.outcome <- Some (Error failure);
+  match result with
+  | Ok () -> release_idle_completion t completion
+  | Error diagnostic ->
+    Option.iter completion.write ~f:(fun write ->
+      Idle_completion_write.retain_failure write diagnostic);
+    Idle_completion_data.request_cancellation completion failure;
+    Error diagnostic
+;;
+
+let idle_operation_matches suffix (actual : Agent_protocol.Operation.t) =
+  Agent_protocol.Id.Operation.equal suffix.Idle_completion_data.operation.id actual.id
+  && Int.equal suffix.operation.generation actual.generation
+  && Agent_protocol.Operation.equal_kind suffix.operation.kind actual.kind
+;;
+
+let retire_paired_idle_completion t (completion : Idle_completion_data.t) =
+  let open Result.Let_syntax in
+  let%bind () = check_idle_completion_identity t completion in
+  match completion.phase with
+  | Fresh | Retired -> Ok ()
+  | Claimed _ | Completing _ ->
+    let%bind () = check_idle_completion_owner t completion in
+    let%bind () =
+      match Eio.Promise.peek completion.exited with
+      | Some () -> Ok ()
+      | None -> Error (error Conflict "legacy callback has not left its actual capture")
+    in
+    let%bind () =
+      match completion.write with
+      | Some write ->
+        (match Idle_completion_write.phase write with
+         | Attempted -> Error (idle_completion_failure completion)
+         | Installed _ | Not_attempted -> Ok ())
+      | None -> Ok ()
+    in
+    let%bind () =
+      match completion.suffix with
+      | None -> Ok ()
+      | Some (Stop (jobs, permissions)) ->
+        (match completion.write with
+         | Some write ->
+           (match Idle_completion_write.phase write with
+            | Installed _ ->
+              cancel_job_scopes t jobs;
+              resolve_cleaned_permission_waiters t permissions;
+              completion.suffix <- None;
+              Ok ()
+            | Not_attempted ->
+              completion.suffix <- None;
+              Ok ()
+            | Attempted -> Error (idle_completion_failure completion))
+         | None ->
+           completion.suffix <- None;
+           Ok ())
+      | Some (Operation suffix) ->
+        (match suffix.phase with
+         | Prepared | Handed_off | Terminated -> Ok ()
+         | Terminal_acknowledged -> Error (idle_completion_failure completion)
+         | Acknowledged ->
+           let%bind () =
+             match suffix.native_write with
+             | Some write ->
+               (match Idle_completion_write.phase write with
+                | Installed acknowledgement ->
+                  (match
+                     Idle_completion_write.Acknowledgement.selected acknowledgement
+                   with
+                   | Requested (Start_ordinary_turn | Start_compaction) -> Ok ()
+                   | Requested _ | Admission_hold _ ->
+                     Error (error Conflict "legacy operation lacks its actual native ACK"))
+                | Attempted | Not_attempted ->
+                  Error (error Conflict "legacy operation writer is not acknowledged"))
+             | None ->
+               Error (error Conflict "legacy operation has no actual writer owner")
+           in
+           let%bind () =
+             match t.state.active_operation, t.operation_agent_custody with
+             | Some actual, Some owner
+               when idle_operation_matches suffix actual && phys_equal suffix.owner owner
+               -> Ok ()
+             | _ ->
+               Error
+                 (error
+                    Conflict
+                    "legacy operation retirement lost its exact acknowledged owner")
+           in
+           let failure =
+             Option.value
+               completion.cancellation
+               ~default:(error Interrupted "legacy completion source retired")
+           in
+           let%bind () =
+             match
+               with_runtime_terminal t suffix.operation.id (fun () ->
+                 match suffix.kind with
+                 | Turn _ ->
+                   worker_terminal
+                     ~idle_completion:completion
+                     t
+                     suffix.operation.id
+                     (Failed failure)
+                     None
+                 | Compaction _ ->
+                   compaction_terminal
+                     ~idle_completion:completion
+                     t
+                     suffix.operation.id
+                     (Compaction_cancelled failure.message))
+             with
+             | Ok () -> Ok ()
+             | Error diagnostic ->
+               Option.iter completion.write ~f:(fun write ->
+                 Idle_completion_write.retain_failure write diagnostic);
+               Error diagnostic
+             | exception exn ->
+               let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+               Option.iter completion.write ~f:(fun write ->
+                 Idle_completion_write.retain_exception write exn backtrace);
+               Exn.raise_with_original_backtrace exn backtrace
+           in
+           (match suffix.phase with
+            | Terminal_acknowledged ->
+              suffix.phase <- Terminated;
+              Ok ()
+            | Prepared | Acknowledged | Handed_off | Terminated ->
+              Error (error Conflict "legacy operation terminal has no actual State ACK")))
+    in
+    release_idle_completion t completion
+;;
+
+let handle_idle_completion_request
+  : type outcome.
+    t
+    -> outcome Idle_completion_data.Request.t
+    -> (outcome, Agent_protocol.Error.t) result
+  =
+  fun t request ->
+  match request with
+  | Claim -> claim_idle_moderator t
+  | Complete drain -> complete_idle_moderator t drain
+  | Fail failure -> fail_idle_moderator t failure
+  | Claim_paired completion -> claim_paired_idle_completion t completion
+  | Capture_paired (completion, drain) ->
+    capture_paired_idle_completion t completion drain
+  | Fail_paired (completion, failure) -> fail_paired_idle_completion t completion failure
+  | Retire_paired completion -> retire_paired_idle_completion t completion
 ;;
 
 let lease_generation t = Int64.(t.state.counters.owner_lease_generation + 1L)
@@ -34887,6 +35799,10 @@ let enable_automatic_turn_budget ?check_before_commit ?run_preparation t policy 
 ;;
 
 let lifecycle_request_allowed : type a. a request -> bool = function
+  | Idle_completion request ->
+    (match request with
+     | Claim | Claim_paired _ -> false
+     | Complete _ | Fail _ | Capture_paired _ | Fail_paired _ | Retire_paired _ -> true)
   | Inherited_turn request -> Inherited_turn.Request.lifecycle_allowed request
   | Descendant_root request -> Descendant_root_request.lifecycle_allowed request
   | Native_goal (Close_scope _ | Rollback _ | Finish_start_dispatch _) -> true
@@ -35018,8 +35934,6 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Complete_schedule _
   | Fail_schedule _
   | Skip_schedule _
-  | Complete_idle_moderator _
-  | Fail_idle_moderator _
   | Expire_permission _
   | Detach _
   | Owner_expired _
@@ -35241,7 +36155,6 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Retry_schedule _
   | Prepare_ingress_submission _
   | Commit_ingress_submission _
-  | Claim_idle_moderator
   | Apply_observation_follow_up
   | Attach _
   | Renew_owner _ -> false
@@ -35662,7 +36575,8 @@ let begin_lifecycle t attachment_id expected_generation expected_revision =
   if Option.is_some t.lifecycle_fence
   then Error (error Conflict "session lifecycle change is already reserved")
   else if
-    Option.is_some t.descendant_admission_slot
+    Option.is_some t.idle_completion
+    || Option.is_some t.descendant_admission_slot
     || Option.is_some t.inherited_turn_prepared
     || Option.is_some t.inherited_turn_cleanup
   then
@@ -43851,10 +44765,8 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
     | Fail_schedule (schedule_id, generation, failure) ->
       fail_schedule t schedule_id generation failure
     | Skip_schedule (schedule_id, generation) -> skip_schedule t schedule_id generation
-    | Claim_idle_moderator -> claim_idle_moderator t
+    | Idle_completion request -> handle_idle_completion_request t request
     | Apply_observation_follow_up -> apply_observation_follow_up t
-    | Complete_idle_moderator drain -> complete_idle_moderator t drain
-    | Fail_idle_moderator failure -> fail_idle_moderator t failure
     | Attach (mode, subscribe, principal_id, reclaim_token) ->
       attach t mode subscribe principal_id reclaim_token
     | Detach attachment_id -> detach t attachment_id
@@ -44046,6 +44958,7 @@ let create_internal
     ; descendant_policy_cells = []
     ; descendant_host_binding = None
     ; descendant_admission_slot = None
+    ; idle_completion = None
     ; inherited_turn_prepared = None
     ; inherited_turn_cleanup = None
     ; configuration_update_owner = Configuration_update.Owner.create ()
@@ -45804,7 +46717,93 @@ let skip_schedule t ~schedule_id ~generation =
   call t (Skip_schedule (schedule_id, generation))
 ;;
 
-let claim_idle_moderator t = call t Claim_idle_moderator
+module Idle_moderator_completion = struct
+  type actor = t
+
+  type t =
+    { actor : actor
+    ; completion : Idle_completion_data.t
+    }
+
+  let create (actor : actor) =
+    let exited, exit = Eio.Promise.create () in
+    let completion : Idle_completion_data.t =
+      { issuing_actor = actor.inference_owner_identity
+      ; identity = ref ()
+      ; domain = actor.runtime_source_domain
+      ; exited
+      ; exit
+      ; phase = Fresh
+      ; action = None
+      ; prefix = Empty
+      ; pending_prefix = None
+      ; write = None
+      ; suffix = None
+      ; drain = None
+      ; outcome = None
+      ; cancellation = None
+      ; cleanup = Idle
+      }
+    in
+    { actor; completion }
+  ;;
+
+  let check (t : t) = check_idle_completion_identity t.actor t.completion
+
+  let claim t =
+    let%bind.Result () = check t in
+    call t.actor (Idle_completion (Claim_paired t.completion))
+  ;;
+
+  let capture t drain =
+    let%bind.Result () = check t in
+    call
+      t.actor
+      ~priority:Priority
+      (Idle_completion (Capture_paired (t.completion, drain)))
+  ;;
+
+  let fail_callback t ~failure =
+    let%bind.Result () = check t in
+    call
+      t.actor
+      ~priority:Priority
+      (Idle_completion (Fail_paired (t.completion, failure)))
+  ;;
+
+  let leave_capture t =
+    match check t with
+    | Error _ -> ()
+    | Ok () ->
+      (match Eio.Promise.peek t.completion.exited with
+       | None -> Eio.Promise.resolve t.completion.exit ()
+       | Some () -> ())
+  ;;
+
+  let finish t =
+    let%bind.Result () = check t in
+    match t.completion.outcome with
+    | Some result -> result
+    | None -> Error (error Conflict "legacy callback has no captured outcome")
+  ;;
+
+  let cancel t ~failure =
+    match check t with
+    | Error _ -> ()
+    | Ok () ->
+      Idle_completion_data.request_cancellation t.completion failure;
+      (match schedule_idle_completion_retirement t.actor t.completion with
+       | Ok _ | Error _ -> ())
+  ;;
+
+  let join_retirement t =
+    let%bind.Result () = check t in
+    let%bind.Result promise = schedule_idle_completion_retirement t.actor t.completion in
+    Eio.Promise.await promise
+  ;;
+end
+
+let claim_idle_moderator t = call t (Idle_completion Claim)
 let apply_observation_follow_up t = call t Apply_observation_follow_up
 let apply_moderator_follow_up t = call t Apply_observation_follow_up
 
@@ -45813,11 +46812,11 @@ let invocation_granted t ~tool_name ~identity_digest =
 ;;
 
 let complete_idle_moderator t drain =
-  call t ~priority:Priority (Complete_idle_moderator drain)
+  call t ~priority:Priority (Idle_completion (Complete drain))
 ;;
 
 let fail_idle_moderator t failure =
-  call t ~priority:Priority (Fail_idle_moderator failure)
+  call t ~priority:Priority (Idle_completion (Fail failure))
 ;;
 
 let attach_with_snapshot t ~principal_id ~reclaim_token ~mode ~subscribe =

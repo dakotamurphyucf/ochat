@@ -534,3 +534,26 @@ retains the exact prepared owner for factual cleanup and recovery. Waiting,
 settlement, controlled and retained outcomes reserve no Turn and keep their
 actual metadata results and failure classification. No new input, Run, lifecycle
 callback replay or fresh count decision is inferred from a command receipt.
+
+## Aggregate legacy idle completion
+
+The aggregate legacy moderator callback retains one process-local completion
+owner from its idle claim through callback exit and native completion. A late
+cancellation cannot release a later claim. Checkpoint, Stop, suppression and
+compaction metadata use the existing writer. An attempted write without an
+installed State acknowledgement retains its actual candidate, diagnostic and
+runtime; neither a failed return nor the absence of an inherited reservation
+proves that no write occurred.
+
+A Goal Hold acknowledgement belongs to its selected metadata candidate, rather
+than the requested Turn. Checkpoint, foreground reconciliation and
+compaction-start acknowledgements remain separate facts. An acknowledged
+operation retains its actual custody, staged Turn or compaction history, and
+physical worker until launch or factual terminal cleanup. Publication failure
+cannot erase that acknowledgement or select a replacement worker.
+
+Source close joins the exact completion cleanup before raw runtime close. If
+terminal acknowledgement is known but subsequent cleanup fails, both the fact
+and its unresolved cleanup diagnostic remain retained; the callback or writer is
+not replayed. This ownership bookkeeping does not classify a source or create an
+inherited admission.
