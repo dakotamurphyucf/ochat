@@ -64,7 +64,9 @@ end
     context into the mutable state owner. Conflicts fail before any write. Optional
     transaction metadata changes only its four owned scalar fields; original
     native validation and complete bounds admission precede those changes, and
-    the complete stamped document passes bounds and current domain validation. *)
+    the complete stamped document passes bounds and current domain validation.
+    Newly Included local occurrences must match the actual final publication
+    revision after optional stamping; other unstamped replay remains supported. *)
 val apply
   :  t
   -> ?transaction_metadata:Transaction_metadata.t

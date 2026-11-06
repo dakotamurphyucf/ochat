@@ -14,6 +14,7 @@ type t =
   ; goal_accounts_absent : bool
   ; delegated_usage_absent : bool
   ; child_contributions_absent : bool
+  ; goal_descendants_absent : bool
   ; instruction_selection_absent : bool
   ; recurrence_catalog_absent : bool
   ; delivery_bindings : bool Map.M(Delivery_id).t
@@ -25,6 +26,7 @@ let authored =
   ; goal_accounts_absent = false
   ; delegated_usage_absent = false
   ; child_contributions_absent = false
+  ; goal_descendants_absent = false
   ; instruction_selection_absent = false
   ; recurrence_catalog_absent = false
   ; delivery_bindings = Map.empty (module Delivery_id)
@@ -36,6 +38,7 @@ let goal_catalog_is_absent t = t.goal_catalog_absent
 let goal_accounts_is_absent t = t.goal_accounts_absent
 let delegated_usage_is_absent t = t.delegated_usage_absent
 let child_contributions_is_absent t = t.child_contributions_absent
+let goal_descendants_is_absent t = t.goal_descendants_absent
 let instruction_selection_is_absent t = t.instruction_selection_absent
 let recurrence_catalog_is_absent t = t.recurrence_catalog_absent
 
@@ -85,6 +88,11 @@ let of_document document ~limits =
     | Absent -> true
     | Null | Value _ -> false
   in
+  let goal_descendants_absent =
+    match D.Json.field payload ~name:"goal_descendants" with
+    | Absent -> true
+    | Null | Value _ -> false
+  in
   let recurrence_catalog_absent =
     match D.Json.field payload ~name:"recurrence_catalog" with
     | Absent -> true
@@ -129,6 +137,7 @@ let of_document document ~limits =
   ; goal_accounts_absent
   ; delegated_usage_absent
   ; child_contributions_absent
+  ; goal_descendants_absent
   ; instruction_selection_absent
   ; recurrence_catalog_absent
   ; delivery_bindings

@@ -285,6 +285,7 @@ let before event state = Task.bind(Intercept.respond("%s:" ++ to_string(state), 
               ; parent_stop_epoch = Some parent.stop_epoch
               ; authority_sha256 = Authority.fingerprint parent |> protocol_ok
               ; authored_tool = Some origin
+              ; goal_origin = None
               ; captured_recurrence = None
               ; capability_pins =
                   Chat_response.Background_request.capability_pins capabilities

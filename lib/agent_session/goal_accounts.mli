@@ -73,6 +73,15 @@ module Ordered_bootstrap : sig
       Existing partitions retain original-to-final Stored validation. *)
   val advance : t -> step -> (t, Agent_protocol.Error.t) result
 
+  (** A genuinely new Goal observed at an actual Catalog missing-to-present
+      edge, followed by its actual Accounts bootstrap against the original
+      ledger. Replacement does not manufacture creation evidence. The original
+      Goal and account remain available through later same-batch edits. *)
+  val creation
+    :  t
+    -> goal_id:Agent_protocol.Id.Goal.t
+    -> (Agent_protocol.Goal.t * Goal_accounting_document.t) option
+
   (** Same final checks as validate_transition, with the narrow additional
       captured creation Goal for each genuinely new partition. Incoming new
       Stored accounting must still equal the original before-ledger bootstrap;

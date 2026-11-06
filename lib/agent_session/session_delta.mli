@@ -45,6 +45,7 @@ type t =
   | Delegated_inference_ledger_changed of
       (Inference_ledger.t[@sexp.opaque]) * (Delegated_usage.t[@sexp.opaque])
   | Child_contributions_changed of (Child_contributions.t[@sexp.opaque])
+  | Goal_descendants_changed of (Goal_descendants.Update.t[@sexp.opaque])
   | Job_changed of Agent_protocol.Job.t
   | Schedule_changed of Agent_protocol.Schedule.t
   | Invocation_changed of Agent_protocol.Invocation.t
@@ -133,4 +134,21 @@ val validate_goal_accounts
   :  t
   -> previous:Session_state.t
   -> next:Session_state.t
+  -> (unit, Agent_protocol.Error.t) result
+
+(** Validate descendant updates against each actual ordered canonical/catalog
+    edge, then check the complete final projection. Structural [apply] alone is
+    not this admission gate. *)
+val validate_goal_descendants
+  :  t
+  -> previous:Session_state.t
+  -> next:Session_state.t
+  -> (unit, Agent_protocol.Error.t) result
+
+(** At the actual publication boundary, each newly recorded LOCAL Included
+    receipt must name the published revision. Remote Reserve/Import revisions
+    are independent. This supplements the original+1 ordered-edge check. *)
+val validate_descendant_publication
+  :  t
+  -> revision:int64
   -> (unit, Agent_protocol.Error.t) result

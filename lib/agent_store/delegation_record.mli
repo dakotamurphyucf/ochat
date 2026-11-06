@@ -33,6 +33,9 @@ module Admission : sig
     ; parent_stop_epoch : int64 option [@sexp.option]
     ; authority_sha256 : string
     ; authored_tool : authored_tool option [@sexp.option]
+    ; goal_origin : Delegation_goal_origin.t option [@sexp.option]
+      (** Immutable inherited Goal DATA. Absence is historical Unknown; positive
+          Unrelated and Associated are explicit runtime birth decisions. *)
     ; captured_recurrence : Delegation_captured_origin.t option [@sexp.option]
       (** Immutable lower custody, never permission. Mutually exclusive with
             [authored_tool]; the upper owner validates its actual domain types.

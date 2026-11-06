@@ -89,7 +89,7 @@ module Stored = struct
         ~supported_semantics:Agent_protocol.Session_storage_semantics.supported_children
         delta
         ~kind:"session.delta"
-        ~versions:[ 1; 2; 3; 4; 5; 6; 7 ]
+        ~versions:[ 1; 2; 3; 4; 5; 6; 7; 8 ]
     in
     let%bind audit = F.optional payload "command_audit" (F.document ~limits) in
     let%bind () =

@@ -143,13 +143,67 @@ let usage_delta_requires payload =
     List.exists changes ~f:(fun change ->
       match D.Json.field change ~name:"kind" with
       | Value
-          (`String ("delegated_inference_ledger_changed" | "child_contributions_changed"))
-        -> true
+          (`String
+             ( "delegated_inference_ledger_changed"
+             | "child_contributions_changed"
+             | "goal_descendants_changed" )) -> true
       | Value (`String "created") ->
         (match D.Json.field change ~name:"state" with
          | Value state ->
            (match D.Json.field state ~name:"payload" with
             | Value payload -> usage_state_requires payload
+            | Absent | Null -> false)
+         | Absent | Null -> false)
+      | Value _ | Absent | Null -> false)
+  | Value _ | Absent | Null -> false
+;;
+
+(* Inspect raw fields before decoding: old readers must not silently discard
+   scoped attribution, even when it is nested in a replacement child slot. *)
+let populated value name =
+  match D.Json.field value ~name with
+  | Value _ -> true
+  | Absent | Null -> false
+;;
+
+let descendant_children_require document =
+  match D.Json.field document ~name:"payload" with
+  | Value payload ->
+    (match D.Json.field payload ~name:"children" with
+     | Value (`Array children) ->
+       List.exists children ~f:(fun child ->
+         populated child "goal_origin"
+         ||
+         match D.Json.field child ~name:"snapshot" with
+         | Value snapshot -> populated snapshot "goal_scopes"
+         | Absent | Null -> false)
+     | Value _ | Absent | Null -> false)
+  | Absent | Null -> false
+;;
+
+let descendant_state_requires payload =
+  populated payload "goal_descendants"
+  ||
+  match D.Json.field payload ~name:"child_contributions" with
+  | Value children -> descendant_children_require children
+  | Absent | Null -> false
+;;
+
+let descendant_delta_requires payload =
+  match D.Json.field payload ~name:"changes" with
+  | Value (`Array changes) ->
+    List.exists changes ~f:(fun change ->
+      match D.Json.field change ~name:"kind" with
+      | Value (`String "goal_descendants_changed") -> true
+      | Value (`String "child_contributions_changed") ->
+        (match D.Json.field change ~name:"value" with
+         | Value children -> descendant_children_require children
+         | Absent | Null -> false)
+      | Value (`String "created") ->
+        (match D.Json.field change ~name:"state" with
+         | Value state ->
+           (match D.Json.field state ~name:"payload" with
+            | Value payload -> descendant_state_requires payload
             | Absent | Null -> false)
          | Absent | Null -> false)
       | Value _ | Absent | Null -> false)
@@ -176,11 +230,18 @@ let require_state document ~limits =
         ~limits
         ~required:(native_state_requires (D.Document.payload document) ~kind))
   in
+  let%bind document =
+    require
+      document
+      ~name:Agent_protocol.Session_storage_semantics.delegated_usage
+      ~limits
+      ~required:(usage_state_requires (D.Document.payload document))
+  in
   require
     document
-    ~name:Agent_protocol.Session_storage_semantics.delegated_usage
+    ~name:Agent_protocol.Session_storage_semantics.goal_descendants
     ~limits
-    ~required:(usage_state_requires (D.Document.payload document))
+    ~required:(descendant_state_requires (D.Document.payload document))
 ;;
 
 let check_state document =
@@ -199,10 +260,16 @@ let check_state document =
         ~name
         ~required:(native_state_requires (D.Document.payload document) ~kind))
   in
+  let%bind () =
+    check
+      document
+      ~name:Agent_protocol.Session_storage_semantics.delegated_usage
+      ~required:(usage_state_requires (D.Document.payload document))
+  in
   check
     document
-    ~name:Agent_protocol.Session_storage_semantics.delegated_usage
-    ~required:(usage_state_requires (D.Document.payload document))
+    ~name:Agent_protocol.Session_storage_semantics.goal_descendants
+    ~required:(descendant_state_requires (D.Document.payload document))
 ;;
 
 let require_delta document ~limits =
@@ -225,11 +292,18 @@ let require_delta document ~limits =
         ~limits
         ~required:(native_delta_requires (D.Document.payload document) ~kind))
   in
+  let%bind document =
+    require
+      document
+      ~name:Agent_protocol.Session_storage_semantics.delegated_usage
+      ~limits
+      ~required:(usage_delta_requires (D.Document.payload document))
+  in
   require
     document
-    ~name:Agent_protocol.Session_storage_semantics.delegated_usage
+    ~name:Agent_protocol.Session_storage_semantics.goal_descendants
     ~limits
-    ~required:(usage_delta_requires (D.Document.payload document))
+    ~required:(descendant_delta_requires (D.Document.payload document))
 ;;
 
 let check_delta document =
@@ -248,8 +322,14 @@ let check_delta document =
         ~name
         ~required:(native_delta_requires (D.Document.payload document) ~kind))
   in
+  let%bind () =
+    check
+      document
+      ~name:Agent_protocol.Session_storage_semantics.delegated_usage
+      ~required:(usage_delta_requires (D.Document.payload document))
+  in
   check
     document
-    ~name:Agent_protocol.Session_storage_semantics.delegated_usage
-    ~required:(usage_delta_requires (D.Document.payload document))
+    ~name:Agent_protocol.Session_storage_semantics.goal_descendants
+    ~required:(descendant_delta_requires (D.Document.payload document))
 ;;

@@ -45,7 +45,7 @@ type record = Delegation_record.t = private
   ; artifact_collection : artifact_collection option
   ; preservation :
       (unit Document_schema.Extension_carrier.t option[@sexp.opaque] [@equal.ignore])
-    (** Private complete v6 document preservation context. Stage and revocation
+    (** Private complete v7 document preservation context. Stage and revocation
         updates retain unknown fields and immutable original admission JSON. *)
   }
 [@@deriving equal, sexp_of]
@@ -88,7 +88,7 @@ val resolve : t -> Reference.t -> (record, Store_error.t) result
 (** The request digest must cover all user-selected creation inputs. Admission
     comes from trusted validation and may contain fresh candidate IDs on retry;
     only a New result accepts those candidates. A changed authored-tool identity
-    or exact captured recurrence origin conflicts even if the request digest is
+    or exact captured recurrence/Goal origin conflicts even if the request digest is
     unchanged; generated, authored-tool and captured recurrence source kinds
     cannot be relabeled on retry. Replay reestablishes durability
     after a potentially ambiguous prior write acknowledgement.
@@ -157,7 +157,7 @@ val with_records
     the complete artifact matches its admitted digest under bounded validation.
     Persist a collection intent before invoking [f]; future passes may finish
     partially deleted artifacts under that same irrevocable intent. This preserves
-    the current named v6 carrier and original admission reference hash.
+    the current named v7 carrier and original admission reference hash.
     Installed/linked children, unrevoked attempts and every parent revision remain
     protected. Protection is the union across all records: releasing one record
     never permits deletion of an artifact retained by another record. The

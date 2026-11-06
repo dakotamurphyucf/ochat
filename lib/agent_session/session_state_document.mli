@@ -114,13 +114,15 @@ val adopt
   -> t
   -> (t, Document_schema.Error.t) result
 
-(** Adjacent generic v1 through v10 conversion. The v9 to v10 step introduces
+(** Adjacent generic v1 through v12 conversion. The v9 to v10 step introduces
     required spec.root_invocation. Historical absence converts to Ui, the actual
     previous native root contract; present invalid values reject. Existing unknown
     fields remain in the original preservation carrier. The native state schema25
     also rejects Headless claims in an older native schema. Native schema26
     introduces owned delegated accounting; historical absence stays absent and
-    cannot bootstrap exact zero or complete child inventory.
+    cannot bootstrap exact zero or complete child inventory. Native schema27
+    adds optional descendant Goal accounting; the v11 to v12 conversion preserves
+    absent versus null fields and never invents historical origin or receipts.
      The v8 to v9 step wraps each
     original pending entry, preserving its entire raw document, and introduces
     independent pending revision/disposition fields with unknown legacy owner. The v7 to v8 step is
@@ -199,6 +201,26 @@ module Admitted : sig
     -> (t, Document_schema.Error.t) result
 end
 
+(** Complete ordered but unstamped DATA. Its encoding retains native validation,
+    preservation and limits; it is distinct from a finalized [Admitted] mutation.
+    Replay must check the actual publication revision after metadata stamping. *)
+module Prefix : sig
+  type state_document = t
+  type t
+
+  val document : t -> Document_schema.Document.t
+
+  (** Union only compatible Created extensions, retaining the same native
+      candidate, original transaction cursor and complete admission checks. *)
+  val merge_created
+    :  t
+    -> captured:state_document
+    -> limits:Document_schema.Limits.t
+    -> (t, Document_schema.Error.t) result
+
+  val validate_publication : t -> revision:int64 -> (unit, Document_schema.Error.t) result
+end
+
 (** Opaque ordered transaction prefixes. Only validated checkpoints and [finish] return durable carriers;
     ordinary public encode/decode always retain complete state validation. *)
 module Transaction : sig
@@ -212,6 +234,29 @@ module Transaction : sig
 
   val value : t -> Session_state.t
   val with_value : t -> Session_state.t -> t
+
+  module Descendant_observation : sig
+    type t =
+      | Ordinary_children of Child_contributions.t
+      | Active_operation of Agent_protocol.Operation.t option
+      | Invocation of Agent_protocol.Invocation.t
+      | Moderator_execution of Agent_protocol.Moderator_execution.t
+  end
+
+  (** Observe an actual ordered context or ordinary child leaf. This never
+      changes the native candidate by itself; finish compares the actual fields.
+      Accounting updates and creation evidence can only advance through their
+      dedicated validated operations, not this observation interface. *)
+  val observe_descendants
+    :  t
+    -> Descendant_observation.t
+    -> (t, Document_schema.Error.t) result
+
+  (** Validate and apply the closed accounting/child replacement together. *)
+  val update_goal_descendants
+    :  t
+    -> Goal_descendants.Update.t
+    -> (t, Document_schema.Error.t) result
 
   (** Continue the SAME transaction after actual History_retirement admission.
       Requires the identical issued private accounting cursor, exact pure next
@@ -269,8 +314,20 @@ module Transaction : sig
     -> limits:Document_schema.Limits.t
     -> (t, Document_schema.Error.t) result
 
+  (** Admit the complete exact ordered candidate before publication metadata.
+      Owner-stamped time/counters normalize for candidate equality; complete
+      unstamped native, preservation and capacity checks still run. This returns
+      only a [Prefix], whose actual publication revision remains to be checked. *)
+  val checkpoint_encoded
+    :  t
+    -> next:Session_state.t
+    -> limits:Document_schema.Limits.t
+    -> (Prefix.t, Document_schema.Error.t) result
+
   (** Validate complete candidate and exact ordered semantics; only owner-stamped
-      time/counters normalize. Ordinary durable encoding rechecks preservation. *)
+      time/counters normalize for equality. A newly Included local occurrence
+      must match [next]'s actual publication revision. Ordinary durable encoding
+      rechecks preservation. *)
   val finish_encoded
     :  t
     -> next:Session_state.t

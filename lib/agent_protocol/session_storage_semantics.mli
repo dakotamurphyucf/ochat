@@ -3,5 +3,6 @@
     themselves. These constants convey no runtime or admission authority. *)
 val delegated_usage : string
 
+val goal_descendants : string
 val recurrence_run_origin : string
 val supported_children : string list

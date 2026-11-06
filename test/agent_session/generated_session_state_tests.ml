@@ -62,6 +62,7 @@ let%expect_test
           ; parent_revision_id = prompt_revision_id
           ; parent_stop_epoch = None
           ; authored_tool = None
+          ; goal_origin = None
           ; captured_recurrence = None
           ; authority_sha256 = digest "admitted host authority"
           ; capability_pins = []
@@ -307,7 +308,7 @@ let%expect_test
       Store.close store |> store_ok));
   [%expect
     {|
-    ((checkpoint_schema 26) (stage Child_installed)
+    ((checkpoint_schema 27) (stage Child_installed)
      (retained_revocation (Parent_stopped))
      (rejected_inconsistent_checkpoints 6))
     |}]

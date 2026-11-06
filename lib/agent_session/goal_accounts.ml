@@ -391,6 +391,8 @@ module Ordered_bootstrap = struct
     ; catalog : Goal_catalog.t option
     ; accounts : accounts option
     ; captured : P.Goal.t list
+    ; births : P.Goal.t list
+    ; created : (P.Goal.t * Child.t) list
     }
 
   let begin_ ~previous ~before ~catalog =
@@ -400,6 +402,8 @@ module Ordered_bootstrap = struct
     ; catalog
     ; accounts = previous
     ; captured = []
+    ; births = []
+    ; created = []
     }
   ;;
 
@@ -455,15 +459,55 @@ module Ordered_bootstrap = struct
           else invalid "new partition differs from actual before-ledger bootstrap")
   ;;
 
+  let creation t ~goal_id =
+    List.find t.created ~f:(fun (goal, _) -> P.Id.Goal.equal goal_id (P.Goal.id goal))
+  ;;
+
+  let capture_births t catalog =
+    List.fold (Goal_catalog.goals catalog) ~init:t.births ~f:(fun births goal ->
+      let present catalog =
+        Option.exists catalog ~f:(fun catalog ->
+          Option.is_some (Goal_catalog.find catalog (P.Goal.id goal)))
+      in
+      if
+        present t.previous_catalog
+        || present t.catalog
+        || List.exists births ~f:(fun previous ->
+          P.Id.Goal.equal (P.Goal.id previous) (P.Goal.id goal))
+      then births
+      else goal :: births)
+  ;;
+
+  let capture_creations t accounts =
+    List.fold_result t.births ~init:t.created ~f:(fun created goal ->
+      let goal_id = P.Goal.id goal in
+      if
+        Option.is_some (creation t ~goal_id)
+        || Option.exists t.accounts ~f:(fun accounts ->
+          Option.is_some (find accounts goal_id))
+      then Ok created
+      else (
+        match Option.bind accounts ~f:(fun accounts -> find accounts goal_id) with
+        | None -> Ok created
+        | Some child ->
+          let%bind.Result bootstrap = Child.create goal ~ledger:t.before in
+          if S.equal (Child.stored bootstrap) (Child.stored child)
+          then Ok ((goal, child) :: created)
+          else
+            invalid
+              "created descendant root account differs from its original Goal bootstrap"))
+  ;;
+
   let advance t = function
     | Catalog catalog ->
       let%map.Result () = catalog_edge t.catalog (Some catalog) in
-      { t with catalog = Some catalog }
+      { t with catalog = Some catalog; births = capture_births t catalog }
     | Accounts incoming ->
       let open Result.Let_syntax in
       let%bind accounts = account_edge t.accounts (Some incoming) ~adopt_incoming:true in
-      let%map captured = capture_new t accounts in
-      { t with accounts; captured }
+      let%bind captured = capture_new t accounts in
+      let%map created = capture_creations t accounts in
+      { t with accounts; captured; created }
     | Replacement { catalog; accounts } ->
       let open Result.Let_syntax in
       let%bind () = catalog_edge t.catalog catalog in

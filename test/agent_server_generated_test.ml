@@ -94,6 +94,7 @@ let install_child
     ; parent_revision_id = parent.spec.prompt_revision_id
     ; parent_stop_epoch = Some parent.stop_epoch
     ; authored_tool = None
+    ; goal_origin = None
     ; captured_recurrence = None
     ; inference_target
     ; authority_sha256 =
@@ -1004,6 +1005,27 @@ let%expect_test
                    ~substring:"Root.")));
           state.identity.session_id
         in
+        (* Disabling delegation must still allow an ordinary root actor to be
+           materialized under the actual zero-depth Factory host profile. *)
+        Eio.Switch.run (fun sw ->
+          let daemon = start sw 0 |> protocol_ok in
+          Exn.protect
+            ~finally:(fun () -> Daemon.shutdown daemon |> protocol_ok)
+            ~f:(fun () ->
+              let client = connection daemon (principal ()) in
+              Exn.protect
+                ~finally:(fun () -> Agent_client.Connection.close client)
+                ~f:(fun () ->
+                  initialize client;
+                  let parent, _ = create_session ~key:"zero-depth-root" client in
+                  let entry =
+                    Agent_server.Session_registry.find (Daemon.registry daemon) parent.id
+                    |> Option.value_exn
+                  in
+                  let state = A.state entry.actor |> protocol_ok in
+                  assert (P.Id.Session.equal parent.id state.identity.session_id);
+                  assert (Option.is_none state.spec.delegation);
+                  [%test_eq: int] 0 !requests)));
         let root_id, child_id, leaf_id =
           Eio.Switch.run (fun sw ->
             let daemon = start sw 2 |> protocol_ok in
@@ -1184,7 +1206,7 @@ let%expect_test
                        unavailable ();
                        S.remove_session (Daemon.store daemon) leaf_id |> store_ok;
                        unavailable ();
-                       assert (List.length (S.list_sessions (Daemon.store daemon)) = 2)
+                       assert (List.length (S.list_sessions (Daemon.store daemon)) = 3)
                      | _ -> H.detach handle |> protocol_ok);
                     print_s
                       [%sexp

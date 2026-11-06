@@ -1,4 +1,7 @@
-(** Validated current named delegation document. Original immutable admission
+(** Validated current v7 named delegation document. v6 upgrades structurally
+    without filling historical origin omissions. Populated Goal origin requires
+    [delegation.goal-origin.v1]; construction/decoding grants no authority.
+    Original immutable admission
     JSON and nested/envelope extensions survive disposition updates. *)
 type t
 

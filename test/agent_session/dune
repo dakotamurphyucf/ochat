@@ -19,6 +19,8 @@
   goal_accounting_persistence_tests
   goal_accounting_state_tests
   goal_accounting_bootstrap_tests
+  descendant_depth_state_tests
+  descendant_physical_recovery_tests
   instruction_selection_tests
   instruction_selection_persistence_tests
   instruction_clear_capacity_tests

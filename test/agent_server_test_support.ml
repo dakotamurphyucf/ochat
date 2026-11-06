@@ -226,7 +226,7 @@ let delegation_stage payload =
     |> Result.ok_or_failwith
   in
   assert (String.equal (Document_schema.Document.kind document) "delegation.intent");
-  assert (Int.equal (Document_schema.Document.version document) 6);
+  assert (Int.equal (Document_schema.Document.version document) 7);
   match
     Document_schema.Json.field (Document_schema.Document.payload document) ~name:"stage"
   with
@@ -391,6 +391,20 @@ let controlled_wall_clock real_clock ~initial =
 let protocol_ok = function
   | Ok value -> value
   | Error error -> raise_s [%sexp (error : Agent_protocol.Error.t)]
+;;
+
+(* This direct fixture host uses the actual daemon delegation profile, matching
+   its existing staged-service configuration. Each persisted component captures
+   its own immutable bounds; tests with narrower hosts can supply those instead. *)
+let goal_descendant_profile =
+  let host = Agent_server.Daemon.default_options.factory_limits in
+  Agent_session.Goal_descendants.Profile.create
+    ~max_scopes:host.delegation_max_depth
+    ~max_roots:16
+    ~max_branches:host.delegation_recovery_max_count
+    ~max_encoded_bytes:(256 * 1024)
+    ~child_max_encoded_bytes:host.delegation_recovery_max_bytes
+  |> protocol_ok
 ;;
 
 let observed_idle = function

@@ -45,6 +45,7 @@
   session_index
   captured_source_kind
   delegation_captured_origin
+  delegation_goal_origin
   delegation_record
   delegation_document
   delegation_store

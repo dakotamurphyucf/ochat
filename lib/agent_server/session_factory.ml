@@ -5873,6 +5873,14 @@ let actor_services
       ~max_upload_bytes:(Int64.of_int t.limits.job_result_max_bytes)
     |> Result.map_error ~f:protocol_of_store
   in
+  let%bind goal_descendant_profile =
+    Agent_session.Goal_descendants.Profile.create
+      ~max_scopes:t.limits.delegation_max_depth
+      ~max_roots:16
+      ~max_branches:t.limits.delegation_recovery_max_count
+      ~max_encoded_bytes:(256 * 1024)
+      ~child_max_encoded_bytes:t.limits.delegation_recovery_max_bytes
+  in
   let principal =
     Option.value_or_thunk creating_principal ~default:Agent_protocol.Id.Principal.create
   in
@@ -5926,6 +5934,7 @@ let actor_services
     ; schedule_limits = t.limits.schedules
     ; notification_limits = t.limits.notifications
     ; ingress_limits = t.limits.ingress
+    ; goal_descendant_profile
     ; create_attachment_id = Agent_protocol.Id.Attachment.create
     ; create_reclaim_token =
         (fun () ->
@@ -9748,6 +9757,7 @@ let create_delegated_session
         ; parent_revision_id = before.spec.prompt_revision_id
         ; parent_stop_epoch = Some before.stop_epoch
         ; authored_tool = source.authored_tool
+        ; goal_origin = None
         ; captured_recurrence = None
         ; authority_sha256
         ; capability_pins = source.capability_pins
@@ -10313,6 +10323,7 @@ let create_recurrence_child t ~parent ~permit =
           ; parent_stop_epoch = Some before.stop_epoch
           ; authority_sha256
           ; authored_tool = None
+          ; goal_origin = None
           ; captured_recurrence = Some captured_recurrence
           ; capability_pins = Parent.capability_pins captured_parent
           ; lifetime = Owned

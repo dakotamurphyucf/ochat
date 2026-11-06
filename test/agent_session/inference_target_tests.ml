@@ -104,7 +104,7 @@ let%test_unit
      | Unresolved -> ()
      | Captured _ -> assert false);
     let stored = capture admitted.delta in
-    assert (Int.equal (D.Document.version (A.Session_delta_document.document stored)) 7);
+    assert (Int.equal (D.Document.version (A.Session_delta_document.document stored)) 8);
     let replayed =
       A.Session_delta.apply before (A.Session_delta_document.value stored) |> protocol_ok
     in
@@ -344,6 +344,7 @@ let%test_unit "initialization preserves acknowledged shell grants before Ready" 
             ; schedule_limits = A.Staged_schedules.default_limits
             ; notification_limits = A.Staged_notifications.default_limits
             ; ingress_limits = A.Staged_ingress.default_limits
+            ; goal_descendant_profile
             ; subscription_limits = A.Staged_subscriptions.default_limits
             ; state_committed = (fun _ _ -> ())
             }
@@ -452,6 +453,7 @@ let create_pending_actor env sw initial =
         ; schedule_limits = A.Staged_schedules.default_limits
         ; notification_limits = A.Staged_notifications.default_limits
         ; ingress_limits = A.Staged_ingress.default_limits
+        ; goal_descendant_profile
         ; subscription_limits = A.Staged_subscriptions.default_limits
         ; state_committed = (fun _ _ -> ())
         }

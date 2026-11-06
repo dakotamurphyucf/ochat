@@ -323,6 +323,7 @@ let%expect_test "captured authored source is explicit data with exact legacy cus
           ; parent_stop_epoch = Some 0L
           ; authority_sha256 = String.make 64 'f'
           ; authored_tool = None
+          ; goal_origin = None
           ; captured_recurrence = Some raw
           ; capability_pins = []
           ; lifetime = Owned

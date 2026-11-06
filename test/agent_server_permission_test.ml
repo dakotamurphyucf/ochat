@@ -7,6 +7,20 @@ let protocol_ok = function
   | Error error -> raise_s [%sexp (error : Agent_protocol.Error.t)]
 ;;
 
+(* This direct fixture host uses the actual daemon delegation profile, matching
+   its existing staged-service configuration. Each persisted component captures
+   its own immutable bounds; tests with narrower hosts can supply those instead. *)
+let goal_descendant_profile =
+  let host = Agent_server.Daemon.default_options.factory_limits in
+  Agent_session.Goal_descendants.Profile.create
+    ~max_scopes:host.delegation_max_depth
+    ~max_roots:16
+    ~max_branches:host.delegation_recovery_max_count
+    ~max_encoded_bytes:(256 * 1024)
+    ~child_max_encoded_bytes:host.delegation_recovery_max_bytes
+  |> protocol_ok
+;;
+
 let store_ok = function
   | Ok value -> value
   | Error error -> raise_s [%sexp (error : Agent_store.Store_error.t)]
@@ -112,6 +126,7 @@ let actor ~sw ~env state =
       ; schedule_limits = Agent_session.Staged_schedules.default_limits
       ; notification_limits = Agent_session.Staged_notifications.default_limits
       ; ingress_limits = Agent_session.Staged_ingress.default_limits
+      ; goal_descendant_profile
       ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
       ; state_committed = (fun _ _ -> ())
       }

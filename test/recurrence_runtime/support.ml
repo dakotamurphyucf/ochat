@@ -237,6 +237,7 @@ let create_actor
               published_events events;
               published state)
         ; job_results = None
+        ; goal_descendant_profile
         ; subscription_limits = A.Staged_subscriptions.default_limits
         ; schedule_limits = A.Staged_schedules.default_limits
         ; notification_limits = A.Staged_notifications.default_limits

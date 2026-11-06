@@ -38,7 +38,7 @@ let changes_document changes ~limits =
     D.Document.create
       ~limits
       ~kind:"session.delta"
-      ~version:7
+      ~version:8
       ~payload:(`Object [ "changes", `Array changes ])
   in
   Session_storage_semantics.require_delta document ~limits
@@ -265,6 +265,9 @@ let atom_to_jsonaf ~limits ~state_document delta =
       ; "ledger", D.Document.json ledger
       ; "usage", D.Document.json usage
       ]
+  | Goal_descendants_changed update ->
+    let%map value = Goal_descendants.Update.to_json update in
+    `Object [ "kind", `String "goal_descendants_changed"; "value", value ]
   | Child_contributions_changed children ->
     let%map value = Child_contributions.to_jsonaf children in
     `Object [ "kind", `String "child_contributions_changed"; "value", value ]
@@ -631,6 +634,9 @@ let atom_of_jsonaf ~limits json =
     in
     let%map usage = Delegated_usage.of_document usage in
     Delta.Delegated_inference_ledger_changed (ledger, usage)
+  | "goal_descendants_changed" ->
+    let%map update = X.required fields "value" Goal_descendants.Update.of_json in
+    Delta.Goal_descendants_changed update
   | "child_contributions_changed" ->
     let%map children = X.required fields "value" Child_contributions.of_jsonaf in
     Delta.Child_contributions_changed children
@@ -866,6 +872,9 @@ let shape =
                    ; "ledger", D.Shape.value
                    ; "usage", D.Shape.value
                    ] )
+             ; ( "goal_descendants_changed"
+               , X.shape_exn
+                   [ "kind", D.Shape.value; "value", Goal_descendants.Update.shape ] )
              ; ( "child_contributions_changed"
                , X.shape_exn [ "kind", D.Shape.value; "value", D.Shape.value ] )
              ; ( "job_changed"
@@ -1151,11 +1160,14 @@ let upgrade document ~limits =
                  name, if String.equal name "changes" then `Array changes else old)))
       | _ -> F.invalid "payload" "must be an object")
   in
+  let%bind descendants_step =
+    D.Conversion.Step.of_function ~kind:"session.delta" ~from_version:7 ~f:Result.return
+  in
   let%bind conversion =
     D.Conversion.create
       ~limits
-      ~targets:[ "session.delta", 7 ]
-      ~max_steps:6
+      ~targets:[ "session.delta", 8 ]
+      ~max_steps:7
       ~max_operations:100_000
       ~steps:
         [ step
@@ -1164,6 +1176,7 @@ let upgrade document ~limits =
         ; run_step
         ; pending_input_step
         ; native_goal_action_step
+        ; descendants_step
         ]
   in
   D.Conversion.upgrade conversion document
@@ -1173,7 +1186,7 @@ let codec ~limits =
   D.Domain_codec.create
     ~limits
     ~kind:"session.delta"
-    ~version:7
+    ~version:8
     ~shape
     ~supported_semantics:Session_storage_semantics.supported
     ~decode:(fun json -> decode_payload ~limits json |> X.document_result)
@@ -1499,7 +1512,7 @@ let apply t ?transaction_metadata ~limits previous =
     |> X.document_result
   in
   let%bind candidate =
-    Session_document_transition.admit_encoded previous ~delta:t.value ~next ~limits
+    Session_document_transition.admit_prefix_encoded previous ~delta:t.value ~next ~limits
   in
   let%bind changes = raw_changes t in
   (* Created is an immutable captured state document, carrying its full template.
@@ -1511,10 +1524,10 @@ let apply t ?transaction_metadata ~limits previous =
         let%bind json = get_path change [ "state" ] in
         let%bind document = D.Document.inspect ~limits json in
         let%bind captured = Session_state_document.decode ~limits document in
-        Session_state_document.Admitted.merge_created candidate ~captured ~limits
+        Session_state_document.Prefix.merge_created candidate ~captured ~limits
       | _ -> Ok candidate)
   in
-  let document = Session_state_document.Admitted.document candidate in
+  let document = Session_state_document.Prefix.document candidate in
   let%bind payload =
     List.fold_result changes ~init:(D.Document.payload document) ~f:(fun payload change ->
       let%bind kind =
@@ -1594,6 +1607,34 @@ let apply t ?transaction_metadata ~limits previous =
       | "instruction_selection_changed" ->
         scalar [ "instruction_selection" ] "value" Instruction_selection.shape
       | "goal_accounts_changed" -> scalar [ "goal_accounts" ] "value" D.Shape.value
+      | "goal_descendants_changed" ->
+        let%bind raw = field "value" in
+        let%bind fields = X.object_ raw |> X.document_result in
+        let%bind accounting = X.required fields "accounting" X.raw |> X.document_result in
+        let%bind payload =
+          patch_scalar
+            ~limits
+            ~shape:D.Shape.value
+            payload
+            [ "goal_descendants" ]
+            accounting
+        in
+        let%bind children = X.required fields "children" X.raw |> X.document_result in
+        let%bind children_fields = X.object_ children |> X.document_result in
+        let%bind kind = X.required children_fields "kind" J.string |> X.document_result in
+        (match kind with
+         | "preserve" -> Ok payload
+         | "replace" ->
+           let%bind children =
+             X.required children_fields "value" X.raw |> X.document_result
+           in
+           patch_scalar
+             ~limits
+             ~shape:D.Shape.value
+             payload
+             [ "child_contributions" ]
+             children
+         | _ -> Error (path_error [ "changes" ] "invalid descendant child action"))
       | "child_contributions_changed" ->
         scalar [ "child_contributions" ] "value" D.Shape.value
       | "delegated_inference_ledger_changed" ->
@@ -1639,10 +1680,23 @@ let apply t ?transaction_metadata ~limits previous =
   let%bind incoming_document =
     match transaction_metadata with
     | None -> Ok incoming_document
-    | Some metadata -> Transaction_metadata.apply metadata ~limits incoming_document
+    | Some metadata ->
+      let%bind () =
+        Delta.validate_descendant_publication
+          t.value
+          ~revision:metadata.Transaction_metadata.revision
+        |> X.document_result
+      in
+      Transaction_metadata.apply metadata ~limits incoming_document
   in
   (* The fold starts from the complete carried candidate. Component merges keep
      its known projection and add only compatible preservation paths, so this
      admitted document already contains the candidate and captured child fields. *)
-  Session_state_document.decode ~limits incoming_document
+  let%bind state_document = Session_state_document.decode ~limits incoming_document in
+  let%map () =
+    Session_state_document.Prefix.validate_publication
+      candidate
+      ~revision:(Session_state_document.value state_document).counters.revision
+  in
+  state_document
 ;;

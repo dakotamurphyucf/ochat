@@ -6,6 +6,7 @@ module G = P.Goal
 module D = Document_schema
 module C = A.Goal_catalog
 module Accounts = A.Goal_accounts
+module Descendants = A.Goal_descendants
 module Child = A.Goal_accounting_document
 module SD = A.Session_state_document
 module Persistence = A.Session_persistence
@@ -55,6 +56,7 @@ let project (state : A.Session_state.t) ~session ~key mutation =
       ~actor:original
       ~authorize:(fun _ -> Ok ())
       ~session
+      ~descendant_profile:goal_descendant_profile
       ~request
       ~now:timestamp
     |> protocol_ok
@@ -75,6 +77,13 @@ let child_json state id =
   Accounts.find (Option.value_exn state.A.Session_state.goal_accounts) id
   |> Option.value_exn
   |> Child.to_document
+  |> protocol_ok
+  |> D.Document.json
+;;
+
+let descendants_json state =
+  Option.value_exn state.A.Session_state.goal_descendants
+  |> Descendants.to_document
   |> protocol_ok
   |> D.Document.json
 ;;
@@ -102,7 +111,35 @@ let account_extensions state =
   let accounts = Option.value_exn state.A.Session_state.goal_accounts in
   let raw = Accounts.to_jsonaf accounts |> protocol_ok in
   let raw = set raw "future_bootstrap_accounts" sentinel in
-  { state with goal_accounts = Some (Accounts.of_jsonaf raw |> protocol_ok) }
+  let descendants = descendants_json state in
+  let payload = member descendants "payload" in
+  let roots =
+    match member payload "roots" with
+    | `Array [ root ] -> `Array [ set root "future_bootstrap_root" sentinel ]
+    | _ -> failwith "expected the actual unrelated root"
+  in
+  let payload =
+    set
+      payload
+      "profile"
+      (set (member payload "profile") "future_bootstrap_profile" sentinel)
+    |> fun payload ->
+    set payload "roots" roots
+    |> fun payload -> set payload "future_bootstrap_descendants" sentinel
+  in
+  let descendants =
+    set descendants "payload" payload
+    |> fun raw ->
+    set raw "future_bootstrap_descendant_envelope" sentinel
+    |> D.Document.inspect ~limits:document_limits
+    |> document_ok
+    |> Descendants.of_document
+    |> protocol_ok
+  in
+  { state with
+    goal_accounts = Some (Accounts.of_jsonaf raw |> protocol_ok)
+  ; goal_descendants = Some descendants
+  }
 ;;
 
 let assert_rejected previous delta message =
@@ -124,7 +161,7 @@ let assert_rejected previous delta message =
       (A.Session_delta_document.apply encoded ~limits:document_limits previous))
 ;;
 
-let with_writer sw journal ~next ~previous_hash f =
+let with_writer ?(session_id = session_id) sw journal ~next ~previous_hash f =
   let writer =
     Store.Commit_writer.create
       ~sw
@@ -173,6 +210,39 @@ let assert_final previous expected document =
   assert (D.Json.equal (child_json expected goal_id) (child_json current goal_id));
   assert (
     D.Json.equal (child_json previous unrelated_id) (child_json current unrelated_id));
+  let descendants = Option.value_exn current.goal_descendants in
+  let previous_descendants = Option.value_exn previous.goal_descendants in
+  assert (Option.is_none (Descendants.origin descendants));
+  assert (List.is_empty (Descendants.local_included descendants));
+  assert (
+    Descendants.Profile.equal
+      (Descendants.profile previous_descendants)
+      (Descendants.profile descendants));
+  assert (
+    P.Session_ref.equal
+      (Descendants.session previous_descendants)
+      (Descendants.session descendants));
+  [%test_eq: P.Id.Goal.t list]
+    (List.sort [ goal_id; unrelated_id ] ~compare:P.Id.Goal.compare)
+    (Descendants.roots descendants);
+  List.iter (Descendants.roots descendants) ~f:(fun goal_id ->
+    assert (List.is_empty (Descendants.branches descendants ~goal_id)));
+  assert (D.Json.equal (descendants_json expected) (descendants_json current));
+  let raw_descendants = descendants_json current in
+  assert (
+    D.Json.equal (member raw_descendants "future_bootstrap_descendant_envelope") sentinel);
+  let payload = member raw_descendants "payload" in
+  assert (D.Json.equal (member payload "future_bootstrap_descendants") sentinel);
+  assert (
+    D.Json.equal (member (member payload "profile") "future_bootstrap_profile") sentinel);
+  let unrelated_root =
+    match member payload "roots" with
+    | `Array roots ->
+      List.find_exn roots ~f:(fun root ->
+        D.Json.equal (member root "goal_id") (P.Id.Goal.to_json unrelated_id))
+    | _ -> failwith "expected descendant roots"
+  in
+  assert (D.Json.equal (member unrelated_root "future_bootstrap_root") sentinel);
   let accounting =
     Accounts.find (Option.value_exn current.goal_accounts) goal_id
     |> Option.value_exn
@@ -298,6 +368,25 @@ let%expect_test
   Run_admission_tests.with_startup_actor
     (fun actor _ _ _ _ _ _ session _ ->
        let state = A.Session_actor.state actor |> protocol_ok in
+       let ledger, _, _ =
+         A.Inference_ledger.admit_turn
+           state.inference_ledger
+           P.Operation.
+             { id = P.Id.Operation.of_string "op_ordered_prior" |> protocol_ok
+             ; generation = state.identity.generation
+             ; kind = Turn User_submit
+             ; state = Running
+             ; started_at = timestamp
+             ; updated_at = timestamp
+             }
+         |> Existing.ledger
+       in
+       let state =
+         A.Session_delta.apply state (Inference_ledger_changed ledger) |> protocol_ok
+       in
+       [%test_eq: int64]
+         1L
+         (P.Inference_query.Summary.turns (A.Inference_ledger.summary ledger)).pending;
        let projected, delta = create state ~session unrelated_id "unrelated-create" in
        ignore (projected : A.Session_state.t);
        let state =
@@ -318,7 +407,7 @@ let%expect_test
            account. Check begin_ itself, before any new ordered edge exists. *)
         List.iter [ None; Some Accounts.empty ] ~f:(fun goal_accounts ->
           let forged = { initial with goal_accounts } in
-          A.Session_state.validate forged |> protocol_ok;
+          assert (Result.is_error (A.Session_state.validate forged));
           let forged = SD.with_value accepted forged in
           assert (Result.is_error (SD.Transaction.begin_ forged ~limits:document_limits)));
         assert_history_transaction_origin initial ~session;
@@ -338,7 +427,12 @@ let%expect_test
             (Abandon (goal_id, Catalog.reason "closed in the same transaction"))
         in
         let held_accounts = Option.value_exn held.goal_accounts in
-        let historical = { closed with goal_accounts = initial.goal_accounts } in
+        let historical =
+          { closed with
+            goal_accounts = initial.goal_accounts
+          ; goal_descendants = initial.goal_descendants
+          }
+        in
         List.iter
           [ A.Session_delta.Goal_accounts_changed held_accounts
           ; Created { historical with goal_accounts = Some held_accounts }
@@ -471,14 +565,242 @@ let%expect_test
             journal
             ~next:2L
             ~previous_hash:recovered.latest_transaction_hash
-            (fun _ ->
+            (fun writer ->
                assert_final
                  initial
                  closed
-                 (Persistence.Restored.state_document recovered.state)))));
+                 (Persistence.Restored.state_document recovered.state);
+               let persistence =
+                 Persistence.create
+                   ~archive:(fun _ _ -> failwith "unexpected archive")
+                   ~pending_archive:None
+                   ~before_commit:None
+                   ~command_accepted:(fun _ _ -> ())
+                   ~writer
+                   ~durability:Flush
+                   ~limits:document_limits
+                   ~archive_limits:document_limits
+                   ~retention_preflight:None
+                   ~restored:recovered.state
+                   ~previous_transaction_hash:recovered.latest_transaction_hash
+               in
+               let previous = Persistence.Restored.state recovered.state in
+               ignore
+                 (Persistence.install_snapshot_at
+                    persistence
+                    ~env
+                    ~directory:snapshots
+                    ~max_payload_length:1048576
+                    ~transaction_hash:(Persistence.transaction_hash persistence)
+                    previous
+                  |> store_ok
+                  : Store.Snapshot.installed);
+               let values =
+                 P.Session_metadata.Values.create
+                   ~display_name:(Some "after descendant recovery")
+                   ~labels:[]
+                 |> protocol_ok
+               in
+               let transition =
+                 A.Session_transition.apply
+                   ~now:timestamp
+                   previous
+                   ~delta:
+                     (Metadata_changed
+                        (values, Int64.succ previous.identity.metadata_revision))
+                   ~payloads:[]
+                 |> protocol_ok
+               in
+               Persistence.commit persistence ~command_audit:None ~previous transition
+               |> protocol_ok;
+               assert_final
+                 initial
+                 closed
+                 (Persistence.Restored.state_document (Persistence.restored persistence))));
+        Eio.Switch.run (fun sw ->
+          let journal = journal env directory ~existing:true in
+          let recovered =
+            Store.Recovery.load
+              ~env
+              ~journal
+              ~snapshot_directory:snapshots
+              ~max_snapshot_payload_length:1048576
+              ~session_id
+              ~initial:restored
+              ~restore_snapshot:(Persistence.restore_snapshot ~limits:document_limits)
+              ~apply:(Persistence.apply_transaction ~limits:document_limits)
+              ~validate_transaction:
+                (Persistence.validate_transaction ~limits:document_limits)
+              ~validate:Persistence.validate
+            |> store_ok
+          in
+          [%test_eq: int64] 2L recovered.latest_transaction_sequence;
+          assert_final
+            initial
+            closed
+            (Persistence.Restored.state_document recovered.state);
+          with_writer
+            sw
+            journal
+            ~next:3L
+            ~previous_hash:recovered.latest_transaction_hash
+            (fun _ -> ()))));
   print_endline
     "ordered creation preserved; historical/reset and wrong-ledger rejected; one journal \
-     transaction reopens exactly";
+     transaction reopens exactly; snapshot and next write retain descendant roots";
   [%expect
-    {| ordered creation preserved; historical/reset and wrong-ledger rejected; one journal transaction reopens exactly |}]
+    {| ordered creation preserved; historical/reset and wrong-ledger rejected; one journal transaction reopens exactly; snapshot and next write retain descendant roots |}]
+;;
+
+let%test_unit "descendant roots require their actual ordered Create and retained carrier" =
+  Run_admission_tests.with_startup_actor (fun actor _ _ _ _ _ _ session _ ->
+    let initial = A.Session_actor.state actor |> protocol_ok in
+    let held, creation = create initial ~session goal_id "descendant-boundary-create" in
+    let descendants = Option.value_exn held.goal_descendants in
+    assert (Option.is_none (Descendants.origin descendants));
+    assert (
+      Descendants.Profile.equal goal_descendant_profile (Descendants.profile descendants));
+    [%test_eq: P.Id.Goal.t list] [ goal_id ] (Descendants.roots descendants);
+    let genuine =
+      A.Session_transition.apply ~now:timestamp initial ~delta:creation ~payloads:[]
+      |> protocol_ok
+    in
+    let genuine =
+      A.Session_document_transition.admit_encoded
+        (carried initial)
+        ~delta:creation
+        ~next:genuine.state
+        ~limits:document_limits
+      |> document_ok
+      |> SD.Admitted.state_document
+    in
+    assert (D.Json.equal (descendants_json held) (descendants_json (SD.value genuine)));
+    let old_held =
+      { held with
+        goal_descendants = initial.goal_descendants
+      ; child_contributions = initial.child_contributions
+      }
+    in
+    A.Session_state.validate old_held |> protocol_ok;
+    let rec descendant_leaf (delta : A.Session_delta.t) =
+      match delta with
+      | Goal_descendants_changed _ -> Some delta
+      | Batch changes -> List.find_map changes ~f:descendant_leaf
+      | _ -> None
+    in
+    let update = descendant_leaf creation |> Option.value_exn in
+    let rejected previous delta =
+      assert (
+        Result.is_error
+          (A.Session_transition.apply ~now:timestamp previous ~delta ~payloads:[]));
+      let encoded =
+        A.Session_delta_document.create
+          delta
+          ~limits:document_limits
+          ~state_document:SD.authored
+        |> document_ok
+      in
+      assert (
+        Result.is_error
+          (A.Session_delta_document.apply
+             encoded
+             ~limits:document_limits
+             (carried previous)))
+    in
+    (* Equal held Goal/account DATA are not proof of the actual creation edge.
+       Created replacement and duplicate catalog/account leaves cannot supply it. *)
+    rejected old_held update;
+    rejected old_held (Created held);
+    rejected initial (Created held);
+    rejected
+      old_held
+      (Batch
+         [ Goal_catalog_changed (Option.value_exn held.goal_catalog)
+         ; Goal_accounts_changed (Option.value_exn held.goal_accounts)
+         ; update
+         ]);
+    let old_document = carried old_held in
+    let held_document = carried held in
+    List.iter
+      [ old_document, held; held_document, old_held ]
+      ~f:(fun (previous, next) ->
+        let forged = SD.with_value previous next in
+        assert (Result.is_error (SD.encode forged ~limits:document_limits));
+        assert (Result.is_error (SD.Transaction.begin_ forged ~limits:document_limits));
+        assert (
+          Result.is_error (SD.adopt previous ~limits:document_limits (SD.authored next))));
+    let marker = P.Session_storage_semantics.goal_descendants in
+    let strip_marker document =
+      assert (List.mem (D.Document.required_semantics document) marker ~equal:String.equal);
+      set
+        (D.Document.json document)
+        "required_semantics"
+        (`Array
+            (List.filter_map (D.Document.required_semantics document) ~f:(fun name ->
+               if String.equal name marker then None else Some (`String name))))
+      |> D.Document.inspect ~limits:document_limits
+      |> document_ok
+    in
+    let encoded = SD.encode held_document ~limits:document_limits |> document_ok in
+    assert (Result.is_error (SD.decode ~limits:document_limits (strip_marker encoded)));
+    let encoded_delta =
+      A.Session_delta_document.create
+        creation
+        ~limits:document_limits
+        ~state_document:SD.authored
+      |> document_ok
+      |> A.Session_delta_document.document
+    in
+    assert (
+      Result.is_error
+        (A.Session_delta_document.decode
+           ~limits:document_limits
+           (strip_marker encoded_delta)));
+    (* Adjacent old-version conversion preserves both historical wire forms on
+       an unrelated ordered write; neither form invents an accounting origin. *)
+    let raw =
+      SD.authored initial
+      |> fun document ->
+      SD.encode document ~limits:document_limits |> document_ok |> D.Document.json
+    in
+    let remove json name =
+      match json with
+      | `Object fields -> `Object (List.Assoc.remove fields name ~equal:String.equal)
+      | _ -> failwith "expected object"
+    in
+    List.iter [ false; true ] ~f:(fun explicit_null ->
+      let payload = member raw "payload" in
+      let payload =
+        if explicit_null
+        then set payload "goal_descendants" `Null
+        else remove payload "goal_descendants"
+      in
+      let old =
+        set raw "payload" payload
+        |> fun raw ->
+        set raw "version" (`Number "11")
+        |> D.Document.inspect ~limits:document_limits
+        |> document_ok
+        |> SD.decode ~limits:document_limits
+        |> document_ok
+      in
+      assert (Option.is_none (SD.value old).goal_descendants);
+      let delta = A.Session_delta.Halt_changed (Some "unrelated historical write") in
+      let transition =
+        A.Session_transition.apply ~now:timestamp (SD.value old) ~delta ~payloads:[]
+        |> protocol_ok
+      in
+      let admitted =
+        A.Session_document_transition.admit_encoded
+          old
+          ~delta
+          ~next:transition.state
+          ~limits:document_limits
+        |> document_ok
+        |> SD.Admitted.document
+      in
+      match D.Json.field (D.Document.payload admitted) ~name:"goal_descendants" with
+      | Null -> assert explicit_null
+      | Absent -> assert (not explicit_null)
+      | Value _ -> failwith "historical write invented descendant accounting"))
 ;;

@@ -424,7 +424,7 @@ until actor/journal hydration, with no invented pending initial start.
 | Projection recovery marker | `Session_projection_update` / `Session_index_recovery_document` | Store reopen/eager hydration | Named document; serialized recovery ownership |
 | Blob metadata | `Blob_store` / `Blob_metadata_document` | Expiry, preparation protection and `Blob_retention` share decoder | Named carrier; original blob ID and raw content digest |
 | Private result intent | `Job_result_intent` / `Job_result_intent_document` | Publisher restart and independent retention | Verified frame, full reference, exact temporary/durable metadata strings |
-| Delegation intent | `Delegation_store` / `Delegation_document` | Admission resolution, revoke and independent artifact collection | Named current v6; original scoped filename and immutable admission hash |
+| Delegation intent | `Delegation_store` / `Delegation_document` | Admission resolution, revoke and independent artifact collection | Named current v7 with structural v6 conversion; original scoped filename and immutable admission hash |
 | Prompt manifest | `Prompt_artifact_store` / `Prompt_manifest_document.Publication` | Revision rebuild and independent retention | Exact immutable bytes/digest before conversion; known inventory validation |
 | Root audit evidence | `Audit_store` / `Audit_evidence_document` / `Audit_event_document` | Complete semantic admission before tail repair | Original embedded bytes/hash; verified canonical snapshot and signed pages |
 | Host server ID, actor/daemon locks, secrets | Existing host owners | Existing validation | Intentionally outside session JSON |
@@ -485,8 +485,10 @@ owner lock. A fresh verified reopen remains possible after uncertain acknowledgm
 
 ## M3 delegation ledger
 
-The private delegation owner admits only current `delegation.intent` version 6
-named documents inside complete checksum-verified, zero-flag frames. The original
+The private delegation owner writes `delegation.intent` version 7 named
+documents inside complete checksum-verified, zero-flag frames. Supported version 6
+documents upgrade through a bounded structural conversion that retains the raw
+admission subtree and does not fill omitted fields. The original
 scoped key must match its deterministic existing filename before document
 conversion or current admission validation. Filename identity continues to use
 the current scoped key serialization; it does not admit historical ledger formats.
@@ -504,6 +506,27 @@ retention all use this same document owner. Record admission confers no authorit
 current generation, parent policy, stop/revocation and invocation lifetime checks
 still belong to the existing delegation coordination owner. Cancellation propagates
 outside the ledger mutex with its original exception/backtrace.
+
+Optional `goal_origin` is immutable lower DATA. Historical omission remains
+Unknown; new positive Unrelated and Associated origins are explicit birth
+choices by the runtime owner. Associated origins freeze each host-qualified
+Goal root, creator Workflow episode/source and original first-child branch
+anchor. Their bounded, strictly ordered root vector uses stable owner/Goal
+identities for preservation. A populated origin requires
+`delegation.goal-origin.v1`; missing semantics, explicit null and conflicting
+replay origins reject. The lower decoder does not authenticate ancestry or
+issue execution authority. Runtime binding and descendant admission remain
+separate work.
+
+The session carrier writes `session.state` version 12 (native schema 27) and
+`session.delta` version 8 for this accounting. Populated descendant components,
+positive child origins and scoped child snapshots require
+`session.goal-descendants.v1` in their enclosing session document. Conversion
+preserves old absent/null fields and raw historical evidence; decoding rejects
+populated scoped fields without the marker. The closed descendant delta carries
+one accounting candidate and an explicit preserve-or-replace child action.
+Readers validate the reason against the actual preceding ordered state before
+accepting either half. Historical origin remains unknown after unrelated edits.
 
 ## M3 prompt manifest publication
 

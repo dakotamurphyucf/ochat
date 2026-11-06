@@ -335,6 +335,7 @@ let%expect_test "terminal persistence failure resolves retirement and keeps deta
             ; create_attachment_id = P.Id.Attachment.create
             ; create_reclaim_token = (fun () -> "retirement-test")
             ; job_results = None
+            ; goal_descendant_profile
             ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
             ; schedule_limits = Agent_session.Staged_schedules.default_limits
             ; notification_limits = Agent_session.Staged_notifications.default_limits

@@ -430,3 +430,301 @@ let%expect_test "whole-child carriers preserve future data and reserve bounded g
   [%expect
     {| future fields survive folds/replacements; counts and exact reserved bytes bound admission; unknown/overflow stay labelled |}]
 ;;
+
+module Scoped_snapshot_boundaries = struct
+  module Shared = Descendant_contribution_tests
+  module Origin = Agent_store.Delegation_goal_origin
+  module Occurrence = Agent_session.Goal_descendant_occurrence
+  module Pending = Agent_session.Goal_descendant_pending
+  module Included = Agent_session.Goal_descendant_included
+  module Growth = Agent_session.Capacity_growth
+  open Carrier_laws
+
+  let frame reference revision =
+    let leaf =
+      P.Session_ref.create
+        ~session_id:reference.DS.Reference.child_session_id
+        ~server_id:(P.Session_ref.server_id session)
+    in
+    Occurrence.Frame.create
+      ~session:leaf
+      ~generation:0
+      ~candidate_session_revision:revision
+    |> protocol
+  ;;
+
+  let pending scope reference ~nonce ~prefix occurrence =
+    Pending.create
+      ~scope
+      ~branch_reference:reference
+      ~nonce
+      ~next_prefix:prefix
+      ~occurrence
+    |> protocol
+  ;;
+
+  let entry scope own included =
+    Snapshot.Goal_scope.create ~scope ~own ~descendants:Shared.empty_descendants ~included
+    |> protocol
+  ;;
+
+  let create_snapshot scope reference ~revision ~own ~canonical_coverage included =
+    Snapshot.create_with_scopes
+      ~reference
+      ~revision
+      ~own
+      ~descendants:Shared.empty_descendants
+      ~canonical_coverage
+      ~origin:(Shared.origin scope)
+      ~goal_scopes:[ entry scope own (Some included) ]
+    |> protocol
+  ;;
+
+  let scope_row snapshot_json =
+    match member snapshot_json "goal_scopes" with
+    | `Array [ entry ] -> entry
+    | _ -> failwith "expected one scoped boundary fixture"
+  ;;
+
+  let slot_snapshot child_json =
+    match member (member child_json "payload") "children" with
+    | `Array [ slot ] -> member slot "snapshot"
+    | _ -> failwith "expected one child boundary fixture"
+  ;;
+
+  let map_slot_snapshot child_json ~f =
+    let payload = member child_json "payload" in
+    set
+      child_json
+      "payload"
+      (set
+         payload
+         "children"
+         (first (member payload "children") ~f:(fun slot ->
+            set slot "snapshot" (f (member slot "snapshot")))))
+  ;;
+end
+
+let%expect_test "same scoped prefix preserves exact receipt and both count partitions" =
+  let open Scoped_snapshot_boundaries in
+  let reference = Shared.reference "receipt_boundary" in
+  let scope = Shared.scope reference in
+  let occurrence ordinal =
+    Occurrence.attempt
+      (frame reference ordinal)
+      ~ordinal
+      ~operation_id:None
+      ~invocation_id:None
+    |> protocol
+  in
+  let first = pending scope reference ~nonce:1L ~prefix:1L (occurrence 1L) in
+  let included = Included.create first in
+  let before = entry scope Shared.one (Some included) in
+  Snapshot.Goal_scope.validate_update before ~incoming:before |> protocol;
+  let two = Snapshot.Partition.add_disjoint Shared.one Shared.one |> protocol in
+  let more_counts = entry scope two (Some included) in
+  assert (
+    Result.is_error (Snapshot.Goal_scope.validate_update before ~incoming:more_counts));
+  let more_descendants =
+    Snapshot.Goal_scope.create
+      ~scope
+      ~own:Shared.one
+      ~descendants:
+        (Snapshot.Descendants.create
+           ~partition:Shared.one
+           ~coverage:Snapshot.Coverage.complete)
+      ~included:(Some included)
+    |> protocol
+  in
+  assert (
+    Result.is_error
+      (Snapshot.Goal_scope.validate_update before ~incoming:more_descendants));
+  let changed_nonce =
+    pending scope reference ~nonce:2L ~prefix:1L (occurrence 1L)
+    |> Included.create
+    |> fun included -> entry scope Shared.one (Some included)
+  in
+  assert (
+    Result.is_error (Snapshot.Goal_scope.validate_update before ~incoming:changed_nonce));
+  let changed_occurrence =
+    pending scope reference ~nonce:1L ~prefix:1L (occurrence 2L)
+    |> Included.create
+    |> fun included -> entry scope Shared.one (Some included)
+  in
+  assert (
+    Result.is_error
+      (Snapshot.Goal_scope.validate_update before ~incoming:changed_occurrence));
+  let no_receipt = entry scope Shared.one None in
+  assert (
+    Result.is_error (Snapshot.Goal_scope.validate_update before ~incoming:no_receipt));
+  let advanced =
+    pending scope reference ~nonce:3L ~prefix:2L (occurrence 2L)
+    |> Included.create
+    |> fun included -> entry scope two (Some included)
+  in
+  Snapshot.Goal_scope.validate_update before ~incoming:advanced |> protocol;
+  let same_nonce_before =
+    pending scope reference ~nonce:3L ~prefix:1L (occurrence 1L)
+    |> Included.create
+    |> fun included -> entry scope Shared.one (Some included)
+  in
+  assert (
+    Result.is_error
+      (Snapshot.Goal_scope.validate_update same_nonce_before ~incoming:advanced));
+  let raw = Pending.to_json first in
+  assert (
+    Result.is_error (Pending.of_json (Carrier_laws.set raw "next_prefix" (`String "0"))));
+  print_endline
+    "same prefix preserves receipt and counts; later prefix consumes a later nonce; \
+     decoded zero rejects";
+  [%expect
+    {| same prefix preserves receipt and counts; later prefix consumes a later nonce; decoded zero rejects |}]
+;;
+
+let%expect_test
+    "scoped Host_turn capacity retains nested unknowns and protects kind replacement"
+  =
+  let open Scoped_snapshot_boundaries in
+  let open Carrier_laws in
+  let reference = Shared.reference "host_capacity" in
+  let scope = Shared.scope reference in
+  let origin = Shared.origin scope in
+  let host =
+    Occurrence.host_turn
+      (frame reference 1L)
+      ~operation_id:(P.Id.Operation.of_string "op_host_capacity" |> protocol)
+    |> protocol
+    |> pending scope reference ~nonce:1L ~prefix:1L
+    |> Included.create
+  in
+  let own =
+    Snapshot.Partition.create
+      ~usage:U.empty
+      ~marks:
+        { F.Marks.attempt = 0L; turn = 1L; untracked_attempts = 0L; untracked_turns = 1L }
+    |> protocol
+  in
+  let coverage attempts =
+    P.Inference_query.Coverage.create
+      ~before_tracking_unknown:false
+      ~retired_attempts:0L
+      ~untracked_attempts:attempts
+      ~retired_turns:0L
+      ~untracked_turns:1L
+      ~tracking_status:Available
+    |> protocol
+  in
+  let before =
+    create_snapshot
+      scope
+      reference
+      ~revision:1L
+      ~own
+      ~canonical_coverage:(coverage 0L)
+      host
+  in
+  let clean_extra =
+    Agent_session.Child_usage_capacity.extra_growth
+      ~origin
+      ~snapshot:(Some before)
+      ~raw_snapshot:(Some (Snapshot.to_json before))
+    |> protocol
+  in
+  assert (Growth.encoded_bytes clean_extra > 0);
+  let children =
+    Children.register_with_origin (Shared.empty ()) ~reference ~origin
+    |> protocol
+    |> fun children -> Children.replace children ~snapshot:before |> protocol |> fst
+  in
+  let future = `Object [ "number_spelling", `Number "7e0"; "retained", `True ] in
+  let enriched_raw =
+    Children.to_jsonaf children
+    |> protocol
+    |> map_slot_snapshot ~f:(fun snapshot ->
+      set
+        snapshot
+        "goal_scopes"
+        (first (member snapshot "goal_scopes") ~f:(fun entry ->
+           let scope = member entry "scope" in
+           let episode = member scope "creator_episode" in
+           let admission = member episode "admission" in
+           let scope =
+             set
+               (set scope "source" (set (member scope "source") "future_source" future))
+               "creator_episode"
+               (set
+                  episode
+                  "admission"
+                  (set
+                     admission
+                     "source"
+                     (set (member admission "source") "future_source" future)))
+           in
+           let included = member entry "included" in
+           set
+             (set entry "scope" scope)
+             "included"
+             (set
+                included
+                "occurrence"
+                (set (member included "occurrence") "future_kind" future)))))
+  in
+  let protected_extra =
+    Agent_session.Child_usage_capacity.extra_growth
+      ~origin
+      ~snapshot:(Some before)
+      ~raw_snapshot:(Some (slot_snapshot enriched_raw))
+    |> protocol
+  in
+  [%test_eq: int] 0 (Growth.encoded_bytes protected_extra);
+  let enriched = Children.of_jsonaf enriched_raw |> protocol in
+  let correction =
+    create_snapshot
+      scope
+      reference
+      ~revision:2L
+      ~own
+      ~canonical_coverage:(coverage 0L)
+      host
+  in
+  let corrected, _ = Children.replace enriched ~snapshot:correction |> protocol in
+  let retained = Children.to_jsonaf corrected |> protocol |> slot_snapshot |> scope_row in
+  let scope_raw = member retained "scope" in
+  assert (D.Json.equal future (member (member scope_raw "source") "future_source"));
+  assert (
+    D.Json.equal
+      future
+      (member
+         (member (member (member scope_raw "creator_episode") "admission") "source")
+         "future_source"));
+  assert (
+    D.Json.equal
+      future
+      (member (member (member retained "included") "occurrence") "future_kind"));
+  let attempt =
+    Occurrence.attempt
+      (frame reference 3L)
+      ~ordinal:1L
+      ~operation_id:None
+      ~invocation_id:None
+    |> protocol
+    |> pending scope reference ~nonce:2L ~prefix:2L
+    |> Included.create
+  in
+  let with_attempt = Snapshot.Partition.add_disjoint own Shared.one |> protocol in
+  let next =
+    create_snapshot
+      scope
+      reference
+      ~revision:3L
+      ~own:with_attempt
+      ~canonical_coverage:(coverage 1L)
+      attempt
+  in
+  assert (Result.is_error (Children.replace corrected ~snapshot:next));
+  print_endline
+    "clean Host_turn funds Attempt growth; protected kind remains readable and \
+     correctable; nested number lexemes survive; incompatible replacement rejects";
+  [%expect
+    {| clean Host_turn funds Attempt growth; protected kind remains readable and correctable; nested number lexemes survive; incompatible replacement rejects |}]
+;;

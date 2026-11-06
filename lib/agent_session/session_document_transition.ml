@@ -2,8 +2,16 @@ open! Core
 module X = Persistence_codec
 module Transaction = Session_state_document.Transaction
 
-let admit_encoded previous ~delta ~(next : Session_state.t) ~limits =
+let prepare previous ~delta ~limits =
   let previous_value = Session_state_document.value previous in
+  let apply_context carrier delta step =
+    let open Result.Let_syntax in
+    let%bind state =
+      Session_delta.apply ~limits (Transaction.value carrier) delta |> X.document_result
+    in
+    let%map carrier = Transaction.observe_descendants carrier step in
+    Transaction.with_value carrier state
+  in
   let rec apply carrier = function
     | Session_delta.Batch changes -> List.fold_result changes ~init:carrier ~f:apply
     | Pending_inputs_changed (mutation, archive, expiry_archive) as delta ->
@@ -31,6 +39,16 @@ let admit_encoded previous ~delta ~(next : Session_state.t) ~limits =
         ~limits
     | Goal_catalog_changed incoming -> Transaction.update_goal_catalog carrier incoming
     | Goal_accounts_changed incoming -> Transaction.update_goal_accounts carrier incoming
+    | Goal_descendants_changed update ->
+      Transaction.update_goal_descendants carrier update
+    | Child_contributions_changed children as delta ->
+      apply_context carrier delta (Ordinary_children children)
+    | Active_operation_changed operation as delta ->
+      apply_context carrier delta (Active_operation operation)
+    | (Invocation_changed invocation | Invocation_reconciled invocation) as delta ->
+      apply_context carrier delta (Invocation invocation)
+    | (Moderator_execution_changed execution | Moderator_execution_reconciled execution)
+      as delta -> apply_context carrier delta (Moderator_execution execution)
     | Created _ as delta ->
       let open Result.Let_syntax in
       let%bind state =
@@ -67,7 +85,6 @@ let admit_encoded previous ~delta ~(next : Session_state.t) ~limits =
       | Workspace_changed _
       | Canonical_entries_appended _
       | Instruction_selection_changed _
-      | Child_contributions_changed _
       | Recurrence_catalog_changed _
       | Run_state_changed _
       | Canonical_history_replaced _
@@ -75,7 +92,6 @@ let admit_encoded previous ~delta ~(next : Session_state.t) ~limits =
       | Authoring_publication_changed _
       | Initial_prompt_count_changed _
       | Deferred_entries_enqueued _
-      | Active_operation_changed _
       | Automatic_turn_budget_enabled _
       | Automatic_turn_pauses_changed _
       | Attachment_added _
@@ -90,13 +106,9 @@ let admit_encoded previous ~delta ~(next : Session_state.t) ~limits =
       | Model_job_target_restored _
       | Job_changed _
       | Schedule_changed _
-      | Invocation_changed _
       | Managed_submission_admitted _
       | Managed_submission_changed _
       | Managed_stop_admitted _
-      | Invocation_reconciled _
-      | Moderator_execution_changed _
-      | Moderator_execution_reconciled _
       | Subscription_changed _
       | Subscription_expired _
       | Subscription_cancelled _
@@ -139,14 +151,24 @@ let admit_encoded previous ~delta ~(next : Session_state.t) ~limits =
     Queue_provenance_validation.validate (Session_state.queue_provenance current)
     |> X.document_result
   in
-  let%bind () =
+  let%map () =
     Goal_run_evidence.validate_transition
       ~previous_runs:previous_value.run_state
       ~catalog:current.goal_catalog
       ~runs:current.run_state
     |> X.document_result
   in
+  candidate
+;;
+
+let admit_encoded previous ~delta ~next ~limits =
+  let%bind.Result candidate = prepare previous ~delta ~limits in
   Transaction.finish_encoded candidate ~next ~limits
+;;
+
+let admit_prefix_encoded previous ~delta ~next ~limits =
+  let%bind.Result candidate = prepare previous ~delta ~limits in
+  Transaction.checkpoint_encoded candidate ~next ~limits
 ;;
 
 let admit previous ~delta ~next ~limits =

@@ -8,6 +8,20 @@ let protocol_ok = function
     raise_s [%sexp "unexpected protocol error", (error : Agent_protocol.Error.t)]
 ;;
 
+(* This direct fixture host uses the actual daemon delegation profile, matching
+   its existing staged-service configuration. Each persisted component captures
+   its own immutable bounds; tests with narrower hosts can supply those instead. *)
+let goal_descendant_profile =
+  let host = Agent_server.Daemon.default_options.factory_limits in
+  Agent_session.Goal_descendants.Profile.create
+    ~max_scopes:host.delegation_max_depth
+    ~max_roots:16
+    ~max_branches:host.delegation_recovery_max_count
+    ~max_encoded_bytes:(256 * 1024)
+    ~child_max_encoded_bytes:host.delegation_recovery_max_bytes
+  |> protocol_ok
+;;
+
 let store_ok = function
   | Ok value -> value
   | Error error ->
@@ -588,6 +602,7 @@ let with_handoff_actor ?(reject = fun _ -> false) ?inference ~make_worker f =
             ; schedule_limits = Agent_session.Staged_schedules.default_limits
             ; notification_limits = Agent_session.Staged_notifications.default_limits
             ; ingress_limits = Agent_session.Staged_ingress.default_limits
+            ; goal_descendant_profile
             ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
             ; state_committed = (fun _ _ -> ())
             }
@@ -986,6 +1001,7 @@ let audit_actor
         ; schedule_limits = Agent_session.Staged_schedules.default_limits
         ; notification_limits = Agent_session.Staged_notifications.default_limits
         ; ingress_limits = Agent_session.Staged_ingress.default_limits
+        ; goal_descendant_profile
         ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
         ; state_committed = (fun _ _ -> ())
         }

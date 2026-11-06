@@ -23,6 +23,7 @@ val prepare
   -> actor:Operator_authorization.t
   -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
   -> session:Agent_protocol.Session_ref.t
+  -> descendant_profile:Goal_descendants.Profile.t
   -> request:Goal_command.t
   -> now:Agent_protocol.Timestamp.t
   -> (t, Agent_protocol.Error.t) result

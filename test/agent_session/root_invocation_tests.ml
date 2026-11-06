@@ -37,7 +37,7 @@ let%test_unit
       let state = { initial with spec = { initial.spec with root_invocation = role } } in
       S.validate state |> protocol_ok;
       let document = D.encode (D.authored state) ~limits:document_limits |> document_ok in
-      [%test_eq: int] 11 (Doc.version document);
+      [%test_eq: int] 12 (Doc.version document);
       let with_future =
         Doc.create
           ~limits:document_limits

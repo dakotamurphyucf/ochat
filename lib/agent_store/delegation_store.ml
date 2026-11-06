@@ -477,6 +477,10 @@ let reserve t ~key ~request_sha256 ~admission ~max_records ~max_bytes =
                 Delegation_captured_origin.equal
                 admission.captured_recurrence
                 record.admission.captured_recurrence
+           && Option.equal
+                Delegation_goal_origin.equal
+                admission.goal_origin
+                record.admission.goal_origin
            && same_invocation_scope admission.lifetime record.admission.lifetime ->
       let%map () = save t record in
       Replay record

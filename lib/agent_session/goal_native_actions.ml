@@ -303,7 +303,7 @@ module Plan = struct
     | true, (None | Some (Wait _ | Finish _)), false | false, _, _ -> Ok ()
   ;;
 
-  let prepare entries ~(state : Session_state.t) ~session ~now =
+  let prepare entries ~(state : Session_state.t) ~session ~descendant_profile ~now =
     let open Result.Let_syntax in
     let%bind projected, deltas, dispatches, fresh_holds, controlled_goals, fresh_controls =
       List.fold_result
@@ -324,6 +324,7 @@ module Plan = struct
                 ~actor
                 ~authorize:(entry.Entry.authorize actor)
                 ~session
+                ~descendant_profile
                 ~request
                 ~now
             in
