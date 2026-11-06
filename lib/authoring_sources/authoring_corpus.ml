@@ -3707,6 +3707,25 @@ let runtime_foundation ~sources =
                }
          }
        ]
+     @ [ { id = "runtime.goal_metadata"
+         ; title = "Selected Goal metadata, staged controls and canonical accounting"
+         ; prerequisites = []
+         ; surfaces = shared
+         ; excerpts =
+             [ { path = "guide/native-goal-metadata.md"
+               ; heading = "# Selected native Goal metadata and controls"
+               ; include_children = true
+               }
+             ]
+         ; review =
+             Audited
+               { excerpt_sha256 =
+                   [ "4a59eb6c75f06d02dbac8c55717167522d44a65d008fea7a38928ab84c257ebc" ]
+               ; evidence =
+                   [ "test/factory_catalog_publication/goal_native_metadata_tests.ml" ]
+               }
+         }
+       ]
      @ [ { id = "runtime.recurrence"
          ; title = "Recurring automation metadata, exact requests and retained outcomes"
          ; prerequisites = []

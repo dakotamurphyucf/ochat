@@ -40,5 +40,5 @@ let%expect_test "native operation semantics require reviewed source and topic ma
       (List.length V.native_features : int)
     , (List.length targets : int)
     , (List.length paths : int)];
-  [%expect {| (22 88 65) |}]
+  [%expect {| (23 92 69) |}]
 ;;

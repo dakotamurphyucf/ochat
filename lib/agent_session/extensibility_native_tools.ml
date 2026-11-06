@@ -17,6 +17,12 @@ type t =
   | Instructions_activate
   | Instructions_deactivate
   | Instructions_status
+  | Goal_get
+  | Goal_create
+  | Goal_hold
+  | Goal_abandon
+  | Goal_objective
+  | Goal_progress
   | Recurrence_create
   | Recurrence_list
   | Recurrence_get
@@ -43,6 +49,12 @@ let name = function
   | Instructions_activate -> Instruction_native_admission.Effect.name Activate
   | Instructions_deactivate -> Instruction_native_admission.Effect.name Deactivate
   | Instructions_status -> Instruction_native_admission.Effect.name Status
+  | Goal_get -> Goal_native_admission.Effect.name Get
+  | Goal_create -> Goal_native_admission.Effect.name Create
+  | Goal_hold -> Goal_native_admission.Effect.name Hold
+  | Goal_abandon -> Goal_native_admission.Effect.name Abandon
+  | Goal_objective -> Goal_native_admission.Effect.name Objective
+  | Goal_progress -> Goal_native_admission.Effect.name Progress
   | Recurrence_create -> Recurrence_native_admission.Effect.name Create
   | Recurrence_list -> Recurrence_native_admission.Effect.name List
   | Recurrence_get -> Recurrence_native_admission.Effect.name Get
@@ -85,6 +97,12 @@ let registration ~env ~one_off_policy ~authoring_validation_host kind =
   let present value = Ok (Some value) in
   let unavailable message = P.Error.create Invalid_state ~message ~retryable:false () in
   match kind, one_off_policy with
+  | Goal_get, _ -> Goal_native_metadata_tool.get |> present
+  | Goal_create, _ -> Goal_native_metadata_tool.create |> present
+  | Goal_hold, _ -> Goal_native_metadata_tool.hold |> present
+  | Goal_abandon, _ -> Goal_native_metadata_tool.abandon |> present
+  | Goal_objective, _ -> Goal_native_metadata_tool.objective |> present
+  | Goal_progress, _ -> Goal_native_metadata_tool.progress |> present
   | Recurrence_create, _ -> Recurrence_native_tool.registration Create |> present
   | Recurrence_list, _ -> Recurrence_native_tool.registration List |> present
   | Recurrence_get, _ -> Recurrence_native_tool.registration Get |> present

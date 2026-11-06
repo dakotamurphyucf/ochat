@@ -71,6 +71,7 @@ type t =
   ; managed_session_service : Managed_session_service.t option
   ; instruction_service : Instruction_service.t option
   ; recurrence_service : Recurrence_service.t option
+  ; goal_metadata_service : Goal_native_metadata_service.t option
   ; bind_inference_identity :
       (Inference_allocation.Port.t -> Inference_client.Identity.t) option
   ; agent_source_code_view : Agent_source_code_view.t option
@@ -475,6 +476,7 @@ let create
   ; managed_session_service = None
   ; instruction_service = None
   ; recurrence_service = None
+  ; goal_metadata_service = None
   ; bind_inference_identity = None
   ; agent_source_code_view = None
   ; shell_code_view = None
@@ -487,6 +489,8 @@ let with_instruction_service t service = { t with instruction_service = Some ser
 let instruction_service t = t.instruction_service
 let with_recurrence_service t service = { t with recurrence_service = Some service }
 let recurrence_service t = t.recurrence_service
+let with_goal_metadata_service t service = { t with goal_metadata_service = Some service }
+let goal_metadata_service t = t.goal_metadata_service
 
 let with_inference_identity_binding t ~bind =
   { t with bind_inference_identity = Some bind }

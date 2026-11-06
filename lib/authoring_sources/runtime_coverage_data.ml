@@ -674,7 +674,7 @@ let implementation_sources =
   ; ( "lib/agent_session/session_state.ml"
     , "7a75340c567d0604a69f984e5a9267c041ac97cf5e430e123b06c00a52a59e0f" )
   ; ( "lib/agent_session/script_tool_calls.ml"
-    , "ba391e326cf6e4cc7711d2070c912b728f5343f70b2c3f18235c935f59cd04cc" )
+    , "6cc02b1179707911d5ac9fa5e73cf28589f44ecb3337998b90ffc0e003643131" )
   ; ( "lib/chat_response/agent_guidance.ml"
     , "5f00cdc8f90b5819dd8e079c8c201ec7ca790af59045b82a4c874315ad97be4b" )
   ; ( "lib/agent_session/instruction_guidance_text.ml"
@@ -736,7 +736,7 @@ let implementation_sources =
   ; ( "bin/ochat_agent_stdio.ml"
     , "8d134cd11c7df2a60e6b4b77a5ff7f9ea0c28a8a2674a3dd9f573adaa7623902" )
   ; ( "lib/agent_server/session_factory.ml"
-    , "2c41ecc0ed8529c0ee2fd9b9aa682dd014fa52792c74b528869679d3e909537d" )
+    , "84f9454d954015b80a0d939e0fc6bc6bbfd4062cb03bba3a7b4ec6f17c966ce7" )
   ; ( "bin/inference_composition.ml"
     , "1f57451d5543a5fe8f2f23dc0e593374b64946d088cba164acd1c087a7cdce18" )
   ; ( "lib/agent_protocol/developer_command_id.ml"

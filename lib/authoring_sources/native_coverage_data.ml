@@ -214,6 +214,16 @@ let features =
       ; "test/agent_server_config_test.ml"
       ; "test/chatml_composition/authoring_reference_scope_tests.ml"
       ] )
+  ; ( "goals.selected_metadata"
+    , "Six explicitly selected same-session Goal metadata tools with lexical native \
+       admission, transferred original custody and atomic callback-staged commands"
+    , [ "lib/agent_session/goal_native_admission.ml"
+      ; "lib/agent_session/goal_native_metadata_tool.ml"
+      ; "lib/agent_session/goal_native_metadata_service.ml"
+      ; "lib/agent_session/goal_native_metadata_view.ml"
+      ]
+    , "runtime.goal_metadata"
+    , [ "test/factory_catalog_publication/goal_native_metadata_tests.ml" ] )
   ; ( "recurrence.selected_metadata"
     , "Nine explicitly selected same-controller native metadata operations with genuine \
        invocation/current original checks and admitted write semantics"
@@ -303,7 +313,7 @@ let implementation_sources =
   ; ( "lib/agent_server/recurrence_authored_source.ml"
     , "e8f4b287579ae891c1d8197671c335e4e07afb02105ac206a44025701111bf3b" )
   ; ( "lib/agent_server/session_factory.ml"
-    , "2c41ecc0ed8529c0ee2fd9b9aa682dd014fa52792c74b528869679d3e909537d" )
+    , "84f9454d954015b80a0d939e0fc6bc6bbfd4062cb03bba3a7b4ec6f17c966ce7" )
   ; ( "lib/agent_session/authoring_context_tool.ml"
     , "6e318b45f799b485f802dc6d5e4d8bc031721e379cc8800f6ed484d59694840d" )
   ; ( "lib/agent_session/authoring_reference_scope.ml"
@@ -347,7 +357,7 @@ let implementation_sources =
   ; ( "lib/agent_session/run_chatml_tool.ml"
     , "eadb7cf2ac6622e977db08798fbfce7661062c47883cdf4f28700f1c85249b75" )
   ; ( "lib/agent_session/script_tool_calls.ml"
-    , "ba391e326cf6e4cc7711d2070c912b728f5343f70b2c3f18235c935f59cd04cc" )
+    , "6cc02b1179707911d5ac9fa5e73cf28589f44ecb3337998b90ffc0e003643131" )
   ; ( "lib/agent_session/session_management.ml"
     , "18431c4fd97a2d24a72b927fe8f0d20b8aea561f1f119d8f122d943f2a137f86" )
   ; ( "lib/agent_session/session_management_native.ml"
@@ -390,6 +400,14 @@ let implementation_sources =
     , "fcb6bd74ac79a90cff4e472a9f90610d1425b68f94bd5fb347de1552eb8411aa" )
   ; ( "lib/agent_session/recurrence_service.ml"
     , "ee3c04f4c48a296d9ce311656c386709da550569513ac3995d44f30d52cccd41" )
+  ; ( "lib/agent_session/goal_native_admission.ml"
+    , "65295af6c0d9d946ad225b1095a6bcfc4c58b66572bd131268cdc4540ba62d8b" )
+  ; ( "lib/agent_session/goal_native_metadata_tool.ml"
+    , "3d33f3536350c0611e0abf837c9304d0a609a8ebaa79206fccda68f85c3aeeac" )
+  ; ( "lib/agent_session/goal_native_metadata_service.ml"
+    , "00d915fdd81d78e360676d5f7d78969555434d71daaa735836c9ff69280468b7" )
+  ; ( "lib/agent_session/goal_native_metadata_view.ml"
+    , "24f7259f0bd64562b2b5d1d030ba0629acb1368e762090b92aaa3a4d04b9421f" )
   ]
 ;;
 
@@ -502,5 +520,17 @@ let topic_contracts =
   ; ( "delegated_moderator_v1"
     , "runtime.recurrence"
     , "67c46da5b0c221e9d663c4c7d25bee64ff31977d3326891e01ef35d359b9a150" )
+  ; ( "one_off_v1"
+    , "runtime.goal_metadata"
+    , "c71b0411396f9adbf4e6e9832f1614099e300963fce6749a0ef73a75629823fe" )
+  ; ( "tool_v1"
+    , "runtime.goal_metadata"
+    , "8296f003bbc69ba7795be5db04d5801d9d13b1f28e965f31439979f209839efd" )
+  ; ( "moderator_v1"
+    , "runtime.goal_metadata"
+    , "51bcc3aa417415544abc7e21941946fbfa89e2326d7f0aaaf505d55bb1ae9d13" )
+  ; ( "delegated_moderator_v1"
+    , "runtime.goal_metadata"
+    , "f62943c00929b109ba604736a71b41981ddf52dd3d78c7e5812e0d0ca5bdfe3d" )
   ]
 ;;

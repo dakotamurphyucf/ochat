@@ -158,6 +158,10 @@ type t =
       Agent_session.Permission_policy.t
       -> Agent_session.Session_actor.t option ref
       -> Agent_session.Recurrence_service.t
+  ; goal_metadata_service :
+      Agent_session.Permission_policy.t
+      -> Agent_session.Session_actor.t option ref
+      -> Agent_session.Goal_native_metadata_service.t
   ; generated_creation_mutex : Eio.Mutex.t
   ; idempotency_store : Agent_store.Idempotency_store.t
   ; blob_store : Agent_store.Blob_store.t
@@ -1985,6 +1989,10 @@ let native_script_tools
   Agent_session.Script_tool_calls.with_recurrence_service
     tools
     (t.recurrence_service profile actor_ref)
+  |> fun tools ->
+  Agent_session.Script_tool_calls.with_goal_metadata_service
+    tools
+    (t.goal_metadata_service profile actor_ref)
   |> fun tools ->
   Agent_session.Script_tool_calls.with_shell_context tools shell_context
   |> fun tools ->
@@ -12366,6 +12374,83 @@ let recurrence_service t (profile : Agent_session.Permission_policy.t) actor_ref
         ~request)
 ;;
 
+let goal_metadata_service t (profile : Agent_session.Permission_policy.t) actor_ref =
+  let module A = Agent_session in
+  let module Actor = A.Session_actor in
+  let module Admission = A.Goal_native_admission in
+  let module P = Agent_protocol in
+  let open Result.Let_syntax in
+  let authorize
+        (invocation : P.Invocation.t)
+        principal_id
+        actor
+        (state : A.Session_state.t)
+    =
+    if
+      Operator_authorization.is_current actor
+      && P.Id.Principal.equal (Operator_authorization.principal actor).id principal_id
+      && P.Id.Session.equal invocation.context.session_id state.identity.session_id
+      && Int.equal invocation.context.generation state.identity.generation
+      && String.equal
+           profile.A.Permission_policy.revision_digest
+           state.spec.permission_profile_digest
+      && (not state.halted)
+      && Option.is_none state.failure
+      && (not (P.Session.equal_desired_state state.lifecycle.desired Stopped))
+      && not
+           (Option.exists state.active_operation ~f:(fun operation ->
+              match operation.P.Operation.state with
+              | Cancelling | Cancelled | Failed _ | Interrupted _ -> true
+              | Starting | Running | Completed -> false))
+    then Ok ()
+    else
+      Error
+        (unavailable Permission_denied "Goal metadata invoking owner changed or stopped")
+  in
+  let with_actor effect_kind admission f =
+    let%bind actor = extension_actor actor_ref in
+    let%bind current = Actor.state actor in
+    let%bind () = Admission.check_now admission current ~effect_kind in
+    let invocation = Admission.invocation admission in
+    let original = Admission.actor admission in
+    (* The native token ends before Invocation completion. Later checks use the
+       exact transferred command custody supplied by the Actor, not that token. *)
+    let authorize = authorize invocation (Operator_authorization.principal original).id in
+    let%bind () = authorize original current in
+    f actor authorize
+  in
+  A.Goal_native_metadata_service.create
+    ~get:(fun ~admission ~goal_id ->
+      with_actor Get admission (fun actor authorize ->
+        let%bind current = Actor.native_goal_state actor ~admission ~authorize in
+        let session =
+          P.Session_ref.create
+            ~server_id:(Agent_store.Session_store.server_id t.store)
+            ~session_id:current.identity.session_id
+        in
+        let%bind view = A.Goal_native_metadata_view.capture current ~session ~goal_id in
+        A.Goal_native_metadata_view.to_json view))
+    ~create_goal:(fun ~admission ~request ->
+      with_actor Create admission (fun actor authorize ->
+        Actor.stage_native_goal_create actor ~admission ~authorize ~request))
+    ~control:(fun ~admission ~request ->
+      let effect_kind =
+        match P.Goal_native_control_request.mutation request with
+        | Hold _ -> Admission.Effect.Hold
+        | Abandon _ -> Abandon
+      in
+      with_actor effect_kind admission (fun actor authorize ->
+        Actor.stage_native_goal_control actor ~admission ~authorize ~request))
+    ~edit:(fun ~admission ~request ->
+      let effect_kind =
+        match P.Goal_edit.mutation request with
+        | Revise_objective _ -> Admission.Effect.Objective
+        | Record_progress _ -> Progress
+      in
+      with_actor effect_kind admission (fun actor authorize ->
+        Actor.stage_native_goal_edit actor ~admission ~authorize ~edit:request))
+;;
+
 let create
       ~sw
       ~env
@@ -12423,6 +12508,8 @@ let create
         (fun prepared borrowed -> authored_call_services t prepared borrowed)
     ; recurrence_service =
         (fun profile actor_ref -> recurrence_service t profile actor_ref)
+    ; goal_metadata_service =
+        (fun profile actor_ref -> goal_metadata_service t profile actor_ref)
     ; generated_creation_mutex = Eio.Mutex.create ()
     ; idempotency_store
     ; blob_store

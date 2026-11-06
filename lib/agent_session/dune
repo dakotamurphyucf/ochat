@@ -181,6 +181,9 @@
   goal_document
   goal_command
   goal_native_admission
+  goal_native_metadata_service
+  goal_native_metadata_view
+  goal_native_metadata_tool
   goal_native_actions
   goal_command_receipt
   goal_catalog

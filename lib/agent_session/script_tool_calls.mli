@@ -31,6 +31,12 @@ val with_recurrence_service : t -> Recurrence_service.t -> t
 
 val recurrence_service : t -> Recurrence_service.t option
 
+(** Actual invoking session's Goal metadata/control consumer. Installation grants
+    no selected tool or actor authority and never starts/resumes execution. *)
+val with_goal_metadata_service : t -> Goal_native_metadata_service.t -> t
+
+val goal_metadata_service : t -> Goal_native_metadata_service.t option
+
 (** Require this SAME current native service and completed admitted binding,
     then run the inherited host check before/after yielding and recheck physical
     services/native admission. Reuses metadata policy; never requests approval.

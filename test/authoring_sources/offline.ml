@@ -51,6 +51,7 @@ let () =
     ; "guide/chatml-surface-inventory.md"
     ; "guide/chatml-tables.md"
     ; "guide/chatml-task-effects.md"
+    ; "guide/native-goal-metadata.md"
     ; "overview/chatmd-language.md"
     ]
   in
