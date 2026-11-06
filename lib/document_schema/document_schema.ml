@@ -190,13 +190,32 @@ module Json = struct
       check 0)
   ;;
 
+  module Measurement_path = struct
+    type t =
+      | Root
+      | Field of string * t
+      | Index of int * t
+
+    let to_list t =
+      let rec loop t path =
+        match t with
+        | Root -> path
+        | Field (name, parent) -> loop parent (name :: path)
+        | Index (index, parent) -> loop parent (Int.to_string index :: path)
+      in
+      loop t []
+    ;;
+  end
+
   let validate_and_measure_with_checkpoint ~limits ~checkpoint t =
     (* Keep the per-node walk allocation-light. This private escape preserves the
        first validation error without allocating Result callbacks at every field;
        callers still receive the same bounded byte count or structured error. *)
     With_return.with_return (fun return ->
       let fail error = return.return (Error error) in
-      let invalid path reason = fail (Error.Invalid_field { path; reason }) in
+      let invalid rev_path reason =
+        fail (Error.Invalid_field { path = Measurement_path.to_list rev_path; reason })
+      in
       let fields_seen = ref 0 in
       let nodes_seen = ref 0 in
       let bytes_seen = ref 0 in
@@ -209,28 +228,33 @@ module Json = struct
          overflow. The same scan proves UTF-8 validity for ASCII strings. *)
       let charge_string text =
         let available = limits.Limits.max_bytes - !bytes_seen in
-        let encoded_bytes = ref 2 in
-        let index = ref 0 in
-        let exceeds_limit = ref (available < 2) in
-        let seen_bits = ref 0 in
-        while !index < String.length text && not !exceeds_limit do
-          let byte = text.[!index] in
-          seen_bits := !seen_bits lor Char.to_int byte;
-          let width =
-            match byte with
-            | '"' | '\\' | '\b' | '\012' | '\n' | '\r' | '\t' -> 2
-            | '\000' .. '\031' -> 6
-            | _ -> 1
-          in
-          if width > available - !encoded_bytes
-          then exceeds_limit := true
-          else encoded_bytes := !encoded_bytes + width;
-          incr index;
-          if !index land 0xffff = 0 then checkpoint ()
-        done;
-        if !exceeds_limit then fail (Error.Limit_exceeded "bytes");
-        charge_bytes !encoded_bytes;
-        !seen_bits land 0x80 = 0
+        if available < 2 then fail (Error.Limit_exceeded "bytes");
+        let length = String.length text in
+        let rec scan index encoded_bytes seen_bits =
+          if index >= length
+          then (
+            charge_bytes encoded_bytes;
+            seen_bits land 0x80 = 0)
+          else (
+            let byte = String.get text index in
+            let seen_bits = seen_bits lor Char.to_int byte in
+            let width =
+              match byte with
+              | '"' | '\\' | '\b' | '\012' | '\n' | '\r' | '\t' -> 2
+              | '\000' .. '\031' -> 6
+              | _ -> 1
+            in
+            let fits = width <= available - encoded_bytes in
+            let encoded_bytes = if fits then encoded_bytes + width else encoded_bytes in
+            let index = index + 1 in
+            (* A processed boundary byte checkpoints even when it first exceeds
+               the budget. Preserve cancellation before that byte-limit error. *)
+            if index land 0xffff = 0 then checkpoint ();
+            if fits
+            then scan index encoded_bytes seen_bits
+            else fail (Error.Limit_exceeded "bytes"))
+        in
+        scan 0 2 0
       in
       let rec walk t depth rev_path =
         incr nodes_seen;
@@ -246,29 +270,33 @@ module Json = struct
             charge_bytes (if Set.is_empty !seen then 1 else 2);
             let is_ascii = charge_string key in
             if not (is_ascii || valid_utf8_with_checkpoint key ~checkpoint)
-            then invalid (List.rev (key :: rev_path)) "invalid UTF-8 object key";
+            then
+              invalid (Measurement_path.Field (key, rev_path)) "invalid UTF-8 object key";
             if !fields_seen > limits.max_fields then fail (Error.Limit_exceeded "fields");
             if Set.mem !seen key
-            then fail (Error.Duplicate_key (List.rev (key :: rev_path)));
-            walk value (depth + 1) (key :: rev_path);
+            then
+              fail
+                (Error.Duplicate_key
+                   (Measurement_path.to_list (Measurement_path.Field (key, rev_path))));
+            walk value (depth + 1) (Measurement_path.Field (key, rev_path));
             seen := Set.add !seen key)
         | `Array values ->
           charge_bytes 2;
           List.iteri values ~f:(fun index value ->
             if index > 0 then charge_bytes 1;
-            walk value (depth + 1) (Int.to_string index :: rev_path))
+            walk value (depth + 1) (Measurement_path.Index (index, rev_path)))
         | `Number number ->
           charge_bytes (String.length number);
           if not (valid_number number ~checkpoint)
-          then invalid (List.rev rev_path) "invalid JSON number"
+          then invalid rev_path "invalid JSON number"
         | `String text ->
           let is_ascii = charge_string text in
           if not (is_ascii || valid_utf8_with_checkpoint text ~checkpoint)
-          then invalid (List.rev rev_path) "invalid UTF-8 string"
+          then invalid rev_path "invalid UTF-8 string"
         | `True | `Null -> charge_bytes 4
         | `False -> charge_bytes 5
       in
-      walk t 1 [];
+      walk t 1 Measurement_path.Root;
       Ok !bytes_seen)
   ;;
 
