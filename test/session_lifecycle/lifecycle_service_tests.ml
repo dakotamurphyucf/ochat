@@ -1472,7 +1472,22 @@ let%expect_test "startup rollback retains actual failed owner and its storage un
               let registry = Agent_server.Daemon.registry daemon in
               let original = R.remove registry session.id |> Option.value_exn in
               let handle = original.store_handle |> Option.value_exn in
+              let foreign_session, _ =
+                create_session ~key:"startup-foreign-tuple" client
+              in
+              let foreign = R.find registry foreign_session.id |> Option.value_exn in
+              let mixed_tuples =
+                [ { original with actor = foreign.actor }
+                ; { original with runtime = foreign.runtime }
+                ; { original with store_handle = foreign.store_handle }
+                ]
+              in
               let attempts = ref 0 in
+              let factual_during_shutdown = ref false in
+              let cleanup_started, signal_cleanup_started = Eio.Promise.create () in
+              let cleanup_released, signal_cleanup_released = Eio.Promise.create () in
+              let cleanup_finished, signal_cleanup_finished = Eio.Promise.create () in
+              let close_before_graph_join = ref false in
               let retained =
                 { original with
                   close =
@@ -1480,10 +1495,28 @@ let%expect_test "startup rollback retains actual failed owner and its storage un
                       Int.incr attempts;
                       if Int.equal !attempts 1
                       then failwith "original startup close failure";
+                      (* Retry still owns the SAME genuine Entry and open Handle.
+                         Check while its failed cleanup is retained and global
+                         closing is true, before actual Actor/writer destruction. *)
+                      assert (R.is_closing registry);
+                      close_before_graph_join
+                      := Option.is_none (Eio.Promise.peek cleanup_finished);
+                      let current = R.find registry session.id |> Option.value_exn in
+                      R.check_retained_factual_owner registry current |> protocol_ok;
+                      factual_during_shutdown := true;
                       original.close ())
                 }
               in
               R.add registry ~session_id:session.id retained |> protocol_ok;
+              R.check_retained_factual_owner registry retained |> protocol_ok;
+              List.iter mixed_tuples ~f:(fun entry ->
+                match R.check_retained_factual_owner registry entry with
+                | Error failure ->
+                  [%test_eq: P.Error.code] Conflict failure.code;
+                  [%test_eq: string]
+                    "factual owner is no longer registered"
+                    failure.message
+                | Ok () -> failwith "factual check accepted a mixed actual resource tuple");
               let primary =
                 P.Error.create
                   Persistence_error
@@ -1505,12 +1538,82 @@ let%expect_test "startup rollback retains actual failed owner and its storage un
                 Option.exists (R.find registry session.id) ~f:(fun entry ->
                   phys_equal entry.actor original.actor)
               in
+              (* The injected callback failed before original.close. Its Actor,
+                 writer and lower Store head remain genuine and available; no
+                 uncertain/closed Handle is promoted to writable custody. *)
+              Agent_store.Session_store.Handle.metadata_checked handle
+              |> store_ok
+              |> ignore;
+              Agent_session.Session_actor.state original.actor |> protocol_ok |> ignore;
+              R.check_retained_factual_owner registry retained |> protocol_ok;
               let fresh_load_refused =
                 match R.load registry session.id with
                 | Error error -> P.Error.equal_code error.code Conflict
                 | Ok _ -> false
               in
-              R.shutdown registry;
+              let borrowed, signal_borrowed = Eio.Promise.create () in
+              let never, _ = Eio.Promise.create () in
+              let foreign_borrow =
+                Eio.Fiber.fork_promise ~sw (fun () ->
+                  try
+                    Agent_server.Runtime_owner.with_resource_lifetime
+                      foreign.runtime
+                      (fun () ->
+                         Eio.Promise.resolve signal_borrowed ();
+                         Exn.protect
+                           ~f:(fun () ->
+                             Eio.Promise.await never;
+                             Ok ())
+                           ~finally:(fun () ->
+                             (* Actual Owner close cancels this genuine resource
+                               borrow. Its resource cleanup must join before ANY
+                               failed Entry resource-close callback is retried. *)
+                             Eio.Cancel.protect (fun () ->
+                               Eio.Promise.resolve signal_cleanup_started ();
+                               Eio.Promise.await cleanup_released;
+                               Eio.Promise.resolve signal_cleanup_finished ())))
+                    |> protocol_ok;
+                    failwith "foreign resource borrow ended without Owner cancellation"
+                  with
+                  | Eio.Cancel.Cancelled _ -> ())
+              in
+              let closing =
+                Exn.protect
+                  ~finally:(fun () ->
+                    if Option.is_none (Eio.Promise.peek cleanup_released)
+                    then Eio.Promise.resolve signal_cleanup_released ())
+                  ~f:(fun () ->
+                    Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
+                      Eio.Fiber.first
+                        (fun () -> Eio.Promise.await borrowed)
+                        (fun () ->
+                           Eio.Promise.await_exn foreign_borrow;
+                           failwith "foreign resource borrow ended before shutdown"));
+                    let closing =
+                      Eio.Fiber.fork_promise ~sw (fun () -> R.shutdown registry)
+                    in
+                    Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
+                      Eio.Promise.await cleanup_started);
+                    assert (R.is_closing registry);
+                    assert (Option.is_none (Eio.Promise.peek closing));
+                    (* The failed Entry's runtime is already joined. Only the
+                     graph-wide barrier prevents its second close callback from
+                     running while this OTHER actual Owner is still cleaning up.
+                     Observe callback entry, not a checkpoint blocked behind IO. *)
+                    [%test_eq: int] 1 !attempts;
+                    assert (not !close_before_graph_join);
+                    R.check_retained_factual_owner registry retained |> protocol_ok;
+                    Agent_store.Session_store.Handle.metadata_checked handle
+                    |> store_ok
+                    |> ignore;
+                    closing)
+              in
+              Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
+                Eio.Promise.await_exn closing;
+                Eio.Promise.await_exn foreign_borrow);
+              assert (Option.is_some (Eio.Promise.peek cleanup_finished));
+              assert (not !close_before_graph_join);
+              assert !factual_during_shutdown;
               let owner_released = not (R.retains_cleanup_handle registry handle) in
               print_s
                 [%sexp

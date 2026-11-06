@@ -226,6 +226,10 @@ val ensure_loaded_authenticated
   -> actor:Operator_authorization.t
   -> (unit, Agent_protocol.Error.t) result
 
+(** Finite detachment refuses active or borrowed execution and every outstanding
+    descendant Slot/ACK before mutating the runtime. Does not cancel work or wait
+    on remote roots to make an ordinary unload eligible. Use the strong close or
+    stop retirement path for explicit cancellation and retained factual drain. *)
 val unload : t -> (unit, Agent_protocol.Error.t) result
 
 (** Begin and join dependency cancellation after a durable stop request, even
@@ -869,7 +873,15 @@ val deliver_run_job_completion
     if no callback or foreground operation owns the runtime. An active foreground
     operation is cancelled; [close_and_wait] must join its terminal checkpoint
     before resources or the actor are retired. An in-progress unload retains control
-    of retirement. The actor must remain running through cleanup. *)
+    of retirement. The actor must remain running through cleanup.
+
+    Failed close retains the exact retired resource for explicit unload/close
+    retry. It is never returned as loaded again. Unborrowed pending cleanup
+    blocks constructing another runtime or replacing its source; a separate
+    already-loaded current runtime retains its original execution checks. A positive retry removes that resource only
+    after its close closure returns successfully. Errors remain errors, including
+    an unavailable canonical writer that requires recovery.
+*)
 val close : t -> unit
 
 (** Close and join foreground/dependency/background cleanup before shutting down the actor or

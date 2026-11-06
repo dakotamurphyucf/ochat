@@ -705,11 +705,11 @@ let implementation_sources =
   ; ( "lib/agent_session/legacy_callback_runtime.ml"
     , "558426b59a1832b4eb43a8e944a981a0ba635617e92df1eb98520c2b337e982e" )
   ; ( "lib/agent_session/runtime_builder.ml"
-    , "2bc142447fc35809900da1c5dd4dececcc604cdb33a38e28b193eb52ea38b865" )
+    , "2bd4b1ebe0200ee9be0538a72b07030b4c0317c60b0aa5e2bf52ba69034abbb0" )
   ; ( "lib/context_compaction/compactor.ml"
     , "7b11eae5ce4d929bf1ab4702111d03f70fe97cfe8543135c73782c2b92391ff0" )
   ; ( "lib/agent_session/session_transition.ml"
-    , "2439953cd97d86047ab73456e9ff2d14773057b0774e62c51d19a91ffe60e4eb" )
+    , "d91b0b135d560aa2e7cd9e41fbf78b0468a1437ac0e947e1954f2cfdec77b251" )
   ; ( "lib/agent_session/instruction_clear_capacity.ml"
     , "baa952a408f74f0795059df9e7f6bb3c677957c1866c6d2b20cb83fc7a475e0e" )
   ; ( "lib/agent_session/session_terminal_journal.ml"
@@ -743,7 +743,7 @@ let implementation_sources =
   ; ( "bin/ochat_agent_stdio.ml"
     , "8d134cd11c7df2a60e6b4b77a5ff7f9ea0c28a8a2674a3dd9f573adaa7623902" )
   ; ( "lib/agent_server/session_factory.ml"
-    , "397a8007481c92eddd65fff4347a30e1830596d4fb75fc3a4d224f5f6d306209" )
+    , "62f95c25b3316fdc5eaf4f8d21374d0d3f80d4b23a546057fbf57dc31c1a17af" )
   ; ( "bin/inference_composition.ml"
     , "1f57451d5543a5fe8f2f23dc0e593374b64946d088cba164acd1c087a7cdce18" )
   ; ( "lib/agent_protocol/developer_command_id.ml"
@@ -871,7 +871,7 @@ let implementation_sources =
   ; ( "lib/agent_session/delegated_runtime_load.ml"
     , "c202fb7653c63d810965bf80d65b60bc91067f544ffb886a4539fc67e0d0e859" )
   ; ( "lib/agent_server/runtime_owner.ml"
-    , "73c9a9e31ed42fc41043e9bf5d28977ec7cad007d87ad02db917325c87935963" )
+    , "c097e94324d1d4e8682ea5b24c94a1ded5505f030bdf37c4a0123a50d530d68a" )
   ; ( "lib/agent_session/managed_submission_tracking.ml"
     , "6c8804b2d0c2033631b965769af63c5240afeb6dabff72695c818dc1a68baed8" )
   ; ( "lib/agent_server/managed_output_cursor.ml"
@@ -999,7 +999,7 @@ let implementation_sources =
   ; ( "lib/agent_session/initial_lifecycle_startup.ml"
     , "34befd9d623fc41ffc0e0013960277ff03d4cde6d0f2febf6f0149dd91f074eb" )
   ; ( "lib/agent_session/session_actor.ml"
-    , "cc75afbbd42db48ac5f5b92551414a1d6d4914c7601502812b938aacd5548a7c" )
+    , "04d793b9b1fd8e4d12913bbbbe66046c72e7d953d951260de13da0893dda3de6" )
   ; ( "lib/agent_session/job_custody.ml"
     , "6a3b5951629d8440ebfcaf9f72aa625cf522087e8996bb73cec82ce16abfa120" )
   ; ( "lib/agent_session/staged_jobs.ml"

@@ -174,6 +174,12 @@ let on_event ctx state event = Task.pure(state)
                        |> Entry.frontier
                        |> protocol_ok
                        |> Frontier.child_associations));
+                  let factual = state parent in
+                  Unrelated_birth_facts.check
+                    Registered_initial_snapshot
+                    ~before
+                    ~after:factual
+                    ~record:(record daemon row);
                   (* The shared pending projection rejects a stale equal-revision
                      rewrite before the already-unavailable writer is reached.
                      No creation-only poison flag or stale control install. *)
@@ -194,10 +200,10 @@ let on_event ctx state event = Task.pure(state)
                       | _ -> failwith "stale control lost its canonical projection fence")
                    | Ok _ -> failwith "uncertain writer accepted a stale control commit");
                   let unchanged = state parent in
-                  [%test_eq: int64] before.counters.revision unchanged.counters.revision;
-                  [%test_eq: int64]
-                    before.counters.transaction_sequence
-                    unchanged.counters.transaction_sequence;
+                  assert (
+                    Jsonaf.exactly_equal
+                      (T.state_document factual |> store_ok |> D.Document.json)
+                      (T.state_document unchanged |> store_ok |> D.Document.json));
                   assert (Entry.equal_control (Entry.control (entry parent)) Enabled))));
          (* This is exception/cleanup recovery after a post-sync write, not an
             externally killed process. Fresh host and current proof are real. *)

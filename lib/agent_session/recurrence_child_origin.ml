@@ -25,6 +25,10 @@ let root_invocation t =
   root_invocation_for_source ~source_kind:(source_kind t) t.definition
 ;;
 
+let matches_record t record =
+  Store.Reference.equal (Store.reference t.record) (Store.reference record)
+;;
+
 let reservation t = t.reservation
 let definition t = t.definition
 let invalid message = Error (P.Error.invalid_request message)

@@ -176,6 +176,7 @@ let runtime ?script_tools ?check_execution ?activity ~close () : Builder.t =
   ; idle_notifications = None
   ; automatic_turn_policy = None
   ; check_execution
+  ; check_ancestry = None
   ; ancestor_capabilities = None
   ; source_lease = Agent_session.Prompt_source_lease.legacy
   ; activity
@@ -909,9 +910,17 @@ let%expect_test
         | _ -> failwith "stop produced an unexpected cleanup outcome");
       assert (not (Owner.is_loaded owner));
       [%test_eq: int] 1 !closes;
+      if fail_close
+      then (
+        assert (not (Owner.source_lane_idle owner));
+        (match Owner.ensure_loaded owner with
+         | Error { code = Conflict; retryable = true; _ } -> ()
+         | Ok () | Error _ -> failwith "failed retirement lost its exact runtime");
+        Owner.unload_and_wait owner |> protocol_ok;
+        [%test_eq: int] 2 !closes);
       Owner.ensure_loaded owner |> protocol_ok;
       Owner.unload_and_wait owner |> protocol_ok;
-      [%test_eq: int] 2 !closes;
+      [%test_eq: int] (if fail_close then 3 else 2) !closes;
       print_s
         [%sexp
           (fail_close : bool)
@@ -1165,18 +1174,17 @@ let%expect_test "close cancels callbacks and retires only after their cleanup fi
     |}]
 ;;
 
-let%expect_test
-    "callback errors release ownership and self-close cleanup cannot poison the mutex"
-  =
+let%expect_test "callback errors retain failed close ownership until exact retry" =
   with_actor (fun _env _sw actor _writer _backend ->
     let closes = ref 0 in
+    let close_succeeds = ref false in
     let owner =
       Owner.create ~actor ~initial:None ~build:(fun () ->
         Ok
           (runtime
              ~close:(fun () ->
                incr closes;
-               failwith "fixture close failure")
+               if not !close_succeeds then failwith "fixture close failure")
              ()))
     in
     let callback_failed =
@@ -1202,12 +1210,24 @@ let%expect_test
     in
     [%test_eq: bool] true close_failed;
     reject "closed after cleanup error" (Owner.ensure_loaded owner);
+    let retry_failed =
+      try
+        Owner.close owner;
+        false
+      with
+      | Failure message -> String.equal message "fixture close failure"
+    in
+    assert retry_failed;
+    [%test_eq: int] 2 !closes;
+    assert (not (Owner.is_loaded owner));
+    close_succeeds := true;
+    Owner.close owner;
     Owner.close owner;
     print_s [%sexp (!reused : bool), (!closes : int), (Owner.is_loaded owner : bool)]);
   [%expect
     {|
     ("closed after cleanup error" Server_shutting_down)
-    (true 1 false)
+    (true 3 false)
     |}]
 ;;
 
@@ -1428,7 +1448,7 @@ let%expect_test "lease cleanup preserves primary failures and reports standalone
                (runtime
                   ~close:(fun () ->
                     incr closes;
-                    raise Lease_cleanup)
+                    if Int.equal !closes 1 then raise Lease_cleanup)
                   ()))
           ~build:(fun () -> failwith "unexpected lease reload")
       in
@@ -1459,11 +1479,14 @@ let%expect_test "lease cleanup preserves primary failures and reports standalone
         | _ -> false);
       [%test_eq: int] 1 !closes;
       assert (not (Owner.is_loaded owner));
-      Owner.close_and_wait owner));
+      Owner.close_and_wait owner;
+      Owner.close_and_wait owner;
+      [%test_eq: int] 2 !closes));
   print_endline
-    "typed error and exception retained; cleanup raised only after success; closed once";
+    "typed error and exception retained; cleanup raised only after success; failed close \
+     retried exactly";
   [%expect
-    {| typed error and exception retained; cleanup raised only after success; closed once |}]
+    {| typed error and exception retained; cleanup raised only after success; failed close retried exactly |}]
 ;;
 
 let%expect_test "source report joins delayed cleanup and retains its hidden failure" =
@@ -1488,9 +1511,11 @@ let%expect_test "source report joins delayed cleanup and retains its hidden fail
                  (runtime
                     ~close:(fun () ->
                       Int.incr closes;
-                      Eio.Promise.resolve closing_u ();
-                      Eio.Promise.await release;
-                      raise Lease_cleanup)
+                      if Int.equal !closes 1
+                      then (
+                        Eio.Promise.resolve closing_u ();
+                        Eio.Promise.await release;
+                        raise Lease_cleanup))
                     ()))
             ~build:(fun () -> failwith "reported cleanup reloaded a runtime")
         in
@@ -1582,7 +1607,7 @@ let%expect_test "source report joins delayed cleanup and retains its hidden fail
         match result, cleanup with
         | Error (exn, backtrace), _ | Ok (), Error (exn, backtrace) ->
           Exn.raise_with_original_backtrace exn backtrace
-        | Ok (), Ok () -> ())));
+        | Ok (), Ok () -> [%test_eq: int] 2 !closes)));
   print_endline
     "no report before join; failed inner close survives outer clear; exact primary \
      retained";
@@ -1678,4 +1703,76 @@ let%expect_test
             "unloaded/retiring deny; no builder; Error/cancellation release; unload joins")));
   [%expect
     {| unloaded/retiring deny; no builder; Error/cancellation release; unload joins |}]
+;;
+
+let%expect_test "retired cleanup attempts every resource and preserves the first failure" =
+  with_actor (fun env sw actor _writer _backend ->
+    Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 15. (fun () ->
+      let first_closes = ref 0
+      and second_closes = ref 0 in
+      let first_succeeds = ref false
+      and second_succeeds = ref false in
+      let resource name closes succeeds =
+        runtime
+          ~close:(fun () ->
+            Int.incr closes;
+            if not !succeeds then failwith name)
+          ()
+      in
+      let first = resource "first retained resource" first_closes first_succeeds in
+      let second = resource "second retained resource" second_closes second_succeeds in
+      let builds = ref 0 in
+      let owner =
+        Owner.create ~actor ~initial:(Some first) ~build:(fun () ->
+          Int.incr builds;
+          [%test_eq: int] 1 !builds;
+          Ok second)
+      in
+      let borrow expected =
+        let entered, enter = Eio.Promise.create () in
+        let release, release_u = Eio.Promise.create () in
+        let finished =
+          Eio.Fiber.fork_promise ~sw (fun () ->
+            Result.try_with (fun () ->
+              Owner.with_delegation_resources owner (fun actual ->
+                assert (phys_equal expected actual);
+                Eio.Promise.resolve enter ();
+                Eio.Promise.await release;
+                Ok ())
+              |> protocol_ok))
+        in
+        Eio.Promise.await entered;
+        release_u, finished
+      in
+      let first_release, first_finished = borrow first in
+      Owner.unload_and_wait owner |> protocol_ok;
+      let second_release, second_finished = borrow second in
+      Owner.unload_and_wait owner |> protocol_ok;
+      [%test_eq: int] 0 !first_closes;
+      [%test_eq: int] 0 !second_closes;
+      let failed expected = function
+        | Error (Failure message) -> [%test_eq: string] expected message
+        | Error exn -> raise exn
+        | Ok _ -> failwith "failed resource close was forgotten"
+      in
+      Eio.Promise.resolve first_release ();
+      Eio.Promise.await_exn first_finished |> failed "first retained resource";
+      Eio.Promise.resolve second_release ();
+      Eio.Promise.await_exn second_finished |> failed "second retained resource";
+      first_succeeds := true;
+      Result.try_with (fun () -> Owner.unload_and_wait owner |> protocol_ok)
+      |> failed "second retained resource";
+      [%test_eq: int] 2 !first_closes;
+      [%test_eq: int] 2 !second_closes;
+      assert (not (Owner.is_loaded owner));
+      assert (not (Owner.source_lane_idle owner));
+      second_succeeds := true;
+      Owner.unload_and_wait owner |> protocol_ok;
+      Owner.close_and_wait owner;
+      [%test_eq: int] 2 !first_closes;
+      [%test_eq: int] 3 !second_closes));
+  print_endline
+    "a failed head does not starve later cleanup; successful resources never close again";
+  [%expect
+    {| a failed head does not starve later cleanup; successful resources never close again |}]
 ;;

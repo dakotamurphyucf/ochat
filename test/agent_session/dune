@@ -1,3 +1,12 @@
+(copy_files ../../lib/agent_session/goal_root_policy.ml)
+(copy_files ../../lib/agent_session/goal_root_policy.mli)
+(library
+ (name goal_root_policy_test_support)
+ (modules goal_root_policy)
+ (libraries core ochat.agent_session ochat.agent_protocol)
+ (flags (:standard -open Agent_session))
+ (preprocess (pps ppx_jane)))
+
 (library
  (name agent_session_test)
  (modules
@@ -25,6 +34,7 @@
   instruction_selection_persistence_tests
   instruction_clear_capacity_tests
   goal_run_tests
+  goal_root_policy_tests
   goal_control_transition_tests
   goal_work_attribution_tests
   run_terminal_capacity_tests
@@ -174,7 +184,7 @@
   standalone_tests
   root_invocation_tests
   state_tests)
- (libraries agent_server_test_support developer_root_owner_test_suite developer_run_store_test_suite inference_fixture ochat.transcript core eio eio_main mirage-crypto-rng.unix ochat.agent_session ochat.instruction_content ochat.agent_server ochat.agent_store)
+ (libraries goal_root_policy_test_support agent_server_test_support developer_root_owner_test_suite developer_run_store_test_suite inference_fixture ochat.transcript core eio eio_main mirage-crypto-rng.unix ochat.agent_session ochat.instruction_content ochat.agent_server ochat.agent_store)
  (inline_tests)
  (preprocess
   (pps ppx_jane ppx_expect)))

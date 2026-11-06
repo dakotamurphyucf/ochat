@@ -2,6 +2,7 @@ open! Core
 module P = Agent_protocol
 module S = Child_usage_snapshot
 module C = Child_contributions
+module O = Agent_store.Delegation_goal_origin
 
 let initialize_new (state : Session_state.t) ~max_children ~max_encoded_bytes =
   let open Result.Let_syntax in
@@ -33,6 +34,33 @@ let initialize_new (state : Session_state.t) ~max_children ~max_encoded_bytes =
   state
 ;;
 
+let descendants children ~scope =
+  let open Result.Let_syntax in
+  match children, scope with
+  | Some children, None -> C.aggregate children
+  | Some children, Some scope -> C.aggregate_scope children ~scope
+  | None, _ ->
+    let%map coverage =
+      S.Coverage.create ~historical_children_unknown:true ~unobserved_children:0L
+    in
+    S.Descendants.create ~partition:S.Partition.empty ~coverage
+;;
+
+let goal_scopes accounting ~origin ~children ~own =
+  let open Result.Let_syntax in
+  let heads = Goal_descendants.local_included accounting in
+  List.map (O.scopes origin) ~f:(fun scope ->
+    let%bind descendants = descendants children ~scope:(Some scope) in
+    let included =
+      List.find heads ~f:(fun included ->
+        O.Scope.equal
+          scope
+          (Goal_descendant_pending.scope (Goal_descendant_included.pending included)))
+    in
+    S.Goal_scope.create ~scope ~own ~descendants ~included)
+  |> Result.all
+;;
+
 let snapshot (state : Session_state.t) =
   let open Result.Let_syntax in
   match state.delegated_usage with
@@ -46,24 +74,35 @@ let snapshot (state : Session_state.t) =
           (Sexp.to_string_hum (Canonical_usage_fold.Error.sexp_of_t error)))
     in
     let%bind own_partition = S.Partition.create ~usage ~marks in
-    let%bind descendants =
-      match state.child_contributions with
-      | Some children -> C.aggregate children
-      | None ->
-        let%map coverage =
-          S.Coverage.create ~historical_children_unknown:true ~unobserved_children:0L
-        in
-        S.Descendants.create ~partition:S.Partition.empty ~coverage
+    let%bind descendants = descendants state.child_contributions ~scope:None in
+    let canonical_coverage =
+      P.Inference_query.Summary.coverage (Inference_ledger.summary state.inference_ledger)
     in
+    let reference = Delegated_usage.reference own in
+    let revision = state.counters.revision in
     let%map snapshot =
-      S.create
-        ~reference:(Delegated_usage.reference own)
-        ~revision:state.counters.revision
-        ~own:own_partition
-        ~descendants
-        ~canonical_coverage:
-          (P.Inference_query.Summary.coverage
-             (Inference_ledger.summary state.inference_ledger))
+      match
+        Option.map state.goal_descendants ~f:(fun accounting ->
+          accounting, Goal_descendants.origin accounting)
+      with
+      | Some (accounting, Some origin) ->
+        let%bind goal_scopes =
+          goal_scopes
+            accounting
+            ~origin
+            ~children:state.child_contributions
+            ~own:own_partition
+        in
+        S.create_with_scopes
+          ~reference
+          ~revision
+          ~own:own_partition
+          ~descendants
+          ~canonical_coverage
+          ~origin
+          ~goal_scopes
+      | None | Some (_, None) ->
+        S.create ~reference ~revision ~own:own_partition ~descendants ~canonical_coverage
     in
     Some snapshot
 ;;
@@ -76,5 +115,10 @@ let register (state : Session_state.t) ~reference ~max_children ~max_encoded_byt
     | None ->
       C.create ~inventory:Historical_children_unknown ~max_children ~max_encoded_bytes
   in
-  C.register children ~reference
+  if
+    List.exists
+      (C.references children)
+      ~f:(Agent_store.Delegation_store.Reference.equal reference)
+  then Ok children
+  else C.register children ~reference
 ;;

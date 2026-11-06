@@ -512,8 +512,8 @@ let%expect_test "late scope-only callbacks cannot reconstruct a retired admissio
     in
     { state with inference_ledger }
   in
-  with_tracking_actor ~map_initial (fun sw actor _ commits ->
-    let context, request, _ = prepared () in
+  with_tracking_actor ~map_initial (fun sw actor reject commits ->
+    let context, request, prepared = prepared () in
     let graph =
       G.create
         actor
@@ -539,7 +539,90 @@ let%expect_test "late scope-only callbacks cannot reconstruct a retired admissio
     in
     dispatch ();
     let actual_handle = only_handle actor in
+    let module Host = Agent_session.Inference_graph_owner.Host in
+    let module Registration = Agent_session.Inference_graph_owner.Registration in
+    (* A second actual graph exposes its public read-only lifetime projection;
+       no registration or Handle is manufactured by the test. *)
+    let joined_owner =
+      A.open_inference_owner actor ~source:(source "joined-prune-owner") |> protocol_ok
+    in
+    let before_joined = !commits in
+    let joined_handle =
+      A.admit_inference
+        actor
+        ~owner:joined_owner
+        ~relation:Root
+        ~operation_id:None
+        ~invocation_id:None
+        ~configuration:(R.Prepared.configuration prepared)
+      |> protocol_ok
+    in
+    A.release_inference actor ~owner:joined_owner ~handle:joined_handle |> protocol_ok;
+    (* These are two real successful canonical writes: Prepared admission and
+       truthful unsubmitted interruption. Existing later no-write oracles retain
+       their exact baseline rather than assuming the original total. *)
+    [%test_eq: int] (before_joined + 2) !commits;
+    assert (
+      Option.is_none
+        (Host.registration joined_owner ~ordinal:(L.Handle.ordinal joined_handle)));
+    let joined =
+      Host.retained_registration joined_owner joined_handle |> Option.value_exn
+    in
+    assert (L.Handle.equal joined_handle (Registration.handle joined));
+    assert (not (Registration.policy_is_current joined));
+    let before_rejected = A.state actor |> protocol_ok in
+    let commits_before_rejected = !commits in
+    (* This fixture rejects before storage; it does not model retry of an
+       uncertain physical Commit_writer. A rejected candidate must not prune. *)
+    let publication_rejected =
+      Exn.protect
+        ~finally:(fun () -> reject := false)
+        ~f:(fun () ->
+          reject := true;
+          try
+            dispatch ();
+            false
+          with
+          | G.Rejected error ->
+            [%test_eq: Agent_protocol.Error.code] Persistence_error error.code;
+            true)
+    in
+    assert publication_rejected;
+    assert (phys_equal before_rejected (A.state actor |> protocol_ok));
+    [%test_eq: int] commits_before_rejected !commits;
+    assert (
+      Option.exists
+        (Host.retained_registration joined_owner joined_handle)
+        ~f:(phys_equal joined));
+    assert (L.Handle.equal joined_handle (only_handle actor));
     dispatch ();
+    (* Check before graph finish: otherwise finish itself could mask a missing
+       Joined-pruning step in the positive State installation path. *)
+    assert (
+      Option.is_none
+        (L.find
+           (A.state actor |> protocol_ok).inference_ledger
+           ~ordinal:(L.Handle.ordinal joined_handle)));
+    assert (Option.is_none (Host.retained_registration joined_owner joined_handle));
+    A.seal_inference_owner actor ~owner:joined_owner |> protocol_ok;
+    A.finish_inference_owner actor ~owner:joined_owner |> protocol_ok;
+    let module Fold = Agent_session.Canonical_usage_fold in
+    let marks =
+      Fold.Marks.of_ledger (A.state actor |> protocol_ok).inference_ledger
+      |> Result.map_error ~f:(fun error ->
+        Sexp.to_string_hum (Fold.Error.sexp_of_t error))
+      |> Result.ok_or_failwith
+    in
+    let expected_marks : Fold.Marks.t =
+      { attempt = 3L; turn = 0L; untracked_attempts = 0L; untracked_turns = 0L }
+    in
+    if not (Fold.Marks.equal expected_marks marks)
+    then
+      raise_s
+        [%sexp
+          "unexpected canonical admission marks"
+        , (expected_marks : Fold.Marks.t)
+        , (marks : Fold.Marks.t)];
     let incoming = usage actual_handle 1L 9L in
     let after = !commits in
     let rejected =
@@ -557,9 +640,9 @@ let%expect_test "late scope-only callbacks cannot reconstruct a retired admissio
     G.finish graph |> protocol_ok;
     print_endline
       "scope-only retired callback rejects; actual held admission ignores with no new \
-       charge");
+       charge; Joined membership prunes only after positive publication");
   [%expect
-    {| scope-only retired callback rejects; actual held admission ignores with no new charge |}]
+    {| scope-only retired callback rejects; actual held admission ignores with no new charge; Joined membership prunes only after positive publication |}]
 ;;
 
 let%expect_test "actual worker allocation requires ACK and expires before terminal save" =
@@ -811,4 +894,78 @@ let%expect_test "actual Run worker refreshes before a nonyielding final authorit
      no host policy";
   [%expect
     {| actual provider admitted once; later composed revocation rejects; final check calls no host policy |}]
+;;
+
+let%expect_test "failed factual release retains the actual registration for retry" =
+  with_tracking_actor (fun _ actor reject commits ->
+    let _, _, prepared = prepared () in
+    let source = source "retained-release-owner" in
+    let owner = A.open_inference_owner actor ~source |> protocol_ok in
+    let handle =
+      A.admit_inference
+        actor
+        ~owner
+        ~relation:Root
+        ~operation_id:None
+        ~invocation_id:None
+        ~configuration:(R.Prepared.configuration prepared)
+      |> protocol_ok
+    in
+    let confirmed = A.state actor |> protocol_ok in
+    (* This fixture rejects before touching storage. It does not model an
+       unavailable physical Commit_writer or permit retrying its uncertain head. *)
+    reject := true;
+    let failed = A.release_inference actor ~owner ~handle |> Result.is_error in
+    assert failed;
+    A.seal_inference_owner actor ~owner |> protocol_ok;
+    assert (Result.is_error (A.finish_inference_owner actor ~owner));
+    assert (phys_equal confirmed (A.state actor |> protocol_ok));
+    assert (Result.is_error (A.open_inference_owner actor ~source));
+    [%test_eq: int] 1 !commits;
+    reject := false;
+    (* SAME opaque owner and handle must remain usable. Removing the registration
+       in a failed release's finalizer makes this retry fail before persistence. *)
+    A.release_inference actor ~owner ~handle |> protocol_ok;
+    let saved = List.hd_exn (rows actor) in
+    assert (L.Handle.equal handle (L.Row.handle saved));
+    (match O.Attempt_record.state (L.Row.record saved) with
+     | Interrupted { reason = Host_interrupted; delivery = Definitely_not_submitted } ->
+       ()
+     | Prepared | Running | Terminal _ | Interrupted _ -> assert false);
+    A.finish_inference_owner actor ~owner |> protocol_ok;
+    assert (Result.is_error (A.release_inference actor ~owner ~handle));
+    let replacement = A.open_inference_owner actor ~source |> protocol_ok in
+    let replacement_handle =
+      A.admit_inference
+        actor
+        ~owner:replacement
+        ~relation:Root
+        ~operation_id:None
+        ~invocation_id:None
+        ~configuration:(R.Prepared.configuration prepared)
+      |> protocol_ok
+    in
+    [%test_eq: int] (L.Handle.generation handle) (L.Handle.generation replacement_handle);
+    assert (
+      Transcript.Source_id.equal
+        (Transcript.Scope.key (L.Handle.scope handle)).source
+        (Transcript.Scope.key (L.Handle.scope replacement_handle)).source);
+    let before_wrong_owner = A.state actor |> protocol_ok in
+    (* Source and generation are deliberately identical. The new actual graph
+       must not inherit old joined membership from those metadata fields. *)
+    assert (
+      Result.is_error
+        (A.observe_owned_inference actor ~owner:replacement (usage handle 1L 7L)));
+    assert (Result.is_error (A.release_inference actor ~owner:replacement ~handle));
+    assert (phys_equal before_wrong_owner (A.state actor |> protocol_ok));
+    A.release_inference actor ~owner:replacement ~handle:replacement_handle |> protocol_ok;
+    A.seal_inference_owner actor ~owner:replacement |> protocol_ok;
+    A.finish_inference_owner actor ~owner:replacement |> protocol_ok;
+    [%test_eq: int] 4 !commits;
+    [%test_eq: int] 2 (List.length (rows actor));
+    print_endline
+      "failed release retains custody; exact retry settles once; replacement graph \
+       cannot inherit old facts");
+  [%expect
+    {| failed release retains custody; exact retry settles once; replacement graph cannot inherit old facts |}]
 ;;

@@ -197,11 +197,7 @@ let prepare (state : Session_state.t) ~request ~principal_id ~session ~now =
     let%bind catalog, basis = select_basis state ~request ~session in
     let%bind goal = G.resume basis.goal in
     let%bind eligibility =
-      Goal_admission_policy.check_activation
-        goal
-        ~accounting:basis.accounting
-        ~ledger:state.inference_ledger
-        ~now
+      Goal_charge_admission.check_activation state ~goal ~accounting:basis.accounting ~now
     in
     let%bind () =
       match eligibility with

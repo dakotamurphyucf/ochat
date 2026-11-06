@@ -35,6 +35,11 @@ val of_record : Agent_store.Delegation_store.record -> (t, Agent_protocol.Error.
     The actual source owner/private bindings must still be resolved and checked. *)
 val source_kind : t -> Agent_store.Captured_source_kind.t
 
+(** Exact immutable lower Reference association, including the captured admission.
+    Publication stage and revocation may advance. This DATA comparison neither
+    resolves a current record nor grants runtime authority. *)
+val matches_record : t -> Agent_store.Delegation_store.record -> bool
+
 (** Actual child root family derived from this origin's validated source kind.
     The retained defining metadata remains the original parent provenance. *)
 val root_invocation

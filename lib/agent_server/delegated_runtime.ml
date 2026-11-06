@@ -54,7 +54,7 @@ let prepare_with_lease ~with_parent ~sw ~parent ~on_revoked ~build =
                           | Error error -> Error error
                           | Ok (runtime : B.t) ->
                             created := Some runtime;
-                            let check_execution () =
+                            let check_open () =
                               match !terminal with
                               | Some (Ok (Error error)) -> Error error
                               | Some _ ->
@@ -62,10 +62,22 @@ let prepare_with_lease ~with_parent ~sw ~parent ~on_revoked ~build =
                                   (interrupted
                                      "delegation.runtime_closed: inherited runtime scope \
                                       has ended")
-                              | None ->
-                                (match runtime.check_execution with
-                                 | None -> Ok ()
-                                 | Some check -> check ())
+                              | None -> Ok ()
+                            in
+                            let check_execution () =
+                              let open Result.Let_syntax in
+                              let%bind () = check_open () in
+                              match runtime.check_execution with
+                              | None -> Ok ()
+                              | Some check -> check ()
+                            in
+                            let check_ancestry =
+                              Option.map runtime.check_ancestry ~f:(fun check () ->
+                                let open Result.Let_syntax in
+                                let%bind () = check_open () in
+                                let%bind ancestry = check () in
+                                let%map () = check_open () in
+                                ancestry)
                             in
                             published := true;
                             Eio.Promise.resolve
@@ -75,6 +87,7 @@ let prepare_with_lease ~with_parent ~sw ~parent ~on_revoked ~build =
                                     { runtime with
                                       close
                                     ; check_execution = Some check_execution
+                                    ; check_ancestry
                                     }));
                             Eio.Promise.await stop;
                             Ok ()))

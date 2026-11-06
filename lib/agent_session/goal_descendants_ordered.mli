@@ -60,6 +60,8 @@ type step =
     Register_new_root uses ORIGINAL ledger plus actual captured creation, while
     Record_included uses the saved SAME local canonical edge and original +1
     session revision. Other reasons use current ledger as before=after.
+    Register_first_unrelated_child is the finite absent-component gate for a new
+    Unrelated slot; it preserves historical own origin and canonical use.
 
     Untracked Attempt operation labels require a same-generation Running active
     operation or a retained same-session/generation moderator execution context
@@ -71,7 +73,7 @@ type step =
     creation is supplied only from Ordered_bootstrap.creation, retaining its
     actual captured pre-episode Goal and original-ledger bootstrap account. Replacement cannot change known accounting or
     ordinary scoped-child projection, reset the original basis, or manufacture
-    sequential catalog creation. Other changed scalar projections remain the
+    sequential catalog creation or first-child registration. Other changed scalar projections remain the
     existing native/owner validators' responsibility. *)
 val advance : t -> step -> (t, Agent_protocol.Error.t) result
 

@@ -166,6 +166,13 @@ let create
 ;;
 
 let max_payload_length t = t.max_payload_length
+let session_id t = t.session_id
+
+let is_available t =
+  match t.availability with
+  | Available -> Option.is_none (Eio.Promise.peek t.stopped)
+  | Unavailable _ | Closed -> false
+;;
 
 let await_reply t ~promise ~enqueue ~if_stopped =
   Eio.Fiber.first

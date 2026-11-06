@@ -3,6 +3,7 @@ module P = Agent_protocol
 
 type decision =
   | Allow
+  | Deferred of Goal_charge_admission.deferred
   | Held of
       { goal_id : P.Id.Goal.t
       ; delta : Session_delta.t option
@@ -14,11 +15,13 @@ let prepare ~previous ~(candidate : Session_state.t) ~payloads ~now =
     { candidate with
       inference_ledger = previous.Session_state.inference_ledger
     ; goal_accounts = previous.goal_accounts
+    ; child_contributions = previous.child_contributions
+    ; goal_descendants = previous.goal_descendants
     }
   in
   List.fold_result payloads ~init:Allow ~f:(fun decision payload ->
     match decision, payload with
-    | Held _, _ -> Ok decision
+    | (Held _ | Deferred _), _ -> Ok decision
     | Allow, P.Event.Durable.Payload.Operation_started operation ->
       (match operation.kind with
        | Compaction -> Ok Allow
@@ -34,6 +37,7 @@ let prepare ~previous ~(candidate : Session_state.t) ~payloads ~now =
          in
          (match admission with
           | Unbound | Ready _ -> Ok Allow
+          | Deferred deferred -> Ok (Deferred deferred)
           | Held { goal_id; reason; delta = _ } ->
             let%map delta = Goal_charge_admission.hold_delta previous ~goal_id ~reason in
             Held { goal_id; delta }))

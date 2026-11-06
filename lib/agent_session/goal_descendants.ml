@@ -175,11 +175,21 @@ module Update = struct
           ; session : P.Session_ref.t
           ; goal_id : P.Id.Goal.t
           }
+      | Register_first_unrelated_child of
+          { host_profile : Profile.t
+          ; session : P.Session_ref.t
+          ; reference : R.Reference.t
+          }
       | Register_child of
           { reference : R.Reference.t
           ; origin : O.t
           }
       | Register_branch of
+          { scope : O.Scope.t
+          ; reference : R.Reference.t
+          ; origin : O.t
+          }
+      | Register_retained_branch of
           { scope : O.Scope.t
           ; reference : R.Reference.t
           ; origin : O.t
@@ -248,6 +258,13 @@ module Update = struct
         ; "session", P.Session_ref.to_json session
         ; "goal_id", P.Id.Goal.to_json goal_id
         ]
+    | Register_first_unrelated_child { host_profile; session; reference } ->
+      `Object
+        [ "kind", `String "register_first_unrelated_child"
+        ; "host_profile", Profile.to_json host_profile
+        ; "session", P.Session_ref.to_json session
+        ; "reference", R.reference_to_jsonaf reference
+        ]
     | Register_child { reference; origin } ->
       `Object
         [ "kind", `String "register_child"
@@ -257,6 +274,13 @@ module Update = struct
     | Register_branch { scope; reference; origin } ->
       `Object
         [ "kind", `String "register_branch"
+        ; "scope", O.Scope.to_json scope
+        ; "reference", R.reference_to_jsonaf reference
+        ; "origin", O.to_json origin
+        ]
+    | Register_retained_branch { scope; reference; origin } ->
+      `Object
+        [ "kind", `String "register_retained_branch"
         ; "scope", O.Scope.to_json scope
         ; "reference", R.reference_to_jsonaf reference
         ; "origin", O.to_json origin
@@ -292,6 +316,11 @@ module Update = struct
       let%bind session = X.required fields "session" P.Session_ref.of_json in
       let%map goal_id = X.required fields "goal_id" P.Id.Goal.of_json in
       Reason.Register_new_root { host_profile; session; goal_id }
+    | "register_first_unrelated_child" ->
+      let%bind host_profile = X.required fields "host_profile" Profile.of_json in
+      let%bind session = X.required fields "session" P.Session_ref.of_json in
+      let%map reference = X.required fields "reference" reference_of_json in
+      Reason.Register_first_unrelated_child { host_profile; session; reference }
     | "register_child" ->
       let%bind reference = X.required fields "reference" reference_of_json in
       let%map origin = X.required fields "origin" origin_of_json in
@@ -301,6 +330,11 @@ module Update = struct
       let%bind reference = X.required fields "reference" reference_of_json in
       let%map origin = X.required fields "origin" origin_of_json in
       Reason.Register_branch { scope; reference; origin }
+    | "register_retained_branch" ->
+      let%bind scope = X.required fields "scope" O.Scope.of_json in
+      let%bind reference = X.required fields "reference" reference_of_json in
+      let%map origin = X.required fields "origin" origin_of_json in
+      Reason.Register_retained_branch { scope; reference; origin }
     | "reserve" ->
       let%bind scope = X.required fields "scope" O.Scope.of_json in
       let%bind occurrence = X.required fields "occurrence" Occurrence.of_json in
@@ -380,9 +414,19 @@ module Update = struct
             ; "session", X.fields_shape [ "server_id"; "session_id" ]
             ; "goal_id", D.Shape.value
             ] )
+      ; ( "register_first_unrelated_child"
+        , object_shape
+            [ "host_profile", Profile.shape
+            ; "session", X.fields_shape [ "server_id"; "session_id" ]
+            ; "reference", R.reference_shape
+            ] )
       ; ( "register_child"
         , object_shape [ "reference", R.reference_shape; "origin", O.shape ] )
       ; ( "register_branch"
+        , object_shape
+            [ "scope", O.Scope.shape; "reference", R.reference_shape; "origin", O.shape ]
+        )
+      ; ( "register_retained_branch"
         , object_shape
             [ "scope", O.Scope.shape; "reference", R.reference_shape; "origin", O.shape ]
         )
@@ -437,6 +481,60 @@ let child_change previous incoming =
     if same then Update.Children.Preserve else Replace incoming
 ;;
 
+let historical_children ~host_profile = function
+  | Some children -> Ok children
+  | None ->
+    C.create
+      ~inventory:Historical_children_unknown
+      ~max_children:(Profile.max_branches host_profile)
+      ~max_encoded_bytes:(Profile.child_max_encoded_bytes host_profile)
+;;
+
+let historical_accounting ~host_profile ~session children =
+  let%bind.Result profile = Profile.restrict_to_children host_profile children in
+  admit
+    (Carrier.of_authored_value
+       Data.{ profile; session; origin = None; heads = []; roots = [] })
+;;
+
+let register_first_unrelated_child ~host_profile ~session ~reference ~children ~ledger =
+  let open Result.Let_syntax in
+  let%bind () =
+    L.validate
+      ledger
+      ~limits:L.Limits.default
+      ~session_id:(P.Session_ref.session_id session)
+      ~generation:(L.generation ledger)
+    |> ledger_error
+  in
+  let%bind () =
+    R.validate_reference reference
+    |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
+  in
+  let%bind () =
+    if
+      P.Id.Session.equal reference.R.Reference.key.parent_session_id (L.session_id ledger)
+      && Int.equal reference.key.parent_generation (L.generation ledger)
+    then Ok ()
+    else invalid "first unrelated child differs from actual parent session/generation"
+  in
+  let%bind actual_children = historical_children ~host_profile children in
+  let%bind () =
+    if List.mem (C.references actual_children) reference ~equal:R.Reference.equal
+    then invalid "first unrelated child must register a new child slot"
+    else Ok ()
+  in
+  let%bind accounting = historical_accounting ~host_profile ~session actual_children in
+  let%bind incoming =
+    C.register_with_origin actual_children ~reference ~origin:O.unrelated
+  in
+  let%bind changed = child_change children incoming in
+  make_update
+    accounting
+    changed
+    (Register_first_unrelated_child { host_profile; session; reference })
+;;
+
 let register_new_root
       previous
       ~host_profile
@@ -457,26 +555,14 @@ let register_new_root
     then Ok ()
     else invalid "new descendant root differs from actual zero account bootstrap"
   in
-  let%bind actual_children =
-    match children with
-    | Some children -> Ok children
-    | None ->
-      C.create
-        ~inventory:Historical_children_unknown
-        ~max_children:(Profile.max_branches host_profile)
-        ~max_encoded_bytes:(Profile.child_max_encoded_bytes host_profile)
-  in
+  let%bind actual_children = historical_children ~host_profile children in
   let%bind accounting =
     match previous with
     | Some previous ->
       if P.Session_ref.equal session (Carrier.value previous).Data.session
       then Ok previous
       else invalid "new descendant root session differs"
-    | None ->
-      let%bind profile = Profile.restrict_to_children host_profile actual_children in
-      admit
-        (Carrier.of_authored_value
-           Data.{ profile; session; origin = None; heads = []; roots = [] })
+    | None -> historical_accounting ~host_profile ~session actual_children
   in
   let%bind () =
     if Option.is_none (Data.find_root (Carrier.value accounting) (P.Goal.id goal))
@@ -531,7 +617,7 @@ let register_child t ~children ~reference ~origin =
   make_update t changed (Register_child { reference; origin })
 ;;
 
-let register_branch t ~children ~scope ~reference ~origin =
+let register_branch_projection t ~children ~scope ~reference ~origin =
   let open Result.Let_syntax in
   let%bind () =
     if
@@ -569,7 +655,21 @@ let register_branch t ~children ~scope ~reference ~origin =
   in
   let%bind accounting = with_value t value in
   let%bind changed = child_change (Some children) incoming in
+  Ok (accounting, changed)
+;;
+
+let register_branch t ~children ~scope ~reference ~origin =
+  let%bind.Result accounting, changed =
+    register_branch_projection t ~children ~scope ~reference ~origin
+  in
   make_update accounting changed (Register_branch { scope; reference; origin })
+;;
+
+let register_retained_branch t ~children ~scope ~reference ~origin =
+  let%bind.Result accounting, changed =
+    register_branch_projection t ~children ~scope ~reference ~origin
+  in
+  make_update accounting changed (Register_retained_branch { scope; reference; origin })
 ;;
 
 let add left right =
@@ -794,9 +894,8 @@ let scoped_entry snapshot scope =
     List.find entries ~f:(fun entry -> O.Scope.equal scope (S.Goal_scope.scope entry)))
 ;;
 
-let import t ~children ~snapshot =
+let apply_import t ~children ~snapshot ~incoming ~disposition =
   let open Result.Let_syntax in
-  let%bind incoming, disposition = C.replace children ~snapshot in
   match disposition with
   | C.Duplicate | Stale -> make_update t Preserve (Import (S.reference snapshot))
   | Added | Replaced ->
@@ -907,6 +1006,17 @@ let import t ~children ~snapshot =
     in
     let%bind accounting = with_value t { value with heads } in
     make_update accounting (Replace incoming) (Import reference)
+;;
+
+let import_with_disposition t ~children ~snapshot =
+  let open Result.Let_syntax in
+  let%bind incoming, disposition = C.replace children ~snapshot in
+  let%map update = apply_import t ~children ~snapshot ~incoming ~disposition in
+  update, disposition
+;;
+
+let import t ~children ~snapshot =
+  Result.map (import_with_disposition t ~children ~snapshot) ~f:fst
 ;;
 
 let close_before_writer t ~children:_ ~pending =
@@ -1175,6 +1285,25 @@ let validate_transition
         ~goal
         ~account
         ~before_ledger
+    | Register_first_unrelated_child { host_profile; session; reference } ->
+      let%bind () =
+        if Option.is_none previous
+        then Ok ()
+        else invalid "first unrelated child requires absent descendant accounting"
+      in
+      let%bind before = L.to_document before_ledger |> ledger_error in
+      let%bind after = L.to_document after_ledger |> ledger_error in
+      let%bind () =
+        if D.Json.equal (D.Document.json before) (D.Document.json after)
+        then Ok ()
+        else invalid "first unrelated child cannot change the canonical ledger"
+      in
+      register_first_unrelated_child
+        ~host_profile
+        ~session
+        ~reference
+        ~children:before_children
+        ~ledger:before_ledger
     | Register_child { reference; origin } ->
       let%bind previous = require_accounting previous in
       let%bind children = require_children before_children in
@@ -1184,6 +1313,17 @@ let validate_transition
       let%bind children = require_children before_children in
       let%bind () = validate_new_branch_scopes previous ~origin ~catalog in
       register_branch previous ~children ~scope ~reference ~origin
+    | Register_retained_branch { scope; reference; origin } ->
+      let%bind previous = require_accounting previous in
+      let%bind children = require_children before_children in
+      let%bind before = L.to_document before_ledger |> ledger_error in
+      let%bind after = L.to_document after_ledger |> ledger_error in
+      let%bind () =
+        if D.Json.equal (D.Document.json before) (D.Document.json after)
+        then Ok ()
+        else invalid "retained branch registration cannot change the canonical ledger"
+      in
+      register_retained_branch previous ~children ~scope ~reference ~origin
     | Reserve { scope; occurrence; local_count; ceiling } ->
       let%bind previous = require_accounting previous in
       let%bind children = require_children before_children in

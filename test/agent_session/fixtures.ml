@@ -377,6 +377,33 @@ let actor_state ~workspace_instance ~liveness ~start_immediately =
   Agent_session.Session_state.create ~identity ~spec ~initial_history:[]
 ;;
 
+(* Explicit fresh-child fixture initialization, matching the Factory birth path.
+   Historical omitted origin is intentionally not repaired by actor_state. *)
+let initialize_new_unrelated_child (state : Agent_session.Session_state.t) ~server_id =
+  let limits = Agent_server.Daemon.default_options.factory_limits in
+  let state =
+    Agent_session.Child_accounting.initialize_new
+      state
+      ~max_children:limits.delegation_recovery_max_count
+      ~max_encoded_bytes:limits.delegation_recovery_max_bytes
+    |> protocol_ok
+  in
+  let goal_descendants =
+    Agent_session.Goal_descendants.create_new
+      ~profile:goal_descendant_profile
+      ~session:
+        (Agent_protocol.Session_ref.create
+           ~server_id
+           ~session_id:state.identity.session_id)
+      ~origin:Agent_store.Delegation_goal_origin.unrelated
+      ~ledger:state.inference_ledger
+    |> protocol_ok
+  in
+  let state = { state with goal_descendants = Some goal_descendants } in
+  Agent_session.Session_state.validate state |> protocol_ok;
+  state
+;;
+
 let actor_entry =
   Agent_session.History_codec.user_text ~id:history_id "hello"
   |> Agent_session.History_codec.to_protocol

@@ -221,7 +221,18 @@ type t =
   ; request : Run_admission_request.t
   ; request_sha256 : string
   ; mutable deferred : deferred option
+  ; mutable admission_exit : admission_exit option
   }
+
+and admission_exit =
+  { preparation : t
+  ; mutable phase : admission_exit_phase
+  }
+
+and admission_exit_phase =
+  | Captured
+  | Transferred
+  | Closed
 
 and deferred =
   { preparation : t
@@ -246,6 +257,76 @@ let close t = Custody.close t.custody
 let check_basis t ~owner ~state = Custody.check_basis t.custody ~owner ~state
 let check_current t ~owner ~state = Custody.check_current t.custody ~owner ~state
 let check t ~owner ~state = Custody.check t.custody ~owner ~state
+
+module Admission_exit = struct
+  type preparation = t
+  type t = admission_exit
+
+  type caller_exit =
+    | Closed
+    | Retained_by_admission
+
+  let owns t ~owner = belongs_to t.preparation ~owner
+
+  let capture preparation ~owner =
+    if not (belongs_to preparation ~owner)
+    then conflict "Run admission exit belongs to another Actor"
+    else (
+      match preparation.admission_exit with
+      | Some _ -> conflict "Run preparation already has an admission exit owner"
+      | None ->
+        let exit = { preparation; phase = Captured } in
+        preparation.admission_exit <- Some exit;
+        Ok exit)
+  ;;
+
+  let check t ~owner =
+    if
+      owns t ~owner
+      && Option.exists t.preparation.admission_exit ~f:(phys_equal t)
+      &&
+      match t.phase with
+      | Captured | Transferred -> true
+      | Closed -> false
+    then Ok ()
+    else conflict "Run admission exit owner changed or closed"
+  ;;
+
+  let transfer t ~owner =
+    let%bind.Result () = check t ~owner in
+    match t.phase with
+    | Captured ->
+      t.phase <- Transferred;
+      Ok ()
+    | Transferred | Closed -> conflict "Run admission exit was already transferred"
+  ;;
+
+  let close t ~owner =
+    if not (owns t ~owner) then invalid_arg "Run admission exit belongs to another Actor";
+    (* Lifecycle force-close may already have revoked execution. The exact exit
+       still settles the original factual obligation without reopening it. *)
+    Custody.close t.preparation.custody;
+    t.phase <- Closed
+  ;;
+
+  let is_retained preparation =
+    match preparation.admission_exit with
+    | Some { phase = Transferred; _ } -> true
+    | None | Some { phase = Captured | Closed; _ } -> false
+  ;;
+
+  let close_from_caller preparation ~owner =
+    if not (belongs_to preparation ~owner)
+    then conflict "Run preparation exit belongs to another Actor"
+    else (
+      match preparation.admission_exit with
+      | Some { phase = Transferred; _ } -> Ok Retained_by_admission
+      | None | Some { phase = Captured | Closed; _ } ->
+        Custody.close preparation.custody;
+        Option.iter preparation.admission_exit ~f:(fun exit -> exit.phase <- Closed);
+        Ok Closed)
+  ;;
+end
 
 let capture_authorization t ~owner ~state =
   Custody.capture_authorization t.custody ~owner ~state
@@ -286,6 +367,7 @@ let create_request_internal
       ; request
       ; request_sha256
       ; deferred = None
+      ; admission_exit = None
       }
 ;;
 
@@ -431,7 +513,7 @@ module Deferred = struct
     deferred
   ;;
 
-  let preparation t = t.preparation
+  let preparation (t : t) = t.preparation
   let of_preparation (t : preparation) = t.deferred
 
   let exclude t ~reason =

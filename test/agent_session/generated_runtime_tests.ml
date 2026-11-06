@@ -232,7 +232,7 @@ let%expect_test
               ; parent_revision_id = !parent_state.spec.prompt_revision_id
               ; parent_stop_epoch = Some !parent_state.stop_epoch
               ; authored_tool = None
-              ; goal_origin = None
+              ; goal_origin = Some Agent_store.Delegation_goal_origin.unrelated
               ; captured_recurrence = None
               ; authority_sha256 = Authority.fingerprint !parent_state |> protocol_ok
               ; capability_pins = G.capability_pins definition
@@ -568,6 +568,11 @@ let%expect_test
                 ; reserved_history_through = Int64.of_int runtime.reserved_history_through
                 }
             }
+          in
+          let initial =
+            initialize_new_unrelated_child
+              initial
+              ~server_id:(Session_store.server_id session_store)
           in
           let child_handle =
             Session_store.create_session

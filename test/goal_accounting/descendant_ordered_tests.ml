@@ -206,6 +206,61 @@ let%expect_test
 ;;
 
 let%expect_test
+    "historical first Unrelated child requires the closed ordered presence edge"
+  =
+  let before, children, _, _, _, update = T.first_unrelated_fixture () in
+  let projection : Cursor.Projection.t =
+    { ledger = before
+    ; accounting = None
+    ; children = Some children
+    ; catalog = None
+    ; accounts = None
+    ; delegation = None
+    ; active_operation = None
+    ; invocations = []
+    ; moderator_executions = []
+    }
+  in
+  let cursor = begin_ projection |> fun cursor -> advance cursor (update_step update) in
+  finish cursor;
+  Cursor.validate_publication cursor ~revision:0L |> protocol;
+  let incoming = Cursor.current cursor in
+  assert (Result.is_error (Cursor.advance (begin_ projection) (Replacement incoming)));
+  assert (Result.is_error (Cursor.validate_checkpoint ~before:projection ~incoming));
+  assert (
+    Result.is_error
+      (Cursor.advance
+         (begin_ projection)
+         (Ordinary_children (Option.value_exn incoming.children))));
+  assert (Result.is_error (Cursor.advance cursor (update_step update)));
+  (* Canonical work remains owned by the existing ledger. This bootstrap creates
+     no inherited count obligation or retroactive root attribution. *)
+  let after, _, _ = admit before in
+  let continued = advance cursor (Canonical after) in
+  finish continued;
+  Cursor.validate_publication continued ~revision:1L |> protocol;
+  let later_update =
+    GD.register_first_unrelated_child
+      ~host_profile:(T.profile ())
+      ~session
+      ~reference:(T.reference "first_unrelated_after_work")
+      ~children:(Some children)
+      ~ledger:after
+    |> protocol
+  in
+  let with_work = advance (begin_ projection) (Canonical after) in
+  let initialized = advance with_work (update_step later_update) in
+  finish initialized;
+  assert (
+    Option.is_none (GD.origin (Option.value_exn (Cursor.current initialized).accounting)));
+  print_endline
+    "closed Update accepts historical bootstrap before or after ordinary work; \
+     replacement/checkpoint/Children cannot invent it";
+  [%expect
+    {| closed Update accepts historical bootstrap before or after ordinary work; replacement/checkpoint/Children cannot invent it |}]
+;;
+
+let%expect_test
     "checkpoint cannot invent inherited accounting or counts; maximum revision remains \
      readable"
   =

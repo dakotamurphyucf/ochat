@@ -1638,8 +1638,10 @@ let validate_goal_descendants
       let creation =
         match Goal_descendants.Update.reason update with
         | Register_new_root { goal_id; _ } -> B.creation accounts ~goal_id
+        | Register_first_unrelated_child _
         | Register_child _
         | Register_branch _
+        | Register_retained_branch _
         | Reserve _
         | Record_included _
         | Import _
@@ -1751,8 +1753,10 @@ let rec validate_descendant_publication delta ~revision =
            (Agent_protocol.Error.invalid_request
               "local Included receipt differs from published session revision")
      | Register_new_root _
+     | Register_first_unrelated_child _
      | Register_child _
      | Register_branch _
+     | Register_retained_branch _
      | Reserve _
      | Import _
      | Close_before_writer _ -> Ok ())

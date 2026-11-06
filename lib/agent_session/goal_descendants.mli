@@ -71,6 +71,16 @@ module Canonical : sig
     val tracking : t -> Inference_ledger.tracking
     val operation : t -> Agent_protocol.Operation.t option
   end
+
+  (** Validate this genuine canonical Handle/Turn_handle and occurrence against
+      the SAME immediate before/after ledger edge. This pure check grants no
+      persistence acknowledgement or execution authority. *)
+  val check
+    :  before:Inference_ledger.t
+    -> after:Inference_ledger.t
+    -> canonical:t
+    -> occurrence:Goal_descendant_occurrence.t
+    -> (Fact.t, Agent_protocol.Error.t) result
 end
 
 module Update : sig
@@ -84,19 +94,29 @@ module Update : sig
 
   module Reason : sig
     (** Finite durable reasons; no arbitrary setter or whole-State dependency.
-        Register_new_root distinguishes actual absent prior component from an
-        existing one through the immutable original basis below. *)
+        Register_new_root and Register_first_unrelated_child distinguish an actual
+        absent prior component through their finite replay relation below. *)
     type t =
       | Register_new_root of
           { host_profile : Profile.t
           ; session : Agent_protocol.Session_ref.t
           ; goal_id : Agent_protocol.Id.Goal.t
           }
+      | Register_first_unrelated_child of
+          { host_profile : Profile.t
+          ; session : Agent_protocol.Session_ref.t
+          ; reference : Agent_store.Delegation_store.Reference.t
+          }
       | Register_child of
           { reference : Agent_store.Delegation_store.Reference.t
           ; origin : Agent_store.Delegation_goal_origin.t
           }
       | Register_branch of
+          { scope : Agent_store.Delegation_goal_origin.Scope.t
+          ; reference : Agent_store.Delegation_store.Reference.t
+          ; origin : Agent_store.Delegation_goal_origin.t
+          }
+      | Register_retained_branch of
           { scope : Agent_store.Delegation_goal_origin.Scope.t
           ; reference : Agent_store.Delegation_store.Reference.t
           ; origin : Agent_store.Delegation_goal_origin.t
@@ -148,6 +168,28 @@ val register_new_root
   -> before_ledger:Inference_ledger.t
   -> (Update.t, Agent_protocol.Error.t) result
 
+(** Initialize previously absent descendant accounting only to register one new
+    explicit Unrelated child. Retains historical own origin=None, empty local
+    roots/heads, and the actual ledger unchanged, including nonzero/Unknown use.
+    Reference must target this actual parent session and ledger generation and
+    must not already occur in the actual child inventory. Existing slots,
+    inventory uncertainty, profile and compatible raw fields remain unchanged;
+    absent children start Historical_children_unknown. The captured descendant
+    profile is capped by the actual child profile, as at register_new_root.
+
+    Finite replay requires previous accounting=None and identical before/after
+    canonical ledger. It admits this paired Update only; Created, ordinary
+    Children, encode/adopt and replacement cannot initialize the component.
+    Existing components use register_child instead. No root/account is created,
+    own origin is never retrofitted, and this operation cannot name Associated. *)
+val register_first_unrelated_child
+  :  host_profile:Profile.t
+  -> session:Agent_protocol.Session_ref.t
+  -> reference:Agent_store.Delegation_store.Reference.t
+  -> children:Child_contributions.t option
+  -> ledger:Inference_ledger.t
+  -> (Update.t, Agent_protocol.Error.t) result
+
 val register_child
   :  t
   -> children:Child_contributions.t
@@ -163,8 +205,44 @@ val register_child
     atomically; all such local roots must already exist. Finite replay requires
     each new local scope's creator episode/source to match the actual current
     catalog Goal. The runtime admission owner must commit the parent frontier before child effects;
-    recovery reuses its retained frontier after episode/source changes. *)
+    recovery of a missing frontier uses register_retained_branch. *)
 val register_branch
+  :  t
+  -> children:Child_contributions.t
+  -> scope:Agent_store.Delegation_goal_origin.Scope.t
+  -> reference:Agent_store.Delegation_store.Reference.t
+  -> origin:Agent_store.Delegation_goal_origin.t
+  -> (Update.t, Agent_protocol.Error.t) result
+
+(** Factual missing-frontier recovery for an already durable positive lower
+    admission, selected only by the runtime owner after resolving the exact
+    original private record through its same Store/controller. This constructor
+    and decoded reason are DATA and confer no record custody or child authority.
+    The runtime must verify reference and complete immutable origin against that
+    original record; reference retains its original raw admission hash.
+
+    Same branch body and capacity/preservation checks as register_branch. The
+    named scope belongs to this actual owner and occurs in origin; every local
+    owner/Goal already has a retained root, and every new local branch is built
+    at zero confirmed prefix/nonce/pending from the exact frozen scope/reference.
+    Existing branch attribution and existing positive/Unknown child slots cannot
+    be changed; no local root, canonical charge, account or own origin is created.
+    All local scopes in the origin register atomically, as at new birth.
+
+    Finite replay requires previous component and child carrier, identical actual
+    before/after canonical document, and the exact paired child/accounting result.
+    The enclosing ordered State/document validator checks existing root/Goal/account
+    context. This reason does not require frozen creator episode/source to equal
+    the current catalog episode/source. This is
+    truthful recovery of retained attribution, never reclassification from a
+    later native invocation. No claim is made that source adoption preserves
+    original child execution authority; all actual current original/source/tool
+    guards remain mandatory before initialization/effects.
+
+    An inherited-only origin with no local scope uses existing register_child;
+    Unrelated recovery uses the already accepted closed Unrelated operations.
+    Historical lower origin omission and absent local roots cannot recover here. *)
+val register_retained_branch
   :  t
   -> children:Child_contributions.t
   -> scope:Agent_store.Delegation_goal_origin.Scope.t
@@ -249,6 +327,15 @@ val import
   -> snapshot:Child_usage_snapshot.t
   -> (Update.t, Agent_protocol.Error.t) result
 
+(** Same paired import, retaining the actual replacement disposition for runtime
+    callers. Replacement validation runs once. Duplicate/Stale returns Preserve
+    and cannot acknowledge a new confirmation or retire pending capacity. *)
+val import_with_disposition
+  :  t
+  -> children:Child_contributions.t
+  -> snapshot:Child_usage_snapshot.t
+  -> (Update.t * Child_contributions.disposition, Agent_protocol.Error.t) result
+
 (** DATA exact relation only. The runtime admission owner supplies the actual same preparation seal.
     Keeps count/prefix and consumes nonce. Exact latest terminal replay never
     clears a newer pending reservation. *)
@@ -260,6 +347,8 @@ val close_before_writer
 
 (** Replays the finite reason from State's actual original basis and requires its
     complete accounting/paired child candidate, preserving all unknowns.
+    Register_first_unrelated_child requires previous=None and an unchanged
+    actual canonical ledger; it admits no account or Goal creation.
     Projections stay below Session_state to avoid a dependency cycle.
 
     [creation] is supplied only at Register_new_root from the actual captured

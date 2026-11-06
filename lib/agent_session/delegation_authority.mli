@@ -58,7 +58,14 @@ val fingerprint
     selection. The adapter is rechecked after ancestor lookups; it grants no tool
     execution or approvals. Each ancestor's public registry stays separate from
     the closure selected for its authored child. Missing adapters reject authored
-    edges, including authored ancestors of otherwise generated children. *)
+    edges, including authored ancestors of otherwise generated children.
+
+    [source_owner], when supplied by trusted Factory wiring, captures its original
+    private issuer for [check_ancestry]. Omission leaves existing preparation and
+    execution checks available, but ancestry observations unavailable. The issuer
+    does not authenticate arbitrary host callbacks: consumers must match their
+    original Factory issuer and independently re-resolve these records in their
+    actual controller Store. *)
 val create
   :  ?max_depth:int
   -> ?parent_stop_epoch:int64
@@ -71,6 +78,7 @@ val create
        (Agent_store.Delegation_store.record
         -> public:Chat_response.Tool_capability.t
         -> (Chat_response.Tool_capability.t, Agent_protocol.Error.t) result)
+  -> ?source_owner:Runtime_source_owner.t
   -> host:host
   -> reference:Agent_store.Delegation_store.Reference.t
   -> capabilities:Chat_response.Tool_capability.t
@@ -78,6 +86,49 @@ val create
   -> t
 
 val reference : t -> Agent_store.Delegation_store.Reference.t
+
+module Checked_ancestry : sig
+  (** Bounded observation from the existing private-chain guard, never a current
+      Goal policy grant or atomic multi-Actor snapshot. No decoder/constructor.
+      Consumers must authenticate actual owner/Actor/Store routes independently. *)
+  type t
+
+  (** Nonempty leaf-to-root records, each retained after its frame's existing
+      final yielding revalidation. Later changes do not mutate this observation;
+      current root policy and private Store checks remain mandatory at consumers.
+      Historical origin omissions are retained exactly, not reconstructed. *)
+  val records : t -> Agent_store.Delegation_store.record list
+
+  (** Compare against the private issuer captured at guard creation. Matching
+      alone is not permission or proof that supplied host callbacks were genuine. *)
+  val issued_by : t -> source_owner:Runtime_source_owner.t -> bool
+end
+
+(** Same private traversal and guards as [check_execution], including Linked,
+    revocation, original lifetime/Independent handling and exact live bindings.
+    Retains the revalidated leaf-to-root records and checks frozen Goal origins:
+    known associated edges preserve every inherited scope exactly and add only
+    scopes anchored to that actual local edge; explicit Unrelated is a birth
+    boundary. Historical Unknown stays Unknown. A known Associated child above
+    an Unknown delegated ancestor rejects rather than pretending a complete
+    vector. Root/no-delegation termination needs no invented ancestor origin.
+
+    Host lookups may yield: call outside Actor/Owner locks. This is an observation,
+    not an atomic snapshot or a perpetually live grant. Requires [source_owner]
+    captured at [create]; no issuer can be attached by this call. *)
+val check_ancestry : t -> (Checked_ancestry.t, Agent_protocol.Error.t) result
+
+(** Checks the actual private ancestry and the captured Artifact's immutable
+    association to that same record before the normal preparation identity and
+    profile checks. A decoded origin cannot replace this actual authority. *)
+val check_captured_artifact_preparation
+  :  t
+  -> origin:Recurrence_child_origin.t
+  -> session_id:Agent_protocol.Id.Session.t
+  -> revision_id:Agent_protocol.Id.Prompt_revision.t
+  -> manifest_sha256:string
+  -> permission_profile:Permission_policy.t
+  -> (unit, Agent_protocol.Error.t) result
 
 (** Artifact-installed/child-installed/linked admission permits runtime preparation.
     Requires the exact inherited profile; children may narrow tools and add their

@@ -375,6 +375,40 @@ let check_retained_owner entry =
 (* Actor identity is the retained ownership capability, not value equality. *)
 let same_owner first second = phys_equal first.actor second.actor
 
+let check_retained_factual_owner t (entry : entry) =
+  let open Result.Let_syntax in
+  let%bind () = check_retained_owner entry in
+  let%bind handle =
+    Result.of_option
+      entry.store_handle
+      ~error:(lifecycle_conflict "factual owner has no retained Store Handle")
+  in
+  let session_id = Agent_store.Session_store.Handle.session_id handle in
+  let same_tuple actual =
+    same_owner actual entry
+    && phys_equal actual.runtime entry.runtime
+    && Option.exists actual.store_handle ~f:(phys_equal handle)
+  in
+  (* Like has_pending_cleanup, this negative check runs on the creating Eio
+     domain. Each list/binding update is nonyielding; no registry lock or callback
+     is entered while comparing actual retained ownership. *)
+  let%bind () =
+    match find t session_id with
+    | Some actual when same_tuple actual -> Ok ()
+    | Some _ | None -> Error (lifecycle_conflict "factual owner is no longer registered")
+  in
+  if
+    List.for_all t.failed_cleanups ~f:(fun cleanup ->
+      if Agent_protocol.Id.Session.equal cleanup.Failed_cleanup.session_id session_id
+      then (
+        match cleanup.owner with
+        | Cleanup_owner.Entry actual -> same_tuple actual
+        | Handle _ | Fence _ | Recovery _ -> false)
+      else true)
+  then Ok ()
+  else Error (lifecycle_conflict "factual owner has foreign pending cleanup")
+;;
+
 let same_cleanup_owner (first : Cleanup_owner.t) (second : Cleanup_owner.t) =
   match first, second with
   | Entry first, Entry second -> same_owner first second
@@ -940,51 +974,61 @@ let unload_inactive t ~index_entries =
         if not (matches state)
         then Ok false
         else (
-          let%bind fence =
-            Agent_session.Session_actor.begin_lifecycle
-              entry.actor
-              ~attachment_id:None
-              ~expected_generation:state.identity.generation
-              ~expected_revision:state.counters.revision
+          (* Cleanup may advance the canonical projection. Resample before the
+             reversible eviction fence and decline this old index candidate. *)
+          let%bind () =
+            Agent_session.Session_actor.drain_descendant_cleanup entry.actor
           in
-          let retired = ref false in
-          Exn.protect
-            ~f:(fun () ->
-              let%bind current =
-                Agent_session.Session_actor.lifecycle_state entry.actor fence
-              in
-              let%bind () = check_retained_owner entry in
-              if not (matches current)
-              then Ok false
-              else
-                Eio.Cancel.protect (fun () ->
-                  if not (Runtime_owner.reserve_inactive_close entry.runtime)
-                  then Ok false
-                  else (
-                    retired := true;
-                    let%bind () =
-                      Agent_session.Session_actor.retire_lifecycle entry.actor fence
-                    in
-                    (* Keep failed cleanup discoverable; detach only after its owner closed. *)
-                    entry.close ();
-                    Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
-                      let%bind () = check_reservation t reservation in
-                      match find t session_id with
-                      | Some current when same_owner current entry ->
-                        Atomic.set
-                          t.sessions
-                          (Map.remove (Atomic.get t.sessions) session_id);
-                        t.indexed <- Map.set t.indexed ~key:session_id ~data:indexed;
-                        Ok true
-                      | Some _ | None ->
-                        Error (lifecycle_conflict "eviction owner changed")))))
-            ~finally:(fun () ->
-              if not !retired
-              then
-                Eio.Cancel.protect (fun () ->
-                  ignore
-                    (Agent_session.Session_actor.abort_lifecycle entry.actor fence
-                     : (unit, Agent_protocol.Error.t) Result.t)))))
+          let%bind state = Agent_session.Session_actor.state entry.actor in
+          let%bind () = check_retained_owner entry in
+          if not (matches state)
+          then Ok false
+          else (
+            let%bind fence =
+              Agent_session.Session_actor.begin_lifecycle
+                entry.actor
+                ~attachment_id:None
+                ~expected_generation:state.identity.generation
+                ~expected_revision:state.counters.revision
+            in
+            let retired = ref false in
+            Exn.protect
+              ~f:(fun () ->
+                let%bind current =
+                  Agent_session.Session_actor.lifecycle_state entry.actor fence
+                in
+                let%bind () = check_retained_owner entry in
+                if not (matches current)
+                then Ok false
+                else
+                  Eio.Cancel.protect (fun () ->
+                    if not (Runtime_owner.reserve_inactive_close entry.runtime)
+                    then Ok false
+                    else (
+                      retired := true;
+                      let%bind () =
+                        Agent_session.Session_actor.retire_lifecycle entry.actor fence
+                      in
+                      (* Keep failed cleanup discoverable; detach only after its owner closed. *)
+                      entry.close ();
+                      Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
+                        let%bind () = check_reservation t reservation in
+                        match find t session_id with
+                        | Some current when same_owner current entry ->
+                          Atomic.set
+                            t.sessions
+                            (Map.remove (Atomic.get t.sessions) session_id);
+                          t.indexed <- Map.set t.indexed ~key:session_id ~data:indexed;
+                          Ok true
+                        | Some _ | None ->
+                          Error (lifecycle_conflict "eviction owner changed")))))
+              ~finally:(fun () ->
+                if not !retired
+                then
+                  Eio.Cancel.protect (fun () ->
+                    ignore
+                      (Agent_session.Session_actor.abort_lifecycle entry.actor fence
+                       : (unit, Agent_protocol.Error.t) Result.t))))))
   in
   let observe session_id =
     with_read_snapshot
@@ -1034,7 +1078,13 @@ let shutdown t =
       List.iter reservations ~f:Eio.Promise.await;
       List.iter readers ~f:Eio.Promise.await;
       let failed_cleanups = Eio.Mutex.use_ro t.mutex (fun () -> t.failed_cleanups) in
-      List.iter failed_cleanups ~f:(fun cleanup ->
+      let other_cleanups, entry_cleanups =
+        List.partition_tf failed_cleanups ~f:(fun cleanup ->
+          match cleanup.Failed_cleanup.owner with
+          | Entry _ -> false
+          | Handle _ | Fence _ | Recovery _ -> true)
+      in
+      List.iter other_cleanups ~f:(fun cleanup ->
         match cleanup_owner cleanup.Failed_cleanup.owner with
         | Ok () ->
           Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
@@ -1072,19 +1122,85 @@ let shutdown t =
           t.reader <- None;
           entries)
       in
-      (* Dependency cleanup can still need another actor's durable stop acknowledgement.
-     Keep the complete loaded graph and all actors alive until every runtime has
-     joined cleanup. No registry mutex is held while entering a runtime owner. *)
-      List.map entries ~f:(fun entry () -> Runtime_owner.close_and_wait entry.runtime)
-      |> Eio.Fiber.all;
-      List.map entries ~f:(fun entry () ->
-        entry.close ();
-        Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
-          Atomic.set
-            t.sessions
-            (Map.filter (Atomic.get t.sessions) ~f:(fun current ->
-               not (same_owner current.Binding.entry entry)))))
-      |> Eio.Fiber.all))
+      (* Failed Entry retries own the same dependency graph as loaded entries.
+         Keep every Actor and Store handle alive until every runtime has joined;
+         an independent child's retained ACK can outlive its ancestor resource lease. *)
+      let entries =
+        List.fold
+          (List.filter_map entry_cleanups ~f:(fun cleanup ->
+             match cleanup.Failed_cleanup.owner with
+             | Entry entry -> Some entry
+             | Handle _ | Fence _ | Recovery _ -> None)
+           @ entries)
+          ~init:[]
+          ~f:(fun retained entry ->
+            if List.exists retained ~f:(fun current -> same_owner current entry)
+            then retained
+            else entry :: retained)
+        |> List.rev
+      in
+      let raise_entry_failure entry (exn, backtrace) =
+        match
+          List.find entry_cleanups ~f:(fun cleanup ->
+            match cleanup.Failed_cleanup.owner with
+            | Entry retained -> same_owner retained entry
+            | Handle _ | Fence _ | Recovery _ -> false)
+        with
+        | Some cleanup ->
+          (match Cleanup_failure.exception_and_backtrace cleanup.failure with
+           | Some (original, original_backtrace) ->
+             Exn.raise_with_original_backtrace original original_backtrace
+           | None -> raise (Cleanup_failed cleanup.failure))
+        | None -> Exn.raise_with_original_backtrace exn backtrace
+      in
+      let joined =
+        Eio.Fiber.List.map
+          (fun entry ->
+             let outcome =
+               try
+                 Runtime_owner.close_and_wait entry.runtime;
+                 Ok ()
+               with
+               | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())
+             in
+             entry, outcome)
+          entries
+      in
+      List.iter joined ~f:(fun (entry, outcome) ->
+        match outcome with
+        | Ok () -> ()
+        | Error failure -> raise_entry_failure entry failure);
+      let closed =
+        Eio.Fiber.List.map
+          (fun entry ->
+             let outcome =
+               try
+                 entry.close ();
+                 Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
+                   Atomic.set
+                     t.sessions
+                     (Map.filter (Atomic.get t.sessions) ~f:(fun current ->
+                        not (same_owner current.Binding.entry entry)));
+                   t.failed_cleanups
+                   <- List.filter t.failed_cleanups ~f:(fun cleanup ->
+                        not
+                          (List.exists entry_cleanups ~f:(fun retained ->
+                             phys_equal retained cleanup
+                             &&
+                             match retained.Failed_cleanup.owner with
+                             | Entry actual -> same_owner actual entry
+                             | Handle _ | Fence _ | Recovery _ -> false))));
+                 Ok ()
+               with
+               | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())
+             in
+             entry, outcome)
+          entries
+      in
+      List.iter closed ~f:(fun (entry, outcome) ->
+        match outcome with
+        | Ok () -> ()
+        | Error failure -> raise_entry_failure entry failure)))
 ;;
 
 let install_lifecycle_projection t reservation indexed =

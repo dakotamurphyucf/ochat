@@ -218,6 +218,19 @@ let borrowed_capabilities (scope : borrowed) =
          "borrowed scope has no active verified tool capabilities")
 ;;
 
+let check_borrowed_effect_current (scope : borrowed) =
+  let open Result.Let_syntax in
+  let%bind _ = borrowed_capabilities scope in
+  scope.capabilities.check_effect_current ~invocation:scope.invocation
+;;
+
+let refresh_borrowed_effect_current (scope : borrowed) =
+  let open Result.Let_syntax in
+  let%bind _ = borrowed_capabilities scope in
+  let%bind () = scope.capabilities.refresh_effect_current ~invocation:scope.invocation in
+  check_borrowed_effect_current scope
+;;
+
 let require_native_admission (scope : borrowed) ~binding =
   let open Result.Let_syntax in
   let denied () =
@@ -1305,10 +1318,21 @@ let run_with_native
       ~authorize
       ~prepare_output
   =
+  let actual_scope : borrowed option ref = ref None in
   let scoped_execute ~invocation f =
     execute ~invocation (fun ~dispatched ~capabilities ->
       with_scope ?moderator_execute ~capabilities ~execute dispatched (fun () ->
-        f ~dispatched))
+        (* Retain the real executor-installed scope rather than rediscovering
+           ambient owned/selected contexts or comparing with an admission DTO. *)
+        match Eio.Fiber.get scope_key with
+        | Some scope when Atomic.get scope.active && I.equal scope.invocation dispatched
+          ->
+          actual_scope := Some scope;
+          Exn.protect
+            ~finally:(fun () -> actual_scope := None)
+            ~f:(fun () -> f ~dispatched)
+        | None | Some _ ->
+          Error (Agent_protocol.Error.invalid_request "dispatched native scope is absent")))
   in
   let managed_revision binding =
     match C.implementation binding, managed with
@@ -1321,9 +1345,30 @@ let run_with_native
   in
   let check_halted () =
     let failure = fail "invocation.session_ended" "The session has ended." in
-    match checked failure (fun () -> Ok (is_halted ())) with
-    | Ok false -> Ok ()
-    | Ok true | Error _ -> Error failure
+    checked failure (fun () ->
+      let open Result.Let_syntax in
+      let%bind scope =
+        Result.of_option
+          !actual_scope
+          ~error:(Agent_protocol.Error.invalid_request "native effect scope is absent")
+      in
+      let check_current () =
+        let%bind () =
+          if Atomic.get scope.active && Option.exists !actual_scope ~f:(phys_equal scope)
+          then Ok ()
+          else Error (Agent_protocol.Error.invalid_request "native effect scope expired")
+        in
+        scope.capabilities.check_effect_current ~invocation:scope.invocation
+      in
+      let%bind () = check_current () in
+      let halted = is_halted () in
+      (* Existing halted callbacks may await. Recheck this SAME actual dispatched
+         lifetime and admitted operation view immediately before the prefix.
+         Generic effects do not borrow stronger agent-creation authentication. *)
+      let%bind () = check_current () in
+      if halted
+      then Error (Agent_protocol.Error.invalid_request "native effect authority ended")
+      else Ok ())
   in
   Native_tool_policy.run_policy
     ~run_native

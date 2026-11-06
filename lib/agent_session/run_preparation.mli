@@ -3,7 +3,9 @@ open! Core
 (** Ephemeral actor-issued admission custody. No serialization or executable
     authority. The actor keeps its [Owner.t] private; callers cannot construct a
     preparation for that owner from session IDs, revisions or receipt data.
-    All operations run in that actor's serialized mailbox. *)
+    Mutating operations run in that actor's serialized mailbox. The callback-free
+    [Admission_exit.is_retained] observation is also permitted in the owning
+    Eio domain during lexical cleanup. *)
 module Owner = Preparation_tracking.Owner
 
 type t
@@ -77,6 +79,39 @@ val check_current
   -> owner:Owner.t
   -> state:Session_state.t
   -> (unit, Agent_protocol.Error.t) result
+
+module Admission_exit : sig
+  (** One close obligation attached to SAME actual preparation. Only its private
+      Actor Owner may capture/transfer it. No new execution/source permission,
+      policy callback or registry. Lifecycle close can still revoke custody. *)
+  type preparation = t
+
+  type t
+
+  val capture : preparation -> owner:Owner.t -> (t, Agent_protocol.Error.t) result
+  val check : t -> owner:Owner.t -> (unit, Agent_protocol.Error.t) result
+  val transfer : t -> owner:Owner.t -> (unit, Agent_protocol.Error.t) result
+
+  (** Exact known ACK or genuine no-writer/definite prewriter exit only.
+      Idempotent, nonyielding. Foreign private Owner is an invariant violation. *)
+  val close : t -> owner:Owner.t -> unit
+
+  type caller_exit =
+    | Closed
+    | Retained_by_admission
+
+  (** Pure owning-domain fact about the actual preparation's transferred close
+      obligation, including after execution retirement. No ACK or permission. *)
+  val is_retained : preparation -> bool
+
+  (** Ordinary caller finally cannot close admission-owned uncertain writer
+      custody. The SAME transferred exit must later settle its actual ACK or
+      no-writer proof. This does not infer no-write from an error. *)
+  val close_from_caller
+    :  preparation
+    -> owner:Owner.t
+    -> (caller_exit, Agent_protocol.Error.t) result
+end
 
 module Authorization : sig
   (** Actual authenticated policy captured under the issuing private owner.

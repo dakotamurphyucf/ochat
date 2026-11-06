@@ -2,6 +2,7 @@ open Core
 module P = Agent_protocol
 module D = Agent_store.Delegation_store
 module C = Chat_response.Tool_capability
+module Origin = Agent_store.Delegation_goal_origin
 
 type host =
   { state : P.Id.Session.t -> (Session_state.t, P.Error.t) result
@@ -18,6 +19,7 @@ type t =
   ; moderation : P.Id.Session.t -> (P.Invocation.observer option, P.Error.t) result
   ; authorize_independent : (D.record -> (unit, P.Error.t) result) option
   ; authored_capabilities : (D.record -> public:C.t -> (C.t, P.Error.t) result) option
+  ; source_owner : Runtime_source_owner.Identity.t option
   }
 
 let create
@@ -26,6 +28,7 @@ let create
       ?(moderation = fun _ -> Ok None)
       ?authorize_independent
       ?authored_capabilities
+      ?source_owner
       ~host
       ~reference
       ~capabilities
@@ -39,6 +42,7 @@ let create
   ; moderation
   ; authorize_independent
   ; authored_capabilities
+  ; source_owner = Option.map source_owner ~f:Runtime_source_owner.identity
   }
 ;;
 
@@ -48,6 +52,16 @@ let denied message = Error (P.Error.create Permission_denied ~message ~retryable
 let unavailable message =
   Error (P.Error.create Invalid_state ~message ~retryable:false ())
 ;;
+
+module Checked_ancestry = struct
+  type t =
+    { records : D.record list
+    ; source_owner : Runtime_source_owner.Identity.t
+    }
+
+  let records t = t.records
+  let issued_by t ~source_owner = Runtime_source_owner.matches source_owner t.source_owner
+end
 
 let fingerprint ?moderator (parent : Session_state.t) =
   let open Result.Let_syntax in
@@ -226,9 +240,9 @@ let rec read_chain t ~visited ~depth ~expected ~require_execution reference =
   in
   let%bind current = t.host.capabilities parent.identity.session_id in
   let%bind () = selected_bindings t record ~public:current ~expected in
-  let%bind () =
+  let%bind ancestors =
     match parent.spec.delegation with
-    | None -> Ok ()
+    | None -> Ok []
     | Some ancestor ->
       let%bind () =
         match
@@ -241,7 +255,7 @@ let rec read_chain t ~visited ~depth ~expected ~require_execution reference =
         | false ->
           denied "delegation.ancestry_changed: parent has a foreign delegation reference"
       in
-      let%bind ancestor_record, _ =
+      let%bind ancestor_record, _, ancestors =
         read_chain
           t
           ~visited
@@ -251,7 +265,7 @@ let rec read_chain t ~visited ~depth ~expected ~require_execution reference =
           ancestor
       in
       (match ancestor_record.D.stage with
-       | Linked -> Ok ()
+       | Linked -> Ok ancestors
        | _ ->
          denied
            "delegation.ancestor_not_linked: parent management relationship is not \
@@ -283,11 +297,11 @@ let rec read_chain t ~visited ~depth ~expected ~require_execution reference =
     && D.equal_record record retained
     && ((not require_execution) || Int64.equal latest.stop_epoch parent.stop_epoch)
   with
-  | true -> Ok (retained, latest)
+  | true -> Ok (retained, latest, retained :: ancestors)
   | false -> denied "delegation.authority_changed: admission changed during validation"
 ;;
 
-let read t =
+let read_ancestry t =
   read_chain
     t
     ~visited:[]
@@ -295,6 +309,94 @@ let read t =
     ~expected:t.capabilities
     ~require_execution:true
     t.reference
+;;
+
+let read t =
+  let%map.Result record, parent, _ = read_ancestry t in
+  record, parent
+;;
+
+let anchor_matches (record : D.record) anchor =
+  let module A = Origin.Anchor in
+  P.Id.Session.equal (A.parent_session_id anchor) record.key.parent_session_id
+  && Int.equal (A.parent_generation anchor) record.key.parent_generation
+  && P.Id.Principal.equal (A.principal_id anchor) record.key.principal_id
+  && P.Idempotency_key.equal (A.key anchor) record.key.idempotency_key
+  && P.Id.Session.equal (A.child_session_id anchor) record.admission.child_session_id
+  && P.Id.Transaction.equal (A.transaction_id anchor) record.admission.transaction_id
+;;
+
+let validate_origin_edge (record : D.record) ancestor =
+  let module Scope = Origin.Scope in
+  let open Result.Let_syntax in
+  match record.admission.goal_origin with
+  | None -> Ok ()
+  | Some origin ->
+    let scopes = Origin.scopes origin in
+    (* Positive Unrelated is an explicit birth boundary, including ordinary
+       independently authorized management creation. Unknown is never one. *)
+    if List.is_empty scopes
+    then Ok ()
+    else (
+      let%bind inherited =
+        match ancestor with
+        | None -> Ok []
+        | Some (ancestor : D.record) ->
+          (match ancestor.admission.goal_origin with
+           | None ->
+             unavailable
+               "delegation.goal_origin_unknown: inherited Goal origin is unavailable"
+           | Some origin -> Ok (Origin.scopes origin))
+      in
+      let%bind () =
+        List.fold_result inherited ~init:() ~f:(fun () expected ->
+          if List.exists scopes ~f:(Scope.equal expected)
+          then Ok ()
+          else
+            denied
+              "delegation.goal_origin_changed: inherited Goal scope was changed or \
+               omitted")
+      in
+      List.fold_result scopes ~init:() ~f:(fun () scope ->
+        if
+          List.exists inherited ~f:(Scope.equal scope)
+          || anchor_matches record (Scope.branch scope)
+        then Ok ()
+        else
+          denied
+            "delegation.goal_origin_changed: Goal scope does not name its actual \
+             first-child edge"))
+;;
+
+let rec validate_origin_chain = function
+  | [] -> Ok ()
+  | record :: ancestors ->
+    let open Result.Let_syntax in
+    let%bind () = validate_origin_edge record (List.hd ancestors) in
+    validate_origin_chain ancestors
+;;
+
+let check_ancestry t =
+  let open Result.Let_syntax in
+  let%bind source_owner =
+    Result.of_option
+      t.source_owner
+      ~error:
+        (P.Error.create
+           Invalid_state
+           ~message:"delegation.issuer_unavailable: ancestry guard has no Factory issuer"
+           ~retryable:false
+           ())
+  in
+  let%bind record, _, observed_records = read_ancestry t in
+  let%bind () =
+    match record.stage with
+    | Linked -> Ok ()
+    | Reserved | Artifact_installed | Child_installed ->
+      denied "delegation.not_linked: child management relationship is not committed"
+  in
+  let%map () = validate_origin_chain observed_records in
+  Checked_ancestry.{ records = observed_records; source_owner }
 ;;
 
 let check_preparation_record
@@ -330,6 +432,32 @@ let check_preparation_record
 let check_preparation t ~session_id ~revision_id ~manifest_sha256 ~permission_profile =
   let open Result.Let_syntax in
   let%bind record, parent = read t in
+  check_preparation_record
+    t
+    record
+    parent
+    ~session_id
+    ~revision_id
+    ~manifest_sha256
+    ~permission_profile
+;;
+
+let check_captured_artifact_preparation
+      t
+      ~origin
+      ~session_id
+      ~revision_id
+      ~manifest_sha256
+      ~permission_profile
+  =
+  let open Result.Let_syntax in
+  let%bind record, parent = read t in
+  let%bind () =
+    match Recurrence_child_origin.source_kind origin with
+    | Artifact when Recurrence_child_origin.matches_record origin record -> Ok ()
+    | Artifact | Authored_tool _ ->
+      denied "delegation.captured_artifact: source differs from actual admission"
+  in
   check_preparation_record
     t
     record

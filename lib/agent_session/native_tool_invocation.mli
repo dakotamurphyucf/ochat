@@ -183,6 +183,16 @@ val borrowed_capabilities
   :  borrowed
   -> (Chat_response.Tool_capability.t, Agent_protocol.Error.t) result
 
+(** Negative currentness of SAME lexical dispatch, without ambient lookup,
+    original agent-creation custody or child eligibility. Refresh checks the
+    active selected borrow before/after yielding SAME admitted operation-view
+    refresh; check is callback-free on the issuing Actor domain. Explicit legacy
+    unavailable capabilities retain compatibility, never an expired-owner
+    fallback. Neither operation grants execution/admission/source permission. *)
+val refresh_borrowed_effect_current : borrowed -> (unit, Agent_protocol.Error.t) result
+
+val check_borrowed_effect_current : borrowed -> (unit, Agent_protocol.Error.t) result
+
 (** Require the exact currently executing native handler's completed admission.
     Ordinary dispatched scopes and capability borrows are not permission proofs.
     Only the native execution dispatcher creates this evidence after authorization and post-wait

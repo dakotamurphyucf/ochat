@@ -107,6 +107,8 @@ module Handle = struct
     ; mutable canonical_projection : Session_projection_update.Pending.t option
     ; mutable lifecycle_unavailable : Store_error.t option
     ; mutable lifecycle_epoch : unit ref
+    ; mutable retained_lifecycle_epoch : unit ref
+    ; projection_updates : Session_projection_update.t
     ; mutable closed : bool
     ; owner_available : unit -> bool
     ; daemon_lock_live : unit -> bool
@@ -137,6 +139,16 @@ module Handle = struct
       match t.metadata_unavailable, t.lifecycle_unavailable with
       | None, None -> Ok t.metadata
       | Some error, _ | _, Some error -> Error error)
+  ;;
+
+  let retained_available t =
+    (not t.closed)
+    && t.owner_available ()
+    && t.daemon_lock_live ()
+    && Lock.is_live t.actor_lock
+    && Option.is_none t.lifecycle_unavailable
+    && Option.is_none t.metadata_unavailable
+    && Session_projection_update.is_available t.projection_updates
   ;;
 
   let session_id t = t.metadata.session.id
@@ -200,6 +212,11 @@ module Handle = struct
   let idempotency_directory t = t.idempotency_directory
 end
 
+let invalidate_lifecycle_authority (handle : Handle.t) =
+  handle.lifecycle_epoch <- ref ();
+  handle.retained_lifecycle_epoch <- ref ()
+;;
+
 module Lifecycle = struct
   module R = Session_archive_record
 
@@ -240,6 +257,19 @@ module Lifecycle = struct
       && handle.owner_available ()
       && Option.is_none handle.lifecycle_unavailable
       && Option.is_none handle.metadata_unavailable
+    ;;
+  end
+
+  module Retained_owner = struct
+    type t =
+      { owner : Handle.t
+      ; epoch : unit ref
+      }
+
+    let is_current t handle =
+      phys_equal t.owner handle
+      && phys_equal t.epoch handle.Handle.retained_lifecycle_epoch
+      && Handle.retained_available handle
     ;;
   end
 
@@ -302,6 +332,23 @@ let check_handle t handle =
   if (not (owns_handle t handle)) || t.closed
   then Error (Store_error.Corrupt "session handle belongs to a different or closed store")
   else Handle.metadata_checked handle |> Result.map ~f:(fun _ -> ())
+;;
+
+let retained_lifecycle_available t handle =
+  owns_handle t handle && (not t.closed) && Handle.retained_available handle
+;;
+
+let retain_lifecycle_owner t handle current =
+  if retained_lifecycle_available t handle && Lifecycle.Current.is_current current handle
+  then
+    Ok
+      { Lifecycle.Retained_owner.owner = handle
+      ; epoch = handle.Handle.retained_lifecycle_epoch
+      }
+  else
+    Error
+      (Store_error.Corrupt
+         "retained lifecycle requires the actual current Store/Handle owner")
 ;;
 
 let current_schema_version = 2
@@ -909,6 +956,7 @@ let make_handle
       ~metadata:session_metadata
       ~actor_lock
       ~owner_available
+      ~projection_updates
       ~daemon_lock_live
       ~developer_root_state
       ~store_owner
@@ -922,6 +970,8 @@ let make_handle
   ; canonical_projection = None
   ; lifecycle_unavailable = None
   ; lifecycle_epoch = ref ()
+  ; retained_lifecycle_epoch = ref ()
+  ; projection_updates
   ; closed = false
   ; owner_available
   ; daemon_lock_live
@@ -965,6 +1015,7 @@ let acquire_handle t ~sw ~directory ~actor_lock_nonce _metadata =
       ~metadata
       ~actor_lock
       ~owner_available:(fun () -> not t.closed)
+      ~projection_updates:t.projection_updates
       ~daemon_lock_live:(fun () -> Lock.is_live t.daemon_lock)
       ~developer_root_state:t.developer_root_state
       ~store_owner:t.owner_token
@@ -973,7 +1024,7 @@ let acquire_handle t ~sw ~directory ~actor_lock_nonce _metadata =
   in
   Eio.Switch.on_release sw (fun () ->
     handle.Handle.closed <- true;
-    handle.lifecycle_epoch <- ref ());
+    invalidate_lifecycle_authority handle);
   handle.Handle.metadata_carrier <- metadata_carrier;
   handle
 ;;
@@ -1091,13 +1142,13 @@ let open_session t ~sw ~actor_lock_nonce session_id =
              (Session_archive_record.status (Session_archive_document.value document))
              Removed ->
       handle.Handle.closed <- true;
-      handle.lifecycle_epoch <- ref ();
+      invalidate_lifecycle_authority handle;
       let%bind () = Lock.release ~env:t.env handle.actor_lock in
       Error (Store_error.Missing directory)
     | Ok None | Ok (Some _) -> Ok handle
     | Error error ->
       handle.Handle.closed <- true;
-      handle.lifecycle_epoch <- ref ();
+      invalidate_lifecycle_authority handle;
       Eio.Cancel.protect (fun () ->
         try
           ignore
@@ -1108,7 +1159,7 @@ let open_session t ~sw ~actor_lock_nonce session_id =
     | exception exn ->
       let backtrace = Stdlib.Printexc.get_raw_backtrace () in
       handle.Handle.closed <- true;
-      handle.lifecycle_epoch <- ref ();
+      invalidate_lifecycle_authority handle;
       Eio.Cancel.protect (fun () ->
         try
           ignore
@@ -1276,7 +1327,7 @@ let close_session t handle =
   then Error (Store_error.Corrupt "session handle belongs to a different store")
   else (
     handle.closed <- true;
-    handle.lifecycle_epoch <- ref ();
+    invalidate_lifecycle_authority handle;
     Lock.release ~env:t.env handle.actor_lock)
 ;;
 
@@ -1534,7 +1585,7 @@ let publish_prepared_lifecycle t handle prepared =
       in
       publish_projection ~publish_authority:(fun () ->
         let%bind () = require_intent () in
-        handle.lifecycle_epoch <- ref ();
+        invalidate_lifecycle_authority handle;
         handle.lifecycle_unavailable
         <- Some (Store_error.Corrupt "lifecycle publication is in progress");
         match
@@ -1637,7 +1688,7 @@ let complete_lifecycle_outcome t handle ~key ~request_digest ~complete =
       Session_projection_update.publish t.projection_updates ~f:(fun ~require_intent ->
         let%bind () = check_lifecycle_observation t handle observation in
         let%bind () = require_intent () in
-        handle.Handle.lifecycle_epoch <- ref ();
+        invalidate_lifecycle_authority handle;
         handle.lifecycle_unavailable
         <- Some (Store_error.Corrupt "lifecycle acknowledgement is in progress");
         match
@@ -1718,7 +1769,7 @@ let finish_removal t removal ~complete ~retire =
       let%bind directory =
         Session_removal_directory.create ~env:t.env ~data_root:t.root removal.session_id
       in
-      handle.lifecycle_epoch <- ref ();
+      invalidate_lifecycle_authority handle;
       let%bind () =
         match
           Session_removal_directory.complete_receipts directory ~complete:complete_owned

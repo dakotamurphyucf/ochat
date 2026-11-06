@@ -12,14 +12,20 @@ val initialize_new
 
 (** Read only ACKed native State. None is historical missing own accounting,
     never exact zero. Missing historical child inventory is carried as unknown;
-    no mutable external delegation scan enters this version or digest. *)
+    no mutable external delegation scan enters this version or digest. A known
+    frozen origin projects its exact scope vector, actual own partition, scoped
+    child contributions and retained Included heads in the same snapshot.
+    Historical unknown origin stays omitted; positive Unrelated stays an empty
+    known vector. This projection grants neither admission nor confirmation. *)
 val snapshot
   :  Session_state.t
   -> (Child_usage_snapshot.t option, Agent_protocol.Error.t) result
 
 (** Build the exact next slot document; the Actor separately authenticates the
     real parent/child/reference before publication. Historical absence initializes
-    only Historical_children_unknown. Existing stored bounds stay unchanged. *)
+    only Historical_children_unknown. An exact existing slot retains its frozen
+    origin and observation; a conflicting admission still rejects. Existing
+    stored bounds stay unchanged. *)
 val register
   :  Session_state.t
   -> reference:Agent_store.Delegation_store.Reference.t

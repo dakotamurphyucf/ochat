@@ -2635,8 +2635,10 @@ module Transaction = struct
       | Register_new_root { goal_id; _ } ->
         Option.bind t.staged.ordered_goal_accounts ~f:(fun cursor ->
           Goal_accounts.Ordered_bootstrap.creation cursor ~goal_id)
+      | Register_first_unrelated_child _
       | Register_child _
       | Register_branch _
+      | Register_retained_branch _
       | Reserve _
       | Record_included _
       | Import _

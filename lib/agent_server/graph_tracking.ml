@@ -16,7 +16,7 @@ module Upstream = struct
     }
 end
 
-exception Rejected of Agent_protocol.Error.t
+exception Rejected of Agent_protocol.Error.t [@@deriving sexp]
 
 module Mutation_owner = struct
   type t =
@@ -126,62 +126,48 @@ let release t handle =
 
 let with_attempt t ?allocate prepared ~relation ~f =
   let allocation =
-    Eio.Cancel.protect (fun () ->
-      let allocation =
-        match allocate with
-        | Some allocate ->
-          allocate
-            ~graph:t.owner
-            ~relation
-            ~configuration:(R.Prepared.configuration prepared)
-          |> require
-        | None ->
-          let unbound admit =
-            let handle =
-              admit
-                t.actor
-                ~owner:t.owner
-                ~relation
-                ~operation_id:None
-                ~invocation_id:None
-                ~configuration:(R.Prepared.configuration prepared)
-              |> require
-            in
-            Agent_session.Inference_allocation.Host.create
-              ~handle
-              ~submission_guard:R.Submission_guard.empty
-          in
-          (match t.mutation_owner with
-           | Held_input _ ->
-             raise
-               (Rejected
-                  (Agent_protocol.Error.create
-                     Permission_denied
-                     ~message:"held input requires its exact execution allocator"
-                     ~retryable:false
-                     ()))
-           | Runtime preparation ->
-             unbound
-               (match !preparation with
-                | None -> A.admit_inference
-                | Some preparation -> A.Constructor_mutations.admit_inference ~preparation)
-           | Runtime_construction _ ->
-             raise
-               (Rejected
-                  (Agent_protocol.Error.create
-                     Permission_denied
-                     ~message:"constructed runtime requires its exact execution allocator"
-                     ~retryable:false
-                     ())))
+    match allocate with
+    | Some allocate ->
+      allocate ~graph:t.owner ~relation ~configuration:(R.Prepared.configuration prepared)
+      |> require
+    | None ->
+      let unbound admit =
+        admit
+          t.actor
+          ~owner:t.owner
+          ~relation
+          ~operation_id:None
+          ~invocation_id:None
+          ~configuration:(R.Prepared.configuration prepared)
+        |> require
       in
-      let handle = Agent_session.Inference_allocation.handle allocation in
-      t.routing
-      <- Map.set
-           t.routing
-           ~key:(Transcript.Scope.key (L.Handle.scope handle))
-           ~data:handle;
-      allocation)
+      (match t.mutation_owner with
+       | Held_input _ ->
+         raise
+           (Rejected
+              (Agent_protocol.Error.create
+                 Permission_denied
+                 ~message:"held input requires its exact execution allocator"
+                 ~retryable:false
+                 ()))
+       | Runtime preparation ->
+         unbound
+           (match !preparation with
+            | None -> A.admit_inference_allocation
+            | Some preparation ->
+              A.Constructor_mutations.admit_inference_allocation ~preparation)
+       | Runtime_construction _ ->
+         raise
+           (Rejected
+              (Agent_protocol.Error.create
+                 Permission_denied
+                 ~message:"constructed runtime requires its exact execution allocator"
+                 ~retryable:false
+                 ())))
   in
+  let handle = Agent_session.Inference_allocation.handle allocation in
+  t.routing
+  <- Map.set t.routing ~key:(Transcript.Scope.key (L.Handle.scope handle)) ~data:handle;
   let handle = Agent_session.Inference_allocation.handle allocation in
   match
     t.upstream.on_admitted

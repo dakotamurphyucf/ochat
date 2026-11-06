@@ -28,7 +28,7 @@ let unknown metric =
        ~f:(fun reason -> Int64.(U.Unknown.count counts reason > 0L))
 ;;
 
-let token_decision usage (stop : G.Budget.Token_stop.t) =
+let token_decision ?(coverage_unknown = false) usage (stop : G.Budget.Token_stop.t) =
   let metric = U.component usage stop.component in
   let reached =
     match U.Metric.actual metric, U.Metric.estimated metric with
@@ -39,12 +39,12 @@ let token_decision usage (stop : G.Budget.Token_stop.t) =
   in
   if reached
   then Hold (Budget_gate Observed_tokens)
-  else if unknown metric
+  else if coverage_unknown || unknown metric
   then Hold (Usage_uncertain stop.component)
   else Allow
 ;;
 
-let check_policy goal ~accounting:account ~ledger ~now ~dimension =
+let account_usage goal ~accounting:account ~ledger =
   let open Result.Let_syntax in
   let%bind () =
     if
@@ -53,42 +53,58 @@ let check_policy goal ~accounting:account ~ledger ~now ~dimension =
     then Ok ()
     else Error (P.Error.invalid_request "goal admission accounting scope differs")
   in
-  let%bind usage = A.usage account ~ledger |> accounting in
+  A.usage account ~ledger |> accounting
+;;
+
+let control_deadline goal ~now =
   match G.state goal with
   | Closed _ -> Error (P.Error.invalid_request "closed goal cannot admit new work")
-  | Open (Held hold) -> Ok (Hold hold)
+  | Open (Held hold) -> Ok (Some (Hold hold))
   | Open Enabled ->
-    let budget = G.budget goal in
     if
-      Option.exists (G.Budget.deadline budget) ~f:(fun deadline ->
-        P.Timestamp.compare now deadline >= 0)
-    then Ok (Hold Deadline_reached)
-    else (
-      let count_hold =
-        Option.bind dimension ~f:(fun dimension ->
-          let count, ceiling, budget_dimension =
-            match dimension with
-            | Attempt ->
-              ( A.admitted_attempts account
-              , G.Budget.admitted_attempts budget
-              , G.Budget.Dimension.Admitted_attempts )
-            | Host_turn ->
-              ( A.admitted_turns account
-              , G.Budget.admitted_turns budget
-              , G.Budget.Dimension.Admitted_turns )
-          in
-          if Option.exists ceiling ~f:(fun ceiling -> Int64.(count >= ceiling))
-          then Some (G.Hold.Budget_gate budget_dimension)
-          else None)
-      in
-      match count_hold with
-      | Some hold -> Ok (Hold hold)
-      | None ->
-        Ok
-          (Option.value_map
-             (G.Budget.observed_tokens budget)
-             ~default:Allow
-             ~f:(token_decision usage)))
+      Option.exists
+        (G.Budget.deadline (G.budget goal))
+        ~f:(fun deadline -> P.Timestamp.compare now deadline >= 0)
+    then Ok (Some (Hold Deadline_reached))
+    else Ok None
+;;
+
+let observed_tokens goal usage ~coverage_unknown =
+  Option.value_map
+    (G.Budget.observed_tokens (G.budget goal))
+    ~default:Allow
+    ~f:(token_decision ~coverage_unknown usage)
+;;
+
+let check_policy goal ~accounting:account ~ledger ~now ~dimension =
+  let open Result.Let_syntax in
+  (* Account integrity precedes control even for Held/Closed Goals. *)
+  let%bind usage = account_usage goal ~accounting:account ~ledger in
+  let%map control = control_deadline goal ~now in
+  match control with
+  | Some decision -> decision
+  | None ->
+    let budget = G.budget goal in
+    let count_hold =
+      Option.bind dimension ~f:(fun dimension ->
+        let count, ceiling, budget_dimension =
+          match dimension with
+          | Attempt ->
+            ( A.admitted_attempts account
+            , G.Budget.admitted_attempts budget
+            , G.Budget.Dimension.Admitted_attempts )
+          | Host_turn ->
+            ( A.admitted_turns account
+            , G.Budget.admitted_turns budget
+            , G.Budget.Dimension.Admitted_turns )
+        in
+        if Option.exists ceiling ~f:(fun ceiling -> Int64.(count >= ceiling))
+        then Some (G.Hold.Budget_gate budget_dimension)
+        else None)
+    in
+    (match count_hold with
+     | Some hold -> Hold hold
+     | None -> observed_tokens goal usage ~coverage_unknown:false)
 ;;
 
 let check goal ~accounting ~ledger ~now ~dimension =
@@ -104,4 +120,68 @@ let same_allocation_policy before after =
   && P.Run_source.equal (G.source before) (G.source after)
   && G.Objective.equal (G.objective before) (G.objective after)
   && Option.equal P.Goal_episode.equal (G.episode before) (G.episode after)
+;;
+
+module Descendants = struct
+  type t =
+    { usage : U.t
+    ; coverage_unknown : bool
+    }
+end
+
+module Count_availability = struct
+  type t =
+    | Available
+    | Reserved
+    | Exhausted
+    | Unknown
+  [@@deriving equal, sexp_of]
+end
+
+module Deferred = struct
+  type t =
+    | Reserved
+    | Unknown
+  [@@deriving equal, sexp_of]
+end
+
+type scoped_decision =
+  | Decided of decision
+  | Deferred of Deferred.t
+
+let scoped_usage goal ~accounting ~ledger (descendants : Descendants.t) =
+  let%bind.Result own = account_usage goal ~accounting ~ledger in
+  U.add_disjoint own descendants.usage
+  |> Result.map_error ~f:(fun error ->
+    P.Error.invalid_request (Sexp.to_string_hum (U.Counter.sexp_of_error error)))
+;;
+
+let check_scoped goal ~accounting ~ledger ~descendants ~availability ~now ~dimension =
+  let open Result.Let_syntax in
+  let%bind usage = scoped_usage goal ~accounting ~ledger descendants in
+  let%map control = control_deadline goal ~now in
+  match control with
+  | Some decision -> Decided decision
+  | None ->
+    (match (availability : Count_availability.t) with
+     | Reserved -> Deferred Reserved
+     | Unknown -> Deferred Unknown
+     | Exhausted ->
+       Decided
+         (Hold
+            (Budget_gate
+               (match dimension with
+                | Attempt -> Admitted_attempts
+                | Host_turn -> Admitted_turns)))
+     | Available ->
+       Decided (observed_tokens goal usage ~coverage_unknown:descendants.coverage_unknown))
+;;
+
+let check_scoped_activation goal ~accounting ~ledger ~descendants ~now =
+  let open Result.Let_syntax in
+  let%bind usage = scoped_usage goal ~accounting ~ledger descendants in
+  let%map control = control_deadline goal ~now in
+  match control with
+  | Some decision -> decision
+  | None -> observed_tokens goal usage ~coverage_unknown:descendants.coverage_unknown
 ;;

@@ -27,6 +27,119 @@ let document_ok = function
   | Error error -> raise_s [%sexp (error : D.Error.t)]
 ;;
 
+(* Failed staged publication can retain ACKed lower registration and an initial
+   child observation. Their DATA rows permit neither a recurrence link nor Goal
+   usage. Check those rows and conserve every other parent State field. *)
+module Unrelated_birth_facts = struct
+  module C = A.Child_contributions
+  module G = A.Goal_descendants
+  module Snapshot = A.Child_usage_snapshot
+  module Origin = Agent_store.Delegation_goal_origin
+
+  type t =
+    | Registered_unobserved
+    | Registered_initial_snapshot
+
+  let check
+        kind
+        ~(before : A.Session_state.t)
+        ~(after : A.Session_state.t)
+        ~(record : Ledger.record)
+    =
+    let reference = Ledger.reference record in
+    assert (P.Id.Session.equal reference.key.parent_session_id before.identity.session_id);
+    [%test_eq: int] before.identity.generation reference.key.parent_generation;
+    assert (
+      P.Id.Prompt_revision.equal
+        record.admission.parent_revision_id
+        before.spec.prompt_revision_id);
+    assert (Option.is_some record.admission.captured_recurrence);
+    (match record.admission.goal_origin with
+     | Some origin -> assert (Origin.equal origin Origin.unrelated)
+     | None -> failwith "fresh recurrence child lost its frozen Unrelated origin");
+    let accounting = Option.value_exn before.goal_descendants in
+    (match G.origin accounting with
+     | Some origin -> assert (Origin.equal origin Origin.unrelated)
+     | None -> failwith "fresh parent lost its known own origin");
+    assert (List.is_empty (G.roots accounting));
+    assert (List.is_empty (G.local_included accounting));
+    let incoming_accounting = Option.value_exn after.goal_descendants in
+    assert (
+      Jsonaf.exactly_equal
+        (G.to_document accounting |> protocol_ok |> D.Document.json)
+        (G.to_document incoming_accounting |> protocol_ok |> D.Document.json));
+    let previous = Option.value_exn before.child_contributions in
+    (match C.inventory previous with
+     | Complete_inventory -> ()
+     | Historical_children_unknown -> failwith "fresh fixture parent inventory is unknown");
+    assert (List.is_empty (C.references previous));
+    let actual = Option.value_exn after.child_contributions in
+    let registered =
+      C.register_with_origin previous ~reference ~origin:Origin.unrelated |> protocol_ok
+    in
+    (match C.origin actual ~reference |> protocol_ok with
+     | Some origin -> assert (Origin.equal origin Origin.unrelated)
+     | None -> failwith "actual child slot lost its frozen origin");
+    let expected, increments, unobserved =
+      match kind, C.snapshot actual ~reference |> protocol_ok with
+      | Registered_unobserved, None -> registered, 1L, 1L
+      | Registered_initial_snapshot, Some snapshot ->
+        assert (Ledger.Reference.equal reference (Snapshot.reference snapshot));
+        Snapshot.validate_origin snapshot ~origin:Origin.unrelated |> protocol_ok;
+        (match Snapshot.goal_scopes snapshot with
+         | Some scopes -> assert (List.is_empty scopes)
+         | None -> failwith "positive Unrelated snapshot lost scoped semantics");
+        assert (Snapshot.Partition.equal (Snapshot.own snapshot) Snapshot.Partition.empty);
+        assert (
+          Snapshot.Partition.equal
+            (Snapshot.total snapshot |> protocol_ok)
+            Snapshot.Partition.empty);
+        let coverage = Snapshot.coverage snapshot in
+        assert (not (Snapshot.Coverage.historical_children_unknown coverage));
+        [%test_eq: int64] 0L (Snapshot.Coverage.unobserved_children coverage);
+        let expected, disposition = C.replace registered ~snapshot |> protocol_ok in
+        (match disposition with
+         | Added -> ()
+         | Replaced | Duplicate | Stale ->
+           failwith "initial child snapshot was not first observation");
+        expected, 2L, 0L
+      | Registered_unobserved, Some _ ->
+        failwith "denied publication fabricated a child observation"
+      | Registered_initial_snapshot, None ->
+        failwith "post-sync link lost its ACKed initial child observation"
+    in
+    assert (
+      Jsonaf.exactly_equal
+        (C.to_jsonaf expected |> protocol_ok)
+        (C.to_jsonaf actual |> protocol_ok));
+    let aggregate = C.aggregate actual |> protocol_ok in
+    assert (
+      Snapshot.Partition.equal
+        (Snapshot.Descendants.partition aggregate)
+        Snapshot.Partition.empty);
+    let coverage = Snapshot.Descendants.coverage aggregate in
+    assert (not (Snapshot.Coverage.historical_children_unknown coverage));
+    [%test_eq: int64] unobserved (Snapshot.Coverage.unobserved_children coverage);
+    let counters =
+      { before.counters with
+        revision = Int64.(before.counters.revision + increments)
+      ; transaction_sequence = Int64.(before.counters.transaction_sequence + increments)
+      }
+    in
+    let expected : A.Session_state.t =
+      { before with
+        child_contributions = Some expected
+      ; identity = { before.identity with updated_at = after.identity.updated_at }
+      ; counters
+      }
+    in
+    assert (
+      Jsonaf.exactly_equal
+        (T.state_document expected |> store_ok |> D.Document.json)
+        (T.state_document after |> store_ok |> D.Document.json))
+  ;;
+end
+
 (* Cleanup joins while the owning switch is live; a failed oracle retains its
    original exception even if joining the daemon also reports an error. *)
 let protect_cleanup ~finally f =
