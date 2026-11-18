@@ -60,13 +60,11 @@ test('catalog distinguishes complete examples, configured templates and illustra
   try {
     const page = await context.newPage();
     await page.goto('/docs/examples/#source-catalog');
-    await expect(page.locator('.example-card')).toHaveCount(
-      report.examples.length,
-    );
     await page
       .getByRole('navigation', { name: 'Example types' })
       .getByRole('link', { name: 'Templates', exact: true })
       .click();
+    expect(new URL(page.url()).hash).toBe('#template-examples');
     await expect(page.locator('#template-examples')).toBeVisible();
     const specialist = page.locator('#example-specialist');
     await specialist.locator('.source-details > summary').click();
@@ -76,12 +74,24 @@ test('catalog distinguishes complete examples, configured templates and illustra
         exact: true,
       }),
     ).toHaveAttribute('download', 'docs-reviewer.chatmd');
-    await expect(specialist).toContainText('reference/project.txt');
-    await expect(specialist).toContainText('LICENSE.txt');
-    await expect(
-      page.locator('#example-search-output a[download]'),
-    ).toHaveCount(0);
-    await expect(page.locator('#example-narrow-shell')).toContainText(
+    // Read the static catalog in one pass because each traced locator
+    // assertion otherwise snapshots the entire inline-source catalog.
+    const catalog = await page.evaluate(() => ({
+      count: document.querySelectorAll('.example-card').length,
+      specialistText: document.querySelector('#example-specialist')
+        ?.textContent,
+      illustrativeDownloads: document
+        .querySelector('#example-search-output')
+        ?.querySelectorAll('a[download]').length,
+      narrowShellText: document
+        .querySelector('#example-narrow-shell')
+        ?.textContent?.replace(/\s+/g, ' '),
+    }));
+    expect(catalog.count).toBe(report.examples.length);
+    expect(catalog.specialistText).toContain('reference/project.txt');
+    expect(catalog.specialistText).toContain('LICENSE.txt');
+    expect(catalog.illustrativeDownloads).toBe(0);
+    expect(catalog.narrowShellText).toContain(
       'Use --local --authorize-shell-manifest',
     );
   } finally {
