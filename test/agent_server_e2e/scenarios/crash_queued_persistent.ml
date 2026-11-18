@@ -149,7 +149,7 @@ let run_child env ~config_path ~boundary =
   Crash_notification_host.run ~standalone:true ~provider env ~config_path ~boundary
 ;;
 
-let with_host env environment fixture boundary f =
+let with_host env environment fixture ?startup_timeout_seconds boundary f =
   Eio.Switch.run (fun sw ->
     let child =
       F.child
@@ -162,7 +162,11 @@ let with_host env environment fixture boundary f =
     Exn.protect
       ~finally:(fun () -> F.terminate env child)
       ~f:(fun () ->
-        F.await_marker env child "notification-host-ready";
+        F.await_marker
+          env
+          child
+          ?timeout_seconds:startup_timeout_seconds
+          "notification-host-ready";
         F.with_client ~sw env fixture (fun client -> f child client)))
 ;;
 
@@ -344,8 +348,14 @@ let test env environment =
   Eio.Path.unlink (F.path env child_path);
   Eio.Path.unlink (F.path env nested_path);
   let previous = ref None in
+  (* A reopening host verifies retained artifacts and restores sessions before
+     publishing its ready marker. Bound that startup separately from the
+     crash-boundary and notification waits. *)
+  let with_recovered_host f =
+    with_host env environment fixture ~startup_timeout_seconds:20. "recover" f
+  in
   for reopen = 1 to 2 do
-    with_host env environment fixture "recover" (fun child client ->
+    with_recovered_host (fun child client ->
       ignore
         (F.await_notifications
            env
