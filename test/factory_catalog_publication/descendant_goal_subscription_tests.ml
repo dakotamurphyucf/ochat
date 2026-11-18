@@ -411,7 +411,7 @@ module Waiting_fixture = struct
                 write_context env child run ();
                 Gate.release initial;
                 phase := "actual pending mixed notices after Run.wait";
-                await_signal cache_entered;
+                Birth.within env !phase (fun () -> await_signal cache_entered);
                 [%test_eq: int] 1 !cache_hits;
                 [%test_eq: int] 2 !child_calls;
                 let passive = Resume.checkpoint child in
@@ -474,7 +474,10 @@ module Waiting_fixture = struct
                          match work.P.Run_work.key with
                          | Operation id -> P.Id.Operation.equal id ordinary_operation
                          | Retained _ -> false)));
-                let stable = Resume.settled_snapshot child in
+                let stable =
+                  Birth.within env "ordinary notice source checkpoint" (fun () ->
+                    Resume.settled_snapshot child)
+                in
                 assert (
                   not
                     (Factory.drain_idle_moderator (Daemon.factory daemon) child
@@ -526,6 +529,7 @@ let%expect_test "cold associated Goal subscription runs at local and inherited c
     ~at_wake_provider:(fun _ -> Probe.at_provider (Option.value_exn !probe))
     (fun fixture ->
        let { Waiting_fixture.env
+           ; real_env
            ; daemon
            ; parent
            ; child
@@ -612,7 +616,8 @@ let%expect_test "cold associated Goal subscription runs at local and inherited c
         | Resume_failed { error; _ } | Rejected error | Uncertain error ->
           raise_s [%sexp (error : P.Error.t)]);
        phase := "true cold subscription provider at both caps";
-       Waiting_fixture.await_wake_provider fixture;
+       Birth.within real_env !phase (fun () ->
+         Waiting_fixture.await_wake_provider fixture);
        raise_failure ();
        let probe = Option.value_exn !probe in
        let first_effect, _, _ = Option.value_exn probe.observed in
@@ -624,7 +629,7 @@ let%expect_test "cold associated Goal subscription runs at local and inherited c
            Eio.Fiber.yield ();
            joined ())
        in
-       joined ();
+       Birth.within real_env "cold wake source lane joined" joined;
        assert (Owner.is_loaded child.runtime);
        Owner.with_loaded_runtime child.runtime (fun runtime ->
          assert (not (phys_equal runtime old_runtime));
@@ -679,7 +684,10 @@ let%expect_test "cold associated Goal subscription runs at local and inherited c
        A.Goal_run_evidence.validate ~catalog:final.goal_catalog ~runs:final.run_state
        |> protocol_ok;
        Probe.after_terminal probe;
-       let stable = Resume.settled_snapshot child in
+       let stable =
+         Birth.within real_env "associated notice source checkpoint" (fun () ->
+           Resume.settled_snapshot child)
+       in
        phase := "exact wake duplicate and quiet no-Turn";
        (match
           Factory.deliver_goal_wake (Daemon.factory daemon) child ~wake |> protocol_ok
@@ -778,10 +786,7 @@ module Scheduler_parking = struct
   ;;
 end
 
-let boundary_within (fixture : Waiting_fixture.t) phase f =
-  try Eio.Time.with_timeout_exn (Eio.Stdenv.clock fixture.real_env) 30. f with
-  | Eio.Time.Timeout -> failwith ("570 actual subscription boundary timed out: " ^ phase)
-;;
+let boundary_within (fixture : Waiting_fixture.t) = Birth.within fixture.real_env
 
 let assert_no_job_producer (current : A.Session_state.t) =
   assert (List.is_empty current.jobs);

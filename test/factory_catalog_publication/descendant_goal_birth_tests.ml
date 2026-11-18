@@ -350,7 +350,9 @@ let%expect_test
     if Option.is_none (Eio.Promise.peek release)
     then Eio.Promise.resolve signal_release ()
   in
+  (* Parent and management births precede three separately bounded Turns. *)
   with_native_goal_child
+    ~timeout:120.
     ~wrap_env:(fun env ->
       let env =
         Crash_fault_io.wrap
@@ -616,10 +618,9 @@ let%expect_test
                   , (current.active_operation : P.Operation.t option)]
             in
             assert (Option.is_some submitted.operation_id);
-            Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
-              Eio.Promise.await entered);
+            within "first direct Turn worker" (fun () -> Eio.Promise.await entered);
             let after =
-              Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
+              within "first direct Turn completion" (fun () ->
                 Goal_native_test_support.await_quiet child)
             in
             assert (Option.is_none after.failure);
@@ -671,10 +672,12 @@ let%expect_test
               Eio.Cancel.cancel (Eio.Promise.await caller) cancelled;
               (* Caller must finish cancellation while real writer is still
                  suspended. Releasing it later produces a genuine delayed ACK. *)
-              (match Result.try_with (fun () -> Eio.Promise.await_exn submission) with
-               | Error (Eio.Cancel.Cancelled cause) -> assert (phys_equal cause cancelled)
-               | Error exn -> raise exn
-               | Ok _ -> failwith "canonical-writer waiter did not preserve cancellation");
+              within "cancelled canonical writer waiter" (fun () ->
+                match Result.try_with (fun () -> Eio.Promise.await_exn submission) with
+                | Error (Eio.Cancel.Cancelled cause) ->
+                  assert (phys_equal cause cancelled)
+                | Error exn -> raise exn
+                | Ok _ -> failwith "canonical-writer waiter did not preserve cancellation");
               release_writer ();
               let rec await_factual_cleanup () =
                 let child_now = state child in

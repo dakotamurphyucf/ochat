@@ -114,16 +114,19 @@ let assert_source env daemon child reference record ~prompt =
   |> protocol_ok
 ;;
 
+let within env phase f =
+  try Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 30. f with
+  | Eio.Time.Timeout -> failwith ("actual associated subscription timed out: " ^ phase)
+;;
+
 (* The actual persistent wrapper starts and submits to its child. Its bootstrap
    therefore has real usage and a terminal submission; it is not a stopped seed. *)
 let with_child ~phase ~chatml_runtime_policy ~prompt ~post_creation_stream ~wrap_env f =
   let first = ref true in
-  (* The existing cold subscription workflow has a 60-second whole-flow budget.
-     Actual authored creation adds a parent Goal and a completed child bootstrap;
-     measured setup reached the ordinary notice at 29 seconds. Preserve each
-     existing 30-second phase deadline while allowing the complete composition. *)
+  (* The emergency envelope covers both serialized authored/subscription setup
+     and a consumer scenario with its own deadlines. *)
   with_recoverable_fixture
-    ~timeout:90.
+    ~timeout:180.
     ~chatml_runtime_policy
     ~sources:[ child_file, prompt; "any.json", "true"; Subscription.context_file, "{}\n" ]
     ~prompt_text:
@@ -202,7 +205,7 @@ let with_child ~phase ~chatml_runtime_policy ~prompt ~post_creation_stream ~wrap
            Eio.Promise.await changed;
            await_created ()
        in
-       let current, value = await_created () in
+       let current, value = within env !phase await_created in
        (match Jsonaf.member_exn "status" value |> Jsonaf.string_exn with
         | "completed" | "pending" -> ()
         | status -> raise_s [%sexp "authored bootstrap reply failed", (status : string)]);
@@ -222,7 +225,9 @@ let with_child ~phase ~chatml_runtime_policy ~prompt ~post_creation_stream ~wrap
        (* The wrapper's bounded wait can publish pending while the same child
           runs. The committed receipt is the completion proof for this fixture. *)
        phase := "actual child bootstrap reaches its completed receipt";
-       let born, bootstrap = await_bootstrap child ~receipt_id in
+       let born, bootstrap =
+         within env !phase (fun () -> await_bootstrap child ~receipt_id)
+       in
        assert (Option.is_none born.active_operation);
        (match born.lifecycle.observed with
         | Idle -> ()
