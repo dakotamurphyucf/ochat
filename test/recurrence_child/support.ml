@@ -617,6 +617,7 @@ let assert_ordinary_execution_blocked env sw connection daemon child_id ~start_e
 let with_daemon
       ?policy
       ?(on_runtime_construction = fun () -> ())
+      ?(timeout = 30.)
       env
       root
       configuration
@@ -661,5 +662,5 @@ let with_daemon
     protect_cleanup
       ~finally:(fun () -> Daemon.shutdown daemon |> protocol_ok)
       (fun () ->
-         Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 30. (fun () -> f sw daemon)))
+         Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) timeout (fun () -> f sw daemon)))
 ;;

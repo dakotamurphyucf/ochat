@@ -40,12 +40,13 @@ let configured (config : Agent_server.Config.t) session_id =
 ;;
 
 let await env f =
-  Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 15. (fun () ->
+  let clock = Eio.Stdenv.clock env in
+  Eio.Time.with_timeout_exn clock 15. (fun () ->
     let rec loop () =
       match f () with
       | Some result -> result
       | None ->
-        Eio.Fiber.yield ();
+        Eio.Time.sleep clock 0.01;
         loop ()
     in
     loop ())
@@ -679,8 +680,13 @@ let%expect_test "captured occurrence spends its original Goal's final Attempt on
          let load daemon id =
            Agent_server.Session_registry.load (Daemon.registry daemon) id |> protocol_ok
          in
+         (* The captured dispatch crosses independent Start, Goal, import and due waits.
+            Keep their individual deadlines and bound the aggregate separately. *)
+         let with_captured_dispatch =
+           with_daemon ~policy ~timeout:60. env root config ~provider_calls:providers
+         in
          let recover =
-           with_daemon ~policy env root config ~provider_calls:providers (fun sw daemon ->
+           with_captured_dispatch (fun sw daemon ->
              protect_cleanup ~finally:release_provider (fun () ->
                let parent = load daemon parent_id in
                with_controller_connection daemon (fun connection ->
