@@ -29,7 +29,18 @@ let%expect_test
         assert_preservation preservation prior_checkpoint;
         Eio.Path.unlink Eio.Path.(root / "prompt.chatmd");
         if declared_child then Eio.Path.unlink Eio.Path.(root / "child.chatmd");
-        let config = { config with server = { config.server with data_dir } } in
+        (* Recovery and shutdown each install a real snapshot. Keep the
+           periodic online snapshot worker out of this recovery sequence so
+           its per-session retention reservation cannot overlap public Stop. *)
+        let durability =
+          { config.server.durability with
+            snapshot_every_events = Int.max_value
+          ; snapshot_every_ms = Int.max_value
+          }
+        in
+        let config =
+          { config with server = { config.server with data_dir; durability } }
+        in
         let provider_calls = ref 0 in
         let constructor_calls = ref 0 in
         let inference_policy =
@@ -50,7 +61,7 @@ let%expect_test
               }
           }
         in
-        Eio.Switch.run (fun sw ->
+        let exercise_recovery sw =
           let daemon =
             Agent_server.Daemon.start
               ~options
@@ -176,9 +187,11 @@ let%expect_test
                     assert (D.Json.equal retained_checkpoint retained);
                     assert (not (Runtime.is_loaded entry.runtime));
                     assert (!constructor_calls = 0 && !provider_calls = 0);
-                    print_endline
-                      "protected checkpoint unknown refuses rebuild without state loss \
-                       or initializer"
+                    let directory =
+                      Option.value_exn entry.store_handle
+                      |> Store.Handle.snapshot_directory
+                    in
+                    Some (directory, stopped.counters.revision)
                   | Known, false, Ok (Non_history result) ->
                     (match P.Public.Result.Non_history.value result with
                      | Session_rebuild _ -> ()
@@ -211,7 +224,8 @@ let%expect_test
                     assert (!provider_calls = 0);
                     print_endline
                       "physical captured MD5 blocked with queued work intact; \
-                       Stop/Pinned rebuild archives and rotates SHA256"
+                       Stop/Pinned rebuild archives and rotates SHA256";
+                    None
                   | Known, true, Error failure ->
                     assert (P.Error.equal_code failure.code Invalid_state);
                     [%test_eq: string]
@@ -229,11 +243,34 @@ let%expect_test
                     assert (D.Json.equal retained_checkpoint archived);
                     print_endline
                       "declared historical child refuses missing custody after archival \
-                       generation change"
+                       generation change";
+                    None
                   | Known, false, Error failure -> raise_s [%sexp (failure : P.Error.t)]
                   | Protected_unknown, _, Ok _ ->
                     failwith "unknown container was retired without ownership"
-                  | Known, _, Ok _ -> failwith "unexpected rebuild result"))))
+                  | Known, _, Ok _ -> failwith "unexpected rebuild result"))
+        in
+        Option.iter
+          (Eio.Switch.run exercise_recovery)
+          ~f:(fun (directory, stopped_revision) ->
+            let snapshot = stored_snapshot ~env ~directory in
+            let state =
+              State_document.decode snapshot.payload ~limits:D.Limits.default
+              |> document_ok
+              |> State_document.value
+            in
+            assert (Int64.(state.counters.revision >= stopped_revision));
+            assert (P.Session.equal_desired_state state.lifecycle.desired Stopped);
+            (match state.lifecycle.observed with
+             | Stopped -> ()
+             | _ -> failwith "shutdown snapshot is not stopped");
+            assert (State.execution_migration_required state);
+            let retained = checkpoint_in_document snapshot.payload in
+            assert_preservation preservation retained;
+            assert (D.Json.equal prior_checkpoint retained);
+            print_endline
+              "protected checkpoint unknown refuses rebuild without state loss or \
+               initializer"))
       (fun _sw _env root daemon ->
          if declared_child
          then (

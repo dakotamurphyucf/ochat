@@ -44,18 +44,24 @@ let assert_preservation preservation checkpoint =
     failwith "prior checkpoint preservation differs"
 ;;
 
-let stored_checkpoint ~env (entry : Agent_server.Session_registry.entry) =
-  let handle = Option.value_exn entry.store_handle in
+let stored_snapshot ~env ~directory =
   let installed =
     Agent_store.Snapshot.load_current
       ~env
-      ~directory:(Store.Handle.snapshot_directory handle)
+      ~directory
       ~max_payload_length:
         Agent_server.Daemon.default_options.factory_limits.snapshot_payload_limit
     |> stored
     |> Option.value_exn
   in
-  checkpoint_in_document installed.snapshot.payload
+  installed.snapshot
+;;
+
+let stored_checkpoint ~env (entry : Agent_server.Session_registry.entry) =
+  let directory =
+    Option.value_exn entry.store_handle |> Store.Handle.snapshot_directory
+  in
+  checkpoint_in_document (stored_snapshot ~env ~directory).payload
 ;;
 
 let archived_checkpoint ~env (entry : Agent_server.Session_registry.entry) reference =
