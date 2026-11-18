@@ -208,6 +208,7 @@ let assert_recovered candidate current =
 
 let reopen env sw root daemon policy entry before counters request candidate =
   let old_store = Daemon.store daemon in
+  Uncertain_writer_test_support.close_uncertain_entry entry ~env ~store:old_store;
   Daemon.shutdown daemon |> protocol_ok;
   assert (Agent_store.Session_store.is_closed old_store);
   let recovered =

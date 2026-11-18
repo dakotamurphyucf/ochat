@@ -89,10 +89,24 @@ let to_json t =
     ]
 ;;
 
+let max_bytes = 4096
+let max_depth = 8
+
+let source_of_json json =
+  let open Result.Let_syntax in
+  let%bind fields = Json_codec.fields json in
+  let%bind () =
+    Extension_codec.closed
+      fields
+      [ "script_id"; "source_sha256"; "generation"; "installation_epoch" ]
+  in
+  P.Run_source.of_json json
+;;
+
 let of_json json =
   let open Result.Let_syntax in
   let module J = Json_codec in
-  let%bind () = J.validate_limits ~max_bytes:4096 ~max_depth:8 json in
+  let%bind () = J.validate_limits ~max_bytes ~max_depth json in
   let%bind f = J.fields json in
   let names =
     [ "kind"
@@ -136,7 +150,7 @@ let of_json json =
   in
   let%bind goal_id = J.required_as f "goal_id" Id.Goal.of_json in
   let%bind run_id = J.required_as f "run_id" Id.Run.of_json in
-  let%bind source = J.required_as f "source" Run_source.of_json in
+  let%bind source = J.required_as f "source" source_of_json in
   let%bind expected_goal_revision = J.required_as f "expected_goal_revision" counter in
   let%bind expected_catalog_revision =
     J.required_as f "expected_catalog_revision" counter

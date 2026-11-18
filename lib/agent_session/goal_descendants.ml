@@ -66,11 +66,8 @@ let required_depth t =
   Goal_descendants_capacity.required_depth capacity
 ;;
 
-let validate_capacity t current =
+let validate_capacity_with_growth t current growth =
   let open Result.Let_syntax in
-  let%bind growth =
-    Goal_descendants_capacity.reserved_growth (Carrier.value t) ~current
-  in
   let%bind remaining = Capacity_growth.remaining_limits growth limits in
   let%bind () = D.Document.validate current ~limits:remaining |> domain in
   let%bind measured = Capacity_growth.measure (D.Document.json current) ~limits in
@@ -87,11 +84,42 @@ let validate_capacity t current =
          ())
 ;;
 
-let to_document t =
-  let%bind.Result document = encoded t in
-  let%map.Result () = validate_capacity t document in
-  document
+let validate_capacity t current =
+  let%bind.Result growth =
+    Goal_descendants_capacity.reserved_growth (Carrier.value t) ~current
+  in
+  validate_capacity_with_growth t current growth
 ;;
+
+module Export = struct
+  type source = t
+
+  type t =
+    { document : D.Document.t
+    ; capacity : Goal_descendants_capacity.t
+    }
+
+  let prepare source =
+    let open Result.Let_syntax in
+    let%bind document = encoded source in
+    let%bind capacity =
+      Goal_descendants_capacity.capture (Carrier.value source) ~current:document
+    in
+    let%map () =
+      validate_capacity_with_growth
+        source
+        document
+        (Goal_descendants_capacity.growth capacity)
+    in
+    { document; capacity }
+  ;;
+
+  let document t = t.document
+  let reserved_growth t = Goal_descendants_capacity.growth t.capacity
+  let required_depth t = Goal_descendants_capacity.required_depth t.capacity
+end
+
+let to_document t = Result.map (Export.prepare t) ~f:Export.document
 
 let of_document document =
   let open Result.Let_syntax in

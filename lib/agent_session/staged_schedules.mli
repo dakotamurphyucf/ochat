@@ -44,6 +44,9 @@ val selected
   -> lookup:(Agent_protocol.Id.Schedule.t -> Agent_protocol.Schedule.t option)
   -> (Agent_protocol.Schedule.t list, Agent_protocol.Error.t) result
 
+(** Actual selected receipts, in execution order, for paired creator custody. *)
+val selected_receipts : t -> owner:Agent_protocol.Job.launch_owner -> int list
+
 val abort
   :  t
   -> owner:Agent_protocol.Job.launch_owner

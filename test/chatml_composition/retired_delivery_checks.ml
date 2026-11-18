@@ -34,10 +34,18 @@ let check_storage before (job : P.Job.t) =
   in
   same state restored;
   same state (Agent_session.Session_delta.apply state delta |> protocol_ok);
-  (* Legacy schemas had neither a stop counter nor child accounting. Test
-     retirement migration independently of those later fields. *)
+  (* Legacy schemas had neither a stop counter nor descendant/causal accounting.
+     Test retirement migration independently of those later fields. The current
+     state roundtrip above retains all of its actual accounting. *)
   let legacy_before =
-    { before with stop_epoch = 0L; delegated_usage = None; child_contributions = None }
+    { before with
+      stop_epoch = 0L
+    ; delegated_usage = None
+    ; child_contributions = None
+    ; goal_descendants = None
+    ; policy_canonical_usage = None
+    ; goal_policy_contributions = None
+    }
   in
   let legacy_retired =
     Agent_session.Session_delta.apply legacy_before delta |> protocol_ok
@@ -106,11 +114,11 @@ let with_actor env initial f =
         ~persistence:
           { archive_reference = persistence.archive_reference
           ; commit =
-              (fun ~command_audit ~previous next ->
+              (fun ?observation ~command_audit ~previous next ->
                 match !reject_save with
                 | true ->
                   Error (P.Error.invalid_request "injected retirement save failure")
-                | false -> persistence.commit ~command_audit ~previous next)
+                | false -> persistence.commit ?observation ~command_audit ~previous next)
           }
         ~services:
           { now = P.Timestamp.now
@@ -134,8 +142,11 @@ let with_actor env initial f =
 let check_actor_case env initial current_capabilities =
   let job = List.hd_exn initial.State.jobs in
   let owner =
-    match job.launch with
-    | Some { owner = Invocation id; _ } -> id
+    match
+      Option.bind job.launch ~f:(fun launch ->
+        P.Job.Birth_parent.callback_owner launch.owner)
+    with
+    | Some (Invocation id) -> id
     | _ -> failwith "missing standalone owner"
   in
   let invocation =

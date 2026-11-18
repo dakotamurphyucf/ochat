@@ -98,7 +98,10 @@ let run (lifetime : Agent_server.Session_factory.generated_lifetime) =
         in
         let next_call = ref None in
         let provider_calls = ref 0 in
-        let with_daemon f =
+        let with_daemon
+              ?(shutdown = fun daemon -> Daemon.shutdown daemon |> protocol_ok)
+              f
+          =
           Eio.Switch.run (fun sw ->
             let daemon =
               Daemon.start
@@ -161,7 +164,7 @@ let run (lifetime : Agent_server.Session_factory.generated_lifetime) =
               |> protocol_ok
             in
             Exn.protect
-              ~finally:(fun () -> Daemon.shutdown daemon |> protocol_ok)
+              ~finally:(fun () -> shutdown daemon)
               ~f:(fun () ->
                 Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 15. (fun () ->
                   let client = connection daemon (principal ()) in
@@ -259,9 +262,9 @@ let run (lifetime : Agent_server.Session_factory.generated_lifetime) =
             let retained_connections = connections () in
             let leaf = create_child env root daemon child in
             [%test_eq: int] retained_connections (connections ());
-            (match lifetime with
-             | Owned -> [%test_eq: int] connected retained_connections
-             | Independent -> [%test_eq: int] (connected + 1) retained_connections);
+            (* Both lifetimes retain the canonical parent's connection; an
+               Independent child no longer reconstructs its own MCP pool. *)
+            [%test_eq: int] connected retained_connections;
             call sw client child "echo" "{}" |> success child;
             call sw client leaf "echo" "{}" |> success leaf;
             List.iter [ child; leaf ] ~f:(fun entry ->
@@ -322,12 +325,52 @@ let run (lifetime : Agent_server.Session_factory.generated_lifetime) =
           H.detach handle |> protocol_ok;
           assert (P.Session.equal_desired_state (state child).lifecycle.desired Stopped);
           assert (P.Session.equal_desired_state (state leaf).lifecycle.desired Stopped));
-        with_daemon (fun sw daemon client ->
+        let denied_start = ref None in
+        let expected_start_shutdown daemon =
+          match !denied_start with
+          | None -> Daemon.shutdown daemon |> protocol_ok
+          | Some (expected : P.Error.t) ->
+            let module Report = Agent_server.Session_disposal_report in
+            let report = Daemon.shutdown_reported daemon in
+            assert (Report.disposed report);
+            (match Report.failures report with
+             | [ Protocol actual ] ->
+               assert (P.Error.equal_code expected.code actual.code);
+               [%test_eq: string] expected.message actual.message;
+               assert (Bool.equal expected.retryable actual.retryable);
+               assert (Jsonaf.exactly_equal expected.data actual.data)
+             | failures ->
+               let failures =
+                 List.map failures ~f:(function
+                   | Protocol error -> [%sexp "Protocol", (error : P.Error.t)]
+                   | Raised (exn, _) -> [%sexp "Raised", (Exn.to_string exn : string)])
+               in
+               raise_s
+                 [%sexp
+                   "denied start shutdown changed its actual diagnostic"
+                 , (failures : Sexp.t list)])
+        in
+        let shutdown =
+          match lifetime with
+          | Owned -> None
+          | Independent -> Some expected_start_shutdown
+        in
+        with_daemon ?shutdown (fun sw daemon client ->
           let before = !provider_calls in
           let handle = attach sw client child_id in
           (match H.start handle ~queue_if_limited:false with
            | Error error ->
-             assert (String.is_substring error.message ~substring:"capabilit")
+             assert (String.is_substring error.message ~substring:"capabilit");
+             (match lifetime with
+              | Owned -> ()
+              | Independent ->
+                assert (P.Error.equal_code error.code Prompt_unavailable);
+                assert (not error.retryable);
+                assert (
+                  String.is_substring
+                    error.message
+                    ~substring:"delegation.capability_changed");
+                denied_start := Some error)
            | Ok _ -> failwith "changed remote schema restored old delegation");
           [%test_eq: int] before !provider_calls;
           [%test_eq: string list]
@@ -344,6 +387,114 @@ let run (lifetime : Agent_server.Session_factory.generated_lifetime) =
         [%test_eq: string list]
           [ "echo"; "echo"; "echo"; "change_catalog"; "echo" ]
           (lines "calls");
+        with_daemon (fun sw daemon client ->
+          let parent = R.load (Daemon.registry daemon) parent_id |> protocol_ok in
+          let child = R.load (Daemon.registry daemon) child_id |> protocol_ok in
+          let leaf = R.load (Daemon.registry daemon) leaf_id |> protocol_ok in
+          let handle = attach sw client leaf_id in
+          H.start handle ~queue_if_limited:false |> protocol_ok |> ignore;
+          H.detach handle |> protocol_ok;
+          let controller =
+            match lifetime with
+            | Owned -> parent
+            | Independent -> child
+          in
+          Eio.Switch.run (fun gate_switch ->
+            let listener =
+              Eio.Net.listen
+                ~sw:gate_switch
+                ~backlog:1
+                (Eio.Stdenv.net env)
+                (`Unix (Filename.concat root "mcp/catalog-gate.sock"))
+            in
+            call sw client controller "change_catalog" {|{"mode":"gate"}|}
+            |> success controller;
+            let calls_before = lines "calls" in
+            let before = state leaf in
+            let result =
+              Eio.Fiber.fork_promise ~sw:gate_switch (fun () ->
+                call sw client leaf "echo" "{}")
+            in
+            (* A real list request must enter before we change authority. A
+               rejected invocation cannot strand an accept or a peer waiter. *)
+            let flow =
+              Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
+                Eio.Fiber.first
+                  (fun () ->
+                     let flow, _ = Eio.Net.accept ~sw:gate_switch listener in
+                     let input = Eio.Buf_read.of_flow flow ~max_size:32 in
+                     match Eio.Buf_read.line input with
+                     | "entered" -> flow
+                     | line ->
+                       Eio.Flow.close flow;
+                       raise_s [%sexp "invalid catalog gate entry", (line : string)]
+                     | exception exn ->
+                       let trace = Stdlib.Printexc.get_raw_backtrace () in
+                       Eio.Flow.close flow;
+                       Exn.raise_with_original_backtrace exn trace)
+                  (fun () ->
+                     Eio.Promise.await_exn result |> ignore;
+                     failwith "MCP invocation finished before its catalog gate"))
+            in
+            Exn.protect
+            (* EOF releases the actual peer even if an assertion below fails,
+                 before the enclosing daemon begins shutdown. *)
+              ~finally:(fun () -> Eio.Flow.close flow)
+              ~f:(fun () ->
+                let waiting = state leaf in
+                let invocation : P.Invocation.t =
+                  match
+                    List.filter waiting.invocations ~f:(fun invocation ->
+                      not
+                        (List.exists before.invocations ~f:(fun previous ->
+                           P.Id.Invocation.equal previous.context.id invocation.context.id)))
+                  with
+                  | [ invocation ] -> invocation
+                  | invocations ->
+                    raise_s
+                      [%sexp
+                        "catalog gate lacks one admitted invocation"
+                      , (invocations : P.Invocation.t list)]
+                in
+                assert (P.Invocation.equal_status Dispatching invocation.status);
+                assert (P.Id.Session.equal leaf_id invocation.context.session_id);
+                assert (
+                  List.exists waiting.permissions ~f:(fun permission ->
+                    P.Permission.equal_state permission.state Approved
+                    && P.Permission.equal_owner
+                         permission.owner
+                         (Invocation invocation.context.id)));
+                let permissions = List.map waiting.permissions ~f:P.Permission.to_json in
+                let module D = Agent_store.Delegation_store in
+                let store = Agent_store.Session_store.delegations (Daemon.store daemon) in
+                let reference = Option.value_exn waiting.spec.delegation in
+                assert (P.Id.Session.equal leaf_id reference.child_session_id);
+                let record =
+                  D.resolve store reference
+                  |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
+                  |> protocol_ok
+                in
+                assert (D.Reference.equal reference (D.reference record));
+                D.revoke store record Authority_changed
+                |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
+                |> protocol_ok
+                |> ignore;
+                Eio.Flow.copy_string "release\n" flow;
+                let invocations = Eio.Promise.await_exn result in
+                [%test_eq: string list] calls_before (lines "calls");
+                assert (
+                  List.equal
+                    Jsonaf.exactly_equal
+                    permissions
+                    (List.map (state leaf).permissions ~f:P.Permission.to_json));
+                match invocations with
+                | [ { status = Published (Fail error); _ } ] ->
+                  [%test_eq: string] "invocation.handler_failed" error.code
+                | invocations ->
+                  raise_s
+                    [%sexp
+                      "revoked MCP consumer reached its effect"
+                    , (invocations : P.Invocation.t list)])));
         print_endline
           "MCP connection shared; child approvals isolated; descendants restore; live \
            and restored schema substitution blocked; original catalog recovers"))

@@ -44,6 +44,13 @@ type t =
   | Inference_ledger_changed of (Inference_ledger.t[@sexp.opaque])
   | Delegated_inference_ledger_changed of
       (Inference_ledger.t[@sexp.opaque]) * (Delegated_usage.t[@sexp.opaque])
+  | Policy_cause_changed of (Policy_canonical_usage.Update.t[@sexp.opaque])
+  | Goal_policy_contributions_changed of
+      (Goal_policy_contributions.Update.t[@sexp.opaque])
+  | Policy_inference_ledger_changed of
+      (Inference_ledger.t[@sexp.opaque])
+      * (Delegated_usage.t option[@sexp.opaque])
+      * (Policy_canonical_usage.Update.t[@sexp.opaque])
   | Child_contributions_changed of (Child_contributions.t[@sexp.opaque])
   | Goal_descendants_changed of (Goal_descendants.Update.t[@sexp.opaque])
   | Job_changed of Agent_protocol.Job.t
@@ -56,6 +63,10 @@ type t =
   (** Recovery-only terminalization/publication of an existing invocation,
         including older generations. Cannot admit, dispatch or create outcomes. *)
   | Moderator_execution_changed of Agent_protocol.Moderator_execution.t
+  | Moderator_lifecycle_claimed of
+      { receipt : Agent_protocol.Moderator_execution.t
+      ; capture : Moderator_lifecycle.t
+      }
   | Moderator_execution_reconciled of Agent_protocol.Moderator_execution.t
   (** Recovery-only interruption of an existing execution or discard of retained
       runtime intent. Cannot create receipts or successful outcomes. *)
@@ -95,7 +106,8 @@ type t =
 (** Shared representation selection for actual inference/host-turn writers.
     Applying an ordinary leaf to an already partitioned child is rejected. *)
 val inference_ledger_update
-  :  Inference_ledger.t
+  :  ?policy_update:Policy_canonical_usage.Update.t
+  -> Inference_ledger.t
   -> delegated_usage:Delegated_usage.t option
   -> t
 
@@ -151,4 +163,47 @@ val validate_goal_descendants
 val validate_descendant_publication
   :  t
   -> revision:int64
+  -> (unit, Agent_protocol.Error.t) result
+
+(** Exhaustive lookahead over the actual whole delta, before any ordered leaf.
+    Positive previous/Created carriers and all policy leaves select capture;
+    absent ordinary work cannot acquire a new causal birth-window limit. *)
+val requires_policy_tracking : t -> previous:Policy_canonical_usage.t option -> bool
+
+(** Shared finite per-leaf policy projection. Call only after applying the exact
+    native leaf to obtain [next]; Batch is deliberately rejected. No permission
+    or birth is inferred from an endpoint. Source rotation carries only the actual
+    new current source and cannot change work/native rows in the cursor. *)
+val policy_usage_step
+  :  t
+  -> previous:Session_state.t
+  -> next:Session_state.t
+  -> (Policy_canonical_usage.Ordered.step option, Agent_protocol.Error.t) result
+
+(** Actual ordered canonical/subset checks supplement existing native validators.
+    Replays the finite native leaves; no IO, execution or authority construction. *)
+val validate_policy_usage
+  :  ?limits:Document_schema.Limits.t
+  -> t
+  -> previous:Session_state.t
+  -> next:Session_state.t
+  -> revision:int64
+  -> (unit, Agent_protocol.Error.t) result
+
+(** Independent exhaustive whole-delta selection for optional Goal-book policy.
+    No positive carrier can be introduced through the absence-only fast path. *)
+val requires_goal_policy_tracking
+  :  t
+  -> previous:Goal_policy_contributions.t option
+  -> canonical:Policy_canonical_usage.t option
+  -> bool
+
+(** Actual ordered prefix capacity/creation checks for optional Goal books.
+    Existing native, descendant and canonical-subset validators remain required.
+    Whole-delta absence bypasses only this optional feature's new work. *)
+val validate_goal_policy
+  :  ?limits:Document_schema.Limits.t
+  -> t
+  -> previous:Session_state.t
+  -> next:Session_state.t
   -> (unit, Agent_protocol.Error.t) result

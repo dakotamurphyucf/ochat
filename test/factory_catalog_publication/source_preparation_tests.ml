@@ -121,193 +121,204 @@ let on_event ctx state event = Task.pure(state)
            (create_request ())
          |> protocol_ok
        in
-       Exn.protect ~finally:entry.close ~f:(fun () ->
-         assert (not (Owner.is_loaded entry.runtime));
-         let retained =
-           match
-             (List.hd_exn (A.Prompt_catalog.entries (Daemon.prompts daemon))).availability
-           with
-           | Ready revision -> revision
-           | Disabled | Unavailable _ -> failwith "captured source unavailable"
-         in
-         assert (Option.is_some (A.Prompt_revision.programs retained));
-         List.iter [ "parent.chatmd"; "chatml.project.json" ] ~f:(fun name ->
-           Eio.Path.unlink Eio.Path.(Eio.Stdenv.fs env / root / name));
-         let before = state entry in
-         let saved = frames env entry in
-         let initial_constructions = !constructions in
-         with_preparation entry "verified-cached-source" (fun preparation ->
-           Factory.with_prepared_run_source factory entry ~preparation (fun prepared ->
-             let selected = source prepared in
-             (match Source.selection selected with
-              | Authored revision -> assert (phys_equal revision retained)
-              | Captured _ | Authored_child _ | Generated _ ->
-                failwith "ordinary source was reclassified");
-             assert (Option.is_some (Source.programs selected));
-             Ok ())
-           |> protocol_ok);
-         assert_same before entry;
-         [%test_eq: string list] saved (frames env entry);
-         [%test_eq: int] initial_constructions !constructions;
-         [%test_eq: int] 0 !provider_calls;
-         (* An actual second Factory cannot bind the first Factory's real entry,
+       Exn.protect
+         ~finally:(fun () -> Agent_server.Session_registry.close_entry entry)
+         ~f:(fun () ->
+           assert (not (Owner.is_loaded entry.runtime));
+           let retained =
+             match
+               (List.hd_exn (A.Prompt_catalog.entries (Daemon.prompts daemon)))
+                 .availability
+             with
+             | Ready revision -> revision
+             | Disabled | Unavailable _ -> failwith "captured source unavailable"
+           in
+           assert (Option.is_some (A.Prompt_revision.programs retained));
+           List.iter [ "parent.chatmd"; "chatml.project.json" ] ~f:(fun name ->
+             Eio.Path.unlink Eio.Path.(Eio.Stdenv.fs env / root / name));
+           let before = state entry in
+           let saved = frames env entry in
+           let initial_constructions = !constructions in
+           with_preparation entry "verified-cached-source" (fun preparation ->
+             Factory.with_prepared_run_source factory entry ~preparation (fun prepared ->
+               let selected = source prepared in
+               (match Source.selection selected with
+                | Authored revision -> assert (phys_equal revision retained)
+                | Captured _ | Authored_child _ | Generated _ | Generated_artifact _ ->
+                  failwith "ordinary source was reclassified");
+               assert (Option.is_some (Source.programs selected));
+               Ok ())
+             |> protocol_ok);
+           assert_same before entry;
+           [%test_eq: string list] saved (frames env entry);
+           [%test_eq: int] initial_constructions !constructions;
+           [%test_eq: int] 0 !provider_calls;
+           (* An actual second Factory cannot bind the first Factory's real entry,
            even though that entry is intentionally not registered anywhere. *)
-         let foreign_root = Filename.concat root "foreign" in
-         Eio.Path.mkdir ~perm:0o700 Eio.Path.(Eio.Stdenv.fs env / foreign_root);
-         let foreign_prompt = Filename.concat foreign_root "parent.chatmd" in
-         Eio.Path.save
-           ~create:(`Exclusive 0o600)
-           Eio.Path.(Eio.Stdenv.fs env / foreign_prompt)
-           "<developer>Foreign retained publication.</developer>";
-         let foreign =
-           Daemon.start
-             ~sw
-             ~env
-             ~config:(config foreign_root foreign_root foreign_prompt)
-             ~tool_dir:foreign_root
-             ~home:foreign_root
-             ~process_start_identity:None
-             ~options:{ Daemon.default_options with inference_policy = policy }
-             ()
-           |> protocol_ok
-         in
-         Exn.protect
-           ~finally:(fun () -> Daemon.shutdown foreign |> protocol_ok)
-           ~f:(fun () ->
-             let calls = ref 0 in
-             with_preparation entry "foreign-source-factory" (fun preparation ->
-               match
-                 Factory.with_prepared_run_source
-                   (Daemon.factory foreign)
+           let foreign_root = Filename.concat root "foreign" in
+           Eio.Path.mkdir ~perm:0o700 Eio.Path.(Eio.Stdenv.fs env / foreign_root);
+           let foreign_prompt = Filename.concat foreign_root "parent.chatmd" in
+           Eio.Path.save
+             ~create:(`Exclusive 0o600)
+             Eio.Path.(Eio.Stdenv.fs env / foreign_prompt)
+             "<developer>Foreign retained publication.</developer>";
+           let foreign =
+             Daemon.start
+               ~sw
+               ~env
+               ~config:(config foreign_root foreign_root foreign_prompt)
+               ~tool_dir:foreign_root
+               ~home:foreign_root
+               ~process_start_identity:None
+               ~options:{ Daemon.default_options with inference_policy = policy }
+               ()
+             |> protocol_ok
+           in
+           Exn.protect
+             ~finally:(fun () -> Daemon.shutdown foreign |> protocol_ok)
+             ~f:(fun () ->
+               let calls = ref 0 in
+               with_preparation entry "foreign-source-factory" (fun preparation ->
+                 match
+                   Factory.with_prepared_run_source
+                     (Daemon.factory foreign)
+                     entry
+                     ~preparation
+                     (fun _ ->
+                        Int.incr calls;
+                        Ok ())
+                 with
+                 | Error { code = Permission_denied; message; _ } ->
+                   [%test_eq: string] "source staging has a foreign session store" message
+                 | Error _ | Ok _ ->
+                   failwith "foreign Factory staged another owner's source");
+               [%test_eq: int] 0 !calls;
+               let original = Operator_authorization.trusted_local (principal ()) in
+               let clean =
+                 Factory.with_effect_deferred_run_source
+                   factory
                    entry
-                   ~preparation
-                   (fun _ ->
-                      Int.incr calls;
+                   ~actor:original
+                   ~authorize:(fun _ -> Ok ())
+                   ~request:(headless_request entry "before-foreign-deferred-source")
+                   (fun _ prepared ->
+                      Owner.Prepared.check_basis prepared |> protocol_ok;
                       Ok ())
-               with
-               | Error { code = Permission_denied; message; _ } ->
-                 [%test_eq: string] "source staging has a foreign session store" message
-               | Error _ | Ok _ ->
-                 failwith "foreign Factory staged another owner's source");
-             [%test_eq: int] 0 !calls;
-             let original = Operator_authorization.trusted_local (principal ()) in
-             let clean =
-               Factory.with_effect_deferred_run_source
-                 factory
-                 entry
-                 ~actor:original
-                 ~authorize:(fun _ -> Ok ())
-                 ~request:(headless_request entry "before-foreign-deferred-source")
-                 (fun _ prepared ->
-                    Owner.Prepared.check_basis prepared |> protocol_ok;
-                    Ok ())
-               |> protocol_ok
-             in
-             let module Attempt = Factory.Deferred_run_attempt in
-             let observation =
-               match clean with
-               | Attempt.Outcome.Attempted attempt ->
-                 Attempt.result attempt |> protocol_ok;
-                 Attempt.no_effects attempt |> Option.value_exn
-               | Retained _ -> failwith "clean foreign-control source retained a Run"
-             in
-             A.Session_actor.No_effects_observation.check_current observation
-             |> protocol_ok;
-             (match
-                Factory.with_effect_deferred_run_source
-                  (Daemon.factory foreign)
-                  entry
-                  ~actor:original
-                  ~authorize:(fun _ -> Ok ())
-                  ~request:(headless_request entry "foreign-deferred-source-factory")
-                  (fun _ _ ->
-                     Int.incr calls;
-                     Ok ())
-              with
-              | Error error ->
-                let expected =
-                  P.Error.create
-                    Permission_denied
-                    ~message:"source lifetime belongs to another Factory"
-                    ~retryable:false
-                    ()
-                in
-                assert (
-                  Jsonaf.exactly_equal (P.Error.to_json expected) (P.Error.to_json error))
-              | Ok _ -> failwith "foreign Factory issued deferred source ownership");
-             [%test_eq: int] 0 !calls;
-             A.Session_actor.No_effects_observation.check_current observation
-             |> protocol_ok;
-             A.Session_actor.No_effects_observation.check_basis observation |> protocol_ok;
-             assert_same before entry;
-             [%test_eq: string list] saved (frames env entry);
-             [%test_eq: int] initial_constructions !constructions;
-             [%test_eq: int] 0 !provider_calls;
-             assert (not (Owner.is_loaded entry.runtime)));
-         (* Corrupt the consumed captured tree, not the deleted original source.
-           The cached revision must not bypass the actual Factory verifier. *)
-         let captured_file =
-           Eio.Path.(
-             A.Prompt_revision.materialized_tree retained
-             / A.Prompt_revision.root_relative_path retained)
-         in
-         let payload =
-           A.Prompt_revision.artifact retained
-           |> fun (artifact : Agent_store.Prompt_artifact_store.Artifact.t) ->
-           Option.value_exn artifact.program_bundle
-           |> Agent_store.Prompt_program_bundle.payloads
-           |> List.hd_exn
-         in
-         let payload_file =
-           Eio.Path.(
-             Eio.Stdenv.fs env
-             / Filename.dirname
-                 (Eio.Path.native_exn (A.Prompt_revision.materialized_tree retained))
-             / "programs"
-             / Agent_store.Prompt_program_bundle.Payload.sha256 payload)
-         in
-         [%test_eq: string]
-           (Agent_store.Prompt_program_bundle.Payload.contents payload)
-           (Eio.Path.load payload_file);
-         List.iter
-           [ "changed-cached-tree", captured_file
-           ; "changed-private-program", payload_file
-           ]
-           ~f:(fun (key, file) ->
-             let bytes = Eio.Path.load file in
-             Eio.Path.unlink file;
-             Eio.Path.save ~create:(`Exclusive 0o600) file (bytes ^ "\nchanged");
-             Exn.protect
-               ~finally:(fun () ->
-                 Eio.Path.unlink file;
-                 Eio.Path.save ~create:(`Exclusive 0o400) file bytes)
-               ~f:(fun () ->
-                 let calls = ref 0 in
-                 with_preparation entry key (fun preparation ->
-                   match
-                     Factory.with_prepared_run_source factory entry ~preparation (fun _ ->
+                 |> protocol_ok
+               in
+               let module Attempt = Factory.Deferred_run_attempt in
+               let observation =
+                 match clean with
+                 | Attempt.Outcome.Attempted attempt ->
+                   Attempt.result attempt |> protocol_ok;
+                   Attempt.no_effects attempt |> Option.value_exn
+                 | Retained _ -> failwith "clean foreign-control source retained a Run"
+               in
+               A.Session_actor.No_effects_observation.check_current observation
+               |> protocol_ok;
+               (match
+                  Factory.with_effect_deferred_run_source
+                    (Daemon.factory foreign)
+                    entry
+                    ~actor:original
+                    ~authorize:(fun _ -> Ok ())
+                    ~request:(headless_request entry "foreign-deferred-source-factory")
+                    (fun _ _ ->
                        Int.incr calls;
                        Ok ())
-                   with
-                   | Error { code = Prompt_unavailable; _ } -> ()
-                   | Error _ | Ok _ -> failwith "Factory accepted changed retained bytes");
-                 [%test_eq: int] 0 !calls));
-         with_preparation entry "restored-private-program" (fun preparation ->
-           Factory.with_prepared_run_source factory entry ~preparation (fun prepared ->
-             (match Source.selection (source prepared) with
-              | Authored revision -> assert (phys_equal revision retained)
-              | Captured _ | Authored_child _ | Generated _ ->
-                failwith "restored source changed ownership");
-             Ok ())
-           |> protocol_ok);
-         assert_same before entry;
-         [%test_eq: string list] saved (frames env entry);
-         [%test_eq: int] initial_constructions !constructions;
-         [%test_eq: int] 0 !provider_calls;
-         assert (not (Owner.is_loaded entry.runtime));
-         print_endline
-           "exact cached programs; originals absent; foreign/tampered denied; no \
-            construction"));
+                with
+                | Error error ->
+                  let expected =
+                    P.Error.create
+                      Permission_denied
+                      ~message:"source lifetime belongs to another Factory"
+                      ~retryable:false
+                      ()
+                  in
+                  assert (
+                    Jsonaf.exactly_equal
+                      (P.Error.to_json expected)
+                      (P.Error.to_json error))
+                | Ok _ -> failwith "foreign Factory issued deferred source ownership");
+               [%test_eq: int] 0 !calls;
+               A.Session_actor.No_effects_observation.check_current observation
+               |> protocol_ok;
+               A.Session_actor.No_effects_observation.check_basis observation
+               |> protocol_ok;
+               assert_same before entry;
+               [%test_eq: string list] saved (frames env entry);
+               [%test_eq: int] initial_constructions !constructions;
+               [%test_eq: int] 0 !provider_calls;
+               assert (not (Owner.is_loaded entry.runtime)));
+           (* Corrupt the consumed captured tree, not the deleted original source.
+           The cached revision must not bypass the actual Factory verifier. *)
+           let captured_file =
+             Eio.Path.(
+               A.Prompt_revision.materialized_tree retained
+               / A.Prompt_revision.root_relative_path retained)
+           in
+           let payload =
+             A.Prompt_revision.artifact retained
+             |> fun (artifact : Agent_store.Prompt_artifact_store.Artifact.t) ->
+             Option.value_exn artifact.program_bundle
+             |> Agent_store.Prompt_program_bundle.payloads
+             |> List.hd_exn
+           in
+           let payload_file =
+             Eio.Path.(
+               Eio.Stdenv.fs env
+               / Filename.dirname
+                   (Eio.Path.native_exn (A.Prompt_revision.materialized_tree retained))
+               / "programs"
+               / Agent_store.Prompt_program_bundle.Payload.sha256 payload)
+           in
+           [%test_eq: string]
+             (Agent_store.Prompt_program_bundle.Payload.contents payload)
+             (Eio.Path.load payload_file);
+           List.iter
+             [ "changed-cached-tree", captured_file
+             ; "changed-private-program", payload_file
+             ]
+             ~f:(fun (key, file) ->
+               let bytes = Eio.Path.load file in
+               Eio.Path.unlink file;
+               Eio.Path.save ~create:(`Exclusive 0o600) file (bytes ^ "\nchanged");
+               Exn.protect
+                 ~finally:(fun () ->
+                   Eio.Path.unlink file;
+                   Eio.Path.save ~create:(`Exclusive 0o400) file bytes)
+                 ~f:(fun () ->
+                   let calls = ref 0 in
+                   with_preparation entry key (fun preparation ->
+                     match
+                       Factory.with_prepared_run_source
+                         factory
+                         entry
+                         ~preparation
+                         (fun _ ->
+                            Int.incr calls;
+                            Ok ())
+                     with
+                     | Error { code = Prompt_unavailable; _ } -> ()
+                     | Error _ | Ok _ ->
+                       failwith "Factory accepted changed retained bytes");
+                   [%test_eq: int] 0 !calls));
+           with_preparation entry "restored-private-program" (fun preparation ->
+             Factory.with_prepared_run_source factory entry ~preparation (fun prepared ->
+               (match Source.selection (source prepared) with
+                | Authored revision -> assert (phys_equal revision retained)
+                | Captured _ | Authored_child _ | Generated _ | Generated_artifact _ ->
+                  failwith "restored source changed ownership");
+               Ok ())
+             |> protocol_ok);
+           assert_same before entry;
+           [%test_eq: string list] saved (frames env entry);
+           [%test_eq: int] initial_constructions !constructions;
+           [%test_eq: int] 0 !provider_calls;
+           assert (not (Owner.is_loaded entry.runtime));
+           print_endline
+             "exact cached programs; originals absent; foreign/tampered denied; no \
+              construction"));
   [%expect
     {| exact cached programs; originals absent; foreign/tampered denied; no construction |}]
 ;;
@@ -359,7 +370,7 @@ let on_event ctx state event = Task.pure(state)
         with
         | Ok () -> ()
         | Error error ->
-          parent.close ();
+          Agent_server.Session_registry.close_entry parent;
           raise_s [%sexp (error : P.Error.t)]);
        Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
          let rec await_idle () =
@@ -440,7 +451,7 @@ let on_event ctx state event = Task.pure(state)
                 P.Id.Prompt_revision.equal
                   expected_revision
                   (A.Generated_definition.artifact actual).revision_id)
-            | Authored _ | Captured _ | Authored_child _ ->
+            | Authored _ | Captured _ | Authored_child _ | Generated_artifact _ ->
               failwith "generated source was coerced to ordinary revision");
            (match Source.moderator selected with
             | Extension _ -> ()
@@ -492,8 +503,8 @@ let on_event ctx state event = Task.pure(state)
                          P.Id.Prompt_revision.equal
                            expected_revision
                            (A.Generated_definition.artifact actual).revision_id)
-                     | Authored _ | Captured _ | Authored_child _ ->
-                       failwith "deferred generated source changed family");
+                     | Authored _ | Captured _ | Authored_child _ | Generated_artifact _
+                       -> failwith "deferred generated source changed family");
                     let held =
                       Eio.Fiber.fork_promise ~sw (fun () ->
                         Owner.For_testing.with_loaded_runtime parent.runtime (fun () ->

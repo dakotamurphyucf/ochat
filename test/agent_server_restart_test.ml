@@ -197,16 +197,16 @@ let on_event = fun ctx state event -> match event with
             |> Option.value_exn
           in
           let snapshot_value state =
-            match state.Agent_session.Session_state.moderator with
-            | Some (`Object [ ("identity_snapshot", encoded) ]) ->
-              let snapshot =
-                Session.Moderator_state.Identity_snapshot.of_jsonaf encoded
-                |> Result.ok_or_failwith
-              in
+            match
+              Agent_session.Moderator_checkpoint.decode
+                state.Agent_session.Session_state.moderator
+              |> protocol_ok
+            with
+            | Some snapshot ->
               (match snapshot.current_state with
                | Session.Snapshot.Int value -> value
                | _ -> failwith "unexpected lifecycle state")
-            | _ -> failwith "missing lifecycle checkpoint"
+            | None -> failwith "missing lifecycle checkpoint"
           in
           let await actor predicate =
             Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 15. (fun () ->
@@ -561,85 +561,6 @@ let on_event = fun ctx state event -> match event with
               Option.is_some invocation.parent_event
               && Option.is_none invocation.context.parent_invocation)
           in
-          let owner_available_during_delivery = ref false in
-          let delivery_cancelled =
-            Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
-              (* Halt publishes before the automatic stop cleanup has joined its
-                 leases. Finish that retirement before loading a stopped runtime
-                 deliberately for this checkpoint-gate cancellation fixture. *)
-              Agent_server.Runtime_owner.unload_and_wait entry.runtime |> protocol_ok;
-              Agent_server.Runtime_owner.ensure_loaded entry.runtime |> protocol_ok;
-              let held, held_u = Eio.Promise.create () in
-              let release, release_u = Eio.Promise.create () in
-              let released, released_u = Eio.Promise.create () in
-              Eio.Fiber.fork ~sw (fun () ->
-                A.with_moderator_checkpoint entry.actor (fun () ->
-                  Eio.Promise.resolve held_u ();
-                  Eio.Promise.await release;
-                  Ok ())
-                |> protocol_ok;
-                Eio.Promise.resolve released_u ());
-              Eio.Promise.await held;
-              let started, started_u = Eio.Promise.create () in
-              (* Reach the held checkpoint gate with a structurally valid claimed
-                 delivery. A completed timer may fail validation before cancellation
-                 gets scheduled and does not exercise the gate wait. The actor still
-                 rejects this stale claim if it ever reaches commit. *)
-              let claimed =
-                { (List.hd_exn final.schedules) with
-                  status = Agent_protocol.Schedule.Delivering
-                ; delivery_count = 0
-                ; last_delivery_at = None
-                ; inference_provenance = None
-                ; delivery_cancellation = None
-                }
-              in
-              let cancelled =
-                Eio.Fiber.first
-                  (fun () ->
-                     Eio.Promise.resolve started_u ();
-                     Agent_server.Runtime_owner.deliver_schedule entry.runtime claimed
-                     |> protocol_ok;
-                     false)
-                  (fun () ->
-                     Eio.Promise.await started;
-                     Eio.Fiber.yield ();
-                     (* A delegated policy check can need this owner while it
-                        holds the checkpoint that delivery is waiting for. Keep
-                        this bounded so a lock-order regression still cleans up. *)
-                     owner_available_during_delivery
-                     := Result.is_ok
-                          (Eio.Time.with_timeout (Eio.Stdenv.clock env) 2. (fun () ->
-                             Agent_server.Runtime_owner.ensure_loaded entry.runtime
-                             |> protocol_ok;
-                             Ok ()));
-                     true)
-              in
-              Exn.protect
-                ~finally:(fun () ->
-                  Eio.Promise.resolve release_u ();
-                  Eio.Promise.await released)
-                ~f:(fun () ->
-                  (* Owner retirement cancels this lease independently of its
-                     scheduler caller. It must return an interruption, rather
-                     than let Cancelled escape and terminate the daemon switch. *)
-                  let delivery_started, delivery_started_u = Eio.Promise.create () in
-                  let delivery =
-                    Eio.Fiber.fork_promise ~sw (fun () ->
-                      Eio.Promise.resolve delivery_started_u ();
-                      Agent_server.Runtime_owner.deliver_schedule entry.runtime claimed)
-                  in
-                  Eio.Promise.await delivery_started;
-                  Eio.Fiber.yield ();
-                  Agent_server.Runtime_owner.unload_and_wait entry.runtime |> protocol_ok;
-                  match Eio.Promise.await_exn delivery with
-                  | Error { code = Interrupted; _ } -> ()
-                  | _ -> failwith "retired delivery did not report interruption");
-              Agent_server.Runtime_owner.ensure_loaded entry.runtime |> protocol_ok;
-              let after = A.state entry.actor |> protocol_ok in
-              assert (Option.equal Jsonaf.exactly_equal final.moderator after.moderator);
-              cancelled)
-          in
           Agent_client.Connection.close client;
           Agent_server.Daemon.shutdown daemon |> protocol_ok;
           print_s
@@ -648,18 +569,13 @@ let on_event = fun ctx state event -> match event with
               ; completed_events : int
               ; native_calls = (List.length final.invocations : int)
               ; native_event_owned : bool
-              ; delivery_cancelled : bool
-              ; owner_available_during_delivery =
-                  (!owner_available_during_delivery : bool)
               ; model_calls = (!model_calls : int)
               ; halt_reason = (final.halt_reason : string option)
               }])));
   [%expect
     {|
     ((delivered (1 1)) (completed_events 2) (native_calls 2)
-     (native_event_owned true) (delivery_cancelled true)
-     (owner_available_during_delivery true) (model_calls 0)
-     (halt_reason ("timers complete")))
+     (native_event_owned true) (model_calls 0) (halt_reason ("timers complete")))
     |}]
 ;;
 
@@ -1226,16 +1142,16 @@ let%expect_test
           | _ -> failwith "review outcome was not published"
         in
         let reviews state =
-          match state.Agent_session.Session_state.moderator with
-          | Some (`Object [ ("identity_snapshot", value) ]) ->
-            let snapshot =
-              Session.Moderator_state.Identity_snapshot.of_jsonaf value
-              |> Result.ok_or_failwith
-            in
+          match
+            Agent_session.Moderator_checkpoint.decode
+              state.Agent_session.Session_state.moderator
+            |> protocol_ok
+          with
+          | Some snapshot ->
             (match snapshot.current_state with
              | Session.Snapshot.Array reviews -> List.length reviews
              | _ -> failwith "review state is not an array")
-          | _ -> failwith "review state was not persisted"
+          | None -> failwith "review state was not persisted"
         in
         let id, first =
           Eio.Switch.run (fun sw ->

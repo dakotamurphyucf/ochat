@@ -186,7 +186,7 @@ let%expect_test
             ~persistence:
               { archive_reference
               ; commit =
-                  (fun ~command_audit:_ ~previous:_ _ ->
+                  (fun ?observation:_ ~command_audit:_ ~previous:_ _ ->
                     if !fail_commit
                     then
                       Error
@@ -402,7 +402,10 @@ let%expect_test
                         ~persistence:
                           { archive_reference
                           ; commit =
-                              (fun ~command_audit:_ ~previous:_ transition ->
+                              (fun ?observation:_
+                                ~command_audit:_
+                                ~previous:_
+                                transition ->
                                 if !admitted
                                 then (
                                   persisted := Some transition;

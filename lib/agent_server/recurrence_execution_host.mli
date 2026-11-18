@@ -14,7 +14,8 @@ type t
     Execute/On_demand differ only in existing selected-owner reachability;
     configuring an ID never selects it. Same Eio domain. [now] must not yield. *)
 val create
-  :  Recurrence_execution_configuration.t
+  :  ?command_receipts:Agent_store.Session_store.Command_receipts.t
+  -> Recurrence_execution_configuration.t
   -> factory:Session_factory.t
   -> server_id:Agent_protocol.Id.Server.t
   -> sw:Eio.Switch.t
@@ -174,6 +175,24 @@ val acquire_existing_target
   -> session:Agent_protocol.Session_ref.t
   -> (Target.t, Agent_protocol.Error.t) result
 
+type existing_target_observation =
+  | Available of Target.t
+  | Invalidated of
+      { evidence : Agent_session.Session_actor.Recurrence_target_invalidation.t
+      ; authorize :
+          Agent_session.Session_state.t
+          -> Agent_session.Recurrence_definition.t
+          -> (unit, Agent_protocol.Error.t) result
+      }
+
+(** Select the exact configured same-host edge. Missing or unavailable metadata
+    propagates unless the protected Store or exact current Actor proves a
+    permanent invalidation. The callback is same-domain and does not yield. *)
+val observe_existing_target
+  :  Controller.t
+  -> definition:Agent_session.Recurrence_definition.t
+  -> (existing_target_observation, Agent_protocol.Error.t) result
+
 (** The same Target original/policy through the actual Factory's joined immutable
     source preview; no Intent, runtime or executable authority is manufactured. *)
 val preview_target_source
@@ -217,6 +236,7 @@ val pending_occupancy : t -> (Dispatch_occupancy.t, Agent_protocol.Error.t) resu
     Enabled/grace qualification; current original visibility/captured-family
     policy still applies. Missing facts never create a replacement. *)
 val acquire_captured_target
-  :  Controller.t
+  :  ?fresh_goal:bool
+  -> Controller.t
   -> occurrence:Agent_session.Recurrence_identity.Occurrence.t
   -> (Target.t, Agent_protocol.Error.t) result

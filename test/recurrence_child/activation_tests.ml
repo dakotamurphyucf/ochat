@@ -40,8 +40,9 @@ let completed_response text =
   |> Stdlib.List.to_seq
 ;;
 
-let cold_prompt =
-  {|<developer>Actual recurrence constructor Model fixture.</developer>
+let cold_start_prompt ~first_input ~after_read =
+  Printf.sprintf
+    {|<developer>Actual recurrence constructor Model fixture.</developer>
 <tool name="recipe_source" agent="activation-recipe.chatmd" local/>
 <tool name="read_file"><read id="data" path="${workspace}"/></tool>
 <script id="controller" language="chatml" kind="moderator">
@@ -53,7 +54,7 @@ let payload input = `Object([
 ])
 let on_event ctx state event = match event with
 | `Session_start ->
-  let* first = Model.call("agent_prompt_v1", payload("520_START_FIRST")) in
+  let* first = Model.call("agent_prompt_v1", payload(%S)) in
   (match first with
   | `Ok(value) ->
     let* native = Tool.call("read_file", `Object([
@@ -62,16 +63,25 @@ let on_event ctx state event = match event with
     ])) in
     (match native with
     | `Ok(value) ->
-      let* second = Model.call("agent_prompt_v1", payload("520_START_SECOND")) in
-      (match second with
-      | `Ok(value) -> Task.pure(state + 1)
-      | `Refused(message) -> Task.fail(message)
-      | `Error(message) -> Task.fail(message))
+      %s
     | `Error(message) -> Task.fail(message))
   | `Refused(message) -> Task.fail(message)
   | `Error(message) -> Task.fail(message))
 | _ -> Task.pure(state)
 </script>|}
+    first_input
+    after_read
+;;
+
+let cold_prompt =
+  cold_start_prompt
+    ~first_input:"520_START_FIRST"
+    ~after_read:
+      {|let* second = Model.call("agent_prompt_v1", payload("520_START_SECOND")) in
+      (match second with
+      | `Ok(value) -> Task.pure(state + 1)
+      | `Refused(message) -> Task.fail(message)
+      | `Error(message) -> Task.fail(message))|}
 ;;
 
 (* before_response is unarmed during real parent startup. Once the genuine cold
@@ -433,7 +443,7 @@ let with_cold_occurrence
   f ~child ~intent ~attempt ~assert_dormant_effects:no_effects
 ;;
 
-let with_cold_held
+let with_cold_held_result
       ?(mode = P.Run.Mode.Single_turn)
       ?(check_prewarm = false)
       ?(catalog_target = false)
@@ -486,7 +496,7 @@ let with_cold_held
                  let selected = Actor.Source_binding.source binding in
                  (match A.Runtime_builder.Source.selection selected with
                   | Captured _ -> ()
-                  | Authored _ | Authored_child _ | Generated _ ->
+                  | Authored _ | Authored_child _ | Generated _ | Generated_artifact _ ->
                     failwith "cold fixture lost actual captured-child source custody");
                  (match A.Runtime_builder.Source.moderator selected with
                   | Legacy observer | Extension observer ->
@@ -557,8 +567,35 @@ let with_cold_held
                       no_effects ();
                       Held.check_basis held |> protocol_ok;
                       Owner.Prepared.check_basis prepared |> protocol_ok;
-                      f child prepared held checked intent attempt))
-            |> protocol_ok))
+                      f child prepared held checked intent attempt))))
+;;
+
+let with_cold_held
+      ?mode
+      ?check_prewarm
+      ?catalog_target
+      ?before_prepare
+      env
+      daemon
+      parent
+      ~root_file
+      ~counters
+      ~original
+      f
+  =
+  with_cold_held_result
+    ?mode
+    ?check_prewarm
+    ?catalog_target
+    ?before_prepare
+    env
+    daemon
+    parent
+    ~root_file
+    ~counters
+    ~original
+    f
+  |> protocol_ok
 ;;
 
 let%test_unit
@@ -839,7 +876,7 @@ let on_event ctx state event = Task.pure(state)
                    let directory =
                      Option.value_exn child.store_handle |> S.Handle.snapshot_directory
                    in
-                   child.close ();
+                   Agent_server.Session_registry.close_entry child;
                    let installed =
                      Agent_store.Snapshot.load_current
                        ~env
@@ -1352,7 +1389,7 @@ let assert_saved_child env child =
   let directory =
     Option.value_exn child.Registry.store_handle |> S.Handle.snapshot_directory
   in
-  child.close ();
+  Agent_server.Session_registry.close_entry child;
   let installed =
     Agent_store.Snapshot.load_current
       ~env

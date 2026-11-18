@@ -163,6 +163,230 @@ let%expect_test "generated installation requires its exact durable unrevoked res
         D.equal_record
           installed
           (G.install_reserved ~delegations ~reservation ~artifact_store prepared |> get));
+      (* Source selection is DATA-only: the actual executable still rebinds to
+         a distinct genuine registry and must match its selected artifact. *)
+      G.Source.load ~artifact_store ~record:installed ()
+      |> expect "delegation.source_record";
+      G.Metadata_source.load ~artifact_store ~record:installed ()
+      |> expect "delegation.metadata_source_record";
+      let linked_record ~lifetime definition suffix =
+        let source_admission =
+          { admission with
+            child_session_id = P.Id.Session.create ()
+          ; revision_id = (G.artifact definition).revision_id
+          ; transaction_id = P.Id.Transaction.create ()
+          ; manifest_sha256 = (G.artifact definition).manifest_sha256
+          ; capability_pins = G.capability_pins definition
+          ; lifetime
+          }
+        in
+        let source_key =
+          { key with idempotency_key = P.Idempotency_key.of_string suffix |> protocol_ok }
+        in
+        let reserved =
+          match
+            D.reserve
+              delegations
+              ~key:source_key
+              ~request_sha256:(digest suffix)
+              ~admission:source_admission
+              ~max_records:8
+              ~max_bytes:1048576
+            |> store_ok
+          with
+          | D.New record -> record
+          | _ -> failwith "expected distinct source DATA reservation"
+        in
+        let staged =
+          G.install_reserved ~delegations ~reservation:reserved ~artifact_store definition
+          |> get
+        in
+        let child = D.advance delegations staged Child_installed |> store_ok in
+        D.advance delegations child Linked |> store_ok
+      in
+      let independent_record definition suffix =
+        linked_record
+          ~lifetime:(Independent { authorization_sha256 = digest "source fixture" })
+          definition
+          suffix
+      in
+      let independent = independent_record prepared "source-moderator" in
+      let source = G.Source.load ~artifact_store ~record:independent () |> get in
+      assert (D.Reference.equal (G.Source.reference source) (D.reference independent));
+      [%test_eq: string]
+        (G.artifact prepared).manifest_sha256
+        (G.Source.artifact source).manifest_sha256;
+      assert (
+        List.equal
+          (fun (a, x) (b, y) -> String.equal a b && String.equal x y)
+          (G.capability_pins prepared)
+          (G.Source.capability_pins source));
+      let fresh_parent = registry calls in
+      let executable =
+        G.restore
+          ~env
+          ~artifact_store
+          ~revision_id
+          ~manifest_sha256:(G.artifact prepared).manifest_sha256
+          ~current_capabilities:(fun () -> fresh_parent)
+          ~pins:(G.capability_pins prepared)
+          ()
+        |> get
+      in
+      G.Source.check_definition source ~definition:executable |> protocol_ok;
+      let _, observer =
+        Chat_response.Moderator_manager.Registry.of_definition
+          Chat_response.Moderator_manager.Registry.empty
+          (Chat_response.Generated_admission.definition (G.admission executable))
+        |> Result.ok_or_failwith
+      in
+      let actual =
+        Option.map observer ~f:(fun observer ->
+          P.Invocation.
+            { script_id = Chat_response.Moderator_manager.Registry.script_id observer
+            ; source_sha256 =
+                Chat_response.Moderator_manager.Registry.source_hash observer
+            })
+      in
+      assert (Option.is_some actual);
+      assert (Option.equal P.Invocation.equal_observer actual (G.Source.moderator source));
+      let check_metadata record =
+        let metadata = G.Metadata_source.load ~artifact_store ~record () |> get in
+        assert (
+          D.Reference.equal (G.Metadata_source.reference metadata) (D.reference record));
+        assert (
+          Store.Artifact.same_content
+            (G.artifact prepared)
+            (G.Metadata_source.artifact metadata));
+        [%test_eq: string]
+          (G.artifact prepared).manifest_sha256
+          (G.Metadata_source.artifact metadata).manifest_sha256;
+        assert (
+          List.equal
+            (fun (name, pin) (other_name, other_pin) ->
+               String.equal name other_name && String.equal pin other_pin)
+            (G.capability_pins prepared)
+            (G.Metadata_source.capability_pins metadata));
+        assert (
+          Option.equal
+            P.Invocation.equal_observer
+            actual
+            (G.Metadata_source.moderator metadata));
+        metadata
+      in
+      let _ = check_metadata independent in
+      let owned = linked_record ~lifetime:Owned prepared "source-owned" in
+      let _ = check_metadata owned in
+      G.Source.load ~artifact_store ~record:owned () |> expect "delegation.source_record";
+      G.Metadata_source.load
+        ~artifact_store
+        ~record:owned
+        ~source_limits:{ Chatmd_source_bundle.default_limits with max_source_bytes = 1 }
+        ()
+      |> expect "delegation.source_bounds";
+      (* Invocation ownership is an authored-tool family, not a third lawful
+         plain-generated lifetime. Exercise the actual store invariant instead
+         of manufacturing a private record that Metadata_source could accept. *)
+      let invocation_key =
+        { key with
+          idempotency_key =
+            P.Idempotency_key.of_string "source-invocation-owned" |> protocol_ok
+        }
+      in
+      let invocation_admission =
+        { admission with
+          child_session_id = P.Id.Session.create ()
+        ; transaction_id = P.Id.Transaction.create ()
+        ; lifetime = Invocation_owned { invocation_id = P.Id.Invocation.create () }
+        }
+      in
+      (match
+         D.reserve
+           delegations
+           ~key:invocation_key
+           ~request_sha256:(digest "source-invocation-owned")
+           ~admission:invocation_admission
+           ~max_records:8
+           ~max_bytes:1048576
+       with
+       | Error (Agent_store.Store_error.Corrupt message) ->
+         [%test_eq: string]
+           "invalid delegated creation identity or capability pins"
+           message
+       | Error error ->
+         raise_s [%sexp "unexpected store refusal", (error : Agent_store.Store_error.t)]
+       | Ok _ -> failwith "plain-generated Invocation_owned reservation was accepted");
+      assert (Option.is_none (D.find delegations invocation_key |> store_ok));
+      (match G.Source.check_definition source ~definition:altered with
+       | Error error -> assert (P.Error.equal_code error.code Invalid_state)
+       | Ok () -> failwith "mismatched executable source accepted");
+      let no_moderator =
+        G.prepare
+          ~env
+          ~dir:Eio.Path.(Eio.Stdenv.fs env / temporary)
+          ~revision_id:(P.Id.Prompt_revision.create ())
+          ~created_at
+          ~current_capabilities:(fun () -> parent)
+          ~references
+          (Chatmd_source_bundle.create
+             ~root_file:"plain.chatmd"
+             ~sources:
+               [ ( "plain.chatmd"
+                 , {|<developer>Plain child.</developer><tool type="inherited" name="read_file"/>|}
+                 )
+               ]
+             ()
+           |> Result.ok_or_failwith)
+        |> get
+      in
+      let plain_record = independent_record no_moderator "source-plain" in
+      let plain_source = G.Source.load ~artifact_store ~record:plain_record () |> get in
+      assert (Option.is_none (G.Source.moderator plain_source));
+      let plain_metadata =
+        G.Metadata_source.load ~artifact_store ~record:plain_record () |> get
+      in
+      assert (Option.is_none (G.Metadata_source.moderator plain_metadata));
+      G.Source.check_definition plain_source ~definition:no_moderator |> protocol_ok;
+      let changed_store =
+        Store.create ~env ~root:(Filename.concat temporary "source-substitution")
+        |> store_ok
+      in
+      G.install ~artifact_store:changed_store ~transaction_id altered |> get;
+      G.Source.load ~artifact_store:changed_store ~record:independent ()
+      |> expect "delegation.artifact_identity";
+      G.Metadata_source.load ~artifact_store:changed_store ~record:owned ()
+      |> expect "delegation.artifact_identity";
+      (* The old Independent-only guard still precedes artifact validation. *)
+      G.Source.load ~artifact_store:changed_store ~record:owned ()
+      |> expect "delegation.source_record";
+      let revoked = D.revoke delegations independent Authority_changed |> store_ok in
+      G.Source.load ~artifact_store ~record:revoked ()
+      |> expect "delegation.source_record";
+      G.Metadata_source.load ~artifact_store ~record:revoked ()
+      |> expect "delegation.metadata_source_record";
+      (* Both metadata routes use the same full materialized-tree validator. *)
+      let materialized =
+        Store.materialized_tree artifact_store (G.artifact no_moderator).revision_id
+      in
+      let path = Eio.Path.(materialized / (G.artifact no_moderator).root_relative_path) in
+      Eio.Process.run
+        (Eio.Stdenv.process_mgr env)
+        [ "/bin/chmod"; "600"; Eio.Path.native_exn path ];
+      Eio.Path.save ~create:(`Or_truncate 0o600) path "changed after installation";
+      let original_errors =
+        match G.Source.load ~artifact_store ~record:plain_record () with
+        | Error errors -> errors
+        | Ok _ -> failwith "original Source accepted changed materialized tree"
+      in
+      let metadata_errors =
+        match G.Metadata_source.load ~artifact_store ~record:plain_record () with
+        | Error errors -> errors
+        | Ok _ -> failwith "metadata Source accepted changed materialized tree"
+      in
+      [%test_eq: string list]
+        (List.map original_errors ~f:Chatmd_shell_spec.Diagnostic.to_string)
+        (List.map metadata_errors ~f:Chatmd_shell_spec.Diagnostic.to_string);
+      [%test_eq: int] 0 !calls;
       let _ = D.revoke delegations reservation Parent_stopped |> store_ok in
       G.install_reserved ~delegations ~reservation ~artifact_store prepared
       |> expect "delegation.revoked";

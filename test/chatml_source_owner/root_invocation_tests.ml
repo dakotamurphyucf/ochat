@@ -255,17 +255,21 @@ let on_event ctx state event = if ctx.session_id == "ses_root_contract" then Tas
           |> ok
         in
         let snapshot =
-          Fun.protect ~finally:first.close (fun () ->
-            let snapshot = first.start_moderator () |> ok in
-            snapshot_state first 41;
-            snapshot)
+          Fun.protect
+            ~finally:(fun () -> B.close first)
+            (fun () ->
+               let snapshot = first.start_moderator () |> ok in
+               snapshot_state first 41;
+               snapshot)
         in
         let second =
           build env sw root fixture target retained restored ~startup:None ~snapshot |> ok
         in
-        Fun.protect ~finally:second.close (fun () ->
-          ignore (second.start_moderator () |> ok : Jsonaf.t option);
-          snapshot_state second 42);
+        Fun.protect
+          ~finally:(fun () -> B.close second)
+          (fun () ->
+             ignore (second.start_moderator () |> ok : Jsonaf.t option);
+             snapshot_state second 42);
         [%test_eq: int] 0 !providers;
         print_s
           [%sexp

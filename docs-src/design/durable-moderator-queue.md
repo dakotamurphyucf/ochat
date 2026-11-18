@@ -25,6 +25,24 @@ from being pruned. A Run can remain named after terminal disposition; the claim
 still grants no execution permission. Historical missing origin never becomes
 positively unbound or a choice of the current Goal.
 
+An actual queue claim also retains the selected row's validated producer fact in
+its immutable execution receipt. The fact survives consumption and reopening;
+it never becomes the current Job attempt or the physical drainer's ownership.
+Historical receipt schema5 leaves the producer absent. New receipt schema6
+captures an explicit null when the selected row has unavailable producer data,
+or the exact shared producer object otherwise. Neither absence nor null proves
+that the callback is unrelated to delegated policy. Captures cannot be removed,
+reassigned or adopted later, including after completion. Internal-event Job
+context remains absent. These facts grant no execution permission.
+
+Producer captures require the `runtime.queue-occurrence-producer.v1` child
+semantics marker on state and delta documents, including replacement State and
+both receipt mutation forms. Older readers reject the new nested receipt schema
+or unsupported marker. Complete retained capture and raw producer bounds apply
+before projection. Unfamiliar fields already belonging to a receipt remain with
+that receipt through universal updates; opaque fields from a consumed queue row
+are not copied into a newly authored receipt.
+
 The universal document carrier owns unfamiliar row fields by ordinal. Fields on a
 retained row follow that occurrence through a head removal or equal-value
 append. Consuming a row with protected unfamiliar fields fails closed rather than
@@ -178,6 +196,24 @@ Missing historical or reopened custody stays unavailable. These cases never
 become a fresh legacy None admission. Ordinary new-work selection and emitted
 children still require a current parent. General host callback routing requires
 its actual execution owner; data provenance alone does not provide it.
+
+Modern owned callbacks also retain creator admissions for their selected timers
+and ingress registrations. The actual staged receipts select independent loans
+from that callback's original admission. The Actor validates the complete ordered
+DATA transition chain, then installs the loans with the same State acknowledgement
+as the selected work, before releasing the callback or publishing its result.
+Unselected, aborted or failed speculative work retires its loans. An uncertain
+write does not reconstruct an acknowledged loan from the stored record.
+
+A timer linked to a subscription in a later callback keeps the same creator
+admission through the validated ownership transition; the linking callback does
+not replace or renew it. Each accepted ingress receipt can transfer an independent
+child from the retained original. Duplicate delivery transfers none, and later
+receipts do not extend the original's lifetime. The exact installed Manager, full
+source and current subscription/registration facts remain mandatory. Source or
+runtime retirement, cancellation, revocation and expiry retire the applicable
+loans. A known expired original remains negative; historical or reopened absence
+remains unavailable. Neither becomes a fresh admission without authentication.
 
 Active Job custody uses one private `Job_custody` inventory keyed by the exact
 acknowledged Job record and attempt. Genuine initialization and Run-constructor
@@ -404,6 +440,17 @@ never drains them with constructor defaults. Standalone embeddings that explicit
 supply no construction port retain their existing behavior. Installed host routing
 uses the separate callback services described below; its actual foreground and
 idle execution qualification remains a distinct gate from constructor tests.
+
+An ended callback retains its original terminal receipt, closed Run scope and
+completion sample until factual settlement. Constructor cleanup keeps the same
+Init factual basis after fresh initialization permission closes. A failed save
+may prepare those same facts again only when the canonical persistence host
+observed that its journal writer was not entered. Once entered without an ACK,
+the exact candidate and transaction remain unresolved for existing recovery;
+cleanup neither reruns the callback nor selects a replacement outcome. Runtime
+retirement drains this ended owner before replacing its worker. Its actual State
+and receipt ACK release only its own borrow before publication, so publication
+failure cannot leave an already settled callback holding the runtime.
 
 The shared legacy callback bridge returns the actual committed outcome together
 with that acknowledged checkpoint. Its explicit notification list commits in the
@@ -737,3 +784,42 @@ it cannot create a second activation. Concrete recurrence checks retain the
 original Store, Run admission and reciprocal origin through startup and transfer
 to the worker. Only the acknowledged transfer publishes that worker's ownership.
 This shared consumer does not itself issue Goal or recurrence authority.
+
+
+## Delegated policy claim custody
+
+The child execution supplies a process-local borrowed Caller from its actual
+Operation, native Invocation or moderator Event. Capturing this association grants
+no admission. The parent validates the private relation, exact request, current
+source and permissions before transferring the original admission. A genuine
+admitted absence of principal stays distinct from an unavailable historical
+original. The explicit delegated selection prevents a concurrent parent
+Operation from becoming the policy callback's original caller.
+
+The Actor retains the complete prepared claim and its canonical candidate before
+calling the existing writer. Only that candidate's positive acknowledgement
+installs the callback borrow and activates its transferred admission. A known
+no-writer failure can retire its uninstalled custody; an entered or unknown write
+retains the exact candidate and first outcome, excluding replacement writes.
+Callback execution and decision disclosure still perform their currentness and
+permission checks. A saved decision or receipt cannot authorize replay.
+
+The runtime owner pairs this capture with one loan of the actual physical
+Product. Its one-shot host extent begins before holder registration and the
+Manager's pre-claim snapshot wait. Callback acknowledgement and actual wrapper
+join are separate facts: cancellation alone proves neither. The same callback's
+terminal acknowledgement is remembered only after its existing release cleanup
+succeeds. The owner releases the exact loan only after that acknowledgement and
+true join, or after joined no-writer cleanup. Unknown settlement retains the
+holder and excludes resource retirement. Explicit strong cleanup joins sources
+before factual claim cleanup; finite close can leave this obligation pending.
+
+Policy-only use of a stopped parent requires the same retained Product, completed
+extension lifecycle, actual Manager and current source/profile. It never invokes
+a cold constructor or installs a worker. Known snapshot validation remains inside
+the actual serialized claim. Native observations and emitted queue work capture
+the delegated original before the callback retires, through the existing producer
+custody paths. After a running callback joins and exact claim cleanup succeeds,
+Actor-owned follow-up may apply its committed intent. No selected-runtime closure
+is used after the extent joins, and stopped policy checks do not apply automatic
+follow-up. An earlier callback or disclosure error remains the primary outcome.

@@ -211,12 +211,16 @@ let%expect_test "commit writer replies to interrupted commits and rejects queued
         let path = Eio.Path.(Eio.Stdenv.fs native_env / directory / segment_name) in
         Eio.Switch.run (fun sw ->
           let writer = writer sw journal 1L None in
+          assert (Writer.is_available writer);
+          assert (not (Writer.requires_recovery writer));
           armed := Some Fault.{ boundary; failure; secondary_timeout = false };
           let first =
             Eio.Fiber.fork_promise ~sw (fun () ->
               Writer.commit writer ~durability:Flush (transaction 1L None))
           in
           Eio.Promise.await reached;
+          assert (Writer.is_available writer);
+          assert (not (Writer.requires_recovery writer));
           let queued =
             Eio.Fiber.fork_promise ~sw (fun () ->
               Writer.commit writer ~durability:Flush (transaction 1L None))
@@ -238,12 +242,16 @@ let%expect_test "commit writer replies to interrupted commits and rejects queued
           (match Eio.Promise.await queued with
            | Ok (Error _) -> ()
            | Ok (Ok _) | Error _ -> assert false);
+          assert (not (Writer.is_available writer));
+          assert (Writer.requires_recovery writer);
           assert (Option.is_none !armed);
           let original = Eio.Path.load path in
           assert (
             Result.is_error (Writer.commit writer ~durability:Flush (transaction 1L None)));
           [%test_eq: string] original (Eio.Path.load path);
           Writer.close writer;
+          assert (not (Writer.is_available writer));
+          assert (not (Writer.requires_recovery writer));
           Writer.close writer);
         let reopened = reopen_journal native_env directory in
         let restored = recover native_env root reopened in
@@ -316,6 +324,7 @@ let%expect_test "commit writer preserves genuine owning-switch cancellation" =
        | Error (Eio.Cancel.Cancelled _) -> ()
        | Ok _ | Error _ -> assert false);
       assert (Option.is_none !armed);
+      assert (not (Writer.requires_recovery (Option.value_exn !owner)));
       Writer.close (Option.value_exn !owner);
       assert (
         Result.is_error

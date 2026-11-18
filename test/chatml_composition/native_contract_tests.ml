@@ -50,6 +50,14 @@ let documentation name =
   | "recurrence_cancel"
   | "recurrence_status"
   | "recurrence_history" -> "runtime.recurrence", shared
+  | "goal_get"
+  | "goal_create"
+  | "goal_hold"
+  | "goal_abandon"
+  | "goal_objective"
+  | "goal_progress"
+  | "goal_start"
+  | "goal_resume" -> "runtime.goal_metadata", shared
   | "run_chatml" -> "runtime.native.requests", shared
   | "agent_create" -> "runtime.delegation.creation", shared
   | "agent_status" | "agent_send" -> "runtime.delegation.submissions", shared
@@ -103,22 +111,22 @@ let%expect_test "runtime native catalog contracts remain paired with reviewed re
      f1f3f713b6b4e6e7e1606945763d52931f2ad7a60546e3257bada7ffc62c5643)
     (agent_create runtime.delegation.creation
      f50060c1bdd22759d368f8962e1f21f2f347fdcc2bb5383d392d99025f5dd664
-     bc5e9d61e6673a40997087f793e27cfa3afbb0af45899af45902b7b2757d1ff4)
+     464193755a4ada37a7f628fd79bd3bb35f2e107cc4d0ec68e0ea988b65af4f6d)
     (agent_status runtime.delegation.submissions
      c948e863b277175b367e349d6edd845405843173ab2845a17dd220a0bcbe1273
-     897c182c482a85450eb37608e4be303fee02e650075818822aa8ba0a338bdc67)
+     053e35ed4a0601374b91367536f920b1d06e79654dbaa0cec4374a0f65fd9943)
     (agent_send runtime.delegation.submissions
      ebd399228691c35671afa1fe353623284f6eabd788c95748e7e6b38f3ebdbf0e
-     897c182c482a85450eb37608e4be303fee02e650075818822aa8ba0a338bdc67)
+     053e35ed4a0601374b91367536f920b1d06e79654dbaa0cec4374a0f65fd9943)
     (agent_read runtime.delegation.output
      7b7763f30e055fcc0a81a0578b08d75c7d90ccc5b7e524ead6e99b450fe8d946
-     44e3790eeda33594c0819333e9ffd1cb53d85d342c3baf6473265cbf2c731f4e)
+     834fdacabf6c924612abfae99be4eb39daef695dd52bdafe11e77da8eb1afb92)
     (agent_wait runtime.delegation.output
      88196ca1f4dc34e34441e8687ffff3557e8e48215205e4cdcd0303b50a2be722
-     44e3790eeda33594c0819333e9ffd1cb53d85d342c3baf6473265cbf2c731f4e)
+     834fdacabf6c924612abfae99be4eb39daef695dd52bdafe11e77da8eb1afb92)
     (agent_stop runtime.delegation.stop-helper
      d10ebc8001ca0ea8e709be0a4ee5a3d64de024e9fcff086774aba2463a9d1a6d
-     356a16bf8785d533f9e795ba86f496e0a617d37bebb1dd301161fcfeddf753a1)
+     5e58cfa8d79f542d465474b50142e28f7b13364a5a170e672cefb941e8521353)
     (ochat_validate runtime.native.requests
      f151690e0f4692e8aaf9aa6b4454b1306d8bcf1f4432c6759fecf5cbb1cce4f8
      f1f3f713b6b4e6e7e1606945763d52931f2ad7a60546e3257bada7ffc62c5643)
@@ -127,46 +135,70 @@ let%expect_test "runtime native catalog contracts remain paired with reviewed re
      c9fb4ef833b03ebbb428ba83cf856712054a2cf7dfe1608493d8b303b0f2c268)
     (instructions_refresh instructions.sources
      7e7602e9a7cb3b07316c036607484ab66493d061de0c46b7471657213eb9ecce
-     a75d305fe5c228d85ab983e21d5c5d93721b08ba4715d815a9a2da0f3b4ac123)
+     3838b75b95419129bea126eeb2f7da07f229ccb180a83f34c68648a16f0c8fa5)
     (instructions_read instructions.sources
      b5d7c4847415ebd291f9b37e7bdfe38589c599c530ea102cc8ee7e6b063298eb
-     a75d305fe5c228d85ab983e21d5c5d93721b08ba4715d815a9a2da0f3b4ac123)
+     3838b75b95419129bea126eeb2f7da07f229ccb180a83f34c68648a16f0c8fa5)
     (instructions_activate instructions.sources
      1a65c90884f6f002b1e2938e144b247f94f6b4af6be21441aaec42031ff92bb8
-     a75d305fe5c228d85ab983e21d5c5d93721b08ba4715d815a9a2da0f3b4ac123)
+     3838b75b95419129bea126eeb2f7da07f229ccb180a83f34c68648a16f0c8fa5)
     (instructions_deactivate instructions.sources
      eec6ebbe4b66d02cdd865047b63acf37f5c0b59b431a8ed1ff5f3d876485c12d
-     a75d305fe5c228d85ab983e21d5c5d93721b08ba4715d815a9a2da0f3b4ac123)
+     3838b75b95419129bea126eeb2f7da07f229ccb180a83f34c68648a16f0c8fa5)
     (instructions_status instructions.sources
      9aa238203e9443b0a8d51f41421fd455b18291a8b306ff76b209a5ae6e2c9934
-     a75d305fe5c228d85ab983e21d5c5d93721b08ba4715d815a9a2da0f3b4ac123)
+     3838b75b95419129bea126eeb2f7da07f229ccb180a83f34c68648a16f0c8fa5)
+    (goal_get runtime.goal_metadata
+     c8c1615cb79ccbff4199c462328b97eae95a061c9741fb9c570dc3da791cd617
+     b06cac08508c2f3340bb60c47164ebd97bcee15ef04e9a09832552c4e50db111)
+    (goal_create runtime.goal_metadata
+     eaf459185f620360a0f8bc56f5245e63492a6e01c78b7892caff2747834c827c
+     b06cac08508c2f3340bb60c47164ebd97bcee15ef04e9a09832552c4e50db111)
+    (goal_hold runtime.goal_metadata
+     6da6bab823ef4f73565b1fc887e3c3d5a3c2db0d9cde35a50187efab49d41128
+     b06cac08508c2f3340bb60c47164ebd97bcee15ef04e9a09832552c4e50db111)
+    (goal_abandon runtime.goal_metadata
+     18dd6a27e05bd52bd4f61445f4ae3365946328b436e3c6d7bcbf73d837c44d3e
+     b06cac08508c2f3340bb60c47164ebd97bcee15ef04e9a09832552c4e50db111)
+    (goal_objective runtime.goal_metadata
+     af9a30037ae3e0052bc4804aa6019c13e77322cbfc685ff4fc3411bad73d17d3
+     b06cac08508c2f3340bb60c47164ebd97bcee15ef04e9a09832552c4e50db111)
+    (goal_progress runtime.goal_metadata
+     71a4f29cb94df2fec946330aa3ab718a24733dcd796218bbcebea37fc5210b00
+     b06cac08508c2f3340bb60c47164ebd97bcee15ef04e9a09832552c4e50db111)
+    (goal_start runtime.goal_metadata
+     03228dda5a2b4e68a664bf4b3979fe241b81cefea47b6b088ae69e77f97e256a
+     b06cac08508c2f3340bb60c47164ebd97bcee15ef04e9a09832552c4e50db111)
+    (goal_resume runtime.goal_metadata
+     d66672d44671e939df1f7491e4bfb2443d0164e90cea4c71ec417cf55913772e
+     b06cac08508c2f3340bb60c47164ebd97bcee15ef04e9a09832552c4e50db111)
     (recurrence_create runtime.recurrence
      a640749b03237f585387cee9c6562cc9cc2560af1d4f67cf8de1c115ff7379f7
-     02012d0e153775779d3ed4d3e479b6967d9608db5ce5d1b0b629dd7ecde8feef)
+     71214da724ae366ebda99abdadf088d9574b2e4fc248b30932b021b86dbf4374)
     (recurrence_list runtime.recurrence
      e8f0ec7896e58af08b6bfabfda3cecfdd86dd0a0c5f42e90cb55cf4a57d5d373
-     02012d0e153775779d3ed4d3e479b6967d9608db5ce5d1b0b629dd7ecde8feef)
+     71214da724ae366ebda99abdadf088d9574b2e4fc248b30932b021b86dbf4374)
     (recurrence_get runtime.recurrence
      1c229dd8219650ff274cc633733ff25ac9d8d554679c4c2f366a3578070f1187
-     02012d0e153775779d3ed4d3e479b6967d9608db5ce5d1b0b629dd7ecde8feef)
+     71214da724ae366ebda99abdadf088d9574b2e4fc248b30932b021b86dbf4374)
     (recurrence_edit runtime.recurrence
      e99cde739818601145d3bc52fcd59e78aa887d2cb26057b9e4748403e8b95c04
-     02012d0e153775779d3ed4d3e479b6967d9608db5ce5d1b0b629dd7ecde8feef)
+     71214da724ae366ebda99abdadf088d9574b2e4fc248b30932b021b86dbf4374)
     (recurrence_pause runtime.recurrence
      0eb6efea54e64cd2cda3dce586ae6eda25c975729cb1191b7a203c3c965163d9
-     02012d0e153775779d3ed4d3e479b6967d9608db5ce5d1b0b629dd7ecde8feef)
+     71214da724ae366ebda99abdadf088d9574b2e4fc248b30932b021b86dbf4374)
     (recurrence_resume runtime.recurrence
      7d67f87b0f58acfe6a244831ae0fbfc313e03b730712a26dc2de64728c90a299
-     02012d0e153775779d3ed4d3e479b6967d9608db5ce5d1b0b629dd7ecde8feef)
+     71214da724ae366ebda99abdadf088d9574b2e4fc248b30932b021b86dbf4374)
     (recurrence_cancel runtime.recurrence
      b5956b32ae20efff038163ef6800ea9372dc100907aecc970e18014ff29ccd02
-     02012d0e153775779d3ed4d3e479b6967d9608db5ce5d1b0b629dd7ecde8feef)
+     71214da724ae366ebda99abdadf088d9574b2e4fc248b30932b021b86dbf4374)
     (recurrence_status runtime.recurrence
      64d91fd2c4056dd2c6ba89471c6cacb7715ad5df458171c12ab808042591ce23
-     02012d0e153775779d3ed4d3e479b6967d9608db5ce5d1b0b629dd7ecde8feef)
+     71214da724ae366ebda99abdadf088d9574b2e4fc248b30932b021b86dbf4374)
     (recurrence_history runtime.recurrence
      341d5ee94a789d80e3aacac5609ba64fccaba4ee5e625a0c3647dea5840a8d33
-     02012d0e153775779d3ed4d3e479b6967d9608db5ce5d1b0b629dd7ecde8feef)
+     71214da724ae366ebda99abdadf088d9574b2e4fc248b30932b021b86dbf4374)
     |}]
 ;;
 

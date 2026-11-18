@@ -102,6 +102,21 @@ let with_daemon_switch env ~clocks f =
       f sw daemon_env ~release_clocks))
 ;;
 
+let operation_failures (entry : Agent_server.Session_registry.entry) ~after_sequence =
+  match
+    Agent_session.Durable_event_log.replay
+      entry.durable_events
+      ~after_sequence
+      ~through_sequence:Int64.max_value
+  with
+  | Snapshot_required -> []
+  | Available events ->
+    List.filter_map events ~f:(fun event ->
+      match event.Agent_protocol.Event.Durable.kind with
+      | Operation_failed -> Some event.payload
+      | _ -> None)
+;;
+
 let with_daemon
       ?(request_guidance = false)
       ?(inspect_preparation = fun ~selection:_ ~request:_ -> ())
@@ -189,6 +204,7 @@ let with_daemon
         let preparation_state = ref (fun () -> None) in
         let on_prepare request =
           try inspect_preparation ~selection:(!preparation_state ()) ~request with
+          | Eio.Cancel.Cancelled _ as exn -> raise exn
           | exn ->
             provider_failure := Some exn;
             raise exn
@@ -210,6 +226,7 @@ let with_daemon
                | _ -> failwith "tool execution requested an unexpected model turn")
           with
           | events -> events
+          | exception (Eio.Cancel.Cancelled _ as exn) -> raise exn
           | exception error ->
             (* The runtime handles provider errors. Preserve fixture assertions
                so a bad transcript fails directly instead of timing out idle. *)
@@ -320,22 +337,13 @@ let with_daemon
                              when request_guidance
                                   && List.is_empty
                                        state.conversation.deferred_user_entries ->
-                             (match
-                                Agent_session.Durable_event_log.replay
-                                  entry.durable_events
-                                  ~after_sequence:0L
-                                  ~through_sequence:Int64.max_value
-                              with
-                              | Snapshot_required -> ()
-                              | Available events ->
-                                List.iter events ~f:(fun event ->
-                                  match event.Agent_protocol.Event.Durable.kind with
-                                  | Operation_failed ->
-                                    raise_s
-                                      [%sexp
-                                        "guidance fixture operation failed"
-                                      , (event.payload : Jsonaf.t)]
-                                  | _ -> ()));
+                             List.iter
+                               (operation_failures entry ~after_sequence:0L)
+                               ~f:(fun failure ->
+                                 raise_s
+                                   [%sexp
+                                     "guidance fixture operation failed"
+                                   , (failure : Jsonaf.t)]);
                              Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
                              wait ()
                            | _ ->
@@ -345,20 +353,7 @@ let with_daemon
                          wait ())
                   with
                   | Eio.Time.Timeout ->
-                    let failures =
-                      match
-                        Agent_session.Durable_event_log.replay
-                          entry.durable_events
-                          ~after_sequence:0L
-                          ~through_sequence:Int64.max_value
-                      with
-                      | Snapshot_required -> []
-                      | Available events ->
-                        List.filter_map events ~f:(fun event ->
-                          match event.Agent_protocol.Event.Durable.kind with
-                          | Operation_failed -> Some event.payload
-                          | _ -> None)
-                    in
+                    let failures = operation_failures entry ~after_sequence:0L in
                     raise_s
                       [%sexp
                         "composition session did not finish"
@@ -497,6 +492,7 @@ let with_daemon
                     settle env entry;
                     A.state entry.actor |> protocol_ok
                 in
+                Option.iter !provider_failure ~f:raise;
                 [%test_eq: int] (snd (request_counts ())) !requests;
                 f final;
                 H.close handle;

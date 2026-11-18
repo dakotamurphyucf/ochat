@@ -623,6 +623,33 @@ let%expect_test
             in
             within env "actual ancestor reserve writer" (fun () ->
               Eio.Promise.await barrier.entered);
+            (* This genuine prospective child occurrence owns its before-State.
+               No new idle callback may borrow the moderator while the ancestor
+               reservation is awaiting its actual writer acknowledgement. *)
+            let idle_claim = Actor.claim_idle_moderator child.actor |> protocol_ok in
+            Option.iter idle_claim ~f:(fun history ->
+              let current = state child in
+              (* Discharge an unexpected old-code claim before the intentional
+                 assertion below. The no-op drain uses its actual checkpoint and
+                 exact returned history; it invents no callback receipt. *)
+              protect_cleanup
+                ~finally:(fun () ->
+                  Actor.complete_idle_moderator
+                    child.actor
+                    { moderator_snapshot = current.moderator
+                    ; runtime_requests = []
+                    ; notifications = []
+                    ; remaining_events = false
+                    }
+                  |> protocol_ok)
+                (fun () ->
+                   assert (
+                     List.equal
+                       P.History.equal_entry
+                       current.conversation.canonical_history
+                       (A.History_codec.all_to_protocol
+                          ~previous:current.conversation.canonical_history
+                          history))));
             (* Only the ancestor writer is suspended. The child's mailbox must be
              free to retire the genuine captured attachment before its commit. *)
             detach ();
@@ -680,7 +707,9 @@ let%expect_test
                 (GD.local_included (Option.value_exn before.goal_descendants))
                 (GD.local_included (Option.value_exn after.goal_descendants)));
             [%test_eq: int] 1 !calls;
-            [%test_eq: int] 3 !(counters.providers)));
+            [%test_eq: int] 3 !(counters.providers);
+            if Option.is_some idle_claim
+            then failwith "prospective inherited admission allowed a new idle borrow"));
   print_endline
     "stale writer rejected before child edit and provider; genuine root reservation \
      closed without confirmation";

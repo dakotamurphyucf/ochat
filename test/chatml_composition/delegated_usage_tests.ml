@@ -60,6 +60,27 @@ let contributed_input state =
 
 let entry daemon id = Registry.find (D.registry daemon) id |> Option.value_exn
 
+let assert_empty_birth_snapshot children ~reference =
+  let initial =
+    A.Child_contributions.snapshot children ~reference |> protocol_ok |> Option.value_exn
+  in
+  assert (
+    Agent_store.Delegation_store.Reference.equal
+      reference
+      (A.Child_usage_snapshot.reference initial));
+  List.iter
+    [ A.Child_usage_snapshot.own initial
+    ; A.Child_usage_snapshot.descendants initial
+      |> A.Child_usage_snapshot.Descendants.partition
+    ]
+    ~f:(fun partition ->
+      assert (
+        A.Child_usage_snapshot.Partition.equal
+          A.Child_usage_snapshot.Partition.empty
+          partition));
+  initial
+;;
+
 let%expect_test "actual native child registration and historical whole-ledger replacement"
   =
   let child_providers = ref 0 in
@@ -124,8 +145,15 @@ let%expect_test "actual native child registration and historical whole-ledger re
            in
            assert (
              not (A.Child_usage_snapshot.Coverage.historical_children_unknown coverage));
+           (* Native birth already imported this SAME child's empty snapshot
+              before Init. It is an observed fact, not unobserved coverage or
+              fabricated usage from the later provider result. *)
+           let initial = assert_empty_birth_snapshot children ~reference in
+           assert (
+             Int64.(
+               A.Child_usage_snapshot.revision initial < child_state.counters.revision));
            [%test_eq: int64]
-             1L
+             0L
              (A.Child_usage_snapshot.Coverage.unobserved_children coverage);
            let handle =
              match L.rows child_state.inference_ledger with
@@ -172,9 +200,9 @@ let%expect_test "actual native child registration and historical whole-ledger re
              (correction handle Int64.(usage_revision + 1L) 7L)
            |> protocol_ok;
            (match import () with
-            | Imported Added -> ()
-            | Imported (Replaced | Duplicate | Stale) | Historical_absence ->
-              failwith "first actual observed child contribution was not Added");
+            | Imported Replaced -> ()
+            | Imported (Added | Duplicate | Stale) | Historical_absence ->
+              failwith "actual provider snapshot did not replace native birth snapshot");
            let seven = state parent_id in
            assert (
              P.Inference_query.Metric.equal_sum (Tokens 7L) (contributed_input seven));
@@ -420,8 +448,27 @@ let%expect_test "actual two-level child usage follows only its immediate associa
            let coverage =
              contribution before_nested |> A.Child_usage_snapshot.Descendants.coverage
            in
+           let child_children = Option.value_exn (state child_id).child_contributions in
+           let grandchild_reference =
+             Option.value_exn (state grandchild_id).spec.delegation
+           in
+           assert_empty_birth_snapshot child_children ~reference:grandchild_reference
+           |> ignore;
+           let child_reference = Option.value_exn (state child_id).spec.delegation in
+           let imported_child =
+             A.Child_contributions.snapshot
+               (Option.value_exn before_nested.child_contributions)
+               ~reference:child_reference
+             |> protocol_ok
+             |> Option.value_exn
+           in
+           assert (
+             A.Child_usage_snapshot.Partition.equal
+               A.Child_usage_snapshot.Partition.empty
+               (A.Child_usage_snapshot.descendants imported_child
+                |> A.Child_usage_snapshot.Descendants.partition));
            [%test_eq: int64]
-             1L
+             0L
              (A.Child_usage_snapshot.Coverage.unobserved_children coverage);
            import child grandchild |> protocol_ok |> ignore;
            import root child |> protocol_ok |> ignore;
@@ -447,8 +494,8 @@ let%expect_test "actual two-level child usage follows only its immediate associa
            [%test_eq: int] 3 !child_calls;
            [%test_eq: int] 1 !grandchild_calls;
            print_endline
-             "two actual native edges: unknown subtree -> 7+11 exactly once; direct \
-              grandchild import denied"));
+             "two actual native edges: empty birth snapshots -> 7+11 exactly once; \
+              direct grandchild import denied"));
   [%expect
-    {| two actual native edges: unknown subtree -> 7+11 exactly once; direct grandchild import denied |}]
+    {| two actual native edges: empty birth snapshots -> 7+11 exactly once; direct grandchild import denied |}]
 ;;

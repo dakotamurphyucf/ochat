@@ -61,9 +61,10 @@ let on_event ctx state event = match event with
        in
        let launch = Option.value_exn outer.launch in
        assert (Option.is_none launch.parent_job);
-       (match launch.owner with
-        | Moderator_event _ -> ()
-        | Invocation _ -> failwith "model probe was not launched by Session_start");
+       (match P.Job.Birth_parent.view launch.owner with
+        | Callback (Moderator_event _) -> ()
+        | Callback (Invocation _) | Job_attempt _ ->
+          failwith "model probe was not launched by Session_start");
        let _, completion = await env client outer in
        (match completion with
         | Succeeded (`String message) ->

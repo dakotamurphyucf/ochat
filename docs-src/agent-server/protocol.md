@@ -112,6 +112,11 @@ epoch is published.
 | `session.get` | `Session.Get_request` | `session.transcript.read` | Scoped snapshot; optional history window. |
 | `session.configuration_get` | `Session_configuration.Get_request` | `session.transcript.read` | Safe selected/captured configuration and independent configuration revision; profile identity requires `diagnostics.read`. |
 | `session.configuration_update` | `Session_configuration.Update_request` | `session.message.send`; profile patches also require `provider.select` | Writable attachment, expected generation/configuration revision and nonempty model/profile/settings patch; next root capture selection. |
+| `session.instructions_get` | `Instruction_control.Request.Inspect` | `session.transcript.read` plus current session/root visibility | Selected safe root/member/digest identities and available actions; no bodies or execution activation. |
+| `session.instructions_refresh` | `Instruction_control.Request.Refresh` | `session.transcript.read` plus current session/root visibility | Explicit root listing or discovery; never replaces selected bytes. |
+| `session.instructions_capture` | `Instruction_control.Request.Capture` | `session.transcript.read` plus current session/root visibility | Fresh manifest verification and comparison capture ID; no bodies or source capability. |
+| `session.instructions_activate` | `Instruction_control.Request.Activate` | `session.message.send` plus current session/root visibility | Connection-owned writable attachment, expected generation/selection revision and explicit key; durable selection receipt. |
+| `session.instructions_remove` | `Instruction_control.Request.Remove` | `session.message.send` plus current session visibility | Connection-owned writable attachment, expected generation/selection revision and explicit key; Clear/project/qualified-skill removal without source access. |
 | `session.inference_summary` | `Inference_query.Summary_request` | Authentication plus session visibility | Safe retained totals, coverage and host turns; not lifetime totals or pricing. |
 | `session.inference_observations` | `Inference_query.Request` | `session.transcript.read`; configuration and diagnostics also require `diagnostics.read` | Ordered, paginated retained attempts, with scoped disclosure. |
 | `session.attach` | `Session.Attach_request` | `session.transcript.read` plus requested mode | Attachment, replay decision, sequence and optional reclaim token. |
@@ -464,6 +469,42 @@ or an exactly-once external-execution guarantee. Keys are nonempty, up to 256 ch
 characters or `-_.:/`. Revision preconditions and idempotency solve different
 problems. Acknowledgement is not terminal model/tool completion, and durability
 depends on selected flush mode. No exactly-once external side-effect guarantee.
+
+## Explicit instruction selection
+
+The five `session.instructions_*` methods use the closed
+[`Instruction_control` request/result types](../../lib/agent_protocol/instruction_control.mli).
+Descriptors contain configured root labels, portable members and SHA-256 digests;
+they are comparison data, never host paths or permission proofs. Capture responses
+contain no file bodies. `instructions_get` denies the complete identity view if
+any selected root is no longer readable. The ordinary `instruction_status`
+snapshot/event summary remains counts-only and retains its existing compatibility
+codec.
+
+Nullable fields must be present: use `attachment_id: null` for
+`session.instructions_get` without an attachment, `selection: null` for
+`session.instructions_refresh` root discovery, and `scope: null` in a project
+selection for the configured root scope. Omitting these keys is invalid.
+
+Activation/removal use `expected_generation`, `expected_revision` (canonical
+nonnegative decimal **string**, the selection receipt frontier), and caller-retained
+`key`. The attachment must belong to the actual authenticated connection and pass
+the Actor's current writer/lease checks. A successful receipt records principal,
+key, request digest, session, generation, new selection revision and acceptance
+time. Exact accepted retry returns the same receipt; new attachment admission may
+replace the transport attachment ID without changing that semantic request.
+Generic response caching and `command.receipt` do not own these receipts. Repeat
+the exact original request/key after an uncertain response under current authority;
+never infer success or silently choose a new key. The current-root activation
+check still applies to a retained retry; authorized removal needs no root read.
+
+Complete parameter/result admission is fixed at 128 KiB/512 KiB, depth 12,
+1024 fields and 2048 nodes, with at most 64 explicit roots/members. New
+instruction-specific records reject unknown/duplicate fields; embedded
+`Instruction_status` preserves its existing codec behavior. The server exposes no
+mutable instruction-source registry, capture authority token or provider state
+through this protocol. See [admitted instruction sources](../guide/admitted-instructions.md)
+for discovery order, stored-byte limits and explicit replacement.
 
 ## Events and client projection
 
@@ -838,6 +879,67 @@ original authentication and current policy. Disconnecting a client does not gran
 new authority or itself finish the workflow. ChatML orchestration determines its
 subsequent run actions through the native run operations. Admission is not proof
 of successful completion; clients must inspect subsequent retained outcomes.
+
+## Inspect and control persistent Goals
+
+After initializing a connection, check its advertised features. A host offering
+`sessions.goals` accepts `session.goals` and `session.goal`. Supply the host
+and session reference returned by that connection. These reads work without
+attaching or starting a Workflow. They return the Goal's objective, progress
+and disposition, with available accounting for its own and descendant work.
+Unknown usage and pending reservations remain visible. A missing account means
+that accounting is unavailable. Current Run details have their own visibility
+requirements. On an inspection-only host, a recorded stop is reported as
+`stopped`. A last-known idle or running session without a current execution
+owner is reported as `unavailable`. Its retained Goal data can still be read.
+On an execution-enabled host, an authorized reader may see a stopped Goal's
+nonterminal Run as `retained`, with its saved Run ID and revision. An attached
+writer can use those values to request Resume when the host offers that action.
+
+On a host advertising `sessions.goal_control`, attach a writer to the session,
+then read the Goal again using that attachment. Attaching advances the session
+revision. Use the resulting revisions, source and permitted actions to prepare
+the command. The host checks authorization and the recorded state again when
+handling it.
+
+| Method | What the acknowledgement tells you |
+| --- | --- |
+| `session.goal.command` | The host committed a metadata change, such as progress, Hold or Abandon. Hold pauses future Goal continuation. Cancellation of work already admitted uses its own control. |
+| `session.goal.start` | Start requests a new Workflow episode. Its admission receipt identifies that Run. Read the Goal or Run again to observe its eventual outcome. |
+| `session.goal.resume` | Resume targets the existing held episode. The result distinguishes a retained acknowledgement, a continuation that started or is waiting, and a settled Run. |
+
+Keep the original key and immutable command before sending a mutation. If the
+reply is lost, reconnect to the same host, acquire a writer for the same
+session and resend the original command with that attachment. Preserve the
+original revisions and source. A new key describes a new intent.
+
+For an acknowledged Start, the reply includes the Run admission receipt and
+`association_sha256`. The typed client checks that the receipt matches the
+original session, generation, session revision, workflow input, key and
+principal. It also checks that the association matches the selected Goal, Goal
+and catalog revisions, and source. An uncertain admission carries no receipt.
+Use `Agent_client.Goal_controls` for these checks in a headless or interactive
+client.
+
+ChatMD authors can manage the same Goals from a moderator callback. See
+[selected native Goal tools](../guide/native-goal-metadata.md).
+
+## Inspect and control recurring schedules
+
+A host advertising `sessions.recurrences` accepts four read methods on the
+controller session. `session.recurrences` lists its definitions and
+`session.recurrence` reads one definition. Use `session.recurrence.status` to
+inspect the planner and next due time. Use `session.recurrence.history` to see
+which occurrences reached a Run and what happened to them. Each read checks
+current visibility, including separate access to the target.
+
+`sessions.recurrence_control` enables `session.recurrence.command`. Obtain a
+writer attachment before sending Create, Edit, Enable, Pause or Retire. Create
+leaves a schedule paused. On a lost reply, reconnect as the same principal and
+resubmit the original intent, revisions and key with a current writer attachment.
+The receipt acknowledges the definition change. See the [headless client
+example](recurring-automation.md#inspect-a-controller-from-a-headless-client)
+for the typed OCaml interface.
 
 ## Retained run inspection
 

@@ -161,16 +161,18 @@ let%test_unit
                 Agent_server.Session_factory.recover_session (Daemon.factory daemon) index
                 |> protocol_ok
               in
-              Exn.protect ~finally:restored.close ~f:(fun () ->
-                let state = A.state restored.actor |> protocol_ok in
-                assert (Int.equal !callbacks 1);
-                (match state.runtime_initialization with
-                 | Pending { fresh_history = true } -> ()
-                 | Ready | Pending { fresh_history = false } -> assert false);
-                (match state.lifecycle.observed with
-                 | Failed _ -> ()
-                 | _ -> assert false);
-                assert (Option.is_some state.failure))))))
+              Exn.protect
+                ~finally:(fun () -> Agent_server.Session_registry.close_entry restored)
+                ~f:(fun () ->
+                  let state = A.state restored.actor |> protocol_ok in
+                  assert (Int.equal !callbacks 1);
+                  (match state.runtime_initialization with
+                   | Pending { fresh_history = true } -> ()
+                   | Ready | Pending { fresh_history = false } -> assert false);
+                  (match state.lifecycle.observed with
+                   | Failed _ -> ()
+                   | _ -> assert false);
+                  assert (Option.is_some state.failure))))))
 ;;
 
 let%expect_test "child publication never reacquires its parent runtime from the actor" =
@@ -312,18 +314,38 @@ let on_event ctx state event = Task.pure(state)
                              |> String.concat ~sep:"\n")))
                       |> protocol_ok
                     in
-                    let creation =
-                      Eio.Fiber.fork_promise ~sw (fun () ->
-                        Agent_server.Session_factory.create_generated_session
-                          (Daemon.factory daemon)
-                          ~parent_session_id:parent.id
-                          ~idempotency_key:
-                            (P.Idempotency_key.of_string "publication" |> protocol_ok)
-                          ~display_name:None
-                          definition)
+                    let clock = Eio.Stdenv.clock env in
+                    let rec await_parent_start () =
+                      let state = A.state entry.actor |> protocol_ok in
+                      match state.lifecycle.observed with
+                      | Failed error -> raise_s [%sexp (error : P.Error.t)]
+                      | _ when session_start_completed_exn state -> ()
+                      | _ ->
+                        Eio.Time.sleep clock 0.01;
+                        await_parent_start ()
                     in
-                    Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
-                      Eio.Promise.await installed);
+                    let creation =
+                      Eio.Time.with_timeout_exn clock 10. (fun () ->
+                        (* The factory checks the exact parent revision. Its startup
+                           moderator must commit before the publication probe. *)
+                        if moderated then await_parent_start ();
+                        let creation =
+                          Eio.Fiber.fork_promise ~sw (fun () ->
+                            Agent_server.Session_factory.create_generated_session
+                              (Daemon.factory daemon)
+                              ~parent_session_id:parent.id
+                              ~idempotency_key:
+                                (P.Idempotency_key.of_string "publication" |> protocol_ok)
+                              ~display_name:None
+                              definition)
+                        in
+                        Eio.Fiber.first
+                          (fun () -> Eio.Promise.await installed)
+                          (fun () ->
+                             Eio.Promise.await_exn creation |> protocol_ok |> ignore;
+                             failwith "factory completed before Child_installed");
+                        creation)
+                    in
                     let linked_while_locked =
                       Owner.For_testing.with_loaded_runtime entry.runtime (fun () ->
                         Eio.Promise.resolve proceed_u ();

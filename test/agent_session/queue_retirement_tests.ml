@@ -73,7 +73,7 @@ let with_actor f =
       let persistence = A.Memory_backend.persistence memory in
       { persistence with
         commit =
-          (fun ~command_audit ~previous transition ->
+          (fun ?observation ~command_audit ~previous transition ->
             if !reject
             then
               Error
@@ -82,7 +82,7 @@ let with_actor f =
                    ~message:"injected queue retirement failure"
                    ~retryable:true
                    ())
-            else persistence.commit ~command_audit ~previous transition)
+            else persistence.commit ?observation ~command_audit ~previous transition)
       })
     (fun actor _ _ request start _ _ _ attachment ->
        start (request "queue-retirement") |> protocol_ok |> ignore;
@@ -325,6 +325,7 @@ let running (before : A.Session_state.t) =
       ~source:(Q.source metadata)
       ~ordinal:(Q.Entry.ordinal head)
       ~origin:(Q.Entry.origin head)
+      ~producer:(Captured (Q.Entry.producer head))
     |> protocol_ok
   in
   P.Moderator_execution.create_queued

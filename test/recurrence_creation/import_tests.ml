@@ -651,7 +651,7 @@ let%expect_test
 ;;
 
 let%expect_test "actual Model completion installs its fixed-delay clock only after ACK" =
-  let index_projection = Agent_server.Session_projection.index_entry in
+  let index_projection = Agent_server.Session_factory.index_entry in
   with_store (fun base ->
     let seed = create_actor base ~sw:base.sw () in
     let intent, attempt =

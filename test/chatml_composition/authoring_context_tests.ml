@@ -560,13 +560,31 @@ let%expect_test
        (* Isolate authoring-reference migration from the later child-accounting
           fields, so rejection still exercises the intended reference guard. *)
        let legacy_state =
-         { restored with delegated_usage = None; child_contributions = None }
+         { restored with
+           delegated_usage = None
+         ; child_contributions = None
+         ; goal_descendants = None
+         ; policy_canonical_usage = None
+         ; goal_policy_contributions = None
+         }
        in
-       assert (
-         Result.is_error (State.upgrade_schema { legacy_state with schema_version = 19 }));
+       let require_migration state ~message =
+         match State.upgrade_schema state with
+         | Error error ->
+           [%test_eq: Agent_protocol.Error.code] Migration_required error.code;
+           [%test_eq: string] message error.message
+         | Ok _ -> failwith "historical authoring evidence bypassed migration"
+       in
+       require_migration
+         { legacy_state with schema_version = 19 }
+         ~message:"authoring publication context requires session schema 20";
        assert (List.equal I.equal state.invocations restored.invocations);
-       assert (
-         Result.is_error (State.upgrade_schema { legacy_state with schema_version = 18 }));
+       require_migration
+         { legacy_state with
+           schema_version = 18
+         ; conversation = { restored.conversation with authoring_publication = None }
+         }
+         ~message:"invocation authoring references require session schema 19";
        let legacy =
          { legacy_state with
            schema_version = 18

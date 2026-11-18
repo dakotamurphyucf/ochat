@@ -751,5 +751,65 @@
         "test/chatml_composition/embedded_extension_tests.ml": "ef39846409e77f69cfebc907eee5a87f2df1b1f86c5d45c08777f483fdad4b89"
       }
     }
+  },
+  {
+    "id": "T19",
+    "page": "tutorials/goal-recurrence",
+    "host": "Configured durable Ochat daemon",
+    "examples": [
+      "goal-recurrence"
+    ],
+    "verification": {
+      "state": "offline-checked",
+      "baseRevision": "45edce5ff90470ca2c9b86588745a3f706a1d321",
+      "testedAt": "2026-11-17",
+      "platform": "macOS 14.5 / arm64",
+      "toolchain": "OCaml 5.3.0, pinned Dune 3.24.2 and Eio 1.3+ochat.1, Node.js 22.22.1",
+      "liveProvider": false,
+      "commands": [
+        "dune build -j 2 --disable-promotion @agent-docs-check @test/capability_sources/runtest @test/authoring_sources/runtest",
+        "tar -xf goal-recurrence.tar",
+        "docs_check.exe --tutorials EXTRACTED_EXAMPLE"
+      ],
+      "observed": "Offline documentation and installed-source checks passed. All 23 archive members and individual downloads matched the recorded source files byte for byte. All 19 dependency paths resolved after extraction. The daemon admitted the extracted project and rejected each missing required companion. Archive SHA-256 88a4b2eccb5945d176e2e6f586c9ead09e6a606184e6d7b83870a9f0df40db9e.",
+      "limitations": "The extracted-tree check used a single catalog entry pointing to the archive member paths. Scope covers offline parser and daemon project admission. Hosted delivery and live model behavior require separate checks.",
+      "hashes": {
+        ".github/ci-toolchain.json": "cd329d3ffc890eb03cbd47a079362c951adc677be2e7f70a76d1b3a90a1152b7",
+        "LICENSE.txt": "cfe7ad42b7c3ddb8772df672f1001e6457ce5dcef9eaaaa6f271779e67e8b153",
+        "docs-src/examples/learning/goal-recurrence/README.md": "13a507d56f2dcb873de120bf0e837402122b973cf2c0112a1a3391857c1d5b14",
+        "docs-src/examples/learning/goal-recurrence/agent.chatmd": "4b26984ad5c0e6fcef42c1c35bd814ad92f83eb090a4a7d120ae58d009b2d60b",
+        "docs-src/examples/learning/goal-recurrence/chatml.project.json": "bac8ff0cfacdf16162cb291077675cdfedcc3c587502756d65b5a1e05d6465ea",
+        "docs-src/examples/learning/goal-recurrence/guidance/AGENTS.md": "188fda268508a0dd207591f4e4f5e3eb5fe327eee9a308c7544089698f7841b8",
+        "docs-src/examples/learning/goal-recurrence/guidance/release-review/SKILL.md": "5855fe242c4e9d00910e34c9a28481938599ce0597d648e2cfdb9e52f0ba2960",
+        "docs-src/examples/learning/goal-recurrence/moderator.chatml": "6a215592965f1e8fb57b8bb071e5450b415ba03569a290d0640cfaae3f2d22fc",
+        "docs-src/examples/learning/goal-recurrence/worker.chatmd": "ce59a3a421c77f59b1110dfed92c45d305b593c3fc8b11474fa8cee1d3cca9e4",
+        "docs-src/examples/libraries/goal-requests/chatml.project.json": "1aca8ebd25134e24f24ea3c596b6627db7e54f8564208170343c74be947ded2e",
+        "docs-src/examples/libraries/goal-requests/src/goal_requests.chatml": "6ac0f2fa0320fcab9b14d045e26a0b67f6e989eca7014f095c484dfabf01aa97",
+        "docs-src/examples/libraries/goal-requests/src/goal_requests.chatmli": "db8cd7101465da737bf65b48b2d9c200bcffdc1fcad47df5a48eb6a3cd1b7906",
+        "docs-src/examples/libraries/instruction-requests/chatml.project.json": "2fa071ccc615d24baf869595a549a5e3feedb3518bd2a3c36ef53b767a794670",
+        "docs-src/examples/libraries/instruction-requests/src/instruction_requests.chatml": "6b407edc33df31d980434b32fda2961a5d5c1963c4fe0d767f9731cef7876ba2",
+        "docs-src/examples/libraries/instruction-requests/src/instruction_requests.chatmli": "de5042ffb96bacab0179131a554ae0cdbc09cdb8ca9dabc2e01aedb05d597763",
+        "docs-src/examples/libraries/lifecycle-run/chatml.project.json": "1cb0db4f62a9b417316b1eb82cc001d61bd9ad9dabfc0e8e997a16445bd90857",
+        "docs-src/examples/libraries/lifecycle-run/src/lifecycle_run.chatml": "d6767440334c199452db3aec67643e01132a5f874be8fd19ba3c2b786026e24c",
+        "docs-src/examples/libraries/lifecycle-run/src/lifecycle_run.chatmli": "00f9b445a541ae07afe375c91e862fa301daee40acf076663406b8acde7e085c",
+        "docs-src/examples/libraries/lifecycle/chatml.project.json": "54a26874e094aa567cc218fde6b9ab1e0008d5b72c0b9b70d01c46fa4c890e6d",
+        "docs-src/examples/libraries/lifecycle/src/lifecycle.chatml": "15f53fe13e80a4e04478102fd5618b10209e6f111fcb39ae09751b2976fdde61",
+        "docs-src/examples/libraries/lifecycle/src/lifecycle.chatmli": "b530d9e1f0f373c3911f1e69c1e3d259eaf513f8ddb3926dcf99ac9b9fa98a34",
+        "docs-src/examples/libraries/recurrence-requests/chatml.project.json": "33339a39f368e08cefb1076d7d01bcbe805deb2ac3289d3ae1b6d0a95f88045b",
+        "docs-src/examples/libraries/recurrence-requests/src/recurrence_requests.chatml": "818cb94b4120a01d2dff7651add67914d4e2b42c215290bf5e282a746f742fce",
+        "docs-src/examples/libraries/recurrence-requests/src/recurrence_requests.chatmli": "12519a722dff0717db886fb3f6ca27529bdeb2d42d6e3465006b06a41fd64fbf",
+        "docs-src/tutorials/goal-recurrence.md": "309e771f5151334c4d039b293f6f18c382e04bee4372a5b9b381d068548c827a",
+        "lib/agent_server/daemon.ml": "23ae3e2d3de38ab5c2ce6d98dee2868f62b0a169196ae930fa5223681d0ca9e3",
+        "lib/agent_session/prompt_revision_builder.ml": "eaa1553325dd9a63b75c7c15b4450bf23037774e567d75d898f11d1c819af0bf",
+        "lib/chatmd/prompt.ml": "9d35e23e50ad499469c2a6c067d9c20ae8683c23d0c26c8b6dcc1883e7feef6d",
+        "test/agent_docs/docs_check.ml": "7ef9ba17af61cec2b457802713368aa2177b7c94834431b6851eef99875d5f02",
+        "test/agent_docs/docs_project_bundle.ml": "e92aa8997144b816187a6e8b22a2fd0b5bb0ac2e307b0ce1fb1be09300480fd3",
+        "test/agent_docs/docs_tutorials.ml": "c3bd2e21f7b41adaecb8377cb128dacac704e337448d9bbcf4d826979c548ca1",
+        "test/agent_docs/dune": "26499edadd546d0707ade68e7e0f33b298787570426259d6c3d9f36e153f7d7c",
+        "website/config/supplemental-sources.json": "468eff847722203790b6b24fb1630a184f48a0c9af941483419d2a5846e13c17",
+        "website/scripts/examples.mjs": "f0671a627eedfd7c1b1ee2b2f34fa58df9da583ef4ad416e7eb4e9017020f718",
+        "website/scripts/publication-policy.mjs": "9b319f666e661a872c9d5a95c34424258e51920bb388c71602a07077e27d4ba3"
+      }
+    }
   }
 ]

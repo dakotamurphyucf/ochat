@@ -558,53 +558,27 @@ let%expect_test
                           parent.id
                         |> Option.value_exn
                       in
-                      let pins =
+                      let prepare_definition ~filename ~inherited source =
                         Owner.with_background_runtime parent_entry.runtime (fun runtime ->
+                          let module C = Chat_response.Tool_capability in
                           let native =
                             Option.value_exn
                               runtime.Agent_session.Runtime_builder.native_runtime
                           in
                           let capabilities =
                             Lazy.force native.capabilities
-                            |> Result.map_error ~f:(fun error ->
-                              error.Chat_response.Tool_capability.message)
+                            |> Result.map_error ~f:(fun error -> error.C.message)
                             |> Result.ok_or_failwith
                           in
                           let selected =
-                            Chat_response.Tool_capability.select
-                              capabilities
-                              ~names:[ "read_file" ]
-                            |> Result.map_error ~f:(fun error ->
-                              error.Chat_response.Tool_capability.message)
-                            |> Result.ok_or_failwith
-                          in
-                          Chat_response.Background_request.capability_pins selected)
-                        |> protocol_ok
-                      in
-                      let parent_state = A.state parent_entry.actor |> protocol_ok in
-                      let bad_definition =
-                        Owner.with_background_runtime parent_entry.runtime (fun runtime ->
-                          let native =
-                            Option.value_exn
-                              runtime.Agent_session.Runtime_builder.native_runtime
-                          in
-                          let capabilities =
-                            Lazy.force native.capabilities
-                            |> Result.map_error ~f:(fun error ->
-                              error.Chat_response.Tool_capability.message)
+                            C.select capabilities ~names:inherited
+                            |> Result.map_error ~f:(fun error -> error.C.message)
                             |> Result.ok_or_failwith
                           in
                           let bundle =
                             Chatmd_source_bundle.create
-                              ~root_file:"bad.chatmd"
-                              ~sources:
-                                [ ( "bad.chatmd"
-                                  , {|<developer>Bad initializer.</developer><script id="bad" language="chatml" kind="moderator" api="extensibility-v1">
-let initial_state = if true then fail("fixture initialization failure") else 0
-let on_event ctx state event = Task.pure(state)
-</script>|}
-                                  )
-                                ]
+                              ~root_file:filename
+                              ~sources:[ filename, source ]
                               ()
                             |> Result.ok_or_failwith
                           in
@@ -614,7 +588,7 @@ let on_event ctx state event = Task.pure(state)
                             ~revision_id:(P.Id.Prompt_revision.create ())
                             ~created_at:(P.Timestamp.now ())
                             ~current_capabilities:(fun () -> capabilities)
-                            ~references:[]
+                            ~references:(C.references selected)
                             bundle
                           |> Result.map_error ~f:(fun errors ->
                             P.Error.invalid_request
@@ -622,17 +596,30 @@ let on_event ctx state event = Task.pure(state)
                                |> String.concat ~sep:"\n")))
                         |> protocol_ok
                       in
-                      let create_bad () =
+                      let create ~start_immediately ~key definition =
                         Agent_server.Session_factory.create_generated_session
-                          ~start_immediately:true
+                          ~start_immediately
                           (Daemon.factory daemon)
                           ~parent_session_id:parent.id
-                          ~idempotency_key:
-                            (P.Idempotency_key.of_string "bad-initial-start"
-                             |> protocol_ok)
+                          ~idempotency_key:(P.Idempotency_key.of_string key |> protocol_ok)
                           ~display_name:None
-                          bad_definition
+                          definition
                         |> protocol_ok
+                      in
+                      let bad_definition =
+                        prepare_definition
+                          ~filename:"bad.chatmd"
+                          ~inherited:[]
+                          {|<developer>Bad initializer.</developer><script id="bad" language="chatml" kind="moderator" api="extensibility-v1">
+let initial_state = if true then fail("fixture initialization failure") else 0
+let on_event ctx state event = Task.pure(state)
+</script>|}
+                      in
+                      let create_bad () =
+                        create
+                          ~start_immediately:true
+                          ~key:"bad-initial-start"
+                          bad_definition
                       in
                       let failed = create_bad () in
                       let failed_state = A.state failed.actor |> protocol_ok in
@@ -669,19 +656,30 @@ let on_event ctx state event = Task.pure(state)
                       H.detach bad |> protocol_ok;
                       [%test_eq: int] 0 !requests;
                       assert (Owner.is_loaded parent_entry.runtime);
-                      let child_id, _ =
-                        install_child
-                          ~env
-                          ~sw
-                          ~daemon
-                          ~parent:parent_state
-                          ~mode:`Valid
-                          ~source:
-                            {|<config model="child-test" reasoning_effort="high"/><developer>Child.</developer><tool type="inherited" name="read_file"/>|}
-                          ~capability_pins:pins
-                          ~pending_initial_start:false
-                          ~revoke:false
+                      let child_definition =
+                        prepare_definition
+                          ~filename:"child.chatmd"
+                          ~inherited:[ "read_file" ]
+                          {|<config model="child-test" reasoning_effort="high"/><developer>Child.</developer><tool type="inherited" name="read_file"/>|}
                       in
+                      let created =
+                        create
+                          ~start_immediately:false
+                          ~key:"inherited-read"
+                          child_definition
+                      in
+                      let state = A.state created.actor |> protocol_ok in
+                      let child_id = state.identity.session_id in
+                      let reference = Option.value_exn state.spec.delegation in
+                      let record =
+                        D.resolve (S.delegations (Daemon.store daemon)) reference
+                        |> store_ok
+                      in
+                      assert (
+                        Option.equal
+                          Agent_store.Delegation_goal_origin.equal
+                          record.admission.goal_origin
+                          (Some Agent_store.Delegation_goal_origin.unrelated));
                       let child =
                         H.attach
                           ~sw
@@ -1215,7 +1213,7 @@ let%expect_test
                 let previous =
                   Agent_server.Session_registry.find registry leaf_id |> Option.value_exn
                 in
-                previous.close ();
+                Agent_server.Session_registry.close_entry previous;
                 ignore
                   (Agent_server.Session_registry.remove registry leaf_id
                    : Agent_server.Session_registry.entry option);
@@ -1300,7 +1298,7 @@ let%expect_test
                      | 2 ->
                        H.stop handle ~mode:Cancel |> protocol_ok |> ignore;
                        H.detach handle |> protocol_ok;
-                       entry.close ();
+                       Agent_server.Session_registry.close_entry entry;
                        ignore
                          (Agent_server.Session_registry.remove registry leaf_id
                           : Agent_server.Session_registry.entry option);

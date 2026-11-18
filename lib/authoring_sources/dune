@@ -19,11 +19,28 @@
   (with-stdout-to %{targets}
    (run %{exe:embed_contracts.exe}
     lib/agent_server/authoring_instruction_sources.ml %{dep:../agent_server/authoring_instruction_sources.ml}
+    lib/agent_client/instruction_controls.ml %{dep:../agent_client/instruction_controls.ml}
+    lib/agent_client/instruction_controls.mli %{dep:../agent_client/instruction_controls.mli}
+    lib/agent_client/session_handle.ml %{dep:../agent_client/session_handle.ml}
+    lib/agent_client/session_handle.mli %{dep:../agent_client/session_handle.mli}
+    lib/agent_protocol/command.ml %{dep:../agent_protocol/command.ml}
+    lib/agent_protocol/command.mli %{dep:../agent_protocol/command.mli}
+    lib/agent_protocol/instruction_control.ml %{dep:../agent_protocol/instruction_control.ml}
+    lib/agent_protocol/instruction_control.mli %{dep:../agent_protocol/instruction_control.mli}
+    lib/agent_protocol/method_result.ml %{dep:../agent_protocol/method_result.ml}
+    lib/agent_protocol/method_result.mli %{dep:../agent_protocol/method_result.mli}
+    lib/agent_protocol/public_result.ml %{dep:../agent_protocol/public_result.ml}
+    lib/agent_server/authorization.ml %{dep:../agent_server/authorization.ml}
+    lib/agent_server/instruction_operator_service.ml %{dep:../agent_server/instruction_operator_service.ml}
+    lib/agent_server/instruction_operator_service.mli %{dep:../agent_server/instruction_operator_service.mli}
+    lib/agent_server/principal_projection.ml %{dep:../agent_server/principal_projection.ml}
     lib/agent_session/goal_native_admission.ml %{dep:../agent_session/goal_native_admission.ml}
+    lib/agent_protocol/goal_resume_request.ml %{dep:../agent_protocol/goal_resume_request.ml}
     lib/agent_session/goal_native_metadata_tool.ml %{dep:../agent_session/goal_native_metadata_tool.ml}
     lib/agent_session/goal_native_start_tool.ml %{dep:../agent_session/goal_native_start_tool.ml}
     lib/agent_session/goal_native_metadata_service.ml %{dep:../agent_session/goal_native_metadata_service.ml}
     lib/agent_session/goal_native_metadata_view.ml %{dep:../agent_session/goal_native_metadata_view.ml}
+    lib/agent_session/goal_run_evidence.ml %{dep:../agent_session/goal_run_evidence.ml}
     lib/agent_session/recurrence_native_admission.ml %{dep:../agent_session/recurrence_native_admission.ml}
     lib/agent_session/recurrence_native_schema.ml %{dep:../agent_session/recurrence_native_schema.ml}
     lib/agent_session/recurrence_native_request.ml %{dep:../agent_session/recurrence_native_request.ml}
@@ -31,9 +48,11 @@
     lib/agent_session/recurrence_query.ml %{dep:../agent_session/recurrence_query.ml}
     lib/agent_session/recurrence_target_view.ml %{dep:../agent_session/recurrence_target_view.ml}
     lib/agent_session/recurrence_service.ml %{dep:../agent_session/recurrence_service.ml}
+    lib/agent_session/recurrence_goal_capture.ml %{dep:../agent_session/recurrence_goal_capture.ml}
     lib/agent_session/instruction_source_port.ml %{dep:../agent_session/instruction_source_port.ml}
     lib/agent_session/instruction_source_request.ml %{dep:../agent_session/instruction_source_request.ml}
     lib/agent_session/instruction_native_admission.ml %{dep:../agent_session/instruction_native_admission.ml}
+    lib/agent_session/instruction_admission.ml %{dep:../agent_session/instruction_admission.ml}
     lib/agent_session/instruction_native_request.ml %{dep:../agent_session/instruction_native_request.ml}
     lib/agent_session/instruction_native_tool.ml %{dep:../agent_session/instruction_native_tool.ml}
     lib/agent_session/instruction_command_admission.ml %{dep:../agent_session/instruction_command_admission.ml}
@@ -204,7 +223,37 @@
     lib/agent_store/developer_run_store.ml %{dep:../agent_store/developer_run_store.ml}
     lib/agent_session/background_job_event.ml %{dep:../agent_session/background_job_event.ml}
     lib/agent_session/external_ingress.ml %{dep:../agent_session/external_ingress.ml}
+    lib/agent_protocol/session_storage_semantics.ml %{dep:../agent_protocol/session_storage_semantics.ml}
+    lib/agent_session/policy_restore_basis.ml %{dep:../agent_session/policy_restore_basis.ml}
+    lib/agent_session/policy_restore_basis.mli %{dep:../agent_session/policy_restore_basis.mli}
+    lib/agent_session/moderator_lifecycle.ml %{dep:../agent_session/moderator_lifecycle.ml}
+    lib/agent_session/moderator_lifecycle.mli %{dep:../agent_session/moderator_lifecycle.mli}
+    lib/agent_session/run_state.ml %{dep:../agent_session/run_state.ml}
+    lib/agent_session/run_state.mli %{dep:../agent_session/run_state.mli}
+    lib/agent_session/session_state.mli %{dep:../agent_session/session_state.mli}
+    lib/agent_session/session_storage_semantics.ml %{dep:../agent_session/session_storage_semantics.ml}
+    lib/agent_session/session_state_document.ml %{dep:../agent_session/session_state_document.ml}
+    lib/agent_session/session_state_document.mli %{dep:../agent_session/session_state_document.mli}
+    lib/agent_session/session_state_decode_evidence.ml %{dep:../agent_session/session_state_decode_evidence.ml}
+    lib/agent_session/session_state_decode_evidence.mli %{dep:../agent_session/session_state_decode_evidence.mli}
+    lib/agent_session/session_delta_document.ml %{dep:../agent_session/session_delta_document.ml}
     lib/agent_session/moderator_tool_dispatch.ml %{dep:../agent_session/moderator_tool_dispatch.ml}
+    lib/agent_session/managed_moderator_dispatch.ml %{dep:../agent_session/managed_moderator_dispatch.ml}
+    lib/agent_session/operation_worker.ml %{dep:../agent_session/operation_worker.ml}
+    lib/agent_session/callback_cleanup.ml %{dep:../agent_session/callback_cleanup.ml}
+    lib/agent_session/callback_cleanup.mli %{dep:../agent_session/callback_cleanup.mli}
+    lib/agent_session/callback_cleanup_data.ml %{dep:../agent_session/callback_cleanup_data.ml}
+    lib/agent_session/callback_cleanup_data.mli %{dep:../agent_session/callback_cleanup_data.mli}
+    lib/agent_session/product_callback_data.ml %{dep:../agent_session/product_callback_data.ml}
+    lib/agent_session/product_callback_data.mli %{dep:../agent_session/product_callback_data.mli}
+    lib/agent_session/delegated_policy_caller.ml %{dep:../agent_session/delegated_policy_caller.ml}
+    lib/agent_session/delegated_policy_caller_custody.ml %{dep:../agent_session/delegated_policy_caller_custody.ml}
+    lib/agent_session/delegated_policy_governance_data.ml %{dep:../agent_session/delegated_policy_governance_data.ml}
+    lib/agent_session/delegated_policy_seed.ml %{dep:../agent_session/delegated_policy_seed.ml}
+    lib/agent_session/delegated_policy_claim_state.ml %{dep:../agent_session/delegated_policy_claim_state.ml}
+    lib/agent_session/invocation_capabilities.ml %{dep:../agent_session/invocation_capabilities.ml}
+    lib/agent_session/moderator_event.ml %{dep:../agent_session/moderator_event.ml}
+    lib/agent_session/moderator_observation.ml %{dep:../agent_session/moderator_observation.ml}
     lib/agent_session/notification_delivery.ml %{dep:../agent_session/notification_delivery.ml}
     lib/agent_session/notification_history.ml %{dep:../agent_session/notification_history.ml}
     lib/agent_session/notification_wake_selection.ml %{dep:../agent_session/notification_wake_selection.ml}
@@ -217,7 +266,77 @@
     lib/agent_session/script_schedule_service.ml %{dep:../agent_session/script_schedule_service.ml}
     lib/agent_session/script_subscription_service.ml %{dep:../agent_session/script_subscription_service.ml}
     lib/agent_session/goal_descendant_admission_custody.ml %{dep:../agent_session/goal_descendant_admission_custody.ml}
+    lib/agent_session/goal_wake_selection.ml %{dep:../agent_session/goal_wake_selection.ml}
     lib/agent_session/session_actor.ml %{dep:../agent_session/session_actor.ml}
+    lib/agent_session/writer_attachment.ml %{dep:../agent_session/writer_attachment.ml}
+    lib/agent_session/inference_graph_owner.ml %{dep:../agent_session/inference_graph_owner.ml}
+    lib/agent_session/extension_invariants.ml %{dep:../agent_session/extension_invariants.ml}
+    lib/agent_session/job_dependency.ml %{dep:../agent_session/job_dependency.ml}
+    lib/agent_session/job_launch.ml %{dep:../agent_session/job_launch.ml}
+    lib/agent_session/policy_native_ancestry.ml %{dep:../agent_session/policy_native_ancestry.ml}
+    lib/agent_session/policy_canonical_usage_source.ml %{dep:../agent_session/policy_canonical_usage_source.ml}
+    lib/agent_session/policy_standalone_source.ml %{dep:../agent_session/policy_standalone_source.ml}
+    lib/agent_session/standalone_completion_contract.ml %{dep:../agent_session/standalone_completion_contract.ml}
+    lib/agent_session/policy_caller_source.ml %{dep:../agent_session/policy_caller_source.ml}
+    lib/agent_session/policy_cause_leaf.ml %{dep:../agent_session/policy_cause_leaf.ml}
+    lib/agent_session/policy_forwarding_frame.ml %{dep:../agent_session/policy_forwarding_frame.ml}
+    lib/agent_session/policy_forwarding_route.ml %{dep:../agent_session/policy_forwarding_route.ml}
+    lib/agent_session/policy_forwarding.ml %{dep:../agent_session/policy_forwarding.ml}
+    lib/agent_session/policy_cause_data.ml %{dep:../agent_session/policy_cause_data.ml}
+    lib/agent_session/policy_canonical_usage_data.ml %{dep:../agent_session/policy_canonical_usage_data.ml}
+    lib/agent_session/policy_canonical_usage_carrier.ml %{dep:../agent_session/policy_canonical_usage_carrier.ml}
+    lib/agent_session/policy_canonical_usage_selection.ml %{dep:../agent_session/policy_canonical_usage_selection.ml}
+    lib/agent_session/policy_canonical_usage_update.ml %{dep:../agent_session/policy_canonical_usage_update.ml}
+    lib/agent_session/policy_canonical_usage_projection.ml %{dep:../agent_session/policy_canonical_usage_projection.ml}
+    lib/agent_session/policy_canonical_usage_forwarding.ml %{dep:../agent_session/policy_canonical_usage_forwarding.ml}
+    lib/agent_session/policy_canonical_usage_ordered.ml %{dep:../agent_session/policy_canonical_usage_ordered.ml}
+    lib/agent_session/policy_canonical_usage.ml %{dep:../agent_session/policy_canonical_usage.ml}
+    lib/agent_session/constructor_model_producer.ml %{dep:../agent_session/constructor_model_producer.ml}
+    lib/agent_session/model_job_admission.ml %{dep:../agent_session/model_job_admission.ml}
+    lib/agent_session/model_job_event.ml %{dep:../agent_session/model_job_event.ml}
+    lib/agent_session/model_job_event.mli %{dep:../agent_session/model_job_event.mli}
+    lib/agent_session/session_commit_attempt.ml %{dep:../agent_session/session_commit_attempt.ml}
+    lib/agent_session/goal_causal_admission_custody.ml %{dep:../agent_session/goal_causal_admission_custody.ml}
+    lib/agent_session/goal_causal_root_route.ml %{dep:../agent_session/goal_causal_root_route.ml}
+    lib/agent_session/goal_descendant_root_route.ml %{dep:../agent_session/goal_descendant_root_route.ml}
+    lib/agent_session/session_commit_observation.ml %{dep:../agent_session/session_commit_observation.ml}
+    lib/agent_session/canonical_backend_binding_data.ml %{dep:../agent_session/canonical_backend_binding_data.ml}
+    lib/agent_session/canonical_backend_binding_data.mli %{dep:../agent_session/canonical_backend_binding_data.mli}
+    lib/agent_session/failed_startup_data.ml %{dep:../agent_session/failed_startup_data.ml}
+    lib/agent_session/failed_startup_data.mli %{dep:../agent_session/failed_startup_data.mli}
+    lib/agent_session/failed_startup_release_data.ml %{dep:../agent_session/failed_startup_release_data.ml}
+    lib/agent_session/failed_startup_release_data.mli %{dep:../agent_session/failed_startup_release_data.mli}
+    lib/agent_session/session_actor.mli %{dep:../agent_session/session_actor.mli}
+    lib/agent_session/session_persistence.mli %{dep:../agent_session/session_persistence.mli}
+    lib/agent_session/session_persistence.ml %{dep:../agent_session/session_persistence.ml}
+    lib/agent_session/session_recovery_cpu.ml %{dep:../agent_session/session_recovery_cpu.ml}
+    lib/agent_session/session_recovery_cpu.mli %{dep:../agent_session/session_recovery_cpu.mli}
+    lib/agent_session/goal_policy_receipt.ml %{dep:../agent_session/goal_policy_receipt.ml}
+    lib/agent_session/goal_policy_contributions_data.ml %{dep:../agent_session/goal_policy_contributions_data.ml}
+    lib/agent_session/goal_policy_contributions_capacity.ml %{dep:../agent_session/goal_policy_contributions_capacity.ml}
+    lib/agent_session/goal_policy_contributions_carrier.ml %{dep:../agent_session/goal_policy_contributions_carrier.ml}
+    lib/agent_session/goal_policy_contributions_update.ml %{dep:../agent_session/goal_policy_contributions_update.ml}
+    lib/agent_session/goal_policy_contributions.ml %{dep:../agent_session/goal_policy_contributions.ml}
+    lib/agent_session/goal_policy_totals.ml %{dep:../agent_session/goal_policy_totals.ml}
+    lib/agent_session/goal_policy_ordered.ml %{dep:../agent_session/goal_policy_ordered.ml}
+    lib/agent_session/session_goal_policy_projection.ml %{dep:../agent_session/session_goal_policy_projection.ml}
+    lib/agent_session/goal_charge_admission.ml %{dep:../agent_session/goal_charge_admission.ml}
+    lib/agent_session/goal_activation_policy.ml %{dep:../agent_session/goal_activation_policy.ml}
+    lib/agent_session/goal_root_policy.ml %{dep:../agent_session/goal_root_policy.ml}
+    lib/agent_session/goal_resume_admission.ml %{dep:../agent_session/goal_resume_admission.ml}
+    lib/agent_session/goal_continuation_phase.ml %{dep:../agent_session/goal_continuation_phase.ml}
+    lib/agent_session/goal_command_admission.ml %{dep:../agent_session/goal_command_admission.ml}
+    lib/agent_session/canonical_usage_update.ml %{dep:../agent_session/canonical_usage_update.ml}
+    lib/agent_session/session_delta.ml %{dep:../agent_session/session_delta.ml}
+    lib/agent_session/session_document_transition.ml %{dep:../agent_session/session_document_transition.ml}
+    lib/agent_session/host_turn_tracking.ml %{dep:../agent_session/host_turn_tracking.ml}
+    lib/agent_session/session_state_presence.ml %{dep:../agent_session/session_state_presence.ml}
+    lib/agent_store/job_result_store.ml %{dep:../agent_store/job_result_store.ml}
+    lib/agent_store/snapshot.ml %{dep:../agent_store/snapshot.ml}
+    lib/agent_store/transaction.ml %{dep:../agent_store/transaction.ml}
+    lib/agent_session/history_retirement.ml %{dep:../agent_session/history_retirement.ml}
+    lib/agent_session/pending_archive_transition.ml %{dep:../agent_session/pending_archive_transition.ml}
+    lib/agent_server/session_seed_receipt.ml %{dep:../agent_server/session_seed_receipt.ml}
     lib/agent_session/idle_completion_write.ml %{dep:../agent_session/idle_completion_write.ml}
     lib/agent_session/initial_lifecycle_startup.ml %{dep:../agent_session/initial_lifecycle_startup.ml}
     lib/agent_session/preparation_tracking.ml %{dep:../agent_session/preparation_tracking.ml}
@@ -228,15 +347,69 @@
     lib/agent_session/recurrence_activation_custody.ml %{dep:../agent_session/recurrence_activation_custody.ml}
     lib/agent_session/actor_reply.ml %{dep:../agent_session/actor_reply.ml}
     lib/agent_session/execution_custody.ml %{dep:../agent_session/execution_custody.ml}
+    lib/agent_session/observation_continuation.ml %{dep:../agent_session/observation_continuation.ml}
     lib/agent_session/legacy_queue_custody.ml %{dep:../agent_session/legacy_queue_custody.ml}
     lib/agent_session/legacy_queue_checkpoint.ml %{dep:../agent_session/legacy_queue_checkpoint.ml}
+    lib/agent_session/external_delivery_checkpoint.ml %{dep:../agent_session/external_delivery_checkpoint.ml}
+    lib/agent_session/queued_moderator_event.ml %{dep:../agent_session/queued_moderator_event.ml}
+    lib/agent_session/queue_producer.ml %{dep:../agent_session/queue_producer.ml}
+    lib/agent_protocol/moderator_execution.ml %{dep:../agent_protocol/moderator_execution.ml}
+    lib/agent_protocol/queue_producer.ml %{dep:../agent_protocol/queue_producer.ml}
+    lib/agent_session/session_record_shapes.ml %{dep:../agent_session/session_record_shapes.ml}
+    lib/agent_session/queue_provenance_validation.ml %{dep:../agent_session/queue_provenance_validation.ml}
+    lib/agent_session/retained_job_producer.ml %{dep:../agent_session/retained_job_producer.ml}
     lib/agent_session/legacy_schedule_custody.ml %{dep:../agent_session/legacy_schedule_custody.ml}
+    lib/agent_session/ingress_creator_custody.ml %{dep:../agent_session/ingress_creator_custody.ml}
+    lib/agent_session/staged_mutations.ml %{dep:../agent_session/staged_mutations.ml}
+    lib/agent_session/staged_ingress.ml %{dep:../agent_session/staged_ingress.ml}
     lib/agent_session/moderator_source_installation.ml %{dep:../agent_session/moderator_source_installation.ml}
     lib/agent_session/session_state.ml %{dep:../agent_session/session_state.ml}
     lib/agent_session/legacy_moderator_checkpoint.ml %{dep:../agent_session/legacy_moderator_checkpoint.ml}
     lib/agent_session/administration.ml %{dep:../agent_session/administration.ml}
     lib/agent_server/command_handler.ml %{dep:../agent_server/command_handler.ml}
+    lib/agent_server/initialization_capture.ml %{dep:../agent_server/initialization_capture.ml}
+    lib/agent_server/initialization_capture.mli %{dep:../agent_server/initialization_capture.mli}
+    lib/agent_server/initialization_capture_data.ml %{dep:../agent_server/initialization_capture_data.ml}
+    lib/agent_server/initialization_capture_data.mli %{dep:../agent_server/initialization_capture_data.mli}
+    lib/agent_server/disposal_report_data.ml %{dep:../agent_server/disposal_report_data.ml}
+    lib/agent_server/disposal_report_data.mli %{dep:../agent_server/disposal_report_data.mli}
+    lib/agent_session/cleanup_diagnostic.ml %{dep:../agent_session/cleanup_diagnostic.ml}
+    lib/agent_session/cleanup_diagnostic.mli %{dep:../agent_session/cleanup_diagnostic.mli}
+    lib/agent_session/close_observation.ml %{dep:../agent_session/close_observation.ml}
+    lib/agent_session/close_observation.mli %{dep:../agent_session/close_observation.mli}
+    lib/agent_session/runtime_builder.mli %{dep:../agent_session/runtime_builder.mli}
+    lib/agent_server/session_policy_resource.mli %{dep:../agent_server/session_policy_resource.mli}
+    lib/agent_server/original_cleanup_report.ml %{dep:../agent_server/original_cleanup_report.ml}
+    lib/agent_server/original_cleanup_report.mli %{dep:../agent_server/original_cleanup_report.mli}
+    lib/agent_server/cleanup_original_view.ml %{dep:../agent_server/cleanup_original_view.ml}
+    lib/agent_server/cleanup_original_view.mli %{dep:../agent_server/cleanup_original_view.mli}
+    lib/agent_server/session_disposal_report.ml %{dep:../agent_server/session_disposal_report.ml}
+    lib/agent_server/session_disposal_report.mli %{dep:../agent_server/session_disposal_report.mli}
+    lib/agent_server/callback_disposal.ml %{dep:../agent_server/callback_disposal.ml}
+    lib/agent_server/callback_disposal.mli %{dep:../agent_server/callback_disposal.mli}
+    lib/agent_server/runtime_callback_data.ml %{dep:../agent_server/runtime_callback_data.ml}
+    lib/agent_server/runtime_callback_data.mli %{dep:../agent_server/runtime_callback_data.mli}
     lib/agent_server/runtime_owner.ml %{dep:../agent_server/runtime_owner.ml}
+    lib/agent_server/runtime_resource_testing.ml %{dep:../agent_server/runtime_resource_testing.ml}
+    lib/agent_server/runtime_resource_testing.mli %{dep:../agent_server/runtime_resource_testing.mli}
+    lib/agent_server/ancestry_cleanup.mli %{dep:../agent_server/ancestry_cleanup.mli}
+    lib/agent_server/ancestry_cleanup.ml %{dep:../agent_server/ancestry_cleanup.ml}
+    lib/agent_session/runtime_close.mli %{dep:../agent_session/runtime_close.mli}
+    lib/agent_session/runtime_close.ml %{dep:../agent_session/runtime_close.ml}
+    lib/agent_server/graph_tracking.ml %{dep:../agent_server/graph_tracking.ml}
+    lib/agent_server/session_registry.ml %{dep:../agent_server/session_registry.ml}
+    lib/agent_session/ordinary_runtime_basis.ml %{dep:../agent_session/ordinary_runtime_basis.ml}
+    lib/agent_server/session_policy_resource.ml %{dep:../agent_server/session_policy_resource.ml}
+    lib/agent_server/constructor_inference_graph.ml %{dep:../agent_server/constructor_inference_graph.ml}
+    lib/agent_server/runtime_native_scope.ml %{dep:../agent_server/runtime_native_scope.ml}
+    lib/agent_server/native_cleanup_observation.ml %{dep:../agent_server/native_cleanup_observation.ml}
+    lib/agent_server/native_cleanup_observation.mli %{dep:../agent_server/native_cleanup_observation.mli}
+    lib/agent_server/native_resource_lifetime.ml %{dep:../agent_server/native_resource_lifetime.ml}
+    lib/agent_server/independent_cleanup.ml %{dep:../agent_server/independent_cleanup.ml}
+    lib/agent_server/independent_resources.ml %{dep:../agent_server/independent_resources.ml}
+    lib/agent_server/independent_eligibility.ml %{dep:../agent_server/independent_eligibility.ml}
+    lib/agent_server/independent_eligibility.mli %{dep:../agent_server/independent_eligibility.mli}
+    lib/agent_server/native_resource_authority.ml %{dep:../agent_server/native_resource_authority.ml}
     lib/agent_session/staged_jobs.ml %{dep:../agent_session/staged_jobs.ml}
     lib/agent_session/job_custody.ml %{dep:../agent_session/job_custody.ml}
     lib/agent_session/staged_notifications.ml %{dep:../agent_session/staged_notifications.ml}
@@ -255,6 +428,8 @@
     lib/chat_response/agent_tool_contract.ml %{dep:../chat_response/agent_tool_contract.ml}
     lib/chat_response/authoring_policy.ml %{dep:../chat_response/authoring_policy.ml}
     lib/chat_response/generated_admission.ml %{dep:../chat_response/generated_admission.ml}
+    lib/chat_response/extension_compiler.ml %{dep:../chat_response/extension_compiler.ml}
+    lib/agent_session/runtime_source_preparation.ml %{dep:../agent_session/runtime_source_preparation.ml}
     lib/chat_response/initial_prompt_history.ml %{dep:../chat_response/initial_prompt_history.ml}
     lib/chatmd/chatmd_ast.ml %{dep:../chatmd/chatmd_ast.ml}
     lib/chatmd/chatmd_attribute_lex.ml %{dep:../chatmd/chatmd_attribute_lex.ml}
@@ -290,6 +465,13 @@
     lib/agent_server/managed_output_cursor.ml %{dep:../agent_server/managed_output_cursor.ml}
     lib/agent_server/managed_output_page.ml %{dep:../agent_server/managed_output_page.ml}
     lib/agent_server/session_factory.ml %{dep:../agent_server/session_factory.ml}
+    lib/agent_server/descendant_accounting_host.ml %{dep:../agent_server/descendant_accounting_host.ml}
+    lib/agent_server/delegated_policy_call.ml %{dep:../agent_server/delegated_policy_call.ml}
+    lib/agent_server/delegated_policy_vector.ml %{dep:../agent_server/delegated_policy_vector.ml}
+    lib/agent_server/session_retention.ml %{dep:../agent_server/session_retention.ml}
+    lib/agent_server/session_retention.mli %{dep:../agent_server/session_retention.mli}
+    lib/agent_server/session_recovery_owner.ml %{dep:../agent_server/session_recovery_owner.ml}
+    lib/agent_server/session_recovery_owner.mli %{dep:../agent_server/session_recovery_owner.mli}
     lib/agent_server/recurrence_authored_source.ml %{dep:../agent_server/recurrence_authored_source.ml}
     lib/shell_runtime/approval_broker.ml %{dep:../shell_runtime/approval_broker.ml}
     lib/shell_runtime/call_context.ml %{dep:../shell_runtime/call_context.ml}
@@ -340,6 +522,7 @@
     lib/agent_session/one_off_execution.ml %{dep:../agent_session/one_off_execution.ml}
     lib/agent_session/run_chatml_tool.ml %{dep:../agent_session/run_chatml_tool.ml}
     lib/agent_session/script_tool_calls.ml %{dep:../agent_session/script_tool_calls.ml}
+    lib/agent_session/standalone_tool_dispatch.ml %{dep:../agent_session/standalone_tool_dispatch.ml}
     lib/agent_session/session_management.ml %{dep:../agent_session/session_management.ml}
     lib/agent_session/session_management_native.ml %{dep:../agent_session/session_management_native.ml}
     lib/agent_session/session_management_channel.ml %{dep:../agent_session/session_management_channel.ml}
@@ -349,6 +532,7 @@
     lib/agent_session/prompt_source_lease.ml %{dep:../agent_session/prompt_source_lease.ml}
     lib/agent_session/prompt_catalog.ml %{dep:../agent_session/prompt_catalog.ml}
     lib/agent_session/runtime_builder.ml %{dep:../agent_session/runtime_builder.ml}
+    lib/agent_session/runtime_unmoderated_source.ml %{dep:../agent_session/runtime_unmoderated_source.ml}
     lib/agent_session/legacy_callback_runtime.ml %{dep:../agent_session/legacy_callback_runtime.ml}
     lib/agent_session/run_job_completion.ml %{dep:../agent_session/run_job_completion.ml}
     lib/agent_session/run_transition.ml %{dep:../agent_session/run_transition.ml}
@@ -385,6 +569,7 @@
     lib/chatmd_shell_spec/chatmd_script_spec.ml %{dep:../chatmd_shell_spec/chatmd_script_spec.ml}
     lib/chatmd_shell_spec/shell_element.ml %{dep:../chatmd_shell_spec/shell_element.ml}
     lib/functions.ml %{dep:../functions.ml}
+    lib/apply_patch.ml %{dep:../apply_patch.ml}
     lib/mcp/mcp_tool.ml %{dep:../mcp/mcp_tool.ml}))))
 
 (rule

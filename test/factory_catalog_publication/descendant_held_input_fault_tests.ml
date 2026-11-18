@@ -100,7 +100,8 @@ module Fault = struct
     let ledger =
       List.find_map changes ~f:(function
         | A.Session_delta.Inference_ledger_changed ledger
-        | Delegated_inference_ledger_changed (ledger, _) -> Some ledger
+        | Delegated_inference_ledger_changed (ledger, _)
+        | Policy_inference_ledger_changed (ledger, _, _) -> Some ledger
         | _ -> None)
     in
     match record, index, ledger with

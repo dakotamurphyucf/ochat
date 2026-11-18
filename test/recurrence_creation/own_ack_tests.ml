@@ -13,12 +13,22 @@ module Manager = Chat_response.Moderator_manager
 (* The controller was initialized BEFORE this staged admission. Its real Manager
    checkpoint is compiled from the exact captured revision, then installed by the
    actual Actor. This is not the Factory/cold-Ready initialization path. *)
-let with_controller ?clock_read ?before_commit ?published ?before_observe f =
-  Held_tests.with_captured_target ~controller:true (fun fixture source root_file ->
+let with_controller
+      ?initialize_state
+      ?clock_read
+      ?before_commit
+      ?published
+      ?before_observe
+      f
+  =
+  let with_captured_target =
+    Held_tests.with_captured_target ~controller:true ?initialize_state
+  in
+  with_captured_target (fun fixture source root_file ->
     let revision =
       match Builder.Source.selection source with
       | Authored revision -> revision
-      | Captured _ | Authored_child _ | Generated _ ->
+      | Captured _ | Authored_child _ | Generated _ | Generated_artifact _ ->
         failwith "controller fixture requires its actual captured revision"
     in
     let _, artifact =

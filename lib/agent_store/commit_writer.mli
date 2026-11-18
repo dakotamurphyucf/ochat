@@ -15,6 +15,13 @@ val session_id : t -> Agent_protocol.Id.Session.t
     Does not authorize another commit or recover uncertain journal counters. *)
 val is_available : t -> bool
 
+(** Pure domain-owned status of an unavailable writer whose worker has not
+    stopped. Available, closed and joined workers return false. This is not a
+    write-outcome or disposal proof: unavailability can also follow validation
+    failure or an acknowledged final transaction sequence. It grants no retry,
+    acknowledgement or resource-release authority. *)
+val requires_recovery : t -> bool
+
 type committed =
   { transaction_sequence : int64
   ; transaction_hash : string

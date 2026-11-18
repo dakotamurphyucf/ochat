@@ -5,9 +5,10 @@ A code reviewer can focus on correctness while a documentation reviewer checks
 whether the same change is understandable. The parent gathers their findings
 and decides what to do next.
 
-Ochat supports both specialists you define ahead of time and agents created for
-a particular task. Choose the conversation lifetime as deliberately as the role:
-some questions need one answer, while an investigation benefits from follow-up.
+Use a one-off specialist for a single answer. Persistent agents keep their own
+conversation between calls. Save the returned session ID when a reviewer will
+need to answer follow-up questions or check a later revision. You can define a
+specialist ahead of time or create one for a particular task.
 
 ## Choose a delegation pattern
 

@@ -551,7 +551,9 @@ let unknown_tool_prompt =
       match event with
       | `Session_start ->
         Task.bind(Tool.call("undeclared-workspace-reader", `Null), fun result ->
-        Task.pure(state + 1))
+          match result with
+          | `Error(code) -> Task.fail("workspace authority probe: " ++ code)
+          | `Ok(_) -> Task.pure(state + 1))
 </script>
 |}
 ;;
@@ -602,8 +604,13 @@ let test_unknown_tool env environment =
   with_daemon env environment fixture ~name (fun connection _launch_directory ->
     let failure = failed_session_create connection in
     require
-      (String.is_substring failure.message ~substring:"Tool.call is not configured")
-      "an undeclared ChatML tool did not fail closed")
+      (Agent_protocol.Error.equal_code failure.code Invalid_state)
+      "undeclared tool startup returned the wrong protocol error";
+    require
+      (String.is_substring
+         failure.message
+         ~substring:"workspace authority probe: invocation.unselected_tool")
+      "the runtime did not report the undeclared tool as unselected")
 ;;
 
 let make_narrow_workspace environment fixture =

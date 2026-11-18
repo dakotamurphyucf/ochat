@@ -159,8 +159,9 @@ let settled actor operation_id =
 (* One bounded worker joins through its actual terminal ACK. Exceptions retain
    their backtrace and are observed outside worker conversion; no assertion can
    turn into a successful operation. Cancellation reaches the surrounding scope. *)
-let with_worker ~budget ~run =
-  Own_ack_tests.with_controller (fun fixture actor source owner _intent _attempt ->
+let with_worker_on_initial_state ~initialize_state ~budget ~run =
+  let with_controller = Own_ack_tests.with_controller ~initialize_state in
+  with_controller (fun fixture actor source owner _intent _attempt ->
     Eio.Time.with_timeout_exn (Eio.Stdenv.clock fixture.env) 30. (fun () ->
       let completed, completed_u = Eio.Promise.create () in
       let source_closed, source_closed_u = Eio.Promise.create () in
@@ -205,3 +206,5 @@ let with_worker ~budget ~run =
          | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace);
         settled actor (Option.value_exn submitted.operation_id) |> ignore)))
 ;;
+
+let with_worker = with_worker_on_initial_state ~initialize_state:Fn.id

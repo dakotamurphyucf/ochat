@@ -10,6 +10,7 @@ type t =
   ; runs : Run_state.t option
   ; jobs : Agent_protocol.Job.t list
   ; schedules : Agent_protocol.Schedule.t list
+  ; ingress_registrations : External_ingress.t list
   ; invocations : Agent_protocol.Invocation.t list
   ; events : Agent_protocol.Moderator_execution.t list
   }
@@ -23,10 +24,13 @@ type t =
     Run attribution must name a retained same-session/full-source Run; absence of
     a Schedule work occurrence is allowed because attribution creates no work.
     Any actual retained Schedule owner must agree. Saved historical attribution
-    need not match the actor's newer installation; delivery checks currentness. *)
+    need not match the actor's newer installation; delivery checks currentness.
+    Ingress originals obey the same full-source Run attribution without creating
+    work. A queued ingress producer names its exact retained receipt and frame;
+    revoked/terminal registration facts remain valid audit DATA. *)
 val validate : t -> (unit, Agent_protocol.Error.t) result
 
-(** Validate immutable schedule captures and queue frontiers. Retiring a queue
+(** Validate immutable Schedule/ingress captures and queue frontiers. Retiring a queue
     requires its exact original installation, one validated epoch rotation, the
     same session and unchanged or exactly incremented generation. A destination
     queue starts at ordinal zero with the actual new full source and validated

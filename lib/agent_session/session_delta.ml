@@ -37,6 +37,13 @@ type t =
   | Inference_ledger_changed of (Inference_ledger.t[@sexp.opaque])
   | Delegated_inference_ledger_changed of
       (Inference_ledger.t[@sexp.opaque]) * (Delegated_usage.t[@sexp.opaque])
+  | Policy_cause_changed of (Policy_canonical_usage.Update.t[@sexp.opaque])
+  | Goal_policy_contributions_changed of
+      (Goal_policy_contributions.Update.t[@sexp.opaque])
+  | Policy_inference_ledger_changed of
+      (Inference_ledger.t[@sexp.opaque])
+      * (Delegated_usage.t option[@sexp.opaque])
+      * (Policy_canonical_usage.Update.t[@sexp.opaque])
   | Child_contributions_changed of (Child_contributions.t[@sexp.opaque])
   | Goal_descendants_changed of (Goal_descendants.Update.t[@sexp.opaque])
   | Job_changed of Agent_protocol.Job.t
@@ -47,6 +54,10 @@ type t =
   | Managed_stop_admitted of Managed_stop.t
   | Invocation_reconciled of Agent_protocol.Invocation.t
   | Moderator_execution_changed of Agent_protocol.Moderator_execution.t
+  | Moderator_lifecycle_claimed of
+      { receipt : Agent_protocol.Moderator_execution.t
+      ; capture : Moderator_lifecycle.t
+      }
   | Moderator_execution_reconciled of Agent_protocol.Moderator_execution.t
   | Subscription_changed of Agent_protocol.Subscription.t
   | Subscription_expired of Agent_protocol.Subscription.t
@@ -156,16 +167,179 @@ let retire_pending_dispositions state ~history_ids ~limits =
   }
 ;;
 
-let inference_ledger_update ledger ~delegated_usage =
-  match delegated_usage with
-  | None -> Inference_ledger_changed ledger
-  | Some usage -> Delegated_inference_ledger_changed (ledger, usage)
+let inference_ledger_update ?policy_update ledger ~delegated_usage =
+  match policy_update, delegated_usage with
+  | Some update, usage -> Policy_inference_ledger_changed (ledger, usage, update)
+  | None, None -> Inference_ledger_changed ledger
+  | None, Some usage -> Delegated_inference_ledger_changed (ledger, usage)
+;;
+
+let rec contains_policy_usage = function
+  | Batch changes -> List.exists changes ~f:contains_policy_usage
+  | Created state -> Option.is_some state.Session_state.policy_canonical_usage
+  | Policy_cause_changed _ | Policy_inference_ledger_changed _ -> true
+  | Lifecycle_changed _
+  | Metadata_changed _
+  | Organization_changed _
+  | Initial_start_consumed
+  | Stop_epoch_changed _
+  | Parent_stop_epoch_changed _
+  | Workspace_changed _
+  | Canonical_entries_appended _
+  | Canonical_history_replaced _
+  | Authoring_references_forgotten _
+  | Authoring_publication_changed _
+  | Initial_prompt_count_changed _
+  | Deferred_entries_enqueued _
+  | Deferred_entries_adopted
+  | Pending_inputs_changed _
+  | Active_operation_changed _
+  | Automatic_turn_budget_enabled _
+  | Automatic_turn_pauses_changed _
+  | Attachment_added _
+  | Attachment_removed _
+  | Permission_changed _
+  | Grant_changed _
+  | Inference_target_captured _
+  | Configuration_revision_changed _
+  | Inference_target_changed _
+  | Model_job_target_captured _
+  | Model_job_recipe_target_captured _
+  | Model_job_target_restored _
+  | Inference_ledger_changed _
+  | Delegated_inference_ledger_changed _
+  | Goal_policy_contributions_changed _
+  | Child_contributions_changed _
+  | Goal_descendants_changed _
+  | Job_changed _
+  | Schedule_changed _
+  | Invocation_changed _
+  | Managed_submission_admitted _
+  | Managed_submission_changed _
+  | Managed_stop_admitted _
+  | Invocation_reconciled _
+  | Moderator_execution_changed _
+  | Moderator_lifecycle_claimed _
+  | Moderator_execution_reconciled _
+  | Subscription_changed _
+  | Subscription_expired _
+  | Subscription_cancelled _
+  | Delivery_changed _
+  | Ingress_changed _
+  | Delivery_committed _
+  | Delivery_wake_changed _
+  | Goal_catalog_changed _
+  | Goal_accounts_changed _
+  | Instruction_selection_changed _
+  | Recurrence_catalog_changed _
+  | Run_state_changed _
+  | Moderator_changed _
+  | Shell_changed _
+  | History_block_reserved _
+  | Compaction_generation_changed _
+  | Compaction_archived _
+  | History_deleted _
+  | History_edited _
+  | Owner_lease_generation_changed _
+  | Failure_changed _
+  | Halt_changed _
+  | Reset_generation _ -> false
+;;
+
+let rec contains_goal_policy = function
+  | Batch changes -> List.exists changes ~f:contains_goal_policy
+  | Created state ->
+    Option.is_some state.Session_state.policy_canonical_usage
+    || Option.is_some state.goal_policy_contributions
+  | Policy_cause_changed _
+  | Policy_inference_ledger_changed _
+  | Goal_policy_contributions_changed _ -> true
+  | Lifecycle_changed _
+  | Metadata_changed _
+  | Organization_changed _
+  | Initial_start_consumed
+  | Stop_epoch_changed _
+  | Parent_stop_epoch_changed _
+  | Workspace_changed _
+  | Canonical_entries_appended _
+  | Canonical_history_replaced _
+  | Authoring_references_forgotten _
+  | Authoring_publication_changed _
+  | Initial_prompt_count_changed _
+  | Deferred_entries_enqueued _
+  | Deferred_entries_adopted
+  | Pending_inputs_changed _
+  | Active_operation_changed _
+  | Automatic_turn_budget_enabled _
+  | Automatic_turn_pauses_changed _
+  | Attachment_added _
+  | Attachment_removed _
+  | Permission_changed _
+  | Grant_changed _
+  | Inference_target_captured _
+  | Configuration_revision_changed _
+  | Inference_target_changed _
+  | Model_job_target_captured _
+  | Model_job_recipe_target_captured _
+  | Model_job_target_restored _
+  | Inference_ledger_changed _
+  | Delegated_inference_ledger_changed _
+  | Child_contributions_changed _
+  | Goal_descendants_changed _
+  | Job_changed _
+  | Schedule_changed _
+  | Invocation_changed _
+  | Managed_submission_admitted _
+  | Managed_submission_changed _
+  | Managed_stop_admitted _
+  | Invocation_reconciled _
+  | Moderator_execution_changed _
+  | Moderator_lifecycle_claimed _
+  | Moderator_execution_reconciled _
+  | Subscription_changed _
+  | Subscription_expired _
+  | Subscription_cancelled _
+  | Delivery_changed _
+  | Ingress_changed _
+  | Delivery_committed _
+  | Delivery_wake_changed _
+  | Goal_catalog_changed _
+  | Goal_accounts_changed _
+  | Instruction_selection_changed _
+  | Recurrence_catalog_changed _
+  | Run_state_changed _
+  | Moderator_changed _
+  | Shell_changed _
+  | History_block_reserved _
+  | Compaction_generation_changed _
+  | Compaction_archived _
+  | History_deleted _
+  | History_edited _
+  | Owner_lease_generation_changed _
+  | Failure_changed _
+  | Halt_changed _
+  | Reset_generation _ -> false
+;;
+
+let requires_policy_tracking delta ~previous =
+  Option.is_some previous || contains_policy_usage delta
+;;
+
+let requires_goal_policy_tracking delta ~previous ~canonical =
+  Option.is_some previous || Option.is_some canonical || contains_goal_policy delta
 ;;
 
 let rec apply ?(limits = native_limits) (state : Session_state.t) = function
   | Batch deltas -> List.fold_result deltas ~init:state ~f:(apply ~limits)
   | Created created ->
     let open Result.Let_syntax in
+    let%bind () =
+      Session_state.validate_moderator_lifecycle_update
+        ~previous_runs:state.run_state
+        ~previous_generation:state.identity.generation
+        ~previous_executions:state.moderator_executions
+        created
+    in
     let%bind created = Session_state.upgrade_schema created in
     let%bind () =
       Inference_ledger.validate_update
@@ -269,7 +443,7 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
         ~previous:(Session_state.queue_provenance state)
         (Session_state.queue_provenance created)
     in
-    let%map () =
+    let%bind () =
       match state.run_state, created.run_state with
       | None, _ -> Ok ()
       | Some previous, Some incoming -> Run_state.validate_transition ~previous incoming
@@ -278,7 +452,39 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
           (Agent_protocol.Error.invalid_request
              "replacement discarded durable run custody")
     in
-    { created with child_contributions }
+    let%bind goal_policy_contributions =
+      match state.goal_policy_contributions, created.goal_policy_contributions with
+      | None, None -> Ok None
+      | Some previous, Some incoming ->
+        Goal_policy_contributions.adopt previous ~incoming |> Result.map ~f:Option.some
+      | None, Some _ | Some _, None ->
+        Error
+          (Agent_protocol.Error.invalid_request "replacement changed causal Goal books")
+    in
+    let%map policy_canonical_usage =
+      match state.policy_canonical_usage, created.policy_canonical_usage with
+      | None, None -> Ok None
+      | Some previous, Some incoming ->
+        let%bind expected =
+          Policy_canonical_usage.reconcile_factual
+            previous
+            ~before:state.inference_ledger
+            ~after:created.inference_ledger
+        in
+        Policy_canonical_usage.adopt expected ~incoming |> Result.map ~f:Option.some
+      | None, Some _ ->
+        Error
+          (Agent_protocol.Error.invalid_request
+             "replacement cannot initialize policy causes")
+      | Some _, None ->
+        Error
+          (Agent_protocol.Error.invalid_request "replacement discarded policy accounting")
+    in
+    { created with
+      child_contributions
+    ; policy_canonical_usage
+    ; goal_policy_contributions
+    }
   | Managed_stop_admitted receipt ->
     let open Result.Let_syntax in
     let%bind () = Managed_stop.validate receipt in
@@ -757,6 +963,14 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
             "restored model job target generation changed"))
   | Delegated_inference_ledger_changed (inference_ledger, incoming) ->
     let open Result.Let_syntax in
+    let%bind () =
+      match state.policy_canonical_usage with
+      | None -> Ok ()
+      | Some _ ->
+        Error
+          (Agent_protocol.Error.invalid_request
+             "caused canonical ledger requires its paired policy mutation")
+    in
     let%bind previous =
       Result.of_option
         state.delegated_usage
@@ -789,6 +1003,39 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
     in
     let%map delegated_usage = Delegated_usage.adopt previous ~incoming in
     { state with inference_ledger; delegated_usage = Some delegated_usage }
+  | Goal_policy_contributions_changed update ->
+    Ok
+      { state with
+        goal_policy_contributions =
+          Some (Goal_policy_contributions.Update.candidate update)
+      }
+  | Policy_cause_changed update ->
+    Ok
+      { state with
+        policy_canonical_usage = Some (Policy_canonical_usage.Update.candidate update)
+      }
+  | Policy_inference_ledger_changed (ledger, delegated_usage, update) ->
+    let open Result.Let_syntax in
+    let%bind () =
+      if Option.is_some state.policy_canonical_usage
+      then Ok ()
+      else
+        Error
+          (Agent_protocol.Error.invalid_request
+             "policy canonical mutation has no component")
+    in
+    (* The closed paired leaf reuses the original ledger/delegated checks. The
+       actual policy candidate is then verified by the ordered validator; this
+       temporary pure receiver is neither published nor execution authority. *)
+    let%map next =
+      apply
+        ~limits
+        { state with policy_canonical_usage = None }
+        (inference_ledger_update ledger ~delegated_usage)
+    in
+    { next with
+      policy_canonical_usage = Some (Policy_canonical_usage.Update.candidate update)
+    }
   | Goal_descendants_changed update ->
     let child_contributions =
       match Goal_descendants.Update.children update with
@@ -818,6 +1065,14 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
     Ok { state with child_contributions = Some children }
   | Inference_ledger_changed inference_ledger ->
     let open Result.Let_syntax in
+    let%bind () =
+      match state.policy_canonical_usage with
+      | None -> Ok ()
+      | Some _ ->
+        Error
+          (Agent_protocol.Error.invalid_request
+             "caused canonical ledger requires its paired policy mutation")
+    in
     let%bind () =
       match state.delegated_usage with
       | None -> Ok ()
@@ -1279,6 +1534,47 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
               state.deliveries
               ~id_of:(fun value -> value.P.Delivery.context.id)
         })
+  | Moderator_lifecycle_claimed { receipt; capture } ->
+    let open Result.Let_syntax in
+    let%bind () =
+      if
+        List.exists state.moderator_executions ~f:(fun e ->
+          Agent_protocol.Id.Moderator_execution.equal
+            e.Agent_protocol.Moderator_execution.context.id
+            receipt.context.id)
+      then
+        Error
+          (Agent_protocol.Error.invalid_request
+             "lifecycle capture requires a new receipt")
+      else if
+        not
+          (Agent_protocol.Id.Moderator_execution.equal
+             receipt.context.id
+             (Moderator_lifecycle.execution_id capture))
+      then
+        Error
+          (Agent_protocol.Error.invalid_request
+             "lifecycle capture selects another receipt")
+      else (
+        match receipt.status with
+        | Running when Moderator_lifecycle.lifecycle_phase receipt.context.phase -> Ok ()
+        | Running | Completed _ | Failed _ | Interrupted _ ->
+          Error
+            (Agent_protocol.Error.invalid_request
+               "lifecycle capture requires a new Running lifecycle"))
+    in
+    let%bind index =
+      Result.of_option
+        state.run_state
+        ~error:
+          (Agent_protocol.Error.invalid_request
+             "lifecycle capture requires an installed index")
+    in
+    let%bind index = Run_state.capture_moderator_lifecycle index capture in
+    let%bind state = apply ~limits state (Moderator_execution_changed receipt) in
+    let next = { state with run_state = Some index } in
+    let%map () = Session_state.validate_moderator_lifecycle next in
+    next
   | (Moderator_execution_changed execution | Moderator_execution_reconciled execution) as
     delta ->
     let open Result.Let_syntax in
@@ -1335,7 +1631,11 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
           execution
     in
     { state with
-      moderator_executions =
+      run_state =
+        (if Option.is_none previous && Moderator_lifecycle.lifecycle_phase c.phase
+         then Option.map state.run_state ~f:Run_state.clear_moderator_lifecycle
+         else state.run_state)
+    ; moderator_executions =
         replace_by
           Agent_protocol.Id.Moderator_execution.compare
           c.id
@@ -1369,6 +1669,9 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
     { state with recurrence_catalog = Some catalog }
   | Run_state_changed run_state ->
     let open Result.Let_syntax in
+    let%bind () =
+      Session_state.validate_moderator_lifecycle_index_update state run_state
+    in
     let previous = Option.value state.run_state ~default:Run_state.empty in
     let%map () = Run_state.validate_transition ~previous run_state in
     { state with run_state = Some run_state }
@@ -1439,7 +1742,7 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
           Agent_protocol.Error.invalid_request
             (Sexp.to_string_hum (Inference_ledger.Error.sexp_of_t error)))
       in
-      let%map delegated_usage =
+      let%bind delegated_usage =
         match state.delegated_usage with
         | None -> Ok None
         | Some own ->
@@ -1449,10 +1752,23 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
             ~after:inference_ledger
           |> Result.map ~f:Option.some
       in
+      let%map policy_canonical_usage =
+        Option.value_map
+          state.policy_canonical_usage
+          ~default:(Ok None)
+          ~f:(fun previous ->
+            Policy_canonical_usage.reconcile_factual
+              previous
+              ~before:state.inference_ledger
+              ~after:inference_ledger
+            |> Result.map ~f:Option.some)
+      in
       { state with
         inference_ledger
       ; delegated_usage
+      ; policy_canonical_usage
       ; identity = { state.identity with generation }
+      ; run_state = Option.map state.run_state ~f:Run_state.clear_moderator_lifecycle
       ; pending_initial_start = false
       ; conversation =
           { state.conversation with
@@ -1558,8 +1874,11 @@ let validate_goal_accounts delta ~(previous : Session_state.t) ~(next : Session_
     | Model_job_target_restored _
     | Inference_ledger_changed _
     | Delegated_inference_ledger_changed _
+    | Goal_policy_contributions_changed _
     | Child_contributions_changed _
     | Goal_descendants_changed _
+    | Policy_cause_changed _
+    | Policy_inference_ledger_changed _
     | Job_changed _
     | Schedule_changed _
     | Invocation_changed _
@@ -1568,6 +1887,7 @@ let validate_goal_accounts delta ~(previous : Session_state.t) ~(next : Session_
     | Managed_stop_admitted _
     | Invocation_reconciled _
     | Moderator_execution_changed _
+    | Moderator_lifecycle_claimed _
     | Moderator_execution_reconciled _
     | Subscription_changed _
     | Subscription_expired _
@@ -1649,7 +1969,9 @@ let validate_goal_descendants
       in
       let%map cursor = O.advance cursor (Update { update; creation }) in
       accounts, cursor
-    | Inference_ledger_changed ledger | Delegated_inference_ledger_changed (ledger, _) ->
+    | Inference_ledger_changed ledger
+    | Delegated_inference_ledger_changed (ledger, _)
+    | Policy_inference_ledger_changed (ledger, _, _) ->
       let%map cursor = O.advance cursor (Canonical ledger) in
       accounts, cursor
     | Reset_generation generation ->
@@ -1664,7 +1986,9 @@ let validate_goal_descendants
     | Invocation_changed invocation | Invocation_reconciled invocation ->
       let%map cursor = O.advance cursor (Invocation invocation) in
       accounts, cursor
-    | Moderator_execution_changed execution | Moderator_execution_reconciled execution ->
+    | Moderator_lifecycle_claimed { receipt = execution; _ }
+    | Moderator_execution_changed execution
+    | Moderator_execution_reconciled execution ->
       let%map cursor = O.advance cursor (Moderator_execution execution) in
       accounts, cursor
     | Lifecycle_changed _
@@ -1694,6 +2018,8 @@ let validate_goal_descendants
     | Model_job_target_captured _
     | Model_job_recipe_target_captured _
     | Model_job_target_restored _
+    | Goal_policy_contributions_changed _
+    | Policy_cause_changed _
     | Job_changed _
     | Schedule_changed _
     | Managed_submission_admitted _
@@ -1792,7 +2118,10 @@ let rec validate_descendant_publication delta ~revision =
   | Model_job_recipe_target_captured _
   | Model_job_target_restored _
   | Inference_ledger_changed _
+  | Policy_cause_changed _
+  | Policy_inference_ledger_changed _
   | Delegated_inference_ledger_changed _
+  | Goal_policy_contributions_changed _
   | Child_contributions_changed _
   | Job_changed _
   | Schedule_changed _
@@ -1802,6 +2131,7 @@ let rec validate_descendant_publication delta ~revision =
   | Managed_stop_admitted _
   | Invocation_reconciled _
   | Moderator_execution_changed _
+  | Moderator_lifecycle_claimed _
   | Moderator_execution_reconciled _
   | Subscription_changed _
   | Subscription_expired _
@@ -1824,4 +2154,289 @@ let rec validate_descendant_publication delta ~revision =
   | Failure_changed _
   | Halt_changed _
   | Reset_generation _ -> Ok ()
+;;
+
+let policy_usage_step delta ~(previous : Session_state.t) ~(next : Session_state.t) =
+  let module O = Policy_canonical_usage.Ordered in
+  let open Result.Let_syntax in
+  match delta with
+  | Batch _ ->
+    Error (Agent_protocol.Error.invalid_request "policy evidence consumes actual leaves")
+  | Created _ | Reset_generation _ ->
+    let%map context = Session_state.policy_context next in
+    Some
+      (O.Replacement
+         { context
+         ; ledger = next.inference_ledger
+         ; accounting = next.policy_canonical_usage
+         })
+  | Policy_cause_changed update -> Ok (Some (O.Metadata update))
+  | Policy_inference_ledger_changed (_, _, update) ->
+    Ok
+      (Some
+         (O.Canonical
+            { before = previous.inference_ledger; after = next.inference_ledger; update }))
+  | Inference_ledger_changed _ | Delegated_inference_ledger_changed _ ->
+    Ok
+      (Some
+         (O.Ordinary_canonical
+            { before = previous.inference_ledger; after = next.inference_ledger }))
+  | Goal_catalog_changed _ -> Ok (Some (O.Catalog next.goal_catalog))
+  | Goal_accounts_changed _ -> Ok (Some (O.Accounts next.goal_accounts))
+  | Goal_descendants_changed _ -> Ok (Some (O.Descendants next.goal_descendants))
+  | Moderator_lifecycle_claimed { receipt; capture } ->
+    let%map context = Session_state.policy_context next in
+    Some (O.Lifecycle_work { context; receipt; capture = Some capture })
+  | Moderator_execution_changed receipt
+    when Moderator_lifecycle.lifecycle_phase receipt.context.phase
+         && not
+              (List.exists previous.moderator_executions ~f:(fun execution ->
+                 Agent_protocol.Id.Moderator_execution.equal
+                   execution.Agent_protocol.Moderator_execution.context.id
+                   receipt.context.id)) ->
+    let%map context = Session_state.policy_context next in
+    Some (O.Lifecycle_work { context; receipt; capture = None })
+  | Job_changed _
+  | Invocation_changed _
+  | Invocation_reconciled _
+  | Moderator_execution_changed _
+  | Moderator_execution_reconciled _ ->
+    let%map context = Session_state.policy_context next in
+    Some (O.Source_work context)
+  | Moderator_changed _ | Run_state_changed _ ->
+    let%map context = Session_state.policy_context next in
+    Some
+      (O.Source_changed { current_source = context.current_source; runs = context.runs })
+  | Lifecycle_changed _
+  | Metadata_changed _
+  | Organization_changed _
+  | Initial_start_consumed
+  | Stop_epoch_changed _
+  | Parent_stop_epoch_changed _
+  | Workspace_changed _
+  | Canonical_entries_appended _
+  | Canonical_history_replaced _
+  | Authoring_references_forgotten _
+  | Authoring_publication_changed _
+  | Initial_prompt_count_changed _
+  | Deferred_entries_enqueued _
+  | Deferred_entries_adopted
+  | Pending_inputs_changed _
+  | Active_operation_changed _
+  | Automatic_turn_budget_enabled _
+  | Automatic_turn_pauses_changed _
+  | Attachment_added _
+  | Attachment_removed _
+  | Permission_changed _
+  | Grant_changed _
+  | Inference_target_captured _
+  | Configuration_revision_changed _
+  | Inference_target_changed _
+  | Model_job_target_captured _
+  | Model_job_recipe_target_captured _
+  | Model_job_target_restored _
+  | Goal_policy_contributions_changed _
+  | Child_contributions_changed _
+  | Schedule_changed _
+  | Managed_submission_admitted _
+  | Managed_submission_changed _
+  | Managed_stop_admitted _
+  | Subscription_changed _
+  | Subscription_expired _
+  | Subscription_cancelled _
+  | Delivery_changed _
+  | Ingress_changed _
+  | Delivery_committed _
+  | Delivery_wake_changed _
+  | Instruction_selection_changed _
+  | Recurrence_catalog_changed _
+  | Shell_changed _
+  | History_block_reserved _
+  | Compaction_generation_changed _
+  | Compaction_archived _
+  | History_deleted _
+  | History_edited _
+  | Owner_lease_generation_changed _
+  | Failure_changed _
+  | Halt_changed _ -> Ok None
+;;
+
+let validate_policy_usage
+      ?(limits = native_limits)
+      delta
+      ~(previous : Session_state.t)
+      ~(next : Session_state.t)
+      ~revision
+  =
+  if not (requires_policy_tracking delta ~previous:previous.policy_canonical_usage)
+  then
+    if Option.is_none next.policy_canonical_usage
+    then Ok ()
+    else
+      Error
+        (Agent_protocol.Error.invalid_request
+           "ordinary absent policy path became positive")
+  else
+    let module O = Policy_canonical_usage.Ordered in
+    let open Result.Let_syntax in
+    let%bind context = Session_state.policy_context previous in
+    let%bind cursor =
+      O.begin_
+        ~previous:previous.policy_canonical_usage
+        ~context
+        ~ledger:previous.inference_ledger
+    in
+    let rec observe (state, cursor) = function
+      | Batch changes -> List.fold_result changes ~init:(state, cursor) ~f:observe
+      | leaf ->
+        let%bind incoming = apply ~limits state leaf in
+        let%bind step = policy_usage_step leaf ~previous:state ~next:incoming in
+        let%map cursor =
+          Option.value_map step ~default:(Ok cursor) ~f:(O.advance cursor)
+        in
+        incoming, cursor
+    in
+    let%bind _, cursor = observe (previous, cursor) delta in
+    let%bind context = Session_state.policy_context next in
+    let%bind () =
+      O.check
+        cursor
+        ~incoming:next.policy_canonical_usage
+        ~context
+        ~ledger:next.inference_ledger
+    in
+    O.validate_publication cursor ~revision
+;;
+
+let goal_policy_step delta ~(previous : Session_state.t) ~(next : Session_state.t) =
+  let module O = Goal_policy_ordered in
+  match delta with
+  | Batch _ ->
+    Error
+      (Agent_protocol.Error.invalid_request "Goal policy cursor consumes actual leaves")
+  | Created _ | Reset_generation _ ->
+    let%map.Result projection = Session_goal_policy_projection.of_state next in
+    Some (O.Replacement projection)
+  | Goal_catalog_changed _ -> Ok (Some (O.Catalog next.goal_catalog))
+  | Goal_accounts_changed _ -> Ok (Some (O.Accounts next.goal_accounts))
+  | Child_contributions_changed _ -> Ok (Some (O.Children next.child_contributions))
+  | Goal_descendants_changed update -> Ok (Some (O.Descendants update))
+  | Goal_policy_contributions_changed update -> Ok (Some (O.Update update))
+  | Policy_cause_changed update -> Ok (Some (O.Canonical_policy update))
+  | Policy_inference_ledger_changed (_, _, update) ->
+    Ok
+      (Some
+         (O.Canonical
+            { before = previous.inference_ledger
+            ; after = next.inference_ledger
+            ; policy = Some update
+            }))
+  | Inference_ledger_changed _ | Delegated_inference_ledger_changed _ ->
+    Ok
+      (Some
+         (O.Canonical
+            { before = previous.inference_ledger
+            ; after = next.inference_ledger
+            ; policy = None
+            }))
+  | Lifecycle_changed _
+  | Metadata_changed _
+  | Organization_changed _
+  | Initial_start_consumed
+  | Stop_epoch_changed _
+  | Parent_stop_epoch_changed _
+  | Workspace_changed _
+  | Canonical_entries_appended _
+  | Canonical_history_replaced _
+  | Authoring_references_forgotten _
+  | Authoring_publication_changed _
+  | Initial_prompt_count_changed _
+  | Deferred_entries_enqueued _
+  | Deferred_entries_adopted
+  | Pending_inputs_changed _
+  | Active_operation_changed _
+  | Automatic_turn_budget_enabled _
+  | Automatic_turn_pauses_changed _
+  | Attachment_added _
+  | Attachment_removed _
+  | Permission_changed _
+  | Grant_changed _
+  | Inference_target_captured _
+  | Configuration_revision_changed _
+  | Inference_target_changed _
+  | Model_job_target_captured _
+  | Model_job_recipe_target_captured _
+  | Model_job_target_restored _
+  | Job_changed _
+  | Schedule_changed _
+  | Invocation_changed _
+  | Managed_submission_admitted _
+  | Managed_submission_changed _
+  | Managed_stop_admitted _
+  | Invocation_reconciled _
+  | Moderator_execution_changed _
+  | Moderator_lifecycle_claimed _
+  | Moderator_execution_reconciled _
+  | Subscription_changed _
+  | Subscription_expired _
+  | Subscription_cancelled _
+  | Delivery_changed _
+  | Ingress_changed _
+  | Delivery_committed _
+  | Delivery_wake_changed _
+  | Instruction_selection_changed _
+  | Recurrence_catalog_changed _
+  | Run_state_changed _
+  | Moderator_changed _
+  | Shell_changed _
+  | History_block_reserved _
+  | Compaction_generation_changed _
+  | Compaction_archived _
+  | History_deleted _
+  | History_edited _
+  | Owner_lease_generation_changed _
+  | Failure_changed _
+  | Halt_changed _ -> Ok None
+;;
+
+let validate_goal_policy
+      ?(limits = native_limits)
+      delta
+      ~(previous : Session_state.t)
+      ~(next : Session_state.t)
+  =
+  let open Result.Let_syntax in
+  if
+    not
+      (requires_goal_policy_tracking
+         delta
+         ~previous:previous.goal_policy_contributions
+         ~canonical:previous.policy_canonical_usage)
+  then
+    if
+      Option.is_none next.goal_policy_contributions
+      && Option.is_none next.policy_canonical_usage
+    then Ok ()
+    else
+      Error
+        (Agent_protocol.Error.invalid_request
+           "absence-only Goal policy path became positive")
+  else (
+    let%bind cursor = Session_goal_policy_projection.begin_ previous in
+    let rec observe (state, cursor) = function
+      | Batch changes -> List.fold_result changes ~init:(state, cursor) ~f:observe
+      | leaf ->
+        let%bind incoming = apply ~limits state leaf in
+        let%bind step = goal_policy_step leaf ~previous:state ~next:incoming in
+        let%map cursor =
+          Option.value_map
+            step
+            ~default:(Ok cursor)
+            ~f:(Goal_policy_ordered.advance cursor)
+        in
+        incoming, cursor
+    in
+    let%bind _, cursor = observe (previous, cursor) delta in
+    let%bind projection = Session_goal_policy_projection.of_state next in
+    Goal_policy_ordered.check cursor projection)
 ;;

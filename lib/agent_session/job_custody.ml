@@ -1,5 +1,6 @@
 open! Core
 module P = Agent_protocol
+module Policy_source = Policy_standalone_source.Classification
 
 module Moderator_binding = struct
   type t =
@@ -18,6 +19,7 @@ module Row = struct
   type t =
     { job : P.Job.t
     ; binding : Moderator_binding.t
+    ; policy_source : Policy_source.t
     ; phase : phase
     }
 
@@ -36,6 +38,7 @@ module Row = struct
   ;;
 
   let binding t = t.binding
+  let policy_source t = t.policy_source
 
   let retire t =
     match t.phase with
@@ -124,6 +127,36 @@ let validate_binding (job : P.Job.t) binding =
     else invalid "Job custody source differs from its captured launch observer"
 ;;
 
+let validate_policy_source (job : P.Job.t) binding = function
+  | Policy_source.Unknown -> Ok ()
+  | Standalone_unrelated descriptor ->
+    let open Result.Let_syntax in
+    let%bind actual = Policy_native_ancestry.member_of_job job in
+    let%bind () =
+      match descriptor.Policy_standalone_source.subject with
+      | Member subject when Policy_cause_data.Member.equal subject actual -> Ok ()
+      | Member _ | Root_operation _ -> invalid "Job standalone source subject differs"
+    in
+    let%bind () =
+      if
+        P.Id.Session.equal descriptor.session_id job.session_id
+        && Int.equal descriptor.generation job.generation
+        && Option.exists
+             job.inference_origin
+             ~f:(P.Inference_origin.equal descriptor.origin)
+      then Ok ()
+      else invalid "Job standalone source origin or owner differs"
+    in
+    (match descriptor.source.installation, binding with
+     | Some captured, Moderator_binding.Captured { source; manager = _ }
+       when P.Run_source.equal captured source
+            && Option.exists
+                 descriptor.source.observer
+                 ~f:(P.Invocation.equal_observer source.observer) -> Ok ()
+     | None, _ | Some _, No_captured_moderator | Some _, Captured _ ->
+       invalid "Job standalone source lost its exact captured full installation")
+;;
+
 let validate_identity (job : P.Job.t) =
   let open Result.Let_syntax in
   let%bind _ = P.Id.Job.of_string (P.Id.Job.to_string job.id) in
@@ -177,11 +210,14 @@ module Fresh = struct
 
   let binding t = t.row.binding
 
-  let stage ~job ~binding ~parent =
+  let stage ~job ~binding ~parent ~policy_source =
     let open Result.Let_syntax in
     let%bind () = validate_fresh job ~binding in
+    let%bind () = validate_policy_source job binding policy_source in
     let%map admission = Execution_custody.Admission.transfer parent in
-    { row = { Row.job; binding; phase = Active admission }; phase = Staged }
+    { row = { Row.job; binding; policy_source; phase = Active admission }
+    ; phase = Staged
+    }
   ;;
 
   let discard t =
@@ -199,6 +235,9 @@ module Fresh = struct
     | Staged ->
       if same_job t.row.job job
       then (
+        let%bind () =
+          validate_policy_source t.row.job t.row.binding t.row.policy_source
+        in
         let%bind admission = Row.admission t.row in
         let%map () = Execution_custody.Admission.check admission in
         t.row)
@@ -296,6 +335,7 @@ let prepare_constructor_handoff t ~jobs ~binding =
       match original with
       | None -> Ok candidate
       | Some original ->
+        let%bind () = validate_policy_source job binding original.policy_source in
         let%map () = validate_constructor_handoff original.binding binding in
         if same_binding original.binding binding
         then candidate
@@ -340,9 +380,9 @@ let prepare_selected t ~selected =
   }
 ;;
 
-let prepare_fresh t ~job ~binding ~parent =
+let prepare_fresh t ~job ~binding ~parent ~policy_source =
   let open Result.Let_syntax in
-  let%bind fresh = Fresh.stage ~job ~binding ~parent in
+  let%bind fresh = Fresh.stage ~job ~binding ~parent ~policy_source in
   let accepted = ref false in
   Exn.protect
     ~finally:(fun () -> if not !accepted then Fresh.discard fresh)

@@ -107,9 +107,17 @@ val resolve : t -> Reference.t -> (record, Store_error.t) result
     consume entry budget, and unrelated external bytes are not reserved.
     A matching replay reflushes its original record without charging a new
     candidate or allocating replacement identities; historical replay does not
-    retroactively promise unavailable disposition headroom. *)
+    retroactively promise unavailable disposition headroom.
+
+    [before_write] is a trusted, nonyielding check under ledger exclusion, after
+    the temporary frame is synced and immediately before the authoritative
+    rename. New reservations and matching reflushes invoke it. Conflicting keys
+    return their original record without invoking it. A raised exception leaves
+    the prior ledger intact and propagates to the caller. The check must not
+    enter the ledger or call an Actor. *)
 val reserve
-  :  t
+  :  ?before_write:(unit -> unit)
+  -> t
   -> key:Key.t
   -> request_sha256:string
   -> admission:Admission.t
@@ -127,6 +135,12 @@ val advance : t -> record -> stage -> (record, Store_error.t) result
 (** Revocation is terminal and first-writer-wins. It preserves every identity and
     attained stage, including records whose child installation is ambiguous. *)
 val revoke : t -> record -> revocation -> (record, Store_error.t) result
+
+(** A failed creation can revoke only an unfinished reservation. Read the current
+    stage under the ledger lock. If publication already reached [Linked], return
+    its retained record unchanged, including when the caller observed an older
+    stage. This does not authorize execution or retry. *)
+val revoke_unfinished : t -> record -> revocation -> (record, Store_error.t) result
 
 (** Startup only, with exclusive root ownership and no active creation calls.
     Revalidate the private reservation and remove only its exact transaction's

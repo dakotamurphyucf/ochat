@@ -47,6 +47,9 @@ let rec has_stop_epoch (delta : Agent_session.Session_delta.t) =
   | Model_job_target_restored _
   | Inference_ledger_changed _
   | Delegated_inference_ledger_changed _
+  | Goal_policy_contributions_changed _
+  | Policy_cause_changed _
+  | Policy_inference_ledger_changed _
   | Child_contributions_changed _
   | Goal_descendants_changed _
   | Job_changed _
@@ -57,6 +60,7 @@ let rec has_stop_epoch (delta : Agent_session.Session_delta.t) =
   | Managed_stop_admitted _
   | Invocation_reconciled _
   | Moderator_execution_changed _
+  | Moderator_lifecycle_claimed _
   | Moderator_execution_reconciled _
   | Subscription_changed _
   | Subscription_expired _

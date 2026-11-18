@@ -80,7 +80,7 @@ let call actor (caps : W.Capabilities.t) dispatch ~id ~name json =
   in
   assert (dispatch.Dispatch.commit_call request);
   let retained_read = ref None in
-  let run_native implementation ~payload =
+  let run_native native ~payload =
     if String.equal name "instructions_read"
     then (
       let module N = Agent_session.Native_tool_invocation in
@@ -99,7 +99,10 @@ let call actor (caps : W.Capabilities.t) dispatch ~id ~name json =
       assert (
         Result.is_error (Admission.check_now admission state ~effect_kind:Deactivate));
       retained_read := Some admission);
-    implementation.Ochat_function.run payload
+    Chat_response.Tool_call.Native.run
+      native
+      ~invocation:Ochat_function.Invocation.silent
+      payload
   in
   let result =
     dispatch.run ~run_native request ~authorize:(fun () -> ()) |> Option.value_exn

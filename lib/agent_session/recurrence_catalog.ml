@@ -61,12 +61,20 @@ type t =
   { revision : int64
   ; entries : Stored.t list
   ; receipts : R.t list
+  ; reserve_target_pauses : bool
   }
 
-let empty = { revision = 0L; entries = []; receipts = [] }
+let empty = { revision = 0L; entries = []; receipts = []; reserve_target_pauses = false }
 let revision t = t.revision
 let entries t = List.map t.entries ~f:(fun e -> e.Stored.value)
 let receipts t = t.receipts
+let max_entries = 16
+let max_receipts = 256
+let has_entry_slot t = List.length t.entries < max_entries
+
+let has_command_slot t =
+  List.length t.receipts < max_receipts && Int64.(t.revision < max_value)
+;;
 
 let stored t id =
   List.find t.entries ~f:(fun e -> P.Id.Recurrence.equal (E.id e.Stored.value) id)
@@ -79,12 +87,14 @@ let same_key (a : R.t) (b : R.t) =
   && P.Idempotency_key.equal a.key b.key
 ;;
 
+let find_receipt t ~principal_id ~key =
+  List.find t.receipts ~f:(fun r ->
+    P.Id.Principal.equal r.R.principal_id principal_id
+    && P.Idempotency_key.equal r.key key)
+;;
+
 let receipt t ~principal_id ~key ~request_sha256 =
-  match
-    List.find t.receipts ~f:(fun r ->
-      P.Id.Principal.equal r.R.principal_id principal_id
-      && P.Idempotency_key.equal r.key key)
-  with
+  match find_receipt t ~principal_id ~key with
   | None -> Ok None
   | Some r ->
     if String.equal r.request_sha256 request_sha256
@@ -104,13 +114,29 @@ let receipt_id (r : R.t) =
 ;;
 
 let receipt_json r = `Object [ "id", `String (receipt_id r); "receipt", R.to_json r ]
+let target_pause_reserve_field = "reserve_target_pauses"
 
-let raw_json t =
-  `Object
-    [ "revision", X.int64_json t.revision
-    ; "entries", `Array (List.map t.entries ~f:Stored.to_json)
+let inventory_json t ~revision ~entries =
+  let fields =
+    [ "revision", X.int64_json revision
+    ; "entries", `Array entries
     ; "receipts", `Array (List.map t.receipts ~f:receipt_json)
     ]
+  in
+  `Object
+    (if t.reserve_target_pauses
+     then (target_pause_reserve_field, `True) :: fields
+     else fields)
+;;
+
+let raw_json t =
+  inventory_json t ~revision:t.revision ~entries:(List.map t.entries ~f:Stored.to_json)
+;;
+
+let has_existing_target entry =
+  match Recurrence_target.view (F.target (E.current entry)) with
+  | Existing_session _ -> true
+  | Fresh_child _ -> false
 ;;
 
 module Reservation = struct
@@ -141,6 +167,23 @@ let reservation t =
         ~f:(fun e ->
           E.pending_child_associations e.Stored.value
           + E.pending_execution_steps e.Stored.value)
+  in
+  (* A historical unmarked catalog keeps its original bulk reserve. Enabling
+     an existing target prospectively admits independent future target pauses.
+     A last independent pause can take the existing bulk pause's place when
+     there is no enabled captured child. *)
+  let steps =
+    if not t.reserve_target_pauses
+    then steps
+    else (
+      let existing, other_enabled =
+        List.fold t.entries ~init:(0, false) ~f:(fun (count, other) item ->
+          let entry = item.Stored.value in
+          match E.control entry with
+          | Paused _ | Retired _ -> count, other
+          | Enabled -> if has_existing_target entry then count + 1, other else count, true)
+      in
+      if existing = 0 then steps else steps + existing - Bool.to_int (not other_enabled))
   in
   let%bind growth =
     if steps = 0
@@ -176,7 +219,10 @@ let definition_revision entry = I.Definition.revision (F.key (E.current entry))
 
 let validate_structure t =
   let open Result.Let_syntax in
-  if List.length t.entries > 16 || List.length t.receipts > 256 || Int64.(t.revision < 0L)
+  if
+    List.length t.entries > max_entries
+    || List.length t.receipts > max_receipts
+    || Int64.(t.revision < 0L)
   then full "recurrence catalog retention capacity exhausted"
   else (
     let%bind () =
@@ -295,7 +341,13 @@ let of_jsonaf json =
          then Ok r
          else invalid "recurrence receipt wrapper identity disagrees"))
   in
-  let t = { revision; entries; receipts } in
+  let%bind reserve_target_pauses =
+    match D.Json.field json ~name:target_pause_reserve_field with
+    | Absent -> Ok false
+    | Value `True -> Ok true
+    | Null | Value _ -> invalid "invalid recurrence target pause reserve"
+  in
+  let t = { revision; entries; receipts; reserve_target_pauses } in
   let%bind () = validate_structure t in
   let%map () = validate_encoded_capacity t json in
   t
@@ -312,6 +364,7 @@ let t_of_sexp sexp =
 let shape =
   X.shape_exn
     [ "revision", D.Shape.value
+    ; target_pause_reserve_field, D.Shape.value
     ; "entries", X.array_shape_exn ~identity_field:"id" Stored.shape
     ; ( "receipts"
       , X.array_shape_exn
@@ -380,10 +433,20 @@ let validate_command previous incoming (receipt : R.t) =
       && Int64.equal (definition_revision entry) (Int64.succ (definition_revision old))
       && E.equal_control (E.control entry) (Paused Operator_pause)
     | Enable, Some old ->
-      unchanged_except_control old entry && E.equal_control (E.control entry) Enabled
+      unchanged_except_control old entry
+      && E.equal_control (E.control entry) Enabled
+      &&
+        (match E.control old with
+        | Paused (Target_invalidated _) -> false
+        | Enabled | Paused _ | Retired _ -> true)
     | Pause, Some old ->
       unchanged_except_control old entry
-      && E.equal_control (E.control entry) (Paused Operator_pause)
+      &&
+        (match E.control old with
+        | Paused (Target_invalidated _ as reason) ->
+          E.equal_control (E.control entry) (Paused reason)
+        | Enabled | Paused _ | Retired _ ->
+          E.equal_control (E.control entry) (Paused Operator_pause))
     | Retire, Some old ->
       unchanged_except_control old entry
       &&
@@ -446,6 +509,20 @@ let validate_internal previous incoming =
        | None -> false)
     | [] | _ :: _ :: _ -> false
   in
+  let target_pause () =
+    match changed with
+    | [ old ] when E.equal_control (E.control old.value) Enabled ->
+      (match stored incoming (E.id old.value) with
+       | Some next ->
+         (match E.control next.value with
+          | Paused (Target_invalidated _ as reason) ->
+            (match Result.bind (E.pause old.value ~reason) ~f:Stored.create with
+             | Ok expected -> same_entry expected next
+             | Error _ -> false)
+          | Enabled | Paused _ | Retired _ -> false)
+       | None -> false)
+    | [] | _ :: _ -> false
+  in
   let execution_import () =
     match changed with
     | [ old ] ->
@@ -460,11 +537,22 @@ let validate_internal previous incoming =
   else if
     due
     || execution_import ()
+    || target_pause ()
     || disposition Controller_stop
     || disposition Source_review
     || retirement
   then Ok ()
   else invalid "receipt-free recurrence update is not a complete safety disposition"
+;;
+
+let reserves_on_enable previous entry (receipt : R.t) =
+  R.equal_kind receipt.kind Enable
+  && E.equal_control (E.control entry) Enabled
+  && has_existing_target entry
+  && Option.exists (find previous receipt.recurrence_id) ~f:(fun old ->
+    match E.control old with
+    | Paused _ -> true
+    | Enabled | Retired _ -> false)
 ;;
 
 let validate_transition previous ~incoming =
@@ -483,6 +571,20 @@ let validate_transition previous ~incoming =
     | _ -> invalid "immutable recurrence command receipts disappeared or changed"
   in
   let%bind added = retained previous.receipts incoming.receipts in
+  let%bind () =
+    if Bool.equal previous.reserve_target_pauses incoming.reserve_target_pauses
+    then Ok ()
+    else if
+      incoming.reserve_target_pauses
+      &&
+      match added with
+      | [ receipt ] ->
+        Option.exists (find incoming receipt.recurrence_id) ~f:(fun entry ->
+          reserves_on_enable previous entry receipt)
+      | [] | _ :: _ -> false
+    then Ok ()
+    else invalid "target pause reserve requires a new existing-target Enable"
+  in
   let%bind () =
     if D.Json.equal (raw_json previous) (raw_json incoming)
     then Ok ()
@@ -514,7 +616,7 @@ let validate_transition previous ~incoming =
 
 let commit t ~entry ~(receipt : R.t) =
   let open Result.Let_syntax in
-  if List.length t.receipts >= 256 || Int64.equal t.revision Int64.max_value
+  if not (has_command_slot t)
   then full "recurrence command receipt or revision capacity exhausted"
   else (
     let%bind next = Stored.create entry in
@@ -526,7 +628,12 @@ let commit t ~entry ~(receipt : R.t) =
           if P.Id.Recurrence.equal (E.id old.Stored.value) (E.id entry) then next else old)
     in
     let incoming =
-      { revision = Int64.succ t.revision; entries; receipts = t.receipts @ [ receipt ] }
+      { revision = Int64.succ t.revision
+      ; entries
+      ; receipts = t.receipts @ [ receipt ]
+      ; reserve_target_pauses =
+          t.reserve_target_pauses || reserves_on_enable t entry receipt
+      }
     in
     let%map () = validate_transition t ~incoming in
     incoming)
@@ -764,6 +871,21 @@ let pause_for_stop t =
 
 let hold_for_source t = disposition t ~f:E.hold_for_review
 
+let pause_invalid_target t ~recurrence_id ~reason =
+  let open Result.Let_syntax in
+  let%bind paused =
+    disposition t ~f:(fun entry ->
+      if
+        P.Id.Recurrence.equal (E.id entry) recurrence_id
+        && E.equal_control (E.control entry) Enabled
+      then Result.map (E.pause entry ~reason:(Target_invalidated reason)) ~f:Option.some
+      else Ok None)
+  in
+  Result.of_option
+    paused
+    ~error:(P.Error.invalid_request "recurrence target pause lost its enabled entry")
+;;
+
 let retire_stale_births t ~current_revision ~archived =
   disposition t ~f:(fun entry ->
     let%bind.Result effective = E.effective_control entry ~current_revision ~archived in
@@ -783,12 +905,8 @@ let capacity_projection t =
       `Object [ "id", P.Id.Recurrence.to_json (E.id e.value); "document", encoded ])
     |> Result.all
   in
-  `Object
-    [ ( "revision"
-      , X.int64_json
-          (if reserve.required_transition_steps = 0 then t.revision else Int64.max_value)
-      )
-    ; "entries", `Array entries
-    ; "receipts", `Array (List.map t.receipts ~f:receipt_json)
-    ]
+  let revision =
+    if reserve.required_transition_steps = 0 then t.revision else Int64.max_value
+  in
+  inventory_json t ~revision ~entries
 ;;

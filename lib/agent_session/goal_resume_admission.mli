@@ -24,7 +24,8 @@ end
     source identity, current nonterminal Workflow/episode/link/admission and
     canonical account. Select its existing physical binding separately in Actor.
     Resume the same held Goal exactly once, then check global activation policy
-    on that Enabled candidate (no count check/charge). Preserve Run index, link,
+    on that Enabled candidate in its checked prospective catalog (no count
+    check/charge or State publication). Preserve Run index, link,
     episode, account, usage and pending Wait exactly; commit only the preserved
     Goal document and command receipt. A new episode is never planned here. *)
 val prepare

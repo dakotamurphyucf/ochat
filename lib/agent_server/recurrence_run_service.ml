@@ -174,27 +174,105 @@ module Context = struct
       ~attempt
   ;;
 
-  let import t ?held observation =
+  let import t observation =
     let open Result.Let_syntax in
     let%bind () = check_entries t in
     let authorize = controller_policy t in
-    match held with
-    | Some held when self t ->
-      Actor.import_held_recurrence_execution
-        t.controller.actor
-        ~held
-        ~actor:t.controller_actor
-        ~authorize
-        ~automatic_policy:t.service.automatic_policy
-        ~observation
-    | Some _ | None ->
-      Actor.import_recurrence_execution
-        t.controller.actor
-        ~actor:t.controller_actor
-        ~authorize
-        ~automatic_policy:t.service.automatic_policy
-        ~observation
+    Actor.import_recurrence_execution
+      t.controller.actor
+      ~actor:t.controller_actor
+      ~authorize
+      ~automatic_policy:t.service.automatic_policy
+      ~observation
   ;;
+
+  module Held = struct
+    type context = t
+
+    (* Issued only from this Context's actual Held admission response, within
+       its original Prepared source lifetime. A retained receipt cannot enter. *)
+    type t =
+      { context : context
+      ; prepared : Runtime_owner.Prepared.t
+      ; held : Actor.Held_run.t
+      ; attempt : Execution_attempt.t
+      }
+
+    let check_basis t =
+      let open Result.Let_syntax in
+      let%bind () = Runtime_owner.Prepared.check_basis t.prepared in
+      Actor.Held_run.check_basis t.held
+    ;;
+
+    let check t =
+      let open Result.Let_syntax in
+      let%bind () = check_basis t in
+      let context = t.context in
+      let%bind () =
+        if self context
+        then Ok ()
+        else (
+          let controller =
+            Intent.occurrence context.intent
+            |> A.Recurrence_identity.Occurrence.definition
+            |> A.Recurrence_identity.Definition.controller
+          in
+          Factory.check_registered_entry
+            context.service.factory
+            context.controller
+            ~session:controller)
+      in
+      let%bind () =
+        Factory.check_registered_owner
+          context.service.factory
+          context.target
+          ~session:(Intent.target context.intent)
+      in
+      check_basis t
+    ;;
+
+    let create context ~prepared ~held ~attempt =
+      let open Result.Let_syntax in
+      let t = { context; prepared; held; attempt } in
+      let%map () = check t in
+      t
+    ;;
+
+    let observe t =
+      let open Result.Let_syntax in
+      let%bind () = check t in
+      let context = t.context in
+      Actor.observe_recurrence_run
+        context.target.actor
+        ~actor:context.target_actor
+        ~authorize:(target_policy context)
+        ~intent:context.intent
+        ~attempt:t.attempt
+    ;;
+
+    let import t observation =
+      let open Result.Let_syntax in
+      let%bind () = check t in
+      let context = t.context in
+      let authorize = controller_policy context in
+      if self context
+      then
+        Actor.import_held_recurrence_execution
+          context.controller.actor
+          ~held:t.held
+          ~actor:context.controller_actor
+          ~authorize
+          ~automatic_policy:context.service.automatic_policy
+          ~observation
+      else
+        Actor.import_recurrence_execution
+          context.controller.actor
+          ~actor:context.controller_actor
+          ~authorize
+          ~automatic_policy:context.service.automatic_policy
+          ~observation
+    ;;
+  end
 
   let reconcile_known t attempt admission =
     let open Result.Let_syntax in
@@ -248,8 +326,9 @@ let with_permit context observation f =
 
 let activate_held context prepared held attempt =
   let open Result.Let_syntax in
+  let%bind held_context = Context.Held.create context ~prepared ~held ~attempt in
   let observe () =
-    let%bind observation = Context.observe context attempt in
+    let%bind observation = Context.Held.observe held_context in
     Result.of_option
       observation
       ~error:
@@ -260,14 +339,14 @@ let activate_held context prepared held attempt =
            ())
   in
   let%bind observation = observe () in
-  let%bind _imported = Context.import context ~held observation in
+  let%bind _imported = Context.Held.import held_context observation in
   let%bind observation = observe () in
   with_permit context observation (fun permit ->
     let%bind observation = observe () in
     let%bind checked =
       Actor.check_recurrence_activation context.controller.actor permit ~observation
     in
-    let%bind () = Context.check_entries context in
+    let%bind () = Context.Held.check held_context in
     let checked = Actor.Recurrence_activation.Checked.admitted checked in
     let%map admission =
       match Intent.input context.intent with
@@ -299,9 +378,21 @@ let activate_held context prepared held attempt =
 let admit_selected context fact prepared attempt =
   let open Result.Let_syntax in
   let%bind () = Context.check_entries context in
+  let%bind goal_guard =
+    match Intent.child context.Context.intent with
+    | None -> Ok None
+    | Some _ ->
+      Actor.capture_recurrence_goal_run_guard
+        context.controller.actor
+        ~actor:context.controller_actor
+        ~authorize:(Context.controller_policy context)
+        ~intent:context.intent
+        ~attempt
+  in
   let%bind admission =
     Actor.admit_held_recurrence_run
-      context.Context.target.actor
+      ?goal_guard
+      context.target.actor
       ~binding:(Runtime_owner.Prepared.binding prepared)
       ~intent:context.intent
       ~attempt

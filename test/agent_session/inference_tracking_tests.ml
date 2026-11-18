@@ -30,7 +30,7 @@ let with_tracking_actor ?(map_initial = Fn.id) f =
           ~persistence:
             { archive_reference
             ; commit =
-                (fun ~command_audit:_ ~previous:_ _ ->
+                (fun ?observation:_ ~command_audit:_ ~previous:_ _ ->
                   if !reject
                   then
                     Error
@@ -346,7 +346,7 @@ let%expect_test
 let%expect_test
     "administration accepts only acknowledged tracking drift and preserves interruption"
   =
-  with_tracking_actor (fun _ actor _ _ ->
+  with_tracking_actor (fun _ actor _ commits ->
     let _, _, prepared = prepared () in
     let owner =
       A.open_inference_owner actor ~source:(source "graph-admin") |> protocol_ok
@@ -379,6 +379,13 @@ let%expect_test
     |> protocol_ok;
     A.seal_inference_owner actor ~owner |> protocol_ok;
     A.finish_inference_owner actor ~owner |> protocol_ok;
+    let joined = A.state actor |> protocol_ok in
+    let joined_commits = !commits in
+    (* Retry the genuine installed finish receipt, without a second interruption
+       write or a new execution grant. *)
+    A.finish_inference_owner actor ~owner |> protocol_ok;
+    assert (phys_equal joined (A.state actor |> protocol_ok));
+    [%test_eq: int] joined_commits !commits;
     A.commit_reconciled_administration
       actor
       ~command_audit:None
@@ -605,7 +612,12 @@ let%expect_test "late scope-only callbacks cannot reconstruct a retired admissio
            ~ordinal:(L.Handle.ordinal joined_handle)));
     assert (Option.is_none (Host.retained_registration joined_owner joined_handle));
     A.seal_inference_owner actor ~owner:joined_owner |> protocol_ok;
+    let before_empty_finish = A.state actor |> protocol_ok in
+    let empty_finish_commits = !commits in
     A.finish_inference_owner actor ~owner:joined_owner |> protocol_ok;
+    A.finish_inference_owner actor ~owner:joined_owner |> protocol_ok;
+    assert (phys_equal before_empty_finish (A.state actor |> protocol_ok));
+    [%test_eq: int] empty_finish_commits !commits;
     let module Fold = Agent_session.Canonical_usage_fold in
     let marks =
       Fold.Marks.of_ledger (A.state actor |> protocol_ok).inference_ledger
@@ -780,6 +792,13 @@ let%expect_test "actual Run worker refreshes before a nonyielding final authorit
   let expire = ref (fun () -> ()) in
   let checkpoint, checkpoint_u = Eio.Promise.create () in
   let await_checkpoint = ref (fun () -> failwith "fixture clock is unavailable") in
+  let await_terminal : (A.t -> S.t) ref =
+    ref (fun _ -> failwith "fixture clock is unavailable")
+  in
+  let capture_before_worker : (unit -> S.t) ref =
+    ref (fun () -> failwith "fixture Actor is unavailable")
+  in
+  let before_worker = ref None in
   let dispatches = ref 0 in
   let refreshes = ref 0 in
   let final_checks = ref 0 in
@@ -792,6 +811,7 @@ let%expect_test "actual Run worker refreshes before a nonyielding final authorit
   in
   let worker =
     Agent_session.Operation_worker.create ~run:(fun ~sw ~input capabilities ->
+      before_worker := Some (!capture_before_worker ());
       let result =
         Result.try_with (fun () ->
           let graph = Option.value_exn !graph_ref in
@@ -855,10 +875,22 @@ let%expect_test "actual Run worker refreshes before a nonyielding final authorit
   in
   Headless_run_tests.with_service
     ~prepare:(fun env ->
-      await_checkpoint
-      := fun () ->
+      (await_checkpoint
+       := fun () ->
+            Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
+              Eio.Promise.await checkpoint));
+      await_terminal
+      := fun actor ->
            Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
-             Eio.Promise.await checkpoint))
+             let rec loop () =
+               let state = A.state actor |> protocol_ok in
+               match state.active_operation with
+               | None -> state
+               | Some _ ->
+                 Eio.Fiber.yield ();
+                 loop ()
+             in
+             loop ()))
     ~worker
     ~authorize_hook:(fun () ->
       if !forbidden_authorization then failwith "final check invoked host authorization")
@@ -871,6 +903,7 @@ let%expect_test "actual Run worker refreshes before a nonyielding final authorit
          |> protocol_ok
        in
        graph_ref := Some graph;
+       (capture_before_worker := fun () -> A.state fixture.actor |> protocol_ok);
        (expire := fun () -> fixture.auth_now := fixture.expires_at);
        (* Initialize through the real startup, whose no-work Single_turn
           completes. User input is then admitted from actual Running/Idle. *)
@@ -888,12 +921,242 @@ let%expect_test "actual Run worker refreshes before a nonyielding final authorit
         | Ok () -> ()
         | Error exn -> raise exn);
        G.seal graph |> protocol_ok;
-       G.finish graph |> protocol_ok);
+       G.finish graph |> protocol_ok;
+       let settled = !await_terminal fixture.actor in
+       let before = Option.value_exn !before_worker in
+       assert (Option.is_some before.moderator);
+       assert (Option.equal Jsonaf.exactly_equal before.moderator settled.moderator);
+       let before_index = Option.value_exn before.run_state in
+       let settled_index = Option.value_exn settled.run_state in
+       let installation = Agent_session.Run_state.installation before_index in
+       assert (Option.is_some installation.source);
+       assert (
+         Agent_session.Run_source_installation.equal
+           installation
+           (Agent_session.Run_state.installation settled_index));
+       let operation = Option.value_exn before.active_operation in
+       assert (
+         List.exists
+           (Agent_session.Run_state.runs settled_index)
+           ~f:(fun (run : Agent_protocol.Run.t) ->
+             List.exists
+               run.terminal_work
+               ~f:(fun (proof : Agent_protocol.Run_work.Terminal.t) ->
+                 Agent_protocol.Run_work.Terminal.equal_outcome proof.outcome Succeeded
+                 &&
+                 match proof.work.key with
+                 | Operation id -> Agent_protocol.Id.Operation.equal id operation.id
+                 | Retained _ -> false))));
   print_endline
     "actual provider admitted once; later composed revocation rejects; final check calls \
      no host policy";
   [%expect
     {| actual provider admitted once; later composed revocation rejects; final check calls no host policy |}]
+;;
+
+module Terminal_failure_order = struct
+  type t =
+    | Before_retirement
+    | During_retirement
+    | After_committed_cancel
+end
+
+let%expect_test "actual terminal errors survive worker exit and later retirement" =
+  let module Owner = Agent_server.Runtime_owner in
+  let module Retirement = A.Runtime_retirement in
+  List.iter
+    Terminal_failure_order.
+      [ Before_retirement; During_retirement; After_committed_cancel ]
+    ~f:(fun order ->
+      let entered, entered_u = Eio.Promise.create () in
+      let release, release_u = Eio.Promise.create () in
+      let attempted, attempted_u = Eio.Promise.create () in
+      let expected_operation = ref None in
+      let before_terminal = ref None in
+      let worker_calls = ref 0
+      and worker_exits = ref 0
+      and terminal_calls = ref 0 in
+      let failure =
+        Agent_protocol.Error.create
+          Persistence_error
+          ~message:"actual terminal prewriter rejection"
+          ~retryable:true
+          ()
+      in
+      let assert_failure actual =
+        [%test_eq: Sexp.t]
+          (Agent_protocol.Error.sexp_of_t failure)
+          (Agent_protocol.Error.sexp_of_t actual)
+      in
+      let worker =
+        Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input _capabilities ->
+          Int.incr worker_calls;
+          (* A finite exit handoff makes the live-worker assertion deterministic.
+             Both genuine Cancel and retirement can mark its real switch while
+             it is here. The unconditional release below always lets it leave. *)
+          Exn.protect
+            ~finally:(fun () -> Int.incr worker_exits)
+            ~f:(fun () ->
+              Eio.Cancel.protect (fun () ->
+                Eio.Promise.resolve entered_u ();
+                Eio.Promise.await release);
+              Agent_session.Operation_worker.Completed
+                { final_history = input.history
+                ; moderator_snapshot = None
+                ; runtime_requests = []
+                }))
+      in
+      let make_persistence _env _sw _initial =
+        { A.archive_reference
+        ; commit =
+            (fun ?observation:_
+              ~command_audit:_
+              ~(previous : S.t)
+              (transition : Agent_session.Session_transition.t) ->
+              match previous.active_operation, !expected_operation with
+              | Some operation, Some expected
+                when Agent_protocol.Id.Operation.equal operation.id expected
+                     && Option.is_none transition.state.active_operation ->
+                Int.incr terminal_calls;
+                before_terminal := Some previous;
+                if Option.is_none (Eio.Promise.peek attempted)
+                then Eio.Promise.resolve attempted_u ();
+                Error failure
+              | (Some _ | None), (Some _ | None) -> Ok ())
+        }
+      in
+      let release_worker () =
+        if Option.is_none (Eio.Promise.peek release) then Eio.Promise.resolve release_u ()
+      in
+      let with_deadline =
+        ref (fun _ -> failwith "terminal fixture clock is unavailable")
+      in
+      let body_completed = ref false in
+      let body_failure = ref None in
+      let run_body f =
+        match f () with
+        | () -> body_completed := true
+        | exception exn ->
+          let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+          body_failure := Some (exn, backtrace);
+          Exn.raise_with_original_backtrace exn backtrace
+      in
+      let caught_cleanup =
+        try
+          Headless_run_tests.with_service
+            ~make_persistence
+            ~worker
+            ~keep_writer:true
+            ~prepare:(fun env ->
+              with_deadline := Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5.)
+            (fun fixture ->
+               run_body (fun () ->
+                 Exn.protect ~finally:release_worker ~f:(fun () ->
+                   !with_deadline (fun () ->
+                     fixture.start
+                       (fixture.request ~mode:Single_turn "initialize-terminal")
+                     |> Headless_run_tests.admitted
+                     |> ignore;
+                     assert (fixture.activate () |> protocol_ok);
+                     fixture.start
+                       (fixture.request
+                          ~input:(Headless_run_tests.input "terminal outcome")
+                          "actual-terminal")
+                     |> Headless_run_tests.admitted
+                     |> ignore;
+                     Eio.Promise.await entered;
+                     let state = A.state fixture.actor |> protocol_ok in
+                     let operation = Option.value_exn state.active_operation in
+                     expected_operation := Some operation.id;
+                     let retirement =
+                       match order with
+                       | Before_retirement -> None
+                       | During_retirement ->
+                         let retirement =
+                           A.retire_runtime_worker fixture.actor ~closing:true
+                           |> protocol_ok
+                         in
+                         assert (not (Retirement.is_finished retirement));
+                         assert (Int.equal !worker_exits 0);
+                         Some retirement
+                       | After_committed_cancel ->
+                         A.cancel_operation
+                           fixture.actor
+                           ~attachment_id:fixture.attachment_id
+                           ~operation_id:operation.id
+                         |> protocol_ok
+                         |> ignore;
+                         let cancelled = A.state fixture.actor |> protocol_ok in
+                         let active = Option.value_exn cancelled.active_operation in
+                         assert (Agent_protocol.Id.Operation.equal active.id operation.id);
+                         (match active.state with
+                          | Cancelling -> ()
+                          | Starting
+                          | Running
+                          | Completed
+                          | Failed _
+                          | Cancelled
+                          | Interrupted _ ->
+                            failwith "actual Cancel did not commit Cancelling");
+                         None
+                     in
+                     release_worker ();
+                     Eio.Promise.await attempted;
+                     (* This serialized read occurs after the real failing terminal
+                     request has left the Actor wrapper, before late retirement. *)
+                     let after = A.state fixture.actor |> protocol_ok in
+                     assert (phys_equal (Option.value_exn !before_terminal) after);
+                     assert (Int.equal !worker_calls 1 && Int.equal !worker_exits 1);
+                     assert (Int.equal !terminal_calls 1);
+                     let retirement =
+                       match retirement with
+                       | Some retirement -> retirement
+                       | None ->
+                         A.retire_runtime_worker fixture.actor ~closing:true
+                         |> protocol_ok
+                     in
+                     (match Retirement.await retirement with
+                      | Error actual -> assert_failure actual
+                      | Ok () -> failwith "failed terminal was reported as acknowledged");
+                     let repeated =
+                       A.retire_runtime_worker fixture.actor ~closing:true |> protocol_ok
+                     in
+                     assert (phys_equal retirement repeated);
+                     (match Retirement.await repeated with
+                      | Error actual -> assert_failure actual
+                      | Ok () -> failwith "retained terminal failure changed");
+                     assert (phys_equal after (A.state fixture.actor |> protocol_ok));
+                     assert (Int.equal !terminal_calls 1);
+                     (* The real Owner must report this same failure rather than
+                     await a nonexistent second callback. It retains its runtime;
+                     this is not a successful raw-resource close assertion. *)
+                     (match Owner.close_and_wait fixture.runtime_owner with
+                      | () -> failwith "Owner close hid the failed terminal"
+                      | exception Owner.Cleanup_failed actual -> assert_failure actual);
+                     assert (Owner.is_loaded fixture.runtime_owner);
+                     assert (Int.equal !terminal_calls 1)))));
+          false
+        with
+        | Owner.Cleanup_failed actual ->
+          (* The fixture's unconditional strong-close finalizer is truthful too. *)
+          assert_failure actual;
+          true
+      in
+      Option.iter !body_failure ~f:(fun (exn, backtrace) ->
+        Exn.raise_with_original_backtrace exn backtrace);
+      assert !body_completed;
+      assert caught_cleanup;
+      match order with
+      | Before_retirement -> print_endline "terminal error before retirement: retained"
+      | During_retirement ->
+        print_endline "live worker then retirement: exact error joined"
+      | After_committed_cancel ->
+        print_endline "committed Cancel then terminal error: retained");
+  [%expect
+    {|
+    terminal error before retirement: retained
+    live worker then retirement: exact error joined
+    committed Cancel then terminal error: retained |}]
 ;;
 
 let%expect_test "failed factual release retains the actual registration for retry" =
@@ -968,4 +1231,129 @@ let%expect_test "failed factual release retains the actual registration for retr
        cannot inherit old facts");
   [%expect
     {| failed release retains custody; exact retry settles once; replacement graph cannot inherit old facts |}]
+;;
+
+let%expect_test "factual graph duties elect once and retain cancelled or newer frontiers" =
+  let module F = Agent_session.Inference_graph_owner.Factual_usage in
+  Eio_main.run (fun _ ->
+    Eio.Switch.run (fun sw ->
+      let initial_calls = ref 0 in
+      let correction_calls = ref 0 in
+      let initial_entered, initial_entered_u = Eio.Promise.create () in
+      let initial_release, initial_release_u = Eio.Promise.create () in
+      let correction_entered, correction_entered_u = Eio.Promise.create () in
+      let correction_release, correction_release_u = Eio.Promise.create () in
+      let failure =
+        Agent_protocol.Error.create
+          Persistence_error
+          ~message:"retained factual procedure failure"
+          ~retryable:false
+          ()
+      in
+      (* Fixed core procedures are state-machine stimuli, not native ACKs or
+         execution permission. Real Actor/registration pruning stays above. *)
+      let facts =
+        F.Host.create
+          ~confirm_initial:(fun () ->
+            incr initial_calls;
+            if !initial_calls = 1
+            then (
+              Eio.Promise.resolve initial_entered_u ();
+              Eio.Promise.await initial_release);
+            Ok ())
+          ~correct_usage:(fun () ->
+            incr correction_calls;
+            match !correction_calls with
+            | 1 ->
+              Eio.Promise.resolve correction_entered_u ();
+              Eio.Promise.await correction_release;
+              Ok F.Correction_outcome.Settled
+            | 2 -> Error failure
+            | 3 -> Ok Awaiting_initial_confirmation
+            | _ -> Ok Settled)
+      in
+      F.Host.invalidate facts ~ledger_revision:1L;
+      (match F.settle_correction facts |> protocol_ok with
+       | Deferred -> ()
+       | Settled -> failwith "correction bypassed actual initial confirmation");
+      assert (!correction_calls = 0);
+      let cancellation, cancellation_u = Eio.Promise.create () in
+      let leader_done, leader_done_u = Eio.Promise.create () in
+      let follower_entered, follower_entered_u = Eio.Promise.create () in
+      let follower_done, follower_done_u = Eio.Promise.create () in
+      Eio.Fiber.fork ~sw (fun () ->
+        let cancelled =
+          try
+            Eio.Cancel.sub (fun context ->
+              Eio.Promise.resolve cancellation_u context;
+              F.confirm_initial facts |> protocol_ok);
+            false
+          with
+          | Eio.Cancel.Cancelled Exit -> true
+        in
+        Eio.Promise.resolve leader_done_u cancelled);
+      Eio.Promise.await initial_entered;
+      Eio.Fiber.fork ~sw (fun () ->
+        Eio.Promise.resolve follower_entered_u ();
+        let cancelled =
+          try
+            F.confirm_initial facts |> protocol_ok;
+            false
+          with
+          | Eio.Cancel.Cancelled Exit -> true
+        in
+        Eio.Promise.resolve follower_done_u cancelled);
+      Eio.Promise.await follower_entered;
+      assert (!initial_calls = 1);
+      Eio.Cancel.cancel (Eio.Promise.await cancellation) Exit;
+      assert (Eio.Promise.await leader_done);
+      assert (Eio.Promise.await follower_done);
+      Eio.Promise.resolve initial_release_u ();
+      assert (not (F.Host.initial_confirmed facts |> protocol_ok));
+      assert (F.Host.pending facts |> protocol_ok);
+      F.confirm_initial facts |> protocol_ok;
+      assert (!initial_calls = 2);
+      assert (F.Host.initial_confirmed facts |> protocol_ok);
+      let corrected, corrected_u = Eio.Promise.create () in
+      let joined, joined_u = Eio.Promise.create () in
+      let joining, joining_u = Eio.Promise.create () in
+      Eio.Fiber.fork ~sw (fun () ->
+        Eio.Promise.resolve corrected_u (F.settle_correction facts |> protocol_ok));
+      Eio.Promise.await correction_entered;
+      Eio.Fiber.fork ~sw (fun () ->
+        Eio.Promise.resolve joining_u ();
+        Eio.Promise.resolve joined_u (F.settle_correction facts |> protocol_ok));
+      Eio.Promise.await joining;
+      assert (!correction_calls = 1);
+      F.Host.invalidate facts ~ledger_revision:2L;
+      Eio.Promise.resolve correction_release_u ();
+      List.iter
+        [ Eio.Promise.await corrected; Eio.Promise.await joined ]
+        ~f:(function
+          | F.Drain_outcome.Deferred -> ()
+          | Settled -> failwith "old correction cleared newer canonical facts");
+      assert (F.Host.pending facts |> protocol_ok);
+      (match F.settle_correction facts with
+       | Error actual -> assert (phys_equal actual failure)
+       | Ok _ -> failwith "factual procedure lost its original Error");
+      assert (F.Host.pending facts |> protocol_ok);
+      (match F.settle_correction facts |> protocol_ok with
+       | Deferred -> ()
+       | Settled -> failwith "awaiting initial confirmation became settled");
+      assert (F.Host.pending facts |> protocol_ok);
+      (match F.settle_correction facts |> protocol_ok with
+       | Settled -> ()
+       | Deferred -> failwith "current factual procedure did not settle");
+      assert (not (F.Host.pending facts |> protocol_ok));
+      F.Host.invalidate facts ~ledger_revision:1L;
+      F.confirm_initial facts |> protocol_ok;
+      (match F.settle_correction facts |> protocol_ok with
+       | Settled -> ()
+       | Deferred -> failwith "older invalidation regressed the clean frontier");
+      assert (!initial_calls = 2 && !correction_calls = 4);
+      print_endline
+        "one initial/correction election; cancellation and Error retain duty; newer and \
+         awaiting frontiers remain pending"));
+  [%expect
+    {| one initial/correction election; cancellation and Error retain duty; newer and awaiting frontiers remain pending |}]
 ;;

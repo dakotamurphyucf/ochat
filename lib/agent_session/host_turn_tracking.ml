@@ -58,6 +58,7 @@ module Ledger_state = struct
     { ledger : Inference_ledger.t
     ; accounts : Goal_accounts.t option
     ; delegated_usage : Delegated_usage.t option
+    ; policy_usage : Policy_canonical_usage.t option
     ; descendants : Goal_descendants.t option
     ; children : Child_contributions.t option
     ; inherited_edge : Inherited_edge.t option
@@ -91,6 +92,7 @@ let apply_internal ?inherited_turn ~previous state delta payloads =
   let reconcile (current : Ledger_state.t) after ~admission =
     let%map prepared =
       Canonical_usage_update.prepare
+        ?policy_usage:current.policy_usage
         current.ledger
         ~after
         ~accounts:current.accounts
@@ -101,8 +103,12 @@ let apply_internal ?inherited_turn ~previous state delta payloads =
     let accounts = Canonical_usage_update.accounts prepared in
     let delegated_usage = Canonical_usage_update.delegated_usage prepared in
     let accounts_changed = Canonical_usage_update.accounts_changed prepared in
+    let policy_usage = Canonical_usage_update.policy_usage prepared in
     let changes =
-      Session_delta.inference_ledger_update after ~delegated_usage
+      Session_delta.inference_ledger_update
+        ?policy_update:(Canonical_usage_update.policy_update prepared)
+        after
+        ~delegated_usage
       ::
       (if accounts_changed
        then
@@ -115,6 +121,7 @@ let apply_internal ?inherited_turn ~previous state delta payloads =
       Ledger_state.ledger = after
     ; accounts
     ; delegated_usage
+    ; policy_usage
     ; accounts_changed = current.accounts_changed || accounts_changed
     ; changes_rev = List.rev_append changes current.changes_rev
     }
@@ -265,6 +272,7 @@ let apply_internal ?inherited_turn ~previous state delta payloads =
         { Ledger_state.ledger = state.Session_state.inference_ledger
         ; accounts = state.goal_accounts
         ; delegated_usage = state.delegated_usage
+        ; policy_usage = state.policy_canonical_usage
         ; descendants = state.goal_descendants
         ; children = state.child_contributions
         ; inherited_edge = None
@@ -292,6 +300,7 @@ let apply_internal ?inherited_turn ~previous state delta payloads =
   let { Ledger_state.ledger = inference_ledger
       ; accounts = goal_accounts
       ; delegated_usage
+      ; policy_usage = policy_canonical_usage
       ; descendants = goal_descendants
       ; children = child_contributions
       ; inherited_edge
@@ -313,6 +322,7 @@ let apply_internal ?inherited_turn ~previous state delta payloads =
         inference_ledger
       ; goal_accounts
       ; delegated_usage
+      ; policy_canonical_usage
       ; goal_descendants
       ; child_contributions
       }

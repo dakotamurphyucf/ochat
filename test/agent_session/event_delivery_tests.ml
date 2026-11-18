@@ -8,8 +8,24 @@ let%expect_test "external event delivery commits receipts before changing the li
   let module S = Session.Moderator_state.Identity_snapshot in
   with_actor_workspace (fun env workspace_instance ->
     Eio.Switch.run (fun sw ->
-      let manager, _ = handoff_manager env in
+      let source =
+        {|type state = { count : int }
+          type event = [ `Session_start | `Session_resume | `Turn_start | `Turn_end ]
+          let initial_state = { count = 0 }
+          let on_event : context -> state -> event -> state task = fun ctx st ev ->
+            Task.pure(st)|}
+      in
+      let manager =
+        prepared_legacy_callback_managers env ~id:"external-delivery" ~source ()
+      in
+      (* This retained invocation supplies only the creator identity in timer
+         DATA. No Manager, callback admission or runtime is installed in Actor. *)
+      let creator = invocation_fixture () in
       let snapshot () = M.identity_snapshot manager |> Result.ok_or_failwith in
+      let captured = snapshot () in
+      let source : Agent_protocol.Invocation.observer =
+        { script_id = captured.script_id; source_sha256 = captured.script_source_hash }
+      in
       let initial =
         actor_state ~workspace_instance ~liveness:Detached ~start_immediately:false
       in
@@ -26,7 +42,8 @@ let%expect_test "external event delivery commits receipts before changing the li
         ; last_delivery_at = None
         ; inference_provenance = None
         ; delivery_cancellation = None
-        ; ownership = None
+        ; ownership =
+            Some { source; creator = Invocation creator.context.id; subscription = None }
         }
       in
       let first = schedule ()
@@ -37,7 +54,9 @@ let%expect_test "external event delivery commits receipts before changing the li
         ; session_id
         ; generation = 0
         ; kind = Model_call
-        ; payload = `Null
+        ; payload =
+            `Object
+              [ "recipe", `String Chat_response.Model_executor.agent_prompt_v1_name ]
         ; status = Succeeded
         ; retry_policy = Never
         ; attempt = 1
@@ -57,6 +76,7 @@ let%expect_test "external event delivery commits receipts before changing the li
           moderator = Some (B.encode_moderator_snapshot (snapshot ()))
         ; schedules = [ first; second; third ]
         ; jobs = [ job ]
+        ; invocations = [ creator ]
         ; model_job_targets = [ model_job_binding initial job ]
         }
       in
@@ -76,12 +96,12 @@ let%expect_test "external event delivery commits receipts before changing the li
           ~persistence:
             { archive_reference
             ; commit =
-                (fun ~command_audit ~previous next ->
+                (fun ?observation ~command_audit ~previous next ->
                   match !reject with
                   | true ->
                     reject := false;
                     Error (handoff_error "delivery save rejected")
-                  | false -> persistence.commit ~command_audit ~previous next)
+                  | false -> persistence.commit ?observation ~command_audit ~previous next)
             }
           ~services:
             { now = (fun () -> timestamp)
@@ -102,17 +122,25 @@ let%expect_test "external event delivery commits receipts before changing the li
         ~f:(fun () ->
           let same = Option.equal Jsonaf.exactly_equal in
           let current_matches () =
-            same
-              (Some (B.encode_moderator_snapshot (snapshot ())))
-              (A.state actor |> protocol_ok).moderator
+            let state = A.state actor |> protocol_ok in
+            let current =
+              Agent_session.Moderator_checkpoint.decode state.moderator |> protocol_ok
+            in
+            let matches =
+              Option.exists current ~f:(fun current ->
+                Sexp.equal (S.sexp_of_t current) (S.sexp_of_t (snapshot ())))
+            in
+            assert_moderator_checkpoint state ~snapshot:(snapshot ()) |> ignore;
+            matches
           in
-          let append ?(before_commit = fun () -> ()) label save =
+          (* These are complete claimed owned-timer / Model completion DATA
+             frames, not execution admissions or arbitrary Runtime.emit values. *)
+          let schedule_event schedule =
+            Chat_response.Schedule_delivery.capture schedule |> Result.ok_or_failwith
+          in
+          let job_event = B.model_job_event job |> protocol_ok in
+          let append ?(before_commit = fun () -> ()) event save =
             A.with_moderator_checkpoint actor (fun () ->
-              let event =
-                Chat_response.Moderator_invocation.internal_event
-                  (Chatml.Chatml_lang.VVariant ("String", [ VString label ]))
-                |> Result.ok_or_failwith
-              in
               M.enqueue_internal_event_entries
                 manager
                 ~event
@@ -146,27 +174,27 @@ let%expect_test "external event delivery commits receipts before changing the li
           assert (
             Result.is_error
               (append
-                 "stale-timer"
+                 (schedule_event first)
                  (save_schedule { first with payload = `String "different payload" })));
           assert (
             Result.is_error
               (append
-                 "stale-job"
+                 job_event
                  (save_job
                     { job with attempt = 0; result = Some (`String "previous attempt") })));
           assert (Sexp.equal (S.sexp_of_t unchanged) (S.sexp_of_t (snapshot ())));
           assert (current_matches ());
           List.iter
-            [ "schedule", save_schedule first; "job", save_job job ]
-            ~f:(fun (label, save) ->
+            [ schedule_event first, save_schedule first; job_event, save_job job ]
+            ~f:(fun (event, save) ->
               let before = snapshot () in
               reject := true;
-              assert (Result.is_error (append label save));
+              assert (Result.is_error (append event save));
               assert (Sexp.equal (S.sexp_of_t before) (S.sexp_of_t (snapshot ())));
               assert (current_matches ());
-              append label save |> protocol_ok |> ignore;
+              append event save |> protocol_ok |> ignore;
               let delivered = snapshot () in
-              assert (Result.is_error (append label save));
+              assert (Result.is_error (append event save));
               assert (Sexp.equal (S.sexp_of_t delivered) (S.sexp_of_t (snapshot ())));
               assert (current_matches ()));
           let entered, entered_u = Eio.Promise.create () in
@@ -177,17 +205,22 @@ let%expect_test "external event delivery commits receipts before changing the li
           let second_prepared = ref false in
           Eio.Fiber.fork ~sw (fun () ->
             let result =
-              append "concurrent-first" (save_schedule second) ~before_commit:(fun () ->
-                Eio.Promise.resolve entered_u ();
-                Eio.Promise.await release)
+              append
+                (schedule_event second)
+                (save_schedule second)
+                ~before_commit:(fun () ->
+                  Eio.Promise.resolve entered_u ();
+                  Eio.Promise.await release)
             in
             Eio.Promise.resolve first_done_u result);
           Eio.Promise.await entered;
           Eio.Fiber.fork ~sw (fun () ->
             Eio.Promise.resolve queued_u ();
             let result =
-              append "concurrent-second" (save_schedule third) ~before_commit:(fun () ->
-                second_prepared := true)
+              append
+                (schedule_event third)
+                (save_schedule third)
+                ~before_commit:(fun () -> second_prepared := true)
             in
             Eio.Promise.resolve second_done_u result);
           Eio.Promise.await queued;
@@ -199,6 +232,21 @@ let%expect_test "external event delivery commits receipts before changing the li
           Eio.Promise.await first_done |> protocol_ok |> ignore;
           Eio.Promise.await second_done |> protocol_ok |> ignore;
           let final = A.state actor |> protocol_ok in
+          let metadata =
+            assert_moderator_checkpoint final ~snapshot:(snapshot ()) |> Option.value_exn
+          in
+          assert_moderator_queue_frontier (Some metadata) ~required:true ~head:0L ~next:4L;
+          let produced =
+            List.nth_exn (Agent_session.Moderator_queue.entries metadata) 1
+          in
+          assert (
+            Option.equal
+              Agent_session.Queue_producer.equal
+              (Agent_session.Moderator_queue.Entry.producer produced)
+              (Some
+                 (Job_completion
+                    { id = job.id; generation = job.generation; attempt = job.attempt })));
+          assert (Option.is_none (Agent_session.Moderator_queue.Entry.origin produced));
           print_s
             [%sexp
               { queue_length = (List.length (snapshot ()).queued_internal_events : int)
@@ -303,6 +351,7 @@ let%expect_test "two session event owners reject a wait cycle and release both b
                     ~event:Session_start
                     ~snapshot:(fun () -> Ok snapshot)
                     (fun ~executing:_
+                      ~policy_caller:_
                       ~model_jobs:_
                       ~allocate_inference:_
                       ~retirement_reason:_
@@ -534,11 +583,21 @@ let%expect_test "queued events retain actor ownership through checkpoint install
             | _ -> results := [ safe_run () ]);
            let saved = A.state actor |> protocol_ok in
            let live = M.identity_snapshot manager |> Result.ok_or_failwith in
-           assert (
-             Option.equal
-               Jsonaf.exactly_equal
-               saved.moderator
-               (Some (Agent_session.Runtime_builder.encode_moderator_snapshot live)));
+           let metadata = assert_moderator_checkpoint saved ~snapshot:live in
+           let completed =
+             match mode with
+             | `Commit | `Concurrent -> true
+             | `Claim_rejected
+             | `Commit_rejected
+             | `Terminal_rejected
+             | `Stop_cancel
+             | `Bad_tail -> false
+           in
+           assert_moderator_queue_frontier
+             metadata
+             ~required:completed
+             ~head:(if completed then 1L else 0L)
+             ~next:(if completed then 3L else 2L);
            assert (
              List.length saved.conversation.canonical_history
              = List.length initial.conversation.canonical_history);
@@ -599,11 +658,20 @@ let%expect_test "queued events retain actor ownership through checkpoint install
               assert (Sexp.equal (S.sexp_of_t before) (S.sexp_of_t live));
               assert (Result.is_error (run ()));
               let changed = { before with revision = before.revision + 1 } in
-              A.change_moderator
-                actor
-                (Some (Agent_session.Runtime_builder.encode_moderator_snapshot changed))
-              |> protocol_ok
-              |> ignore;
+              let checkpoint =
+                Agent_session.Moderator_checkpoint.of_jsonaf
+                  (Option.value_exn saved.moderator)
+                |> protocol_ok
+              in
+              let checkpoint =
+                Agent_session.Moderator_checkpoint.update
+                  checkpoint
+                  ~snapshot:changed
+                  ~queue:Keep
+                |> protocol_ok
+                |> Agent_session.Moderator_checkpoint.to_jsonaf
+              in
+              A.change_moderator actor (Some checkpoint) |> protocol_ok |> ignore;
               assert (
                 Result.is_error
                   (A.with_idle_queued_moderator_event
@@ -983,6 +1051,7 @@ let%expect_test "event-owned native calls retain lineage and expire with their c
              ~snapshot:before
              (fun
                  ~executing
+                  ~policy_caller:_
                   ~model_jobs:_
                   ~allocate_inference:_
                   ~retirement_reason:_
@@ -1195,26 +1264,32 @@ let%expect_test
                     (fun ~name:_ ~args:_ -> failwith "unscoped Tool.call fallback used")
                 }
           in
-          M.handle_event_entries_transactional
-            manager
-            ~session_id:"fixture"
-            ~now_ms:0
-            ~history:[]
-            ~available_tools:[]
-            ~session_meta:`Null
-            ~event:Session_start
-            ~authorize:(fun () -> Ok ())
-            ~on_tool_call:(fun ~name:_ ~args:_ -> assert false)
-            ~prepare_event:(fun ~outcome:_ ~snapshot:_ -> Ok (M.memory_commit ignore))
-          |> Result.ok_or_failwith
-          |> ignore;
-          let before = M.identity_snapshot manager |> Result.ok_or_failwith in
+          let empty = M.identity_snapshot manager |> Result.ok_or_failwith in
+          assert (List.is_empty empty.queued_internal_events);
           let snapshot =
-            Some (Agent_session.Runtime_builder.encode_moderator_snapshot before)
+            Some (Agent_session.Runtime_builder.encode_moderator_snapshot empty)
           in
           prepared := Some manager;
           Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input caps ->
             caps.commit_moderator snapshot |> protocol_ok;
+            let startup =
+              Agent_session.Moderator_event.run_ordinary
+                ~event:Session_start
+                ~claim:(caps.with_moderator_event ~event:Session_start)
+                ~manager
+                ~history:(fun () -> input.history)
+                ~available_tools:[]
+                ~session_meta:`Null
+                ~now:Agent_protocol.Timestamp.now
+                ()
+              |> protocol_ok
+            in
+            assert (Option.is_some startup);
+            let snapshot =
+              Some
+                (Agent_session.Runtime_builder.encode_moderator_snapshot
+                   (M.identity_snapshot manager |> Result.ok_or_failwith))
+            in
             Completed
               { final_history = input.history
               ; moderator_snapshot = snapshot
@@ -1223,6 +1298,34 @@ let%expect_test
         (fun _env actor writer backend ->
            let initial = await_idle actor in
            let manager = Option.value_exn !prepared in
+           let startup =
+             match
+               List.filter initial.moderator_executions ~f:(fun event ->
+                 Agent_protocol.Moderator_execution.equal_phase
+                   event.context.phase
+                   Session_start)
+             with
+             | [ startup ] -> startup
+             | _ -> failwith "fixture requires one actual Session_start receipt"
+           in
+           (match startup.status with
+            | Completed _ -> ()
+            | Running | Failed _ | Interrupted _ ->
+              failwith "actual fixture Session_start failed");
+           let metadata =
+             assert_moderator_checkpoint
+               initial
+               ~snapshot:(M.identity_snapshot manager |> Result.ok_or_failwith)
+             |> Option.value_exn
+           in
+           let entries = Agent_session.Moderator_queue.entries metadata in
+           [%test_eq: int] 2 (List.length entries);
+           List.iter entries ~f:(fun entry ->
+             match Agent_session.Moderator_queue.Entry.producer entry with
+             | Some (Event actual) ->
+               assert (
+                 Agent_protocol.Id.Moderator_execution.equal actual startup.context.id)
+             | _ -> failwith "fixture emit lost its actual Session_start producer");
            (on_native
             := fun () ->
                  assert (Option.is_none (A.state actor |> protocol_ok).active_operation);
@@ -1267,6 +1370,7 @@ let%expect_test
                ~snapshot
                (fun
                    ~executing
+                    ~policy_caller
                     ~model_jobs
                     ~allocate_inference
                     ~retirement_reason
@@ -1281,6 +1385,7 @@ let%expect_test
                   in
                   f
                     ~executing
+                    ~policy_caller
                     ~model_jobs
                     ~allocate_inference
                     ~retirement_reason
@@ -1539,6 +1644,25 @@ let%expect_test "legacy exact Manager claim installs source facts without a Run"
                     admission_entered := true;
                     last_scope := Some scope;
                     A.check_callback_current actor scope |> protocol_ok;
+                    if M.Callback.consumes_head callback
+                    then (
+                      let current = A.state actor |> protocol_ok in
+                      let metadata =
+                        Agent_session.Moderator_checkpoint.queue current.moderator
+                        |> protocol_ok
+                        |> Option.value_exn
+                      in
+                      let head =
+                        List.hd_exn (Agent_session.Moderator_queue.entries metadata)
+                      in
+                      let receipt = A.Callback_scope.executing scope in
+                      let module C = Agent_protocol.Moderator_execution.Queue_occurrence
+                      in
+                      let capture = Option.value_exn receipt.queue_occurrence in
+                      assert (
+                        C.Producer.equal
+                          (C.producer capture)
+                          (Captured (Agent_session.Moderator_queue.Entry.producer head))));
                     (match inspect with
                      | Some inspect -> inspect scope
                      | None ->
@@ -1733,12 +1857,21 @@ let%expect_test "legacy exact Manager claim installs source facts without a Run"
        assert (not (Operator_authorization.is_current proof));
        assert (Result.is_error (A.check_callback_current actor scope));
        resume unavailable |> Result.ok_or_failwith |> ignore;
+       let operation_receipts = ref [] in
        let run_operation ~sequence ~original ~expect_error ~after inspect =
          let inspected = ref false in
          let worker_oracle_completed = ref false in
          let before_events = (A.state actor |> protocol_ok).counters.event_sequence in
          (during_worker
-          := fun input _caps ->
+          := fun input caps ->
+               let module F = Agent_session.Callback_cleanup in
+               let receipt = caps.callback_cleanup () |> protocol_ok in
+               let original_operation = F.Operation.operation receipt |> protocol_ok in
+               assert (
+                 Agent_protocol.Id.Operation.equal
+                   original_operation.id
+                   input.operation.id);
+               operation_receipts := !operation_receipts @ [ input.operation.id, receipt ];
                let result =
                  invoke
                    ~selection:(Boundary Turn_start)
@@ -1773,6 +1906,14 @@ let%expect_test "legacy exact Manager claim installs source facts without a Run"
          in
          let operation_id = Option.value_exn admitted.operation_id in
          await_idle actor |> ignore;
+         let module F = Agent_session.Callback_cleanup in
+         List.iter !operation_receipts ~f:(fun (expected_id, receipt) ->
+           let original_operation = F.Operation.operation receipt |> protocol_ok in
+           assert (Agent_protocol.Id.Operation.equal expected_id original_operation.id);
+           match F.Operation.terminal receipt |> protocol_ok with
+           | Some (Ok (Ok ())) -> ()
+           | None | Some (Ok (Error _)) | Some (Error _) ->
+             failwith "original operation terminal receipt was lost or replaced");
          (* These assertions run outside BOTH Manager and worker exception-to-
             result boundaries. Neither can convert an unfinished oracle to pass. *)
          assert !inspected;
@@ -1839,6 +1980,11 @@ let%expect_test "legacy exact Manager claim installs source facts without a Run"
             assert (Operator_authorization.is_current proof);
             A.check_callback_current actor scope |> protocol_ok;
             cleared_loan := Some (scope, proof));
+       (match !operation_receipts with
+        | [ (first_id, first); (second_id, second) ] ->
+          assert (not (phys_equal first second));
+          assert (not (Agent_protocol.Id.Operation.equal first_id second_id))
+        | _ -> failwith "two actual workers did not retain distinct original receipts");
        print_endline
          "exact legacy source; fresh None differs from unavailable; one-event proof; \
           failed ACK preserves pending; original expiry and serialized Manager clear; \
@@ -3379,6 +3525,7 @@ let%expect_test "already stopped Job loans retire only after the actual Stop ACK
              |> Option.value_exn
            in
            let observed = ref None in
+           let completion = ref None in
            let call : Chat_response.Moderation.Tool_call.t =
              { id = "stopped-job-tool"
              ; name = "read_file"
@@ -3397,7 +3544,14 @@ let%expect_test "already stopped Job loans retire only after the actual Stop ACK
                ~deadline:(Some Job_fixtures.deadline)
                (fun services ->
                   L.invoke
-                    ~claim:services.claim_legacy_callback
+                    ~claim:(fun ?capture_cleanup ~callback f ->
+                      services.claim_legacy_callback
+                        ~capture_cleanup:(fun acquired ->
+                          assert (Option.is_none !completion);
+                          completion := Some acquired;
+                          Option.iter capture_cleanup ~f:(fun capture -> capture acquired))
+                        ~callback
+                        f)
                     ~actor
                     ~manager
                     ~selection:(Boundary (Pre_tool_call call))
@@ -3415,6 +3569,20 @@ let%expect_test "already stopped Job loans retire only after the actual Stop ACK
              |> protocol_ok
            in
            ignore result;
+           let module F = Agent_session.Callback_cleanup in
+           let module C = F.Completion_snapshot in
+           let completed =
+             F.Completion.snapshot (Option.value_exn !completion) |> protocol_ok
+           in
+           (match C.producer_exit completed with
+            | Returned (Ok ()) -> ()
+            | Not_returned | Returned (Error _) ->
+              failwith "actual Job producer did not complete successfully");
+           (match C.finish_call completed, C.release completed with
+            | Completed (Ok ()), Completed (Ok ()) -> ()
+            | _ -> failwith "actual Job callback cleanup did not complete successfully");
+           assert (Option.is_none (C.capture_failure completed));
+           assert (List.is_empty (C.failures completed));
            (match retry_stop, Option.value_exn !observed with
             | false, (Ok (Some proof), true) ->
               assert (not (Operator_authorization.is_current proof))
@@ -3464,6 +3632,12 @@ let%expect_test "constructor handoff preserves exact checkpoints and intended re
            L.A.begin_initialization_authenticated actor ~actor:original ~expected
            |> protocol_ok
          in
+         let no_source_handoff () =
+           match L.A.Initialization_scope.source_handoff scope with
+           | Error failure -> [%test_eq: P.Error.code] Conflict failure.code
+           | Ok _ -> failwith "unacknowledged constructor issued a source handoff"
+         in
+         no_source_handoff ();
          let job delivery : P.Job.t =
            { id = P.Id.Job.create ()
            ; session_id
@@ -3515,10 +3689,20 @@ let%expect_test "constructor handoff preserves exact checkpoints and intended re
          [%test_eq: int64] before.counters.revision rejected.counters.revision;
          assert (Option.is_none rejected.moderator);
          assert (Option.is_none rejected.run_state);
+         no_source_handoff ();
          assert (Operator_authorization.is_current original);
          L.A.complete_initialization ~moderator_manager:manager actor ~scope ~candidate
          |> protocol_ok
          |> ignore;
+         let handoff = L.A.Initialization_scope.source_handoff scope |> protocol_ok in
+         assert (
+           Option.is_none (L.A.Initialization_scope.Source_handoff.before_source handoff));
+         L.A.Initialization_scope.Source_handoff.check
+           handoff
+           ~actor
+           ~moderator_manager:(Some manager)
+           ~expected:(S.Memory_backend.state backend)
+         |> protocol_ok;
          L.A.end_initialization actor ~scope |> protocol_ok;
          let initialized = L.A.state actor |> protocol_ok in
          let index = Option.value_exn initialized.run_state in
@@ -3529,6 +3713,31 @@ let%expect_test "constructor handoff preserves exact checkpoints and intended re
              ~generation:initialized.identity.generation
            |> protocol_ok
          in
+         assert (
+           Option.equal
+             P.Run_source.equal
+             (L.A.Initialization_scope.Source_handoff.after_source handoff)
+             (Some source));
+         let ended_handoff =
+           L.A.Initialization_scope.source_handoff scope |> protocol_ok
+         in
+         assert (phys_equal handoff ended_handoff);
+         L.A.Initialization_scope.Source_handoff.check
+           ended_handoff
+           ~actor
+           ~moderator_manager:(Some manager)
+           ~expected:initialized
+         |> protocol_ok;
+         let replacement = make_manager () in
+         (match
+            L.A.Initialization_scope.Source_handoff.check
+              ended_handoff
+              ~actor
+              ~moderator_manager:(Some replacement)
+              ~expected:initialized
+          with
+          | Error failure -> [%test_eq: P.Error.code] Conflict failure.code
+          | Ok () -> failwith "foreign Manager matched an initialization source handoff");
          let queue = S.Moderator_queue.bootstrap ~source ~queue:[] |> protocol_ok in
          let full =
            S.Moderator_checkpoint.encode_with_queue snapshot ~queue
@@ -3687,7 +3896,6 @@ let%expect_test "constructor handoff preserves exact checkpoints and intended re
                Jsonaf.exactly_equal
                (S.Memory_backend.state backend).moderator
                (Some full)));
-         let replacement = make_manager () in
          L.install actor replacement worker;
          (match inspect replacement ready with
           | Error failure, false ->
@@ -4421,8 +4629,13 @@ let%expect_test "constructor callbacks hand off their exact emitted and timer cu
             | Some (Event id) ->
               assert (P.Id.Moderator_execution.equal id receipt.context.id)
             | None
-            | Some (Invocation _ | Job_completion _ | Schedule_delivery _ | Source_setup _)
-              -> assert false);
+            | Some
+                ( Invocation _
+                | Invocation_at_source _
+                | Job_completion _
+                | Schedule_delivery _
+                | Source_setup _
+                | Ingress_delivery _ ) -> assert false);
            assert (
              Option.equal P.Inference_origin.equal (Q.Entry.origin entry) (Some Unbound));
            let timer = List.hd_exn emitted.schedules in
@@ -4605,9 +4818,15 @@ let%expect_test "constructor claim failures preserve their exact previous basis"
            let before = A.state actor |> protocol_ok in
            let entered = ref false in
            let claim_error = ref None in
-           let claim ~callback run =
+           let claim ?capture_cleanup ~callback run =
              let result =
-               A.with_initialization_callback actor ~scope ~manager ~callback run
+               A.with_initialization_callback
+                 actor
+                 ~scope
+                 ~manager
+                 ?capture_cleanup
+                 ~callback
+                 run
              in
              Result.iter_error result ~f:(fun failure -> claim_error := Some failure);
              result
@@ -4752,11 +4971,12 @@ let%expect_test
          in
          let observed = ref None in
          let checkpoint_error = ref None in
-         let claim ~callback run =
+         let claim ?capture_cleanup ~callback run =
            A.with_initialization_callback
              actor
              ~scope
              ~manager
+             ?capture_cleanup
              ~callback
              (fun ~scope ~commit ->
                 run ~scope ~commit:(fun ~snapshot ~requests ~notifications ->
@@ -4923,8 +5143,14 @@ let%expect_test
              (match Q.Entry.producer entry with
               | Some (Schedule_delivery actual) ->
                 assert (P.Id.Schedule.equal actual.id timer.id)
-              | None | Some (Event _ | Invocation _ | Job_completion _ | Source_setup _)
-                -> assert false);
+              | None
+              | Some
+                  ( Event _
+                  | Invocation _
+                  | Invocation_at_source _
+                  | Job_completion _
+                  | Source_setup _
+                  | Ingress_delivery _ ) -> assert false);
              consume_unavailable ();
              let settled = A.state actor |> protocol_ok in
              assert_same_session_snapshot settled (S.Memory_backend.state backend);
@@ -5827,6 +6053,9 @@ let%expect_test "legacy callback adapters preserve typed failures and exceptiona
                    ~prepare_output:(fun _ -> failwith "unexpected native output")
                    ~defer_observation:(fun _ -> Ok ())
                in
+               let receipt = ref None in
+               let pending_parent = ref None in
+               let producer_result = ref None in
                let entered = ref false in
                let committed = ref false in
                let checkpointed = ref false in
@@ -5844,8 +6073,23 @@ let%expect_test "legacy callback adapters preserve typed failures and exceptiona
                               ~scope:constructor
                               ~manager
                               ~callback
+                              ~capture_cleanup:(fun actual -> receipt := Some actual)
                               (fun ~scope ~commit ->
                                  entered := true;
+                                 (match mode with
+                                  | `Authorize ->
+                                    pending_parent
+                                    := Some
+                                         (A.Initialization_scope.callback_cleanup
+                                            constructor
+                                          |> S.Callback_cleanup.Initialization.snapshot
+                                          |> protocol_ok)
+                                  | `Claim
+                                  | `Commit
+                                  | `Checkpoint
+                                  | `Script
+                                  | `Unexpected
+                                  | `Cancel -> ());
                                  let check_current () =
                                    let open Result.Let_syntax in
                                    let%bind () = A.check_callback_current actor scope in
@@ -5874,6 +6118,8 @@ let%expect_test "legacy callback adapters preserve typed failures and exceptiona
                                        }
                                    ; execute = A.callback_tool_executor actor ~scope
                                    ; executing = A.Callback_scope.executing scope
+                                   ; policy_caller =
+                                       (fun () -> A.callback_policy_caller actor ~scope)
                                    ; check_current
                                    ; is_halted = (fun () -> false)
                                    ; checkpoint =
@@ -5889,17 +6135,21 @@ let%expect_test "legacy callback adapters preserve typed failures and exceptiona
                                             | None -> failwith "actual Event did not ACK"))
                                    }
                                  in
-                                 f
-                                   ~services
-                                   ~commit:(fun ~snapshot ~requests ~notifications ->
-                                     match mode with
-                                     | `Commit -> Error rejection
-                                     | _ ->
-                                       let open Result.Let_syntax in
-                                       let%map () =
-                                         commit ~snapshot ~requests ~notifications
-                                       in
-                                       committed := true))
+                                 let produced =
+                                   f
+                                     ~services
+                                     ~commit:(fun ~snapshot ~requests ~notifications ->
+                                       match mode with
+                                       | `Commit -> Error rejection
+                                       | _ ->
+                                         let open Result.Let_syntax in
+                                         let%map () =
+                                           commit ~snapshot ~requests ~notifications
+                                         in
+                                         committed := true)
+                                 in
+                                 producer_result := Some produced;
+                                 produced)
                         in
                         R.run
                           manager
@@ -5967,10 +6217,666 @@ let%expect_test "legacy callback adapters preserve typed failures and exceptiona
                   raise_s
                     [%sexp (settled.moderator_executions : P.Moderator_execution.t list)]);
                A.end_initialization actor ~scope:constructor |> protocol_ok;
+               (match mode with
+                | `Authorize ->
+                  let module F = S.Callback_cleanup in
+                  let module C = F.Completion_snapshot in
+                  let receipt = Option.value_exn !receipt in
+                  (* The Manager adapter wraps its script-facing error inside
+                     the Actor producer phase, then restores the original typed
+                     host rejection outside that bracket. Observe each actual
+                     boundary instead of inventing identity between them. *)
+                  let phase_error =
+                    match !producer_result with
+                    | Some (Error actual) -> actual
+                    | None | Some (Ok ()) ->
+                      failwith "actual producer phase did not reject"
+                  in
+                  [%test_eq: P.Error.code] Invalid_state phase_error.code;
+                  let check_primary snapshot =
+                    match C.producer_exit snapshot with
+                    | Returned (Error (Protocol actual)) ->
+                      assert (phys_equal actual phase_error)
+                    | Not_returned | Returned (Ok ()) | Returned (Error (Raised _)) ->
+                      failwith "handled producer error was lost or classified as cleanup"
+                  in
+                  let completed = F.Completion.snapshot receipt |> protocol_ok in
+                  check_primary completed;
+                  (match C.finish_call completed, C.release completed with
+                   | Completed (Ok ()), Completed (Ok ()) -> ()
+                   | _ ->
+                     failwith "handled producer failure lacks actual positive cleanup");
+                  assert (List.is_empty (C.failures completed));
+                  let parent =
+                    A.Initialization_scope.callback_cleanup constructor
+                    |> F.Initialization.snapshot
+                    |> protocol_ok
+                  in
+                  assert (F.Cleanup_snapshot.registration_closed parent);
+                  assert (not (F.Cleanup_snapshot.pending parent));
+                  assert (List.is_empty (F.Cleanup_snapshot.failures parent));
+                  assert (List.is_empty (F.Cleanup_snapshot.completions parent));
+                  let pending = Option.value_exn !pending_parent in
+                  assert (F.Cleanup_snapshot.pending pending);
+                  [%test_eq: int] 1 (List.length (F.Cleanup_snapshot.completions pending));
+                  check_primary (F.Completion.snapshot receipt |> protocol_ok)
+                | `Claim | `Commit | `Checkpoint | `Script | `Unexpected | `Cancel -> ());
                assert (Operator_authorization.is_current original)))));
   print_endline
     "claim/authorize/commit/checkpoint preserve whole host errors; script failure stays \
      Invalid_state; unexpected exception and cancellation escape; no native effects";
   [%expect
     {| claim/authorize/commit/checkpoint preserve whole host errors; script failure stays Invalid_state; unexpected exception and cancellation escape; no native effects |}]
+;;
+
+let%expect_test "modern completed emits retain exact originals through queue claim ACK" =
+  let module S = Agent_session in
+  let module A = S.Session_actor in
+  let module P = Agent_protocol in
+  let module E = P.Moderator_execution in
+  let module I = P.Invocation in
+  let module N = S.Native_tool_invocation in
+  let module M = Chat_response.Moderator_manager in
+  let module Q = S.Moderator_queue in
+  List.iter
+    [ `Current_none; `Current_original; `Expired_original; `Historical_absent ]
+    ~f:(fun mode ->
+      with_actor_workspace (fun env workspace_instance ->
+        let live = Atomic.make true in
+        let original = Agent_authority_tests.authentication live in
+        let ambient_live = Atomic.make true in
+        let ambient_principal =
+          P.Principal.create
+            ~id:second_principal_id
+            ~authentication_kind:"local"
+            ~scopes:(P.Scope.Set.of_list [ Send_messages ])
+            ~attributes:[]
+          |> protocol_ok
+        in
+        let ambient =
+          Operator_authorization.guarded
+            ~principal:ambient_principal
+            ~is_current:(fun () -> Atomic.get ambient_live)
+        in
+        assert (
+          not
+            (P.Id.Principal.equal
+               (Operator_authorization.principal original).id
+               ambient_principal.id));
+        let calls = ref 0 in
+        let on_native = ref (fun () -> ()) in
+        let registry =
+          native_registry calls ~raises:false ~on_call:(fun () ->
+            !on_native ();
+            match mode with
+            | `Expired_original -> Atomic.set live false
+            | `Current_none | `Current_original | `Historical_absent -> ())
+        in
+        let finish =
+          match mode with
+          | `Expired_original ->
+            {|Task.bind(Tool.call("read_file", `Object([])), fun ignored -> Task.pure(state))|}
+          | `Current_none | `Current_original | `Historical_absent -> "Task.pure(state)"
+        in
+        let events =
+          {| | `Turn_start ->
+                    Task.bind(Runtime.emit(`String("equal")), fun ignored ->
+                    Task.bind(Runtime.emit(`String("equal")), fun ignored -> |}
+          ^ finish
+          ^ {|))
+                  | `Internal_event(payload) ->
+                    Task.bind(Tool.call("read_file", `Object([])), fun ignored -> Task.pure(state))
+                  | `Tool_observed(p) ->
+                    Task.bind(Runtime.emit(`String("observed")), fun ignored -> Task.pure(state))
+                  | _ -> Task.pure(state) |}
+        in
+        let make_manager ?snapshot () =
+          handoff_definition
+            env
+            ?snapshot
+            ~capability_registry:registry
+            ~declare_tool:false
+            ~events
+        in
+        let manager, _, definition = make_manager () in
+        let observer = M.invocation_observer manager |> Option.value_exn in
+        let initial_snapshot = M.identity_snapshot manager |> Result.ok_or_failwith in
+        let initial_encoded =
+          Some (S.Runtime_builder.encode_moderator_snapshot initial_snapshot)
+        in
+        let tools =
+          S.Script_tool_calls.create
+            ~registry:(fun () -> registry)
+            ~moderator_names:String.Set.empty
+            ~now:(fun () -> timestamp)
+            ~is_halted:(fun () -> false)
+            ~requires_active_moderator:(fun _ -> false)
+            ~authorize:(fun _ _ -> Ok ())
+            ~prepare_output:(fun _ -> Ok (`String "actual native result"))
+            ~defer_observation:(fun _ -> Ok ())
+        in
+        let reject_producer = ref false in
+        let reject_claim = ref false in
+        let producer_cut_completed = ref false in
+        let producer_rejections = ref 0 in
+        let claim_rejections = ref 0 in
+        let rejected = function
+          | Error _ -> ()
+          | Ok _ -> failwith "selected checkpoint unexpectedly acknowledged"
+        in
+        let queue state =
+          S.Moderator_checkpoint.queue state.S.Session_state.moderator
+          |> protocol_ok
+          |> Option.value_exn
+        in
+        let history actor () =
+          (A.state actor |> protocol_ok).conversation.canonical_history
+          |> S.History_codec.all_of_protocol
+          |> protocol_ok
+        in
+        let exercise actor backend ~worker =
+          let emitted = A.state actor |> protocol_ok in
+          let before_entries = Q.entries (queue emitted) in
+          [%test_eq: int] 2 (List.length before_entries);
+          let first = List.nth_exn before_entries 0 in
+          let second = List.nth_exn before_entries 1 in
+          assert (not (Int64.equal (Q.Entry.ordinal first) (Q.Entry.ordinal second)));
+          [%test_eq: string]
+            (Q.Entry.payload_sha256 first)
+            (Q.Entry.payload_sha256 second);
+          let producer =
+            match Q.Entry.producer first, Q.Entry.producer second with
+            | Some (Event a), Some (Event b) when P.Id.Moderator_execution.equal a b -> a
+            | _ -> failwith "actual emitted suffix lost its one completed producer"
+          in
+          assert (
+            List.exists emitted.moderator_executions ~f:(fun receipt ->
+              P.Id.Moderator_execution.equal receipt.E.context.id producer
+              && E.equal_phase receipt.context.phase Turn_start
+              && P.Invocation.equal_observer
+                   (Q.source (queue emitted)).observer
+                   receipt.context.source
+              && Int.equal
+                   (Q.source (queue emitted)).generation
+                   receipt.context.generation
+              && Option.is_some receipt.context.operation_id
+              &&
+              match receipt.status with
+              | Completed _ -> true
+              | Running | Failed _ | Interrupted _ -> false));
+          let claim ~snapshot f =
+            A.with_current_idle_queued_moderator_event_tools actor ~snapshot f
+          in
+          let run () =
+            S.Moderator_event.run_queued_idle
+              ~claim
+              ~script_tools:tools
+              ~manager
+              ~history:(history actor)
+              ~available_tools:[]
+              ~session_meta:`Null
+              ~now:(fun () -> timestamp)
+              ()
+          in
+          let drain_under_another_operation () =
+            let failure = ref None in
+            let handled = ref None in
+            let native_admissions = ref 0 in
+            let native_proofs = ref [] in
+            let drainer =
+              S.Operation_worker.create ~run:(fun ~sw:_ ~input caps ->
+                try
+                  let proof =
+                    caps.original_agent_actor () |> protocol_ok |> Option.value_exn
+                  in
+                  assert (
+                    P.Id.Principal.equal
+                      (Operator_authorization.principal proof).id
+                      ambient_principal.id);
+                  let result =
+                    Exn.protect
+                      ~finally:(fun () -> on_native := ignore)
+                      ~f:(fun () ->
+                        (on_native
+                         := fun () ->
+                              Int.incr native_admissions;
+                              let borrowed = N.borrow () |> protocol_ok in
+                              assert (
+                                Option.is_some
+                                  (N.borrowed_invocation borrowed).parent_event);
+                              match
+                                mode, N.borrowed_agent_actor borrowed |> protocol_ok
+                              with
+                              | `Current_original, Some proof ->
+                                assert (Operator_authorization.is_current proof);
+                                assert (
+                                  P.Id.Principal.equal
+                                    (Operator_authorization.principal proof).id
+                                    (Operator_authorization.principal original).id);
+                                native_proofs := proof :: !native_proofs
+                              | `Historical_absent, None -> ()
+                              | ( ( `Current_none
+                                  | `Current_original
+                                  | `Expired_original
+                                  | `Historical_absent )
+                                , _ ) ->
+                                failwith
+                                  "foreground drainer replaced the selected queue \
+                                   original");
+                        S.Moderator_event.run_queued_idle
+                          ~claim:caps.with_queued_moderator_event
+                          ~script_tools:tools
+                          ~manager
+                          ~history:(history actor)
+                          ~available_tools:[]
+                          ~session_meta:`Null
+                          ~now:(fun () -> timestamp)
+                          ()
+                        |> protocol_ok)
+                  in
+                  handled := result;
+                  Completed
+                    { final_history = input.history
+                    ; moderator_snapshot = (A.state actor |> protocol_ok).moderator
+                    ; runtime_requests = []
+                    }
+                with
+                | exn ->
+                  failure := Some exn;
+                  raise exn)
+            in
+            A.set_runtime_worker
+              ~moderator_manager:manager
+              actor
+              ~worker:(Some drainer)
+              ~inference:
+                (Some
+                   (Inference_ports.create ~config:Chat_response.Config.default ()
+                    |> Inference_ports.execution))
+            |> protocol_ok;
+            let reservation = A.reserve_history_block actor ~count:1 |> protocol_ok in
+            let entry =
+              Pending_input_tests.occurrence
+                (Int64.to_int_exn reservation.first_sequence)
+                "queued work drained by A"
+            in
+            let attachment, _ =
+              A.attach actor ~mode:Read_write ~subscribe:false |> protocol_ok
+            in
+            A.submit_message_authenticated
+              actor
+              ~actor:ambient
+              ~attachment_id:attachment.id
+              entry
+            |> protocol_ok
+            |> ignore;
+            let rec await_drainer () =
+              Option.iter !failure ~f:raise;
+              let current = A.state actor |> protocol_ok in
+              match current.active_operation, current.lifecycle.observed with
+              | None, Idle -> ()
+              | _ ->
+                Eio.Fiber.yield ();
+                await_drainer ()
+            in
+            await_drainer ();
+            assert (Option.is_some !handled);
+            [%test_eq: int] 1 !native_admissions;
+            List.iter !native_proofs ~f:(fun proof ->
+              assert (not (Operator_authorization.is_current proof)));
+            assert (Operator_authorization.is_current ambient);
+            assert (Operator_authorization.is_current original);
+            drainer
+          in
+          match mode with
+          | `Expired_original ->
+            let before_calls = !calls in
+            (match run () with
+             | Error failure -> [%test_eq: P.Error.code] Permission_denied failure.code
+             | Ok _ -> failwith "expired original borrowed a new contextual head");
+            [%test_eq: int] before_calls !calls;
+            assert_same_session_snapshot emitted (A.state actor |> protocol_ok);
+            assert_same_session_snapshot emitted (S.Memory_backend.state backend)
+          | `Current_none | `Current_original | `Historical_absent ->
+            (match mode with
+             | `Current_original ->
+               reject_claim := true;
+               rejected (run ());
+               [%test_eq: int] 1 !claim_rejections;
+               [%test_eq: int] 0 !calls;
+               assert_same_session_snapshot emitted (A.state actor |> protocol_ok);
+               assert_same_session_snapshot emitted (S.Memory_backend.state backend)
+             | `Current_none | `Historical_absent -> ()
+             | `Expired_original -> assert false);
+            let worker =
+              match mode with
+              | `Current_none ->
+                assert (Option.is_some (run () |> protocol_ok));
+                worker
+              | `Current_original | `Historical_absent -> drain_under_another_operation ()
+              | `Expired_original -> assert false
+            in
+            [%test_eq: int] 1 !calls;
+            let consumed = A.state actor |> protocol_ok in
+            let remaining = Q.entries (queue consumed) in
+            assert (List.equal Q.Entry.equal [ second ] remaining);
+            let proofs = ref [] in
+            let admissions = ref 0 in
+            let observed =
+              S.Moderator_observation.drain_idle_with_tools
+                ~max_observations:1
+                ~script_tools:tools
+                ~definition
+                ~claim:(fun f ->
+                  A.with_idle_moderator_observation_tools
+                    actor
+                    ~observer
+                    (fun ~observing ~capabilities ~execute ~commit ->
+                       Int.incr admissions;
+                       assert (Option.is_some observing.parent_event);
+                       (match
+                          mode, capabilities.borrow_agent_actor ~invocation:observing
+                        with
+                        | `Current_none, Ok None -> ()
+                        | `Current_original, Ok (Some proof) ->
+                          assert (Operator_authorization.is_current proof);
+                          assert (
+                            P.Id.Principal.equal
+                              (Operator_authorization.principal proof).id
+                              (Operator_authorization.principal original).id);
+                          proofs := proof :: !proofs
+                        | `Historical_absent, Error failure ->
+                          [%test_eq: P.Error.code] Permission_denied failure.code
+                        | ( ( `Current_none
+                            | `Current_original
+                            | `Historical_absent
+                            | `Expired_original )
+                          , unexpected ) ->
+                          ignore unexpected;
+                          failwith "observation changed the actual producer original");
+                       f ~observing ~capabilities ~execute ~commit))
+                ~manager
+                ~history:(history actor)
+                ~available_tools:[]
+                ~session_meta:`Null
+                ~now:(fun () -> timestamp)
+                ()
+              |> protocol_ok
+            in
+            ignore observed;
+            [%test_eq: int] 1 !admissions;
+            List.iter !proofs ~f:(fun proof ->
+              assert (not (Operator_authorization.is_current proof)));
+            let final = A.state actor |> protocol_ok in
+            let entries = Q.entries (queue final) in
+            [%test_eq: int] 2 (List.length entries);
+            assert (Q.Entry.equal second (List.hd_exn entries));
+            (match Q.Entry.producer (List.nth_exn entries 1) with
+             | Some (Invocation id) ->
+               assert (
+                 List.exists final.invocations ~f:(fun invocation ->
+                   P.Id.Invocation.equal invocation.context.id id
+                   &&
+                   match invocation.observation with
+                   | Some { status = Observed; _ } -> true
+                   | None
+                   | Some { status = Awaiting | Observing | Observation_failed _; _ } ->
+                     false))
+             | Some
+                 ( Event _
+                 | Invocation_at_source _
+                 | Job_completion _
+                 | Schedule_delivery _
+                 | Source_setup _
+                 | Ingress_delivery _ )
+             | None -> failwith "Tool_observed appended suffix lost its actual producer");
+            assert (Option.is_none final.active_operation);
+            assert_same_session_snapshot final (S.Memory_backend.state backend);
+            (match mode with
+             | `Current_original ->
+               let snapshot = M.identity_snapshot manager |> Result.ok_or_failwith in
+               let replacement, _, _ = make_manager ~snapshot () in
+               assert (not (phys_equal manager replacement));
+               A.set_runtime_worker
+                 ~moderator_manager:replacement
+                 actor
+                 ~worker:(Some worker)
+                 ~inference:
+                   (Some
+                      (Inference_ports.create ~config:Chat_response.Config.default ()
+                       |> Inference_ports.execution))
+               |> protocol_ok;
+               let replaced = A.state actor |> protocol_ok in
+               assert (
+                 P.Run_source.equal (Q.source (queue final)) (Q.source (queue replaced)));
+               assert (List.equal Q.Entry.equal entries (Q.entries (queue replaced)));
+               assert (
+                 Option.is_some
+                   (S.Moderator_event.run_queued_idle
+                      ~claim
+                      ~script_tools:tools
+                      ~manager:replacement
+                      ~history:(history actor)
+                      ~available_tools:[]
+                      ~session_meta:`Null
+                      ~now:(fun () -> timestamp)
+                      ()
+                    |> protocol_ok));
+               [%test_eq: int] 2 !calls;
+               let checked = ref false in
+               assert (
+                 A.with_idle_moderator_observation
+                   actor
+                   ~observer
+                   (fun ~observing ~capabilities ~commit ->
+                      (match capabilities.borrow_agent_actor ~invocation:observing with
+                       | Error failure ->
+                         [%test_eq: P.Error.code] Permission_denied failure.code
+                       | Ok _ -> failwith "replacement Manager revived old queue custody");
+                      checked := true;
+                      let snapshot =
+                        M.identity_snapshot replacement |> Result.ok_or_failwith
+                      in
+                      commit
+                        ~resolved:(I.complete_observation observing |> protocol_ok)
+                        ~snapshot)
+                 |> protocol_ok);
+               assert !checked;
+               assert_same_session_snapshot
+                 (A.state actor |> protocol_ok)
+                 (S.Memory_backend.state backend)
+             | `Current_none | `Historical_absent -> ()
+             | `Expired_original -> assert false)
+        in
+        let saved = ref None in
+        let worker_failure = ref None in
+        let make_worker actor backend =
+          S.Operation_worker.create ~run:(fun ~sw:_ ~input caps ->
+            try
+              (match mode, caps.original_agent_actor () |> protocol_ok with
+               | `Current_none, None -> ()
+               | (`Current_original | `Expired_original | `Historical_absent), Some proof
+                 -> assert (Operator_authorization.is_current proof)
+               | ( ( `Current_none
+                   | `Current_original
+                   | `Expired_original
+                   | `Historical_absent )
+                 , _ ) ->
+                 failwith "actual foreground Operation changed its original admission");
+              caps.commit_moderator initial_encoded |> protocol_ok;
+              let run () =
+                S.Moderator_event.run_ordinary
+                  ~event:Turn_start
+                  ~claim:(caps.with_moderator_event ~event:Turn_start)
+                  ~script_tools:tools
+                  ~manager
+                  ~history:(fun () -> input.history)
+                  ~available_tools:[]
+                  ~session_meta:`Null
+                  ~now:(fun () -> timestamp)
+                  ()
+              in
+              let write_source =
+                match mode with
+                | `Current_original when not !producer_cut_completed ->
+                  reject_producer := true;
+                  rejected (run ());
+                  [%test_eq: int] 1 !producer_rejections;
+                  let rejected_state = A.state actor |> protocol_ok in
+                  assert (
+                    S.Moderator_checkpoint.queue rejected_state.moderator
+                    |> protocol_ok
+                    |> Option.for_all ~f:(fun metadata ->
+                      List.is_empty (Q.entries metadata)));
+                  assert_same_session_snapshot
+                    rejected_state
+                    (S.Memory_backend.state backend);
+                  producer_cut_completed := true;
+                  false
+                | `Current_none
+                | `Current_original
+                | `Expired_original
+                | `Historical_absent -> true
+              in
+              if write_source then assert (Option.is_some (run () |> protocol_ok));
+              Completed
+                { final_history = input.history
+                ; moderator_snapshot = (A.state actor |> protocol_ok).moderator
+                ; runtime_requests = []
+                }
+            with
+            | exn ->
+              worker_failure := Some exn;
+              raise exn)
+        in
+        Job_fixtures.with_actor
+          ~environment:(env, workspace_instance)
+          ~reject_save:(fun next ->
+            let receipts = next.S.Session_transition.state.moderator_executions in
+            let producer_ack =
+              List.exists receipts ~f:(fun receipt ->
+                E.equal_phase receipt.E.context.phase Turn_start
+                &&
+                match receipt.status with
+                | Completed _ -> true
+                | Running | Failed _ | Interrupted _ -> false)
+            in
+            let head_claim =
+              List.exists receipts ~f:(fun receipt ->
+                E.equal_phase receipt.E.context.phase Internal_event
+                &&
+                match receipt.status with
+                | Running -> true
+                | Completed _ | Failed _ | Interrupted _ -> false)
+            in
+            if !reject_producer && producer_ack
+            then (
+              reject_producer := false;
+              Int.incr producer_rejections;
+              true)
+            else if !reject_claim && head_claim
+            then (
+              reject_claim := false;
+              Int.incr claim_rejections;
+              true)
+            else false)
+          (fun _env _sw actor writer backend ->
+             let worker = make_worker actor backend in
+             A.change_moderator actor initial_encoded |> protocol_ok |> ignore;
+             A.set_runtime_worker
+               ~moderator_manager:manager
+               actor
+               ~worker:(Some worker)
+               ~inference:
+                 (Some
+                    (Inference_ports.create ~config:Chat_response.Config.default ()
+                     |> Inference_ports.execution))
+             |> protocol_ok;
+             let entry =
+               S.History_codec.user_text ~id:history_id "modern emitted original"
+               |> S.History_codec.to_protocol
+             in
+             (match mode with
+              | `Current_none ->
+                A.submit_message
+                  ~submitting_principal:principal_id
+                  actor
+                  ~attachment_id:writer.id
+                  entry
+              | `Current_original | `Expired_original | `Historical_absent ->
+                A.submit_message_authenticated
+                  actor
+                  ~actor:original
+                  ~attachment_id:writer.id
+                  entry)
+             |> protocol_ok
+             |> ignore;
+             let rec await_producer () =
+               Option.iter !worker_failure ~f:raise;
+               let state = A.state actor |> protocol_ok in
+               match state.active_operation, state.lifecycle.observed with
+               | None, Idle -> state
+               | _ ->
+                 Eio.Fiber.yield ();
+                 await_producer ()
+             in
+             let completed = await_producer () in
+             let completed =
+               match mode with
+               | `Current_original ->
+                 assert !producer_cut_completed;
+                 let reservation =
+                   A.reserve_history_block actor ~count:1 |> protocol_ok
+                 in
+                 let fresh =
+                   Pending_input_tests.occurrence
+                     (Int64.to_int_exn reservation.first_sequence)
+                     "new B Operation after rejected producer ACK"
+                 in
+                 A.submit_message_authenticated
+                   actor
+                   ~actor:original
+                   ~attachment_id:writer.id
+                   fresh
+                 |> protocol_ok
+                 |> ignore;
+                 await_producer ()
+               | `Current_none | `Expired_original | `Historical_absent -> completed
+             in
+             match mode with
+             | `Historical_absent ->
+               saved
+               := Some
+                    (S.Session_state_document.authored completed
+                     |> S.Session_state_document.encode ~limits:document_limits
+                     |> document_ok
+                     |> S.Session_state_document.decode ~limits:document_limits
+                     |> document_ok
+                     |> S.Session_state_document.value)
+             | `Current_none | `Current_original | `Expired_original ->
+               exercise actor backend ~worker);
+        match mode with
+        | `Historical_absent ->
+          Job_fixtures.with_actor
+            ~environment:(env, workspace_instance)
+            ~start:false
+            ~prepare_state:(fun _ -> Option.value_exn !saved)
+            (fun _env _sw actor _writer backend ->
+               let worker = make_worker actor backend in
+               A.set_runtime_worker
+                 ~moderator_manager:manager
+                 actor
+                 ~worker:(Some worker)
+                 ~inference:
+                   (Some
+                      (Inference_ports.create ~config:Chat_response.Config.default ()
+                       |> Inference_ports.execution))
+               |> protocol_ok;
+               exercise actor backend ~worker)
+        | `Current_none | `Current_original | `Expired_original -> ()));
+  print_endline
+    "modern queue original B survives foreground A and ACK cuts; genuine None, expiry \
+     and restored absence stay distinct";
+  [%expect
+    {| modern queue original B survives foreground A and ACK cuts; genuine None, expiry and restored absence stay distinct |}]
 ;;

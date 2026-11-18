@@ -15,6 +15,8 @@
   ochat.chatml_program_document ochat.chatml_catalog)
  (inline_tests)
  (preprocessor_deps
+  (glob_files_rec ../../docs-src/examples/libraries/goal-requests/*)
+  ../../docs-src/guide/native-goal-metadata.md
   ../../docs-src/examples/libraries/lifecycle/src/lifecycle.chatml
   ../../docs-src/examples/libraries/instruction-requests/src/instruction_requests.chatmli)
  (preprocess (pps ppx_jane ppx_expect ppx_blob)))

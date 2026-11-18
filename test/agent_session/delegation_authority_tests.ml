@@ -39,6 +39,22 @@ let%expect_test
           let base =
             actor_state ~workspace_instance ~liveness:Detached ~start_immediately:false
           in
+          let profile =
+            permission_policy
+              ~tool_default:Allow
+              ~fallback:Fallback_allow
+              ~evaluator:None
+              ~reviewer:None
+          in
+          let base =
+            { base with
+              spec =
+                { base.spec with
+                  permission_profile = profile.id
+                ; permission_profile_digest = profile.revision_digest
+                }
+            }
+          in
           let root = { base with lifecycle = { desired = Running; observed = Idle } } in
           let grant_digest = digest "explicit operator lifetime policy revision" in
           let reserve (parent : State.t) label lifetime =
@@ -108,7 +124,7 @@ let%expect_test
               "independent"
               (Independent { authorization_sha256 = grant_digest })
           in
-          let owned_peer, _ = reserve middle "owned-peer" Owned in
+          let owned_peer, owned_peer_child = reserve middle "owned-peer" Owned in
           let owned_tip, _ = reserve independent "owned-tip" Owned in
           let root_state = ref (Some root) in
           let middle_state = ref middle in
@@ -192,6 +208,214 @@ let%expect_test
           check "explicit current lifetime authority" (authorized leaf);
           root_state := Some (stopped root);
           middle_state := stopped middle;
+          (* Native metadata does not pretend live selection is already approved.
+             The SAME walker switches only at middle's exact original authority,
+             then revalidates the lower Independent edge after yielding checks. *)
+          let module Path = Authority.Resource_path in
+          let source_owner = Agent_session.Runtime_source_owner.create () in
+          let path =
+            Path.of_records
+              ~source_owner
+              ~max_depth:8
+              ~actual_leaf:independent
+              ~reference:(D.reference leaf)
+              ~records:
+                (List.map [ leaf; ancestor ] ~f:(fun record ->
+                   D.resolve ledger (D.reference record) |> store_ok))
+            |> protocol_ok
+          in
+          let first = Path.first path in
+          let prefix = Path.Prefix.parent first |> protocol_ok |> Option.value_exn in
+          let metadata_host : Path.Host.t =
+            { state = host.state
+            ; resolve = host.resolve
+            ; moderation = (fun _ -> Ok None)
+            ; authorize_independent = independent_authorization
+            }
+          in
+          let observed =
+            Path.observe_prefix
+              prefix
+              ~source_owner
+              ~host:metadata_host
+              ~actual_leaf:independent
+            |> protocol_ok
+          in
+          let equivalent_prefix =
+            Path.Prefix.parent (Path.first path) |> protocol_ok |> Option.value_exn
+          in
+          Path.Observation.check_prefix observed ~source_owner ~prefix:equivalent_prefix
+          |> protocol_ok;
+          assert (
+            Result.is_error
+              (Path.Observation.check_prefix observed ~source_owner ~prefix:first));
+          let other_path =
+            Path.of_records
+              ~source_owner
+              ~max_depth:8
+              ~actual_leaf:independent
+              ~reference:(D.reference leaf)
+              ~records:(Path.records path)
+            |> protocol_ok
+          in
+          let other_prefix =
+            Path.Prefix.parent (Path.first other_path) |> protocol_ok |> Option.value_exn
+          in
+          assert (
+            P.Id.Session.equal
+              (Path.Prefix.endpoint prefix)
+              (Path.Prefix.endpoint other_prefix));
+          assert (
+            Result.is_error
+              (Path.Observation.check_prefix observed ~source_owner ~prefix:other_prefix));
+          assert (
+            Result.is_error
+              (Path.Observation.check_prefix
+                 observed
+                 ~source_owner:(Agent_session.Runtime_source_owner.create ())
+                 ~prefix));
+          assert (
+            D.Reference.equal
+              (D.reference (Path.Observation.record observed))
+              (D.reference ancestor));
+          (match Path.Observation.stop_boundary observed with
+           | Independent_resource -> ()
+           | Ordinary ->
+             failwith "terminal Owned record erased the lower Independent boundary");
+          let revoke_during_binding = ref false in
+          let native_host =
+            { host with
+              capabilities =
+                (fun id ->
+                  (* Middle's cold metadata frame has no live capability lookup. *)
+                  assert (P.Id.Session.equal id root.identity.session_id);
+                  let result = host.capabilities id in
+                  if !revoke_during_binding then grant := None;
+                  result)
+            }
+          in
+          let original_middle =
+            Authority.create
+              ~source_owner
+              ~authorize_independent:independent_authorization
+              ~host:native_host
+              ~reference:(D.reference ancestor)
+              ~capabilities:selected
+              ()
+          in
+          let resource_checks = ref 0 in
+          let native_preparation prefix =
+            Authority.check_native_resource_preparation
+              original_middle
+              ~prefix
+              ~check_resource:(fun () ->
+                Int.incr resource_checks;
+                Ok ())
+              ~session_id:middle.identity.session_id
+              ~revision_id:middle.spec.prompt_revision_id
+              ~manifest_sha256:ancestor.admission.manifest_sha256
+              ~permission_profile:profile
+          in
+          assert (Result.is_error (Authority.check_execution original_middle));
+          native_preparation prefix |> protocol_ok;
+          [%test_eq: int] 2 !resource_checks;
+          assert (Result.is_error (native_preparation first));
+          [%test_eq: int] 2 !resource_checks;
+          (* Actual ledger admissions retain birth epochs. Current Source leaf
+             and original terminal authority retain their own resumed epochs. *)
+          let before_root = !root_state in
+          let before_middle = !middle_state in
+          Exn.protect
+            ~finally:(fun () ->
+              root_state := before_root;
+              middle_state := before_middle;
+              during_lookup := fun () -> ())
+            ~f:(fun () ->
+              let resumed_root = { root with stop_epoch = 2L } in
+              let resumed_middle =
+                { middle with stop_epoch = 1L; parent_stop_epoch = Some 2L }
+              in
+              let resumed_leaf = { owned_peer_child with parent_stop_epoch = Some 1L } in
+              root_state := Some resumed_root;
+              middle_state := resumed_middle;
+              let path_for (leaf : State.t) records =
+                Path.of_records
+                  ~source_owner
+                  ~max_depth:8
+                  ~actual_leaf:leaf
+                  ~reference:(Option.value_exn leaf.State.spec.delegation)
+                  ~records:
+                    (List.map records ~f:(fun record ->
+                       D.resolve ledger (D.reference record) |> store_ok))
+                |> protocol_ok
+              in
+              let resumed_path = path_for resumed_leaf [ owned_peer; ancestor ] in
+              let resumed_prefix =
+                Path.Prefix.parent (Path.first resumed_path)
+                |> protocol_ok
+                |> Option.value_exn
+              in
+              Path.observe_prefix
+                resumed_prefix
+                ~source_owner
+                ~host:metadata_host
+                ~actual_leaf:resumed_leaf
+              |> protocol_ok
+              |> ignore;
+              let authority epoch =
+                Authority.create
+                  ~source_owner
+                  ~parent_stop_epoch:epoch
+                  ~host:native_host
+                  ~reference:(D.reference ancestor)
+                  ~capabilities:selected
+                  ()
+              in
+              let current_authority = authority 2L in
+              Authority.check_execution current_authority |> protocol_ok;
+              let prepare authority prefix =
+                Authority.check_native_resource_preparation
+                  authority
+                  ~prefix
+                  ~check_resource:(fun () -> Ok ())
+                  ~session_id:middle.identity.session_id
+                  ~revision_id:middle.spec.prompt_revision_id
+                  ~manifest_sha256:ancestor.admission.manifest_sha256
+                  ~permission_profile:profile
+              in
+              prepare current_authority resumed_prefix |> protocol_ok;
+              (* The exact same leaf/terminal uses original authority first. *)
+              let terminal_path = path_for resumed_middle [ ancestor ] in
+              assert (Result.is_error (prepare (authority 0L) (Path.first terminal_path)));
+              (* An omitted original epoch still uses birth admission; it does
+                 not fall through to the path's newer saved epoch. *)
+              assert (Result.is_error (prepare original_middle (Path.first terminal_path)));
+              (* Saved C epoch1 cannot be substituted for original M epoch2. *)
+              assert (Result.is_error (prepare (authority 1L) resumed_prefix));
+              assert (
+                Result.is_error
+                  (Path.observe_prefix
+                     resumed_prefix
+                     ~source_owner
+                     ~host:metadata_host
+                     ~actual_leaf:{ resumed_leaf with parent_stop_epoch = Some 2L }));
+              let wrong_leaf_path =
+                path_for
+                  { resumed_leaf with parent_stop_epoch = Some 2L }
+                  [ owned_peer; ancestor ]
+              in
+              let wrong_leaf_prefix =
+                Path.Prefix.parent (Path.first wrong_leaf_path)
+                |> protocol_ok
+                |> Option.value_exn
+              in
+              assert (Result.is_error (prepare current_authority wrong_leaf_prefix));
+              (during_lookup
+               := fun () -> middle_state := { resumed_middle with stop_epoch = 2L });
+              assert (Result.is_error (prepare current_authority resumed_prefix)));
+          revoke_during_binding := true;
+          assert (Result.is_error (native_preparation prefix));
+          grant := Some grant_digest;
           check "stopped Owned ancestry above independent edge" (authorized leaf);
           check "Owned peer still needs parent execution" (authorized owned_peer);
           check "Owned descendant below independent edge" (authorized owned_tip);

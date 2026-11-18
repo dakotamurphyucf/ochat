@@ -22,7 +22,7 @@ let create
       ~session_meta
       ~now
       tools
-      ~execute
+      ~(execute : N.moderator_executor)
       ~native_execute
       ~selected
       ~reference
@@ -45,8 +45,16 @@ let create
       failure := outcome;
       Error "moderator dispatch check failed"
   in
+  let invoke =
+    execute
+      ~snapshot:(fun () ->
+        M.identity_snapshot manager
+        |> Result.map_error ~f:(fun message ->
+          Agent_protocol.Error.create Conflict ~message ~retryable:false ()))
+      ~invocation
+  in
   let result =
-    execute ~invocation (fun ~dispatched ~capabilities ~commit ->
+    invoke (fun ~dispatched ~capabilities ~commit ->
       let authoring_scope =
         Authoring_reference_scope.capture ~invocation_id:dispatched.I.context.id
       in

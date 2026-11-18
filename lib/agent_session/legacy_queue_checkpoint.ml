@@ -35,6 +35,40 @@ let append_delivery ~metadata ~(before : S.t) ~(snapshot : S.t) ~capture =
   { metadata; appended = [ List.last_exn (Moderator_queue.entries metadata) ] }
 ;;
 
+let prepare_suffix
+      ~metadata
+      ~(before : S.t)
+      ~(snapshot : S.t)
+      ~(consumption : Moderator_queue.Consumption.t)
+      ~producer
+      ~origin
+  =
+  let open Result.Let_syntax in
+  let retained =
+    List.length before.queued_internal_events
+    -
+    match consumption with
+    | Keep -> 0
+    | Consume_head -> 1
+  in
+  let fresh = List.length snapshot.queued_internal_events - retained in
+  let%bind () =
+    if fresh < 0 || fresh > 256
+    then invalid "legacy callback fresh suffix limit"
+    else Ok ()
+  in
+  let%bind capture = Moderator_queue.Capture.create ~producer ~origin in
+  let%map metadata =
+    Moderator_queue.advance
+      metadata
+      ~before:before.queued_internal_events
+      ~after:snapshot.queued_internal_events
+      ~consume:consumption
+      ~appended:(List.init fresh ~f:(fun _ -> capture))
+  in
+  { metadata; appended = List.drop (Moderator_queue.entries metadata) retained }
+;;
+
 let prepare
       ~metadata
       ~(before : S.t)
@@ -63,29 +97,51 @@ let prepare
     then Ok ()
     else invalid "legacy callback changed its captured source"
   in
-  let retained =
-    List.length before.queued_internal_events
-    -
-    match consumption with
-    | Keep -> 0
-    | Consume_head -> 1
-  in
-  let fresh = List.length snapshot.queued_internal_events - retained in
+  prepare_suffix
+    ~metadata
+    ~before
+    ~snapshot
+    ~consumption
+    ~producer:(Event completed.context.id)
+    ~origin
+;;
+
+let prepare_invocation
+      ~metadata
+      ~(before : S.t)
+      ~(snapshot : S.t)
+      ~(resolved : P.Invocation.t)
+  =
+  let open Result.Let_syntax in
+  let%bind () = P.Invocation.validate resolved in
   let%bind () =
-    if fresh < 0 || fresh > 256
-    then invalid "legacy callback fresh suffix limit"
-    else Ok ()
+    match resolved.status with
+    | Resolved _ | Published _ -> Ok ()
+    | Admitted | Dispatching -> invalid "queue emits require a resolved Invocation"
   in
-  let%bind capture =
-    Moderator_queue.Capture.create ~producer:(Event completed.context.id) ~origin
+  let source = Moderator_queue.source metadata in
+  let%bind () =
+    if
+      Option.for_all resolved.observation ~f:(fun observation ->
+        P.Invocation.equal_observer source.observer observation.observer)
+      && Int.equal source.generation resolved.context.generation
+      && String.equal source.observer.script_id before.script_id
+      && String.equal source.observer.source_sha256 before.script_source_hash
+      && String.equal before.script_id snapshot.script_id
+      && String.equal before.script_source_hash snapshot.script_source_hash
+    then Ok ()
+    else invalid "invocation callback changed its captured source"
   in
-  let%map metadata =
-    Moderator_queue.advance
-      metadata
-      ~before:before.queued_internal_events
-      ~after:snapshot.queued_internal_events
-      ~consume:consumption
-      ~appended:(List.init fresh ~f:(fun _ -> capture))
+  let producer =
+    match resolved.observation with
+    | Some _ -> Queue_producer.Invocation resolved.context.id
+    | None -> Invocation_at_source { id = resolved.context.id; source }
   in
-  { metadata; appended = List.drop (Moderator_queue.entries metadata) retained }
+  prepare_suffix
+    ~metadata
+    ~before
+    ~snapshot
+    ~consumption:Keep
+    ~producer
+    ~origin:resolved.inference_origin
 ;;

@@ -5,6 +5,8 @@ open! Core
     None. This module has no codec and cannot restore credentials from Jobs. *)
 type t
 
+module Policy_source = Policy_standalone_source.Classification
+
 module Moderator_binding : sig
   (** Physical topology captured by the real creator. Source-only construction
       does not lend a Manager; later resource handoff needs its actual owner.
@@ -31,6 +33,10 @@ module Row : sig
   val settlement_parent : t -> Observation_continuation.Parent.t
 
   val binding : t -> Moderator_binding.t
+
+  (** Immutable no-Cause association installed only at actual Job birth ACK.
+      Unknown is not an unrelatedness proof; this field grants no permission. *)
+  val policy_source : t -> Policy_source.t
 end
 
 val empty : t
@@ -51,6 +57,7 @@ module Fresh : sig
     :  job:Agent_protocol.Job.t
     -> binding:Moderator_binding.t
     -> parent:Execution_custody.Admission.t
+    -> policy_source:Policy_source.t
     -> (t, Agent_protocol.Error.t) result
 
   val binding : t -> Moderator_binding.t
@@ -105,6 +112,7 @@ val prepare_fresh
   -> job:Agent_protocol.Job.t
   -> binding:Moderator_binding.t
   -> parent:Execution_custody.Admission.t
+  -> policy_source:Policy_source.t
   -> (Update.t, Agent_protocol.Error.t) result
 
 (** Pure phase updates for the genuine claim/retry owners only. They validate the

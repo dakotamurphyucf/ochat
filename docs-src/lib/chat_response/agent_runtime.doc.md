@@ -200,7 +200,8 @@ val validate_tool_paths
     planning/restoring scripts. It requires the same original [compilation_limits]
     and remains owned by the enclosing [Startup_compilation.with_context]. *)
 val create
-  :  ?native_service_revision:string
+  :  ?mcp_checks:Tool.Mcp_checks.t
+  -> ?native_service_revision:string
   -> ?startup:Startup_compilation.t
   -> ?agent_source_runner:Tool.Agent_source_runner.t
   -> ?programs:Chatml_prompt_programs.Restored.t
@@ -368,7 +369,8 @@ val admit_exact_saved_agent_registration
     planner. This is not Model.spawn execution authority.
     This internal preparation entrypoint does not enable public feature flags. *)
 val prepare_extensions
-  :  ?native_service_revision:string
+  :  ?mcp_checks:Tool.Mcp_checks.t
+  -> ?native_service_revision:string
   -> ?startup:Startup_compilation.t
   -> ?tool_contract:Chatml_compilation.Tool_contract.t
   -> ?agent_source_runner:Tool.Agent_source_runner.t

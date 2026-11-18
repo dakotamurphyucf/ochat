@@ -168,9 +168,10 @@ let%expect_test "moderator launches survive handler, event and observation commi
               | other -> raise_s [%sexp (other : Completion.t)]);
              let launch = Option.value_exn parent.launch in
              assert (Option.is_none launch.parent_job);
-             (match launch.owner with
-              | Moderator_event _ -> ()
-              | Invocation _ -> failwith "observed parent was not a lifecycle launch");
+             (match Agent_protocol.Job.Birth_parent.view launch.owner with
+              | Callback (Moderator_event _) -> ()
+              | Callback (Invocation _) | Job_attempt _ ->
+                failwith "observed parent was not a lifecycle launch");
              Some parent
          in
          let job =
@@ -182,9 +183,10 @@ let%expect_test "moderator launches survive handler, event and observation commi
          let _, completion = await env client job in
          let launch = Option.value_exn job.launch in
          let owner =
-           match launch.owner with
-           | Moderator_event _ -> "event"
-           | Invocation _ -> "invocation"
+           match Agent_protocol.Job.Birth_parent.view launch.owner with
+           | Callback (Moderator_event _) -> "event"
+           | Callback (Invocation _) -> "invocation"
+           | Job_attempt _ -> failwith "background fixture lost its callback owner"
          in
          let state = Background_moderator_tests.await_cleanup env entry.actor in
          (match observed_parent with
@@ -199,9 +201,10 @@ let%expect_test "moderator launches survive handler, event and observation commi
                assert (Agent_protocol.Id.Job.equal id parent.id);
                [%test_eq: int] parent.attempt attempt
              | None -> failwith "observation child lost its actual parent attempt");
-            (match launch.owner with
-             | Moderator_event _ -> failwith "observation child lost its invocation owner"
-             | Invocation id ->
+            (match Agent_protocol.Job.Birth_parent.view launch.owner with
+             | Callback (Moderator_event _) | Job_attempt _ ->
+               failwith "observation child lost its invocation owner"
+             | Callback (Invocation id) ->
                let producer =
                  List.find_exn state.invocations ~f:(fun invocation ->
                    Agent_protocol.Id.Invocation.equal invocation.context.id id)

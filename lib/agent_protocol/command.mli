@@ -30,6 +30,11 @@ type t =
   | Session_work of Session_work.Query.t
   | Session_configuration_get of Session_configuration.Get_request.t
   | Session_configuration_update of Session_configuration.Update_request.t
+  | Instructions of (Instruction_control.Request.t[@sexp.opaque])
+  | Goal_query of (Goal_query.Request.t[@sexp.opaque])
+  | Goal_control of (Goal_control.Request.t[@sexp.opaque])
+  | Recurrence_query of (Recurrence_query.Request.t[@sexp.opaque])
+  | Recurrence_control of (Recurrence_control.Request.t[@sexp.opaque])
   | Session_get of Session.Get_request.t
   | Session_inference_summary of Inference_query.Summary_request.t
   | Session_inference_observations of Inference_query.Request.t

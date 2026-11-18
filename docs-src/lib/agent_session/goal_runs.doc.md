@@ -309,8 +309,9 @@ is busy, or after a later episode becomes current. An uncertain writer result
 must remain uncertain; it is not permission to repeat admission. Reopening a
 session restores those facts without reconstructing the callback's original
 permission. The explicitly selected `goal_start` tool stages this request through
-the actual Factory service. Checked ChatML convenience helpers and bundled
-orchestration instructions are a separate integration.
+the actual Factory service. The installed [Goal_requests library](../../guide/chatml-installed-libraries.md#export-the-pure-goal-request-helper)
+constructs the request data. The builtin [goals instructions](../../guide/builtin-instructions.md)
+describe the authority and settlement boundaries.
 
 ## Native creation and safe controls in the callback checkpoint
 
@@ -398,7 +399,6 @@ Ordinary delegated loading still consumes the same constructor. Its real Scoped
 Init or deferred Installed_resume route does not acquire a Goal lifecycle owner
 from stored source or Goal metadata. The existing source-stage cleanup and
 administration cancellation remain authoritative. The explicitly selected Start
-adapter uses the existing Factory staging port.
-Checked convenience helpers, bundled orchestration instructions and remaining
-Resume packaging are separate integration work; no new executor or metadata
-permission issuer is added.
+adapter uses the existing Factory staging port. The selected [native Resume
+tool](../../guide/native-goal-metadata.md#resume-a-held-episode) stages continuation
+for the same held episode through the existing owner.

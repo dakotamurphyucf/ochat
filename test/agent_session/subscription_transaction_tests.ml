@@ -260,8 +260,8 @@ let%expect_test
                   (Some (Succeeded (`String "ready")))
                   value.result);
               assert (S.equal value (S.of_json (S.to_json value) |> protocol_ok));
-              assert (
-                Option.exists saved.moderator ~f:(Jsonaf.exactly_equal (encode after)))
+              let metadata = assert_moderator_checkpoint saved ~snapshot:after in
+              assert_moderator_queue_frontier metadata ~required:true ~head:0L ~next:0L
             | [] -> ()
             | _ -> assert false);
            assert (
@@ -337,6 +337,7 @@ let%expect_test
              ~event
              ~snapshot:(fun () -> Ok before)
              (fun ~executing
+               ~policy_caller:_
                ~model_jobs:_
                ~allocate_inference:_
                ~retirement_reason:_

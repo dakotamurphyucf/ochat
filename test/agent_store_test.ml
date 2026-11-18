@@ -817,6 +817,8 @@ let crash_recovery_invalid env root case =
        |> Document_schema.Document.to_string)
   | "layout" ->
     Eio.Path.rmdir (crash_recovery_path env (Filename.concat directory "journal"))
+  | "workspace" | "archived-workspace" ->
+    Eio.Path.rmdir (crash_recovery_path env (Filename.concat directory "workspace"))
   | "metadata" -> crash_recovery_save env metadata_path "(broken"
   | "symlink" ->
     let target = Filename.concat root "outside-session" in
@@ -829,6 +831,11 @@ let crash_recovery_check_invalid case =
   with_temp_directory "ochat-crash-recovery-invalid" (fun env root ->
     Eio.Switch.run (fun sw ->
       crash_recovery_seed ~sw env root;
+      if String.equal case "archived-workspace"
+      then (
+        let store = crash_recovery_open ~sw env root |> store_ok in
+        Agent_store.Session_store.archive_session store session_id |> store_ok;
+        Agent_store.Session_store.close store |> store_ok);
       crash_recovery_invalid env root case;
       let index_path = crash_recovery_index_path root in
       Eio.Path.unlink (crash_recovery_path env index_path);
@@ -847,10 +854,10 @@ let crash_recovery_check_invalid case =
 ;;
 
 let%expect_test
-    "missing index rejects invalid active layouts without publishing an empty index"
+    "missing index rejects invalid session layouts without publishing an empty index"
   =
   List.iter
-    [ "identity"; "layout"; "metadata"; "symlink" ]
+    [ "identity"; "layout"; "workspace"; "archived-workspace"; "metadata"; "symlink" ]
     ~f:crash_recovery_check_invalid;
   crash_recovery_report
     "identity/layout/metadata/symlink rejected; index absent; ownership released";
@@ -3190,6 +3197,25 @@ let%expect_test "logical remove owns terminal delete proof before physical clean
              (S.open_session reopened ~sw ~actor_lock_nonce:"deny-removed" session_id)
            : bool)
         , (path_exists env (S.Handle.directory handle) : bool)];
+      let workspace =
+        crash_recovery_path env (Filename.concat (S.Handle.directory handle) "workspace")
+      in
+      Eio.Path.rmdir workspace;
+      Eio.Path.symlink ~link_to:root workspace;
+      let reopen_removal () =
+        S.open_removal reopened ~sw ~actor_lock_nonce:"retry-removed" session_id
+      in
+      (match reopen_removal () with
+       | Error (Corrupt _) -> ()
+       | Error error ->
+         raise_s [%sexp "wrong removal error", (error : Agent_store.Store_error.t)]
+       | Ok _ -> failwith "terminal source accepted a symlink workspace");
+      Eio.Path.unlink workspace;
+      let removal = reopen_removal () |> store_ok in
+      let proof = S.Lifecycle.Removal.outcome removal |> Option.value_exn in
+      assert (R.Status.equal proof.status Removed);
+      S.close_session reopened (S.Lifecycle.Removal.handle removal |> Option.value_exn)
+      |> store_ok;
       S.close reopened |> store_ok));
   [%expect
     {|

@@ -581,7 +581,7 @@
 (executable
  (name mcp_delegation_peer)
  (modules mcp_delegation_peer)
- (libraries core jsonaf jsonaf_ext ochat.mcp_types))
+ (libraries core eio eio_main jsonaf jsonaf_ext ochat.mcp_types))
 
 (library
  (name mcp_delegation_test)

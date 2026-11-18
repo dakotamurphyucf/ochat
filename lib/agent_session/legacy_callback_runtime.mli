@@ -14,6 +14,7 @@ module Services : sig
     ; schedules : schedules
     ; execute : Native_tool_invocation.executor
     ; executing : Agent_protocol.Moderator_execution.t
+    ; policy_caller : unit -> (Delegated_policy_caller.t, Agent_protocol.Error.t) result
     ; check_current : unit -> (unit, Agent_protocol.Error.t) result
     ; is_halted : unit -> bool
     ; checkpoint : unit -> (Jsonaf.t option, Agent_protocol.Error.t) result

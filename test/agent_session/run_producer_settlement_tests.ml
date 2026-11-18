@@ -527,7 +527,9 @@ let%expect_test
       { (Job_inference_provenance_tests.job ~inference_origin:(Run before.P.Run.id) ()) with
         launch =
           Some
-            { owner = Moderator_event executing.P.Moderator_execution.context.id
+            { owner =
+                P.Job.Birth_parent.callback
+                  (Moderator_event executing.P.Moderator_execution.context.id)
             ; parent_job = None
             ; nested_depth = 0
             ; moderator_source = Some before.source.observer

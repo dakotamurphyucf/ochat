@@ -11,7 +11,7 @@ module Origin = A.Recurrence_run_origin
 (* Real artifact capture and physical target ownership. The optional controller
    case captures harmless code for separate real Manager initialization; the
    default target remains poison code and has no Manager or runtime. *)
-let with_captured_target ?(controller = false) f =
+let with_captured_target ?(controller = false) ?(initialize_state = Fn.id) f =
   let captured = ref None in
   with_store
     ~prepare_initial:(fun env initial ->
@@ -83,7 +83,8 @@ let with_captured_target ?(controller = false) f =
             prompt_definition_id = Some definition.id
           ; prompt_revision_id = A.Prompt_revision.id revision
           }
-      })
+      }
+      |> initialize_state)
     (fun fixture ->
        let source, root_file = Option.value_exn !captured in
        f fixture source root_file)

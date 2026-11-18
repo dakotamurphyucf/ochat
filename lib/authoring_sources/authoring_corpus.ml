@@ -2337,7 +2337,7 @@ module Coverage = struct
   let run_mappings =
     List.concat_map
       [ ( "moderator_v1"
-        , "5d32951cdfe26278e78887fc19d07be4f4024fb6b11b0b4ee16e7947caf78c5f"
+        , "d32db362b3c4d8d77aad5ca4196e6c306438a7f0850244372796bc29da6b5e79"
         , [ ( "module/Run"
             , "6eb6e335f86f30019f0bf3f7ff05141fbe26e7c95312a31501ab52bc016ef0e0" )
           ; ( "module_export/Run.continue"
@@ -2348,7 +2348,7 @@ module Coverage = struct
             , "79322e34f129f854d870a6f52dd729f64afabd8255eb83e9642ccd2ee8b1dc23" )
           ] )
       ; ( "delegated_moderator_v1"
-        , "9b026f950a26a85042b0c022ecf2010656999b3d7134613b227ebc123775f58e"
+        , "e5bd3958d939e04386bb1effd19b1e9a1c1266fbe9d2a9ab6ebc890019f4a93c"
         , [ ( "module/Run"
             , "845fbe661e06d288d0974a92ecb3b14cde3918f2d126dfb0f4b8cc7c49de919b" )
           ; ( "module_export/Run.continue"
@@ -2377,14 +2377,14 @@ module Coverage = struct
   let goal_mappings =
     List.concat_map
       [ ( "moderator_v1"
-        , "d0eaeacfbd5bc8d003a8374ff4babf89bbab20f5cf18006fa43c423de4049815"
+        , "6209c4733211906d58e70ffdc4db718f2648689b5aeac23e02c909acabd73aa6"
         , [ ( "module/Goal"
             , "ae3986a7e62a9ab0300c1ce8382da73f6cd455fe920fdf0b159d5355780041bf" )
           ; ( "module_export/Goal.finish"
             , "4ac7320a107a1a30e184c8cf78d2e8f424ca6f1c0e909d66c8d28860154ee194" )
           ] )
       ; ( "delegated_moderator_v1"
-        , "cfbc6c1c2e197cdf8a0723010231a9d5580b30f4b6db6f0dc2ef81b528b6ca3b"
+        , "89f9e99fd633eb683e1c9257991f652dbf5fdfc0c535b59201aecb8f5da31ecb"
         , [ ( "module/Goal"
             , "8803a36e3d21a566bf06c43e8f8bbd17db9611457ee0b015eeaf755a76928ce9" )
           ; ( "module_export/Goal.finish"
@@ -3146,7 +3146,7 @@ let runtime_foundation ~sources =
         "Creation retries, lifetimes and inherited authority"
         [ "runtime.delegation.generated" ]
         [ ( "## Create, retry and retain authority"
-          , "5dfd52233e75cf9adb876f47917c5c663d40770e3796287ee261cdd41774698c" )
+          , "48012f5d35cbaad5b5e9c3fad4dc873f483879a5d1bc60cfc370e5983e209c3f" )
         ]
     ; make_child
         "runtime.delegation.submissions"
@@ -3472,7 +3472,7 @@ let runtime_foundation ~sources =
          ; review =
              Audited
                { excerpt_sha256 =
-                   [ "2ddd89a69fb931200596a52794c0b0661883ff3a4bf4ddf0a695d59885bc689d" ]
+                   [ "8ed504ad77a86c0042b0b4e6a99892fd2732e6517c34ed2c94946f7f285c6417" ]
                ; evidence =
                    [ "lib/agent_session/administration.ml"
                    ; "lib/agent_session/session_actor.ml"
@@ -3508,7 +3508,7 @@ let runtime_foundation ~sources =
          ; review =
              Audited
                { excerpt_sha256 =
-                   [ "61c51102584b197b97d02e32379eeb626f686cc8cff6c128604c5f8ca90509f5" ]
+                   [ "237ac9dc3d9b25634f5d15e25ad8bbba5a49cb622d8f6ebd5accb694a820ad54" ]
                ; evidence =
                    [ "lib/chatml/chatml_compilation.ml"
                    ; "lib/chatml/chatml_execution.ml"
@@ -3723,9 +3723,12 @@ let runtime_foundation ~sources =
          ; review =
              Audited
                { excerpt_sha256 =
-                   [ "ea471419986d37942aa5648389abaae75ff664bf750debdb307e46b0d0c7c40d" ]
+                   [ "53e1e7f0bab84cc5abc76d3779ab88c51060a7e98f7d30da667fa714aa37e201" ]
                ; evidence =
-                   [ "test/factory_catalog_publication/goal_native_metadata_tests.ml" ]
+                   [ "test/factory_catalog_publication/goal_native_metadata_tests.ml"
+                   ; "test/factory_catalog_publication/goal_native_resume_tests.ml"
+                   ; "test/goal_domain/goal_resume_request_tests.ml"
+                   ]
                }
          }
        ]
@@ -3742,7 +3745,7 @@ let runtime_foundation ~sources =
          ; review =
              Audited
                { excerpt_sha256 =
-                   [ "ca40e51d82cce7a2bf679019bd96900020ec6d0d69094acaf394070d27a4c55e" ]
+                   [ "33060b79e99187de189202b5b1c1582fa00929ca289fbfb9fca4227473629127" ]
                ; evidence =
                    [ "test/recurrence_creation/recurrence_native_request_tests.ml"
                    ; "test/chatml_composition/recurrence_runtime_tests.ml"
@@ -3766,7 +3769,7 @@ let runtime_foundation ~sources =
          ; review =
              Audited
                { excerpt_sha256 =
-                   [ "85b3a8f6d139999f8ad2909610fa08dfa931aa02f04f1a7973fe6070a532be9d" ]
+                   [ "100b4e20581498636be8063fd67560960dc1e52b99321135a2d4746f48ec4b41" ]
                ; evidence =
                    [ "test/instruction_sources/metadata_tests.ml"
                    ; "test/instruction_sources/snapshot_tests.ml"
@@ -3775,6 +3778,8 @@ let runtime_foundation ~sources =
                    ; "test/agent_session/agent_authority_tests.ml"
                    ; "test/agent_session/instruction_selection_tests.ml"
                    ; "test/agent_session/instruction_selection_persistence_tests.ml"
+                   ; "test/chatml_composition/instruction_control_codec_tests.ml"
+                   ; "test/chatml_composition/instruction_control_tests.ml"
                    ]
                }
          }
@@ -3792,11 +3797,13 @@ let runtime_foundation ~sources =
          ; review =
              Audited
                { excerpt_sha256 =
-                   [ "cde14cf26810a295b4ef27ede2787a58b46d4417f21491ec26989206d783c4de" ]
+                   [ "ec62b6e31cc33115038a141bdc89a67f2a45823c4ed41fad1ba29ee8841f9335" ]
                ; evidence =
                    [ "test/capability_sources/inventory_tests.ml"
                    ; "test/capability_sources/export_tests.ml"
                    ; "test/capability_sources/closure_tests.ml"
+                   ; "test/capability_sources_cli/main.ml"
+                   ; "test/lifecycle_helpers/goal_request_tests.ml"
                    ; "lib/capability_sources/capability_source_inventory_tests.ml"
                    ]
                }
@@ -3815,7 +3822,7 @@ let runtime_foundation ~sources =
          ; review =
              Audited
                { excerpt_sha256 =
-                   [ "f08e193a20c118cf2b5a01b72dff9a0f31f1e5b31cf14d1345e600997bb0f311" ]
+                   [ "2b5ee324aa8f8057b37615e6249941ef98536d72c7fd1ea40f4ef64d2b7cd246" ]
                ; evidence =
                    [ "test/lifecycle_helpers/staging_tests.ml"
                    ; "test/agent_session/run_action_scope_tests.ml"
@@ -3839,7 +3846,7 @@ let runtime_foundation ~sources =
          ; review =
              Audited
                { excerpt_sha256 =
-                   [ "b609f6eee543b5a8288e5100eef55658f7271a12aada185377042464a52a9228" ]
+                   [ "fae1bb6e30213297ae46479384763486aad53b340ae1c7a8e6f970c080021859" ]
                ; evidence =
                    [ "test/agent_session/run_action_scope_tests.ml"
                    ; "test/run_lifecycle_protocol_test.ml"

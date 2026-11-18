@@ -204,7 +204,8 @@ let on_event ctx state event = Task.pure(state)
                     Jsonaf.exactly_equal
                       (T.state_document factual |> store_ok |> D.Document.json)
                       (T.state_document unchanged |> store_ok |> D.Document.json));
-                  assert (Entry.equal_control (Entry.control (entry parent)) Enabled))));
+                  assert (Entry.equal_control (Entry.control (entry parent)) Enabled));
+                close_uncertain_entry wrapped parent));
          (* This is exception/cleanup recovery after a post-sync write, not an
             externally killed process. Fresh host and current proof are real. *)
          with_daemon env root configuration ~provider_calls (fun sw daemon ->

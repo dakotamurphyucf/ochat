@@ -819,3 +819,10 @@ let selection_lateness (t : t) ~entry ~nominal ~snapshot =
              (Time_ns.to_int63_ns_since_epoch now |> Int63.to_int64)
              - (Time_ns.to_int63_ns_since_epoch due |> Int63.to_int64)))
 ;;
+
+let within_selection_grace t ~entry ~nominal ~snapshot ~policy =
+  let open Result.Let_syntax in
+  let%map lateness = selection_lateness t ~entry ~nominal ~snapshot in
+  Option.exists lateness ~f:(fun lateness ->
+    Int64.(lateness <= Recurrence_policy.grace_ns policy))
+;;

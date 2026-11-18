@@ -407,6 +407,22 @@ let goal_descendant_profile =
   |> protocol_ok
 ;;
 
+(** Check the durable Session_start receipt of a fresh moderated fixture. An
+    idle actor can still be waiting to claim its first startup callback. Raise
+    with the actual receipt if startup failed or was interrupted. *)
+let session_start_completed_exn (state : Agent_session.Session_state.t) =
+  let module M = Agent_protocol.Moderator_execution in
+  List.exists state.moderator_executions ~f:(fun receipt ->
+    Int.equal receipt.context.generation state.identity.generation
+    && M.equal_phase receipt.context.phase Session_start
+    &&
+    match receipt.status with
+    | Completed _ -> true
+    | Running -> false
+    | Failed _ | Interrupted _ ->
+      raise_s [%sexp "fixture Session_start did not complete", (receipt : M.t)])
+;;
+
 let observed_idle = function
   | Agent_protocol.Session.Idle -> true
   | Stopped

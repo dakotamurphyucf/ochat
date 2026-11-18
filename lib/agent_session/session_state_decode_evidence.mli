@@ -9,6 +9,14 @@ val ledger_of_jsonaf
   -> Jsonaf.t
   -> (Inference_ledger.t, Agent_protocol.Error.t) Result.t
 
+val policy_canonical_usage_of_jsonaf
+  :  Jsonaf.t
+  -> (Policy_canonical_usage.t, Agent_protocol.Error.t) Result.t
+
+val goal_policy_contributions_of_jsonaf
+  :  Jsonaf.t
+  -> (Goal_policy_contributions.t, Agent_protocol.Error.t) Result.t
+
 module Capture : sig
   type evidence := t
   type t
@@ -36,6 +44,20 @@ module Capture : sig
     :  t
     -> Jsonaf.t
     -> (Inference_ledger.t, Agent_protocol.Error.t) Result.t
+
+  (** Actual successful component wire decodes at their existing fixed
+      profiles. Reuse additionally requires this capture's unchanged State
+      limits and exact complete child JSON. Unvisited optional fields are
+      absent from the finished generation. Native context validation is separate. *)
+  val policy_canonical_usage
+    :  t
+    -> Jsonaf.t
+    -> (Policy_canonical_usage.t, Agent_protocol.Error.t) Result.t
+
+  val goal_policy_contributions
+    :  t
+    -> Jsonaf.t
+    -> (Goal_policy_contributions.t, Agent_protocol.Error.t) Result.t
 
   (** Freezes the current generation. The immutable result has no link to earlier
       generations or to this capture's mutable slots. *)

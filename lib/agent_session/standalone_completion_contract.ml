@@ -99,9 +99,11 @@ let subject (invocation : P.Invocation.t) (job : P.Job.t) =
     | ( Some contract
       , Published (Pending (Job id, _))
       , Async_tool
-      , Some { owner = Invocation owner; parent_job = None; _ } )
+      , Some { owner; parent_job = None; _ } )
       when P.Id.Job.equal id job.id
-           && P.Id.Invocation.equal owner invocation.context.id
+           && P.Job.Birth_parent.equal
+                owner
+                (P.Job.Birth_parent.callback (Invocation invocation.context.id))
            && P.Id.Session.equal invocation.context.session_id job.session_id
            && Int.equal invocation.context.generation job.generation -> Ok contract
     | _ -> invalid "standalone completion does not match its admitted owned job"

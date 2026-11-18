@@ -17,6 +17,10 @@ end
 (** No guard invocation: truthful outcome writers preserve negative facts. *)
 val parent : t -> Parent.t
 
+(** Immutable factual classification from the SAME actual native birth/result
+    ACK. It does not authorize an effect or refresh the original admission. *)
+val policy_source : t -> Policy_standalone_source.Classification.t
+
 (** Stage only an actual resolved/published Awaiting observation. No observation
     returns None. A missing parent creates an unavailable component, never fresh
     legacy authority. Completed-fact transfer preserves known expiry; unrelated
@@ -25,6 +29,7 @@ val stage_completed
   :  Agent_protocol.Invocation.t
   -> source:Agent_protocol.Run_source.t option
   -> parent:Parent.t
+  -> policy_source:Policy_standalone_source.Classification.t
   -> (t option, Agent_protocol.Error.t) result
 
 (** Exact immutable result/context/source, allowing only protocol-valid publication

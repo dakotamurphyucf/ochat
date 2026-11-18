@@ -264,6 +264,7 @@ let callback_in_runtime
         ~event
         (fun
             ~executing
+             ~policy_caller:_
              ~model_jobs:_
              ~allocate_inference:_
              ~retirement_reason:_

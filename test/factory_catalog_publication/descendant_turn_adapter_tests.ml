@@ -15,8 +15,7 @@ let within ?(seconds = 10.) env phase f =
   | Eio.Time.Timeout -> failwith ("567 adapter timed out: " ^ phase)
 ;;
 
-let start_child daemon child =
-  Factory.prepare_session_start (Daemon.factory daemon) child |> protocol_ok;
+let start_prepared_child child =
   Owner.ensure_loaded_authenticated child.Registry.runtime ~actor:original |> protocol_ok;
   let writer, _ =
     Actor.attach child.actor ~mode:Read_write ~subscribe:false |> protocol_ok
@@ -74,6 +73,11 @@ let start_child daemon child =
            ready ())
        in
        ready ())
+;;
+
+let start_child daemon child =
+  Factory.prepare_session_start (Daemon.factory daemon) child |> protocol_ok;
+  start_prepared_child child
 ;;
 
 let request entry key text =

@@ -19,6 +19,7 @@ end
 
 type t =
   { installation : Run_source_installation.t
+  ; moderator_lifecycle : Moderator_lifecycle.Field.t
   ; runs : P.Run.t Map.M(Run_id).t
   ; intents : Run_intent.t Map.M(Receipt_key).t
   ; receipts : P.Run_receipt.t Map.M(Receipt_key).t
@@ -29,6 +30,7 @@ type t =
 
 let empty =
   { installation = Run_source_installation.initial
+  ; moderator_lifecycle = Moderator_lifecycle.Field.empty
   ; runs = Map.empty (module Run_id)
   ; intents = Map.empty (module Receipt_key)
   ; receipts = Map.empty (module Receipt_key)
@@ -40,6 +42,7 @@ let empty =
 
 let equal
       { installation
+      ; moderator_lifecycle
       ; runs
       ; intents
       ; receipts
@@ -50,6 +53,7 @@ let equal
       other
   =
   Run_source_installation.equal installation other.installation
+  && Moderator_lifecycle.Field.equal moderator_lifecycle other.moderator_lifecycle
   && Map.equal P.Run.equal runs other.runs
   && Map.equal Run_intent.equal intents other.intents
   && Map.equal P.Run_receipt.equal receipts other.receipts
@@ -74,6 +78,12 @@ let equal_observation t other =
 ;;
 
 let installation t = t.installation
+let moderator_lifecycle t = Moderator_lifecycle.Field.value t.moderator_lifecycle
+
+let clear_moderator_lifecycle t =
+  { t with moderator_lifecycle = Moderator_lifecycle.Field.clear t.moderator_lifecycle }
+;;
+
 let runs t = Map.data t.runs
 let intents t = Map.data t.intents
 let receipts t = Map.data t.receipts
@@ -137,6 +147,15 @@ let current_source t (source : P.Run_source.t) =
   match Run_source_installation.captured t.installation ~generation:source.generation with
   | Error _ -> false
   | Ok installed -> P.Run_source.equal installed source
+;;
+
+let validate_lifecycle_source t =
+  match moderator_lifecycle t with
+  | None -> Ok ()
+  | Some pointer ->
+    if current_source t (Moderator_lifecycle.source pointer)
+    then Ok ()
+    else Error (P.Error.invalid_request "lifecycle pointer has an obsolete installation")
 ;;
 
 let validate_job_deliveries t =
@@ -210,6 +229,7 @@ let to_jsonaf t =
      ; "intents", X.list_json Run_intent.to_jsonaf (intents t)
      ; "receipts", X.list_json P.Run_receipt.to_json (receipts t)
      ]
+     @ Moderator_lifecycle.Field.fields t.moderator_lifecycle
      @ Run_job_deliveries.fields t.job_deliveries
      @ Run_goal_links.fields t.goal_links
      @ Run_recurrence_origins.fields t.recurrence_origins)
@@ -319,6 +339,19 @@ let validate_encoded_capacity t json =
 ;;
 
 let validate_document_size t = validate_encoded_capacity t (to_jsonaf t)
+
+let capture_moderator_lifecycle t capture =
+  let open Result.Let_syntax in
+  let source = Moderator_lifecycle.source capture in
+  let%bind () =
+    if current_source t source
+    then Ok ()
+    else Error (P.Error.invalid_request "lifecycle capture has no current installation")
+  in
+  let next = { t with moderator_lifecycle = Moderator_lifecycle.Field.present capture } in
+  let%map () = validate_document_size next in
+  next
+;;
 
 let compatible_pending left right =
   match left, right with
@@ -455,6 +488,7 @@ let replace_installation t ~installation ~retired_runs =
       let next =
         { t with
           installation
+        ; moderator_lifecycle = Moderator_lifecycle.Field.clear t.moderator_lifecycle
         ; runs
         ; intents = Map.map t.intents ~f:Run_intent.retire
         ; job_deliveries
@@ -515,8 +549,12 @@ let of_jsonaf json =
     Run_recurrence_origins.of_field
       (List.Assoc.find (J.to_alist fields) ~equal:String.equal "recurrence_origins")
   in
+  let%bind moderator_lifecycle =
+    Moderator_lifecycle.Field.of_field (J.optional fields "moderator_lifecycle")
+  in
   let t =
     { installation
+    ; moderator_lifecycle
     ; runs
     ; receipts
     ; intents
@@ -526,6 +564,7 @@ let of_jsonaf json =
     }
   in
   let%bind () = validate_encoded_capacity t json in
+  let%bind () = validate_lifecycle_source t in
   let%bind () = validate_goal_links t in
   let%bind () = validate_recurrence_origins t in
   let%bind () =
@@ -592,6 +631,7 @@ let of_jsonaf json =
 let shape =
   X.shape_exn
     [ "installation", Run_source_installation.shape
+    ; "moderator_lifecycle", X.nullable_shape Moderator_lifecycle.shape
     ; "runs", X.array_shape_exn ~identity_field:"id" Run_record_shapes.run
     ; "intents", X.array_shape_exn Run_record_shapes.intent
     ; "receipts", X.array_shape_exn Run_record_shapes.receipt
@@ -602,6 +642,7 @@ let shape =
 ;;
 
 let validate t ~session_id ~generation =
+  let%bind.Result () = validate_lifecycle_source t in
   let%bind.Result () = validate_document_size t in
   let%bind.Result () = validate_job_deliveries t in
   let%bind.Result () = validate_goal_links t in
@@ -621,6 +662,12 @@ let validate t ~session_id ~generation =
 
 let validate_transition ~previous next =
   let open Result.Let_syntax in
+  let%bind () =
+    Moderator_lifecycle.Field.validate_transition
+      ~previous:previous.moderator_lifecycle
+      next.moderator_lifecycle
+  in
+  let%bind () = validate_lifecycle_source next in
   let%bind () =
     Run_recurrence_origins.validate_transition
       ~previous:previous.recurrence_origins
@@ -865,7 +912,12 @@ let complete_replacement t ~previous ~source =
   let%bind installation =
     Run_source_installation.apply previous.installation ~change:(Reset source)
   in
-  let next = { t with installation } in
+  let next =
+    { t with
+      installation
+    ; moderator_lifecycle = Moderator_lifecycle.Field.clear t.moderator_lifecycle
+    }
+  in
   let%bind () = validate_transition ~previous next in
   let%map () = validate_document_size next in
   next

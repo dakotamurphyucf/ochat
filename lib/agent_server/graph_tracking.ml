@@ -23,6 +23,8 @@ module Mutation_owner = struct
     | Runtime of Agent_session.Run_preparation.t option ref
     | Runtime_construction of A.Runtime_constructor_graph.t
     | Held_input of A.Held_input_scope.t
+    | Restored_policy
+    | Native_setup
 end
 
 type t =
@@ -70,6 +72,32 @@ let create_for_runtime_construction actor ~construction ~source ~upstream =
         }))
 ;;
 
+let create_for_policy_restoration actor ~restoration ~source ~upstream =
+  Eio.Cancel.protect (fun () ->
+    Result.map
+      (A.open_policy_restoration_inference_owner actor ~restoration ~source)
+      ~f:(fun owner ->
+        { actor
+        ; mutation_owner = Restored_policy
+        ; owner
+        ; upstream
+        ; routing = Map.empty (module Transcript.Scope.Key)
+        ; finished = false
+        }))
+;;
+
+let create_for_native_setup actor ~setup ~source ~upstream =
+  Eio.Cancel.protect (fun () ->
+    Result.map (A.open_native_setup_inference_owner actor ~setup ~source) ~f:(fun owner ->
+      { actor
+      ; mutation_owner = Native_setup
+      ; owner
+      ; upstream
+      ; routing = Map.empty (module Transcript.Scope.Key)
+      ; finished = false
+      }))
+;;
+
 let create_for_held_input actor ~scope ~source ~upstream =
   Eio.Cancel.protect (fun () ->
     Result.map (A.Input_graph.open_owner actor ~scope ~source) ~f:(fun owner ->
@@ -98,6 +126,7 @@ let route t scope =
 let ledger_mutation t ~ordinary ~prepared ~construction ~input =
   match t.mutation_owner with
   | Held_input scope -> input scope
+  | Restored_policy | Native_setup -> ordinary
   | Runtime preparation ->
     (match !preparation with
      | None -> ordinary
@@ -105,21 +134,42 @@ let ledger_mutation t ~ordinary ~prepared ~construction ~input =
   | Runtime_construction graph -> construction graph
 ;;
 
+let settle_usage t =
+  if A.inference_usage_cleanup_pending t.actor
+  then (
+    match A.settle_inference_owner_usage t.actor ~owner:t.owner |> require with
+    | Settled | Deferred -> ())
+;;
+
 let release t handle =
+  let capture f =
+    try Ok (f ()) with
+    | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())
+  in
+  let resume = function
+    | Ok () -> ()
+    | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
+  in
   Exn.protect
     ~f:(fun () ->
-      (ledger_mutation
-         t
-         ~ordinary:A.release_inference
-         ~prepared:(fun preparation ->
-           A.Constructor_mutations.release_inference ~preparation)
-         ~construction:(fun graph actor ~owner:_ ->
-           A.Runtime_constructor_mutations.release_inference actor ~graph)
-         ~input:(fun scope -> A.Input_graph.release_inference ~scope))
-        t.actor
-        ~owner:t.owner
-        ~handle
-      |> require)
+      let native =
+        capture (fun () ->
+          (ledger_mutation
+             t
+             ~ordinary:A.release_inference
+             ~prepared:(fun preparation ->
+               A.Constructor_mutations.release_inference ~preparation)
+             ~construction:(fun graph actor ~owner:_ ->
+               A.Runtime_constructor_mutations.release_inference actor ~graph)
+             ~input:(fun scope -> A.Input_graph.release_inference ~scope))
+            t.actor
+            ~owner:t.owner
+            ~handle
+          |> require)
+      in
+      let factual = capture (fun () -> settle_usage t) in
+      resume native;
+      resume factual)
     ~finally:(fun () ->
       t.routing <- Map.remove t.routing (Transcript.Scope.key (L.Handle.scope handle)))
 ;;
@@ -156,7 +206,7 @@ let with_attempt t ?allocate prepared ~relation ~f =
             | None -> A.admit_inference_allocation
             | Some preparation ->
               A.Constructor_mutations.admit_inference_allocation ~preparation)
-       | Runtime_construction _ ->
+       | Runtime_construction _ | Restored_policy | Native_setup ->
          raise
            (Rejected
               (Agent_protocol.Error.create
@@ -216,6 +266,7 @@ let on_attempt t attempt =
     ~handle
     attempt
   |> require;
+  settle_usage t;
   t.upstream.on_attempt attempt
 ;;
 
@@ -249,6 +300,7 @@ let on_observation t incoming =
        ~owner:t.owner
        incoming
      |> require);
+  settle_usage t;
   t.upstream.on_observation incoming
 ;;
 
@@ -269,6 +321,7 @@ let on_completion t completion =
     ~handle
     completion
   |> require;
+  settle_usage t;
   t.upstream.on_completion completion
 ;;
 
@@ -277,7 +330,8 @@ let seal t =
   then Ok ()
   else (
     match t.mutation_owner with
-    | Runtime _ -> A.seal_inference_owner t.actor ~owner:t.owner
+    | Runtime _ | Restored_policy | Native_setup ->
+      A.seal_inference_owner t.actor ~owner:t.owner
     | Runtime_construction graph ->
       A.Runtime_constructor_mutations.seal_inference_owner t.actor ~graph
     | Held_input scope -> A.Input_graph.seal_inference_owner t.actor ~scope ~owner:t.owner)

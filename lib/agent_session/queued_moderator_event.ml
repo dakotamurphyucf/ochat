@@ -395,19 +395,38 @@ let check_versioned_event event =
   Result.map_error checked ~f:P.Error.invalid_request
 ;;
 
-let claim =
-  claim_in_context
-    ~queue_occurrence:None
-    ~check_event:check_versioned_event
-    ~operation_id:None
+let installed_queue_occurrence ~state =
+  let open Result.Let_syntax in
+  let%bind metadata = Moderator_checkpoint.queue state.Session_state.moderator in
+  match metadata with
+  | None -> Ok None
+  | Some metadata ->
+    (match Moderator_queue.entries metadata with
+     | [] -> Ok None
+     | entry :: _ ->
+       E.Queue_occurrence.create
+         ~source:(Moderator_queue.source metadata)
+         ~ordinal:(Moderator_queue.Entry.ordinal entry)
+         ~origin:(Moderator_queue.Entry.origin entry)
+         ~producer:(Captured (Moderator_queue.Entry.producer entry))
+       |> Result.map ~f:Option.some)
 ;;
 
-let claim_foreground ~operation_id =
+let claim_versioned ~operation_id ~state ~id ~snapshot ~now =
+  let open Result.Let_syntax in
+  let%bind queue_occurrence = installed_queue_occurrence ~state in
   claim_in_context
-    ~queue_occurrence:None
+    ~queue_occurrence
     ~check_event:check_versioned_event
-    ~operation_id:(Some operation_id)
+    ~operation_id
+    ~state
+    ~id
+    ~snapshot
+    ~now
 ;;
+
+let claim = claim_versioned ~operation_id:None
+let claim_foreground ~operation_id = claim_versioned ~operation_id:(Some operation_id)
 
 let claim_legacy ~callback ~operation_id ~state ~id ~now =
   let open Result.Let_syntax in
@@ -434,6 +453,7 @@ let claim_legacy ~callback ~operation_id ~state ~id ~now =
       ~source:(Moderator_queue.source metadata)
       ~ordinal:(Moderator_queue.Entry.ordinal entry)
       ~origin:(Moderator_queue.Entry.origin entry)
+      ~producer:(Captured (Moderator_queue.Entry.producer entry))
   in
   claim_in_context
     ~queue_occurrence:(Some queue_occurrence)
@@ -675,6 +695,16 @@ let claim_retirement ~state ~id ~(snapshot : S.t) =
                 receipt.context.source.source_sha256
                 snapshot.script_source_hash -> Ok ()
     | _ -> conflict "retirement requires an unsettled failure at its original checkpoint"
+  in
+  let%bind () =
+    match receipt.queue_occurrence with
+    | None -> Ok ()
+    | Some captured ->
+      let%bind current = installed_queue_occurrence ~state in
+      (match current with
+       | Some current when E.Queue_occurrence.equal captured current -> Ok ()
+       | Some _ | None ->
+         conflict "failed receipt no longer names the exact queue occurrence")
   in
   match snapshot.queued_internal_events with
   | event :: _ when Jsonaf.exactly_equal receipt.context.event (encoded_event event) ->

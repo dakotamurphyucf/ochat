@@ -174,6 +174,12 @@ let is_available t =
   | Unavailable _ | Closed -> false
 ;;
 
+let requires_recovery t =
+  match t.availability with
+  | Unavailable _ -> Option.is_none (Eio.Promise.peek t.stopped)
+  | Available | Closed -> false
+;;
+
 let await_reply t ~promise ~enqueue ~if_stopped =
   Eio.Fiber.first
     (fun () ->

@@ -1,0 +1,177 @@
+--- a/lib_eio/core/switch.ml
++++ b/lib_eio/core/switch.ml
+@@ -1,3 +1,43 @@
++module Release_report = struct
++  type status = Not_entered | Incomplete | Complete
++
++  type t = {
++    status : status;
++    attempted : int;
++    failures : (exn * Printexc.raw_backtrace) list;
++  }
++
++  type capture = {
++    mutable entered : bool;
++    mutable complete : bool;
++    mutable attempted_count : int;
++    mutable failures_rev : (exn * Printexc.raw_backtrace) list;
++  }
++
++  let status t = t.status
++  let attempted t = t.attempted
++  let failures t = t.failures
++
++  let create_capture () =
++    { entered = false; complete = false; attempted_count = 0; failures_rev = [] }
++
++  let snapshot t = {
++    status = if not t.entered then Not_entered else if t.complete then Complete else Incomplete;
++    attempted = t.attempted_count;
++    failures = List.rev t.failures_rev;
++  }
++end
++
++module Outcome = struct
++  type 'a t = {
++    result : ('a, exn * Printexc.raw_backtrace) result;
++    release : Release_report.t;
++  }
++
++  let result t = t.result
++  let release t = t.release
++end
++
+ type t = {
+   mutable fibers : int;         (* Total, including daemon_fibers and the main function *)
+   mutable daemon_fibers : int;
+@@ -92,7 +132,7 @@
+   | Ok x -> x
+   | Error ex -> raise ex
+ 
+-let rec await_idle t =
++let rec await_idle ?release_report t =
+   (* Wait for fibers to finish: *)
+   while t.fibers > 0 do
+     Trace.try_get t.cancel.id;
+@@ -110,8 +150,19 @@
+   t.on_release <- None;
+   Mutex.unlock t.on_release_lock;
+   (* Run on_release handlers *)
+-  !queue |> List.iter (fun fn -> try Cancel.protect fn with ex -> fail t ex);
+-  if t.fibers > 0 then await_idle t
++  !queue |> List.iter (fun fn ->
++      Option.iter (fun (report : Release_report.capture) ->
++          report.Release_report.attempted_count <- report.attempted_count + 1
++        ) release_report;
++      try Cancel.protect fn with ex ->
++        let bt = Printexc.get_raw_backtrace () in
++        Option.iter (fun (report : Release_report.capture) ->
++            report.Release_report.failures_rev <- (ex, bt) :: report.failures_rev
++          ) release_report;
++        fail t ex
++    );
++  if t.fibers > 0 then await_idle ?release_report t
++  else Option.iter (fun (report : Release_report.capture) -> report.Release_report.complete <- true) release_report
+ 
+ let maybe_raise_exs t =
+   match t.exs with
+@@ -129,11 +180,11 @@
+     cancel;
+   }
+ 
+-let run_internal t fn =
++let run_internal ?release_report t fn =
+   match fn t with
+   | v ->
+     dec_fibers t;
+-    await_idle t;
++    await_idle ?release_report t;
+     Trace.get t.cancel.id;
+     maybe_raise_exs t;        (* Check for failure while finishing *)
+     (* Success. *)
+@@ -144,12 +195,24 @@
+        Turn the switch off to cancel any running fibers, if it's not off already. *)
+     dec_fibers t;
+     fail ~bt t ex;
+-    await_idle t;
++    await_idle ?release_report t;
+     Trace.get t.cancel.id;
+     maybe_raise_exs t;
+     assert false
+ 
+ let run ?name fn = Cancel.sub_checked ?name Switch (fun cc -> run_internal (create cc) fn)
++
++let run_reported ?name fn =
++  let report = Release_report.create_capture () in
++  let result =
++    try
++      Ok (Cancel.sub_checked ?name Switch (fun cc ->
++          report.entered <- true;
++          run_internal ~release_report:report (create cc) fn
++        ))
++    with ex -> Error (ex, Printexc.get_raw_backtrace ())
++  in
++  { Outcome.result; release = Release_report.snapshot report }
+ 
+ let run_protected ?name fn =
+   let ctx = Effect.perform Cancel.Get_context in
+--- a/lib_eio/core/eio__core.mli
++++ b/lib_eio/core/eio__core.mli
+@@ -47,6 +47,57 @@
+ 
+   val run_protected : ?name:string -> (t -> 'a) -> 'a
+   (** [run_protected fn] is like [run] but ignores cancellation requests from the parent context. *)
++
++  module Release_report : sig
++    type t
++    (** Immutable observations of the original switch's actual release phase.
++        Only Eio can create this report. It carries no resource-use permission. *)
++
++    type status = Not_entered | Incomplete | Complete
++
++    val status : t -> status
++    (** [Not_entered] means switch entry did not begin (e.g. the parent was
++        already cancelled). [Incomplete] means entry began but actual fiber
++        joining/release did not finish. [Complete] means all registered fibers
++        finished and the original queued release callbacks were all attempted.
++        [Complete] alone does not mean those callbacks succeeded. *)
++
++    val attempted : t -> int
++    (** Number of original queued release callback invocations attempted. *)
++
++    val failures : t -> (exn * Printexc.raw_backtrace) list
++    (** Every exception raised by those actual callback invocations, in execution
++        order, captured before [fail] and exception combination. Preserves the
++        exact exception object and its captured raw backtrace, including
++        [Cancel.Cancelled] and the same exception object raised more than once.
++        An incomplete report may contain only a prefix of the observations.
++        Late [on_release] calls that execute immediately in the registering
++        caller after the hook queue closes are outside this terminal report;
++        they retain their existing direct exception behavior. *)
++  end
++
++  module Outcome : sig
++    type 'a t
++    val result : 'a t -> ('a, exn * Printexc.raw_backtrace) result
++    (** Exact value or aggregate exception/backtrace that [run] would return or
++        raise. This is not a separate callback-primary or cleanup result. *)
++
++    val release : 'a t -> Release_report.t
++  end
++
++  val run_reported : ?name:string -> (t -> 'a) -> 'a Outcome.t
++  (** Runs the same single switch as [run], with the same callback evaluation,
++      child cancellation, fiber joining, hook protection/order and exception
++      aggregation. Returns the terminal outcome as data instead of re-raising
++      its exception. No additional switch, fiber or user report callback runs.
++      Original [run] and [run_protected] behavior is unchanged.
++
++      The independent release report records actual hook failures before lossy
++      aggregation, even if [fn] or a child raised the same exception object, or
++      normal cancellation otherwise suppresses that release exception. It does
++      not classify callback/child errors as hook failures, or certify that a
++      resource was freed by a hook that raised. Complete with no failures proves
++      only that all original switch fibers joined and queued hooks returned. *)
+ 
+   (** {2 Cancellation and failure} *)
+ 

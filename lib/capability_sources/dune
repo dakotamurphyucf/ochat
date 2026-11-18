@@ -3,6 +3,10 @@
  (action
   (with-stdout-to %{targets}
    (run %{exe:../authoring_sources/embed_documents.exe}
+    examples/libraries/goal-requests/chatml.project.json %{dep:../../docs-src/examples/libraries/goal-requests/chatml.project.json}
+    examples/libraries/goal-requests/src/goal_requests.chatml %{dep:../../docs-src/examples/libraries/goal-requests/src/goal_requests.chatml}
+    examples/libraries/goal-requests/src/goal_requests.chatmli %{dep:../../docs-src/examples/libraries/goal-requests/src/goal_requests.chatmli}
+    guide/native-goal-metadata.md %{dep:../../docs-src/guide/native-goal-metadata.md}
     examples/libraries/recurrence-requests/chatml.project.json %{dep:../../docs-src/examples/libraries/recurrence-requests/chatml.project.json}
     examples/libraries/recurrence-requests/src/recurrence_requests.chatml %{dep:../../docs-src/examples/libraries/recurrence-requests/src/recurrence_requests.chatml}
     examples/libraries/recurrence-requests/src/recurrence_requests.chatmli %{dep:../../docs-src/examples/libraries/recurrence-requests/src/recurrence_requests.chatmli}

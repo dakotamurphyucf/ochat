@@ -1216,6 +1216,7 @@ let%expect_test
              ~event:Session_start
              ~snapshot:(fun () -> Ok snapshot)
              (fun ~executing
+               ~policy_caller:_
                ~model_jobs:_
                ~allocate_inference:_
                ~retirement_reason:_

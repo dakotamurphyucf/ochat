@@ -132,6 +132,59 @@ module Descendant_preparation = struct
       | Open | Acknowledged _ | Sealed_before_writer ->
         conflict "child seal requires the same unattempted open preparation")
   ;;
+
+  let seal_observed_attempt_before_writer
+        t
+        ~owner
+        ~slot
+        ~preparation
+        ~attempt
+        ~(candidate : Session_transition.t)
+        ~canonical
+        ~closed
+    =
+    let open Result.Let_syntax in
+    let%bind () =
+      if on_domain t && phys_equal owner t.issuing_actor
+      then Ok ()
+      else conflict "observed child seal belongs to another actual owner or domain"
+    in
+    let%bind () =
+      match !(t.phase) with
+      | Open -> Ok ()
+      | Acknowledged _ | Sealed_before_writer ->
+        conflict "observed child seal requires its same open preparation"
+    in
+    let%bind () =
+      if
+        Session_commit_attempt.No_writer.matches_canonical
+          closed
+          ~attempt
+          ~slot
+          ~preparation
+          ~previous:t.before
+          ~candidate
+      then Ok ()
+      else conflict "observed child seal differs from its original causal writer plan"
+    in
+    let%bind () =
+      match canonical, Goal_descendant_occurrence.kind t.occurrence with
+      | Goal_descendants.Canonical.Attempt _, Attempt _ -> Ok ()
+      | Attempt _, Host_turn _ | Host_turn _, (Attempt _ | Host_turn _) ->
+        conflict "observed child seal is restricted to an actual Attempt edge"
+    in
+    let%bind (_ : Goal_descendants.Canonical.Fact.t) =
+      Goal_descendants.Canonical.check
+        ~before:t.before.inference_ledger
+        ~after:candidate.state.inference_ledger
+        ~canonical
+        ~occurrence:t.occurrence
+    in
+    (* Factual cleanup needs no current-State equality or fresh permission. The
+       original attempted flag remains true if callback entry already set it. *)
+    t.phase := Sealed_before_writer;
+    Ok Closed_before_writer.{ preparation = t }
+  ;;
 end
 
 module Descendant_admission_data = struct
@@ -486,9 +539,23 @@ module Descendant_admission_slot = struct
   end
 
   module Cleanup = struct
+    module Attempt = struct
+      type t =
+        { finished : (unit, Agent_protocol.Error.t) result Eio.Promise.t
+        ; mutable outcome : Retirement_cleanup_completion.t option
+        }
+
+      type issuance =
+        | Scheduled of t
+        | Launch_failed of
+            { attempt : t
+            ; legacy : unit Actor_reply.t
+            }
+    end
+
     type t =
       | Idle
-      | Running of (unit, Agent_protocol.Error.t) result Eio.Promise.t
+      | Running of Attempt.t
   end
 
   type t =

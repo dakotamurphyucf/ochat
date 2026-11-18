@@ -204,6 +204,7 @@ let drain_idle_with_tools
                 Script_tool_calls.with_observation
                   script_tools
                   ~definition
+                  ~capabilities:invocation_capabilities
                   ~execute
                   ~observing
                   (fun on_tool_call ->
@@ -253,6 +254,7 @@ let drain_foreground_with_tools
                 Script_tool_calls.with_observation
                   script_tools
                   ~definition
+                  ~capabilities:invocation_capabilities
                   ~execute:capabilities.with_invocation
                   ~observing
                   (fun on_tool_call ->

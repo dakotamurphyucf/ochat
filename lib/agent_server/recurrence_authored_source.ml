@@ -22,8 +22,8 @@ let capabilities (prepared : Agent_session.Runtime_builder.authored_resources) =
   else Error (unavailable Invalid_state "authored private resources are not realized")
 ;;
 
-let check_artifact
-      (prepared : Agent_session.Runtime_builder.authored_resources)
+let check_source_artifact
+      source
       ~selector
       ~(artifact : Agent_store.Prompt_artifact_store.Artifact.t)
   =
@@ -34,16 +34,13 @@ let check_artifact
     if
       String.equal
         selector.Agent_store.Captured_source_kind.Authored_tool.name
-        (S.identity prepared.source).tool_name
-      && String.equal selector.source_sha256 (S.fingerprint prepared.source)
+        (S.identity source).tool_name
+      && String.equal selector.source_sha256 (S.fingerprint source)
     then Ok ()
     else Error (unavailable Permission_denied "captured authored source binding changed")
   in
   let%bind expected =
-    S.artifact
-      prepared.source
-      ~revision_id:artifact.revision_id
-      ~created_at:artifact.created_at
+    S.artifact source ~revision_id:artifact.revision_id ~created_at:artifact.created_at
     |> Result.map_error ~f:protocol_of_store
   in
   if String.equal expected.manifest_sha256 artifact.manifest_sha256
@@ -53,6 +50,14 @@ let check_artifact
       (unavailable
          Permission_denied
          "captured authored publication differs from its live source")
+;;
+
+let check_artifact
+      (prepared : Agent_session.Runtime_builder.authored_resources)
+      ~selector
+      ~artifact
+  =
+  check_source_artifact prepared.source ~selector ~artifact
 ;;
 
 let capture

@@ -45,6 +45,39 @@ let on_event ctx state event = match event with
 </script>|}
 ;;
 
+let checked_list_declarations =
+  {|<script id="checked" language="chatml" kind="tool" src="checked.chatml" project="chatml.project.json"/>
+<tool name="checked_list" type="chatml" script="checked" entrypoint="run" input_schema="any.json" output_schema="any.json"><uses tool="recurrence_list"/></tool>
+|}
+;;
+
+let checked_list_sources ~namespace =
+  [ "any.json", "{}"
+  ; ( "chatml.project.json"
+    , sprintf
+        {|{"schema_version":1,"namespace":%S,"modules":{"Entry":{"implementation":"checked.chatml"}},"dependencies":{"requests":{"source":{"kind":"local","path":"library"},"project":"chatml.project.json","environment":"pure"}},"environments":{"default":{"modules":{"Requests":"requests.Recurrence_requests"}}}}|}
+        namespace )
+  ; ( "library/chatml.project.json"
+    , [%blob "../../docs-src/examples/libraries/recurrence-requests/chatml.project.json"]
+    )
+  ; ( "library/src/recurrence_requests.chatml"
+    , [%blob
+        "../../docs-src/examples/libraries/recurrence-requests/src/recurrence_requests.chatml"]
+    )
+  ; ( "library/src/recurrence_requests.chatmli"
+    , [%blob
+        "../../docs-src/examples/libraries/recurrence-requests/src/recurrence_requests.chatmli"]
+    )
+  ; ( "checked.chatml"
+    , {|let run ctx input =
+  let* result = Tool.call("recurrence_list", Requests.list()) in
+  match result with
+  | `Ok(value) -> Task.pure(`Complete(value))
+  | `Error(message) -> Task.fail(message)|}
+    )
+  ]
+;;
+
 let controller =
   {|<developer>Explicit native recurring automation controller.</developer>
 <tool name="recurrence_list"/>
@@ -52,9 +85,9 @@ let controller =
 <tool name="recurrence_get"/>
 <tool name="recurrence_resume"/>
 <tool name="weekly_worker" agent="worker.chatmd" local persistence="persistent"/>
-<script id="checked" language="chatml" kind="tool" src="checked.chatml" project="chatml.project.json"/>
-<tool name="checked_list" type="chatml" script="checked" entrypoint="run" input_schema="any.json" output_schema="any.json"><uses tool="recurrence_list"/></tool>
-<script id="controller" language="chatml" kind="moderator" api="extensibility-v1">
+|}
+  ^ checked_list_declarations
+  ^ {|<script id="controller" language="chatml" kind="moderator" api="extensibility-v1">
 let initial_state = 0
 let on_event ctx state event = Task.pure(state)
 </script>|}
@@ -173,32 +206,11 @@ let%expect_test
   Fixtures.with_daemon
     ~config_file:"server.sexp"
     ~sources:
-      [ "agent.chatmd", controller
-      ; "worker.chatmd", worker
-      ; "server.sexp", Native.configuration
-      ; "any.json", "{}"
-      ; ( "chatml.project.json"
-        , {|{"schema_version":1,"namespace":"recurrence-native-example","modules":{"Entry":{"implementation":"checked.chatml"}},"dependencies":{"requests":{"source":{"kind":"local","path":"library"},"project":"chatml.project.json","environment":"pure"}},"environments":{"default":{"modules":{"Requests":"requests.Recurrence_requests"}}}}|}
-        )
-      ; ( "library/chatml.project.json"
-        , [%blob
-            "../../docs-src/examples/libraries/recurrence-requests/chatml.project.json"] )
-      ; ( "library/src/recurrence_requests.chatml"
-        , [%blob
-            "../../docs-src/examples/libraries/recurrence-requests/src/recurrence_requests.chatml"]
-        )
-      ; ( "library/src/recurrence_requests.chatmli"
-        , [%blob
-            "../../docs-src/examples/libraries/recurrence-requests/src/recurrence_requests.chatmli"]
-        )
-      ; ( "checked.chatml"
-        , {|let run ctx input =
-  let* result = Tool.call("recurrence_list", Requests.list()) in
-  match result with
-  | `Ok(value) -> Task.pure(`Complete(value))
-  | `Error(message) -> Task.fail(message)|}
-        )
-      ]
+      ([ "agent.chatmd", controller
+       ; "worker.chatmd", worker
+       ; "server.sexp", Native.configuration
+       ]
+       @ checked_list_sources ~namespace:"recurrence-native-example")
     ~workspace_files:[ "native-private.txt", private_text ]
     ~connect:(fun ~sw ~env:_ ~root:_ daemon ->
       actual_daemon := Some daemon;

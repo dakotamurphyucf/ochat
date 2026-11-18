@@ -9,6 +9,7 @@ type t =
   ; runs : Run_state.t option
   ; jobs : P.Job.t list
   ; schedules : P.Schedule.t list
+  ; ingress_registrations : External_ingress.t list
   ; invocations : P.Invocation.t list
   ; events : P.Moderator_execution.t list
   }
@@ -88,12 +89,89 @@ let validate_schedule t (schedule : P.Schedule.t) =
        invalid "Schedule original inference provenance contradicts retained Run custody")
 ;;
 
+let validate_ingress t (registration : External_ingress.t) =
+  let open Result.Let_syntax in
+  let%bind () = External_ingress.validate registration in
+  match registration.inference_provenance with
+  | None -> Ok ()
+  | Some provenance ->
+    if
+      P.Id.Session.equal t.session_id registration.context.session_id
+      && registration.context.generation <= t.generation
+    then
+      validate_origin
+        t
+        (External_ingress.Provenance.source provenance)
+        (External_ingress.Provenance.origin provenance)
+    else invalid "ingress original provenance belongs to another session or generation"
+;;
+
+let retained_job_producer t source entry ~id ~generation ~attempt =
+  let open Result.Let_syntax in
+  let%bind retained =
+    Retained_job_producer.capture
+      ~session_id:t.session_id
+      ~generation:t.generation
+      ~runs:t.runs
+      ~source
+      ~origin:(Moderator_queue.Entry.origin entry)
+      ~id
+      ~job_generation:generation
+      ~attempt
+  in
+  Retained_job_producer.check_payload
+    retained
+    ~sha256:(Moderator_queue.Entry.payload_sha256 entry)
+;;
+
 let validate_producer t source entry =
   let open Result.Let_syntax in
   let expected = Moderator_queue.Entry.origin entry in
   let%bind () = validate_origin t source expected in
   match Moderator_queue.Entry.producer entry with
   | None -> Ok ()
+  | Some (Queue_producer.Ingress_delivery { registration_id; event_id }) ->
+    let%bind registration =
+      List.find t.ingress_registrations ~f:(fun registration ->
+        P.Id.Capability.equal registration.context.id registration_id)
+      |> Result.of_option
+           ~error:(P.Error.invalid_request "queued ingress registration was removed")
+    in
+    let%bind () = validate_ingress t registration in
+    let%bind () =
+      same_identity t registration.context.session_id registration.context.generation
+    in
+    let%bind provenance =
+      Result.of_option
+        registration.inference_provenance
+        ~error:(P.Error.invalid_request "queued ingress original provenance is absent")
+    in
+    let%bind () =
+      if
+        P.Run_source.equal source (External_ingress.Provenance.source provenance)
+        && Option.equal
+             P.Inference_origin.equal
+             expected
+             (External_ingress.Provenance.origin provenance)
+      then Ok ()
+      else invalid "queued ingress source or original inference origin changed"
+    in
+    let%bind receipt =
+      List.find registration.receipts ~f:(fun receipt ->
+        P.Id.Ingress_event.equal receipt.id event_id)
+      |> Result.of_option
+           ~error:(P.Error.invalid_request "queued ingress receipt was removed")
+    in
+    let%bind frame = External_ingress.delivery_frame registration receipt in
+    let%bind payload =
+      Chat_response.Ingress_delivery.capture frame
+      |> Session.Snapshot.of_value
+      |> Result.map_error ~f:P.Error.invalid_request
+    in
+    let%bind hashes = Queue_payload.digests [ payload ] in
+    if List.equal String.equal hashes [ Moderator_queue.Entry.payload_sha256 entry ]
+    then Ok ()
+    else invalid "queued ingress payload differs from its exact retained receipt"
   | Some (Queue_producer.Source_setup { basis_revision }) ->
     if
       Int64.(basis_revision <= t.revision)
@@ -140,16 +218,41 @@ let validate_producer t source entry =
          | Admitted | Dispatching -> invalid "queued invocation producer is not resolved"
        in
        origin_matches ~expected invocation.inference_origin)
+  | Some (Invocation_at_source { id; source = captured }) ->
+    let%bind () = P.Run_source.validate captured in
+    let%bind () =
+      if P.Run_source.equal captured source
+      then Ok ()
+      else invalid "queued invocation producer differs from captured installation"
+    in
+    (match
+       List.find t.invocations ~f:(fun invocation ->
+         P.Id.Invocation.equal id invocation.context.id)
+     with
+     | None -> invalid "queued invocation producer receipt was removed"
+     | Some invocation ->
+       let%bind () = P.Invocation.validate invocation in
+       let%bind () =
+         same_identity t invocation.context.session_id invocation.context.generation
+       in
+       let%bind () =
+         match invocation.observation with
+         | None -> Ok ()
+         | Some _ -> invalid "source-qualified invocation producer has observation intent"
+       in
+       let%bind () =
+         match invocation.status with
+         | Resolved _ | Published _ -> Ok ()
+         | Admitted | Dispatching -> invalid "queued invocation producer is not resolved"
+       in
+       if Option.equal P.Inference_origin.equal expected invocation.inference_origin
+       then Ok ()
+       else invalid "source-qualified invocation producer changed its inference origin")
   | Some (Job_completion { id; generation; attempt }) ->
     (match List.find t.jobs ~f:(fun job -> P.Id.Job.equal id job.id) with
-     | None -> invalid "queued Job completion producer was removed"
-     | Some job ->
+     | Some job when Int.equal job.generation generation && Int.equal job.attempt attempt
+       ->
        let%bind () = same_identity t job.session_id generation in
-       let%bind () =
-         if Int.equal job.generation generation && Int.equal job.attempt attempt
-         then Ok ()
-         else invalid "queued Job completion attempt differs"
-       in
        let%bind () =
          match job.status, job.delivery with
          | (Succeeded | Failed _ | Cancelled | Interrupted _), Delivered _ -> Ok ()
@@ -160,7 +263,13 @@ let validate_producer t source entry =
          | Some { moderator_source = Some observer; _ } -> source_matches source observer
          | None | Some { moderator_source = None; _ } -> Ok ()
        in
-       origin_matches ~expected job.inference_origin)
+       origin_matches ~expected job.inference_origin
+     | Some _ | None ->
+       (* Retry may replace the latest Job before an exact authored Wait consumes
+          its old terminal occurrence. The durable retained frame, enqueue and
+          Run owner are independent facts; latest-attempt equality is not that
+          occurrence's identity and must never redirect it to the successor. *)
+       retained_job_producer t source entry ~id ~generation ~attempt)
   | Some (Schedule_delivery { id; generation; delivery_count }) ->
     (match
        List.find t.schedules ~f:(fun schedule -> P.Id.Schedule.equal id schedule.id)
@@ -258,6 +367,14 @@ let validate_head_payload (event : P.Moderator_execution.t) occurrence ~head ~en
            (Moderator_queue.Entry.origin entry)
     then Ok ()
     else invalid "captured queue claim differs from head ordinal or origin"
+  in
+  let%bind () =
+    match Q.producer occurrence with
+    | Unknown -> Ok ()
+    | Captured producer ->
+      if Option.equal Queue_producer.equal producer (Moderator_queue.Entry.producer entry)
+      then Ok ()
+      else invalid "captured queue claim differs from head producer"
   in
   let%bind captured = Queue_payload.receipt_snapshot event in
   let%bind captured =
@@ -550,6 +667,10 @@ let validate t =
     List.fold_result t.schedules ~init:() ~f:(fun () schedule ->
       validate_schedule t schedule)
   in
+  let%bind () =
+    List.fold_result t.ingress_registrations ~init:() ~f:(fun () registration ->
+      validate_ingress t registration)
+  in
   let%bind metadata = Moderator_checkpoint.queue t.moderator in
   match metadata with
   | None -> Ok ()
@@ -715,6 +836,22 @@ let validate_transition ~previous incoming =
             next.inference_provenance
         then Ok ()
         else invalid "Schedule original provenance cannot be adopted later")
+  in
+  let%bind () =
+    List.fold_result incoming.ingress_registrations ~init:() ~f:(fun () next ->
+      match
+        List.find previous.ingress_registrations ~f:(fun old ->
+          P.Id.Capability.equal old.context.id next.context.id)
+      with
+      | None -> Ok ()
+      | Some old ->
+        if
+          Option.equal
+            External_ingress.Provenance.equal
+            old.inference_provenance
+            next.inference_provenance
+        then Ok ()
+        else invalid "ingress original provenance cannot change or be adopted later")
   in
   let%bind old = Moderator_checkpoint.queue previous.moderator in
   let%bind next = Moderator_checkpoint.queue incoming.moderator in

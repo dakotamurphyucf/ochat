@@ -819,17 +819,19 @@ let%expect_test
                        restored
                      |> protocol_ok
                    in
-                   Exn.protect ~finally:rebuilt.close ~f:(fun () ->
-                     let restored_snapshot =
-                       Chat_response.Moderator_manager.identity_snapshot
-                         (Option.value_exn rebuilt.moderator_manager)
-                       |> Result.ok_or_failwith
-                     in
-                     [%test_eq: Sexp.t]
-                       (Session.Snapshot.sexp_of_t
-                          (Option.value_exn snapshot).current_state)
-                       (Session.Snapshot.sexp_of_t restored_snapshot.current_state);
-                     [%test_eq: int] 2 !requests)
+                   Exn.protect
+                     ~finally:(fun () -> B.close rebuilt)
+                     ~f:(fun () ->
+                       let restored_snapshot =
+                         Chat_response.Moderator_manager.identity_snapshot
+                           (Option.value_exn rebuilt.moderator_manager)
+                         |> Result.ok_or_failwith
+                       in
+                       [%test_eq: Sexp.t]
+                         (Session.Snapshot.sexp_of_t
+                            (Option.value_exn snapshot).current_state)
+                         (Session.Snapshot.sexp_of_t restored_snapshot.current_state);
+                       [%test_eq: int] 2 !requests)
                  | `Plain
                  | `Denied
                  | `Revoked

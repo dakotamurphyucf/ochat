@@ -88,6 +88,24 @@ the switch owns fibers/resources. The [embedded interface](../../lib/agent_serve
 and [offline embedded tests](../../test/agent_server_embedded_test.ml) contain
 complete typed lifecycle examples with no real provider calls.
 
+## Headless instruction controls
+
+Use `Agent_client.Session_handle.instructions handle` for explicit selected
+instruction inspection, discovery, capture, activation and removal. The returned
+[`Instruction_controls`](../../lib/agent_client/instruction_controls.mli) view
+borrows that handle's connection and current attachment; it has no mutable mirror
+or automatic provider work. Current operator/session/root permissions remain
+server checks. The existing public session projection exposes counts only.
+
+The caller chooses a root/portable scope or ordered qualified skill members,
+then explicitly discovers and captures them. `activate` takes that comparison
+capture, the inspected generation/selection revision and a caller-retained key.
+Keep the same request/key across a lost response or a new authenticated
+attachment. An exact accepted retry returns the selection's original receipt;
+generic command-receipt reconciliation does not apply. `refresh` never replaces
+selected bytes. `remove` requires a current writer but can Clear without source
+read permission. See the [operator instruction flow](../guide/admitted-instructions.md#explicit-operator-and-headless-client-controls).
+
 ## Daemon embedding
 
 `Daemon.start` owns one durable data root and semantic services; it does not

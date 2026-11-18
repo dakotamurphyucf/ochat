@@ -109,38 +109,104 @@ let resolve t (record : Agent_store.Delegation_store.record) ~public =
     Binding.resolve entry.binding ~record ~public ~current
 ;;
 
-type plan =
-  { source : Prepared_source.t
-  ; children : plan list
-  }
+module Source_plan = struct
+  module Node = struct
+    type t =
+      { source : Prepared_source.t
+      ; children : t list
+      }
+  end
 
-let prepare t ~sw ~max_depth ~revision ~capture ~build ~services ~prepare_source =
-  let module Revision = Agent_session.Prompt_revision in
-  let open Result.Let_syntax in
-  (* Validate the entire captured graph before native preparation can connect an
+  type t = Node.t list
+
+  let capture ~max_depth ~revision ~capture =
+    let module Revision = Agent_session.Prompt_revision in
+    let open Result.Let_syntax in
+    (* Validate the entire captured graph before native preparation can connect an
      MCP server or request shell admission. Paths are relative to one immutable
      source closure, so a back edge cannot evade cycle detection by re-rooting. *)
-  let rec plan ancestors revision =
-    Revision.elements revision
-    |> List.filter_map ~f:(function
-      | Prompt.Chat_markdown.Tool (Persistent_agent (agent, _)) -> Some agent.name
-      | _ -> None)
-    |> List.map ~f:(fun tool_name ->
-      let%bind source = capture ~parent_revision:revision ~tool_name in
-      let path = (Source.identity (Prepared_source.source source)).root_relative_path in
-      match
-        List.length ancestors > max_depth || List.mem ancestors path ~equal:String.equal
-      with
-      | true -> denied "delegation.authored_graph: cyclic or excessive private ancestry"
-      | false ->
-        let%map children = plan (path :: ancestors) (Prepared_source.revision source) in
-        { source; children })
-    |> Result.all
-  in
-  let%bind plans = plan [ Revision.root_relative_path revision ] revision in
-  let rec prepare plans =
+    let rec plan ancestors revision =
+      Revision.elements revision
+      |> List.filter_map ~f:(function
+        | Prompt.Chat_markdown.Tool (Persistent_agent (agent, _)) -> Some agent.name
+        | _ -> None)
+      |> List.map ~f:(fun tool_name ->
+        let%bind source = capture ~parent_revision:revision ~tool_name in
+        let path = (Source.identity (Prepared_source.source source)).root_relative_path in
+        match
+          List.length ancestors > max_depth || List.mem ancestors path ~equal:String.equal
+        with
+        | true -> denied "delegation.authored_graph: cyclic or excessive private ancestry"
+        | false ->
+          let%map children = plan (path :: ancestors) (Prepared_source.revision source) in
+          ({ source; children } : Node.t))
+      |> Result.all
+    in
+    plan [ Revision.root_relative_path revision ] revision
+  ;;
+
+  let equivalent a b =
+    let a_source = Prepared_source.source a in
+    let b_source = Prepared_source.source b in
+    let a_revision = Prepared_source.revision a in
+    let b_revision = Prepared_source.revision b in
+    Source.Identity.equal (Source.identity a_source) (Source.identity b_source)
+    && String.equal (Source.fingerprint a_source) (Source.fingerprint b_source)
+    && P.Id.Prompt_revision.equal
+         (Agent_session.Prompt_revision.id a_revision)
+         (Agent_session.Prompt_revision.id b_revision)
+    && String.equal
+         (Agent_session.Prompt_revision.artifact a_revision).manifest_sha256
+         (Agent_session.Prompt_revision.artifact b_revision).manifest_sha256
+  ;;
+
+  let select t ~(selector : Agent_store.Captured_source_kind.Authored_tool.t) ~descend =
+    let open Result.Let_syntax in
+    let rec search (selected : Node.t option) nodes =
+      List.fold_result nodes ~init:selected ~f:(fun selected (node : Node.t) ->
+        let source = Prepared_source.source node.source in
+        let%bind selected =
+          if
+            String.equal selector.name (Source.identity source).tool_name
+            && String.equal selector.source_sha256 (Source.fingerprint source)
+          then (
+            match selected with
+            | None -> Ok (Some node)
+            | Some prior ->
+              if equivalent prior.source node.source
+              then Ok selected
+              else denied "delegation.authored_graph: source selector is ambiguous")
+          else Ok selected
+        in
+        if descend then search selected node.children else Ok selected)
+    in
+    let%bind selected = search None t in
+    Result.of_option
+      selected
+      ~error:
+        (P.Error.create
+           Permission_denied
+           ~message:"delegation.authored_graph: source selector is unavailable"
+           ~retryable:false
+           ())
+  ;;
+
+  let find t ~selector =
+    select t ~selector ~descend:true |> Result.map ~f:(fun node -> node.Node.source)
+  ;;
+
+  let find_direct t ~selector =
+    select t ~selector ~descend:false
+    |> Result.map ~f:(fun node -> node.Node.source, node.children)
+  ;;
+end
+
+let prepare t ~sw ~max_depth ~revision ~capture ~build ~services ~prepare_source =
+  let open Result.Let_syntax in
+  let%bind plans = Source_plan.capture ~max_depth ~revision ~capture in
+  let rec prepare (plans : Source_plan.t) =
     let%bind prepared =
-      List.map plans ~f:(fun plan ->
+      List.map plans ~f:(fun (plan : Source_plan.Node.t) ->
         let%bind children, native_registrations = prepare plan.children in
         let%bind prepared = build ~source:plan.source ~native_registrations in
         let%bind public = capabilities prepared in

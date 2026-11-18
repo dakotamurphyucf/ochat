@@ -79,7 +79,9 @@ let retained_target catalog ~(receipt : Receipt.t) ~id ~kind ~selector =
     | None -> conflict ()
     | Some definition ->
       let target = Recurrence_definition.target definition in
-      if selector_matches selector target then Ok target else conflict ())
+      if selector_matches selector target
+      then Ok (target, Recurrence_definition.goal_binding definition)
+      else conflict ())
 ;;
 
 let command (state : Session_state.t) (basis : Request.Basis.t) mutation =
@@ -116,13 +118,9 @@ let write t ~admission ~effect_kind ~id ~(basis : Request.Basis.t) ~action =
   let%bind state = check t ~admission ~effect_kind in
   let catalog = Option.value state.recurrence_catalog ~default:Recurrence_catalog.empty in
   let principal_id = (Operator_authorization.principal (Admission.actor admission)).id in
-  let retained =
-    List.find (Recurrence_catalog.receipts catalog) ~f:(fun receipt ->
-      P.Id.Principal.equal principal_id receipt.Receipt.principal_id
-      && P.Idempotency_key.equal basis.key receipt.key)
-  in
+  let retained = Recurrence_catalog.find_receipt catalog ~principal_id ~key:basis.key in
   let capture (capture : Request.Capture.t) =
-    let%map target =
+    let%map target, binding =
       match retained with
       | Some receipt ->
         retained_target
@@ -131,21 +129,24 @@ let write t ~admission ~effect_kind ~id ~(basis : Request.Basis.t) ~action =
           ~id
           ~kind:(Action.kind action)
           ~selector:capture.target
-      | None -> t.capture_target ~admission ~target:capture.target
+      | None ->
+        let%map target = t.capture_target ~admission ~target:capture.target in
+        target, Recurrence_definition.Goal_binding.Unbound
     in
-    Command.Capture.{ schedule = capture.schedule; target; policy = capture.policy }
+    ( Command.Capture.{ schedule = capture.schedule; target; policy = capture.policy }
+    , binding )
   in
-  let%bind mutation =
+  let%bind mutation, binding =
     match action with
     | Action.Create requested ->
-      let%map capture = capture requested in
-      Command.Mutation.Create (id, capture)
+      let%map capture, binding = capture requested in
+      Command.Mutation.Create (id, capture), binding
     | Edit requested ->
-      let%map capture = capture requested in
-      Command.Mutation.Edit (id, capture)
-    | Enable -> Ok (Command.Mutation.Enable id)
-    | Pause -> Ok (Command.Mutation.Pause id)
-    | Retire -> Ok (Command.Mutation.Retire id)
+      let%map capture, binding = capture requested in
+      Command.Mutation.Edit (id, capture), binding
+    | Enable -> Ok (Command.Mutation.Enable id, Unbound)
+    | Pause -> Ok (Command.Mutation.Pause id, Unbound)
+    | Retire -> Ok (Command.Mutation.Retire id, Unbound)
   in
   let%bind request = command state basis mutation in
   (* This check compares every echoed CAS field, including generation, before
@@ -154,7 +155,7 @@ let write t ~admission ~effect_kind ~id ~(basis : Request.Basis.t) ~action =
     match retained with
     | None -> Ok ()
     | Some receipt ->
-      let%bind request_sha256 = Command.digest request in
+      let%bind request_sha256 = Command.digest_native request ~binding in
       if String.equal receipt.request_sha256 request_sha256 then Ok () else conflict ()
   in
   let%bind _ = check t ~admission ~effect_kind in

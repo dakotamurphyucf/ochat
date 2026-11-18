@@ -13,7 +13,9 @@ let%expect_test "schedule delivery is generation-checked and actor-committed" =
           ~initial_state:
             (actor_state ~workspace_instance ~liveness:Detached ~start_immediately:false)
           ~persistence:
-            { archive_reference; commit = (fun ~command_audit:_ ~previous:_ _ -> Ok ()) }
+            { archive_reference
+            ; commit = (fun ?observation:_ ~command_audit:_ ~previous:_ _ -> Ok ())
+            }
           ~operation_worker:None
           ~services:
             { now = (fun () -> timestamp)
@@ -133,7 +135,9 @@ let%expect_test "model jobs are claimed, completed, and delivered atomically" =
           ~initial_state:
             (actor_state ~workspace_instance ~liveness:Detached ~start_immediately:false)
           ~persistence:
-            { archive_reference; commit = (fun ~command_audit:_ ~previous:_ _ -> Ok ()) }
+            { archive_reference
+            ; commit = (fun ?observation:_ ~command_audit:_ ~previous:_ _ -> Ok ())
+            }
           ~operation_worker:None
           ~services:
             { now = (fun () -> timestamp)
@@ -246,7 +250,9 @@ let%expect_test "durable job retry policy persists backoff before terminal deliv
           ~initial_state:
             (actor_state ~workspace_instance ~liveness:Detached ~start_immediately:false)
           ~persistence:
-            { archive_reference; commit = (fun ~command_audit:_ ~previous:_ _ -> Ok ()) }
+            { archive_reference
+            ; commit = (fun ?observation:_ ~command_audit:_ ~previous:_ _ -> Ok ())
+            }
           ~operation_worker:None
           ~services:
             { now = (fun () -> !now)

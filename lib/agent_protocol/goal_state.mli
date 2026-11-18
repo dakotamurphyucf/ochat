@@ -30,3 +30,5 @@ type t =
 
 val to_json : t -> Jsonaf.t
 val of_json : Jsonaf.t -> (t, Error.t) result
+val hold_to_json : Hold.t -> Jsonaf.t
+val hold_of_json : Jsonaf.t -> (Hold.t, Error.t) result

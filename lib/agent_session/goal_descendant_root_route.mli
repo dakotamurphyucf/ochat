@@ -32,3 +32,10 @@ val validate
   -> accounting:Goal_descendants.t
   -> children:Child_contributions.t
   -> (unit, Agent_protocol.Error.t) result
+
+(** Pure exact six-field Anchor/record association shared with causal routes.
+    The caller must independently resolve/validate the actual private record. *)
+val anchor_matches
+  :  Agent_store.Delegation_goal_origin.Anchor.t
+  -> Agent_store.Delegation_store.record
+  -> bool

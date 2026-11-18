@@ -111,10 +111,15 @@ let%expect_test
         let persistence : A.Session_actor.persistence =
           { archive_reference
           ; commit =
-              (fun ~command_audit ~previous transition ->
+              (fun ?observation ~command_audit ~previous transition ->
                 let open Result.Let_syntax in
                 let%bind () =
-                  Persistence.commit durable ~command_audit ~previous transition
+                  Persistence.commit
+                    durable
+                    ?observation
+                    ~command_audit
+                    ~previous
+                    transition
                 in
                 if !lose_acknowledgement
                 then (
@@ -353,9 +358,11 @@ let%expect_test "physical retry carrier survives reopen and complete result coll
       in
       { A.Session_actor.archive_reference
       ; commit =
-          (fun ~command_audit ~previous transition ->
+          (fun ?observation ~command_audit ~previous transition ->
             let open Result.Let_syntax in
-            let%map () = Persistence.commit durable ~command_audit ~previous transition in
+            let%map () =
+              Persistence.commit durable ?observation ~command_audit ~previous transition
+            in
             if !preserve_marker
             then (
               preserve_marker := false;
@@ -597,6 +604,7 @@ let%expect_test "physical retry carrier survives reopen and complete result coll
              ~event:Session_start
              ~snapshot:(fun () -> Ok before)
              (fun ~executing
+               ~policy_caller:_
                ~model_jobs:_
                ~allocate_inference:_
                ~retirement_reason:_

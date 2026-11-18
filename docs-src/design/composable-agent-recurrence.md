@@ -1,14 +1,16 @@
 # Durable recurring automation
 
-Status: accepted engineering design with implemented timing, bounded pure due
-planning, and durable controller metadata. The `ochat.recurrence_rules` library implements validated timing rules,
-finite zone models, clock arithmetic and resumable cursors. The session actor owns
-validated captured definitions, keyed control receipts and lifecycle retirement.
-The configured daemon host publishes bounded due plans through the existing live
-scheduler and actor persistence owner. Execution admission, target dispatch and
-public user controls remain integration work. The retained-root timezone loader
-supplies bounded acquisition under explicit host root policy. Passing the pure
-timing suite does not qualify host scheduling or target execution.
+This design covers the implemented recurrence rules, bounded named-zone loading,
+and durable controller definitions. Configured daemon and embedded hosts reuse
+the existing scheduler and Run owners to admit and reconcile existing-session
+work and captured ChatMD workers. The scheduler keeps admission and terminal
+outcomes distinct and uses retained receipts when the host reopens.
+
+The [recurring automation guide](../agent-server/recurring-automation.md) describes
+the native controls and checked ChatML helpers. Its headless client example shows
+how to inspect schedules and their Run history, then change a schedule using a
+writer attachment and the revisions returned by the host.
+The validation requirements below cover host recovery and the composed workflow.
 
 A recurrence belongs to a durable controller session. Finishing an occurrence or
 disconnecting a client leaves future occurrences enabled. Explicitly stopping the
@@ -70,12 +72,11 @@ Existing primitives establish these boundaries:
 
 The checked lifecycle source helpers compose explicit component obligations and
 at most one continuation or exact wait. Their Run adapter stages existing native
-Run decisions from a genuine actor callback. They do not create a headless caller,
-a recurrence ledger, an execution scope or a new Run. Shared actor-authorized
-headless controller admission is a separate required integration boundary.
-The shared [Run start service](../lib/agent_server/run_start_service.doc.md) now
-supports an internal authenticated headless host command; it does not yet mint
-authority from a goal or recurrence record.
+Run decisions from a genuine actor callback. For a due occurrence, the configured
+execution host checks its controller and target grants. The dispatcher then uses
+the [recurrence Run service](../../lib/agent_server/recurrence_run_service.mli)
+to request admission under that host authority. The recurrence record identifies the
+intended work; the retained admission receipt identifies the actual Run.
 
 ## Timing contract
 
@@ -912,8 +913,8 @@ mode stays manageable and cannot execute by inference.
 Pure contracts alone grant no target observation or execution authority. The
 actual target observation and controller import owners authenticate evidence and
 join terminal, cursor and alarm changes to the existing persistence transaction.
-Effect-deferred startup, reciprocal admission before effects, activation and host
-target dispatch remain required execution integration boundaries.
+The dispatcher records the reciprocal admission before activating the target.
+The target's own Run and lifecycle services then start the selected work.
 
 The implementation proceeds through independently verifiable boundaries: pure
 timing; Eio-owned timezone acquisition; actor ledger/history and atomic alarms;
@@ -1075,11 +1076,10 @@ current-policy revocation, exact retained-reference duplicates, recovered wall
 lateness and lost-reply journal reopening. An in-flight caller re-raises an
 unexpected owner exception or cancellation; queued and later calls instead return
 `Server_shutting_down`. Neither reply permits replay of an effect whose
-acknowledgement is uncertain. These checks do not qualify execution admission or
-target activation. Actual producer-to-importer live-phase
-qualification still requires genuine held admission, reciprocal controller
-acknowledgement, effect-deferred startup and central activation fences. Host
-target dispatch remains a separate required integration boundary.
+acknowledgement is uncertain. The captured-worker tests exercise the next part
+of the workflow through a real held admission, its acknowledgement on the
+controller, target activation and the imported terminal receipt. The release-note
+review example uses these receipts to decide when its Goal can finish.
 
 ### Controller activation custody
 
@@ -1196,6 +1196,15 @@ custody. Closure preserves the last write disposition and durable evidence.
 Prewrite rejection, attempted-write uncertainty and confirmed admission remain
 distinct, including when custody closes during persistence or publication raises.
 
+If an authored worker loses its journal acknowledgement during the first
+lifecycle write or the final Run settlement, inspect the last confirmed Run and
+child results. Replaying startup could repeat effects. During permanent shutdown
+the runtime can release its local handle after it verifies that the original
+producer and any admitted callbacks have exited. The shutdown report retains the
+original write and cleanup errors. If a producer is still live or its exit cannot
+be verified, the runtime retains the handle. Shutdown leaves the journal and
+snapshots available for recovery.
+
 For a controller targeting its own session, the exact prepared-record operation
 keeps the original target request, CAS, key and digest while its controller record
 ACK advances only the actual owned preparation. The held association import then
@@ -1221,6 +1230,36 @@ Activation must consume the same genuine `Prepared` and `Held_run` owners throug
 a one-shot phase, without widening staged quiescence or accepting an arbitrary
 runtime replacement. This inert admission seam starts no deferred effects and
 issues no no-effects proof.
+
+## Inspect and control schedules from a shared client
+
+A client connects to the host that owns the controller session. Negotiate
+`sessions.recurrences` to inspect its schedules and `sessions.recurrence_control`
+to request a change. A controller can own several recurrence definitions.
+Use `session.recurrences` to list them, `session.recurrence` to inspect one,
+`session.recurrence.status` for its planning state and next due time, and
+`session.recurrence.history` for retained occurrences and their Run outcomes.
+Inspection requires current transcript access to the controller. Target
+visibility is checked separately. A disconnected planner or an unreadable
+target does not imply that previously admitted work stopped.
+
+To change a schedule, obtain a current writer attachment to the controller
+and send `session.recurrence.command`. Create and edit take the schedule,
+policy and either a target session plus input, or an authored child name and
+Run mode. The host captures the source. Create records a paused definition.
+Enable permits planning under the host's execution policy. Pause stops future
+selection and retire ends the definition. An acknowledgement records the
+metadata change. Consult occurrence history to find out whether a Run actually
+started or finished.
+
+Use the generation and catalog revision from inspection. Existing definitions
+also require their control revision. Create, edit and enable require the
+controller's source and lifecycle revision. After a lost response, reconnect
+to the same host and controller with the same principal, obtain a current
+writer attachment and repeat the original command with its original key and
+expectations. The host can return the committed receipt even when the original
+target is now unavailable. To change the request, read the current revisions
+and use a new key.
 
 ## Selected native and authored controls
 

@@ -145,23 +145,26 @@ let with_loaded_manual_entry daemon f =
    with
    | Ok () -> ()
    | Error error ->
-     entry.close ();
+     Agent_server.Session_registry.close_entry entry;
      raise_s [%sexp (error : P.Error.t)]);
-  protect_cleanup ~finally:entry.close (fun () ->
-    Owner.ensure_loaded_authenticated entry.runtime ~actor:original |> protocol_ok;
-    let current = state entry in
-    (match current.lifecycle.observed, current.runtime_initialization with
-     | Idle, Ready -> ()
-     | _ ->
-       raise_s
-         [%sexp
-           "actual legacy constructor did not settle"
-         , (current.lifecycle : A.Session_state.Lifecycle.t)
-         , (current.runtime_initialization : A.Session_state.Runtime_initialization.t)]);
-    let runtime =
-      Owner.with_loaded_runtime entry.runtime (fun runtime -> Ok runtime) |> protocol_ok
-    in
-    f entry runtime)
+  protect_cleanup
+    ~finally:(fun () -> Agent_server.Session_registry.close_entry entry)
+    (fun () ->
+       Owner.ensure_loaded_authenticated entry.runtime ~actor:original |> protocol_ok;
+       let current = state entry in
+       (match current.lifecycle.observed, current.runtime_initialization with
+        | Idle, Ready -> ()
+        | _ ->
+          raise_s
+            [%sexp
+              "actual legacy constructor did not settle"
+            , (current.lifecycle : A.Session_state.Lifecycle.t)
+            , (current.runtime_initialization : A.Session_state.Runtime_initialization.t)]);
+       let runtime =
+         Owner.with_loaded_runtime entry.runtime (fun runtime -> Ok runtime)
+         |> protocol_ok
+       in
+       f entry runtime)
 ;;
 
 (* Only wall-clock sampling is controlled. The fixture's real timeout clock
@@ -484,7 +487,7 @@ let%expect_test
     "same loaded runtime and claim survive Hold; fresh inference and expired resource \
      borrowing deny";
   [%expect
-    {| 
+    {|
     Held queued Job stays unclaimed; expired original authority still retires it
     same loaded runtime and claim survive Hold; fresh inference and expired resource borrowing deny
     |}]

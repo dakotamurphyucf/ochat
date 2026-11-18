@@ -198,7 +198,7 @@ test('mobile navigation and contents work without JavaScript', async ({
   await page.getByRole('button', { name: 'Menu', exact: true }).click();
   const installation = page
     .locator('#starlight__sidebar')
-    .getByRole('link', { name: 'Build and configure Ochat' });
+    .getByRole('link', { name: 'Install and configure Ochat' });
   await installation.click();
   await expect(page).toHaveURL(/installation/);
   await page.locator('mobile-starlight-toc summary').click();

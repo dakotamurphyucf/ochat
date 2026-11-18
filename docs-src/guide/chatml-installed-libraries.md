@@ -20,6 +20,22 @@ names and compiler requirements. `show -member` emits that member's exact bytes
 without an added newline. Unknown resources and members fail; they never fall
 back to a file, URL or newer version.
 
+## Export the pure Goal request helper
+
+```sh
+ochat libraries show goal-requests
+ochat libraries export goal-requests -parent /existing/workspace -directory goal-requests-copy
+```
+
+Point an ordinary Local dependency to the exported
+`examples/libraries/goal-requests` directory and its `chatml.project.json`.
+The `pure` environment exposes `Goal_requests`, which constructs checked
+request data. Select the native tools separately in ChatMD. The host authorizes
+each call against its actual Goal state and source. The export includes the
+[selected native Goal reference](native-goal-metadata.md).
+
+## Prepare an exported Lifecycle example
+
 Export requires an explicit existing parent and one absent child name. The
 example creates `/existing/workspace/lifecycle-copy`; its authored entry is
 `examples/learning/lifecycle-composition/agent.chatmd` beneath that directory.
@@ -54,8 +70,7 @@ Export is a source copy. It does not prepare or run the example, register native
 tools or create a workflow run. The example requires genuine actor-owned
 `Workflow` startup and callback scopes; a host without those rejects native Run
 requests. See [lifecycle composition](chatml-lifecycle-composition.md) and
-[scoped run decisions](chatml-authoring-runs.md). Feature wrappers contribute their
-actual sources to this same inventory when implemented.
+[scoped run decisions](chatml-authoring-runs.md).
 
 Existing files, directories and symlinks at the destination are rejected. The
 exporter creates directories with mode 0700 and files with mode 0600, retains

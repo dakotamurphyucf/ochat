@@ -22,6 +22,51 @@ let store_ok = function
   | Error error -> raise_s [%sexp (error : Agent_store.Store_error.t)]
 ;;
 
+(* Capture both durable directories before disposal. The returned assertion
+   can be reused after each close step, including after the Handle is closed. *)
+let preserve_durable_bytes env (entry : Registry.entry) =
+  let handle = Option.value_exn entry.store_handle in
+  let inventory directory =
+    Eio.Path.read_dir Eio.Path.(Eio.Stdenv.fs env / directory)
+    |> List.sort ~compare:String.compare
+    |> List.map ~f:(fun name ->
+      name, Eio.Path.load Eio.Path.(Eio.Stdenv.fs env / directory / name))
+  in
+  let check directory =
+    let before = inventory directory in
+    fun () -> [%test_eq: (string * string) list] before (inventory directory)
+  in
+  let snapshots = check (S.Handle.snapshot_directory handle) in
+  let journal = check (S.Handle.journal_directory handle) in
+  fun () ->
+    snapshots ();
+    journal ()
+;;
+
+(* After an uncertain journal write, closure must preserve physical evidence and
+   report the refused checkpoint. A fresh snapshot would falsely seal an
+   unacknowledged write. Only these intentional writer-fault fixtures use this. *)
+let close_uncertain_entry env (entry : Registry.entry) =
+  let handle = Option.value_exn entry.store_handle in
+  let check_bytes = preserve_durable_bytes env entry in
+  let failure =
+    match Agent_server.Session_registry.close_entry entry with
+    | () -> failwith "uncertain writer unexpectedly installed a close checkpoint"
+    | exception Registry.Cleanup_failed failure -> Registry.Cleanup_failure.error failure
+  in
+  [%test_eq: P.Error.code] failure.code Persistence_error;
+  [%test_eq: bool] failure.retryable false;
+  [%test_eq: string]
+    failure.message
+    (Sexp.to_string_hum
+       ([%sexp_of: Agent_store.Store_error.t]
+          (Corrupt "cache maintenance requires an available commit writer")));
+  check_bytes ();
+  assert (Result.is_error (S.Handle.metadata_checked handle));
+  assert (Result.is_error (Actor.state entry.actor));
+  Agent_server.Session_registry.close_entry entry
+;;
+
 let document_ok = function
   | Ok value -> value
   | Error error -> raise_s [%sexp (error : D.Error.t)]
@@ -181,7 +226,7 @@ let entry parent =
   |> Option.value_exn
 ;;
 
-let command_result parent key mutation =
+let command_result ?goal_owner parent key mutation =
   let current = state parent in
   let catalog = Option.value current.recurrence_catalog ~default:Catalog.empty in
   let _, source = A.Goal_catalog_source.capture current |> protocol_ok in
@@ -199,6 +244,12 @@ let command_result parent key mutation =
       ~key:(P.Idempotency_key.of_string key |> protocol_ok)
       ~mutation
     |> protocol_ok
+  in
+  let request =
+    match goal_owner with
+    | None -> request
+    | Some selection ->
+      A.Recurrence_command.with_goal_owner request selection |> protocol_ok
   in
   Actor.recurrence_command parent.actor ~actor:proof ~authorize ~request
 ;;
@@ -403,12 +454,66 @@ let await_ready env parent =
     loop ())
 ;;
 
+let moderator_execution_ids (current : A.Session_state.t) =
+  List.map current.moderator_executions ~f:(fun receipt ->
+    receipt.P.Moderator_execution.context.id)
+;;
+
+let await_parent_start_settled env parent ~previous =
+  Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
+    let rec await () =
+      (* A no-op callback ACK need not emit a public notification. *)
+      let current =
+        Actor.with_moderator_checkpoint parent.Registry.actor (fun () ->
+          Actor.state parent.actor)
+        |> protocol_ok
+      in
+      let started =
+        List.exists current.moderator_executions ~f:(fun receipt ->
+          (not
+             (List.mem previous receipt.context.id ~equal:P.Id.Moderator_execution.equal))
+          &&
+          match receipt.context.phase, receipt.status with
+          | (Session_start | Session_resume), Completed _ -> true
+          | _ -> false)
+      in
+      let settled =
+        List.for_all current.moderator_executions ~f:(fun receipt ->
+          (match receipt.P.Moderator_execution.status with
+           | Running -> false
+           | Completed _ | Failed _ | Interrupted _ -> true)
+          &&
+          match receipt.intent with
+          | None | Some Applied | Some (Discarded _) -> true
+          | Some Pending | Some (Waiting_compaction _) -> false)
+      in
+      let queue_empty =
+        A.Moderator_checkpoint.decode current.moderator
+        |> protocol_ok
+        |> Option.exists ~f:(fun snapshot ->
+          List.is_empty snapshot.queued_internal_events && not snapshot.halted)
+      in
+      if
+        started
+        && settled
+        && queue_empty
+        && P.Session.equal_desired_state current.lifecycle.desired Running
+        && T.observed_idle current.lifecycle.observed
+        && Option.is_none current.active_operation
+      then current
+      else (
+        Eio.Fiber.yield ();
+        await ())
+    in
+    await ())
+;;
+
 let start_parent_settled env sw connection parent =
   let initial = state parent in
-  let already_loaded = Agent_server.Runtime_owner.is_loaded parent.Registry.runtime in
   let previous =
-    initial.moderator_executions
-    |> List.map ~f:(fun receipt -> receipt.P.Moderator_execution.context.id)
+    if Agent_server.Runtime_owner.is_loaded parent.Registry.runtime
+    then []
+    else moderator_execution_ids initial
   in
   let handle =
     Agent_client.Session_handle.attach
@@ -436,56 +541,7 @@ let start_parent_settled env sw connection parent =
           Agent_client.Session_handle.start handle ~queue_if_limited:false
           |> protocol_ok
           |> ignore);
-       Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
-         let rec await () =
-           (* A no-op callback ACK need not emit a public notification. *)
-           let current =
-             Actor.with_moderator_checkpoint parent.actor (fun () ->
-               Actor.state parent.actor)
-             |> protocol_ok
-           in
-           let started =
-             List.exists current.moderator_executions ~f:(fun receipt ->
-               (already_loaded
-                || not
-                     (List.mem
-                        previous
-                        receipt.context.id
-                        ~equal:P.Id.Moderator_execution.equal))
-               &&
-               match receipt.context.phase, receipt.status with
-               | (Session_start | Session_resume), Completed _ -> true
-               | _ -> false)
-           in
-           let settled =
-             List.for_all current.moderator_executions ~f:(fun receipt ->
-               (match receipt.P.Moderator_execution.status with
-                | Running -> false
-                | Completed _ | Failed _ | Interrupted _ -> true)
-               &&
-               match receipt.intent with
-               | None | Some Applied | Some (Discarded _) -> true
-               | Some Pending | Some (Waiting_compaction _) -> false)
-           in
-           let queue_empty =
-             A.Moderator_checkpoint.decode current.moderator
-             |> protocol_ok
-             |> Option.exists ~f:(fun snapshot ->
-               List.is_empty snapshot.queued_internal_events && not snapshot.halted)
-           in
-           if
-             started
-             && settled
-             && queue_empty
-             && P.Session.equal_desired_state current.lifecycle.desired Running
-             && T.observed_idle current.lifecycle.observed
-             && Option.is_none current.active_operation
-           then ()
-           else (
-             Eio.Fiber.yield ();
-             await ())
-         in
-         await ()))
+       await_parent_start_settled env parent ~previous |> ignore)
 ;;
 
 let assert_dormant daemon id =

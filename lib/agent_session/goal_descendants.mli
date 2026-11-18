@@ -70,6 +70,9 @@ module Canonical : sig
     val occurrence : t -> Goal_descendant_occurrence.t
     val tracking : t -> Inference_ledger.tracking
     val operation : t -> Agent_protocol.Operation.t option
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Agent_protocol.Error.t) result
+    val shape : Document_schema.Shape.t
   end
 
   (** Validate this genuine canonical Handle/Turn_handle and occurrence against
@@ -81,6 +84,14 @@ module Canonical : sig
     -> canonical:t
     -> occurrence:Goal_descendant_occurrence.t
     -> (Fact.t, Agent_protocol.Error.t) result
+
+  (** Revalidate immutable decoded Fact DATA against the actual adjacent canonical
+      ledgers. This never constructs a Handle or admits execution. *)
+  val validate_fact
+    :  before:Inference_ledger.t
+    -> after:Inference_ledger.t
+    -> fact:Fact.t
+    -> (unit, Agent_protocol.Error.t) result
 end
 
 module Update : sig
@@ -390,6 +401,25 @@ val validate_context
   -> accounts:Goal_accounts.t option
   -> delegation:Agent_store.Delegation_store.Reference.t option
   -> (unit, Agent_protocol.Error.t) result
+
+(** Immutable storage projection for one exact component value, including its
+    retained raw document and existing future-capacity proof. This has no host
+    admission or execution authority. No cross-value or lifetime cache is used. *)
+module Export : sig
+  type source = t
+  type t
+
+  (** Same intrinsic serialization/capacity checks and error order as the
+      ordinary serializer. Does not validate enclosing host limits. *)
+  val prepare : source -> (t, Agent_protocol.Error.t) result
+
+  val document : t -> Document_schema.Document.t
+  val reserved_growth : t -> Capacity_growth.t
+
+  (** Full component-document depth, root depth1. The enclosing host must add
+      its actual path length and validate cumulative remaining host limits. *)
+  val required_depth : t -> int
+end
 
 val of_document : Document_schema.Document.t -> (t, Agent_protocol.Error.t) result
 val to_document : t -> (Document_schema.Document.t, Agent_protocol.Error.t) result

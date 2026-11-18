@@ -134,6 +134,16 @@ let owned_operation state request operation =
        invalid "run input operation does not match actual starting user turn")
 ;;
 
+let unfinished_workflow index ~source =
+  List.find (Run_state.runs index) ~f:(fun (run : P.Run.t) ->
+    P.Run_source.equal run.source source
+    && P.Run.Mode.equal run.mode Workflow
+    &&
+    match run.lifecycle with
+    | Admitted | Active | Waiting _ -> true
+    | Terminal _ -> false)
+;;
+
 let current_source (state : Session_state.t) index request =
   let open Result.Let_syntax in
   let%bind source =
@@ -145,14 +155,7 @@ let current_source (state : Session_state.t) index request =
     match request.Run_admission_request.mode with
     | Single_turn -> Ok ()
     | Workflow ->
-      if
-        List.exists (Run_state.runs index) ~f:(fun (run : P.Run.t) ->
-          P.Run_source.equal run.source source
-          && P.Run.Mode.equal run.mode Workflow
-          &&
-          match run.lifecycle with
-          | Admitted | Active | Waiting _ -> true
-          | Terminal _ -> false)
+      if Option.is_some (unfinished_workflow index ~source)
       then conflict "current source already owns an unfinished workflow run"
       else Ok ()
   in
@@ -341,6 +344,20 @@ let prepare_from_preparation
     ~now
 ;;
 
+module Held_input_availability = struct
+  type t =
+    | Authored_or_submission
+    | Submission_only
+    | Unavailable
+end
+
+let held_input_availability (state : Session_state.t) : Held_input_availability.t =
+  match state.lifecycle.desired, state.lifecycle.observed, state.active_operation with
+  | Stopped, Stopped, None -> Authored_or_submission
+  | _, Idle, None -> Submission_only
+  | _ -> Unavailable
+;;
+
 let prepare_held_from_preparation
       (state : Session_state.t)
       ~preparation
@@ -373,13 +390,8 @@ let prepare_held_from_preparation
     else conflict "held admission session or generation changed"
   in
   let%bind () =
-    match
-      ( state.lifecycle.desired
-      , state.lifecycle.observed
-      , state.active_operation
-      , request.input )
-    with
-    | Stopped, Stopped, None, _ | _, Idle, None, User_submission _ -> Ok ()
+    match held_input_availability state, request.input with
+    | Authored_or_submission, _ | Submission_only, User_submission _ -> Ok ()
     | _ ->
       conflict "held admission requires a quiescent target and unstarted authored input"
   in

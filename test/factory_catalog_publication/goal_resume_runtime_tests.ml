@@ -424,14 +424,85 @@ let start_episode daemon entry old_original session before =
   |> Goal.activated
 ;;
 
-let with_cold_episode ?prompt_text surface decision f =
+module Resource_retention = struct
+  type t =
+    | Cold
+    | Shared_resources
+
+  module Control = struct
+    type t = { mutable release_and_join : (unit -> unit) option }
+
+    let create () = { release_and_join = None }
+    let release_and_join t = Option.iter t.release_and_join ~f:(fun release -> release ())
+  end
+end
+
+let with_resource_retention ?control ~sw owner (retention : Resource_retention.t) f =
+  match retention with
+  | Cold -> f ()
+  | Shared_resources ->
+    let entered, enter = Eio.Promise.create () in
+    let released, release = Eio.Promise.create () in
+    let joined, join = Eio.Promise.create () in
+    let release_once () =
+      if Option.is_none (Eio.Promise.peek released) then Eio.Promise.resolve release ()
+    in
+    Eio.Fiber.fork ~sw (fun () ->
+      let result =
+        try
+          Ok
+            (Owner.with_delegation_resources owner (fun _runtime ->
+               Eio.Promise.resolve enter ();
+               Eio.Promise.await released;
+               Ok ()))
+        with
+        | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())
+      in
+      Eio.Promise.resolve join result);
+    let await_join () =
+      match Eio.Promise.await joined with
+      | Ok result -> protocol_ok result
+      | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
+    in
+    protect_cleanup
+      ~finally:(fun () ->
+        release_once ();
+        await_join ())
+      (fun () ->
+         Eio.Fiber.first
+           (fun () -> Eio.Promise.await entered)
+           (fun () ->
+              await_join ();
+              failwith "resource borrower returned before retention");
+         Option.iter control ~f:(fun control ->
+           control.Resource_retention.Control.release_and_join
+           <- Some
+                (fun () ->
+                  release_once ();
+                  await_join ()));
+         f ())
+;;
+
+let with_cold_episode
+      ?observe_shutdown
+      ?observe_entry_close
+      ?test_root
+      ?test_switch
+      ?prompt_text
+      ?(wrap_env = Fn.id)
+      ?post_stream
+      ?(retention = Resource_retention.Cold)
+      surface
+      decision
+      f
+  =
   let counters : counters =
     { inference_ports = ref 0; providers = ref 0; transcripts = ref [] }
   in
   let selected = ref None in
   let probe = Provider_probe.create () in
   let base =
-    inference_policy ~default_model:"fixture-model" ~post_stream:(fun ~sw:_ ~inputs ->
+    inference_policy ~default_model:"fixture-model" ~post_stream:(fun ~sw ~inputs ->
       let transcript =
         `Array (List.map inputs ~f:Res.Item.jsonaf_of_t) |> Jsonaf.to_string
       in
@@ -454,7 +525,9 @@ let with_cold_episode ?prompt_text surface decision f =
       then
         Option.iter !selected ~f:(fun entry ->
           probe.root_states <- probe.root_states @ [ state entry ]);
-      completed_response "543 real Goal continuation result")
+      match post_stream with
+      | None -> completed_response "543 real Goal continuation result"
+      | Some post_stream -> post_stream ~sw ~inputs)
   in
   let policy =
     { base with
@@ -480,6 +553,9 @@ let with_cold_episode ?prompt_text surface decision f =
     }
   in
   Creation_tests.with_daemon
+    ?observe_shutdown
+    ?test_root
+    ~wrap_env
     ~prompt_text:
       (Option.value_or_thunk prompt_text ~default:(fun () -> prompt surface decision))
     ~qualify_chatml_extensions:true
@@ -488,9 +564,11 @@ let with_cold_episode ?prompt_text surface decision f =
       ; constructor_recipe, "<developer>543_GOAL_INIT_RECIPE</developer>"
       ]
     ~policy
-    (fun env _sw root daemon ->
+    (fun env sw root daemon ->
+       Option.iter test_switch ~f:(fun observed -> observed := Some sw);
        Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 45. (fun () ->
          Source.with_loaded_entry
+           ?observe_close:observe_entry_close
            daemon
            (fun ~entry ~runtime:initial_runtime ~revision:_ ->
               selected := Some entry;
@@ -512,109 +590,112 @@ let with_cold_episode ?prompt_text surface decision f =
                     [%test_eq: P.Error.code] Conflict error.code;
                     [%test_eq: bool] false error.retryable
                   | Ok _ -> failwith "initial legacy Session_start claimed a resume ACK"));
-              let attachment, _ =
-                Actor.attach entry.actor ~mode:Read_write ~subscribe:false |> protocol_ok
-              in
-              protect_cleanup
-                ~finally:(fun () -> Actor.detach entry.actor attachment.id |> protocol_ok)
-                (fun () ->
-                   Goal_admitted_guard_tests.command
-                     daemon
-                     entry
-                     ~key:"goal-runtime-hold"
-                     (Hold (Goal.goal_id, Operator_pause))
-                   |> protocol_ok
-                   |> ignore;
-                   let held = state entry in
-                   let original_run = run held admission in
-                   Actor.stop entry.actor ~attachment_id:attachment.id ~mode:Graceful
-                   |> protocol_ok
-                   |> ignore;
-                   Owner.unload_and_wait entry.runtime |> protocol_ok;
-                   assert (not (Owner.is_loaded entry.runtime));
-                   let stopped = checkpoint entry in
-                   assert (P.Run.equal original_run (run stopped admission));
-                   assert (G.equal (Goal.goal held) (Goal.goal stopped));
-                   assert (
-                     A.Goal_accounting.equal
-                       (Goal.accounting held)
-                       (Goal.accounting stopped));
-                   (match stopped.lifecycle.desired, stopped.lifecycle.observed with
-                    | Stopped, Stopped -> ()
-                    | _ -> failwith "actual Stop did not join");
-                   let evidence =
-                     G.Reason.of_string "Actual Session_resume completes this Goal"
+              with_resource_retention ~sw entry.runtime retention (fun () ->
+                let attachment, _ =
+                  Actor.attach entry.actor ~mode:Read_write ~subscribe:false
+                  |> protocol_ok
+                in
+                protect_cleanup
+                  ~finally:(fun () ->
+                    Actor.detach entry.actor attachment.id |> protocol_ok)
+                  (fun () ->
+                     Goal_admitted_guard_tests.command
+                       daemon
+                       entry
+                       ~key:"goal-runtime-hold"
+                       (Hold (Goal.goal_id, Operator_pause))
                      |> protocol_ok
-                   in
-                   let finish =
-                     P.Goal_achievement.Intent.create
-                       ~expected_goal_revision:
-                         (Int64.succ (G.revision (Goal.goal stopped)))
-                       ~evidence
-                       ~action:(Finish { terminal = Completed None; relinquish = [] })
+                     |> ignore;
+                     let held = state entry in
+                     let original_run = run held admission in
+                     Actor.stop entry.actor ~attachment_id:attachment.id ~mode:Graceful
                      |> protocol_ok
-                     |> P.Goal_achievement.Intent.to_json
-                   in
-                   let context =
-                     `Object
-                       [ "run_id", P.Id.Run.to_json original_run.id
-                       ; "source", P.Run_source.to_json original_run.source
-                       ; "finish", finish
-                       ]
-                   in
-                   Eio.Path.save
-                     ~create:(`Or_truncate 0o600)
-                     Eio.Path.(Eio.Stdenv.fs env / root / resume_context_file)
-                     (Jsonaf.to_string context ^ "\n");
-                   let actor = Staging.guarded Staging.resume_principal (ref true) in
-                   let request =
-                     Staging.exact_request stopped ~key:"goal-cold-runtime-resume"
-                   in
-                   probe.awaiting_root <- true;
-                   probe.phase <- "resume callback";
-                   protect_cleanup
-                     ~finally:(fun () -> Provider_probe.release probe)
-                     (fun () ->
-                        match
-                          f
-                            env
-                            daemon
-                            entry
-                            initial_runtime
-                            counters
-                            probe
-                            session
-                            admission
-                            initial
-                            stopped
-                            actor
-                            request
-                        with
-                        | result -> result
-                        | exception exn ->
-                          let backtrace = Stdlib.Printexc.get_raw_backtrace () in
-                          print_s
-                            [%sexp
-                              "cold runtime fixture failed"
-                            , (probe.phase : string)
-                            , (!(counters.providers) : int)
-                            , (List.length probe.allocations : int)];
-                          Option.iter probe.last_state ~f:(fun state ->
-                            let callbacks =
-                              List.map state.moderator_executions ~f:(fun receipt ->
-                                ( receipt.P.Moderator_execution.context.phase
-                                , receipt.status ))
-                            in
+                     |> ignore;
+                     Owner.unload_and_wait entry.runtime |> protocol_ok;
+                     assert (not (Owner.is_loaded entry.runtime));
+                     let stopped = checkpoint entry in
+                     assert (P.Run.equal original_run (run stopped admission));
+                     assert (G.equal (Goal.goal held) (Goal.goal stopped));
+                     assert (
+                       A.Goal_accounting.equal
+                         (Goal.accounting held)
+                         (Goal.accounting stopped));
+                     (match stopped.lifecycle.desired, stopped.lifecycle.observed with
+                      | Stopped, Stopped -> ()
+                      | _ -> failwith "actual Stop did not join");
+                     let evidence =
+                       G.Reason.of_string "Actual Session_resume completes this Goal"
+                       |> protocol_ok
+                     in
+                     let finish =
+                       P.Goal_achievement.Intent.create
+                         ~expected_goal_revision:
+                           (Int64.succ (G.revision (Goal.goal stopped)))
+                         ~evidence
+                         ~action:(Finish { terminal = Completed None; relinquish = [] })
+                       |> protocol_ok
+                       |> P.Goal_achievement.Intent.to_json
+                     in
+                     let context =
+                       `Object
+                         [ "run_id", P.Id.Run.to_json original_run.id
+                         ; "source", P.Run_source.to_json original_run.source
+                         ; "finish", finish
+                         ]
+                     in
+                     Eio.Path.save
+                       ~create:(`Or_truncate 0o600)
+                       Eio.Path.(Eio.Stdenv.fs env / root / resume_context_file)
+                       (Jsonaf.to_string context ^ "\n");
+                     let actor = Staging.guarded Staging.resume_principal (ref true) in
+                     let request =
+                       Staging.exact_request stopped ~key:"goal-cold-runtime-resume"
+                     in
+                     probe.awaiting_root <- true;
+                     probe.phase <- "resume callback";
+                     protect_cleanup
+                       ~finally:(fun () -> Provider_probe.release probe)
+                       (fun () ->
+                          match
+                            f
+                              env
+                              daemon
+                              entry
+                              initial_runtime
+                              counters
+                              probe
+                              session
+                              admission
+                              initial
+                              stopped
+                              actor
+                              request
+                          with
+                          | result -> result
+                          | exception exn ->
+                            let backtrace = Stdlib.Printexc.get_raw_backtrace () in
                             print_s
                               [%sexp
-                                (Ledger.summary state.inference_ledger
-                                 : P.Inference_query.Summary.t)
-                              , (state.active_operation : P.Operation.t option)
-                              , (callbacks
-                                 : (P.Moderator_execution.phase
-                                   * P.Moderator_execution.status)
-                                     list)]);
-                          Exn.raise_with_original_backtrace exn backtrace)))))
+                                "cold runtime fixture failed"
+                              , (probe.phase : string)
+                              , (!(counters.providers) : int)
+                              , (List.length probe.allocations : int)];
+                            Option.iter probe.last_state ~f:(fun state ->
+                              let callbacks =
+                                List.map state.moderator_executions ~f:(fun receipt ->
+                                  ( receipt.P.Moderator_execution.context.phase
+                                  , receipt.status ))
+                              in
+                              print_s
+                                [%sexp
+                                  (Ledger.summary state.inference_ledger
+                                   : P.Inference_query.Summary.t)
+                                , (state.active_operation : P.Operation.t option)
+                                , (callbacks
+                                   : (P.Moderator_execution.phase
+                                     * P.Moderator_execution.status)
+                                       list)]);
+                            Exn.raise_with_original_backtrace exn backtrace))))))
 ;;
 
 let completed_resume current admission =
@@ -749,6 +830,105 @@ let assert_constructor_model before final admission probe =
        raise_s
          [%sexp "constructor provider failed", (terminal : Inference.Event.Terminal.t)])
   | Prepared | Running | Interrupted _ -> failwith "constructor inference has no terminal"
+;;
+
+let%expect_test "selected stopped Goal retains the exact Run for writer Resume advice" =
+  let module C = Agent_client in
+  let module Q = P.Goal_query in
+  with_cold_episode
+    V1
+    Continue
+    (fun
+        env
+         daemon
+         entry
+         _runtime
+         counters
+         _probe
+         session
+         admission
+         _initial
+         stopped
+         _actor
+         _request
+       ->
+       let actual_run = run stopped admission in
+       let before = !(counters.inference_ports), !(counters.providers) in
+       let notifications = Eio.Stream.create 256 in
+       let context =
+         Agent_server.Connection_context.create_authenticated
+           ~actor:original
+           ~connection_id:"goal-cold-inspection"
+           ~transport:In_memory
+           ~publish_notification:(Eio.Stream.add notifications)
+           ~max_attachments:64
+       in
+       let client =
+         C.In_memory.create
+           ~request:(fun command ->
+             Agent_server.Dispatcher.dispatch_command
+               (Daemon.dispatcher daemon)
+               ~context
+               command)
+           ~notifications
+           ~close:(fun () -> Daemon.close_connection daemon context)
+       in
+       Exn.protect
+         ~finally:(fun () -> C.Connection.close client)
+         ~f:(fun () ->
+           C.Session_handle.initialize_with_features
+             client
+             ~implementation_name:"goal-cold-inspection-fixture"
+             ~implementation_version:"1"
+             ~features:[ Q.Features.inspect; P.Goal_control.Features.control ]
+           |> protocol_ok
+           |> ignore;
+           let inspect controls =
+             match C.Goal_controls.get controls Goal.goal_id |> protocol_ok with
+             | Unavailable _ -> failwith "selected stopped Goal was unavailable"
+             | Available view ->
+               assert (Q.Availability.equal view.availability Stopped);
+               let source = Option.value_exn view.source in
+               assert (P.Run_source.equal source actual_run.source);
+               let row = List.hd_exn view.goals in
+               (match row.run with
+                | Observed { status = Retained; run_id; revision } ->
+                  assert (P.Id.Run.equal run_id actual_run.id);
+                  [%test_eq: int64] revision actual_run.revision
+                | observation ->
+                  raise_s
+                    [%sexp
+                      "expected retained Goal Run", (observation : Q.Run_observation.t)]);
+               assert (
+                 not
+                   (List.exists row.execution_blockers ~f:(function
+                      | Q.Execution_blocker.Active_run -> true
+                      | _ -> false)));
+               row.actions
+           in
+           assert (List.is_empty (inspect (C.Goal_controls.create client ~session ())));
+           Eio.Switch.run (fun sw ->
+             let writer =
+               C.Session_handle.attach
+                 ~sw
+                 ~clock:(Eio.Stdenv.clock env)
+                 ~connection:client
+                 ~session_id:(P.Session_ref.session_id session)
+                 ~mode:Read_write
+                 ~subscribe:false
+                 ()
+               |> protocol_ok
+             in
+             Exn.protect
+               ~finally:(fun () -> C.Session_handle.close writer)
+               ~f:(fun () ->
+                 let actions = C.Session_handle.goals writer |> protocol_ok |> inspect in
+                 assert (List.mem actions Resume ~equal:Q.Action.equal);
+                 assert (not (List.mem actions Start ~equal:Q.Action.equal)))));
+       assert (not (Owner.is_loaded entry.runtime));
+       [%test_eq: int * int] before (!(counters.inference_ports), !(counters.providers)));
+  print_endline "stopped owner retains the Run and advises Resume only with a writer";
+  [%expect {| stopped owner retains the Run and advises Resume only with a writer |}]
 ;;
 
 let%expect_test "cold Goal continuation runs legacy and v1 Session_resume before its turn"
@@ -1266,4 +1446,83 @@ let%expect_test
      rejects without an unbound charge and factual graph cleanup joins";
   [%expect
     {| Init borrows the old Run original; revocation expires it; ended graph identity rejects without an unbound charge and factual graph cleanup joins |}]
+;;
+
+let%expect_test
+    "Goal continuation installs a fresh worker over the retained completed lifecycle"
+  =
+  with_cold_episode
+    ~retention:Shared_resources
+    V1
+    Continue
+    (fun
+        env
+         daemon
+         entry
+         old_runtime
+         counters
+         probe
+         session
+         admission
+         initial
+         stopped
+         actor
+         request
+       ->
+       assert (not (Owner.is_loaded entry.runtime));
+       let old_manager = Option.value_exn old_runtime.moderator_manager in
+       let old_native = Option.value_exn old_runtime.native_runtime in
+       let old_tools = Option.value_exn old_runtime.moderator_script_tools in
+       let old_source = Option.value_exn stopped.run_state |> A.Run_state.installation in
+       let ports = !(counters.inference_ports) in
+       let receipt, operation =
+         Service.resume_episode (public daemon) ~entry ~actor ~session ~request
+         |> protocol_ok
+         |> started
+       in
+       Staging.assert_receipt request stopped receipt;
+       Eio.Promise.await probe.entered;
+       [%test_eq: int] 1 !(counters.providers);
+       [%test_eq: int] ports !(counters.inference_ports);
+       Owner.with_loaded_runtime entry.runtime (fun actual ->
+         assert (not (phys_equal old_runtime.worker actual.worker));
+         assert (phys_equal old_manager (Option.value_exn actual.moderator_manager));
+         assert (phys_equal old_native (Option.value_exn actual.native_runtime));
+         assert (phys_equal old_tools (Option.value_exn actual.moderator_script_tools));
+         Ok ())
+       |> protocol_ok;
+       let before_response = state entry in
+       assert (
+         A.Run_source_installation.equal
+           old_source
+           (A.Run_state.installation (Option.value_exn before_response.run_state)));
+       assert (
+         List.equal
+           P.Moderator_execution.equal
+           (startup_receipts initial)
+           (startup_receipts before_response));
+       assert (
+         Option.equal Jsonaf.exactly_equal stopped.moderator before_response.moderator);
+       [%test_eq: int64]
+         stopped.conversation.next_history_sequence
+         before_response.conversation.next_history_sequence;
+       (match before_response.runtime_initialization with
+        | Ready -> ()
+        | Pending _ -> failwith "retained lifecycle lost its genuine Init ACK");
+       Provider_probe.release probe;
+       let final = await_turns env entry counters ~providers:2 ~completed:2 in
+       assert_started stopped final admission operation;
+       assert (
+         List.equal
+           P.Moderator_execution.equal
+           (startup_receipts initial)
+           (startup_receipts final));
+       assert (List.is_empty final.jobs);
+       [%test_eq: int] ports !(counters.inference_ports);
+       repeat daemon entry session actor request receipt counters env);
+  print_endline
+    "same completed lifecycle and services; fresh worker joins real Goal continuation \
+     once";
+  [%expect
+    {| same completed lifecycle and services; fresh worker joins real Goal continuation once |}]
 ;;

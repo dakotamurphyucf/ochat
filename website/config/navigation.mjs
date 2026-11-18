@@ -99,6 +99,13 @@ const paths = [
     label: 'ChatML workflows',
   },
   {
+    id: 'tutorials/goal-recurrence',
+    title: 'Run a recurring release-note review',
+    description:
+      'Give a durable Goal its own Run, schedule captured review workers, and inspect the outcomes before confirming completion.',
+    label: 'ChatML workflows',
+  },
+  {
     id: 'guide/chatml-development-workflow',
     title: 'Develop ChatML interactively',
     description:

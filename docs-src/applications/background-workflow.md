@@ -21,8 +21,10 @@ a small, reproducible way to understand where the work lives.
 
 A daemon-hosted ChatML moderator can start a specialist job with
 `Model.spawn("agent_prompt_v1", payload)`. The recipe payload supplies `prompt`,
-`input`, and `is_local`. Handle `Model_job_succeeded` and `Model_job_failed` events
-to collect results or record failure. Follow the complete contracts and tested
+`input`, and `is_local`. A legacy moderator handles `Model_job_succeeded` and
+`Model_job_failed`; an extensibility-v1 moderator handles `Internal_event` JSON
+with `kind: "model_job_completed"` and its checked stored-completion `result`.
+Use these notifications to collect results or record failure. Follow the complete contracts and tested
 recipe in [ChatML orchestration](../agent-server/chatml-orchestration.md).
 
 For example, a workflow can dispatch a question to a researcher, remain alive
@@ -35,7 +37,9 @@ Read the [agent hosting overview](../agent-server/README.md) for the deployment 
 ## Understand the lifetime
 
 Use the documented job, schedule, and session views to inspect progress after
-reconnecting. Schedules are one-shot events, not a cron service. Restart recovery
+reconnecting. `Schedule` delivers a one-shot event. Use a separate persistent
+[recurrence definition](../agent-server/recurring-automation.md) to create repeated
+occurrences with explicit timing and target rules. Restart recovery
 does not resume arbitrary process stacks or guarantee exactly-once external
 effects. [Sessions and workspaces](../agent-server/sessions-and-workspaces.md)
 explains the host's ownership and persistence boundaries.
@@ -47,5 +51,8 @@ Continue with [real background check results](../tutorials/background-results.md
 then the complete [living documentation lab](documentation-lab.md). The lab
 combines jobs, retained state, child-response polling and notifications, including
 failure, cancellation and interrupted-work recovery.
+
+For a durable objective with repeated workers, try the
+[recurring release-note review](../tutorials/goal-recurrence.md).
 
 [Explore another application](README.md) or [follow the tutorial curriculum](../tutorials/README.md).

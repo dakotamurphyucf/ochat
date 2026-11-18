@@ -96,6 +96,7 @@ jobs:
             website/.release/ochat.opam.locked
             website/.release/toolchain.json
             website/.release/toolchain-key.json
+            website/.release/eio-overlay-provenance.json
   framework-plan:
     needs: changes
     if: needs.changes.outputs.framework == 'true'

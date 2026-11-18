@@ -4,6 +4,10 @@
     disclosure before preparation. *)
 type prepared
 
+(** Temporary managed metadata expires one day after [now], capped at the
+    greatest representable timestamp. Expiry only makes temporary data eligible
+    for an ownership check; matching private preparations and retained durable
+    results remain protected. Already selected metadata and content are unchanged. *)
 val prepare
   :  Blob_store.t
   -> env:Eio_unix.Stdenv.base

@@ -1,7 +1,7 @@
 # Admitted instruction sources
 
 OChat discovers and retains local project guidance and skills under explicitly
-admitted source roots. Five explicitly selected native tools read, refresh,
+admitted source roots. Explicit operator controls and five selected native tools read, refresh,
 activate, deactivate and inspect a session's instruction selection. The actor
 saves exact selected bytes and receipts before acknowledging a mutation. Reading
 or importing an instruction document does not activate it or grant any tool.
@@ -141,8 +141,10 @@ Restored bytes describe custody, not activation or source permission.
 `ochat.instruction-selection` version 1 subdocument inside the sole session
 state. It is separate from editable conversation history. Legacy absence stays
 absent on unrelated writes. A stored selection does not install tools or preserve a historical source grant.
-The native host integration checks authentic current execution and source-use
-authority before activation and provider submission.
+Selection changes require genuine current operator or native execution admission
+and current source-use authority. Provider submission separately requires an actual
+execution borrow and current source-use authority; an operator selection command
+does not grant execution authority.
 
 The pure `Instruction_capture.project` constructor checks a single root and
 scope, with `AGENTS.md` members in root-to-target order. An explicitly selected
@@ -186,11 +188,11 @@ The persistence owner also preflights the future native Clear transaction
 against its actual transaction and journal-frame limits, including the previous
 hash, retained unknown content and the complete typed session.updated/status event.
 The future event uses maximal checked host counter/timestamp widths; its validated
-summary clears active counts and retains captures plus the final receipt. Native
-instruction receipts belong to the selection transaction; they do not create server request-idempotency audit
-records. A smaller writer profile can reject activation before any selection is
-acknowledged. A future operator entry point must separately qualify its genuine
-server-request audit envelope against that profile.
+summary clears active counts and retains captures plus the final receipt. Instruction receipts belong to the selection transaction for both native and
+operator entry points. They do not create a second generic server command-receipt
+or session command-audit payload. Ordinary external method audit delivery retains
+its existing contract; it is separate from the durable selection receipt. A
+smaller writer profile can reject activation before any selection is acknowledged.
 
 ## Explicit native selection
 
@@ -233,6 +235,59 @@ under the same principal/key conflicts. An exact activation retry may use its
 already retained capture after live files disappear, but still requires current
 root/use policy. A fresh key must make a genuine fresh read. Refresh never
 silently replaces the active edition.
+
+## Explicit operator and headless-client controls
+
+The shared protocol exposes five instruction methods. They require the original
+current authenticated operator proof and current session visibility. Reads need
+`session.transcript.read`; activation and removal need `session.message.send`,
+an actual writable attachment owned by that connection, and the expected session
+generation. A principal summary, attachment ID, source descriptor or capture ID
+alone grants no authority.
+
+`session.instructions_get` returns safe selected identities: configured root
+labels, portable members, exact digests, selection counts and currently available
+actions. All currently selected roots must be readable; a denied root rejects the
+whole identity response. This separate authorized response adds no identities to
+ordinary snapshots, events or the counts-only `instruction_status` summary.
+
+`session.instructions_refresh` explicitly lists current permitted roots or
+observes a requested project/skill selection. It never changes selected bytes.
+`session.instructions_capture` verifies the requested complete manifest against
+fresh authorized reads and returns its capture ID and comparison descriptor,
+without file bodies or native source capabilities. Only explicit
+`session.instructions_activate` changes the selected edition. The host repeats
+the real fresh capture/current checks before accepting a new command, and the
+actor checks admission before committing it. A wire capture is consistency data,
+not a reusable read grant.
+
+`session.instructions_remove` clears all selection, removes project guidance or
+removes specified qualified skills. Removal still requires a current authorized
+writer, but no source read permission. A writer can Clear after selected-root
+access has been revoked. Retained captures and receipts remain intact.
+
+The headless entry point is `Agent_client.Session_handle.instructions handle`.
+Its `inspect`, `refresh`, `capture`, `activate` and `remove` operations use the
+actual connection and the handle's current attachment. They maintain no local
+selection mirror and never refresh, activate or call a provider automatically.
+The mutation caller supplies and retains an explicit idempotency key, expected
+generation, expected **selection** revision and exact capture/removal request.
+Selection revision is independent of the session's ordinary revision counter.
+
+After a lost response, repeat that exact request and key under fresh current
+authorization. Reattachment may change only the admission attachment ID; it does
+not change the selection command's semantic digest. An exact accepted retry
+returns the original durable receipt without another event or revision. Current
+source-root permission is still required for activation retries, even when the
+exact capture is retained. These methods bypass the generic server response cache
+and `command.receipt` recovery; the selection transaction owns their receipts.
+A changed request under the same key or a stale fresh selection revision fails.
+
+Physical reopen restores exact inert captures and receipts. Inspection does not
+load an execution runtime or read replacement bodies from disk. Current source
+permissions are checked again, and stored selection/imported data never grants
+provider activation. The existing provider admission separately checks those
+permissions for each actual request.
 
 ## Agent context and lifetime
 
@@ -334,3 +389,27 @@ named Lifecycle components in explicit order, and calls the selected
 counts alongside the inspection flag; this says nothing about current source permission or successful
 activation. Pure Lifecycle decisions remain author policy. The example stages no
 Run action and does not turn component completion into host root completion.
+
+## Use a selected skill with a recurring-work tool
+
+A review agent can follow a selected skill and inspect its controller's saved
+schedules in the same turn. Select the instruction tools in the ChatMD
+definition, import `<doc src="builtin:recurrence"/>` in a developer message,
+and select `<tool name="recurrence_list"/>`. In the ChatML project, expose
+the [recurrence request library](../examples/libraries/recurrence-requests/chatml.project.json)
+as `Requests`. A ChatML tool that declares `<uses tool="recurrence_list"/>` can
+then return the current list:
+
+```chatml
+let run ctx input =
+  let* result = Tool.call("recurrence_list", Requests.list()) in
+  match result with
+  | `Ok(value) -> Task.pure(`Complete(value))
+  | `Error(message) -> Task.fail(message)
+```
+
+When the skill file changes, refresh its descriptor, read the new capture, and
+activate it with the current selection revision and a fresh key. The old
+instructions stay active until activation succeeds. After an authenticated
+reopen, the next turn uses the saved selection even if the file was removed.
+Listing a paused schedule leaves it paused.

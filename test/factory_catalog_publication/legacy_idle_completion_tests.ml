@@ -408,7 +408,7 @@ module Fixture = struct
                      in
                      let handed_off = ref false in
                      protect_cleanup
-                       ~finally:(fun () -> if not !handed_off then runtime.close ())
+                       ~finally:(fun () -> if not !handed_off then B.close runtime)
                        (fun () ->
                           runtime.start_moderator () |> protocol_ok |> ignore;
                           built_runtime := Some runtime;

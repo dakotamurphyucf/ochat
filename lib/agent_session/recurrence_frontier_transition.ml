@@ -425,22 +425,17 @@ let validate_current (s : S.t) ~definition:current ~cursor =
           R.Rule.Interval.equal_mode (R.Rule.Interval.mode rule) Fixed_delay
           && not (Int64.equal slot 0L)
         then (
+          let%bind occurrence = I.Occurrence.create ~definition:(F.key current) ~slot in
+          (* Reserving a captured child moves its nominal into protected custody
+             before the corresponding execution row exists. *)
+          let selected = List.map (s.ready @ candidates s) ~f:value @ protected_rows s in
           match
-            List.find
-              (s.ready @ candidates s)
-              ~f:(fun row -> Int64.equal (I.Occurrence.slot (key row)) slot)
+            List.find selected ~f:(fun nominal ->
+              I.Occurrence.equal (N.key nominal) occurrence)
           with
-          | Some row -> Ok (at row)
+          | Some nominal -> Ok (N.at nominal)
           | None ->
-            (match
-               List.find (S.execution_rows s) ~f:(fun execution ->
-                 let occurrence =
-                   Recurrence_execution_intent.occurrence
-                     (Recurrence_execution.intent execution)
-                 in
-                 I.Definition.equal (I.Occurrence.definition occurrence) (F.key current)
-                 && Int64.equal (I.Occurrence.slot occurrence) slot)
-             with
+            (match S.find_execution s occurrence with
              | Some execution ->
                Ok
                  (N.at
@@ -449,10 +444,9 @@ let validate_current (s : S.t) ~definition:current ~cursor =
              | None ->
                (match s.delay_basis with
                 | Some basis
-                  when Int64.equal
-                         slot
-                         (I.Occurrence.slot (Recurrence_delay_basis.occurrence basis)) ->
-                  Ok (Recurrence_delay_basis.nominal_at basis)
+                  when I.Occurrence.equal
+                         (Recurrence_delay_basis.occurrence basis)
+                         occurrence -> Ok (Recurrence_delay_basis.nominal_at basis)
                 | None | Some _ ->
                   invalid "fixed-delay high-water lacks exact selected metadata")))
         else Result.map (N.create_interval current ~slot) ~f:N.at

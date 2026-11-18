@@ -364,7 +364,7 @@ let on_event = fun ctx state event -> Task.pure(state)</script>|}
           assert (!checkpoints > 0);
           (match Source.selection selected with
            | Authored revision -> assert (phys_equal revision original)
-           | Captured _ | Authored_child _ | Generated _ ->
+           | Captured _ | Authored_child _ | Generated _ | Generated_artifact _ ->
              failwith "ordinary source changed its actual owner");
           assert (Preparation.Invocation.equal (Source.invocation selected) Ui);
           let identity =

@@ -10,7 +10,13 @@ module J = Json_codec
 
 let invalid text = Error (Protocol_error.invalid_request text)
 
-module Hold = Goal_state.Hold
+module Hold = struct
+  include Goal_state.Hold
+
+  let to_json = Goal_state.hold_to_json
+  let of_json = Goal_state.hold_of_json
+end
+
 module Closure = Goal_state.Closure
 module State = Goal_state
 module Capacity = Goal_capacity

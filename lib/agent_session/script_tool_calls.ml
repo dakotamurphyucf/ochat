@@ -33,6 +33,7 @@ type preparation =
   ; session_id : Agent_protocol.Id.Session.t
   ; generation : int
   ; owner : preparation_owner
+  ; caller : Delegated_policy_caller.t option
   ; selected : C.t
   ; call : Chat_response.Moderation.Tool_call.t
   }
@@ -40,6 +41,15 @@ type preparation =
 type preparation_policy =
   preparation
   -> (Chat_response.Moderation.Tool_moderation.t option, Agent_protocol.Error.t) result
+
+module Inference_tracking = struct
+  type t =
+    { bind_identity : Inference_allocation.Port.t -> Inference_client.Identity.t
+    ; on_attempt : Inference_runtime.Attempt.t -> unit
+    ; on_observation : Inference.Observation.t -> unit
+    ; on_completion : Inference_client.Completion.t -> unit
+    }
+end
 
 type t =
   { registry : unit -> C.t
@@ -49,6 +59,7 @@ type t =
   ; durable_requests : bool
   ; requires_active_moderator : C.reference -> bool
   ; authorize : I.t -> C.binding -> (unit, Agent_protocol.Error.t) result
+  ; execution_check : Native_tool_invocation.Execution_check.t
   ; admission_check : (I.t -> C.binding -> (unit, Agent_protocol.Error.t) result) option
   ; preparation : preparation_policy option
   ; prepare_output :
@@ -72,8 +83,7 @@ type t =
   ; instruction_service : Instruction_service.t option
   ; recurrence_service : Recurrence_service.t option
   ; goal_metadata_service : Goal_native_metadata_service.t option
-  ; bind_inference_identity :
-      (Inference_allocation.Port.t -> Inference_client.Identity.t) option
+  ; inference_tracking : Inference_tracking.t option
   ; agent_source_code_view : Agent_source_code_view.t option
   ; shell_code_view : Shell_runtime.Registry.Code_view.t option
   ; agent_artifact :
@@ -455,6 +465,7 @@ let create
   ; durable_requests = false
   ; requires_active_moderator
   ; authorize
+  ; execution_check = Native_tool_invocation.Execution_check.unavailable
   ; admission_check = None
   ; preparation = None
   ; prepare_output
@@ -477,7 +488,7 @@ let create
   ; instruction_service = None
   ; recurrence_service = None
   ; goal_metadata_service = None
-  ; bind_inference_identity = None
+  ; inference_tracking = None
   ; agent_source_code_view = None
   ; shell_code_view = None
   ; agent_artifact = None
@@ -491,10 +502,7 @@ let with_recurrence_service t service = { t with recurrence_service = Some servi
 let recurrence_service t = t.recurrence_service
 let with_goal_metadata_service t service = { t with goal_metadata_service = Some service }
 let goal_metadata_service t = t.goal_metadata_service
-
-let with_inference_identity_binding t ~bind =
-  { t with bind_inference_identity = Some bind }
-;;
+let with_inference_tracking t tracking = { t with inference_tracking = Some tracking }
 
 let agent_context (ctx : Eio_unix.Stdenv.base Chat_response.Ctx.t) =
   match native_services_scope () with
@@ -507,13 +515,18 @@ let agent_context (ctx : Eio_unix.Stdenv.base Chat_response.Ctx.t) =
     in
     let borrowed = Native_tool_invocation.borrow () |> require in
     let ctx =
-      match tools.bind_inference_identity with
-      | None -> ctx
-      | Some bind ->
+      match tools.inference_tracking with
+      | None -> raise Chat_response.Ctx.Inference_admission_rejected
+      | Some tracking ->
         let allocate =
           Native_tool_invocation.borrowed_inference_allocator borrowed |> require
         in
-        Chat_response.Ctx.with_inference_identity ctx ~inference_identity:(bind allocate)
+        Chat_response.Ctx.with_inference_tracking
+          ctx
+          ~identity:(tracking.bind_identity allocate)
+          ~on_attempt:tracking.on_attempt
+          ~on_observation:tracking.on_observation
+          ~on_completion:tracking.on_completion
     in
     (match ctx.agent_guidance_scope, instruction_service tools with
      | Excluded, _ | Eligible _, None -> ctx
@@ -564,7 +577,8 @@ let native_dispatch_base t ~declared ~input ~capabilities =
     |> Result.ok_or_failwith
   in
   let dispatch =
-    Native_tool_dispatch.create
+    Native_tool_dispatch.create_current
+      ~execution_check:t.execution_check
       ~input
       ~capabilities
       ~declared
@@ -611,7 +625,17 @@ let with_authorization_guard t ~check =
     let%map () = check () in
     output
   in
-  { t with authorize; admission_check; prepare_output }
+  let execution_check =
+    Native_tool_invocation.Execution_check.with_guard t.execution_check ~check
+  in
+  { t with authorize; admission_check; prepare_output; execution_check }
+;;
+
+let with_local_execution_current t =
+  { t with
+    execution_check =
+      Native_tool_invocation.Execution_check.with_local_default t.execution_check
+  }
 ;;
 
 let with_lifecycle t ~is_halted = { t with is_halted }
@@ -753,6 +777,7 @@ let call_payload kind input =
 
 let prepare_host_call
       ?(native_origin = "script")
+      ?caller
       t
       ~selected
       ~session_id
@@ -845,6 +870,12 @@ let prepare_host_call
        (match
           checked () (fun () ->
             let current () =
+              let%bind () =
+                Option.value_map
+                  caller
+                  ~default:(Ok ())
+                  ~f:Delegated_policy_caller.check_current
+              in
               C.select
                 (t.registry ())
                 ~names:(List.map (C.references selected) ~f:(fun r -> r.C.name))
@@ -861,7 +892,14 @@ let prepare_host_call
             let%bind () = current () in
             let%bind decision =
               prepare
-                { invocation_id = id; session_id; generation; owner; selected; call }
+                { invocation_id = id
+                ; session_id
+                ; generation
+                ; owner
+                ; caller
+                ; selected
+                ; call
+                }
             in
             let%map () = current () in
             decision)
@@ -903,7 +941,37 @@ let prepare_host_call
               | Ok () -> Ok (route reference input Passed None)))))
 ;;
 
-let with_model_preparation t ~selected ~(input : Operation_worker.Input.t) dispatch =
+type policy_caller_source =
+  | Native_scope
+  | Execution of (unit -> (Delegated_policy_caller.t, Agent_protocol.Error.t) result)
+  | Borrowed_event of Delegated_policy_caller.t option
+
+let with_preparation_caller t source f =
+  let capture_and_use capture =
+    let open Result.Let_syntax in
+    let%bind caller = capture () in
+    Exn.protect
+      ~finally:(fun () -> Delegated_policy_caller.close caller)
+      ~f:(fun () -> f (Some caller))
+  in
+  match t.preparation, source with
+  | None, _ -> f None
+  | Some _, Borrowed_event caller -> f caller
+  | Some _, Execution capture -> capture_and_use capture
+  | Some _, Native_scope ->
+    capture_and_use (fun () ->
+      let open Result.Let_syntax in
+      let%bind borrowed = Native_tool_invocation.borrow () in
+      Native_tool_invocation.borrowed_policy_caller borrowed)
+;;
+
+let with_model_preparation
+      t
+      ~capture_caller
+      ~selected
+      ~(input : Operation_worker.Input.t)
+      dispatch
+  =
   match t.preparation with
   | None -> dispatch
   | Some _ ->
@@ -926,14 +994,16 @@ let with_model_preparation t ~selected ~(input : Operation_worker.Input.t) dispa
         in
         let call_id = History_entry.id request.call in
         let%bind prepared =
-          prepare_host_call
-            t
-            ~selected
-            ~session_id:input.session_id
-            ~generation:input.session_generation
-            ~owner:(Model_call (input.operation.id, call_id))
-            ~id:(Stream_invocation.id_for_call ~input ~call_id)
-            { reference; input = value; routing = None; rejection = None }
+          with_preparation_caller t (Execution capture_caller) (fun caller ->
+            prepare_host_call
+              ?caller
+              t
+              ~selected
+              ~session_id:input.session_id
+              ~generation:input.session_generation
+              ~owner:(Model_call (input.operation.id, call_id))
+              ~id:(Stream_invocation.id_for_call ~input ~call_id)
+              { reference; input = value; routing = None; rejection = None })
           |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
         in
         match prepared.rejection with
@@ -970,6 +1040,7 @@ let validate_script_value ~limits value =
 ;;
 
 let with_scope_results
+      ?(caller_source = Native_scope)
       ~result_of_invocation
       ~result_of_error
       ?prepare
@@ -1056,7 +1127,16 @@ let with_scope_results
                 | Invocation parent -> Native_call parent.context.id
                 | Event parent -> Moderator_event parent.context.id
               in
-              prepare_host_call t ~selected ~session_id ~generation ~owner ~id prepared)
+              with_preparation_caller t caller_source (fun caller ->
+                prepare_host_call
+                  ?caller
+                  t
+                  ~selected
+                  ~session_id
+                  ~generation
+                  ~owner
+                  ~id
+                  prepared))
           in
           let reference = prepared.reference in
           let%bind () = checked `Input (fun () -> validate_value prepared.input) in
@@ -1138,7 +1218,8 @@ let with_scope_results
                      ~invocation
                      ~prepare_output
                  | _ ->
-                   Native_tool_invocation.run_scoped_with_managed
+                   Native_tool_invocation.run_scoped_current_with_managed
+                     ~execution_check:t.execution_check
                      ~on_progress:(progress_for t reference)
                      ~managed:(Option.map t.managed ~f:(fun install -> install t))
                      ~moderator_execute
@@ -1196,6 +1277,7 @@ let tool_result (resolved : I.t) =
 ;;
 
 let with_scope
+      ?caller_source
       ?prepare
       ?moderator_execute
       ?max_nested_calls
@@ -1210,6 +1292,7 @@ let with_scope
       f
   =
   with_scope_results
+    ?caller_source
     ~result_of_invocation:tool_result
     ~result_of_error:(fun code -> M.Tool_error code)
     ?prepare
@@ -1226,7 +1309,7 @@ let with_scope
     f
 ;;
 
-let with_invocation t ~prepared ~capabilities ~(parent : I.t) f =
+let with_invocation t ~prepared ~capabilities ~invocation_capabilities ~(parent : I.t) f =
   let selected = EC.capabilities prepared in
   let valid_parent =
     match parent.status with
@@ -1240,6 +1323,11 @@ let with_invocation t ~prepared ~capabilities ~(parent : I.t) f =
     { t with moderator_names = Set.add t.moderator_names (EC.declaration prepared).name }
   in
   with_scope
+    ~caller_source:
+      (Execution
+         (fun () ->
+           invocation_capabilities.Invocation_capabilities.policy_caller
+             ~invocation:parent))
     ~moderator_execute:
       capabilities.Operation_worker.Capabilities.with_moderator_invocation
     t
@@ -1298,6 +1386,7 @@ let with_managed_invocation t ~execution ~borrowed f =
 ;;
 
 let with_script_native_results
+      ?caller_source
       ~result_of_invocation
       ~result_of_error
       ?observer
@@ -1402,6 +1491,7 @@ let with_script_native_results
   in
   Native_tool_moderation.with_handler ~observer ~prepare:moderate (fun () ->
     with_scope_results
+      ?caller_source
       ~result_of_invocation
       ~result_of_error
       ~prepare
@@ -1419,6 +1509,7 @@ let with_script_native_results
 ;;
 
 let with_script_native_calls
+      ?caller_source
       ?observer
       ?max_nested_calls
       ?moderator_execute
@@ -1432,6 +1523,7 @@ let with_script_native_calls
       f
   =
   with_script_native_results
+    ?caller_source
     ~result_of_invocation:tool_result
     ~result_of_error:(fun code -> M.Tool_error code)
     ?observer
@@ -1689,7 +1781,16 @@ let with_inherited_managed_tools t ~env ~delegation ~current ~execution_limits =
   with_managed_tools { t with registry; jobs } ~env ~definition ~execution_limits
 ;;
 
-let with_standalone ?observer t ~prepared ~capabilities ~(parent : I.t) ~moderate f =
+let with_standalone
+      ?observer
+      t
+      ~prepared
+      ~capabilities
+      ~invocation_capabilities
+      ~(parent : I.t)
+      ~moderate
+      f
+  =
   let selected = EC.capabilities prepared in
   let valid_parent =
     match parent.status, (EC.declaration prepared).implementation with
@@ -1700,6 +1801,11 @@ let with_standalone ?observer t ~prepared ~capabilities ~(parent : I.t) ~moderat
     | _ -> false
   in
   with_script_native_calls
+    ~caller_source:
+      (Execution
+         (fun () ->
+           invocation_capabilities.Invocation_capabilities.policy_caller
+             ~invocation:parent))
     ?observer
     ~moderator_execute:
       capabilities.Operation_worker.Capabilities.with_moderator_invocation
@@ -1747,7 +1853,7 @@ let with_one_off ?observer t ~prepared ~limits ~max_nested_calls ~borrowed ~mode
     f
 ;;
 
-let with_moderator_scope t ~definition ~execute ~parent ~valid_parent f =
+let with_moderator_scope ?caller_source t ~definition ~execute ~parent ~valid_parent f =
   match
     List.find_map (EC.compiled_scripts definition) ~f:(fun (script, program) ->
       match script.Chatmd_shell_spec.Extension_spec.kind with
@@ -1772,6 +1878,7 @@ let with_moderator_scope t ~definition ~execute ~parent ~valid_parent f =
           | Standalone _ -> names)
     in
     with_scope
+      ?caller_source
       { t with moderator_names }
       ~selected:(EC.definition_capabilities definition)
       ~limits:script.limits
@@ -1783,8 +1890,12 @@ let with_moderator_scope t ~definition ~execute ~parent ~valid_parent f =
       f
 ;;
 
-let with_observation t ~definition ~execute ~(observing : I.t) f =
+let with_observation t ~definition ~execute ~capabilities ~(observing : I.t) f =
   with_moderator_scope
+    ~caller_source:
+      (Execution
+         (fun () ->
+           capabilities.Invocation_capabilities.policy_caller ~invocation:observing))
     t
     ~definition
     ~execute
@@ -1797,8 +1908,9 @@ let with_observation t ~definition ~execute ~(observing : I.t) f =
     f
 ;;
 
-let with_event t ~definition ~execute ~(executing : E.t) f =
+let with_event ?policy_caller t ~definition ~execute ~(executing : E.t) f =
   with_moderator_scope
+    ~caller_source:(Borrowed_event policy_caller)
     t
     ~definition
     ~execute
@@ -1812,8 +1924,14 @@ let with_event t ~definition ~execute ~(executing : E.t) f =
     f
 ;;
 
-let with_legacy_event t ~selected ~execute ~(executing : E.t) f =
+let with_legacy_event ?capture_caller t ~selected ~execute ~(executing : E.t) f =
+  let caller_source =
+    match capture_caller with
+    | None -> Borrowed_event None
+    | Some capture -> Execution capture
+  in
   with_scope_results
+    ~caller_source
     ~result_of_invocation:tool_result
     ~result_of_error:(fun code -> M.Tool_error code)
     t
@@ -1850,15 +1968,20 @@ let native_dispatch t ~declared ~input ~capabilities =
         Stream_invocation.parse_input ~kind:request.kind ~payload:request.payload
       in
       let prepare tools prepared =
-        prepare_host_call
-          ~native_origin:"delegated_agent"
+        with_preparation_caller
           tools
-          ~selected
-          ~session_id:parent.context.session_id
-          ~generation:parent.context.generation
-          ~owner:(Native_call parent.context.id)
-          ~id
-          prepared
+          (Execution (fun () -> N.borrowed_policy_caller borrowed))
+          (fun caller ->
+             prepare_host_call
+               ?caller
+               ~native_origin:"delegated_agent"
+               tools
+               ~selected
+               ~session_id:parent.context.session_id
+               ~generation:parent.context.generation
+               ~owner:(Native_call parent.context.id)
+               ~id
+               prepared)
         |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
       in
       let%bind moderated =

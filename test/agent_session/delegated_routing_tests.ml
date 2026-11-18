@@ -65,6 +65,7 @@ let%expect_test "moderator event tool preparation retains the actual event owner
           ~event:Session_start
           ~snapshot:(fun () -> Ok snapshot)
           (fun ~executing
+            ~policy_caller:_
             ~model_jobs:_
             ~allocate_inference:_
             ~retirement_reason:_
@@ -316,7 +317,13 @@ let%expect_test "host preparation routes canonical calls before owned admission"
               | `Legacy ->
                 Stream.Tool_dispatch.with_preparation native ~prepare:(fun _ ->
                   Ok (Some (Redirect ("legacy", `Object []))))
-              | _ -> Tools.with_model_preparation tools ~selected:declared ~input native
+              | _ ->
+                Tools.with_model_preparation
+                  tools
+                  ~capture_caller:caps.policy_caller
+                  ~selected:declared
+                  ~input
+                  native
             in
             let tool_tbl = String.Table.create () in
             Hashtbl.set tool_tbl ~key:"legacy" ~data:(fun ~invocation:_ _ ->

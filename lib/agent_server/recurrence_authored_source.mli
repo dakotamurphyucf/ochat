@@ -1,9 +1,11 @@
 open! Core
 
 (** Captured recurrence source DATA derived from an actual selected authored
-    specialist. The caller must retain its genuine runtime/resource lease across
-    every call and any use of returned private capabilities. This module neither
-    acquires resources nor authorizes a native effect, recurrence creation, Run
+    specialist. Resource operations require the genuine runtime/resource lease
+    across each call and any use of returned private capabilities. Immutable
+    [check_source_artifact] instead consumes only verified source DATA. This
+    module neither acquires resources nor authorizes a native effect, recurrence
+    creation, Run
     admission or execution. Names, selectors and returned data are not permission.
     The existing Authored_resources index remains the sole binding lookup owner;
     this module introduces no registry, issuer, mutable lifetime or token. *)
@@ -14,6 +16,19 @@ open! Core
 val capabilities
   :  Agent_session.Runtime_builder.authored_resources
   -> (Chat_response.Tool_capability.t, Agent_protocol.Error.t) result
+
+(** Check the immutable defining declaration and full source fingerprint, then
+    reconstruct the expected publication at the supplied artifact's actual
+    revision/time and compare its exact manifest. The caller first verifies that
+    artifact through its store and admits the real defining source. No resource
+    wrapper, capability registry, current permission or full Source is supplied
+    or created. Missing/stale selector or publication returns the same error as
+    [check_artifact], in the same order. *)
+val check_source_artifact
+  :  Agent_session.Authored_agent_source.t
+  -> selector:Agent_store.Captured_source_kind.Authored_tool.t
+  -> artifact:Agent_store.Prompt_artifact_store.Artifact.t
+  -> (unit, Agent_protocol.Error.t) result
 
 (** Check exact source selector and original artifact publication against this
     prepared specialist. Uses the supplied artifact's revision and ORIGINAL

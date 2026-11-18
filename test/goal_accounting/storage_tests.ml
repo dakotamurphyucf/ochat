@@ -164,17 +164,38 @@ let%expect_test
   let fold =
     A.plan accounting ~goal ~before:ended ~after:next ~admission:None |> account
   in
-  let with_unknown = set raw "future_envelope" (`String "retain") in
-  let with_unknown =
+  let unknown_raw = set raw "future_envelope" (`String "retain") in
+  let unknown_raw =
     set
-      with_unknown
+      unknown_raw
       "payload"
       (set payload "future_aggregate" (`Object [ "retained", `True ]))
-    |> restored
   in
+  let with_unknown = restored unknown_raw in
+  let exported = Child.Export.prepare with_unknown |> protocol in
+  let exported_raw = Child.Export.document exported |> D.Document.json in
+  assert (String.equal (Jsonaf.to_string exported_raw) (Jsonaf.to_string unknown_raw));
+  let public_growth = Child.reserved_growth with_unknown |> protocol in
+  let exported_growth = Child.Export.reserved_growth exported in
+  [%test_eq: int]
+    (Agent_session.Capacity_growth.encoded_bytes exported_growth)
+    (Agent_session.Capacity_growth.encoded_bytes public_growth);
+  [%test_eq: int]
+    (Agent_session.Capacity_growth.fields exported_growth)
+    (Agent_session.Capacity_growth.fields public_growth);
+  [%test_eq: int]
+    (Agent_session.Capacity_growth.nodes exported_growth)
+    (Agent_session.Capacity_growth.nodes public_growth);
   assert (Child.can_retire with_unknown ~ordinal:(L.Handle.ordinal handle) |> protocol);
   let folded = Child.apply with_unknown fold |> protocol in
   let encoded = child_json folded in
+  let folded_export = Child.Export.prepare folded |> protocol in
+  assert (D.Json.equal encoded (Child.Export.document folded_export |> D.Document.json));
+  assert (not (D.Json.equal exported_raw encoded));
+  assert (
+    String.equal
+      (Jsonaf.to_string (Child.Export.document exported |> D.Document.json))
+      (Jsonaf.to_string unknown_raw));
   assert (D.Json.equal (member encoded "future_envelope") (`String "retain"));
   assert (
     D.Json.equal
@@ -237,6 +258,34 @@ let%expect_test "native and decoded partition limits share the same admission in
     | `Array entries -> entries
     | _ -> assert false
   in
+  let extended_entries =
+    first (`Array entries) ~f:(fun entry ->
+      let document = member entry "document" in
+      let document = set document "future_account_envelope" (`String "child") in
+      let document =
+        set
+          document
+          "payload"
+          (set (member document "payload") "future_account_payload" `True)
+      in
+      set entry "document" document)
+  in
+  let extended =
+    set
+      (set raw "future_catalog" (`String "outer"))
+      "payload"
+      (set payload "accounts" extended_entries)
+  in
+  let extended_accounts = Accounts.of_jsonaf extended |> protocol in
+  let encoded = Accounts.to_jsonaf extended_accounts |> protocol in
+  assert (String.equal (Jsonaf.to_string encoded) (Jsonaf.to_string extended));
+  let adopted =
+    Accounts.adopt extended_accounts ~incoming:extended_accounts |> protocol
+  in
+  assert (
+    String.equal
+      (Jsonaf.to_string (Accounts.to_jsonaf adopted |> protocol))
+      (Jsonaf.to_string extended));
   let too_many =
     set raw "payload" (set payload "accounts" (`Array (List.hd_exn entries :: entries)))
   in

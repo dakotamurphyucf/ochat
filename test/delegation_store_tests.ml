@@ -73,8 +73,9 @@ let admission () =
     }
 ;;
 
-let reserve ledger key admission =
+let reserve ?before_write ledger key admission =
   D.reserve
+    ?before_write
     ledger
     ~key
     ~request_sha256:(digest "complete creation request")
@@ -131,7 +132,24 @@ let%expect_test "authored delegation identity survives restart and cannot change
       let store = create env sw root in
       let ledger = S.delegations store in
       let generated_key = key "generated" in
-      let generated = reserve ledger generated_key (admission ()) |> record in
+      let generated_candidate = admission () in
+      let exception Authority_changed in
+      let deny_write () = raise Authority_changed in
+      let denied () =
+        match
+          reserve ~before_write:deny_write ledger generated_key generated_candidate
+        with
+        | exception Authority_changed -> ()
+        | _ -> failwith "revoked authority published a delegation frame"
+      in
+      denied ();
+      assert (Option.is_none (D.find ledger generated_key |> store_ok));
+      let generated = reserve ledger generated_key generated_candidate |> record in
+      denied ();
+      assert (
+        Option.exists
+          (D.find ledger generated_key |> store_ok)
+          ~f:(D.equal_record generated));
       let generated_reference = D.reference generated in
       let authored_key = key "authored" in
       let origin : D.Admission.authored_tool =
@@ -143,7 +161,7 @@ let%expect_test "authored delegation identity survives restart and cannot change
       let authored = reserve ledger authored_key candidate |> record in
       let reference = D.reference authored in
       let conflict key candidate =
-        match reserve ledger key candidate with
+        match reserve ~before_write:deny_write ledger key candidate with
         | Conflict _ -> ()
         | New _ | Replay _ -> failwith "origin substitution did not conflict"
       in
@@ -214,7 +232,19 @@ let%expect_test "authored delegation identity survives restart and cannot change
         D.equal_record
           scoped
           (reserve ledger scoped_key { retry with lifetime = scope } |> record));
-      let revoked = D.revoke ledger authored Parent_stopped |> store_ok in
+      let linked =
+        List.fold
+          [ D.Artifact_installed; Child_installed; Linked ]
+          ~init:generated
+          ~f:(fun current stage -> D.advance ledger current stage |> store_ok)
+      in
+      assert (
+        D.equal_record
+          linked
+          (D.revoke_unfinished ledger generated Admission_failed |> store_ok));
+      assert (D.equal_record linked (D.resolve ledger generated_reference |> store_ok));
+      let revoked = D.revoke_unfinished ledger authored Parent_stopped |> store_ok in
+      assert (Option.equal D.equal_revocation revoked.revocation (Some Parent_stopped));
       assert (
         Option.equal
           D.Admission.equal_authored_tool

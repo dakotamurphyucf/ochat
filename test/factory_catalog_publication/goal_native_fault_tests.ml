@@ -67,8 +67,7 @@ let%expect_test "native Complete unknown ACK cannot accept or dispatch a callbac
                    Eio.Fiber.pair
                      (fun () ->
                         Eio.Buf_read.take_all
-                          (Eio.Buf_read.of_flow ~max_size:16384 output)
-                        |> Jsonaf.of_string)
+                          (Eio.Buf_read.of_flow ~max_size:16384 output))
                      (fun () ->
                         Eio.Buf_read.take_all
                           (Eio.Buf_read.of_flow ~max_size:8192 diagnostics))
@@ -76,9 +75,15 @@ let%expect_test "native Complete unknown ACK cannot accept or dispatch a callbac
                  (match Eio.Process.await child with
                   | `Exited 73 -> ()
                   | `Exited code ->
-                    raise_s [%sexp "native fault child failed", (code : int)]
+                    raise_s
+                      [%sexp
+                        "native fault child failed", (code : int), (diagnostics : string)]
                   | `Signaled signal ->
-                    raise_s [%sexp "native fault child signaled", (signal : int)]);
+                    raise_s
+                      [%sexp
+                        "native fault child signaled"
+                      , (signal : int)
+                      , (diagnostics : string)]);
                  (* The poisoned writer can race its queued cleanup warning
                     against the deliberate hard exit. Only that exact warning
                     is permitted; parent recovery diagnostics remain visible. *)
@@ -96,7 +101,7 @@ let%expect_test "native Complete unknown ACK cannot accept or dispatch a callbac
                    raise_s
                      [%sexp
                        "unexpected native fault child stderr", (diagnostics : string)];
-                 report)
+                 Jsonaf.of_string report)
              in
              let primary =
                Jsonaf.member_exn "primary" report |> P.Error.of_json |> protocol_ok
@@ -174,8 +179,8 @@ let%expect_test
     ~v1:true
     ~wrap_env:(Fault.wrap fault)
     (fun
-        _env
-         _daemon
+        env
+         daemon
          entry
          runtime
          counters
@@ -205,6 +210,10 @@ let%expect_test
         | Dispatch_claimed _ -> ()
         | _ -> assert false);
        await_no_goal_provider counters resumed_entered;
+       Uncertain_writer_test_support.close_uncertain_entry
+         entry
+         ~env
+         ~store:(Daemon.store daemon);
        reopen (fun recovered loaded actual_runtime ->
          assert (
            Option.is_none (Actor.select_native_goal_resume loaded.actor |> protocol_ok));

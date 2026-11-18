@@ -55,6 +55,17 @@ module Trace = struct
 end
 
 module Invocation = struct
+  module Effect_check = struct
+    type t =
+      { refresh : unit -> unit
+      ; check : unit -> unit
+      }
+
+    let create ~refresh ~check = { refresh; check }
+    let refresh t = t.refresh ()
+    let check t = t.check ()
+  end
+
   type delivery =
     | Protected
     | Propagate
@@ -68,10 +79,15 @@ module Invocation = struct
   type t =
     { observers : observers option
     ; inference_parent : Transcript.Scope.parent option
+    ; effect_check : Effect_check.t option
     }
 
-  let silent = { observers = None; inference_parent = None }
-  let observed observers = { observers = Some observers; inference_parent = None }
+  let silent = { observers = None; inference_parent = None; effect_check = None }
+
+  let observed observers =
+    { observers = Some observers; inference_parent = None; effect_check = None }
+  ;;
+
   let create progress = observed { progress; trace = ignore; delivery = Protected }
 
   let create_with_trace ~progress ~trace =
@@ -104,6 +120,8 @@ module Invocation = struct
   let is_observed t = Option.is_some t.observers
   let with_inference_parent t ~parent = { t with inference_parent = Some parent }
   let inference_parent t = t.inference_parent
+  let with_effect_check t ~check = { t with effect_check = Some check }
+  let effect_check t = t.effect_check
 end
 
 type runner = invocation:Invocation.t -> string -> Openai.Responses.Tool_output.Output.t

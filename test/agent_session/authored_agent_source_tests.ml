@@ -12,6 +12,263 @@ let built = function
   | Error errors -> raise_s [%sexp (errors : B.Diagnostic.t list)]
 ;;
 
+let check_delayed_source_binding ~env ~temporary ~definition ~artifact_store ~root ~parent
+  =
+  (* Capture the real delegated plan before any future child reservation exists.
+     The poisoned moderator above must remain uninitialized throughout. *)
+  let module Preparation = Agent_session.Runtime_script_preparation in
+  let module Selection = Agent_session.Runtime_source_preparation in
+  let policy = script_preparation () in
+  let selected_source, selected_revision, prepared =
+    Preparation.with_authored_child
+      (Some policy)
+      ~parent
+      ~tool_name:"researcher"
+      ~content_limits:None
+      ~env
+      ~checkpoint:Eio.Fiber.check
+      ~f:(fun startup ~source ~revision ->
+        let open Result.Let_syntax in
+        Preparation.with_revision_plan
+          (Some policy)
+          ~startup
+          revision
+          ~env
+          ~invocation:Delegated_ui
+          ~checkpoint:Eio.Fiber.check
+          ~f:(fun startup ~compilation_limits ~plan ~programs ->
+            let%map prepared =
+              Selection.Prepared_revision.capture
+                revision
+                ~invocation:Delegated_ui
+                ~startup
+                ~compilation_limits
+                ~plan
+                ~programs
+                ~checkpoint:(fun () ->
+                  Chat_response.Startup_compilation.checkpoint startup)
+            in
+            source, revision, prepared))
+    |> protocol_ok
+  in
+  let original_selection =
+    Selection.Prepared_revision.bind
+      prepared
+      ~input:
+        (Selection.Revision_input.authored selected_revision ~invocation:Delegated_ui)
+    |> protocol_ok
+  in
+  assert (
+    Selection.Moderator.equal
+      (Selection.Prepared_revision.moderator prepared)
+      (Selection.moderator original_selection));
+  (match Selection.moderator original_selection with
+   | Extension _ -> ()
+   | No_moderator | Legacy _ -> failwith "original delegated moderator was not selected");
+  let denied result =
+    match result with
+    | Error { P.Error.code = Invalid_state; _ } -> ()
+    | Error error -> raise_s [%sexp (error : P.Error.t)]
+    | Ok _ -> failwith "delayed source binding accepted a different role or artifact"
+  in
+  Selection.Prepared_revision.bind
+    prepared
+    ~input:(Selection.Revision_input.authored selected_revision ~invocation:Ui)
+  |> denied;
+  Selection.Prepared_revision.bind
+    prepared
+    ~input:(Selection.Revision_input.authored parent ~invocation:Delegated_ui)
+  |> denied;
+  Eio.Switch.run (fun sw ->
+    let module D = Agent_store.Delegation_store in
+    let module Ledger = Agent_store.Session_store in
+    let ledger =
+      Ledger.create
+        ~env
+        ~sw
+        ~root:(Filename.concat temporary "delayed-source-ledger")
+        ~server_id:(P.Id.Server.create ())
+        ~process_start_identity:None
+        ~lock_nonce:"delayed-source"
+      |> store_ok
+    in
+    Exn.protect
+      ~finally:(fun () -> Ledger.close ledger |> store_ok)
+      ~f:(fun () ->
+        let artifact =
+          S.artifact
+            selected_source
+            ~revision_id:(P.Id.Prompt_revision.create ())
+            ~created_at:timestamp
+          |> store_ok
+        in
+        let admission : D.Admission.t =
+          { child_session_id = P.Id.Session.create ()
+          ; revision_id = artifact.revision_id
+          ; transaction_id = P.Id.Transaction.create ()
+          ; manifest_sha256 = artifact.manifest_sha256
+          ; parent_revision_id = R.id parent
+          ; parent_stop_epoch = Some 0L
+          ; authority_sha256 = Chatmd_shell_spec.Source_ref.digest "source binding DATA"
+          ; authored_tool =
+              Some { name = "researcher"; source_sha256 = S.fingerprint selected_source }
+          ; goal_origin = None
+          ; captured_recurrence = None
+          ; capability_pins = []
+          ; lifetime = Owned
+          ; created_at = artifact.created_at
+          ; inference_target = Some (delegation_inference_target ())
+          }
+        in
+        let record =
+          D.reserve
+            (Ledger.delegations ledger)
+            ~key:
+              { parent_session_id = session_id
+              ; parent_generation = 0
+              ; principal_id
+              ; idempotency_key =
+                  P.Idempotency_key.of_string "delayed-source" |> protocol_ok
+              }
+            ~request_sha256:(Chatmd_shell_spec.Source_ref.digest "delayed-source")
+            ~admission
+            ~max_records:4
+            ~max_bytes:1_000_000
+          |> store_ok
+          |> function
+          | D.New record -> record
+          | Replay _ | Conflict _ -> failwith "delayed source reservation reused"
+        in
+        let record =
+          S.install_reserved
+            ~delegations:(Ledger.delegations ledger)
+            ~reservation:record
+            ~artifact_store
+            ~capability_pins:[]
+            selected_source
+          |> protocol_ok
+        in
+        let installed =
+          B.restore ~artifact_store definition artifact.revision_id |> built
+        in
+        let child =
+          Agent_session.Prompt_child_source.restore
+            ~artifact_store
+            ~definition
+            ~content_limits:None
+            (Agent_session.Prompt_child_source.reference_of_revision
+               installed
+               ~checkpoint:Eio.Fiber.check
+             |> protocol_ok)
+            ~checkpoint:Eio.Fiber.check
+          |> protocol_ok
+        in
+        List.iter
+          Preparation.Invocation.[ Ui; Headless ]
+          ~f:(fun invocation ->
+            let input =
+              Selection.Revision_input.authored_child child ~record ~invocation
+              |> protocol_ok
+            in
+            assert (
+              Preparation.Invocation.equal
+                invocation
+                (Selection.Revision_input.binding_invocation input));
+            assert (
+              Preparation.Invocation.equal
+                Delegated_ui
+                (Selection.Revision_input.preparation_invocation input));
+            let bound = Selection.Prepared_revision.bind prepared ~input |> protocol_ok in
+            assert (Preparation.Invocation.equal invocation (Selection.invocation bound));
+            assert (
+              P.Id.Prompt_revision.equal
+                artifact.revision_id
+                (Selection.artifact bound).revision_id);
+            assert (
+              Selection.Moderator.equal
+                (Selection.moderator original_selection)
+                (Selection.moderator bound));
+            match Selection.programs original_selection, Selection.programs bound with
+            | None, None -> ()
+            | Some original, Some bound -> assert (phys_equal original bound)
+            | None, Some _ | Some _, None ->
+              failwith "delayed binding changed the original restored program custody")));
+  (* Genuine legacy custody absence still classifies the actual declaration;
+     absent plan/programs is never itself a No_moderator proof. *)
+  List.iter
+    [ "none", "<developer>No policy.</developer>"
+    ; ( "legacy"
+      , {|<script id="legacy" language="chatml" kind="moderator">let initial_state = fail("legacy classification initialized")</script>|}
+      )
+    ; ( "extension"
+      , {|<script id="extension" language="chatml" kind="moderator" api="extensibility-v1">let initial_state = fail("extension classification initialized")</script>|}
+      )
+    ]
+    ~f:(fun (kind, text) ->
+      let artifact =
+        Store.Artifact.create
+          ~revision_id:(P.Id.Prompt_revision.create ())
+          ~root_chatmd:text
+          ~sources:[]
+          ~parser_schema_version:5
+          ~runtime_schema_version:1
+          ~created_at:timestamp
+          ()
+        |> store_ok
+      in
+      let revision =
+        R.create
+          ~definition
+          ~artifact
+          ~materialized_tree:root
+          ~elements:
+            (CM.parse_chat_inputs
+               ~dir:root
+               ~source_loader:(Source_loader.captured_filesystem ~root ~sources:[])
+               text)
+      in
+      let bound =
+        Preparation.with_revision_plan
+          None
+          revision
+          ~env
+          ~invocation:Ui
+          ~checkpoint:Eio.Fiber.check
+          ~f:(fun startup ~compilation_limits ~plan ~programs ->
+            assert (Option.is_none plan && Option.is_none programs);
+            let open Result.Let_syntax in
+            let%bind prepared =
+              Selection.Prepared_revision.capture
+                revision
+                ~invocation:Ui
+                ~startup
+                ~compilation_limits
+                ~plan
+                ~programs
+                ~checkpoint:(fun () ->
+                  Chat_response.Startup_compilation.checkpoint startup)
+            in
+            let%map bound =
+              Selection.Prepared_revision.bind
+                prepared
+                ~input:(Selection.Revision_input.authored revision ~invocation:Ui)
+            in
+            assert (
+              Selection.Moderator.equal
+                (Selection.Prepared_revision.moderator prepared)
+                (Selection.moderator bound));
+            bound)
+        |> protocol_ok
+      in
+      let actual =
+        match Selection.moderator bound with
+        | No_moderator -> "none"
+        | Legacy _ -> "legacy"
+        | Extension _ -> "extension"
+      in
+      [%test_eq: string] kind actual)
+;;
+
 let%expect_test
     "authored specialists retain their source closure across edits and relocation"
   =
@@ -72,6 +329,7 @@ let%expect_test
     let parent = build () in
     let captured = S.capture ~parent ~tool_name:"researcher" () |> protocol_ok in
     let reviewer = S.capture ~parent ~tool_name:"reviewer" () |> protocol_ok in
+    check_delayed_source_binding ~env ~temporary ~definition ~artifact_store ~root ~parent;
     assert (phys_equal parent (S.defining_revision captured));
     let parsed = R.parser_context parent |> Option.value_exn in
     let reference = S.defining_reference captured |> Option.value_exn in

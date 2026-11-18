@@ -226,6 +226,7 @@ let%expect_test
                            ~snapshot:(fun () -> Ok snapshot)
                            ~event:Chat_response.Moderation.Event.Turn_end
                            (fun ~executing
+                             ~policy_caller:_
                              ~model_jobs:_
                              ~allocate_inference:_
                              ~retirement_reason:_
@@ -253,7 +254,7 @@ let%expect_test
                   ~persistence:
                     { archive_reference
                     ; commit =
-                        (fun ~command_audit ~previous next ->
+                        (fun ?observation ~command_audit ~previous next ->
                           if !reject
                           then (
                             reject := false;
@@ -270,7 +271,8 @@ let%expect_test
                           then (
                             reject_completion := false;
                             Error (handoff_error "injected compaction checkpoint failure"))
-                          else persistence.commit ~command_audit ~previous next)
+                          else
+                            persistence.commit ?observation ~command_audit ~previous next)
                     }
                   ~operation_worker:(Some worker)
                   ~services:
@@ -445,12 +447,23 @@ let%expect_test
                exercise discard/precedence but cannot authorize a new effect. *)
             (match mode with
              | `End ->
-               let halted =
-                 { snapshot with halted = true; halted_reason = Some "done" }
+               let state = A.state actor |> protocol_ok in
+               let checkpoint =
+                 Agent_session.Moderator_checkpoint.of_jsonaf
+                   (Option.value_exn state.moderator)
+                 |> protocol_ok
                in
-               A.change_moderator actor (Some (B.encode_moderator_snapshot halted))
-               |> protocol_ok
-               |> ignore
+               let current = Agent_session.Moderator_checkpoint.snapshot checkpoint in
+               let halted = { current with halted = true; halted_reason = Some "done" } in
+               let checkpoint =
+                 Agent_session.Moderator_checkpoint.update
+                   checkpoint
+                   ~snapshot:halted
+                   ~queue:Keep
+                 |> protocol_ok
+                 |> Agent_session.Moderator_checkpoint.to_jsonaf
+               in
+               A.change_moderator actor (Some checkpoint) |> protocol_ok |> ignore
              | _ -> ());
             let restore state = restore_state state |> store_ok in
             let actor, backend =
@@ -458,9 +471,25 @@ let%expect_test
               | `Obsolete ->
                 let state = A.state actor |> protocol_ok in
                 A.shutdown actor;
+                (* Keep the original receipt DATA for the old-generation rejection
+                   oracle, but retire its source exactly as a generation reset does.
+                   This fixture is not an administrative reset command test. *)
+                let revision = Int64.succ state.counters.revision in
+                let run_state =
+                  Option.map state.run_state ~f:(fun index ->
+                    Agent_session.Run_retirement.replace
+                      index
+                      ~change:(Reset None)
+                      ~session_revision:revision
+                      ~now:state.identity.updated_at
+                    |> protocol_ok)
+                in
                 let state =
                   { state with
                     identity = { state.identity with generation = 1 }
+                  ; counters = { state.counters with revision }
+                  ; run_state
+                  ; moderator = None
                   ; inference_ledger =
                       Agent_session.Inference_ledger.with_generation
                         state.inference_ledger
@@ -935,8 +964,11 @@ let%expect_test "runtime owner drains observation batches and applies durable te
            ; check_execution = None
            ; check_ancestry = None
            ; ancestor_capabilities = None
+           ; retained_ancestor_sources = None
            ; source_lease = Agent_session.Prompt_source_lease.legacy
            ; activity = None
+           ; product_callbacks = None
+           ; unmoderated_source = None
            ; native_runtime = None
            ; moderator_activation = None
            ; authored_start =
@@ -971,7 +1003,7 @@ let%expect_test "runtime owner drains observation batches and applies durable te
                  ~payload:_ -> failwith "unexpected model job")
            ; enqueue_model_job_completion =
                (fun ?prepare:_ _ -> failwith "unexpected completion")
-           ; close = (fun () -> ())
+           ; close = B.Close.legacy (fun () -> ())
            }
          in
          let owner =
@@ -1122,8 +1154,8 @@ let%expect_test
           match mode, !rejected with
           | `Save_failure, false
             when List.exists next.state.moderator_executions ~f:(fun event ->
-                   match event.status with
-                   | Completed _ -> true
+                   match event.context.phase, event.status with
+                   | Internal_event, Completed _ -> true
                    | _ -> false) ->
             rejected := true;
             true
@@ -1179,27 +1211,32 @@ let%expect_test
                  | _ -> Task.pure(state) |}
                 )
           in
-          M.handle_event_entries_transactional
-            manager
-            ~session_id:"fixture"
-            ~now_ms:0
-            ~history:[]
-            ~available_tools:[]
-            ~session_meta:`Null
-            ~event:Session_start
-            ~authorize:(fun () -> Ok ())
-            ~on_tool_call:(fun ~name:_ ~args:_ -> assert false)
-            ~prepare_event:(fun ~outcome:_ ~snapshot:_ -> Ok (M.memory_commit ignore))
-          |> Result.ok_or_failwith
-          |> ignore;
+          let empty = M.identity_snapshot manager |> Result.ok_or_failwith in
+          assert (List.is_empty empty.queued_internal_events);
           let snapshot =
-            Some
-              (B.encode_moderator_snapshot
-                 (M.identity_snapshot manager |> Result.ok_or_failwith))
+            Some (Agent_session.Runtime_builder.encode_moderator_snapshot empty)
           in
           prepared := Some manager;
           Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input caps ->
             caps.commit_moderator snapshot |> protocol_ok;
+            let startup =
+              Agent_session.Moderator_event.run_ordinary
+                ~event:Session_start
+                ~claim:(caps.with_moderator_event ~event:Session_start)
+                ~manager
+                ~history:(fun () -> input.history)
+                ~available_tools:[]
+                ~session_meta:`Null
+                ~now:Agent_protocol.Timestamp.now
+                ()
+              |> protocol_ok
+            in
+            assert (Option.is_some startup);
+            let snapshot =
+              Some
+                (Agent_session.Runtime_builder.encode_moderator_snapshot
+                   (M.identity_snapshot manager |> Result.ok_or_failwith))
+            in
             Completed
               { final_history = input.history
               ; moderator_snapshot = snapshot
@@ -1209,6 +1246,34 @@ let%expect_test
            Eio.Switch.run (fun probe_sw ->
              let initial = await_idle actor in
              let manager = Option.value_exn !prepared in
+             let startup =
+               match
+                 List.filter initial.moderator_executions ~f:(fun event ->
+                   Agent_protocol.Moderator_execution.equal_phase
+                     event.context.phase
+                     Session_start)
+               with
+               | [ startup ] -> startup
+               | _ -> failwith "fixture requires one actual Session_start receipt"
+             in
+             (match startup.status with
+              | Completed _ -> ()
+              | Running | Failed _ | Interrupted _ ->
+                failwith "actual fixture Session_start failed");
+             let metadata =
+               assert_moderator_checkpoint
+                 initial
+                 ~snapshot:(M.identity_snapshot manager |> Result.ok_or_failwith)
+               |> Option.value_exn
+             in
+             let entries = Agent_session.Moderator_queue.entries metadata in
+             [%test_eq: int] (if interactive then 1 else 35) (List.length entries);
+             List.iter entries ~f:(fun entry ->
+               match Agent_session.Moderator_queue.Entry.producer entry with
+               | Some (Event actual) ->
+                 assert (
+                   Agent_protocol.Id.Moderator_execution.equal actual startup.context.id)
+               | _ -> failwith "fixture emit lost its actual Session_start producer");
              let release_probe, release_probe_u = Eio.Promise.create () in
              let probed, probed_u = Eio.Promise.create () in
              (on_native
@@ -1365,8 +1430,11 @@ let%expect_test
                ; check_execution = None
                ; check_ancestry = None
                ; ancestor_capabilities = None
+               ; retained_ancestor_sources = None
                ; source_lease = Agent_session.Prompt_source_lease.legacy
                ; activity = None
+               ; product_callbacks = None
+               ; unmoderated_source = None
                ; native_runtime = None
                ; moderator_activation = None
                ; authored_start =
@@ -1398,7 +1466,7 @@ let%expect_test
                      ~payload:_ -> failwith "unexpected model job")
                ; enqueue_model_job_completion =
                    (fun ?prepare:_ _ -> failwith "unexpected completion")
-               ; close = (fun () -> ())
+               ; close = B.Close.legacy (fun () -> ())
                }
              in
              let owner =
@@ -1418,11 +1486,20 @@ let%expect_test
              let summarize result =
                let state = A.state actor |> protocol_ok in
                let snapshot = M.identity_snapshot manager |> Result.ok_or_failwith in
-               assert (
-                 Option.equal
-                   Jsonaf.exactly_equal
-                   state.moderator
-                   (Some (B.encode_moderator_snapshot snapshot)));
+               let metadata = assert_moderator_checkpoint state ~snapshot in
+               let emitted = if interactive then 1 else 35 in
+               let committed =
+                 List.exists state.moderator_executions ~f:(fun event ->
+                   match event.context.phase, event.status with
+                   | Internal_event, Completed _ -> true
+                   | _ -> false)
+               in
+               assert_moderator_queue_frontier
+                 metadata
+                 ~required:committed
+                 ~head:
+                   (Int64.of_int (emitted - List.length snapshot.queued_internal_events))
+                 ~next:(Int64.of_int emitted);
                assert_same_session_snapshot
                  state
                  (Agent_session.Memory_backend.state backend);
@@ -1434,14 +1511,14 @@ let%expect_test
                assert (Option.is_none state.active_operation);
                let completed =
                  List.count state.moderator_executions ~f:(fun event ->
-                   match event.status, event.intent with
-                   | Completed _, (None | Some Applied) -> true
+                   match event.context.phase, event.status, event.intent with
+                   | Internal_event, Completed _, (None | Some Applied) -> true
                    | _ -> false)
                in
                let failed =
                  List.count state.moderator_executions ~f:(fun event ->
-                   match event.status with
-                   | Failed _ | Interrupted _ -> true
+                   match event.context.phase, event.status with
+                   | Internal_event, (Failed _ | Interrupted _) -> true
                    | _ -> false)
                in
                let observed =

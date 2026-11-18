@@ -63,7 +63,13 @@ let initialize connection ~implementation_name ~implementation_version =
     connection
     ~implementation_name
     ~implementation_version
-    ~features:Agent_protocol.Inference_query.Features.all
+    ~features:
+      (Agent_protocol.Inference_query.Features.all
+       @ [ Agent_protocol.Goal_query.Features.inspect
+         ; Agent_protocol.Goal_control.Features.control
+         ; Agent_protocol.Recurrence_query.Features.inspect
+         ; Agent_protocol.Recurrence_control.Features.control
+         ])
 ;;
 
 let initial_projection connection session_id replay previous_projection =
@@ -129,24 +135,26 @@ let mark_closed t =
 ;;
 
 let install_projection t result =
-  let projection =
+  let accepted =
     Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
-      match result with
-      | Error failure ->
-        t.last_error <- Some failure;
-        t.projection <- Projection.mark_stale t.projection failure;
-        None
-      | Ok projection ->
-        t.projection <- projection;
-        Some projection)
+      if t.closed
+      then false
+      else (
+        (match result with
+         | Error failure ->
+           t.last_error <- Some failure;
+           t.projection <- Projection.mark_stale t.projection failure
+         | Ok projection -> t.projection <- projection);
+        true))
   in
-  match result, projection with
-  | Error failure, _ ->
-    Exn.protect
-      ~finally:(fun () -> mark_closed t)
-      ~f:(fun () -> Option.iter t.on_error ~f:(fun callback -> callback failure))
-  | Ok _, Some projection -> notify t projection
-  | Ok _, None -> ()
+  if accepted
+  then (
+    match result with
+    | Error failure ->
+      Exn.protect
+        ~finally:(fun () -> mark_closed t)
+        ~f:(fun () -> Option.iter t.on_error ~f:(fun callback -> callback failure))
+    | Ok projection -> notify t projection)
 ;;
 
 let apply_notification t = function
@@ -178,22 +186,13 @@ let apply_notification t = function
   | Notification _ | Request _ | Response _ -> ()
 ;;
 
-let next_notification t lease =
-  Eio.Fiber.first
-    (fun () -> Connection.next_owned_notification lease)
-    (fun () ->
-       Eio.Promise.await t.closed_signal;
-       Ok None)
-;;
-
 let rec read_notifications t lease =
   if not (Eio.Mutex.use_ro t.mutex (fun () -> t.closed))
   then (
-    match next_notification t lease with
+    match Connection.next_owned_notification lease with
     | Error failure -> install_projection t (Error failure)
     | Ok None ->
-      install_projection t (Error (interrupted "session notification stream closed"));
-      mark_closed t
+      install_projection t (Error (interrupted "session notification stream closed"))
     | Ok (Some envelope) ->
       apply_notification t envelope;
       read_notifications t lease)
@@ -953,6 +952,48 @@ let configuration t =
   match result with
   | Session_configuration_get view -> Ok view
   | _ -> Error (Agent_protocol.Error.invalid_request "unexpected configuration result")
+;;
+
+let instructions t =
+  Instruction_controls.create
+    ~connection:t.connection
+    ~session_id:t.session_id
+    ~attachment:(fun () -> (attachment t).id)
+;;
+
+let goals t =
+  let module P = Agent_protocol in
+  match Connection.initialization t.connection with
+  | None ->
+    Error (P.Error.invalid_request "Goal controls require an initialized connection")
+  | Some initialized ->
+    let session =
+      P.Session_ref.create ~server_id:initialized.server_id ~session_id:t.session_id
+    in
+    Ok
+      (Goal_controls.create
+         t.connection
+         ~session
+         ~attachment:(fun () -> (attachment t).id)
+         ())
+;;
+
+let recurrences t =
+  let module P = Agent_protocol in
+  match Connection.initialization t.connection with
+  | None ->
+    Error
+      (P.Error.invalid_request "recurrence controls require an initialized connection")
+  | Some initialized ->
+    let session =
+      P.Session_ref.create ~server_id:initialized.server_id ~session_id:t.session_id
+    in
+    Ok
+      (Recurrence_controls.create
+         t.connection
+         ~session
+         ~attachment:(fun () -> (attachment t).id)
+         ())
 ;;
 
 let update_configuration t ~expected_generation ~expected_revision patch =

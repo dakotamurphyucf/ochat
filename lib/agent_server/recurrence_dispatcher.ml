@@ -152,13 +152,16 @@ let with_target t session f =
            not (P.Session_ref.equal current session))))
 ;;
 
+let with_known_occupancy t f =
+  let open Result.Let_syntax in
+  let%bind occupancy = Host.pending_occupancy t.host in
+  match occupancy.unknown with
+  | unknown :: _ -> Error unknown.error
+  | [] -> f occupancy
+;;
+
 let with_fresh_target t session f =
-  with_target t session (fun () ->
-    let open Result.Let_syntax in
-    let%bind occupancy = Host.pending_occupancy t.host in
-    match occupancy.unknown with
-    | unknown :: _ -> Error unknown.error
-    | [] -> f occupancy)
+  with_target t session (fun () -> with_known_occupancy t f)
 ;;
 
 let result_of_attempt cursor ~intent ~attempt result =
@@ -326,15 +329,32 @@ let with_ready_target
       frontier
       definition
       occurrence
+      ~action
+      ~can_launch
       f
   =
   let open Result.Let_syntax in
   match A.Recurrence_target.view (A.Recurrence_definition.target definition) with
   | Existing_session { session; _ } ->
-    with_fresh_target t session (fun occupancy ->
-      let%bind target = Host.acquire_existing_target controller ~session in
-      f occupancy target)
+    with_target t session (fun () ->
+      let%bind observed = Host.observe_existing_target controller ~definition in
+      match observed with
+      | Available target ->
+        let%bind () = can_launch () in
+        with_known_occupancy t (fun occupancy -> f occupancy target)
+      | Invalidated { evidence; authorize } ->
+        (* Unknown occupancy and retained siblings still fence admission. A
+           factual pause preserves those attempts, so neither requires deferral. *)
+        action := true;
+        Actor.pause_invalid_recurrence_target
+          controller_entry.Session_registry.actor
+          ~actor:(Host.Controller.actor controller)
+          ~authorize
+          ~definition:(A.Recurrence_definition.key definition)
+          ~expected_control_revision:(Entry.control_revision recurrence_entry)
+          ~evidence)
   | Fresh_child _ ->
+    let%bind () = can_launch () in
     let linked =
       List.exists (Frontier.child_associations frontier) ~f:(fun association ->
         Occurrence.equal
@@ -366,7 +386,7 @@ let with_ready_target
     with_fresh_target t session (fun occupancy ->
       let%bind target =
         match permit with
-        | None -> Host.acquire_captured_target controller ~occurrence
+        | None -> Host.acquire_captured_target ~fresh_goal:true controller ~occurrence
         | Some permit ->
           let%bind child =
             Session_factory.create_recurrence_child
@@ -435,7 +455,7 @@ let start_ready t controller cursor ~action recurrence_entry frontier occurrence
            (Option.exists (Frontier.find_execution frontier key) ~f:(fun execution ->
               not (A.Recurrence_execution.is_pending execution))))
   in
-  let%bind () =
+  let can_launch () =
     if sibling then conflict "an earlier occurrence retains serial occupancy" else Ok ()
   in
   with_ready_target
@@ -446,6 +466,8 @@ let start_ready t controller cursor ~action recurrence_entry frontier occurrence
     frontier
     definition
     occurrence
+    ~action
+    ~can_launch
     (fun occupancy target ->
        let%bind child, session, source =
          match A.Recurrence_target.view (A.Recurrence_definition.target definition) with

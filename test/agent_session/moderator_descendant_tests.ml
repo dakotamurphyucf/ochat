@@ -122,6 +122,7 @@ let%expect_test "event and idle descendants require a live parent in the exact o
               ~event:Session_start
               ~snapshot:(fun () -> Ok (snapshot ()))
               (fun ~executing
+                ~policy_caller:_
                 ~model_jobs:_
                 ~allocate_inference:_
                 ~retirement_reason:_

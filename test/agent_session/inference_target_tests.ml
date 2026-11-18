@@ -104,7 +104,7 @@ let%test_unit
      | Unresolved -> ()
      | Captured _ -> assert false);
     let stored = capture admitted.delta in
-    assert (Int.equal (D.Document.version (A.Session_delta_document.document stored)) 8);
+    assert (Int.equal (D.Document.version (A.Session_delta_document.document stored)) 10);
     let replayed =
       A.Session_delta.apply before (A.Session_delta_document.value stored) |> protocol_ok
     in
@@ -433,7 +433,7 @@ let%test_unit "initialization preserves acknowledged shell grants before Ready" 
               (Session.Shell_state.sexp_of_t acknowledged.shell)))))
 ;;
 
-let create_pending_actor env sw initial =
+let create_pending_actor ?(wrap_persistence = Fn.id) env sw initial =
   let backend = A.Memory_backend.create ~event_capacity:128 ~initial_state:initial in
   let actor =
     A.Session_actor.create
@@ -443,7 +443,7 @@ let create_pending_actor env sw initial =
       ~compaction_env:None
       ~initial_state:initial
       ~operation_worker:None
-      ~persistence:(A.Memory_backend.persistence backend)
+      ~persistence:(wrap_persistence (A.Memory_backend.persistence backend))
       ~services:
         { now = (fun () -> timestamp)
         ; monotonic_now = (fun () -> Mtime.min_stamp)
@@ -467,11 +467,15 @@ let pending_state workspace_instance =
   }
 ;;
 
-let with_pending_actor ?(prepare = Fn.id) f =
+let with_pending_actor ?(prepare = Fn.id) ?(wrap_persistence = Fn.id) f =
   with_actor_workspace (fun env workspace_instance ->
     Eio.Switch.run (fun sw ->
       let actor, backend =
-        create_pending_actor env sw (prepare (pending_state workspace_instance))
+        create_pending_actor
+          ~wrap_persistence
+          env
+          sw
+          (prepare (pending_state workspace_instance))
       in
       Exn.protect
         ~f:(fun () -> f actor backend)
@@ -830,4 +834,285 @@ let%test_unit "Ready construction keeps its own purpose and original authority" 
        A.Session_actor.end_initialization actor ~scope |> protocol_ok;
        Atomic.set live true;
        assert (Result.is_error (A.Model_job_admission.admit port (job expected))))
+;;
+
+let%expect_test
+    "constructor producer exit, terminal winner, and unknown write stay distinct"
+  =
+  with_pending_actor (fun actor backend ->
+    let expected = A.Session_actor.state actor |> protocol_ok in
+    let scope = A.Session_actor.begin_initialization actor ~expected |> protocol_ok in
+    let primary = P.Error.invalid_request "actual producer exited before claim" in
+    let queued = ref None in
+    let result =
+      A.Session_actor.with_initialization_model_producer actor ~scope ~f:(fun producer ->
+        let admitted =
+          A.Model_job_admission.admit
+            (A.Session_actor.initialization_model_producer_admission producer)
+            (job expected)
+          |> protocol_ok
+        in
+        queued := Some admitted;
+        Error primary)
+    in
+    (match result with
+     | Error actual -> assert (phys_equal primary actual)
+     | Ok () -> failwith "producer checkpoint failure was lost");
+    let queued = Option.value_exn !queued in
+    [%test_eq: int] 0 queued.attempt;
+    assert (Option.is_none queued.started_at);
+    assert (A.Session_actor.constructor_model_retirement_pending actor);
+    A.Session_actor.end_initialization actor ~scope |> protocol_ok;
+    A.Session_actor.drain_constructor_model_retirement actor |> protocol_ok;
+    let current = A.Session_actor.state actor |> protocol_ok in
+    let cancelled =
+      List.find_exn current.jobs ~f:(fun actual -> P.Id.Job.equal actual.id queued.id)
+    in
+    (match cancelled.status with
+     | Cancelled -> ()
+     | Queued
+     | Running
+     | Waiting_permission _
+     | Waiting_completion _
+     | Succeeded
+     | Failed _
+     | Interrupted _ -> failwith "unclaimed producer invented execution");
+    [%test_eq: int] 0 cancelled.attempt;
+    assert (Option.is_none cancelled.started_at);
+    assert (Option.is_some cancelled.completed_at);
+    assert (Option.is_none cancelled.result);
+    assert (not (A.Session_actor.constructor_model_retirement_pending actor));
+    let revision = current.counters.revision in
+    A.Session_actor.drain_constructor_model_retirement actor |> protocol_ok;
+    [%test_eq: int64] revision (A.Memory_backend.state backend).counters.revision);
+  with_pending_actor (fun actor backend ->
+    let writer, _ =
+      A.Session_actor.attach actor ~mode:Read_write ~subscribe:false |> protocol_ok
+    in
+    let expected = A.Session_actor.state actor |> protocol_ok in
+    let scope = A.Session_actor.begin_initialization actor ~expected |> protocol_ok in
+    A.Session_actor.with_initialization_model_producer actor ~scope ~f:(fun producer ->
+      A.Model_job_admission.admit
+        (A.Session_actor.initialization_model_producer_admission producer)
+        (job expected)
+      |> protocol_ok
+      |> ignore;
+      let running =
+        A.Session_actor.claim_initialization_model_call actor producer |> protocol_ok
+      in
+      let winner =
+        A.Session_actor.cancel_job actor ~attachment_id:writer.id ~job_id:running.id ()
+        |> protocol_ok
+      in
+      (match winner.status with
+       | Cancelled -> ()
+       | Queued
+       | Running
+       | Waiting_permission _
+       | Waiting_completion _
+       | Succeeded
+       | Failed _
+       | Interrupted _ ->
+         failwith "actual cancellation did not install a Cancelled winner");
+      let before = (A.Memory_backend.state backend).counters.revision in
+      let returned =
+        A.Session_actor.complete_initialization_model_call
+          actor
+          producer
+          (A.Runtime_builder.Model_succeeded
+             (`String "late result must not overwrite cancellation"))
+        |> protocol_ok
+      in
+      assert (Jsonaf.exactly_equal (P.Job.to_json winner) (P.Job.to_json returned));
+      [%test_eq: int64] before (A.Memory_backend.state backend).counters.revision;
+      assert (not (A.Session_actor.constructor_model_retirement_pending actor)));
+    A.Session_actor.end_initialization actor ~scope |> protocol_ok);
+  let rejected =
+    P.Error.create
+      Persistence_error
+      ~message:"unobserved constructor admission"
+      ~retryable:true
+      ()
+  in
+  let calls = ref 0 in
+  let wrap_persistence (persistence : A.Session_actor.persistence) =
+    { persistence with
+      commit =
+        (fun ?observation ~command_audit ~previous candidate ->
+          let fresh =
+            List.exists candidate.A.Session_transition.state.jobs ~f:(fun job ->
+              not
+                (List.exists previous.A.Session_state.jobs ~f:(fun old ->
+                   P.Id.Job.equal old.id job.P.Job.id)))
+          in
+          if fresh
+          then (
+            Int.incr calls;
+            (* This trusted host deliberately cannot attest whether its backend was
+             entered. Error is therefore unknown, not a no-writer grant. *)
+            Error rejected)
+          else persistence.commit ?observation ~command_audit ~previous candidate)
+    }
+  in
+  with_pending_actor ~wrap_persistence (fun actor backend ->
+    let expected = A.Session_actor.state actor |> protocol_ok in
+    let scope = A.Session_actor.begin_initialization actor ~expected |> protocol_ok in
+    let require_original = function
+      | Error actual -> assert (phys_equal rejected actual)
+      | Ok _ -> failwith "unknown constructor writer was treated as absent"
+    in
+    A.Session_actor.with_initialization_model_producer actor ~scope ~f:(fun producer ->
+      A.Model_job_admission.admit
+        (A.Session_actor.initialization_model_producer_admission producer)
+        (job expected))
+    |> require_original;
+    [%test_eq: int] 1 !calls;
+    assert (A.Session_actor.constructor_model_retirement_pending actor);
+    (* A second genuine Model producer and an unrelated canonical metadata writer
+       must both stop before another persistence invocation on this basis. *)
+    A.Session_actor.with_initialization_model_producer actor ~scope ~f:(fun producer ->
+      A.Model_job_admission.admit
+        (A.Session_actor.initialization_model_producer_admission producer)
+        (job expected))
+    |> require_original;
+    A.Session_actor.change_moderator actor None |> require_original;
+    [%test_eq: int] 1 !calls;
+    assert (List.is_empty (A.Memory_backend.state backend).jobs);
+    [%test_eq: int64]
+      expected.counters.revision
+      (A.Memory_backend.state backend).counters.revision;
+    A.Session_actor.end_initialization actor ~scope |> protocol_ok;
+    A.Session_actor.drain_constructor_model_retirement actor |> require_original;
+    [%test_eq: int] 1 !calls;
+    assert (A.Session_actor.constructor_model_retirement_pending actor));
+  print_endline
+    "queued exit cancelled without execution; terminal winner unchanged; unknown writer \
+     retained without resubmission";
+  [%expect
+    {| queued exit cancelled without execution; terminal winner unchanged; unknown writer retained without resubmission |}]
+;;
+
+let%expect_test
+    "uncertain constructor cancellation retains its candidate and original result"
+  =
+  let rejected =
+    P.Error.create
+      Persistence_error
+      ~message:"unobserved actual constructor cancellation"
+      ~retryable:true
+      ()
+  in
+  let cancelled_writes = ref 0 in
+  let writes = ref 0 in
+  let wrap_persistence (persistence : A.Session_actor.persistence) =
+    { persistence with
+      commit =
+        (fun ?observation ~command_audit ~previous candidate ->
+          Int.incr writes;
+          let cancelled =
+            List.exists candidate.A.Session_transition.state.jobs ~f:(fun job ->
+              match job.P.Job.status with
+              | Cancelled ->
+                List.exists previous.A.Session_state.jobs ~f:(fun old ->
+                  P.Id.Job.equal old.id job.id
+                  &&
+                  match old.status with
+                  | Running -> true
+                  | Queued
+                  | Waiting_permission _
+                  | Waiting_completion _
+                  | Succeeded
+                  | Failed _
+                  | Cancelled
+                  | Interrupted _ -> false)
+              | Queued
+              | Running
+              | Waiting_permission _
+              | Waiting_completion _
+              | Succeeded
+              | Failed _
+              | Interrupted _ -> false)
+          in
+          if cancelled
+          then (
+            Int.incr cancelled_writes;
+            (* A trusted host Error with no entered/no-writer attestation is
+               unknown. The actual cancellation candidate remains the fence. *)
+            Error rejected)
+          else persistence.commit ?observation ~command_audit ~previous candidate)
+    }
+  in
+  with_pending_actor ~wrap_persistence (fun actor backend ->
+    let attachment, _ =
+      A.Session_actor.attach actor ~mode:Read_write ~subscribe:false |> protocol_ok
+    in
+    let before = A.Session_actor.state actor |> protocol_ok in
+    let scope =
+      A.Session_actor.begin_initialization actor ~expected:before |> protocol_ok
+    in
+    let running = ref None in
+    let boundary_writes = ref None in
+    let require_original = function
+      | Error error -> assert (phys_equal rejected error)
+      | Ok _ -> failwith "unknown operator cancellation lost its original failure"
+    in
+    A.Session_actor.with_initialization_model_producer actor ~scope ~f:(fun producer ->
+      A.Model_job_admission.admit
+        (A.Session_actor.initialization_model_producer_admission producer)
+        (job before)
+      |> protocol_ok
+      |> ignore;
+      let claimed =
+        A.Session_actor.claim_initialization_model_call actor producer |> protocol_ok
+      in
+      running := Some claimed;
+      let outcome =
+        A.Runtime_builder.Model_succeeded (`String "actual first selected Model result")
+      in
+      A.Session_actor.retain_initialization_model_call_result actor producer outcome
+      |> protocol_ok;
+      let result =
+        A.Session_actor.cancel_job
+          actor
+          ~attachment_id:attachment.id
+          ~job_id:claimed.id
+          ~expected_generation:claimed.generation
+          ~expected_attempt:claimed.attempt
+          ()
+      in
+      require_original result;
+      boundary_writes := Some !writes;
+      [%test_eq: int] 1 !cancelled_writes;
+      A.Session_actor.complete_initialization_model_call actor producer outcome
+      |> require_original;
+      A.Session_actor.change_moderator actor before.moderator |> require_original;
+      [%test_eq: int] (Option.value_exn !boundary_writes) !writes;
+      Error rejected)
+    |> require_original;
+    let claimed = Option.value_exn !running in
+    let current = A.Memory_backend.state backend in
+    let actual =
+      List.find_exn current.jobs ~f:(fun job -> P.Id.Job.equal job.id claimed.id)
+    in
+    (match actual.status with
+     | Running -> ()
+     | Queued
+     | Waiting_permission _
+     | Waiting_completion _
+     | Succeeded
+     | Failed _
+     | Cancelled
+     | Interrupted _ -> failwith "uncertain cancel installed a terminal winner");
+    assert (Jsonaf.exactly_equal (P.Job.to_json claimed) (P.Job.to_json actual));
+    assert (A.Session_actor.constructor_model_retirement_pending actor);
+    A.Session_actor.end_initialization actor ~scope |> protocol_ok;
+    A.Session_actor.drain_constructor_model_retirement actor |> require_original;
+    [%test_eq: int] (Option.value_exn !boundary_writes) !writes;
+    [%test_eq: int] 1 !cancelled_writes;
+    assert (A.Session_actor.constructor_model_retirement_pending actor));
+  print_endline
+    "same uncertain cancel retained; original selected result did not authorize \
+     replacement or replay";
+  [%expect
+    {| same uncertain cancel retained; original selected result did not authorize replacement or replay |}]
 ;;

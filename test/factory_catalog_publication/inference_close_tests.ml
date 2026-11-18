@@ -74,6 +74,35 @@ module Fault = struct
       ~matches:(fun path -> Option.exists t.marker ~f:(String.equal path))
       ~reached:(reject t)
   ;;
+
+  (* Consume exactly the expected secondary diagnostic. A missing diagnostic,
+     extra output or a different failure still fails; temporary paths do not
+     become part of the expect snapshot. *)
+  let assert_settlement_diagnostic t output =
+    let message =
+      String.strip output
+      |> String.split_lines
+      |> List.map ~f:(fun line -> String.chop_prefix line ~prefix:"+" |> Option.value_exn)
+      |> String.concat ~sep:"\n"
+      |> fun text ->
+      String.chop_prefix text ~prefix:"queued moderator cleanup failed: "
+      |> Option.value_exn
+      |> Sexp.of_string
+    in
+    match message with
+    | List
+        [ Atom "Io"
+        ; List [ Atom "operation"; Atom "read projection recovery marker" ]
+        ; List [ Atom "path"; Atom path ]
+        ; List [ Atom "message"; Atom detail ]
+        ] ->
+      let expected = Option.value_exn t.marker in
+      [%test_eq: string] expected path;
+      assert (String.is_substring detail ~substring:"566 prewriter projection read");
+      assert (String.is_substring detail ~substring:expected)
+    | other ->
+      raise_s [%sexp "unexpected constructor cleanup diagnostic", (other : Sexp.t)]
+  ;;
 end
 
 let marks state =

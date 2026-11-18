@@ -10,12 +10,27 @@ open! Core
     A failure after persistence may already have committed the request; an
     exceptional reply neither rolls it back nor permits automatic replay. *)
 
+module Canonical_persistence : sig
+  (** SAME concrete backend and physical commit closure, issued together by
+      Session_persistence.actor_persistence_with_startup_disposal. No public
+      constructor, custody success, writer retry or execution authority. *)
+  type t = Canonical_backend_binding_data.t
+end
+
 type persistence =
   { commit :
-      command_audit:Document_schema.Document.t option
+      ?observation:Session_commit_observation.t
+      -> command_audit:Document_schema.Document.t option
       -> previous:Session_state.t
       -> Session_transition.t
       -> (unit, Agent_protocol.Error.t) result
+    (** Forward [observation] to canonical persistence when supplied. A host that
+        ignores it retains the existing commit-success contract, but its failure
+        is an unknown write outcome and cannot authorize a cleanup retry. A host
+        rejecting before its backend call may record that exact no-writer fact
+        through [Session_commit_observation.Host.observe_entry]. Only the real
+        canonical writer belongs inside [Host.with_writer]; in-memory success
+        must not manufacture a journal acknowledgement. *)
   ; archive_reference :
       previous:Session_state.t
       -> kind:Session_state.Compaction_archive.kind
@@ -82,10 +97,19 @@ end
 
 module Runtime_retirement : sig
   (** A process-local foreground cleanup join. The actor remains available to
-      inference and worker finalizers until the terminal checkpoint finishes. *)
+      inference and worker finalizers until the terminal checkpoint finishes.
+      The actual terminal result is retained even when its worker returned before
+      retirement began. This join reports that result; an error does not imply a
+      persisted terminal Operation or successful resource closure. *)
   type t
 
   val is_finished : t -> bool
+
+  (** Pure nonwaiting observation of this SAME actual foreground terminal
+      checkpoint. True only after successful completion; pending, typed errors,
+      and escaping exceptions are false. Does not consume the result, certify
+      resource closure, or grant execution. Safe for an Owner's coverage check. *)
+  val is_successful : t -> bool
 
   (** Await outside the actor mailbox and runtime owner mutex. Terminal commit
       errors are returned; unexpected failures retain their original backtrace. *)
@@ -107,6 +131,101 @@ val retire_runtime_worker
   -> closing:bool
   -> (Runtime_retirement.t, Agent_protocol.Error.t) result
 
+module Retirement_cleanup : sig
+  type actor = t
+  type t
+
+  module Failure : sig
+    type t =
+      | Protocol of Agent_protocol.Error.t
+      | Raised of exn * Stdlib.Printexc.raw_backtrace
+  end
+
+  module Snapshot : sig
+    type t
+
+    type progress =
+      | Pending
+      | Retryable
+      | Terminal
+      | Joined
+    [@@deriving equal, sexp_of]
+
+    (** Next permissible action, not global recoverability. Retryable if any
+        captured exact operation is permitted, even alongside immutable failures;
+        otherwise Pending while an original selected producer/dependency is
+        unfinished; otherwise Terminal for known immutable negatives; Joined only
+        at the final selected-parent cutoff and exact retained-cell observation.
+        Empty current fields, early factual Settled or released bookkeeping alone
+        never establish Joined. Unrelated surviving custody is outside selection. *)
+    val progress : t -> progress
+
+    (** Every actual current negative of captured duties, in original duty order.
+        Does not turn Deferred/Pending into an invented failure. Immutable original
+        snapshots retain their exact exception/aggregate/rawtrace forever. *)
+    val failures : t -> Failure.t list
+  end
+
+  (** SAME actual foreground join, not another cancellation/worker owner. *)
+  val retirement : t -> Runtime_retirement.t
+
+  (** Synchronous domain-checked mutable-holder observation; does not drive work.
+      Snapshot projections themselves inspect immutable values only. *)
+  val snapshot : t -> (Snapshot.t, Agent_protocol.Error.t) result
+
+  (** External operation, outside mailbox/Owner locks. [after] must be this
+      holder's exact latest snapshot. Reject wrong Actor/domain/stale/concurrent
+      calls before effects; reserve same-domain holder before first yield. Drive
+      only selected objects through existing exact operations/schedulers, no
+      arbitrary callback, new Begin/Init/admission/provider work or current sweep.
+
+      First advance keeps existing constructor -> callback -> idle/descendant ->
+      factual order and may be provisionally Pending with no failures. Owner then
+      awaits SAME foreground join in its existing position and advances again.
+      Actual selected promise/producer/exit/finish/ACK objects determine cutoff;
+      caller cannot assert parent completion. Final advance refreshes SAME cells
+      and actual initial dependencies before Joined. Non-factual positive duties
+      never replay; factual positives stay provisional until this cutoff.
+
+      Admission reserves the holder before yielding. Actual admitted cleanup is
+      protected: caller cancellation is deferred until that cleanup finishes.
+      Live callback/constructor/idle/foreground producers return Pending here;
+      advance never waits for their lexical exit or foreground join. Actual
+      existing cleanup/canonical work can await its real owned IO/ACKs.
+
+      Actual failures are snapshot DATA; Actor/domain/stale/concurrent admission refusal
+      is outer Error. A
+      failed prefix leaves its originally selected tail Deferred. A later explicit
+      advance resumes permitted exact failed/deferred legs only. Released callback
+      with pending suffix stays Pending; completed postrelease failure is Terminal
+      and never replays writer/recurrence/publication. Cancelled observation does
+      not overwrite actual producer report. Completed snapshots never mutate. *)
+  val advance
+    :  t
+    -> actor:actor
+    -> after:Snapshot.t
+    -> (Snapshot.t, Agent_protocol.Error.t) result
+end
+
+(** Atomic selected capture at the SAME actual retirement election, BEFORE
+    fallible before_unload/background joins can strand the original Actor tail.
+    Retain original Operation/completion and selected actual objects before actor
+    cancel/clear. Live source callbacks are selected through ORIGINAL Actor-owned
+    physical initialization/lifecycle parents with same issuer/domain and no Job
+    scope; foreground callbacks use original Operation association separately.
+    No caller-supplied source identity or authority/basis refresh is needed.
+
+    Uses the existing actual runtime retirement and preserves its cancellation,
+    strengthening and foreground result semantics. Existing retire_runtime_worker
+    remains compatible and EVERY old/new issuance retains original raw selection.
+    Duplicate same election returns SAME capture, never selects current fields or
+    rebinds a replacement parent. No public prewriter selector/test observer/global
+    enrollment seal. *)
+val retire_runtime_worker_with_cleanup
+  :  t
+  -> closing:bool
+  -> (Retirement_cleanup.t, Agent_protocol.Error.t) result
+
 (** Outside the Actor mailbox and ownership-state/registry locks, request
     cancellation on this Actor's SAME retained native ACK and join its existing
     bounded factual cleanup, then retry an already sealed prewriter Slot.
@@ -115,6 +234,15 @@ val retire_runtime_worker
     rejects every outstanding Slot/ACK. Source owners call this before cancelling
     the Actor switch or closing the Store, after cutting fresh runtime admission. *)
 val drain_descendant_cleanup : t -> (unit, Agent_protocol.Error.t) result
+
+(** Explicit factual retirement of this Actor's already ended queued callback.
+    Call outside runtime/registry mutexes after the real callback exit joins and
+    before worker replacement. Reuses its frozen terminal/Run/Init facts, never
+    executes the callback again or renews its admission. Proven prewriter failure
+    may reprepare; an entered/unknown writer retains its exact candidate and
+    failure for existing recovery. An active callback is not completed by this
+    drain. Positive receipt/State ACK releases its own borrow before publication. *)
+val drain_callback_retirement : t -> (unit, Agent_protocol.Error.t) result
 
 module Compaction_inference : sig
   (** Trusted process-local selected auxiliary lifetime. Operation and complete
@@ -151,6 +279,36 @@ module Inference_owner : sig
       token survives worker detachment and authorized resource borrowing. *)
   type t = Inference_graph_owner.t
 end
+
+(** Outside-mailbox factual sweep: progress all actual initial confirmations
+    first, then correct the SAME selected graph. Deferred retains its duty and
+    is not positive cleanup. Current execution permission is not required;
+    exact Actor/graph ownership remains. *)
+val settle_inference_owner_usage
+  :  t
+  -> owner:Inference_owner.t
+  -> (Inference_graph_owner.Factual_usage.Drain_outcome.t, Agent_protocol.Error.t) result
+
+(** Domain-first, nonyielding negative cleanup read for actual lifecycle owners.
+    Includes pending facts and an installed native-finish ACK awaiting final
+    clear. Foreign domain raises Invalid_argument before any mutable scan;
+    unavailable cell evidence conservatively remains pending. No permission or
+    remote work is acquired. *)
+val inference_usage_cleanup_pending : t -> bool
+
+(** One finite outside-mailbox initial-first factual sweep over actual
+    registrations. [Deferred] retains unfinished work; it is neither cleanup
+    success nor execution authority. Errors and cancellation remain unchanged.
+    Idle maintenance may continue its original polling path after [Deferred];
+    admission and teardown must use the strict [drain_inference_usage] projection. *)
+val poll_inference_usage
+  :  t
+  -> (Inference_graph_owner.Factual_usage.Drain_outcome.t, Agent_protocol.Error.t) result
+
+(** Outside-mailbox initial-first factual cleanup over actual registrations.
+    Deferred initial confirmation is a retryable failure, never cleanup success.
+    Execution policy/source retirement does not revoke this factual duty. *)
+val drain_inference_usage : t -> (unit, Agent_protocol.Error.t) result
 
 module Held_input_scope : sig
   (** One actor-issued rich input attempt. Same Eio domain only. Parsing ports
@@ -456,6 +614,8 @@ module Held_authored_result : sig
 end
 
 module Initialization_scope : sig
+  type actor = t
+
   module Purpose : sig
     type t =
       | Pending_initialization
@@ -468,6 +628,35 @@ module Initialization_scope : sig
       Bound to one actor, stable source/complete Selection and generation; it is
       never reconstructed from durable Pending state or exposed by RPC. *)
   type t
+
+  (** Pure association to this SAME original scope's factual callback parent;
+      no permission renewal. Snapshot is synchronous and creating-domain checked. *)
+  val callback_cleanup : t -> Callback_cleanup.Initialization.t
+
+  module Source_handoff : sig
+    (** Factual SAME Pending Init positive ACK, never reconstructed from State.
+        Survives lexical scope end; grants no execution or source permission. *)
+    type t
+
+    val before_source : t -> Agent_protocol.Run_source.t option
+    val after_source : t -> Agent_protocol.Run_source.t option
+
+    (** Domain-first association with the issuing Actor, actual optional Manager,
+        generation/resource specification and full installed source in a Ready
+        state. The Factory separately checks current authority and the Cell
+        verifies the same native unit and Product binding. *)
+    val check
+      :  t
+      -> actor:actor
+      -> moderator_manager:Chat_response.Moderator_manager.t option
+      -> expected:Session_state.t
+      -> (unit, Agent_protocol.Error.t) result
+  end
+
+  (** Available only after the actual successful Pending completion ACK. Missing
+      or uncertain persistence and an ordinary Ready checkpoint cannot issue it.
+      Exact source options include the no-moderator None-to-None case. *)
+  val source_handoff : t -> (Source_handoff.t, Agent_protocol.Error.t) result
 end
 
 (** Mailbox-level regression support; not exposed by any wire method. *)
@@ -528,6 +717,28 @@ val create_with_runtime_source_owner
   -> services:services
   -> t
 
+(** First-party canonical counterpart. Validates SAME physical commit closure,
+    writer session and creating domain before Actor startup. Old constructors
+    remain unsupported for failed-startup disposal; no generic availability
+    callback or alternative persistence adapter is admitted by this binding. *)
+val create_with_bound_runtime_source_owner
+  :  canonical_persistence:Canonical_persistence.t
+  -> runtime_source_owner:Runtime_source_owner.Identity.t
+  -> ordinary_execution_admission:(unit -> (unit, Agent_protocol.Error.t) result)
+  -> schedule_permission_timeouts:bool
+  -> sw:Eio.Switch.t
+  -> clock:_ Eio.Time.clock
+  -> mailbox_capacity:int
+  -> owner_lease_duration_ms:int
+  -> max_attachments:int
+  -> subscriber_capacity:int
+  -> compaction_env:Eio_unix.Stdenv.base option
+  -> initial_state:Session_state.t
+  -> persistence:persistence
+  -> operation_worker:Operation_worker.t option
+  -> services:services
+  -> t
+
 (** Read-only immutable issuer association, not an issuer projection or resource
     permission. The source host uses it to check its private Factory key against
     this exact resource Actor. Same issuing Eio domain; performs no Actor request,
@@ -543,6 +754,36 @@ val observe
   -> (Session_state.t * Agent_protocol.Snapshot.t, Agent_protocol.Error.t) result
 
 val state : t -> (Session_state.t, Agent_protocol.Error.t) result
+
+module Resource_observation : sig
+  (** Request-local facts captured by one mailbox observation on the issuing
+      Actor. The observation carries no source, execution or cleanup authority. *)
+  type t
+
+  (** The immutable original State returned by the producer. *)
+  val state : t -> Session_state.t
+
+  (** Checks the creating domain before reading the same Actor. Rejects a
+      stopped or finished Actor, a lifecycle reservation, and runtime retirement.
+      Returns the actual current accepted State when the session ID, generation,
+      creating principal, Spec resource identity, optional Run source
+      installation, initialization and pending-start fields, owner lease
+      generation, and local and parent Stop epochs match. Metadata and usage
+      changes can therefore return a newer State while [state] stays fixed.
+
+      This check does not yield, invoke callbacks, or query the mailbox or
+      Store. A pending write may install after the check reads the still
+      accepted State. The returned facts hold until the next yield. Callers
+      must still check the current source and fingerprint on the returned
+      State, the exact host association and physical source, and existing
+      per-effect guards. *)
+  val check_current : t -> (Session_state.t, Agent_protocol.Error.t) result
+end
+
+(** Observes accepted State through this Actor's mailbox. May yield. The host
+    calls this after its existing request admission. Capturing the observation
+    creates no admission and activates no runtime. *)
+val observe_resource_state : t -> (Resource_observation.t, Agent_protocol.Error.t) result
 
 (** Trusted host ingress bridge. Producer must come from authenticated transport
     context. Preparation is read-only; commit requires the exact captured state
@@ -864,6 +1105,11 @@ module Callback_scope : sig
       constructor or decoder; saved source/origin facts grant no authority. *)
   type t
 
+  module Completion = Callback_cleanup.Completion
+
+  (** Same acquired producer, including after expiry or Actor death. No authority. *)
+  val completion : t -> Completion.t
+
   val executing : t -> Agent_protocol.Moderator_execution.t
   val source : t -> Agent_protocol.Run_source.t
   val origin : t -> Agent_protocol.Inference_origin.t option
@@ -891,9 +1137,21 @@ type legacy_callback_handler =
 
 (** Exact installed Manager callback admission. True means checkpoint committed
     and cleanup completed; false means physical actor unavailable. Expired,
-    foreign or mismatching callbacks reject rather than granting a legacy fallback. *)
+    foreign or mismatching callbacks reject rather than granting a legacy fallback.
+    These factual producer wrappers require the Actor's creating domain and
+    reject a foreign domain before gate or claim acquisition. General Actor RPC
+    transport is unchanged.
+    [capture_cleanup] runs once for an actual installed claim ACK, outside the
+    mailbox, protected and before refresh/user code. It must not yield. The
+    acquired-scope finish bracket already exists. This includes publication
+    failure before a successful claim reply; rejected/uninstalled claims never
+    capture. Capture exceptions skip user code and retain their raw failure.
+    An already failed claim remains primary; its independent capture failure and
+    actual finish outcome remain observable. The same optional transport applies
+    to [job_execution.claim_legacy_callback]; it creates no Job parent. *)
 type legacy_callback_claim =
-  callback:Chat_response.Moderator_manager.Callback.t
+  ?capture_cleanup:(Callback_cleanup.Completion.t -> unit)
+  -> callback:Chat_response.Moderator_manager.Callback.t
   -> legacy_callback_handler
   -> (bool, Agent_protocol.Error.t) result
 
@@ -1040,10 +1298,20 @@ val set_operation_worker
     runtime original. Full native currentness/capability/host policy still applies
     at each effect. Construction errors before installation retire the speculative
     admission, including raised exceptions. *)
+module Ordinary_attachment_basis = Ordinary_runtime_basis
+
+(** [expected_ordinary] is a retained root's original factual source/Stop basis.
+    It is checked inside the actual Actor install, after existing original and
+    execution checks. It grants no authority, cannot bypass Pending, and prevents
+    a Stop committed before Owner unload from admitting a stale warm worker.
+    [unmoderated_source] is the SAME Builder fact for this final physical worker;
+    omission at actual replacement clears classification. It grants no effect. *)
 val set_runtime_worker
-  :  ?actor:Operator_authorization.t
+  :  ?unmoderated_source:Runtime_builder.Unmoderated_source.t
+  -> ?actor:Operator_authorization.t
   -> ?initial_startup:Runtime_builder.Authored_start.t
   -> ?moderator_manager:Chat_response.Moderator_manager.t
+  -> ?expected_ordinary:Ordinary_attachment_basis.t
   -> t
   -> worker:Operation_worker.t option
   -> inference:Inference_client.Execution.t option
@@ -1221,6 +1489,58 @@ val initialization_model_admission
   :  t
   -> scope:Initialization_scope.t
   -> Model_job_admission.t
+
+(** One synchronous constructor producer, installed before its admission RPC.
+    The supplied function runs once outside the mailbox. Its actual joined exit
+    retains cleanup facts without masking the original exception/cancellation.
+    No producer outcome grants further provider permission. *)
+type initialization_model_producer
+
+val with_initialization_model_producer
+  :  t
+  -> scope:Initialization_scope.t
+  -> f:(initialization_model_producer -> 'a)
+  -> 'a
+
+val initialization_model_producer_admission
+  :  initialization_model_producer
+  -> Model_job_admission.t
+
+val claim_initialization_model_call
+  :  t
+  -> initialization_model_producer
+  -> (Agent_protocol.Job.t, Agent_protocol.Error.t) result
+
+(** Same-domain producer handoff before a returned execution result can be lost
+    while joining its sibling cancellation fiber. Stores the first result before
+    clock sampling, retaining any clock diagnostic without replacing that result.
+    No mailbox call, writer, or permission is issued. Repeated handoff keeps the
+    original result; completion below uses this same selection. *)
+val retain_initialization_model_call_result
+  :  t
+  -> initialization_model_producer
+  -> Runtime_builder.model_job_outcome
+  -> (unit, Agent_protocol.Error.t) result
+
+val complete_initialization_model_call
+  :  t
+  -> initialization_model_producer
+  -> Runtime_builder.model_job_outcome
+  -> (Agent_protocol.Job.t, Agent_protocol.Error.t) result
+
+(** Actual joined cancellation of the synchronous execution leg. *)
+val interrupt_initialization_model_call
+  :  t
+  -> initialization_model_producer
+  -> (Agent_protocol.Job.t, Agent_protocol.Error.t) result
+
+(** Same-domain nonyielding negative eligibility read. It performs no cleanup. *)
+val constructor_model_retirement_pending : t -> bool
+
+(** Finite factual pass after actual producer/source/worker joins. Runs outside
+    Owner locks, before callback retirement. Uncertain writes retain their exact
+    candidate and original failure; this never re-executes a provider. *)
+val drain_constructor_model_retirement : t -> (unit, Agent_protocol.Error.t) result
 
 val initialization_model_allocation
   :  t
@@ -1910,6 +2230,23 @@ module Held_run : sig
   end
 end
 
+module Recurrence_goal_run_guard : sig
+  (** Scoped exact controller prewriter capability for this one captured Run.
+      Bound to its actual original authority, attempt and lower Goal scope. *)
+  type t
+end
+
+val capture_recurrence_goal_run_guard
+  :  t
+  -> actor:Operator_authorization.t
+  -> authorize:
+       (Session_state.t
+        -> Recurrence_definition.t
+        -> (unit, Agent_protocol.Error.t) result)
+  -> intent:Recurrence_execution_intent.t
+  -> attempt:Recurrence_execution_attempt.t
+  -> (Recurrence_goal_run_guard.t option, Agent_protocol.Error.t) result
+
 (** Trusted host inert admission using the exact actor-issued source binding and
     its original authenticated preparation. Its canonical request must match the
     complete occurrence intent/attempt and exact actual server/session target.
@@ -1922,7 +2259,8 @@ end
     Source binding alone is not installed-artifact or runtime-lease authority;
     the host must supply those genuine owners before any eventual activation. *)
 val admit_held_recurrence_run
-  :  t
+  :  ?goal_guard:Recurrence_goal_run_guard.t
+  -> t
   -> binding:Source_binding.t
   -> intent:Recurrence_execution_intent.t
   -> attempt:Recurrence_execution_attempt.t
@@ -2360,8 +2698,9 @@ val claim_job
 
 (** Complete only the exact claimed attempt. The actual terminal Job, retry
     custody and owning Run evidence/aggregate settlement share one durable ACK;
-    the raw Model result is preserved. No original authority is renewed. Late
-    callbacks cannot mutate a newer retry or an already terminal winner. *)
+    the raw Model result is preserved. An unrepresentable retry time terminates
+    with the original failure, as exhausted retries do. No original authority is
+    renewed. Late callbacks cannot mutate a newer retry or terminal winner. *)
 val complete_job
   :  t
   -> job_id:Agent_protocol.Id.Job.t
@@ -2376,8 +2715,11 @@ val complete_job
     envelope in [Job.result], with a matching success/failure/cancel status;
     expiration is a resource-limit failure.
     Retries require both an explicitly configured retry policy and a retryable
-    tool failure. A worker cannot complete an attempt after it enters a durable
-    dependency wait; only dependency reconciliation may finish that wait.
+    tool failure. Retry timing uses the observed completion time; an
+    unrepresentable endpoint preserves the original terminal failure. Recovery
+    retains the stored completion timestamp separately from retry timing. A worker
+    cannot complete an attempt after it enters a durable dependency wait; only
+    dependency reconciliation may finish that wait.
     Legacy model-job result encoding is unchanged. *)
 val complete_background_job
   :  t
@@ -2421,7 +2763,9 @@ val recover_background_results
 (** Enqueues an exact retained terminal attempt through the existing moderator
     checkpoint. Rechecks actual Pending custody, source and current run authority;
     denial retires that run truthfully before returning the original denial.
-    Saves Enqueued and the exact queue append in one durable transaction. *)
+    Saves Enqueued and the exact queue append in one durable transaction,
+    preserving the full checkpoint carrier and retained original Run origin even
+    when retry has replaced the latest Job attempt. *)
 val enqueue_run_job_delivery
   :  t
   -> delivery:Run_job_delivery.t
@@ -2436,7 +2780,9 @@ val enqueue_run_job_delivery
     terminal custody transfers before Delivered retires its parent; missing
     historical custody stays unavailable. The queue loan installs only after ACK,
     before publication. Named Run source conflicts reject rather than downgrade.
-    Generic and qualified v1 checkpoint comparison remains byte-strict. *)
+    The Manager's expected value compares every known snapshot field; complete
+    carrier metadata and unfamiliar fields are independently validated/preserved.
+    A supplied complete incoming carrier remains strict, never repaired. *)
 val deliver_job
   :  ?expected:Session.Moderator_state.Identity_snapshot.t
   -> ?expected_job:Agent_protocol.Job.t
@@ -2558,12 +2904,14 @@ val retry_schedule
 
 (** Optional expected values compare the old checkpoint and captured schedule
     before saving delivery plus the new moderator checkpoint atomically. Legacy
-    positive creator evidence or existing queue metadata requires the actual
+    positive creator evidence or an unowned queue lifetime requires the actual
     installed Manager resource, exact expected record/checkpoint and one raw
     append. Only genuinely historical absence retains the data-only route.
     Completed delivery persists truthful facts even if original custody expired;
     the corresponding Expired queue loan rejects later execution. No custody is
-    restored from missing inventory. Owned v1 Timer-frame validation is unchanged. *)
+    restored from missing inventory. Owned v1 compares all known snapshot fields
+    and appends only its exact Timer frame, preserving full queue metadata/raw
+    extensions without creating an original admission from ownership DATA. *)
 val complete_schedule
   :  ?expected:Session.Moderator_state.Identity_snapshot.t
   -> ?expected_schedule:Agent_protocol.Schedule.t
@@ -2606,7 +2954,8 @@ val skip_schedule
     handoff does not retire failed heads. A failed terminal save retains the borrow
     until recovery.
     Stop-cancel interrupts the callback; late or escaped commits are rejected.
-    Returns false while the session is unavailable; empty, stale or previously
+    Returns false while the session is unavailable, including while a prospective
+    governed admission retains its actual occupancy; empty, stale or previously
     claimed checkpoints return an error. This internal handoff grants no native
     tool authority and does not apply scheduling intent or start a model turn. *)
 val with_idle_queued_moderator_event
@@ -2633,6 +2982,7 @@ val with_idle_queued_moderator_event_tools
   :  t
   -> snapshot:Session.Moderator_state.Identity_snapshot.t
   -> (executing:Agent_protocol.Moderator_execution.t
+      -> policy_caller:Delegated_policy_caller.t option
       -> model_jobs:Model_job_admission.t
       -> allocate_inference:Inference_allocation.Port.t
       -> retirement_reason:string option
@@ -2658,6 +3008,7 @@ val with_ordinary_moderator_event
   -> snapshot:Session.Moderator_state.Identity_snapshot.t
   -> event:Chat_response.Moderation.Event.t
   -> (executing:Agent_protocol.Moderator_execution.t
+      -> policy_caller:Delegated_policy_caller.t option
       -> model_jobs:Model_job_admission.t
       -> allocate_inference:Inference_allocation.Port.t
       -> retirement_reason:string option
@@ -2683,7 +3034,216 @@ val with_current_moderator_event
 
 val with_current_idle_queued_moderator_event_tools : t -> Moderator_event.claim
 
-(** Trusted host handoff for a parent's live delegated policy check. [authorize]
+(** Validate the opaque Caller against THIS actual child Actor and its existing
+    request owner. Nonyielding, domain confined; Factory still checks private
+    source, reservation and selected tools before and after parent waits. *)
+val check_delegated_policy_caller
+  :  t
+  -> Script_tool_calls.preparation
+  -> (unit, Agent_protocol.Error.t) result
+
+module Native_setup : sig
+  (** Lexical actual Factory source setup; no Caller/Goal/Init/lifecycle or
+      execution permission. Same creating domain and registered target token. *)
+  type t
+
+  val check : t -> (unit, Agent_protocol.Error.t) result
+  val close : t -> unit
+end
+
+(** Trusted Factory setup. Checks the creating domain before invoking authorize
+    outside the mailbox. The caller must capture a successful token into cleanup
+    custody before pending cancellation or another authorization check can escape.
+    Current private source/grant checks remain required around later waits; the
+    token never replaces them. *)
+val begin_native_setup
+  :  t
+  -> source_owner:Runtime_source_owner.t
+  -> reference:Agent_store.Delegation_store.Reference.t
+  -> source:Runtime_builder.Source.t
+  -> expected:Session_state.t
+  -> authorize:(unit -> (unit, Agent_protocol.Error.t) result)
+  -> (Native_setup.t, Agent_protocol.Error.t) result
+
+(** Same target cleanup remains valid after negative [Native_setup.close]. *)
+val end_native_setup : t -> setup:Native_setup.t -> (unit, Agent_protocol.Error.t) result
+
+(** Actual registered graph only. Unbound identity still cannot allocate. *)
+val open_native_setup_inference_owner
+  :  t
+  -> setup:Native_setup.t
+  -> source:Transcript.Source_id.t
+  -> (Inference_owner.t, Agent_protocol.Error.t) result
+
+module Policy_restoration : sig
+  (** Lexical actual Actor admission, issued for a fresh authenticated delegated
+      request. It is neither Init, Run nor ordinary execution authority. Factory
+      owns actual writer/source/profile checks before and after setup waits. *)
+  type t
+
+  val check : t -> (unit, Agent_protocol.Error.t) result
+  val close : t -> unit
+
+  module Published : sig
+    (** Process-local association retained by the actual Owner baseline Cell
+        lease. No old Caller/governance/authorize is retained as permission.
+        Fresh captures require their own genuine current request. *)
+    type t
+
+    val check : t -> (unit, Agent_protocol.Error.t) result
+    val close : t -> unit
+    val product_identity : t -> Runtime_builder.Product_identity.t
+  end
+end
+
+module Delegated_policy_claim : sig
+  type actor = t
+
+  module Access : sig
+    type t =
+      | Running
+      | Policy_only of Runtime_builder.Policy_access.t
+      | Restored_unloaded of Policy_restoration.Published.t
+  end
+
+  module Capture : sig
+    type t
+
+    type disposition =
+      | Waiting
+      | Retained
+      | Released
+
+    (** Nonyielding same-domain association only, before the first claim RPC.
+        Grants no effect or source permission. The owning host registers this
+        exact capture with its actual resource loan before invoking the wrapper. *)
+    val create : actor -> access:Access.t -> (t, Agent_protocol.Error.t) result
+
+    (** Released requires the actual wrapper join, never cancellation alone. *)
+    val disposition : t -> disposition
+
+    (** One-shot host extent, before holder registration or Manager waits.
+        Bracket all selected runtime use and the Actor wrapper; finally records
+        genuine join on return/error/exception/cancellation. Reentry rejects
+        without changing the owning extent. This grants no admission. *)
+    val with_extent
+      :  t
+      -> (unit -> ('a, Agent_protocol.Error.t) result)
+      -> ('a, Agent_protocol.Error.t) result
+
+    (** Nonyielding negative guard for ONLY this same actual Policy_only callback.
+        Requires Activated claim, Entered extent, current Product/source/Stop
+        basis, live uncommitted/unretired borrow and its genuine original admission.
+        Rejects real halt/failure, cancellation, terminal ACK, join and foreign
+        Actor/domain. Grants no admission or permission; reads no Manager snapshot
+        and forces no lifecycle callback. Original authorization's documented
+        nonyielding guards remain mandatory; unexpected host exceptions propagate.
+        Running captures reject. Used only by the trusted host's local tool view. *)
+    val check_policy_effect_current : actor -> t -> (unit, Agent_protocol.Error.t) result
+
+    val cancel_waiting : t -> unit
+  end
+
+  (** Same-domain factual state only. Pending claims exclude resource retirement. *)
+  val pending : actor -> bool
+
+  (** Call after the actual wrapper joins. Exact no-writer cleanup or the same
+      callback terminal ACK releases ownership; unknown retains its first outcome
+      and never resubmits the writer or executes a callback. *)
+  val drain : actor -> (unit, Agent_protocol.Error.t) result
+end
+
+(** Actual child-issued governance transport. Captures are same-domain finite
+    observations, not permission or decoded evidence. Private source/ancestry IO
+    stays in Factory between capture and bind. Bind rechecks the exact physical
+    child observation; later source checks permit its own factual Book ACK. *)
+module Causal_governance : sig
+  type actor = t
+  type captured
+  type t
+
+  (** Freeze SAME actual Caller owner and complete immutable source/work/origin.
+      Errors remain negative. Registered no-moderator callers require the genuine
+    Builder-issued classification and SAME current Actor Binding; an old
+    Caller/Bound cannot refresh after configuration or worker replacement.
+    Capturing grants no parent admission or effect. *)
+  val capture
+    :  actor
+    -> request:Script_tool_calls.preparation
+    -> (captured, Agent_protocol.Error.t) result
+
+  (** Only a genuine controller-free unrelated child may use this branch. No
+      server identity, missing-custody fallback or governance scope is invented.
+      Bound currentness retains the exact original Run/Unbound, subject and
+      recorded observer/full source, alongside SAME issuer/domain/Caller owner.
+      An observer-only factual association cannot authorize a native boundary. *)
+  val bind_standalone : actor -> captured -> (t, Agent_protocol.Error.t) result
+
+  (** Requires SAME actual Factory issuer and checked ancestry; None ancestry
+      only for a genuine no-delegation root. Unknown inherited origin rejects.
+      Does not invoke the Store refresh closure or run any source callback. *)
+  val bind_registered
+    :  actor
+    -> captured
+    -> source_owner:Runtime_source_owner.t
+    -> ancestry:Delegation_authority.Checked_ancestry.t option
+    -> (t, Agent_protocol.Error.t) result
+
+  (** Nonyielding same-domain negative check of SAME actual Caller owner,
+      immutable source/work/origin and full forwarding. No Store refresh or
+      permission is supplied by the Bound. Its own factual Book ACK is allowed. *)
+  val check_current : t -> (unit, Agent_protocol.Error.t) result
+end
+
+(** Source-stage only. Calls authorize outside Actor, then authenticates SAME
+    Factory issuer, actual request/governance and unloaded construction basis.
+    Source stage must capture the returned value before cancellation and repeat
+    authorize/currentness after each wait. No worker/Manager is installed. *)
+val begin_policy_restoration
+  :  t
+  -> source_owner:Runtime_source_owner.t
+  -> source:Runtime_builder.Source.t
+  -> basis:Policy_restore_basis.t
+  -> request:Script_tool_calls.preparation
+  -> governance:Causal_governance.t
+  -> authorize:(unit -> (unit, Agent_protocol.Error.t) result)
+  -> (Policy_restoration.t, Agent_protocol.Error.t) result
+
+(** Adjacent to actual Cell publication under protected source-stage custody.
+    Consumes construction exclusion into a separate actual Published association;
+    no durable Init/lifecycle ACK is invented. Owner must own the first Cell lease
+    before this RPC and retain it on every Error/exn. *)
+val publish_policy_restoration
+  :  t
+  -> restoration:Policy_restoration.t
+  -> access:Runtime_builder.Restored_policy_access.t
+  -> (Policy_restoration.Published.t, Agent_protocol.Error.t) result
+
+(** Closes still-Constructing only. A promoted Published association belongs to
+    the actual Owner anchor and survives lexical source-stage retirement. *)
+val end_policy_restoration
+  :  t
+  -> restoration:Policy_restoration.t
+  -> (unit, Agent_protocol.Error.t) result
+
+(** Same canonical history reservation/ACK under this actual construction. *)
+val reserve_policy_restoration_history_block
+  :  t
+  -> restoration:Policy_restoration.t
+  -> count:int
+  -> (History_id_source.reservation, Agent_protocol.Error.t) result
+
+(** Actual registered graph owner. Later factual callbacks retain exact owner
+    membership; this opener grants no inference allocation or provider access. *)
+val open_policy_restoration_inference_owner
+  :  t
+  -> restoration:Policy_restoration.t
+  -> source:Transcript.Source_id.t
+  -> (Inference_owner.t, Agent_protocol.Error.t) result
+
+(** Trusted host handoff for a parent's live delegated policy check. [governance]
+    must bind SAME physical preparation request and actual Caller. It is required
+    even for an unrelated child; absence never selects a weaker path. [authorize]
     must validate the private relation and owned child invocation candidate after entering
     the parent gate. The handoff rechecks before entering [f], before and after
     native admission, before decision commit and before disclosing native outcomes
@@ -2691,7 +3251,10 @@ val with_current_idle_queued_moderator_event_tools : t -> Moderator_event.claim
     and checkpoint. [authorize] must be repeatable and must not run the policy
     handler itself. Native implementations must still check after their own
     internal approval waits; this wrapper cannot intercept arbitrary host code.
-    The actor persists claim before executing [f]; [commit] saves parent snapshot,
+    The actor persists the actual parent installation and receipt together with
+    its exact Cause seed or standalone Event classification before executing [f].
+    Replays create no seed or original transfer. These metadata facts grant no
+    provider admission; [commit] saves parent snapshot,
     runtime intent, decision and [notifications] atomically and retains ownership through callback
     return. Native calls are parent event-owned and must use the normal scoped
     capability/policy dispatcher. No child invocation is fabricated in this actor.
@@ -2706,6 +3269,9 @@ val with_current_idle_queued_moderator_event_tools : t -> Moderator_event.claim
 val with_delegated_moderator_event
   :  ?notifications:(unit -> string list)
   -> t
+  -> capture:Delegated_policy_claim.Capture.t
+  -> request:Script_tool_calls.preparation
+  -> governance:Causal_governance.t
   -> delegation:Agent_protocol.Moderator_execution.delegation
   -> event:Chat_response.Moderation.Event.t
   -> authorize:(unit -> (unit, Agent_protocol.Error.t) result)
@@ -2713,6 +3279,7 @@ val with_delegated_moderator_event
        (unit
         -> (Session.Moderator_state.Identity_snapshot.t, Agent_protocol.Error.t) result)
   -> (executing:Agent_protocol.Moderator_execution.t
+      -> policy_caller:Delegated_policy_caller.t option
       -> model_jobs:Model_job_admission.t
       -> allocate_inference:Inference_allocation.Port.t
       -> event:Session.Snapshot.t
@@ -2767,6 +3334,14 @@ val callback_tool_executor
   :  t
   -> scope:Callback_scope.t
   -> Native_tool_invocation.executor
+
+(** Opaque Caller view of this SAME actual legacy callback. Its original is
+    checked only when preparing/consuming a delegated policy call; creation does
+    not authorize effects or veto unrelated factual callback completion. *)
+val callback_policy_caller
+  :  t
+  -> scope:Callback_scope.t
+  -> (Delegated_policy_caller.t, Agent_protocol.Error.t) result
 
 (** Model Job admission for this exact installed callback only. Each admission
     rejects constructor scopes, rechecks the physical callback/Manager/source and
@@ -2840,6 +3415,7 @@ val with_initialization_callback
     End-session and truthful failure/cleanup remain available. *)
 val with_legacy_queued_callback
   :  t
+  -> ?capture_cleanup:(Callback_cleanup.Completion.t -> unit)
   -> callback:Chat_response.Moderator_manager.Callback.t
   -> operation_id:Agent_protocol.Id.Operation.t option
   -> (scope:Callback_scope.t
@@ -2950,9 +3526,11 @@ module Idle_moderator_completion : sig
   val create : actor -> t
   val claim : t -> (History_entry.t list option, Agent_protocol.Error.t) result
 
-  (** Capture the actual callback drain exactly once and consume it through the
-      existing ordinary completion path. Retains each real selected writer and
-      State ACK, including no-Turn metadata, Goal Hold and compaction prefixes.
+  (** Capture the actual callback drain exactly once. Ordinary completion uses
+      the existing writer; a governed Turn retains its exact selected continuation
+      for [finish], without waiting on ancestors in this finite capture block.
+      Retains each real selected writer and State ACK, including no-Turn metadata,
+      Goal Hold and compaction prefixes.
       An attempted write without an installed ACK remains uncertain; no callback
       replay or global failure rewrite is performed. *)
   val capture
@@ -2971,7 +3549,14 @@ module Idle_moderator_completion : sig
       Does not release the claim or assert that a writer was unattempted. *)
   val leave_capture : t -> unit
 
-  (** Read the same captured completion result after leaving the finite block. *)
+  (** After leaving the finite block, return the cached ordinary result or drive
+      the same governed Turn through reservation, canonical ACK, confirmation and
+      its exact worker suffix. Call outside mailbox and Owner state locks.
+      The first caller owns this drive; concurrent callers only join its result,
+      and cancelling a joining caller does not cancel the driver. All later calls
+      replay that exact result or exception (with its backtrace), including after
+      successful handoff removes the Actor's continuation. Cancelling the driver
+      retains exact factual cleanup custody; it does not replay the callback. *)
   val finish : t -> (unit, Agent_protocol.Error.t) result
 
   (** First-wins negative cancellation, followed by Actor-owned factual cleanup.
@@ -2987,7 +3572,10 @@ module Idle_moderator_completion : sig
 end
 
 (** [claim_idle_moderator] acquires the process-local exclusive moderator
-    borrow only when the running session is idle and unblocked. *)
+    borrow only when the running session is idle and unblocked. A prospective
+    governed admission leaves the borrow unavailable until its actual native ACK
+    or retirement releases that occupancy. Existing callback completion and
+    factual ACK/cleanup remain available. *)
 val claim_idle_moderator
   :  t
   -> (History_entry.t list option, Agent_protocol.Error.t) result
@@ -3251,6 +3839,17 @@ val instruction_command
   -> request:Instruction_command.t
   -> (Instruction_command.Receipt.t, Agent_protocol.Error.t) result
 
+(** Same sole instruction transaction owner for original-operator and native
+    composition. Current original authority, target generation and real writer
+    attachment (operator writes only) precede receipt lookup and persistence.
+    Replacements require the same live source Use as the native route. *)
+val instruction_command_admitted
+  :  t
+  -> admission:Instruction_admission.t
+  -> source:Instruction_command_admission.Source.t option
+  -> request:Instruction_command.t
+  -> (Instruction_command.Receipt.t, Agent_protocol.Error.t) result
+
 (** Nonyielding immutable selection/generation epoch comparison for a snapshot
     read from this actor. This grants no source or execution permission. The
     owner separately retains original physical execution and source Use checks. *)
@@ -3265,8 +3864,10 @@ val set_recurrence_controller
 
 (** Original operator proof and current host write policy precede receipt
     disclosure and persistence. Capture/enable also require genuine current
-    Active+Automatic lifecycle and actual installed source. Stale births retire
-    durably first; the original CAS then fails if reconciliation changed it.
+    Active+Automatic lifecycle and actual installed source. A fresh command
+    reconciles stale births before CAS. A retained key is classified first
+    without reconciliation. Every new write checks original authority at the
+    canonical writer, including an unbound operator Pause or Retire.
     Safe Pause/Retire require no installed moderator. No target is launched. *)
 val recurrence_command
   :  t
@@ -3274,6 +3875,56 @@ val recurrence_command
   -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
   -> request:Recurrence_command.t
   -> (Recurrence_command_receipt.t, Agent_protocol.Error.t) result
+
+(** Borrowed metadata command. The caller provides the actual host refresh
+    on the native caller fiber. New captured definitions compare the exact
+    invocation and Run-owner attribution again at the Actor writer. *)
+val recurrence_native_command
+  :  t
+  -> admission:Recurrence_native_admission.t
+  -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> refresh:(unit -> (unit, Agent_protocol.Error.t) result)
+  -> request:Recurrence_command.t
+  -> (Recurrence_command_receipt.t, Agent_protocol.Error.t) result
+
+module Recurrence_target_invalidation : sig
+  (** Local factual evidence. The retained Remove fact belongs to the host Store.
+      A source observation belongs to the exact current target Actor. Neither
+      authorizes or launches an execution. *)
+  type actor = t
+
+  type t
+
+  val removed
+    :  controller:actor
+    -> Agent_store.Session_store.Command_receipts.Removal.t
+    -> Recurrence_definition.t
+    -> (t option, Agent_protocol.Error.t) result
+
+  (** Check the exact Actor's current target identity and demonstrate a monotone
+      captured-source change. Both constructors bind the actual controller
+      Actor and require the same live Store. *)
+  val changed_source
+    :  controller:actor
+    -> Resource_observation.t
+    -> Recurrence_definition.t
+    -> (t option, Agent_protocol.Error.t) result
+end
+
+(** Persist the existing safety pause on exactly this enabled revision. The
+    original host policy and target evidence are checked again at the canonical
+    writer edge. Unadmitted decisions are withdrawn, with attempt custody intact. *)
+val pause_invalid_recurrence_target
+  :  t
+  -> actor:Operator_authorization.t
+  -> authorize:
+       (Session_state.t
+        -> Recurrence_definition.t
+        -> (unit, Agent_protocol.Error.t) result)
+  -> definition:Recurrence_identity.Definition.t
+  -> expected_control_revision:int64
+  -> evidence:Recurrence_target_invalidation.t
+  -> (unit, Agent_protocol.Error.t) result
 
 module Recurrence_creation : sig
   (** Process-local permit issued only by this actor after actual reservation ACK.
@@ -3492,7 +4143,8 @@ end
     Activation_unavailable preserves that known admission and exact live-issuance
     error; Retained reports only an exact preexisting receipt lookup. *)
 val admit_held_goal_run
-  :  t
+  :  ?writer:Agent_protocol.Id.Attachment.t
+  -> t
   -> binding:Source_binding.t
   -> intent:Goal_episode_admission.intent
   -> session:Agent_protocol.Session_ref.t
@@ -3503,7 +4155,8 @@ val admit_held_goal_run
     require exact immutable Run_goal_link intent and episode association. Missing
     DATA does NOT prove no effects and grants no permission. Does not create custody. *)
 val goal_run_receipt
-  :  t
+  :  ?writer:Agent_protocol.Id.Attachment.t
+  -> t
   -> actor:Operator_authorization.t
   -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
   -> request:Goal_activation_request.t
@@ -3825,6 +4478,55 @@ module Runtime_construction : sig
   val check_basis : t -> (unit, Agent_protocol.Error.t) result
 end
 
+module Failed_startup_disposal : sig
+  (** Actual process-local custody release of one original failed Initial
+      construction. The original End, Run, and cleanup snapshot keep their
+      observed outcomes. Available after Actor death. Creating-domain only. *)
+  type t
+
+  (** Physical original construction association; foreign reads raise Invalid_argument. *)
+  val same_construction : t -> construction:Runtime_construction.t -> bool
+end
+
+module Failed_startup_request : sig
+  type actor = t
+  type t
+
+  (** Nonyielding naming DATA for already captured original objects, no authority.
+      Creating-domain/Actor association checked. Owner retains SAME request before
+      dispatch so lost reply can be observed without rerunning any retirement.
+      Unsupported/unbound/dead/disposal-only Actor rejects before allocation. *)
+  val create
+    :  actor
+    -> construction:Runtime_construction.t
+    -> retirement:Retirement_cleanup.t
+    -> (t, Agent_protocol.Error.t) result
+
+  (** Domain-checked read of only THIS request's actual atomic receipt. None is
+      unknown/pending; this never reads Actor latest or issues mailbox work. *)
+  val released : t -> (Failed_startup_disposal.t option, Agent_protocol.Error.t) result
+end
+
+(** Exact nonyielding Actor release after permanent closing retirement Joined,
+    original writer-entered failure/no ACK on SAME canonical backend, original
+    failed Initial End, closed actual Init callbacks, and fresh no-live-work
+    guards. Input requires its original producer exit and normal graph-close.
+    Authored startup requires its original producer exit and either an uninstalled
+    first lifecycle write or a confirmed lifecycle and joined callback before the
+    failed final aggregate. The Runtime Owner checks its independent physical
+    joins. Success atomically caches the receipt and installs a monotonic
+    disposal-only gate before reply. Only State, Shutdown and SAME request
+    repeat remain admitted. *)
+val release_failed_startup_custody
+  :  t
+  -> request:Failed_startup_request.t
+  -> (Failed_startup_disposal.t, Agent_protocol.Error.t) result
+
+(** Negative-only creating-domain read. True only DENIES checkpoint dispatch;
+    neither false nor true grants execution or custody authority. Foreign domain
+    raises Invalid_argument. *)
+val is_startup_disposal_only : t -> bool
+
 val check_runtime_construction_admission
   :  t
   -> construction:Runtime_construction.t
@@ -3834,9 +4536,15 @@ val check_runtime_construction_admission
     None->Some law. Goal permits exact existing worker/Manager reuse or the exact
     cold constructor's empty slot; competing runtime/borrow rejects. Optional
     policy DATA uses the existing turn-budget writer with this exact final guard.
-    Store refresh repeats after any policy ACK and before physical install. *)
+    Store refresh repeats after any policy ACK and before physical install.
+    The optional factual retained-lifecycle witness is accepted only for the
+    actual Existing_goal fresh binding. It preserves physical cold installation
+    while joining its genuinely completed SAME lifecycle, without callback replay
+    or inferred authority. Initial and ordinary delegated routes reject Some. *)
 val install_runtime_construction
-  :  ?automatic_turn_policy:Chat_response.Runtime_semantics.policy
+  :  ?unmoderated_source:Runtime_builder.Unmoderated_source.t
+  -> ?retained_lifecycle:Runtime_builder.Retained_lifecycle.t
+  -> ?automatic_turn_policy:Chat_response.Runtime_semantics.policy
   -> ?moderator_manager:Chat_response.Moderator_manager.t
   -> t
   -> construction:Runtime_construction.t
@@ -4088,7 +4796,8 @@ val reserve_runtime_history_block
     before runtime/source acquisition. Historical DATA remains reportable after
     later episode revisions and grants no resumed execution authority. *)
 val goal_resume_receipt
-  :  t
+  :  ?writer:Agent_protocol.Id.Attachment.t
+  -> t
   -> actor:Operator_authorization.t
   -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
   -> session:Agent_protocol.Session_ref.t
@@ -4120,7 +4829,8 @@ val bind_goal_continuation_source
     issuance errors are Resume_failed. Waiting preserves its actual passive Wait
     and creates no Operation. Exceptions/cancellation preserve their primary. *)
 val admit_goal_resume
-  :  t
+  :  ?writer:Agent_protocol.Id.Attachment.t
+  -> t
   -> binding:Goal_continuation.Source_binding.t
   -> (Goal_continuation.Admission.t, Agent_protocol.Error.t) result
 
@@ -4435,6 +5145,15 @@ val query_recurrences
   -> request:Recurrence_query.request
   -> (Recurrence_query.t, Agent_protocol.Error.t) result
 
+(** The same authorized query plus its immutable session state from the same
+    mailbox turn, for registry read composition. *)
+val query_recurrences_with_state
+  :  t
+  -> actor:Operator_authorization.t
+  -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> request:Recurrence_query.request
+  -> (Session_state.t * Recurrence_query.t, Agent_protocol.Error.t) result
+
 module Recurrence_planning_read : sig
   type t =
     { entries : Recurrence_view.t list
@@ -4587,7 +5306,8 @@ val submit_held_run_input
     and cleanup remain owned by the calling Runtime_owner; this returns no lease.
     Same Eio domain as the issuing startup. *)
 val install_held_runtime
-  :  ?automatic_turn_policy:Chat_response.Runtime_semantics.policy
+  :  ?unmoderated_source:Runtime_builder.Unmoderated_source.t
+  -> ?automatic_turn_policy:Chat_response.Runtime_semantics.policy
   -> ?moderator_manager:Chat_response.Moderator_manager.t
   -> t
   -> continuation:Admitted_activation.Continuation.t
@@ -4691,6 +5411,11 @@ val with_current_goal_wake_queued_event_tools
     Run_transition.admit_turn body. Select ONLY the exact matching Pending_wake;
     unrelated pending inputs/follow-ups are not silently adopted by this consumer.
     Actual Operation/Run_work + Wait consumption ACK marks handoff before publish.
+    In an associated child, the SAME canonical Turn ACK installs the actual Goal
+    owner and every inherited ancestor receipt; launch follows ancestor
+    confirmation on the same selected worker without fresh quota admission.
+    A prepared or uncertain writer is not a positive handoff. The bool may report
+    notification metadata only; native ACK facts govern actual runtime transfer.
     Never manufacture a queued subscription frame or call queued claim_wake. *)
 val deliver_goal_wake_notifications
   :  t
@@ -5019,15 +5744,16 @@ val prepare_unrelated_child_origin
   -> source_owner:Runtime_source_owner.t
   -> (Child_origin.Preparation.t, Agent_protocol.Error.t) result
 
-(** Bind explicit Unrelated management birth to the exact protected recurrence
-    row issued by this Actor. Revalidates the original opaque permit and derives
-    its immutable principal/key/child/transaction without caller scalar IDs. The
-    row principal may differ from both controller creator and reauthorizing caller.
-    No ambient Goal attribution is selected and no child effect is authorized. *)
+(** Bind the exact protected recurrence row issued by this Actor. Its immutable
+    principal/key/child/transaction come from the opaque permit and retained row.
+    A bound definition also requires the actual delegated ancestry of its
+    controller, when delegated, and uses its frozen creator Workflow association.
+    An ordinary definition uses the original Unrelated management route. *)
 val bind_recurrence_child_origin
   :  t
   -> source_owner:Runtime_source_owner.t
   -> permit:Recurrence_creation.t
+  -> ancestry:Delegation_authority.Checked_ancestry.t option
   -> (Child_origin.Bound.t, Agent_protocol.Error.t) result
 
 (** Bind before private lower reserve and child initialization. Rechecks original
@@ -5424,6 +6150,369 @@ module Descendant_admission : sig
     -> (Admitted_views.t, Agent_protocol.Error.t) result
 end
 
+(** Finite causal route association beneath per-H admission. These values are
+    issued only from the SAME actual occupied causal preparation and frozen
+    native selection. They grant no provider, count or token admission. All Store
+    I/O runs outside the mailbox; finite consume repeats exact Actor/currentness. *)
+module Causal_admission : sig
+  module Preparation : sig
+    type t
+
+    val session : t -> Agent_protocol.Session_ref.t
+  end
+
+  module Reservation : sig
+    type t
+
+    val owner : t -> Agent_protocol.Session_ref.t
+  end
+
+  module Reservation_attempt : sig
+    type t
+
+    val owner : t -> Agent_protocol.Session_ref.t
+    val acknowledged : t -> Reservation.t option
+
+    type outcome =
+      | Not_attempted
+      | Known_not_reserved
+      | Acknowledged of Reservation.t
+      | Attempt_unconfirmed
+
+    (** [Known_not_reserved] is a settled admission outcome, not evidence that no
+        storage write occurred: a policy Hold may have been acknowledged. The
+        detailed original result remains available through commit/reconciliation. *)
+    val outcome : t -> outcome
+  end
+
+  module Reservation_set : sig
+    type t
+
+    val preparation : t -> Preparation.t
+    val attempts : t -> Reservation_attempt.t list
+
+    val requests
+      :  t
+      -> (Goal_policy_contributions.Request.t list, Agent_protocol.Error.t) result
+  end
+
+  module Acknowledgement : sig
+    (** Only the actual canonical State-ACK suffix issues this custody. It keeps
+        SAME native ACK, actual callee and Plan-owned actual reservation Set. *)
+    type t
+
+    val reservations : t -> Reservation_set.t
+  end
+
+  module Usage_observation : sig
+    (** Complete preserved actual source projections. Neither decoded DATA nor
+        this factual observation grants execution or initial confirmation. *)
+    type t
+  end
+
+  module Import_acknowledgement : sig
+    (** Initial-confirmation State ACK. Factual correction has separate custody
+        and cannot enter the initial confirmation API. *)
+    type t
+
+    val reservation : t -> Reservation.t
+  end
+
+  module Root_before_writer : sig
+    type t
+  end
+
+  module Before_writer : sig
+    type t
+  end
+
+  (** Assemble only SAME complete ordered actual root views, with the consumed
+      full-reference observation and complete actual owner bindings, including
+      inline/covered owners when the remote vector is empty. No reservation or
+      ACK is issued; original/inline policy remain Actor-owned. *)
+  val prepare_before_writer
+    :  preparation:Preparation.t
+    -> reservations:Reservation_set.t
+    -> views:Root_before_writer.t list
+    -> (Before_writer.t, Agent_protocol.Error.t) result
+
+  module Reserve_result : sig
+    type t =
+      | Reserved of Reservation.t
+      | Blocked of Goal_admission_policy.Count_availability.t
+      | Attempt_unconfirmed of Reservation_attempt.t
+  end
+
+  module Route_observation : sig
+    type t
+
+    (** Immutable complete target-owner locators, preserving captured order and
+        typed full-Session_ref deduplication, including inline/covered owners.
+        A locator does not authenticate or select a runtime. *)
+    val owners : t -> Agent_protocol.Session_ref.t list
+  end
+
+  module Root_route : sig
+    type t
+
+    val owner : t -> Agent_protocol.Session_ref.t
+    val target : t -> Policy_cause_data.Goal_target.t
+  end
+
+  (** Factual source capture/current Controller observation/finite consume.
+      No old worker, Caller, live work row, current source epoch, Goal eligibility
+      or transcript permission is needed. Actual Factory/Store/session and SAME
+      immutable streams/frontier remain strict; old stream generations may
+      survive a later State reset. Absence cannot become empty/zero. *)
+  val observe_acknowledged_usage
+    :  t
+    -> source_owner:Runtime_source_owner.t
+    -> acknowledgement:Acknowledgement.t
+    -> (Usage_observation.t, Agent_protocol.Error.t) result
+
+  (** Observe the original callee/stream under genuine initial import custody;
+      this never exports the importing root's physical usage or renews an original. *)
+  val observe_imported_usage
+    :  t
+    -> source_owner:Runtime_source_owner.t
+    -> acknowledgement:Import_acknowledgement.t
+    -> (Usage_observation.t, Agent_protocol.Error.t) result
+
+  (** Same exact callee State/preparation/Set is retained before the first yield.
+      Optional ancestry is genuine SAME issuer evidence for actual Spec.delegation;
+      None is valid only for a real root. Every full Ref in every original Frame,
+      current Cause and actual suffix is checked, including zero/covered targets.
+      Metadata/source changes cause Conflict, never route relabeling or retry. *)
+  val observe_routes
+    :  t
+    -> source_owner:Runtime_source_owner.t
+    -> preparation:Preparation.t
+    -> reservations:Reservation_set.t
+    -> callee_ancestry:Delegation_authority.Checked_ancestry.t option
+    -> (Route_observation.t, Agent_protocol.Error.t) result
+
+  (** Actual root repeats SAME Store/issuer and all-record observations before
+      validating exact Goal/source/GD/Scope. Only remote causal Overlay choices
+      issue routes; covered/inline targets are validated and never reserved here.
+      Historical missing physical root metadata remains unavailable. *)
+  val bind_root_routes
+    :  t
+    -> source_owner:Runtime_source_owner.t
+    -> observation:Route_observation.t
+    -> (Root_route.t list, Agent_protocol.Error.t) result
+
+  (** Retain SAME next native attempt and actual Actor route in SAME Plan-owned
+      Set before reply. Both vectors are preallocated/validated before the two
+      nonyielding assignments; Begin itself reserves no count. *)
+  val begin_reservation
+    :  t
+    -> route:Root_route.t
+    -> reservations:Reservation_set.t
+    -> (Reservation_attempt.t, Agent_protocol.Error.t) result
+
+  (** Fresh count/token/control/deadline check only before reserve. Exact actual
+      writer kernel and ACK survive reply/publication failure. Unknown retains
+      the original root fence and cannot invoke a second writer or refund. *)
+  val commit_reservation
+    :  t
+    -> attempt:Reservation_attempt.t
+    -> (Reserve_result.t, Agent_protocol.Error.t) result
+
+  (** Factual native outcome only. Never captures fresh policy, starts a writer,
+      repeats an old invocation or substitutes current State for original basis. *)
+  val reconcile_reservation
+    :  t
+    -> attempt:Reservation_attempt.t
+    -> (Reserve_result.t, Agent_protocol.Error.t) result
+
+  (** Current exact pending plus count-free activation check for that owned
+      reservation. Actual original/effect guard remains mandatory at callee.
+      This view cannot stand in for the later canonical ACK/confirmation. *)
+  val refresh_reserved
+    :  t
+    -> reservation:Reservation.t
+    -> (Root_before_writer.t, Agent_protocol.Error.t) result
+
+  module Closed_before_writer : sig
+    (** Actual same-slot monotone seal; no constructor/decoder. Issued only by
+        the existing governed callee's finite no-future-writer settlement. *)
+    type t
+  end
+
+  module Confirmation : sig
+    type t
+
+    (** Immutable exact initial receipt vector; not a new confirmation issuer. *)
+    val imports : t -> Import_acknowledgement.t list
+  end
+
+  module Root_admitted : sig
+    type t
+  end
+
+  module Admitted_views : sig
+    type t
+
+    val check_current : t -> (unit, Agent_protocol.Error.t) result
+  end
+
+  (** Initial Pending -> Added only: SAME stream, pending.next_prefix and exact
+      head/work/cause/origin witness. Actual ACK installed before publication.
+      Duplicate/Stale alone cannot issue this ACK or clear Pending. *)
+  val import_usage
+    :  t
+    -> reservation:Reservation.t
+    -> observation:Usage_observation.t
+    -> (Import_acknowledgement.t, Agent_protocol.Error.t) result
+
+  module Correction_attempt : sig
+    (** Exact actual root-issued immutable operation receipt; retained in SAME
+        root fence before prepare replies and retained by host before commit. *)
+    type t
+  end
+
+  module Correction_acknowledgement : sig
+    (** Factual-only actual State ACK. Cannot be passed to [confirmation]. *)
+    type t
+  end
+
+  module No_write : sig
+    type t =
+      | Exact_duplicate
+      | Superseded
+  end
+
+  module Correction_preparation : sig
+    (** [Awaiting_initial_confirmation] retains all custody without a write or
+        settlement: another actual initial import must advance first. It is not
+        a provider failure or permission to consume that attempt's pending. *)
+    type t =
+      | Prepared of Correction_attempt.t
+      | No_write of No_write.t
+      | Awaiting_initial_confirmation
+  end
+
+  (** Explicit factual correction. Actual prior import custody authenticates
+      immutable same stream, not a later H admission. Current Book must return
+      Replaced at CURRENT confirmed_prefix/unchanged head, or raw-changing
+      Duplicate. Exact complete-byte Duplicate/Stale returns factual No_write
+      without a writer/ACK; Superseded does not mean input equals current root. *)
+  val prepare_correction
+    :  t
+    -> acknowledgement:Import_acknowledgement.t
+    -> observation:Usage_observation.t
+    -> (Correction_preparation.t, Agent_protocol.Error.t) result
+
+  val commit_correction
+    :  t
+    -> attempt:Correction_attempt.t
+    -> (Correction_acknowledgement.t, Agent_protocol.Error.t) result
+
+  (** Exact receipt only; old ACK remains historical after a newer operation,
+      never overwrites current phase. No re-invocation or fresh policy. *)
+  val reconcile_correction
+    :  t
+    -> attempt:Correction_attempt.t
+    -> (Correction_acknowledgement.t, Agent_protocol.Error.t) result
+
+  (** Factual lost-prepare-reply lookup: SAME imported stream custody and SAME
+      immutable observation identity, not old reservation alone. Returns only
+      the exact already retained operation; never prepares/invokes one. *)
+  val retained_correction
+    :  t
+    -> acknowledgement:Import_acknowledgement.t
+    -> observation:Usage_observation.t
+    -> (Correction_attempt.t option, Agent_protocol.Error.t) result
+
+  (** Explicit finite refusal of SAME prepared operation. Before any writer it
+      records actual rejection through its kernel then seals/restores. Unknown
+      or ACK cannot be abandoned; no general timestamp/refund/cancel proof. *)
+  val abandon_correction
+    :  t
+    -> attempt:Correction_attempt.t
+    -> (unit, Agent_protocol.Error.t) result
+
+  (** Initial-import reconciliation only; SAME retained initial receipt and
+      immutable observation, even after a later correction. The receipt is
+      installed at actual State ACK and never replaced by later usage. No new
+      writer, policy check or disposition ACK. *)
+  val reconcile_usage
+    :  t
+    -> reservation:Reservation.t
+    -> observation:Usage_observation.t
+    -> (Import_acknowledgement.t, Agent_protocol.Error.t) result
+
+  (** No fresh route/current permission check. SAME actual slot seal + exact
+      Pending; no unknown refund and no close after canonical ACK. *)
+  val close_before_writer
+    :  t
+    -> reservation:Reservation.t
+    -> closed:Closed_before_writer.t
+    -> (unit, Agent_protocol.Error.t) result
+
+  (** Pure exact ordered native vector check, including empty vector. Inline and
+      physically covered choices have no remote ACK. Real canonical ACK + each
+      actual initial import, never Set.complete/DTO/disposition alone. *)
+  val confirmation
+    :  Acknowledgement.t
+    -> imports:Import_acknowledgement.t list
+    -> (Confirmation.t, Agent_protocol.Error.t) result
+
+  (** No prospective count. Current admitted Goal/source/deadline and actual root
+      retained-owner view still gate the final callee check. Factual cleanup does
+      not call this function or depend on its success. *)
+  val refresh_admitted_root
+    :  t
+    -> reservation:Reservation.t
+    -> acknowledgement:Acknowledgement.t
+    -> confirmation:Confirmation.t
+    -> (Root_admitted.t, Agent_protocol.Error.t) result
+
+  val admitted_views
+    :  acknowledgement:Acknowledgement.t
+    -> confirmation:Confirmation.t
+    -> views:Root_admitted.t list
+    -> (Admitted_views.t, Agent_protocol.Error.t) result
+
+  (** SAME Plan-owned factual transport, single elected driver owned by its
+      existing614 Factual_usage cell. Retains exact observations/operations and
+      successful initial prefix across Error/cancellation; no additional election
+      or provider authority. Cached reads recheck actual source/Store/ACK custody. *)
+  val initial_usage
+    :  t
+    -> source_owner:Runtime_source_owner.t
+    -> acknowledgement:Acknowledgement.t
+    -> (Usage_observation.t, Agent_protocol.Error.t) result
+
+  val initial_imports
+    :  Acknowledgement.t
+    -> (Import_acknowledgement.t list, Agent_protocol.Error.t) result
+
+  val initial_confirmation
+    :  Acknowledgement.t
+    -> (Confirmation.t option, Agent_protocol.Error.t) result
+
+  val retain_initial_import
+    :  Acknowledgement.t
+    -> observation:Usage_observation.t
+    -> imported:Import_acknowledgement.t
+    -> (unit, Agent_protocol.Error.t) result
+
+  val retain_initial_confirmation
+    :  Acknowledgement.t
+    -> Confirmation.t
+    -> (unit, Agent_protocol.Error.t) result
+
+  val correct_imported_usage
+    :  t
+    -> source_owner:Runtime_source_owner.t
+    -> acknowledgement:Acknowledgement.t
+    -> imported:Import_acknowledgement.t
+    -> ( Inference_graph_owner.Factual_usage.Correction_outcome.t
+         , Agent_protocol.Error.t )
+         result
+end
+
 module Descendant_host : sig
   (** Actual Factory adapter captured under original Runtime_source_owner.
       Calls occur ONLY in existing child outer driver, never the Actor mailbox or ownership-state/Registry
@@ -5447,6 +6536,32 @@ module Descendant_host : sig
         -> (Descendant_admission.Admitted_views.t, Agent_protocol.Error.t) result
     }
 
+  module Causal_driver : sig
+    type t =
+      { prepare :
+          Causal_admission.Preparation.t
+          -> Causal_admission.Reservation_set.t
+          -> (Causal_admission.Before_writer.t, Agent_protocol.Error.t) result
+      ; close :
+          Causal_admission.Reservation_set.t
+          -> Causal_admission.Closed_before_writer.t
+          -> (unit, Agent_protocol.Error.t) result
+      ; confirm :
+          Causal_admission.Acknowledgement.t
+          -> (Causal_admission.Confirmation.t, Agent_protocol.Error.t) result
+      ; refresh_admitted :
+          Causal_admission.Acknowledgement.t
+          -> Causal_admission.Confirmation.t
+          -> (Causal_admission.Admitted_views.t, Agent_protocol.Error.t) result
+      ; correct_usage :
+          Causal_admission.Acknowledgement.t
+          -> Causal_admission.Confirmation.t
+          -> ( Inference_graph_owner.Factual_usage.Correction_outcome.t
+               , Agent_protocol.Error.t )
+               result
+      }
+  end
+
   module Binding : sig
     (** Actual Factory source lifetime, with no execution permission or decoder. *)
     type t
@@ -5465,9 +6580,16 @@ end
     before any root wait. Native original source/permission and policy checks
     remain independent; canonical/episode progress alone is not retirement.
     Retains the SAME actual delegated ancestry guard for historical own-origin
-    classification outside the mailbox; omission alone never means Unrelated. *)
+    classification outside the mailbox; omission alone never means Unrelated.
+
+    During policy-only construction, [policy_restoration] must be the SAME
+    target Actor's current construction association. This repeats its actual
+    source/Caller admission before the unchanged Factory-owner, selected State
+    and ancestry checks. Omission does not bypass construction exclusion. *)
 val install_descendant_host
-  :  t
+  :  ?policy_restoration:Policy_restoration.t
+  -> ?causal_driver:Descendant_host.Causal_driver.t
+  -> t
   -> source_owner:Runtime_source_owner.t
   -> expected:Session_state.t
   -> check_ancestry:

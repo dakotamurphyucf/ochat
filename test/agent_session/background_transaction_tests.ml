@@ -303,6 +303,7 @@ let%expect_test "job starts commit atomically with managed handler and event che
                         ~event
                         ~snapshot:(fun () -> Ok before)
                         (fun ~executing
+                          ~policy_caller:_
                           ~model_jobs:_
                           ~allocate_inference:_
                           ~retirement_reason:_
@@ -345,11 +346,13 @@ let%expect_test "job starts commit atomically with managed handler and event che
              | true -> before
              | false -> after
            in
-           assert (
-             Option.equal
-               Jsonaf.exactly_equal
-               state.moderator
-               (Some (Agent_session.Runtime_builder.encode_moderator_snapshot expected)));
+           let metadata = assert_moderator_checkpoint state ~snapshot:expected in
+           let completed =
+             match fail_commit, mode with
+             | false, (`Handler | `Event) -> true
+             | true, _ | false, `Handler_cancelled -> false
+           in
+           assert_moderator_queue_frontier metadata ~required:completed ~head:0L ~next:0L;
            let lease =
              Capacity.try_acquire capacity (Background_admission_tests.key actor job)
              |> protocol_ok
@@ -406,7 +409,7 @@ let%expect_test
           | Operation_interrupted operation ->
             terminal_operations := operation :: !terminal_operations
           | _ -> ()))
-      (fun env _sw actor writer backend ->
+      (fun env sw actor writer backend ->
          let expected = A.state actor |> protocol_ok in
          let initialization =
            (match original with
@@ -663,6 +666,189 @@ let%expect_test
            let second = claim (List.nth_exn !selected 1) in
            check_loan first;
            check_loan second;
+           (match mode with
+            | `Original ->
+              (* The public Job service also owns direct inference for this
+                 genuinely selected Async attempt, without a Model or Invocation
+                 standing in for its physical execution. *)
+              let module Tracking = Inference_tracking_tests in
+              let module Graph = Agent_server.Graph_tracking in
+              let module Ledger = Agent_session.Inference_ledger in
+              let before = A.state actor |> protocol_ok in
+              let previous = Ledger.rows before.inference_ledger in
+              let new_rows current =
+                Ledger.rows current.Agent_session.Session_state.inference_ledger
+                |> List.filter ~f:(fun row ->
+                  not
+                    (List.exists previous ~f:(fun old ->
+                       Ledger.Handle.equal (Ledger.Row.handle old) (Ledger.Row.handle row))))
+              in
+              let providers = ref 0 in
+              let observed = ref None in
+              let context, inference_request, _ =
+                Tracking.prepared
+                  ~post_stream:(fun ~sw:_ ~inputs:_ ->
+                    Int.incr providers;
+                    let current = A.state actor |> protocol_ok in
+                    let job =
+                      List.find_exn current.jobs ~f:(fun job ->
+                        P.Id.Job.equal first.id job.id)
+                    in
+                    [%test_eq: J.kind] Async_tool job.kind;
+                    (match job.status with
+                     | Running -> ()
+                     | Queued
+                     | Waiting_permission _
+                     | Waiting_completion _
+                     | Succeeded
+                     | Failed _
+                     | Cancelled
+                     | Interrupted _ ->
+                       raise_s
+                         [%sexp
+                           "direct Async provider lost its running Job"
+                         , (job.status : J.status)]);
+                    [%test_eq: int] first.attempt job.attempt;
+                    let row = List.hd_exn (new_rows current) in
+                    [%test_eq: int] 1 (List.length (new_rows current));
+                    let handle = Ledger.Row.handle row in
+                    assert (Option.is_none (Ledger.Handle.operation_id handle));
+                    assert (Option.is_none (Ledger.Handle.invocation_id handle));
+                    observed := Some handle;
+                    Seq.empty)
+                  ()
+              in
+              let graph =
+                Graph.create
+                  actor
+                  ~source:(Tracking.source "actual-direct-async")
+                  ~upstream:(Tracking.upstream (fun ~scope:_ ~accounting_id:_ -> ()))
+                |> protocol_ok
+              in
+              let dispatch identity =
+                Inference_client.run
+                  context
+                  ~sw
+                  ~identity
+                  ~relation:Root
+                  ~request:inference_request
+                  ~before_dispatch:ignore
+                  ~on_attempt:(Graph.on_attempt graph)
+                  ~on_observation:(Graph.on_observation graph)
+                  ~on_completion:(Graph.on_completion graph)
+                  ~on_event:ignore
+                |> Result.map_error ~f:(fun error ->
+                  Sexp.to_string_hum (Inference_client.Error.sexp_of_t error))
+                |> Result.ok_or_failwith
+                |> ignore
+              in
+              let capture f =
+                try Ok (f ()) with
+                | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())
+              in
+              let result =
+                capture (fun () ->
+                  let escaped =
+                    A.with_job_execution
+                      actor
+                      ~job_id:first.id
+                      ~generation:first.generation
+                      ~attempt:first.attempt
+                      ~deadline:(Some deadline)
+                      (fun execution ->
+                         let identity =
+                           Graph.bind_identity
+                             graph
+                             ~allocate:execution.allocate_inference
+                         in
+                         dispatch identity;
+                         Ok identity)
+                    |> protocol_ok
+                  in
+                  [%test_eq: int] 1 !providers;
+                  let handle = Option.value_exn !observed in
+                  let current = A.state actor |> protocol_ok in
+                  let row = List.hd_exn (new_rows current) in
+                  assert (Ledger.Handle.equal handle (Ledger.Row.handle row));
+                  (match dispatch escaped with
+                   | () -> failwith "expired Async allocator admitted another H"
+                   | exception Graph.Rejected error ->
+                     [%test_eq: P.Error.code] Conflict error.code);
+                  [%test_eq: int] 1 !providers;
+                  [%test_eq: int]
+                    1
+                    (List.length (new_rows (A.state actor |> protocol_ok))))
+              in
+              let closed =
+                Eio.Cancel.protect (fun () ->
+                  capture (fun () ->
+                    Graph.seal graph |> protocol_ok;
+                    Graph.finish graph |> protocol_ok))
+              in
+              (match result, closed with
+               | Error (exn, backtrace), _ | Ok (), Error (exn, backtrace) ->
+                 Exn.raise_with_original_backtrace exn backtrace
+               | Ok (), Ok () -> ());
+              let module Model = Agent_session.Model_job_admission in
+              let retained_port = ref None in
+              let model =
+                A.with_job_execution
+                  actor
+                  ~job_id:first.id
+                  ~generation:first.generation
+                  ~attempt:first.attempt
+                  ~deadline:(Some deadline)
+                  (fun execution ->
+                     retained_port := Some execution.model_jobs;
+                     let before = A.state actor |> protocol_ok in
+                     let rejected = Inference_target_tests.job before in
+                     reject := true;
+                     let result = Model.admit execution.model_jobs rejected in
+                     reject := false;
+                     (match result with
+                      | Error failure ->
+                        [%test_eq: P.Error.code] Internal_error failure.code;
+                        [%test_eq: string]
+                          "injected job transition failure"
+                          failure.message
+                      | Ok _ -> failwith "rejected direct Model save was accepted");
+                     let after = A.state actor |> protocol_ok in
+                     assert_same_session_snapshot before after;
+                     let candidate = Inference_target_tests.job after in
+                     Model.admit execution.model_jobs candidate)
+                |> protocol_ok
+              in
+              let launch =
+                match model.launch with
+                | Some launch -> launch
+                | None ->
+                  failwith "real Job-owned Model admission lost its immediate parent"
+              in
+              (match J.Birth_parent.view launch.owner with
+               | Job_attempt { id; attempt } ->
+                 assert (P.Id.Job.equal id first.id);
+                 [%test_eq: int] first.attempt attempt
+               | Callback _ ->
+                 failwith "direct Job Model birth copied a callback ancestor");
+              let parent_launch = Option.value_exn first.launch in
+              [%test_eq: int] (parent_launch.nested_depth + 1) launch.nested_depth;
+              assert (
+                Option.equal
+                  I.equal_observer
+                  parent_launch.moderator_source
+                  launch.moderator_source);
+              let before = A.state actor |> protocol_ok in
+              assert (
+                Result.is_error
+                  (Model.admit
+                     (Option.value_exn !retained_port)
+                     (Inference_target_tests.job before)));
+              let after = A.state actor |> protocol_ok in
+              assert_same_session_snapshot before after;
+              let model = claim model in
+              check_loan model;
+              complete actor model |> protocol_ok |> ignore
+            | `Legacy | `Rejected_save | `Changed_source -> ());
            let child = ref None in
            let dependency_call = root first in
            let pending =
@@ -743,4 +929,149 @@ let%expect_test
      failed ACK/source change publish no child; real dependency defers and settles";
   [%expect
     {| one current inventory across A/C/B; original and legacy admissions survive parent; failed ACK/source change publish no child; real dependency defers and settles |}]
+;;
+
+(* Pure native provenance. None of these records is used as runtime custody. *)
+let%expect_test
+    "direct Job birth keeps exact parent attempt and source without widening callbacks"
+  =
+  let module P = Agent_protocol in
+  let module Launch = Agent_session.Job_launch in
+  let invocation = I.create (invocation_fixture ()).context |> protocol_ok in
+  let callback =
+    Launch.derive
+      ~session_id
+      ~generation:0
+      ~invocations:[ invocation ]
+      ~events:[]
+      ~jobs:[]
+      ~owner:(Invocation invocation.context.id)
+    |> protocol_ok
+  in
+  let source : I.observer =
+    { script_id = "birth-source"; source_sha256 = String.make 64 'b' }
+  in
+  let parent : J.t =
+    { id = P.Id.Job.create ()
+    ; session_id
+    ; generation = 0
+    ; kind = Async_tool
+    ; payload = `Null
+    ; status = Running
+    ; retry_policy = Never
+    ; attempt = 1
+    ; created_at = timestamp
+    ; started_at = Some timestamp
+    ; next_run_at = None
+    ; completed_at = None
+    ; result = None
+    ; delivery = Not_required
+    ; launch = Some { callback with moderator_source = Some source }
+    ; inference_origin = Some Unbound
+    ; progress = None
+    }
+  in
+  let launch job =
+    Launch.derive_from_job
+      ~session_id
+      ~generation:0
+      ~jobs:[ job ]
+      ~job_id:job.J.id
+      ~attempt:job.attempt
+    |> protocol_ok
+  in
+  let child =
+    { parent with
+      id = P.Id.Job.create ()
+    ; kind = Model_call
+    ; status = Queued
+    ; attempt = 0
+    ; started_at = None
+    ; launch = Some (launch parent)
+    }
+  in
+  let check parent child =
+    Launch.validate ~invocations:[ invocation ] ~events:[] ~jobs:[ parent; child ] child
+  in
+  let decoded = J.of_json (J.to_json child) |> protocol_ok in
+  assert (J.equal_launch (Option.value_exn child.launch) (Option.value_exn decoded.launch));
+  check parent decoded |> protocol_ok;
+  assert (
+    Option.is_none (J.Birth_parent.callback_owner (Option.value_exn child.launch).owner));
+  let launch_raw job =
+    match Document_schema.Json.field (J.to_json job) ~name:"launch" with
+    | Value raw -> raw
+    | Absent | Null -> assert false
+  in
+  let expected_callback version source =
+    `Object
+      ([ "schema_version", `Number version
+       ; "owner_type", `String "invocation"
+       ; "owner_id", P.Id.Invocation.to_json invocation.context.id
+       ; "nested_depth", `Number "0"
+       ]
+       @ Option.to_list
+           (Option.map source ~f:(fun source ->
+              ( "moderator_source"
+              , `Object
+                  [ "script_id", `String source.I.script_id
+                  ; "source_sha256", `String source.source_sha256
+                  ] ))))
+  in
+  [%test_eq: string]
+    (Jsonaf.to_string (expected_callback "1" None))
+    (Jsonaf.to_string (launch_raw { parent with launch = Some callback }));
+  [%test_eq: string]
+    (Jsonaf.to_string (expected_callback "2" (Some source)))
+    (Jsonaf.to_string (launch_raw parent));
+  assert (J.equal_launch callback (J.launch_of_sexp (J.sexp_of_launch callback)));
+  let advanced = { parent with attempt = 2 } in
+  check advanced child |> protocol_ok;
+  assert (
+    Result.is_error
+      (Launch.derive_from_job
+         ~session_id
+         ~generation:0
+         ~jobs:[ advanced ]
+         ~job_id:advanced.id
+         ~attempt:1));
+  let without_source job =
+    { job with
+      J.launch =
+        Option.map job.J.launch ~f:(fun launch -> { launch with moderator_source = None })
+    }
+  in
+  assert (Result.is_error (check parent (without_source child)));
+  assert (Result.is_error (check (without_source parent) child));
+  let no_source_parent = without_source parent in
+  check no_source_parent { child with launch = Some (launch no_source_parent) }
+  |> protocol_ok;
+  assert (Result.is_error (J.of_json (J.to_json { child with kind = Async_tool })));
+  let raw = J.to_json child in
+  let changed =
+    match raw with
+    | `Object fields ->
+      `Object
+        (List.map fields ~f:(fun (key, value) ->
+           if String.equal key "launch"
+           then
+             ( key
+             , match value with
+               | `Object fields ->
+                 `Object
+                   (List.map fields ~f:(fun (key, value) ->
+                      ( key
+                      , if String.equal key "owner_id"
+                        then P.Id.Job.to_json child.id
+                        else value )))
+               | _ -> assert false )
+           else key, value))
+    | _ -> assert false
+  in
+  assert (Result.is_error (J.of_json changed));
+  print_endline
+    "callback wires unchanged; direct parent frozen; new stale attempt, source mismatch \
+     and owner mismatch reject";
+  [%expect
+    {| callback wires unchanged; direct parent frozen; new stale attempt, source mismatch and owner mismatch reject |}]
 ;;

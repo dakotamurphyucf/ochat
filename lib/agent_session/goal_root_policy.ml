@@ -113,3 +113,35 @@ let admitted t ~state ~now =
   then denied "descendant root Goal deadline reached"
   else Ok ()
 ;;
+
+module Causal = struct
+  let context t state =
+    let open Result.Let_syntax in
+    let%bind goal, _ = current t state in
+    let%map context = Session_state.goal_policy_context state ~owner:(G.session goal) in
+    goal, context
+  ;;
+
+  let before_reserve t ~state ~now =
+    let open Result.Let_syntax in
+    let%bind goal, context = context t state in
+    Goal_policy_totals.check
+      context
+      ~goal
+      ~context:Delegated_policy_causal
+      ~now
+      ~dimension:Attempt
+  ;;
+
+  let reserved_before_writer t ~state ~now =
+    let open Result.Let_syntax in
+    let%bind goal, context = context t state in
+    (* The exact reservation is checked by the real receiver. Repeating the
+       prospective count decision here would reject this attempt's own pending. *)
+    Goal_policy_totals.check_activation
+      context
+      ~goal
+      ~context:Delegated_policy_causal
+      ~now
+  ;;
+end

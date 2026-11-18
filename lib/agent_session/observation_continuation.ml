@@ -1,6 +1,7 @@
 open! Core
 module P = Agent_protocol
 module I = P.Invocation
+module Policy_source = Policy_standalone_source.Classification
 
 module Parent = struct
   type t =
@@ -13,8 +14,10 @@ type t =
   { invocation : I.t
   ; source : P.Run_source.t option
   ; continuation : Execution_custody.Continuation.t option
+  ; policy_source : Policy_source.t
   }
 
+let policy_source t = t.policy_source
 let failure message = Error (P.Error.create Conflict ~message ~retryable:false ())
 
 let parent t =
@@ -32,13 +35,46 @@ let stage_parent = function
     |> Result.map ~f:Option.some
 ;;
 
-let stage_completed invocation ~source ~parent =
+let validate_policy_source (invocation : I.t) ~source = function
+  | Policy_source.Unknown -> Ok ()
+  | Standalone_unrelated descriptor ->
+    let open Result.Let_syntax in
+    let%bind member =
+      Policy_cause_data.Member.invocation
+        invocation.context.id
+        ~generation:invocation.context.generation
+    in
+    let%bind () =
+      match descriptor.Policy_standalone_source.subject with
+      | Member actual when Policy_cause_data.Member.equal actual member -> Ok ()
+      | Member _ | Root_operation _ -> failure "observation standalone subject differs"
+    in
+    if
+      P.Id.Session.equal descriptor.session_id invocation.context.session_id
+      && Int.equal descriptor.generation invocation.context.generation
+      && Option.exists
+           invocation.inference_origin
+           ~f:(P.Inference_origin.equal descriptor.origin)
+      &&
+      match descriptor.source.installation, source with
+      | Some captured, Some current ->
+        P.Run_source.equal captured current
+        && Option.exists
+             descriptor.source.observer
+             ~f:(P.Invocation.equal_observer current.observer)
+      | None, _ | Some _, None -> false
+    then Ok ()
+    else failure "observation standalone origin or full source differs"
+;;
+
+let stage_completed invocation ~source ~parent ~policy_source =
   let open Result.Let_syntax in
   let%bind () = I.validate invocation in
   match invocation.I.status, invocation.observation with
   | (Resolved _ | Published _), Some { status = Awaiting; _ } ->
+    let%bind () = validate_policy_source invocation ~source policy_source in
     let%map continuation = stage_parent parent in
-    Some { invocation; source; continuation }
+    Some { invocation; source; continuation; policy_source }
   | ( (Admitted | Dispatching | Resolved _ | Published _)
     , (None | Some { status = Observing | Observed | Observation_failed _; _ }) ) ->
     Ok None
@@ -52,7 +88,9 @@ let same_result t invocation =
 ;;
 
 let matches t ~source invocation =
-  Option.equal P.Run_source.equal t.source source && same_result t invocation
+  Option.equal P.Run_source.equal t.source source
+  && same_result t invocation
+  && Result.is_ok (validate_policy_source invocation ~source t.policy_source)
 ;;
 
 let stage_claim t ~source ~previous ~observing =
@@ -64,13 +102,19 @@ let stage_claim t ~source ~previous ~observing =
     else failure "observation continuation does not own this exact claim"
   in
   let%map continuation = stage_parent (parent t) in
-  { invocation = observing; source = t.source; continuation }
+  { invocation = observing
+  ; source = t.source
+  ; continuation
+  ; policy_source = t.policy_source
+  }
 ;;
 
 let stage_follow_up t ~resolved =
   let open Result.Let_syntax in
   let%bind () =
-    if same_result t resolved
+    if
+      same_result t resolved
+      && Result.is_ok (validate_policy_source resolved ~source:t.source t.policy_source)
     then (
       match resolved.I.observation with
       | Some { status = Observed; _ } -> Ok ()
@@ -79,7 +123,11 @@ let stage_follow_up t ~resolved =
     else failure "observation follow-up changed its original result"
   in
   let%map continuation = stage_parent (parent t) in
-  { invocation = resolved; source = t.source; continuation }
+  { invocation = resolved
+  ; source = t.source
+  ; continuation
+  ; policy_source = t.policy_source
+  }
 ;;
 
 let admission t =

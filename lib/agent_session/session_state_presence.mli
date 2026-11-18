@@ -17,6 +17,8 @@ val goal_accounts_is_absent : t -> bool
 val delegated_usage_is_absent : t -> bool
 val child_contributions_is_absent : t -> bool
 val goal_descendants_is_absent : t -> bool
+val policy_canonical_usage_is_absent : t -> bool
+val goal_policy_contributions_is_absent : t -> bool
 val instruction_selection_is_absent : t -> bool
 val recurrence_catalog_is_absent : t -> bool
 val delivery_binding_is_absent : t -> Agent_protocol.Id.Delivery.t -> bool

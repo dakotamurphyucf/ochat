@@ -13,6 +13,20 @@ val equal_observation : t -> t -> bool
 
 val empty : t
 val installation : t -> Run_source_installation.t
+
+(** Optional current-installation lifecycle DATA. Historical absence and explicit
+    null remain distinct in the wire carrier. No execution permission is issued. *)
+val moderator_lifecycle : t -> Moderator_lifecycle.t option
+
+val clear_moderator_lifecycle : t -> t
+
+(** Only paired actual lifecycle claim application selects a new pointer. The
+    enclosing State validates receipt/new-admission custody independently. *)
+val capture_moderator_lifecycle
+  :  t
+  -> Moderator_lifecycle.t
+  -> (t, Agent_protocol.Error.t) result
+
 val runs : t -> Agent_protocol.Run.t list
 val intents : t -> Run_intent.t list
 val receipts : t -> Agent_protocol.Run_receipt.t list

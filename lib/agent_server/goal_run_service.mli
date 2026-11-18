@@ -6,8 +6,11 @@ open! Core
 type t
 
 (** [authorize] is the host's current nonyielding policy for the original actor
-    and actual session state. The existing command, source and runtime owners
-    independently enforce their scopes, original authority and final checks. *)
+    and actual session state. Fresh entry selection excludes lifecycle reservations;
+    retained authorization rechecks the actual registered owner before and after
+    this policy without treating a transient reservation as permission loss. The
+    existing command, source and runtime owners independently enforce their
+    scopes, original authority and final checks. *)
 val create
   :  factory:Session_factory.t
   -> authorize:
@@ -61,7 +64,10 @@ module Outcome : sig
     | Attempted of Attempt.t
 end
 
-(** Start only a new episode: the Goal has no episode or has an exact terminal
+(** A supplied [writer] must remain current through receipt lookup and the
+    admission commit. It is never retained by the running Workflow.
+
+    Start only a new episode: the Goal has no episode or has an exact terminal
     predecessor. Resuming a live paused episode uses a separate control path.
     Goal/catalog revision intent and the original headless request remain exact;
     admission atomically records enablement, Run, episode and immutable link.
@@ -77,7 +83,8 @@ end
     Factory cleanup before classification. Cancellation and unexpected exceptions
     propagate after factual cleanup; completed effects are not rolled back. *)
 val start_episode
-  :  t
+  :  ?writer:Agent_protocol.Id.Attachment.t
+  -> t
   -> entry:Session_registry.entry
   -> actor:Operator_authorization.t
   -> session:Agent_protocol.Session_ref.t
@@ -86,7 +93,9 @@ val start_episode
 
 module Resume_result = Agent_session.Session_actor.Goal_resume_result
 
-(** Resume the same held nonterminal Goal episode. Authenticate the actual
+(** The optional [writer] is checked for this command only, as in [start_episode].
+
+    Resume the same held nonterminal Goal episode. Authenticate the actual
     registered target and check its retained command receipt before borrowing a
     runtime, including while the owner is busy. A retained receipt is historical
     data; it cannot reconstruct runtime custody or replay execution.
@@ -108,7 +117,8 @@ module Resume_result = Agent_session.Session_actor.Goal_resume_result
     successful callback result. Primary cancellation and unexpected exceptions
     propagate with their original backtraces after factual cleanup. *)
 val resume_episode
-  :  t
+  :  ?writer:Agent_protocol.Id.Attachment.t
+  -> t
   -> entry:Session_registry.entry
   -> actor:Operator_authorization.t
   -> session:Agent_protocol.Session_ref.t

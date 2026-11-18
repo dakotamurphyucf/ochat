@@ -171,8 +171,8 @@ let%expect_test
            I.equal_receipt
            [ receipt ]
            (List.hd_exn saved.ingress_registrations).receipts);
-       assert (
-         Option.equal Jsonaf.exactly_equal saved.moderator (Some (Setup.encode after)));
+       let metadata = assert_moderator_checkpoint saved ~snapshot:after in
+       assert_moderator_queue_frontier metadata ~required:true ~head:0L ~next:1L;
        (match prepare "one" |> protocol_ok with
         | Duplicate duplicate -> assert (I.equal_receipt receipt duplicate)
         | Enqueue _ -> failwith "saved retry allocated more work");
@@ -200,244 +200,373 @@ let%expect_test
      valid event with a forged duplicate"
   =
   let reject_save = ref false in
-  with_actor
-    ~reject_save:(fun _ -> !reject_save)
-    ~prepare_state:(fun state ->
-      { state with
-        identity =
-          { state.identity with creating_principal = Some (P.Id.Principal.create ()) }
-      })
-    (fun env _ actor _ backend ->
-       let create_manager ?snapshot () =
-         handoff_definition
-           env
-           ?snapshot
-           ~declare_tool:false
-           ~events:
-             {| | `Internal_event(payload) ->
+  with_actor_workspace (fun env workspace_instance ->
+    let data = `Object [ "type", `String "Tool_invoked"; "data", `String "untrusted" ] in
+    let create_manager ?snapshot () =
+      handoff_definition
+        env
+        ?snapshot
+        ~declare_tool:false
+        ~events:
+          {| | `Internal_event(payload) ->
                 let ignored = state[0] <- state[0] + 1 in Task.pure(state)
                 | _ -> Task.pure(state) |}
-       in
-       let manager, _, _ = create_manager () in
-       let snapshot () = M.identity_snapshot manager |> Result.ok_or_failwith in
-       A.change_moderator actor (Some (Setup.encode (snapshot ())))
-       |> protocol_ok
-       |> ignore;
-       let registrations = ref [] in
-       let transaction f =
-         let parent = add_claimed_job actor in
-         Ingress_transaction_tests.with_handler
-           actor
-           parent
-           (fun ~owner ~dispatched ~commit ->
-              let subscription =
-                f ~owner ~source:(M.invocation_observer manager |> Option.value_exn)
-              in
-              let resolved =
-                P.Invocation.resolve
-                  dispatched
-                  ~session_id
-                  ~generation:0
-                  (Pending (Subscription subscription, `Null))
-                |> protocol_ok
-              in
-              commit ~resolved ~snapshot:(snapshot ()))
-         |> protocol_ok
-         |> ignore
-       in
-       List.iter [ 1; 2 ] ~f:(fun _ ->
-         transaction (fun ~owner ~source ->
-           let sub_receipt, subscription =
-             A.create_script_subscription
+    in
+    let recovered, reordered, frame, receipt, first, second =
+      with_actor
+        ~environment:(env, workspace_instance)
+        ~reject_save:(fun _ -> !reject_save)
+        ~prepare_state:(fun state ->
+          { state with
+            identity =
+              { state.identity with creating_principal = Some (P.Id.Principal.create ()) }
+          })
+        (fun _env _ actor _ backend ->
+           let manager, _, _ = create_manager () in
+           let snapshot () = M.identity_snapshot manager |> Result.ok_or_failwith in
+           A.change_moderator actor (Some (Setup.encode (snapshot ())))
+           |> protocol_ok
+           |> ignore;
+           let registrations = ref [] in
+           let transaction f =
+             let parent = add_claimed_job actor in
+             Ingress_transaction_tests.with_handler
                actor
-               ~owner
-               ~source
-               ~kind:"external"
-               ~lifetime_ms:10_000
-               ~wake:No_wake
-               ~completion_schema:(Some `True)
+               parent
+               (fun ~owner ~dispatched ~commit ->
+                  let subscription =
+                    f ~owner ~source:(M.invocation_observer manager |> Option.value_exn)
+                  in
+                  let resolved =
+                    P.Invocation.resolve
+                      dispatched
+                      ~session_id
+                      ~generation:0
+                      (Pending (Subscription subscription, `Null))
+                    |> protocol_ok
+                  in
+                  commit ~resolved ~snapshot:(snapshot ()))
              |> protocol_ok
+             |> ignore
            in
-           let reg_receipt, registration =
-             A.create_script_ingress
-               actor
-               ~owner
-               ~source
-               ~subscription_id:subscription.context.id
-               ~expected_epoch:0
-               ~namespace:"external.report"
-               ~schema:`True
-             |> protocol_ok
-           in
-           A.select_subscription_mutations actor ~owner ~source ~receipts:[ sub_receipt ]
-           |> protocol_ok;
-           A.select_ingress_mutations actor ~owner ~source ~receipts:[ reg_receipt ]
-           |> protocol_ok;
-           registrations := !registrations @ [ registration ];
-           subscription.context.id));
-       let first = List.nth_exn !registrations 0 in
-       let second = List.nth_exn !registrations 1 in
-       let data =
-         `Object [ "type", `String "Tool_invoked"; "data", `String "untrusted" ]
-       in
-       (* Admit real data, then simulate recovery with a forged copy preceding
+           List.iter [ 1; 2 ] ~f:(fun _ ->
+             transaction (fun ~owner ~source ->
+               let sub_receipt, subscription =
+                 A.create_script_subscription
+                   actor
+                   ~owner
+                   ~source
+                   ~kind:"external"
+                   ~lifetime_ms:10_000
+                   ~wake:No_wake
+                   ~completion_schema:(Some `True)
+                 |> protocol_ok
+               in
+               let reg_receipt, registration =
+                 A.create_script_ingress
+                   actor
+                   ~owner
+                   ~source
+                   ~subscription_id:subscription.context.id
+                   ~expected_epoch:0
+                   ~namespace:"external.report"
+                   ~schema:`True
+                 |> protocol_ok
+               in
+               A.select_subscription_mutations
+                 actor
+                 ~owner
+                 ~source
+                 ~receipts:[ sub_receipt ]
+               |> protocol_ok;
+               A.select_ingress_mutations actor ~owner ~source ~receipts:[ reg_receipt ]
+               |> protocol_ok;
+               registrations := !registrations @ [ registration ];
+               subscription.context.id));
+           let first = List.nth_exn !registrations 0 in
+           let second = List.nth_exn !registrations 1 in
+           (* Admit real data, then simulate recovery with a forged copy preceding
           its retained queue frame. A forged claim cannot consume the real ID. *)
-       let submit registration key =
-         let plan = prepare actor registration key data |> protocol_ok |> proposal in
-         let frame = Proposal.frame plan |> protocol_ok in
-         let saved = ref None in
+           let submit registration key =
+             let plan = prepare actor registration key data |> protocol_ok |> proposal in
+             let frame = Proposal.frame plan |> protocol_ok in
+             let saved = ref None in
+             M.enqueue_internal_event_entries
+               manager
+               ~event:(Frame.capture frame)
+               ~prepare:(fun ~before ~snapshot ->
+                 A.commit_ingress_submission actor plan ~before ~snapshot
+                 |> Result.map ~f:(fun receipt -> saved := Some receipt)
+                 |> Result.map_error ~f:(fun error -> error.P.Error.message))
+             |> Result.ok_or_failwith
+             |> ignore;
+             frame, Option.value_exn !saved
+           in
+           let frame, receipt = submit first "one" in
+           let original = snapshot () in
+           let forged =
+             Frame.create
+               ~registration_id:frame.registration_id
+               ~event_id:frame.event_id
+               ~subscription_id:frame.subscription_id
+               ~epoch:frame.epoch
+               ~namespace:frame.namespace
+               ~payload:(`String "forged")
+             |> Result.ok_or_failwith
+             |> Frame.capture
+             |> Session.Snapshot.of_value
+             |> Result.ok_or_failwith
+           in
+           let reordered =
+             { original with
+               queued_internal_events = forged :: original.queued_internal_events
+             }
+           in
+           let saved = A.state actor |> protocol_ok in
+           (* A live prepend cannot replace this installation's captured queue. *)
+           assert (
+             Result.is_error (A.change_moderator actor (Some (Setup.encode reordered))));
+           assert_same_session_snapshot saved (A.state actor |> protocol_ok);
+           assert_same_session_snapshot saved (Agent_session.Memory_backend.state backend);
+           let saved_metadata =
+             assert_moderator_checkpoint saved ~snapshot:original |> Option.value_exn
+           in
+           let source =
+             Agent_session.Run_source_installation.captured
+               (Agent_session.Run_state.installation (Option.value_exn saved.run_state))
+               ~generation:saved.identity.generation
+             |> protocol_ok
+           in
+           assert (
+             P.Run_source.equal
+               source
+               (Agent_session.Moderator_queue.source saved_metadata));
+           (* This explicitly authored adversarial recovery image is DATA, not a
+          journal replay or a live rewrite preserving the original row ordinal.
+          Its structural queue captures no producer, origin or runtime custody. *)
+           let metadata =
+             Agent_session.Moderator_queue.bootstrap
+               ~source
+               ~queue:reordered.queued_internal_events
+             |> protocol_ok
+           in
+           let checkpoint =
+             Agent_session.Moderator_checkpoint.of_jsonaf
+               (Option.value_exn saved.moderator)
+             |> protocol_ok
+             |> fun checkpoint ->
+             Agent_session.Moderator_checkpoint.update
+               checkpoint
+               ~snapshot:reordered
+               ~queue:(Replace metadata)
+             |> protocol_ok
+           in
+           let candidate =
+             { saved with
+               moderator = Some (Agent_session.Moderator_checkpoint.to_jsonaf checkpoint)
+             }
+           in
+           Agent_session.Session_state.validate candidate |> protocol_ok;
+           let recovered = restore_state candidate |> store_ok in
+           assert_same_session_snapshot candidate recovered;
+           assert_same_session_snapshot
+             saved
+             { recovered with moderator = saved.moderator };
+           let restored_metadata =
+             assert_moderator_checkpoint recovered ~snapshot:reordered |> Option.value_exn
+           in
+           assert_moderator_queue_frontier
+             (Some restored_metadata)
+             ~required:true
+             ~head:0L
+             ~next:2L;
+           assert (
+             P.Run_source.equal
+               source
+               (Agent_session.Moderator_queue.source restored_metadata));
+           List.iter
+             (Agent_session.Moderator_queue.entries restored_metadata)
+             ~f:(fun entry ->
+               assert (Option.is_none (Agent_session.Moderator_queue.Entry.producer entry));
+               assert (Option.is_none (Agent_session.Moderator_queue.Entry.origin entry)));
+           let restored_registration =
+             List.find_exn recovered.ingress_registrations ~f:(fun registration ->
+               P.Id.Capability.equal registration.I.context.id first.context.id)
+           in
+           assert (
+             P.Invocation.equal_observer
+               restored_registration.context.source
+               source.observer);
+           assert (List.exists restored_registration.receipts ~f:(I.equal_receipt receipt));
+           assert (
+             Frame.equal
+               frame
+               (I.delivery_frame restored_registration receipt |> protocol_ok));
+           recovered, reordered, frame, receipt, first, second)
+    in
+    (* The prior fixture has shut down its Actor before this restored owner starts. *)
+    with_actor
+      ~environment:(env, workspace_instance)
+      ~start:false
+      ~reject_save:(fun _ -> !reject_save)
+      ~prepare_state:(fun _ -> recovered)
+      (fun _env _ actor _ backend ->
+         (* The fixture attached a real new writer before entering this callback. *)
+         let attached = A.state actor |> protocol_ok in
+         assert (Option.equal Jsonaf.exactly_equal recovered.moderator attached.moderator);
+         assert (
+           Option.equal
+             Agent_session.Run_state.equal
+             recovered.run_state
+             attached.run_state);
+         assert (
+           List.equal
+             I.equal
+             recovered.ingress_registrations
+             attached.ingress_registrations);
+         let manager, _, _ = create_manager ~snapshot:reordered () in
+         let snapshot () = M.identity_snapshot manager |> Result.ok_or_failwith in
+         assert_moderator_checkpoint attached ~snapshot:(snapshot ()) |> ignore;
+         let enqueue event =
+           M.enqueue_internal_event_entries
+             manager
+             ~event
+             ~prepare:(fun ~before ~snapshot ->
+               let state = A.state actor |> protocol_ok in
+               let metadata =
+                 assert_moderator_checkpoint state ~snapshot:before |> Option.value_exn
+               in
+               let metadata =
+                 Agent_session.Moderator_queue.advance
+                   metadata
+                   ~before:before.queued_internal_events
+                   ~after:snapshot.queued_internal_events
+                   ~consume:Keep
+                   ~appended:[ Agent_session.Moderator_queue.Capture.unavailable ]
+                 |> protocol_ok
+               in
+               let checkpoint =
+                 Agent_session.Moderator_checkpoint.update_with_queue
+                   state.moderator
+                   ~snapshot
+                   ~queue:metadata
+                 |> protocol_ok
+               in
+               A.change_moderator actor (Some checkpoint)
+               |> Result.map ~f:ignore
+               |> Result.map_error ~f:(fun error -> error.P.Error.message))
+           |> Result.ok_or_failwith
+           |> ignore
+         in
+         enqueue (Frame.capture frame);
+         let second_plan = prepare actor second "two" data |> protocol_ok |> proposal in
+         let second_frame = Proposal.frame second_plan |> protocol_ok in
          M.enqueue_internal_event_entries
            manager
-           ~event:(Frame.capture frame)
+           ~event:(Frame.capture second_frame)
            ~prepare:(fun ~before ~snapshot ->
-             A.commit_ingress_submission actor plan ~before ~snapshot
-             |> Result.map ~f:(fun receipt -> saved := Some receipt)
-             |> Result.map_error ~f:(fun error -> error.P.Error.message))
-         |> Result.ok_or_failwith
-         |> ignore;
-         frame, Option.value_exn !saved
-       in
-       let frame, receipt = submit first "one" in
-       let original = snapshot () in
-       let forged =
-         Frame.create
-           ~registration_id:frame.registration_id
-           ~event_id:frame.event_id
-           ~subscription_id:frame.subscription_id
-           ~epoch:frame.epoch
-           ~namespace:frame.namespace
-           ~payload:(`String "forged")
-         |> Result.ok_or_failwith
-         |> Frame.capture
-         |> Session.Snapshot.of_value
-         |> Result.ok_or_failwith
-       in
-       let reordered =
-         { original with
-           queued_internal_events = forged :: original.queued_internal_events
-         }
-       in
-       A.change_moderator actor (Some (Setup.encode reordered)) |> protocol_ok |> ignore;
-       let manager, _, _ = create_manager ~snapshot:reordered () in
-       (* Subsequent operations use this restored live queue. *)
-       let snapshot () = M.identity_snapshot manager |> Result.ok_or_failwith in
-       let enqueue event =
-         M.enqueue_internal_event_entries
-           manager
-           ~event
-           ~prepare:(fun ~before:_ ~snapshot ->
-             A.change_moderator actor (Some (Setup.encode snapshot))
+             A.commit_ingress_submission actor second_plan ~before ~snapshot
              |> Result.map ~f:ignore
              |> Result.map_error ~f:(fun error -> error.P.Error.message))
          |> Result.ok_or_failwith
-         |> ignore
-       in
-       enqueue (Frame.capture frame);
-       let second_plan = prepare actor second "two" data |> protocol_ok |> proposal in
-       let second_frame = Proposal.frame second_plan |> protocol_ok in
-       M.enqueue_internal_event_entries
-         manager
-         ~event:(Frame.capture second_frame)
-         ~prepare:(fun ~before ~snapshot ->
-           A.commit_ingress_submission actor second_plan ~before ~snapshot
-           |> Result.map ~f:ignore
-           |> Result.map_error ~f:(fun error -> error.P.Error.message))
-       |> Result.ok_or_failwith
-       |> ignore;
-       A.with_current_moderator_event
-         actor
-         ~operation_id:None
-         ~event:Session_start
-         ~snapshot:(fun () -> Ok (snapshot ()))
-         (fun ~executing
-           ~model_jobs:_
-           ~allocate_inference:_
-           ~retirement_reason:_
-           ~event:_
-           ~execute:_
-           ~commit ->
-            let owner = P.Job.Moderator_event executing.context.id in
-            let source = executing.context.source in
-            let revocation, _ =
-              A.revoke_script_ingress
+         |> ignore;
+         A.with_current_moderator_event
+           actor
+           ~operation_id:None
+           ~event:Session_start
+           ~snapshot:(fun () -> Ok (snapshot ()))
+           (fun ~executing
+             ~policy_caller:_
+             ~model_jobs:_
+             ~allocate_inference:_
+             ~retirement_reason:_
+             ~event:_
+             ~execute:_
+             ~commit ->
+              let owner = P.Job.Moderator_event executing.context.id in
+              let source = executing.context.source in
+              let revocation, _ =
+                A.revoke_script_ingress
+                  actor
+                  ~owner
+                  ~source
+                  ~id:first.context.id
+                  ~reason:"producer finished"
+                |> protocol_ok
+              in
+              A.select_ingress_mutations actor ~owner ~source ~receipts:[ revocation ]
+              |> protocol_ok;
+              let cancellation, _ =
+                A.finish_script_subscription
+                  actor
+                  ~owner
+                  ~source
+                  ~id:second.context.subscription_id
+                  ~expected_epoch:0
+                  (Cancelled "finished")
+                |> protocol_ok
+              in
+              A.select_subscription_mutations
                 actor
                 ~owner
                 ~source
-                ~id:first.context.id
-                ~reason:"producer finished"
-              |> protocol_ok
-            in
-            A.select_ingress_mutations actor ~owner ~source ~receipts:[ revocation ]
-            |> protocol_ok;
-            let cancellation, _ =
-              A.finish_script_subscription
-                actor
-                ~owner
-                ~source
-                ~id:second.context.subscription_id
-                ~expected_epoch:0
-                (Cancelled "finished")
-              |> protocol_ok
-            in
-            A.select_subscription_mutations
-              actor
-              ~owner
-              ~source
-              ~receipts:[ cancellation ]
-            |> protocol_ok;
-            commit ~snapshot:(snapshot ()) ~requests:Timer_delivery_tests.requests)
-       |> protocol_ok
-       |> ignore;
-       (match prepare actor second "two" data |> protocol_ok with
-        | Duplicate _ -> ()
-        | Enqueue _ -> failwith "cancelled subscription retried new work");
-       assert (Result.is_error (prepare actor first "one" data));
-       enqueue
-         (Frame.create
-            ~registration_id:(P.Id.Capability.create ())
-            ~event_id:frame.event_id
-            ~subscription_id:frame.subscription_id
-            ~epoch:frame.epoch
-            ~namespace:frame.namespace
-            ~payload:data
-          |> Result.ok_or_failwith
-          |> Frame.capture);
-       enqueue
-         (Chatml.Chatml_lang.VVariant
-            ("Internal_event", [ Chatml.Chatml_value_codec.jsonaf_to_value data ]));
-       let run () =
-         Agent_session.Moderator_event.run_queued_idle
-           ~claim:(A.with_current_idle_queued_moderator_event_tools actor)
-           ~manager
-           ~history:(fun () -> [])
-           ~available_tools:[]
-           ~session_meta:`Null
-           ~now:(fun () -> timestamp)
-           ()
-       in
-       let before = A.state actor |> protocol_ok in
-       let before_manager = snapshot () in
-       reject_save := true;
-       assert (Result.is_error (run ()));
-       reject_save := false;
-       assert_same_session_snapshot before (A.state actor |> protocol_ok);
-       assert (
-         Sexp.equal (Snapshot.sexp_of_t before_manager) (Snapshot.sexp_of_t (snapshot ())));
-       List.iter [ 1; 2; 3; 4; 5; 6 ] ~f:(fun _ -> run () |> protocol_ok |> ignore);
-       assert (Option.is_none (run () |> protocol_ok));
-       let final = A.state actor |> protocol_ok in
-       assert_same_session_snapshot final (Agent_session.Memory_backend.state backend);
-       assert (
-         List.exists final.ingress_registrations ~f:(fun registration ->
-           List.exists registration.receipts ~f:(I.equal_receipt receipt)));
-       let retired =
-         List.filter_map final.moderator_executions ~f:(fun execution ->
-           Option.map execution.retirement ~f:(fun retirement -> retirement.reason))
-         |> List.sort ~compare:String.compare
-       in
-       print_s
-         [%sexp
-           ((snapshot ()).current_state : Session.Snapshot.t), (retired : string list)]);
+                ~receipts:[ cancellation ]
+              |> protocol_ok;
+              commit ~snapshot:(snapshot ()) ~requests:Timer_delivery_tests.requests)
+         |> protocol_ok
+         |> ignore;
+         (match prepare actor second "two" data |> protocol_ok with
+          | Duplicate _ -> ()
+          | Enqueue _ -> failwith "cancelled subscription retried new work");
+         assert (Result.is_error (prepare actor first "one" data));
+         enqueue
+           (Frame.create
+              ~registration_id:(P.Id.Capability.create ())
+              ~event_id:frame.event_id
+              ~subscription_id:frame.subscription_id
+              ~epoch:frame.epoch
+              ~namespace:frame.namespace
+              ~payload:data
+            |> Result.ok_or_failwith
+            |> Frame.capture);
+         enqueue
+           (Chatml.Chatml_lang.VVariant
+              ("Internal_event", [ Chatml.Chatml_value_codec.jsonaf_to_value data ]));
+         let run () =
+           Agent_session.Moderator_event.run_queued_idle
+             ~claim:(A.with_current_idle_queued_moderator_event_tools actor)
+             ~manager
+             ~history:(fun () -> [])
+             ~available_tools:[]
+             ~session_meta:`Null
+             ~now:(fun () -> timestamp)
+             ()
+         in
+         let before = A.state actor |> protocol_ok in
+         let before_manager = snapshot () in
+         reject_save := true;
+         assert (Result.is_error (run ()));
+         reject_save := false;
+         assert_same_session_snapshot before (A.state actor |> protocol_ok);
+         assert (
+           Sexp.equal
+             (Snapshot.sexp_of_t before_manager)
+             (Snapshot.sexp_of_t (snapshot ())));
+         List.iter [ 1; 2; 3; 4; 5; 6 ] ~f:(fun _ -> run () |> protocol_ok |> ignore);
+         assert (Option.is_none (run () |> protocol_ok));
+         let final = A.state actor |> protocol_ok in
+         assert_same_session_snapshot final (Agent_session.Memory_backend.state backend);
+         assert (
+           List.exists final.ingress_registrations ~f:(fun registration ->
+             List.exists registration.receipts ~f:(I.equal_receipt receipt)));
+         let retired =
+           List.filter_map final.moderator_executions ~f:(fun execution ->
+             Option.map execution.retirement ~f:(fun retirement -> retirement.reason))
+           |> List.sort ~compare:String.compare
+         in
+         print_s
+           [%sexp
+             ((snapshot ()).current_state : Session.Snapshot.t), (retired : string list)]));
   [%expect
     {|
     ((Array ((Int 2)))

@@ -1145,24 +1145,241 @@ let on_event : context -> state -> event -> state task =
                { initialization; for_execution = (fun _ -> initialization) })
         |> protocol_ok
       in
-      Exn.protect ~finally:runtime.close ~f:(fun () ->
-        let closes = ref 0 in
-        let wrapped = { runtime with close = (fun () -> Int.incr closes) } in
-        let before = wrapped.moderator_snapshot () in
-        let published = wrapped.start_moderator () |> protocol_ok in
-        assert (not (Option.equal Jsonaf.exactly_equal before published));
-        assert (
-          Option.equal Jsonaf.exactly_equal published (runtime.moderator_snapshot ()));
-        assert (
-          Option.equal Jsonaf.exactly_equal published (wrapped.moderator_snapshot ()));
-        assert (
-          Option.equal
-            Jsonaf.exactly_equal
-            published
-            (runtime.start_moderator () |> protocol_ok));
-        assert_bounded_event_admission runtime;
-        wrapped.close ();
-        [%test_eq: int] 1 !closes)));
+      Exn.protect
+        ~finally:(fun () -> B.close runtime)
+        ~f:(fun () ->
+          let closes = ref 0 in
+          let wrapped =
+            { runtime with close = B.Close.legacy (fun () -> Int.incr closes) }
+          in
+          let before = wrapped.moderator_snapshot () in
+          let published = wrapped.start_moderator () |> protocol_ok in
+          assert (not (Option.equal Jsonaf.exactly_equal before published));
+          assert (
+            Option.equal Jsonaf.exactly_equal published (runtime.moderator_snapshot ()));
+          assert (
+            Option.equal Jsonaf.exactly_equal published (wrapped.moderator_snapshot ()));
+          assert (
+            Option.equal
+              Jsonaf.exactly_equal
+              published
+              (runtime.start_moderator () |> protocol_ok));
+          assert_bounded_event_admission runtime;
+          B.close wrapped;
+          [%test_eq: int] 1 !closes)));
   print_endline "real startup replaces both snapshots; repeated startup is stable";
   [%expect {| real startup replaces both snapshots; repeated startup is stable |}]
+;;
+
+let%expect_test "retained lifecycle witness rejects foreign and retired factual bindings" =
+  let module B = Agent_session.Runtime_builder in
+  let module S = Agent_session.Session_state in
+  with_actor_workspace (fun env workspace_instance ->
+    Eio.Switch.run (fun sw ->
+      let root =
+        Eio.Path.(Eio.Stdenv.fs env / workspace_instance.canonical_root.native_path)
+      in
+      List.iter [ "cache"; "session" ] ~f:(fun name ->
+        Eio.Path.mkdirs ~exists_ok:true ~perm:0o700 Eio.Path.(root / name));
+      Eio.Path.save
+        ~create:(`Or_truncate 0o600)
+        Eio.Path.(root / "root.chatmd")
+        "<developer>Actual callback-free retained resource.</developer>";
+      let definition =
+        Agent_session.Prompt_definition.create
+          ~root_invocation:Ui
+          ~id:prompt_id
+          ~config_name:"retained-lifecycle"
+          ~root_file:(Eio.Path.native_exn Eio.Path.(root / "root.chatmd"))
+          ~allowed_workspaces:[ workspace_id ]
+          ~permission_profile:"interactive"
+          ~runtime_policy:None
+          ~enabled:true
+          ~description:None
+        |> store_ok
+      in
+      let artifact_store =
+        Agent_store.Prompt_artifact_store.create
+          ~env
+          ~root:(Eio.Path.native_exn Eio.Path.(root / "artifacts"))
+        |> store_ok
+      in
+      let revision =
+        Agent_session.Prompt_revision_builder.build
+          ~env
+          ~artifact_store
+          ~transaction_id
+          ~created_at:timestamp
+          definition
+        |> Result.map_error ~f:(fun errors ->
+          Sexp.to_string_hum
+            [%sexp (errors : Agent_session.Prompt_revision_builder.Diagnostic.t list)])
+        |> Result.ok_or_failwith
+      in
+      let prepare_source () =
+        B.Source.prepare
+          revision
+          ~script_preparation:(Some (Fixtures.script_preparation ()))
+          ~invocation:(Agent_session.Runtime_script_preparation.Invocation.of_root Ui)
+          ~env
+          ~checkpoint:Eio.Fiber.check
+        |> protocol_ok
+      in
+      let source = prepare_source () in
+      (* Public target DATA for these pure affinity negatives, not an Actor
+         installation, Goal owner, admission, witness or Joined constructor. *)
+      let template =
+        actor_state ~workspace_instance ~liveness:Detached ~start_immediately:false
+      in
+      let spec =
+        { template.spec with
+          prompt_definition_id = Some definition.id
+        ; prompt_revision_id =
+            (Agent_session.Prompt_revision.artifact revision).revision_id
+        }
+      in
+      let expected = S.create ~identity:template.identity ~spec ~initial_history:[] in
+      S.validate expected |> protocol_ok;
+      B.Source.validate_target source expected |> protocol_ok;
+      let paths : Agent_session.Runtime_paths.t =
+        { tool_dir = root
+        ; workspace = root
+        ; prompt_dir = root
+        ; session_dir = Eio.Path.(root / "session")
+        ; cache_dir = Eio.Path.(root / "cache")
+        ; home = root
+        }
+      in
+      let inference = Inference_ports.create ~config:Chat_response.Config.default () in
+      let product, first =
+        B.build_product
+          ~selected_source:None
+          ~ancestor_capabilities:None
+          ~ancestor_sources:None
+          ~construction_checkpoint:None
+          ~legacy_construction:None
+          ~agent_source:None
+          ~startup:None
+          ~root_invocation:Ui
+          ~script_preparation:(Some (Fixtures.script_preparation ()))
+          ~sw
+          ~env
+          ~inference_context:inference.context
+          ~inference_identity:inference.identity
+          ~bind_inference_identity:(fun _ -> inference.identity)
+          ~on_inference_attempt:ignore
+          ~on_inference_completion:ignore
+          ~on_inference_observation:ignore
+          ~paths
+          ~storage_paths:paths
+          ~revision
+          ~session_id
+          ~history_namespace:(Agent_protocol.Id.Session.to_string session_id)
+          ~next_history_sequence:1
+          ~existing_history:(Some [])
+          ~existing_moderator_snapshot:None
+          ~moderator_reservation_size:100
+          ~manifest_authorizer:Shell_runtime.Manifest_authorizer.assume_authorized
+          ~approval_provider:Shell_runtime.Approval_broker.None_available
+          ~approval_store:(Shell_access.Approval.create_store ())
+          ~permission_profile:
+            (permission_policy
+               ~tool_default:Allow
+               ~fallback:Fallback_deny
+               ~evaluator:None
+               ~reviewer:None)
+          ~review_permission:(fun _ -> failwith "unexpected review")
+          ~schedule_services:
+            { after_ms = (fun ~delay_ms:_ ~payload:_ -> failwith "unexpected schedule")
+            ; cancel = (fun ~id:_ -> failwith "unexpected schedule")
+            }
+          ~job_services:
+            (let initialization : Agent_session.Runtime_model_services.t =
+               { spawn_model = (fun ~recipe:_ ~payload:_ -> failwith "unexpected model")
+               ; call_model =
+                   (fun ~recipe:_ ~payload:_ ~execute:_ -> failwith "unexpected model")
+               }
+             in
+             { initialization; for_execution = (fun _ -> initialization) })
+        |> protocol_ok
+      in
+      Exn.protect
+        ~finally:(fun () -> B.Product.close product)
+        ~f:(fun () ->
+          (match B.Product.selected_source product with
+           | Error { code = Invalid_state; retryable = false; _ } -> ()
+           | Error error -> raise_s [%sexp (error : Agent_protocol.Error.t)]
+           | Ok _ -> failwith "Product without selected Source disclosed policy absence");
+          let first_runtime = B.Product.Binding.runtime first in
+          let cold =
+            B.Product.Binding.attach first ~runtime:first_runtime ~close:(fun () -> ())
+            |> protocol_ok
+          in
+          assert (Option.is_none (B.Attachment.retained_lifecycle cold |> protocol_ok));
+          let bind () =
+            let binding =
+              B.Product.bind
+                product
+                ~source
+                ~expected
+                ~history:[]
+                ~moderator_checkpoint:None
+              |> protocol_ok
+            in
+            let runtime = B.Product.Binding.runtime binding in
+            let attachment =
+              B.Product.Binding.attach binding ~runtime ~close:(fun () -> ())
+              |> protocol_ok
+            in
+            runtime, attachment
+          in
+          let runtime, attachment = bind () in
+          let witness =
+            B.Attachment.retained_lifecycle attachment |> protocol_ok |> Option.value_exn
+          in
+          let check ?(source = source) ?(worker = runtime.worker) () =
+            B.Retained_lifecycle.check witness ~source ~expected ~worker ~manager:None
+          in
+          check () |> protocol_ok;
+          assert (Result.is_error (check ~worker:first_runtime.worker ()));
+          let other_source = prepare_source () in
+          assert (not (phys_equal source other_source));
+          assert (Result.is_error (check ~source:other_source ()));
+          B.close (B.Attachment.runtime attachment);
+          assert (Result.is_error (check ()));
+          let second_runtime, second = bind () in
+          let second_witness =
+            B.Attachment.retained_lifecycle second |> protocol_ok |> Option.value_exn
+          in
+          let check_second () =
+            B.Retained_lifecycle.check
+              second_witness
+              ~source
+              ~expected
+              ~worker:second_runtime.worker
+              ~manager:None
+          in
+          check_second () |> protocol_ok;
+          B.Product.close product;
+          (* Actual Product physical close is already cached. Every original
+             first/rebound binding must forward the SAME producer receipt;
+             recapturing its raw projection would mint a fresh positive report
+             even though no new physical close ran. The attachments above have
+             intentionally separate no-op lease closers, so compare their
+             authentic original binding runtimes, not those lease projections. *)
+          let original_close = B.Product.close_reported product in
+          (match Agent_session.Close_observation.exit original_close with
+           | Returned () -> ()
+           | Raised _ -> failwith "actual Product fixture close failed");
+          assert (phys_equal original_close (B.close_reported first_runtime));
+          assert (phys_equal original_close (B.close_reported runtime));
+          assert (phys_equal original_close (B.close_reported second_runtime));
+          B.close first_runtime;
+          B.close runtime;
+          B.Product.close product;
+          assert (phys_equal original_close (B.Product.close_reported product));
+          assert (Result.is_error (check_second ())));
+      ()));
+  print_endline "actual retained witness is source/worker/binding/Product specific";
+  [%expect {| actual retained witness is source/worker/binding/Product specific |}]
 ;;

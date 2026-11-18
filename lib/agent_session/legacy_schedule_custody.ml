@@ -89,7 +89,12 @@ let retain t ~manager ~source ~schedules =
 
 let install previous ~incoming =
   List.iter previous ~f:(fun (row : Row.t) ->
-    if not (List.mem incoming row ~equal:phys_equal)
+    (* Selected same-source DATA may advance while retaining the SAME original.
+       Retire by admission identity, not by its prebuilt updated row wrapper. *)
+    if
+      not
+        (List.exists incoming ~f:(fun (next : Row.t) ->
+           phys_equal row.admission next.admission))
     then Execution_custody.Admission.retire row.admission);
   incoming
 ;;
@@ -126,3 +131,201 @@ let without_constructor t ~manager ~source ~ids =
        && P.Run_source.equal row.source source
        && List.mem ids row.schedule.id ~equal:P.Id.Schedule.equal))
 ;;
+
+let validate_fresh ~source (schedule : P.Schedule.t) =
+  let open Result.Let_syntax in
+  let%bind () = P.Schedule.validate schedule in
+  match schedule.status, schedule.ownership, schedule.inference_provenance with
+  | Scheduled, Some ownership, Some provenance
+    when P.Invocation.equal_observer ownership.source source.P.Run_source.observer
+         && Int.equal schedule.generation source.generation
+         && P.Run_source.equal (P.Schedule_provenance.source provenance) source -> Ok ()
+  | (Scheduled | Delivering | Delivered | Cancelled | Failed _), _, _ ->
+    Error
+      (P.Error.invalid_request "owned timer custody requires its actual fresh creation")
+;;
+
+module Fresh = struct
+  type phase =
+    | Staged
+    | Installed
+    | Discarded
+
+  type row = Row.t
+
+  type t =
+    { row : row
+    ; mutable phase : phase
+    }
+
+  let value t = t.row.schedule
+
+  let stage ~manager ~source ~schedule ~parent =
+    let open Result.Let_syntax in
+    let%bind () = validate_fresh ~source schedule in
+    let%map admission = Execution_custody.Admission.transfer parent in
+    { row = { Row.manager; source; schedule; admission }; phase = Staged }
+  ;;
+
+  let discard t =
+    match t.phase with
+    | Installed | Discarded -> ()
+    | Staged ->
+      t.phase <- Discarded;
+      Execution_custody.Admission.retire t.row.admission
+  ;;
+end
+
+module Staged = struct
+  type entry =
+    { owner : P.Job.launch_owner
+    ; receipt : int
+    ; fresh : Fresh.t
+    }
+
+  type t = { mutable entries : entry list }
+
+  let create () = { entries = [] }
+  let owned entry owner = P.Job.equal_launch_owner entry.owner owner
+
+  let attach t ~owner ~receipt ~fresh =
+    if
+      List.exists t.entries ~f:(fun entry ->
+        (owned entry owner && Int.equal entry.receipt receipt)
+        || phys_equal entry.fresh fresh)
+    then (
+      (* A duplicate must not revoke a child already owned by this stager. *)
+      if not (List.exists t.entries ~f:(fun entry -> phys_equal entry.fresh fresh))
+      then Fresh.discard fresh;
+      Error (P.Error.invalid_request "duplicate creator custody receipt"))
+    else (
+      t.entries <- { owner; receipt; fresh } :: t.entries;
+      Ok ())
+  ;;
+
+  let selected t ~owner ~receipts =
+    List.filter_map receipts ~f:(fun receipt ->
+      List.find_map t.entries ~f:(fun entry ->
+        Option.some_if
+          (owned entry owner && Int.equal entry.receipt receipt)
+          (Fresh.value entry.fresh, entry.fresh)))
+  ;;
+
+  (* Called only after the actual DATA receipt abort succeeds. *)
+  let abort t ~owner ~receipt =
+    t.entries
+    <- List.filter t.entries ~f:(fun entry ->
+         if owned entry owner && Int.equal entry.receipt receipt
+         then (
+           Fresh.discard entry.fresh;
+           false)
+         else true)
+  ;;
+
+  let release_owner t ~owner =
+    t.entries
+    <- List.filter t.entries ~f:(fun entry ->
+         if owned entry owner
+         then (
+           Fresh.discard entry.fresh;
+           false)
+         else true)
+  ;;
+
+  let abort_all t =
+    List.iter t.entries ~f:(fun entry -> Fresh.discard entry.fresh);
+    t.entries <- []
+  ;;
+end
+
+module Update = struct
+  type inventory = t
+
+  type t =
+    { basis : inventory
+    ; incoming : inventory
+    ; selected : Fresh.t list
+    ; mutable installed : bool
+    }
+
+  let prepare_selected current ~selected ~changes =
+    let fresh = List.map selected ~f:snd in
+    let result =
+      let open Result.Let_syntax in
+      let%bind rows =
+        List.map selected ~f:(fun (chain, (fresh : Fresh.t)) ->
+          let%bind first, rest =
+            match fresh.phase, chain with
+            | Staged, first :: rest
+              when Jsonaf.exactly_equal
+                     (P.Schedule.to_json first)
+                     (P.Schedule.to_json fresh.row.schedule) -> Ok (first, rest)
+            | (Staged | Installed | Discarded), _ ->
+              Error
+                (P.Error.invalid_request
+                   "selected creator differs from its actual creation receipt")
+          in
+          let%map final =
+            List.fold_result rest ~init:first ~f:(fun previous next ->
+              let%map () =
+                P.Schedule.validate_transition ~previous:(Some previous) next
+              in
+              next)
+          in
+          { fresh.row with schedule = final })
+        |> Result.all
+      in
+      let%bind retained =
+        List.map current ~f:(fun (row : Row.t) ->
+          let chain =
+            List.filter changes ~f:(fun value ->
+              P.Id.Schedule.equal row.schedule.id value.P.Schedule.id)
+          in
+          match chain with
+          | [] -> Ok row
+          | _ :: _ ->
+            let%map schedule =
+              List.fold_result chain ~init:row.schedule ~f:(fun previous next ->
+                let%map () =
+                  P.Schedule.validate_transition ~previous:(Some previous) next
+                in
+                next)
+            in
+            { row with schedule })
+        |> Result.all
+      in
+      let%map incoming = candidate retained ~staged:rows in
+      { basis = current; incoming; selected = fresh; installed = false }
+    in
+    match result with
+    | Ok _ -> result
+    | Error _ ->
+      List.iter fresh ~f:Fresh.discard;
+      result
+  ;;
+
+  let check_before_commit t ~current ~manager ~source =
+    let open Result.Let_syntax in
+    let%bind () =
+      if (not t.installed) && phys_equal current t.basis
+      then Ok ()
+      else Error (P.Error.invalid_request "creator custody inventory changed before ACK")
+    in
+    List.fold_result t.selected ~init:() ~f:(fun () (fresh : Fresh.t) ->
+      match fresh.phase with
+      | Staged
+        when Option.exists manager ~f:(phys_equal fresh.row.manager)
+             && P.Run_source.equal source fresh.row.source ->
+        Execution_custody.Admission.check fresh.row.admission
+      | Staged | Installed | Discarded ->
+        Error (P.Error.invalid_request "creator custody lost its source or Manager"))
+  ;;
+
+  let discard t = if not t.installed then List.iter t.selected ~f:Fresh.discard
+
+  let install t =
+    t.installed <- true;
+    List.iter t.selected ~f:(fun (fresh : Fresh.t) -> fresh.phase <- Installed);
+    install t.basis ~incoming:t.incoming
+  ;;
+end

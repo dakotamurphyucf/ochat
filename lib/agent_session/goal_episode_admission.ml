@@ -6,6 +6,7 @@ type intent =
   { goal_id : P.Id.Goal.t
   ; expected_goal_revision : int64
   ; expected_catalog_revision : int64
+  ; expected_source : P.Run_source.t option
   }
 
 let conflict message = Error (P.Error.create Conflict ~message ~retryable:false ())
@@ -14,21 +15,24 @@ let intent ~goal_id ~expected_goal_revision ~expected_catalog_revision =
   let open Result.Let_syntax in
   let%bind _ = P.Id.Goal.of_json (P.Id.Goal.to_json goal_id) in
   if Int64.(expected_goal_revision >= 0L && expected_catalog_revision >= 0L)
-  then Ok { goal_id; expected_goal_revision; expected_catalog_revision }
+  then
+    Ok
+      { goal_id
+      ; expected_goal_revision
+      ; expected_catalog_revision
+      ; expected_source = None
+      }
   else Error (P.Error.invalid_request "goal admission revisions must be nonnegative")
 ;;
 
+let with_expected_source intent source = { intent with expected_source = Some source }
+
 let digest intent =
-  `Object
-    [ "version", `String "goal-episode-admission-v1"
-    ; "goal_id", P.Id.Goal.to_json intent.goal_id
-    ; "expected_goal_revision", `String (Int64.to_string intent.expected_goal_revision)
-    ; ( "expected_catalog_revision"
-      , `String (Int64.to_string intent.expected_catalog_revision) )
-    ]
-  |> Jsonaf.to_string
-  |> Digestif.SHA256.digest_string
-  |> Digestif.SHA256.to_hex
+  P.Goal_control.Start.association_sha256
+    ~goal_id:intent.goal_id
+    ~expected_goal_revision:intent.expected_goal_revision
+    ~expected_catalog_revision:intent.expected_catalog_revision
+    ~expected_source:intent.expected_source
 ;;
 
 type t =
@@ -110,7 +114,9 @@ let prepare_facts
       ~generation:state.identity.generation
   in
   let%bind () =
-    if P.Run_source.equal source run.source
+    if
+      P.Run_source.equal source run.source
+      && Option.for_all intent.expected_source ~f:(P.Run_source.equal source)
     then Ok ()
     else conflict "goal admission source is no longer current"
   in

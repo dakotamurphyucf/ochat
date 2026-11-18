@@ -23,6 +23,7 @@ module Selection = struct
         ; reference : Agent_store.Delegation_store.Reference.t
         }
     | Generated of Generated_definition.t
+    | Generated_artifact of Generated_definition.Source.t
 end
 
 type t =
@@ -31,6 +32,8 @@ type t =
   ; moderator : Moderator.t
   ; programs : Chatml_prompt_programs.Restored.t option
   }
+
+type source = t
 
 let selection t = t.selection
 
@@ -42,6 +45,7 @@ let artifact t =
   | Authored_child { source; reference = _ } ->
     Prompt_revision.artifact (Prompt_child_source.revision source)
   | Generated definition -> Generated_definition.artifact definition
+  | Generated_artifact source -> Generated_definition.Source.artifact source
 ;;
 
 let definition_id t =
@@ -53,6 +57,8 @@ let definition_id t =
     Some (Prompt_revision.definition (Prompt_child_source.revision source)).id
   | Generated definition ->
     (Generated_definition.artifact definition).prompt_definition_id
+  | Generated_artifact source ->
+    (Generated_definition.Source.artifact source).prompt_definition_id
 ;;
 
 let invocation t = t.invocation
@@ -191,38 +197,6 @@ let select_moderator ~elements ~limits ~plan ~programs ~checkpoint =
   | [], None -> Ok Moderator.No_moderator
 ;;
 
-let prepare_revision selection revision ~script_preparation ~invocation ~env ~checkpoint =
-  Runtime_script_preparation.with_revision_plan
-    script_preparation
-    revision
-    ~env
-    ~invocation
-    ~checkpoint
-    ~f:(fun startup ~compilation_limits ~plan ~programs ->
-      let checkpoint () = Startup.checkpoint startup in
-      Startup.within startup ~map_error:compilation_error ~f:(fun () ->
-        let open Result.Let_syntax in
-        let%map moderator =
-          select_moderator
-            ~elements:(Prompt_revision.elements revision)
-            ~limits:compilation_limits
-            ~plan
-            ~programs
-            ~checkpoint
-        in
-        { selection; invocation; moderator; programs }))
-;;
-
-let prepare revision ~script_preparation ~invocation ~env ~checkpoint =
-  prepare_revision
-    (Authored revision)
-    revision
-    ~script_preparation
-    ~invocation
-    ~env
-    ~checkpoint
-;;
-
 let captured_invocation source =
   let module Invocation = Runtime_script_preparation.Invocation in
   let origin = Captured_recurrence_source.origin source in
@@ -231,57 +205,240 @@ let captured_invocation source =
   | Authored_tool _ -> Invocation.Delegated_ui
 ;;
 
-let prepare_captured source ~script_preparation ~invocation ~env ~checkpoint =
-  let module Invocation = Runtime_script_preparation.Invocation in
-  let open Result.Let_syntax in
-  let origin = Captured_recurrence_source.origin source in
-  let%bind () =
-    if
-      Invocation.equal
-        invocation
-        (Invocation.of_root (Recurrence_child_origin.root_invocation origin))
-    then Ok ()
-    else Error (failure "captured source differs from its child root invocation")
-  in
+module Revision_input = struct
+  type target =
+    | Authored of Prompt_revision.t
+    | Captured of Captured_recurrence_source.t
+    | Authored_child of
+        { source : Prompt_child_source.t
+        ; record : Agent_store.Delegation_store.record
+        }
+
+  type t =
+    { target : target
+    ; binding_invocation : Runtime_script_preparation.Invocation.t
+    ; preparation_invocation : Runtime_script_preparation.Invocation.t
+    }
+
+  let authored revision ~invocation =
+    { target = Authored revision
+    ; binding_invocation = invocation
+    ; preparation_invocation = invocation
+    }
+  ;;
+
+  let captured source ~invocation =
+    let module Invocation = Runtime_script_preparation.Invocation in
+    let open Result.Let_syntax in
+    let origin = Captured_recurrence_source.origin source in
+    let%map () =
+      if
+        Invocation.equal
+          invocation
+          (Invocation.of_root (Recurrence_child_origin.root_invocation origin))
+      then Ok ()
+      else Error (failure "captured source differs from its child root invocation")
+    in
+    let invocation = captured_invocation source in
+    { target = Captured source
+    ; binding_invocation = invocation
+    ; preparation_invocation = invocation
+    }
+  ;;
+
+  let authored_child source ~(record : Agent_store.Delegation_store.record) ~invocation =
+    let module B = Chat_response.Background_request.Agent_artifact in
+    let open Result.Let_syntax in
+    let selected = Prompt_child_source.reference source in
+    let%map () =
+      match record.admission.authored_tool, record.admission.captured_recurrence with
+      | Some _, None
+        when Agent_protocol.Id.Prompt_revision.equal
+               (B.revision_id selected)
+               record.admission.revision_id
+             && String.equal
+                  (Chatml_source.Digest.to_hex (B.manifest_sha256 selected))
+                  record.admission.manifest_sha256 -> Ok ()
+      | (None | Some _), (None | Some _) ->
+        Error (failure "authored child source differs from its recorded selection")
+    in
+    { target = Authored_child { source; record }
+    ; binding_invocation = invocation
+    ; preparation_invocation = Delegated_ui
+    }
+  ;;
+
+  let revision t =
+    match t.target with
+    | Authored revision -> revision
+    | Captured source -> Captured_recurrence_source.revision source
+    | Authored_child { source; record = _ } -> Prompt_child_source.revision source
+  ;;
+
+  let binding_invocation t = t.binding_invocation
+  let preparation_invocation t = t.preparation_invocation
+
+  let selection t : Selection.t =
+    match t.target with
+    | Authored revision -> Authored revision
+    | Captured source -> Captured source
+    | Authored_child { source; record } ->
+      Authored_child { source; reference = Agent_store.Delegation_store.reference record }
+  ;;
+end
+
+module Prepared_revision = struct
+  type t =
+    { revision : Prompt_revision.t
+    ; invocation : Runtime_script_preparation.Invocation.t
+    ; moderator : Moderator.t
+    ; programs : Chatml_prompt_programs.Restored.t option
+    }
+
+  let moderator t = t.moderator
+
+  let capture
+        revision
+        ~invocation
+        ~startup
+        ~compilation_limits
+        ~plan
+        ~programs
+        ~checkpoint
+    =
+    Startup.within startup ~map_error:compilation_error ~f:(fun () ->
+      let open Result.Let_syntax in
+      let%map moderator =
+        select_moderator
+          ~elements:(Prompt_revision.elements revision)
+          ~limits:compilation_limits
+          ~plan
+          ~programs
+          ~checkpoint
+      in
+      { revision; invocation; moderator; programs })
+  ;;
+
+  let source_equal
+        (a : Agent_store.Prompt_artifact_store.Source.t)
+        (b : Agent_store.Prompt_artifact_store.Source.t)
+    =
+    String.equal a.relative_path b.relative_path
+    && String.equal a.sha256 b.sha256
+    && String.equal a.contents b.contents
+  ;;
+
+  let payload_equal a b =
+    let module Payload = Agent_store.Prompt_program_bundle.Payload in
+    String.equal (Payload.sha256 a) (Payload.sha256 b)
+    && String.equal (Payload.contents a) (Payload.contents b)
+  ;;
+
+  let bundle_equal a b =
+    let module Bundle = Agent_store.Prompt_program_bundle in
+    Bundle.Manifest.equal (Bundle.manifest a) (Bundle.manifest b)
+    && List.equal payload_equal (Bundle.payloads a) (Bundle.payloads b)
+  ;;
+
+  let artifact_equal
+        (a : Agent_store.Prompt_artifact_store.Artifact.t)
+        (b : Agent_store.Prompt_artifact_store.Artifact.t)
+    =
+    let module Artifact = Agent_store.Prompt_artifact_store.Artifact in
+    let module Publication = Agent_store.Prompt_manifest_document.Publication in
+    Agent_protocol.Id.Prompt_revision.equal a.revision_id b.revision_id
+    && Agent_protocol.Timestamp.equal a.created_at b.created_at
+    && Artifact.same_content a b
+    && String.equal a.manifest_sha256 b.manifest_sha256
+    && String.equal
+         (Publication.bytes a.manifest_publication)
+         (Publication.bytes b.manifest_publication)
+    && String.equal a.root_chatmd b.root_chatmd
+    && List.equal source_equal a.sources b.sources
+    && Option.equal bundle_equal a.program_bundle b.program_bundle
+    && Option.equal bundle_equal a.content_bundle b.content_bundle
+  ;;
+
+  let bind t ~input : (source, Agent_protocol.Error.t) result =
+    let open Result.Let_syntax in
+    let%bind () =
+      if
+        Runtime_script_preparation.Invocation.equal
+          t.invocation
+          (Revision_input.preparation_invocation input)
+      then Ok ()
+      else Error (failure "prepared revision differs from its selected program role")
+    in
+    let original = Prompt_revision.artifact t.revision in
+    let%bind expected =
+      match input.Revision_input.target with
+      | Authored _ | Captured _ -> Ok original
+      | Authored_child { source = _; record } ->
+        Agent_store.Prompt_artifact_store.Artifact.with_identity
+          original
+          ~revision_id:record.admission.revision_id
+          ~created_at:record.admission.created_at
+        |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
+    in
+    let actual = Prompt_revision.artifact (Revision_input.revision input) in
+    let%bind () =
+      if artifact_equal expected actual
+      then Ok ()
+      else
+        Error (failure "prepared revision differs from its selected source publication")
+    in
+    Ok
+      { selection = Revision_input.selection input
+      ; invocation = Revision_input.binding_invocation input
+      ; moderator = t.moderator
+      ; programs = t.programs
+      }
+  ;;
+end
+
+let prepare_revision input ~script_preparation ~env ~checkpoint =
+  let revision = Revision_input.revision input in
+  let invocation = Revision_input.preparation_invocation input in
+  Runtime_script_preparation.with_revision_plan
+    script_preparation
+    revision
+    ~env
+    ~invocation
+    ~checkpoint
+    ~f:(fun startup ~compilation_limits ~plan ~programs ->
+      let open Result.Let_syntax in
+      let%bind prepared =
+        Prepared_revision.capture
+          revision
+          ~invocation
+          ~startup
+          ~compilation_limits
+          ~plan
+          ~programs
+          ~checkpoint:(fun () -> Startup.checkpoint startup)
+      in
+      Prepared_revision.bind prepared ~input)
+;;
+
+let prepare revision ~script_preparation ~invocation ~env ~checkpoint =
   prepare_revision
-    (Captured source)
-    (Captured_recurrence_source.revision source)
+    (Revision_input.authored revision ~invocation)
     ~script_preparation
-    ~invocation:(captured_invocation source)
     ~env
     ~checkpoint
 ;;
 
-let prepare_authored_child
-      source
-      ~(record : Agent_store.Delegation_store.record)
-      ~script_preparation
-      ~invocation
-      ~env
-      ~checkpoint
-  =
-  let module B = Chat_response.Background_request.Agent_artifact in
+let prepare_captured source ~script_preparation ~invocation ~env ~checkpoint =
   let open Result.Let_syntax in
-  let selected = Prompt_child_source.reference source in
-  let%bind () =
-    match record.admission.authored_tool, record.admission.captured_recurrence with
-    | Some _, None
-      when Agent_protocol.Id.Prompt_revision.equal
-             (B.revision_id selected)
-             record.admission.revision_id
-           && String.equal
-                (Chatml_source.Digest.to_hex (B.manifest_sha256 selected))
-                record.admission.manifest_sha256 -> Ok ()
-    | (None | Some _), (None | Some _) ->
-      Error (failure "authored child source differs from its recorded selection")
-  in
-  prepare_revision
-    (Authored_child { source; reference = Agent_store.Delegation_store.reference record })
-    (Prompt_child_source.revision source)
-    ~script_preparation
-    ~invocation
-    ~env
-    ~checkpoint
+  let%bind input = Revision_input.captured source ~invocation in
+  prepare_revision input ~script_preparation ~env ~checkpoint
+;;
+
+let prepare_authored_child source ~record ~script_preparation ~invocation ~env ~checkpoint
+  =
+  let open Result.Let_syntax in
+  let%bind input = Revision_input.authored_child source ~record ~invocation in
+  prepare_revision input ~script_preparation ~env ~checkpoint
 ;;
 
 let prepare_generated definition ~invocation =
@@ -304,6 +461,15 @@ let prepare_generated definition ~invocation =
         }
   in
   { selection = Generated definition; invocation; moderator; programs = None }
+;;
+
+let prepare_generated_artifact source ~invocation =
+  let moderator =
+    match Generated_definition.Source.moderator source with
+    | None -> Moderator.No_moderator
+    | Some observer -> Moderator.Extension observer
+  in
+  Ok { selection = Generated_artifact source; invocation; moderator; programs = None }
 ;;
 
 let validate_target t (state : Session_state.t) =
@@ -340,6 +506,18 @@ let validate_target t (state : Session_state.t) =
         && Option.exists state.spec.delegation ~f:(D.Reference.equal reference)
       then Ok ()
       else mismatch ()
+    | Generated_artifact source ->
+      let reference = Generated_definition.Source.reference source in
+      if
+        Option.is_none state.spec.prompt_definition_id
+        && P.Id.Session.equal state.identity.session_id reference.child_session_id
+        && Option.exists state.spec.delegation ~f:(D.Reference.equal reference)
+        &&
+        match state.spec.protocol.prompt with
+        | Generated revision -> P.Id.Prompt_revision.equal revision reference.revision_id
+        | Catalog _ | Local_path _ -> false
+      then Ok ()
+      else mismatch ()
     | Authored _ | Generated _ ->
       let matches =
         match state.spec.prompt_definition_id with
@@ -354,7 +532,7 @@ let validate_target t (state : Session_state.t) =
       (* The actual origin/target comparison above owns the child root family.
          Only its captured authored kind selects the restricted delegated role. *)
       captured_invocation source
-    | Authored _ | Authored_child _ | Generated _ ->
+    | Authored _ | Authored_child _ | Generated _ | Generated_artifact _ ->
       Runtime_script_preparation.Invocation.of_root state.spec.root_invocation
   in
   if

@@ -27,10 +27,12 @@ let component_state (state : State.t) =
   checkpoint.current_state
 ;;
 
-let status_calls (state : State.t) =
+let invocation_count (state : State.t) tool =
   List.count state.invocations ~f:(fun invocation ->
-    String.equal invocation.P.Invocation.context.tool_name "instructions_status")
+    String.equal invocation.P.Invocation.context.tool_name tool)
 ;;
+
+let status_calls state = invocation_count state "instructions_status"
 
 let program_manifest daemon revision_id =
   Catalog.find_revision (Agent_server.Daemon.prompts daemon) revision_id
@@ -118,6 +120,57 @@ let send env handle entry ~terminal text =
     ~terminal
 ;;
 
+let with_reopened_session
+      ~sw
+      ~env
+      ~root
+      ~configuration
+      ~inference_policy
+      ~session_id
+      ~check_cold
+      f
+  =
+  let daemon =
+    Agent_server.Daemon.start
+      ~sw
+      ~env
+      ~config:configuration
+      ~tool_dir:root
+      ~home:root
+      ~process_start_identity:None
+      ~options:{ Agent_server.Daemon.default_options with inference_policy }
+      ()
+    |> protocol_ok
+  in
+  Exn.protect
+    ~finally:(fun () -> Agent_server.Daemon.shutdown daemon |> protocol_ok)
+    ~f:(fun () ->
+      let entry =
+        Registry.load (Agent_server.Daemon.registry daemon) session_id |> protocol_ok
+      in
+      assert (not (Agent_server.Runtime_owner.is_loaded entry.runtime));
+      check_cold (A.state entry.actor |> protocol_ok);
+      let client = Instruction_runtime_tests.authenticated_connection daemon in
+      initialize client;
+      let handle =
+        H.attach
+          ~sw
+          ~clock:(Eio.Stdenv.clock env)
+          ~connection:client
+          ~session_id
+          ~mode:Read_write
+          ()
+        |> protocol_ok
+      in
+      Exn.protect
+        ~finally:(fun () ->
+          H.close handle;
+          Agent_client.Connection.close client)
+        ~f:(fun () ->
+          H.start handle ~queue_if_limited:false |> protocol_ok |> ignore;
+          f daemon entry handle))
+;;
+
 let exercise saved ~sources ~sw ~env ~root ~configuration =
   (* The first daemon's joined shutdown has released every owner and store lock.
      Remove all ordinary example/library files, not just the original entry. *)
@@ -148,89 +201,53 @@ let exercise saved ~sources ~sw ~env ~root ~configuration =
            raise exn);
         call_events []))
   in
-  let daemon =
-    Agent_server.Daemon.start
-      ~sw
-      ~env
-      ~config:configuration
-      ~tool_dir:root
-      ~home:root
-      ~process_start_identity:None
-      ~options:
-        { Agent_server.Daemon.default_options with
-          inference_policy = inference_policy ~default_model:"fixture-model" ~post_stream
-        }
-      ()
-    |> protocol_ok
-  in
-  Exn.protect
-    ~finally:(fun () -> Agent_server.Daemon.shutdown daemon |> protocol_ok)
-    ~f:(fun () ->
-      let entry =
-        Registry.load (Agent_server.Daemon.registry daemon) saved.session_id
-        |> protocol_ok
-      in
-      assert (not (Agent_server.Runtime_owner.is_loaded entry.runtime));
-      let loaded = A.state entry.actor |> protocol_ok in
-      assert_checkpoint saved loaded ~calls:saved.status_calls;
-      let client = Instruction_runtime_tests.authenticated_connection daemon in
-      initialize client;
-      let handle =
-        H.attach
-          ~sw
-          ~clock:(Eio.Stdenv.clock env)
-          ~connection:client
-          ~session_id:saved.session_id
-          ~mode:Read_write
-          ()
-        |> protocol_ok
-      in
-      Exn.protect
-        ~finally:(fun () ->
-          H.close handle;
-          Agent_client.Connection.close client)
-        ~f:(fun () ->
-          H.start handle ~queue_if_limited:false |> protocol_ok |> ignore;
-          let resumed =
-            send env handle entry ~terminal:Completed "Resume the installed review."
-          in
-          Option.iter !provider_failure ~f:raise;
-          assert_checkpoint saved resumed ~calls:(saved.status_calls + 1);
-          assert (
-            List.exists resumed.moderator_executions ~f:(fun receipt ->
-              match receipt.P.Moderator_execution.context.phase, receipt.status with
-              | Session_resume, Completed _ -> true
-              | _ -> false));
-          assert (
-            Bundle.Manifest.equal
-              saved.programs
-              (program_manifest daemon saved.revision_id));
-          H.compact handle ~expected_revision:(Some resumed.counters.revision)
-          |> protocol_ok
-          |> ignore;
-          let compacted =
-            wait_terminal
-              env
-              entry
-              ~after_sequence:resumed.counters.event_sequence
-              ~kind:Compaction
-              ~terminal:Completed
-          in
-          [%test_eq: int] 1 !summaries;
-          [%test_eq: int]
-            (resumed.conversation.compaction_generation + 1)
-            compacted.conversation.compaction_generation;
-          assert (not (List.is_empty compacted.conversation.compaction_archives));
-          assert_checkpoint saved compacted ~calls:(saved.status_calls + 1);
-          let failed =
-            send env handle entry ~terminal:Failed "Observe a provider failure."
-          in
-          [%test_eq: int] 2 !requests;
-          assert_checkpoint saved failed ~calls:(saved.status_calls + 1);
-          let recovered =
-            send env handle entry ~terminal:Completed "Retry with a fresh turn."
-          in
-          Option.iter !provider_failure ~f:raise;
-          [%test_eq: int] 3 !requests;
-          assert_checkpoint saved recovered ~calls:(saved.status_calls + 2)))
+  with_reopened_session
+    ~sw
+    ~env
+    ~root
+    ~configuration
+    ~inference_policy:(inference_policy ~default_model:"fixture-model" ~post_stream)
+    ~session_id:saved.session_id
+    ~check_cold:(fun loaded -> assert_checkpoint saved loaded ~calls:saved.status_calls)
+    (fun daemon entry handle ->
+       let resumed =
+         send env handle entry ~terminal:Completed "Resume the installed review."
+       in
+       Option.iter !provider_failure ~f:raise;
+       assert_checkpoint saved resumed ~calls:(saved.status_calls + 1);
+       assert (
+         List.exists resumed.moderator_executions ~f:(fun receipt ->
+           match receipt.P.Moderator_execution.context.phase, receipt.status with
+           | Session_resume, Completed _ -> true
+           | _ -> false));
+       assert (
+         Bundle.Manifest.equal saved.programs (program_manifest daemon saved.revision_id));
+       H.compact handle ~expected_revision:(Some resumed.counters.revision)
+       |> protocol_ok
+       |> ignore;
+       let compacted =
+         wait_terminal
+           env
+           entry
+           ~after_sequence:resumed.counters.event_sequence
+           ~kind:Compaction
+           ~terminal:Completed
+       in
+       [%test_eq: int] 1 !summaries;
+       [%test_eq: int]
+         (resumed.conversation.compaction_generation + 1)
+         compacted.conversation.compaction_generation;
+       assert (not (List.is_empty compacted.conversation.compaction_archives));
+       assert_checkpoint saved compacted ~calls:(saved.status_calls + 1);
+       let failed =
+         send env handle entry ~terminal:Failed "Observe a provider failure."
+       in
+       [%test_eq: int] 2 !requests;
+       assert_checkpoint saved failed ~calls:(saved.status_calls + 1);
+       let recovered =
+         send env handle entry ~terminal:Completed "Retry with a fresh turn."
+       in
+       Option.iter !provider_failure ~f:raise;
+       [%test_eq: int] 3 !requests;
+       assert_checkpoint saved recovered ~calls:(saved.status_calls + 2))
 ;;

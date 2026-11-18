@@ -21,6 +21,20 @@ module Mutation : sig
   val needs_source : t -> bool
 end
 
+(** Original Goal selection for a fresh-child capture. The revision belongs to
+    the request digest. Callers supply no creator episode or grant. *)
+module Goal_owner_request : sig
+  type t = private
+    { goal_id : Agent_protocol.Id.Goal.t
+    ; expected_goal_revision : int64
+    }
+
+  val create
+    :  goal_id:Agent_protocol.Id.Goal.t
+    -> expected_goal_revision:int64
+    -> (t, Agent_protocol.Error.t) result
+end
+
 type t = private
   { session_id : Agent_protocol.Id.Session.t
   ; generation : int
@@ -30,6 +44,8 @@ type t = private
   ; expected_control_revision : int64 option
   ; key : Agent_protocol.Idempotency_key.t
   ; mutation : Mutation.t
+  ; goal_owner : Goal_owner_request.t option
+  ; shared_intent_digest : string option
   }
 
 (** Create has no expected entry frontier; every other mutation requires one.
@@ -47,4 +63,23 @@ val create
   -> mutation:Mutation.t
   -> (t, Agent_protocol.Error.t) result
 
+val with_goal_owner : t -> Goal_owner_request.t -> (t, Agent_protocol.Error.t) result
+
+(** Bind a shared client's complete, scoped intent to a host-captured target.
+    A matching durable receipt can be recognized without recapturing that target.
+    The selector must agree with the supplied capture; simple controls accept none. *)
+val of_shared_intent
+  :  session:Agent_protocol.Session_ref.t
+  -> Agent_protocol.Recurrence_control.Intent.t
+  -> target:Recurrence_target.t option
+  -> (t, Agent_protocol.Error.t) result
+
 val digest : t -> (string, Agent_protocol.Error.t) result
+
+(** Trusted native producer fingerprint. Historical unbound native requests
+    keep the ordinary digest. A bound native request hashes the originally
+    acknowledged frozen definition, distinct from the operator selection. *)
+val digest_native
+  :  t
+  -> binding:Recurrence_definition.Goal_binding.t
+  -> (string, Agent_protocol.Error.t) result

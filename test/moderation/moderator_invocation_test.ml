@@ -438,6 +438,10 @@ let%expect_test "observation handlers can retain coalesced runtime follow-up int
       let manager, prepared, make =
         setup
           env
+          ~script_limits:{|max_value="1KiB"|}
+          ~execution_policy:
+            (Chatml_execution.Bounded
+               { Chatml_execution.default_limits with max_value_bytes = 64 * 1024 })
           "Task.pure(state)"
           ~events:
             {| | `Tool_observed(p) ->
@@ -465,7 +469,7 @@ let%expect_test "observation handlers can retain coalesced runtime follow-up int
           invocation
           ~session_id:context.session_id
           ~generation:context.generation
-          (Complete `Null)
+          (Complete (`String (String.make 4096 'x')))
         |> protocol
         |> I.claim_observation
         |> protocol

@@ -405,8 +405,9 @@ let reconcile_reopened
   let old_controller = state controller in
   let old_target = state target in
   let old_store = Daemon.store daemon in
-  (* There is no acknowledged target Run to interrupt. Close actual owners and
-     their poisoned writer; an unexpected shutdown error remains a test failure. *)
+  (* The controller write was uncertain; the distinct target remains healthy.
+     Require conservative closure only for that actual poisoned controller. *)
+  Uncertain_writer_test_support.close_uncertain_entry controller ~env ~store:old_store;
   Daemon.shutdown daemon |> protocol_ok;
   assert (Agent_store.Session_store.is_closed old_store);
   let reopened =

@@ -6,6 +6,8 @@ module M = Chat_response.Moderator_manager
 module B = Agent_session.Runtime_builder
 module Q = Agent_session.Queued_moderator_event
 module D = Chat_response.Schedule_delivery
+module C = Agent_session.Moderator_checkpoint
+module Queue = Agent_session.Moderator_queue
 
 let requests : I.follow_up =
   { request_turn = false; request_compaction = false; end_session = None }
@@ -31,9 +33,13 @@ let%expect_test
        in
        let manager, _, _ = create_manager () in
        let snapshot () = M.identity_snapshot manager |> Result.ok_or_failwith in
-       A.change_moderator actor (Some (B.encode_moderator_snapshot (snapshot ())))
-       |> protocol_ok
-       |> ignore;
+       let retained_extension = `Object [ "value", `String "future delivery metadata" ] in
+       let initial =
+         match B.encode_moderator_snapshot (snapshot ()) with
+         | `Object fields -> `Object (fields @ [ "future_delivery", retained_extension ])
+         | _ -> failwith "checkpoint is not an object"
+       in
+       A.change_moderator actor (Some initial) |> protocol_ok |> ignore;
        let timers = ref [] in
        A.with_current_moderator_event
          actor
@@ -41,6 +47,7 @@ let%expect_test
          ~event:Session_start
          ~snapshot:(fun () -> Ok (snapshot ()))
          (fun ~executing
+           ~policy_caller:_
            ~model_jobs:_
            ~allocate_inference:_
            ~retirement_reason
@@ -94,29 +101,90 @@ let%expect_test
                 ~generation:0
                 ~moderator_snapshot:(Some (B.encode_moderator_snapshot before))));
          assert_same_session_snapshot unchanged (A.state actor |> protocol_ok);
-         M.enqueue_internal_event_entries
-           manager
-           ~event
-           ~prepare:(fun ~before ~snapshot ->
-             A.complete_schedule
-               actor
-               ~expected:before
-               ~expected_schedule:timer
-               ~schedule_id:timer.id
-               ~generation:0
-               ~moderator_snapshot:(Some (B.encode_moderator_snapshot snapshot))
-             |> Result.map ~f:ignore
-             |> Result.map_error ~f:(fun error -> error.P.Error.message))
-         |> Result.ok_or_failwith
-         |> ignore;
+         let enqueue () =
+           M.enqueue_internal_event_entries
+             manager
+             ~event
+             ~prepare:(fun ~before ~snapshot ->
+               A.complete_schedule
+                 actor
+                 ~expected:before
+                 ~expected_schedule:timer
+                 ~schedule_id:timer.id
+                 ~generation:0
+                 ~moderator_snapshot:(Some (B.encode_moderator_snapshot snapshot))
+               |> Result.map ~f:ignore
+               |> Result.map_error ~f:(fun error -> error.P.Error.message))
+         in
+         reject_save := true;
+         let rejected =
+           Exn.protect ~f:enqueue ~finally:(fun () -> reject_save := false)
+         in
+         assert (Result.is_error rejected);
+         assert_same_session_snapshot unchanged (A.state actor |> protocol_ok);
+         [%test_eq: Sexp.t]
+           (Session.Moderator_state.Identity_snapshot.sexp_of_t before)
+           (Session.Moderator_state.Identity_snapshot.sexp_of_t (snapshot ()));
+         let previous = C.queue unchanged.moderator |> protocol_ok |> Option.value_exn in
+         enqueue () |> Result.ok_or_failwith |> ignore;
+         let installed = A.state actor |> protocol_ok in
+         let queue = C.queue installed.moderator |> protocol_ok |> Option.value_exn in
+         assert (P.Run_source.equal (Queue.source previous) (Queue.source queue));
+         assert (Int64.equal (Queue.head_ordinal previous) (Queue.head_ordinal queue));
+         assert (
+           Int64.equal
+             (Int64.succ (Queue.next_ordinal previous))
+             (Queue.next_ordinal queue));
+         assert (
+           List.equal
+             Queue.Entry.equal
+             (Queue.entries previous)
+             (List.drop_last_exn (Queue.entries queue)));
+         (match
+            Document_schema.Json.field
+              (Option.value_exn installed.moderator)
+              ~name:"future_delivery"
+          with
+          | Value value -> assert (Jsonaf.exactly_equal value retained_extension)
+          | Absent | Null -> failwith "retained checkpoint extension disappeared");
+         [%test_eq: Sexp.t]
+           (Session.Moderator_state.Identity_snapshot.sexp_of_t (snapshot ()))
+           (C.decode installed.moderator
+            |> protocol_ok
+            |> Option.value_exn
+            |> Session.Moderator_state.Identity_snapshot.sexp_of_t);
          timer, event
        in
        let enqueue event =
          M.enqueue_internal_event_entries
            manager
            ~event
-           ~prepare:(fun ~before:_ ~snapshot ->
-             A.change_moderator actor (Some (B.encode_moderator_snapshot snapshot))
+           ~prepare:(fun ~before ~snapshot ->
+             let open Result.Let_syntax in
+             let%bind state =
+               A.state actor |> Result.map_error ~f:(fun error -> error.P.Error.message)
+             in
+             let%bind queue =
+               C.queue state.moderator
+               |> Result.map_error ~f:(fun error -> error.P.Error.message)
+             in
+             let%bind queue = Result.of_option queue ~error:"missing actual queue" in
+             (* Deliberate duplicate/forged recovery DATA, never a producer loan.
+                Keep the actual source/frontier/prefix and full raw checkpoint. *)
+             let%bind queue =
+               Queue.advance
+                 queue
+                 ~before:before.queued_internal_events
+                 ~after:snapshot.queued_internal_events
+                 ~consume:Keep
+                 ~appended:[ Queue.Capture.unavailable ]
+               |> Result.map_error ~f:(fun error -> error.P.Error.message)
+             in
+             let%bind full =
+               C.update_with_queue state.moderator ~snapshot ~queue
+               |> Result.map_error ~f:(fun error -> error.P.Error.message)
+             in
+             A.change_moderator actor (Some full)
              |> Result.map ~f:ignore
              |> Result.map_error ~f:(fun error -> error.P.Error.message))
          |> Result.ok_or_failwith
@@ -247,6 +315,7 @@ let%expect_test
            ~event:Session_start
            ~snapshot:(fun () -> Ok (snapshot ()))
            (fun ~executing
+             ~policy_caller:_
              ~model_jobs:_
              ~allocate_inference:_
              ~retirement_reason:_
@@ -392,6 +461,7 @@ let%expect_test
               ~event:Session_resume
               ~snapshot:(fun () -> Ok (snapshot ()))
               (fun ~executing
+                ~policy_caller:_
                 ~model_jobs:_
                 ~allocate_inference:_
                 ~retirement_reason:_

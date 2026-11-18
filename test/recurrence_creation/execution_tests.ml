@@ -574,13 +574,33 @@ let%expect_test
               |> protocol_ok
               |> C.Reservation.required_transition_steps
             in
-            [%test_eq: int] steps 6;
+            [%test_eq: int] steps 7;
+            let legacy =
+              let json = C.to_jsonaf catalog |> protocol_ok in
+              match json with
+              | `Object fields ->
+                `Object
+                  (List.filter_map fields ~f:(function
+                     | "reserve_target_pauses", _ -> None
+                     | "revision", _ ->
+                       Some ("revision", `String Int64.(to_string (max_value - 6L)))
+                     | pair -> Some pair))
+                |> C.of_jsonaf
+                |> protocol_ok
+              | _ -> failwith "expected retained recurrence catalog"
+            in
+            [%test_eq: int]
+              6
+              (C.reservation legacy
+               |> protocol_ok
+               |> C.Reservation.required_transition_steps);
+            C.pause_for_stop legacy |> protocol_ok |> Option.value_exn |> ignore;
             let boundary =
               { current with
                 counters =
                   { current.counters with
-                    revision = Int64.(max_value - 6L)
-                  ; transaction_sequence = Int64.(max_value - 6L)
+                    revision = Int64.(max_value - of_int steps)
+                  ; transaction_sequence = Int64.(max_value - of_int steps)
                   }
               }
             in
@@ -590,7 +610,9 @@ let%expect_test
                 (A.Session_state.validate
                    { boundary with
                      counters =
-                       { boundary.counters with revision = Int64.(max_value - 5L) }
+                       { boundary.counters with
+                         revision = Int64.succ boundary.counters.revision
+                       }
                    }));
             let document = host_document carrier in
             let shallow =

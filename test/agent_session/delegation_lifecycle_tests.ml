@@ -11,11 +11,23 @@ module Lifecycle = Agent_server.Delegation_lifecycle
 
 let digest = Chatmd_shell_spec.Source_ref.digest
 
-let actor ~env ~sw ~state ~reject_save =
+let actor ~runtime_source_owner ~env ~sw ~state ~reject_save =
   let backend = Memory.create ~event_capacity:128 ~initial_state:state in
   let persistence = Memory.persistence backend in
+  let create =
+    match runtime_source_owner with
+    | None -> A.create
+    | Some owner ->
+      A.create_with_runtime_source_owner
+        ~runtime_source_owner:(Agent_session.Runtime_source_owner.identity owner)
+        ~ordinary_execution_admission:(fun () -> Ok ())
+        ~schedule_permission_timeouts:false
+        ~owner_lease_duration_ms:60_000
+        ~max_attachments:4
+        ~subscriber_capacity:8
+  in
   let actor =
-    A.create
+    create
       ~sw
       ~clock:(Eio.Stdenv.clock env)
       ~mailbox_capacity:32
@@ -25,10 +37,10 @@ let actor ~env ~sw ~state ~reject_save =
       ~persistence:
         { archive_reference
         ; commit =
-            (fun ~command_audit ~previous next ->
+            (fun ?observation ~command_audit ~previous next ->
               match reject_save next with
               | true -> Error (handoff_error "injected child stop save failure")
-              | false -> persistence.commit ~command_audit ~previous next)
+              | false -> persistence.commit ?observation ~command_audit ~previous next)
         }
       ~services:
         { now = (fun () -> timestamp)
@@ -47,7 +59,12 @@ let actor ~env ~sw ~state ~reject_save =
   actor, backend
 ;;
 
-let with_fixture ?(lifetime = D.Admission.Owned) ?(reject_transition = fun _ -> false) f =
+let with_fixture
+      ?runtime_source_owner
+      ?(lifetime = D.Admission.Owned)
+      ?(reject_transition = fun _ -> false)
+      f
+  =
   with_actor_workspace (fun env workspace_instance ->
     Eio.Switch.run (fun sw ->
       let store =
@@ -125,7 +142,7 @@ let with_fixture ?(lifetime = D.Admission.Owned) ?(reject_transition = fun _ -> 
           State.validate state |> protocol_ok;
           let reject = ref false in
           let child, backend =
-            actor ~env ~sw ~state ~reject_save:(fun transition ->
+            actor ~runtime_source_owner ~env ~sw ~state ~reject_save:(fun transition ->
               reject_transition transition
               || (!reject
                   &&
@@ -137,11 +154,37 @@ let with_fixture ?(lifetime = D.Admission.Owned) ?(reject_transition = fun _ -> 
           in
           let closes = ref 0 in
           let runtime =
-            Owner.create
-              ~actor:child
-              ~initial:
-                (Some (Runtime_lease_tests.runtime ~close:(fun () -> Int.incr closes) ()))
-              ~build:(fun () -> failwith "unexpected child reload")
+            match runtime_source_owner with
+            | None ->
+              Owner.create
+                ~actor:child
+                ~initial:
+                  (Some
+                     (Runtime_lease_tests.runtime ~close:(fun () -> Int.incr closes) ()))
+                ~build:(fun () -> failwith "unexpected child reload")
+            | Some source_owner ->
+              Owner.create_with_deferred_run_unload
+                ~source_owner
+                ~before_unload:(fun ~closing:_ -> Ok ())
+                ~policy_resource_cleanup:
+                  (Owner.Policy_resource_cleanup.create
+                     ~pending:(fun () -> false)
+                     ~close_pending:(fun () -> Ok ()))
+                ~policy_resource_access:None
+                ~native_resource_access:None
+                ~actor:child
+                ~initial:None
+                ~build:(fun ~initialization_cleanup:_ ~original_actor:_ _ ->
+                  failwith "source fixture built runtime")
+                ~build_deferred:
+                  (fun
+                    ~initialization_cleanup:_
+                    ~source_consumer:_
+                    ~source:_
+                    ~expected_product:_
+                    ~construction:_ -> failwith "source fixture built deferred runtime")
+                ~ordinary_warm:None
+                ~delegated_load:None
           in
           Exn.protect
             ~finally:(fun () ->
@@ -295,7 +338,14 @@ let%expect_test
          }
        in
        State.validate parent_state |> protocol_ok;
-       let parent, _ = actor ~env ~sw ~state:parent_state ~reject_save:(fun _ -> false) in
+       let parent, _ =
+         actor
+           ~runtime_source_owner:None
+           ~env
+           ~sw
+           ~state:parent_state
+           ~reject_save:(fun _ -> false)
+       in
        let entered, enter = Eio.Promise.create () in
        let cleaning, clean = Eio.Promise.create () in
        let release, release_cleanup = Eio.Promise.create () in
@@ -459,4 +509,141 @@ let%expect_test
               cleanup; history remains readable"));
   [%expect
     {| cancelled stop caller cannot release parent resources before child cleanup; history remains readable |}]
+;;
+
+exception Source_join_observer_cancelled
+
+let%expect_test "lexical source consumer keeps exact stage and joins actual completion" =
+  let module Consumer = Owner.Source_consumer in
+  let module Scope = Owner.Scope_outcome in
+  let source_owner = Agent_session.Runtime_source_owner.create () in
+  with_fixture
+    ~runtime_source_owner:source_owner
+    (fun env _sw _ledger _record _foreign _actor runtime _backend closes _reject _ ->
+       Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
+         Eio.Switch.run (fun sw ->
+           let first = ref None in
+           let primary = P.Error.invalid_request "first source callback refusal" in
+           let first_report =
+             Owner.with_delegated_load_source_reported
+               runtime
+               ~source_owner
+               ~custody:(Host None)
+               (fun source ->
+                  first := Some (Owner.Delegated_load_source.consumer source);
+                  Error primary)
+           in
+           (match Scope.primary first_report with
+            | Returned (Error error) ->
+              assert (
+                Jsonaf.exactly_equal (P.Error.to_json primary) (P.Error.to_json error))
+            | Returned (Ok _) -> failwith "source callback refusal disappeared"
+            | Raised (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace);
+           let assert_joined report =
+             match Scope.Cleanup.status report with
+             | Joined -> ()
+             | Never_acquired -> failwith "source lease was not acquired"
+             | Failed _ -> failwith "actual source finalizer failed"
+           in
+           assert_joined (Scope.cleanup first_report);
+           let first = Option.value_exn !first in
+           let entered, enter = Eio.Promise.create () in
+           let body, _body_u = Eio.Promise.create () in
+           let closing, close = Eio.Promise.create () in
+           let released, release = Eio.Promise.create () in
+           let release_finalizer () =
+             if Option.is_none (Eio.Promise.peek released)
+             then Eio.Promise.resolve release ()
+           in
+           let second_report =
+             Eio.Fiber.fork_promise ~sw (fun () ->
+               Owner.with_delegated_load_source_reported
+                 runtime
+                 ~source_owner
+                 ~custody:(Host None)
+                 (fun source ->
+                    let consumer = Owner.Delegated_load_source.consumer source in
+                    Consumer.check consumer |> protocol_ok;
+                    Eio.Promise.resolve enter consumer;
+                    Exn.protect
+                      ~finally:(fun () ->
+                        Eio.Cancel.protect (fun () ->
+                          Eio.Promise.resolve close ();
+                          Eio.Promise.await released))
+                      ~f:(fun () ->
+                        Eio.Promise.await body;
+                        Ok ())))
+           in
+           Exn.protect
+             ~finally:(fun () ->
+               Eio.Cancel.protect (fun () ->
+                 release_finalizer ();
+                 Option.iter (Eio.Promise.peek entered) ~f:(fun second ->
+                   Consumer.join second |> protocol_ok |> ignore);
+                 Eio.Promise.await_exn second_report |> ignore))
+             ~f:(fun () ->
+               let second = Eio.Promise.await entered in
+               assert (not (Owner.source_lane_idle runtime));
+               Consumer.revoke first |> protocol_ok;
+               let first_joined = Consumer.join first |> protocol_ok in
+               assert_joined first_joined;
+               Consumer.check second |> protocol_ok;
+               assert (Option.is_none (Eio.Promise.peek closing));
+               assert (Option.is_none (Eio.Promise.peek second_report));
+               Consumer.revoke second |> protocol_ok;
+               assert (Result.is_error (Consumer.check second));
+               (* Pure intent must not run cancellation or the finalizer inline. *)
+               assert (Option.is_none (Eio.Promise.peek closing));
+               let cancel_observer = ref None in
+               let observer =
+                 Eio.Fiber.fork_promise ~sw (fun () ->
+                   try
+                     Eio.Cancel.sub (fun context ->
+                       cancel_observer
+                       := Some
+                            (fun () ->
+                              Eio.Cancel.cancel context Source_join_observer_cancelled);
+                       Ok (Consumer.join second |> protocol_ok))
+                   with
+                   | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ()))
+               in
+               Eio.Promise.await closing;
+               assert (Option.is_none (Eio.Promise.peek observer));
+               assert (Option.is_none (Eio.Promise.peek second_report));
+               Option.value_exn !cancel_observer ();
+               (match Eio.Promise.await_exn observer with
+                | Error (Eio.Cancel.Cancelled _, _) -> ()
+                | Error (exn, backtrace) ->
+                  Exn.raise_with_original_backtrace exn backtrace
+                | Ok _ -> failwith "cancelled source observer certified cleanup");
+               assert (Option.is_none (Eio.Promise.peek second_report));
+               let joined =
+                 Eio.Fiber.fork_promise ~sw (fun () ->
+                   Consumer.join second |> protocol_ok)
+               in
+               release_finalizer ();
+               let actual = Eio.Promise.await_exn second_report in
+               let cleanup = Eio.Promise.await_exn joined in
+               assert_joined (Scope.cleanup actual);
+               assert_joined cleanup;
+               assert_joined (Consumer.join second |> protocol_ok);
+               assert (Owner.source_lane_idle runtime);
+               assert (not (Owner.is_loaded runtime));
+               (* Source completion does not permanently close its canonical Owner. *)
+               let next =
+                 Owner.with_delegated_load_source_reported
+                   runtime
+                   ~source_owner
+                   ~custody:(Host None)
+                   (fun source ->
+                      Consumer.check (Owner.Delegated_load_source.consumer source))
+               in
+               Scope.resume next |> protocol_ok;
+               assert_joined (Scope.cleanup next);
+               [%test_eq: int] 0 !closes))));
+  print_endline
+    "old source cannot revoke replacement; pure gate closes; cancelled observer leaves \
+     real cleanup owned; exact report joins";
+  [%expect
+    {| old source cannot revoke replacement; pure gate closes; cancelled observer leaves real cleanup owned; exact report joins |}]
 ;;

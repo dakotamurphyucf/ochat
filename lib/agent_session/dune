@@ -1,12 +1,25 @@
 (library
  (name agent_session)
  (public_name ochat.agent_session)
+ (inline_tests)
  (modules
   agent_authority_scope
+  writer_attachment
   actor_reply
+  callback_cleanup_data
+  product_callback_data
+  canonical_backend_binding_data
+  failed_startup_data
+  failed_startup_release_data
+  callback_cleanup
+  cleanup_diagnostic
+  close_observation
+  runtime_close
+  retirement_cleanup_completion
   inference_graph_owner
   inference_allocation
   model_job_admission
+  model_job_event
   runtime_model_services
   runtime_input_preparation
   legacy_callback_runtime
@@ -32,6 +45,7 @@
   recurrence_execution_attempt
   recurrence_run_origin
   recurrence_run_reference
+  recurrence_run_evidence
   recurrence_retry_resolution
   recurrence_execution_capacity
   recurrence_execution_record
@@ -58,6 +72,7 @@
   recurrence_control_capacity
   recurrence_command
   recurrence_controller
+  recurrence_goal_capture
   recurrence_command_transition
   recurrence_command_admission
   recurrence_native_admission
@@ -159,16 +174,26 @@
   moderator_queue
   legacy_queue_checkpoint
   legacy_job_delivery
+  external_delivery_checkpoint
   execution_custody
   observation_continuation
   job_custody
+  constructor_model_producer
+  session_commit_attempt
+  delegated_policy_governance_data
+  delegated_policy_seed
+  delegated_policy_caller_custody
+  delegated_policy_caller
+  delegated_policy_claim_state
   constructor_job_handoff
   constructor_callback_checkpoint
   constructor_invocation_checkpoint
   constructor_permission_checkpoint
   legacy_queue_custody
   legacy_schedule_custody
+  ingress_creator_custody
   queue_provenance_validation
+  retained_job_producer
   moderator_checkpoint
   legacy_moderator_checkpoint
   run_source_installation
@@ -193,6 +218,7 @@
   instruction_source_request
   instruction_source_port
   instruction_native_admission
+  instruction_admission
   instruction_command_admission
   instruction_clear_capacity
   instruction_service
@@ -218,6 +244,7 @@
   goal_activation_policy
   goal_root_policy
   goal_descendant_root_route
+  goal_causal_root_route
   goal_run_transition
   goal_run_settlement
   goal_run_resolution
@@ -229,6 +256,8 @@
   run_terminal_document
   session_terminal_capacity
   session_terminal_journal
+  moderator_lifecycle
+  policy_restore_basis
   run_state
   run_transition
   run_work_settlement
@@ -349,16 +378,21 @@
   captured_agent_runner
   developer_claimed_resource_owner
   claimed_child_runtime
+  ordinary_runtime_basis
   runtime_builder
+  runtime_unmoderated_source
   runtime_activity
   queued_moderator_event
   permission_reviewer
   permission_policy
   session_transition
   goal_descendant_admission_custody
+  goal_causal_admission_custody
+  session_commit_observation
   session_actor
   memory_backend
   session_persistence
+  session_recovery_cpu
   retained_history
   quota_key
   quota_manager
@@ -366,6 +400,32 @@
   inference_usage_count
   goal_accounting_counter
   canonical_usage_fold
+  policy_caller_source
+  policy_cause_leaf
+  policy_forwarding_frame
+  policy_forwarding_route
+  policy_forwarding
+  policy_cause_data
+  policy_native_ancestry
+  policy_standalone_source
+  policy_canonical_usage_data
+  policy_canonical_usage_carrier
+  policy_canonical_usage_selection
+  policy_canonical_usage_update
+  policy_canonical_usage_projection
+  policy_canonical_usage_forwarding
+  policy_canonical_usage_source
+  policy_canonical_usage_ordered
+  policy_canonical_usage
+  goal_policy_receipt
+  goal_policy_contributions_data
+  goal_policy_contributions_capacity
+  goal_policy_contributions_carrier
+  goal_policy_contributions_update
+  goal_policy_contributions
+  goal_policy_totals
+  goal_policy_ordered
+  session_goal_policy_projection
   canonical_usage_update
   child_accounting
   child_contributions
@@ -393,11 +453,13 @@
   goal_ledger_reconciliation
   goal_work_attribution
   goal_execution_selection
+  goal_wake_selection
+  goal_continuation_phase
   goal_charge_admission
   host_turn_tracking
   goal_host_turn_admission
   inference_ledger)
- (private_modules idle_completion_write goal_descendant_admission_custody capacity_depth goal_descendants_data goal_descendants_canonical goal_descendants_capacity delegated_usage_state goal_native_actions goal_activation_policy goal_root_policy goal_descendant_root_route run_work_settlement recurrence_activation_custody actor_reply recurrence_execution_capacity recurrence_executions run_recurrence_origins queue_payload recurrence_runtime recurrence_execution_record recurrence_frontier_records recurrence_frontier_codec recurrence_frontier_transition recurrence_frontier_settlement agent_authority_scope goal_accounting_state goal_accounting_stored instruction_selection_capacity instruction_selection_record workspace_ownership authored_native_contract pending_carrier_admission prompt_parser_boundary prompt_program_custody prompt_script_roles legacy_queue_checkpoint legacy_job_delivery execution_custody observation_continuation job_custody constructor_job_handoff constructor_callback_checkpoint constructor_invocation_checkpoint constructor_permission_checkpoint legacy_queue_custody legacy_schedule_custody
+ (private_modules product_callback_data canonical_backend_binding_data failed_startup_data failed_startup_release_data callback_cleanup_data retirement_cleanup_completion runtime_unmoderated_source retained_job_producer policy_caller_source delegated_policy_governance_data delegated_policy_seed policy_canonical_usage_source goal_causal_admission_custody policy_canonical_usage_forwarding policy_cause_leaf policy_forwarding_frame policy_forwarding_route policy_forwarding constructor_model_producer session_commit_attempt delegated_policy_caller_custody delegated_policy_claim_state goal_policy_ordered session_goal_policy_projection goal_policy_receipt goal_policy_contributions_data goal_policy_contributions_capacity goal_policy_contributions_carrier goal_policy_contributions_update policy_native_ancestry policy_standalone_source policy_canonical_usage_data policy_canonical_usage_carrier policy_canonical_usage_selection policy_canonical_usage_update policy_canonical_usage_projection policy_canonical_usage_ordered idle_completion_write goal_descendant_admission_custody capacity_depth goal_descendants_data goal_descendants_canonical goal_descendants_capacity delegated_usage_state goal_native_actions goal_activation_policy goal_root_policy goal_descendant_root_route goal_causal_root_route run_work_settlement goal_wake_selection goal_continuation_phase recurrence_activation_custody recurrence_run_evidence actor_reply recurrence_execution_capacity recurrence_executions run_recurrence_origins queue_payload recurrence_runtime recurrence_execution_record recurrence_frontier_records recurrence_frontier_codec recurrence_frontier_transition recurrence_frontier_settlement agent_authority_scope goal_accounting_state goal_accounting_stored instruction_selection_capacity instruction_selection_record workspace_ownership authored_native_contract pending_carrier_admission prompt_parser_boundary prompt_program_custody prompt_script_roles legacy_queue_checkpoint legacy_job_delivery external_delivery_checkpoint execution_custody observation_continuation job_custody constructor_job_handoff constructor_callback_checkpoint constructor_invocation_checkpoint constructor_permission_checkpoint legacy_queue_custody legacy_schedule_custody ingress_creator_custody
   prompt_project_baseline_record prompt_project_baseline_document native_tool_policy pending_turn run_input_handoff)
  (libraries ochat.inference_client ochat.inference_runtime ochat.inference ochat.history_chatmd ochat.transcript
   core
@@ -429,4 +491,4 @@
   context_compaction
   ochat.chatmd_shell_spec)
  (preprocess
-  (pps ppx_jane)))
+  (pps ppx_jane ppx_expect)))

@@ -46,6 +46,10 @@ type request =
     final denial-only currentness checks. It is not a target or execution proof. *)
 type t
 
+(** Immutable read projection. Indexed reads carry checked lifecycle data while
+    the temporary Store Handle is held. A snapshot conveys no live owner. *)
+type snapshot
+
 (** Same current-original/read/Current contract as existing read_recurrences.
     The Actor adds actual process-local planning availability separately; this
     operation never resolves a target, creates a source loan or loads a runtime. *)
@@ -59,6 +63,25 @@ val read
   -> (t, P.Error.t) Result.t
 
 val basis : t -> Basis.t
+val snapshot : t -> snapshot
+val snapshot_basis : snapshot -> Basis.t
+
+(** Compares the canonical read basis and process-local planning diagnostics
+    captured by Status. The caller separately checks actual registry binding. *)
+val same_basis : snapshot -> snapshot -> bool
+
+(** Read through a genuine, current indexed Store/Handle projection. The caller
+    retains the admitted indexed Registry read lifetime while the Handle is open.
+    No Actor, canonical writer, source loan or execution selection is created. *)
+val read_indexed
+  :  Session_state.t
+  -> store:Agent_store.Session_store.t
+  -> handle:Agent_store.Session_store.Handle.t
+  -> indexed:Agent_store.Session_index.Entry.t
+  -> actor:Operator_authorization.t
+  -> authorize:(Session_state.t -> (unit, P.Error.t) Result.t)
+  -> request:request
+  -> (snapshot, P.Error.t) Result.t
 
 (** Pure denial-only check on the actual observation issued by [read]. Invoke
     after all yielding host/visibility checks, before disclosure. No refresh,
@@ -96,3 +119,16 @@ val render
   :  t
   -> read_target:(P.Session_ref.t -> (Session_state.t, P.Error.t) Result.t)
   -> (Jsonaf.t, P.Error.t) Result.t
+
+(** Typed shared projection from the same retained facts as [render]. Read
+    targets through their actual immutable, already authorized Registry path.
+    The separate [can_view_run] predicate controls disclosure of actual Run
+    details, including retained outcomes. The caller recaptures the controller
+    after target IO and adds any current writer advice before disclosure. *)
+val render_public
+  :  snapshot
+  -> availability:P.Recurrence_query.Availability.t
+  -> selected:bool
+  -> read_target:(P.Session_ref.t -> (Session_state.t, P.Error.t) Result.t)
+  -> can_view_run:(run_owner:P.Id.Principal.t -> bool)
+  -> (P.Recurrence_query.Result.t, P.Error.t) Result.t

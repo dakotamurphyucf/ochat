@@ -320,8 +320,91 @@ end
       When [decl.names] is [`Some list`] only the named tools are wrapped;
       otherwise the full catalog is exposed. *)
 
-let mcp_tool
-      ?(check_preparation_now = fun () -> Ok ())
+module Mcp_checks = struct
+  type check = unit -> (unit, Native_error.t) result
+
+  module Use = struct
+    type t =
+      | Direct of check
+      | Canonical of
+          { original_context : check
+          ; resource : check
+          }
+  end
+
+  type t =
+    { prepare : check
+    ; use : Use.t
+    }
+
+  let direct check = { prepare = check; use = Use.Direct check }
+
+  let canonical_native ~prepare ~original_context ~resource =
+    { prepare; use = Use.Canonical { original_context; resource } }
+  ;;
+
+  let prepare t = t.prepare ()
+  let retained t = t.use
+end
+
+(* Only projected Use/client/cache metadata reach these retained runners.
+   Construction's lexical preparation check is not an argument of this helper. *)
+let wrap_mcp_tool ~checks ~sw ~client ~cache ~strict (captured : Mcp_types.Tool.t) =
+  let function_ = Mcp_tool.ochat_function_of_remote_tool ~sw ~client ~strict captured in
+  let require = function
+    | Ok value -> value
+    | Error error -> failwithf "%s: %s" error.Native_error.code error.message ()
+  in
+  let validate_catalog tools =
+    match
+      List.filter tools ~f:(fun current ->
+        String.equal current.Mcp_types.Tool.name captured.name)
+    with
+    | [ current ]
+      when Option.equal String.equal current.description captured.description
+           && Jsonaf.exactly_equal current.input_schema captured.input_schema -> ()
+    | _ -> failwith "mcp.catalog_changed: reload the tool definition before calling it"
+  in
+  let check_before_call invocation =
+    match checks with
+    | Mcp_checks.Use.Direct check ->
+      validate_catalog (Mcp_discovery_cache.get cache);
+      require (check ())
+    | Canonical { original_context; resource } ->
+      (match Ochat_function.Invocation.effect_check invocation with
+       | None ->
+         validate_catalog (Mcp_discovery_cache.get cache);
+         require (original_context ());
+         require (resource ())
+       | Some current ->
+         let module Check = Ochat_function.Invocation.Effect_check in
+         Check.refresh current;
+         require (resource ());
+         Mcp_discovery_cache.get_checked cache ~before_load:(fun () ->
+           Check.check current;
+           resource ())
+         |> require
+         |> validate_catalog;
+         (* Discovery may have awaited a mutex or the actual peer. Recheck the
+            SAME admitted consumer, not merely its output after tools/call. *)
+         Check.refresh current;
+         require (resource ());
+         Check.check current)
+  in
+  { function_ with
+    run =
+      (fun input ->
+        check_before_call Ochat_function.Invocation.silent;
+        function_.run input)
+  ; run_with_progress =
+      (fun ~invocation input ->
+        check_before_call invocation;
+        function_.run_with_progress ~invocation input)
+  }
+;;
+
+let mcp_tool_with_checks
+      ~checks
       ~sw
       ~env
       CM.{ names; description = _; mcp_server; strict; client_id_env; client_secret_env }
@@ -343,9 +426,9 @@ let mcp_tool
     Uri.to_string uri
   in
   let open Result.Let_syntax in
-  let%bind () = check_preparation_now () in
+  let%bind () = Mcp_checks.prepare checks in
   let client = Mcp_client.connect ~sw ~env mcp_server_uri in
-  let%bind () = check_preparation_now () in
+  let%bind () = Mcp_checks.prepare checks in
   let cache =
     Mcp_discovery_cache.create
       ~now:(fun () -> Eio.Time.now (Eio.Stdenv.clock env))
@@ -355,39 +438,14 @@ let mcp_tool
         | Error _ -> failwith "MCP tool discovery failed")
   in
   register_invalidation_listener ~sw ~cache ~client;
-  let wrap (captured : Mcp_types.Tool.t) =
-    let function_ = Mcp_tool.ochat_function_of_remote_tool ~sw ~client ~strict captured in
-    let check_catalog () =
-      match
-        List.filter (Mcp_discovery_cache.get cache) ~f:(fun current ->
-          String.equal current.Mcp_types.Tool.name captured.name)
-      with
-      | [ current ]
-        when Option.equal String.equal current.description captured.description
-             && Jsonaf.exactly_equal current.input_schema captured.input_schema -> ()
-      | _ -> failwith "mcp.catalog_changed: reload the tool definition before calling it"
-    in
-    { function_ with
-      run =
-        (fun input ->
-          check_catalog ();
-          (match check_preparation_now () with
-           | Ok () -> ()
-           | Error error -> failwithf "%s: %s" error.Native_error.code error.message ());
-          function_.run input)
-    ; run_with_progress =
-        (fun ~invocation input ->
-          check_catalog ();
-          (match check_preparation_now () with
-           | Ok () -> ()
-           | Error error -> failwithf "%s: %s" error.Native_error.code error.message ());
-          function_.run_with_progress ~invocation input)
-    }
+  let wrap =
+    wrap_mcp_tool ~checks:(Mcp_checks.retained checks) ~sw ~client ~cache ~strict
   in
   let get_tool name =
     let find () =
       Result.map
-        (Mcp_discovery_cache.get_checked cache ~before_load:check_preparation_now)
+        (Mcp_discovery_cache.get_checked cache ~before_load:(fun () ->
+           Mcp_checks.prepare checks))
         ~f:(fun tools ->
           List.find tools ~f:(fun tool -> String.equal tool.Mcp_types.Tool.name name))
     in
@@ -407,8 +465,17 @@ let mcp_tool
     |> Result.map ~f:List.rev
   | None ->
     Result.map
-      (Mcp_discovery_cache.get_checked cache ~before_load:check_preparation_now)
+      (Mcp_discovery_cache.get_checked cache ~before_load:(fun () ->
+         Mcp_checks.prepare checks))
       ~f:(List.map ~f:wrap)
+;;
+
+let mcp_tool ?(check_preparation_now = fun () -> Ok ()) ~sw ~env declaration =
+  mcp_tool_with_checks
+    ~checks:(Mcp_checks.direct check_preparation_now)
+    ~sw
+    ~env
+    declaration
 ;;
 
 (*--- 4-d.  Unified declaration → function mapping ------------------*)
@@ -493,6 +560,7 @@ let inference_required message =
 ;;
 
 let of_declaration_with
+      ?mcp_checks
       ?shell_registry
       ?host
       ?agent_source_runner
@@ -574,10 +642,14 @@ let of_declaration_with
      | Some (ctx, run_agent) ->
        Ok [ agent_fn ?agent_source_runner ~ctx ~run_agent agent_spec ]
      | None -> inference_required "Agent requires admitted inference")
-  | CM.Mcp mcp -> mcp_tool ?check_preparation_now ~sw ~env mcp
+  | CM.Mcp mcp ->
+    (match mcp_checks with
+     | None -> mcp_tool ?check_preparation_now ~sw ~env mcp
+     | Some checks -> mcp_tool_with_checks ~checks ~sw ~env mcp)
 ;;
 
 let of_declaration
+      ?mcp_checks
       ?shell_registry
       ?host
       ?agent_source_runner
@@ -588,6 +660,7 @@ let of_declaration
   =
   match
     of_declaration_with
+      ?mcp_checks
       ?shell_registry
       ?host
       ?agent_source_runner

@@ -55,6 +55,7 @@ type 'env t =
   { inference_relation : Transcript.Scope.relation
   ; inference_context : Inference_runtime.Context.t
   ; inference_identity : Neutral_turn.Identity.t
+  ; before_inference_attempt : Inference_runtime.Attempt.t -> unit
   ; on_inference_attempt : Inference_runtime.Attempt.t -> unit
   ; on_inference_completion : Inference_client.Completion.t -> unit
   ; on_inference_observation : Inference.Observation.t -> unit
@@ -95,6 +96,7 @@ let create
   { inference_relation
   ; inference_context
   ; inference_identity
+  ; before_inference_attempt = ignore
   ; on_inference_attempt
   ; on_inference_completion
   ; on_inference_observation
@@ -157,10 +159,15 @@ let with_effect_checkpoint t ~check =
   }
 ;;
 
+let after_guard guard callback attempt =
+  guard attempt;
+  callback attempt
+;;
+
 let with_inference_tracking t ~identity ~on_attempt ~on_observation ~on_completion =
   { t with
     inference_identity = identity
-  ; on_inference_attempt = on_attempt
+  ; on_inference_attempt = after_guard t.before_inference_attempt on_attempt
   ; on_inference_observation = on_observation
   ; on_inference_completion = on_completion
   }
@@ -197,10 +204,8 @@ let with_submission_guard t guard =
 
 let with_inference_attempt_guard t ~before_attempt =
   { t with
-    on_inference_attempt =
-      (fun attempt ->
-        before_attempt attempt;
-        t.on_inference_attempt attempt)
+    before_inference_attempt = after_guard before_attempt t.before_inference_attempt
+  ; on_inference_attempt = after_guard before_attempt t.on_inference_attempt
   }
 ;;
 

@@ -4,11 +4,10 @@ open Support
 let%expect_test "installed discovery derives source identities and real requirements" =
   Eio_main.run (fun _ ->
     let resource = resource () in
-    (* Adding an independent installed closure preserves this exact existing
-       resource identity, including all original member bytes. *)
+    (* The exact installed identity includes the member bytes, including guides. *)
     [%test_eq: string]
       (Chatml_source.Digest.to_hex (Sources.Resource.digest resource))
-      "161326edc7e919448f86e26325fb08f5ea2503d332494c96cfe038092a277426";
+      "4123fcc2149b52545c9a8fb8c95c5c3edd51ba6d61d1c78f5caa66c266c85311";
     [%test_eq: string] (Sources.Id.to_string (Sources.Resource.id resource)) "lifecycle";
     let pure =
       Sources.Resource.member
@@ -85,22 +84,49 @@ let%expect_test "installed instruction helper closure reuses canonical pure libr
     {| instruction-selection: exact helper, three projects, shared canonical Lifecycle bytes |}]
 ;;
 
-let%expect_test "installed recurrence request helper has one pure ordinary project" =
+let%expect_test "installed request helpers are pure ordinary projects" =
   Eio_main.run (fun _ ->
-    let selected = resource ~id:"recurrence-requests" () in
-    [%test_eq: int] (List.length (Sources.Resource.members selected)) 4;
-    match Sources.Resource.projects selected with
-    | [ project ] ->
-      [%test_eq: string]
-        (Sources.Project_summary.namespace project)
-        "ochat.capabilities.recurrence-requests";
-      [%test_eq: string list] (Sources.Project_summary.required_tools project) [];
-      [%test_eq: string list]
-        (List.map (Sources.Project_summary.environments project) ~f:fst)
-        [ "pure" ];
-      print_endline
-        "one pure project; explicit request sources and shared recurring automation guide"
-    | _ -> failwith "recurrence helper inventory does not match its actual project");
+    List.iter [ "goal-requests"; "recurrence-requests" ] ~f:(fun id ->
+      let selected = resource ~id () in
+      [%test_eq: int] (List.length (Sources.Resource.members selected)) 4;
+      match Sources.Resource.projects selected with
+      | [ project ] ->
+        [%test_eq: string]
+          (Sources.Project_summary.namespace project)
+          ("ochat.capabilities." ^ id);
+        [%test_eq: string list] (Sources.Project_summary.required_tools project) [];
+        [%test_eq: string list]
+          (List.map (Sources.Project_summary.environments project) ~f:fst)
+          [ "pure" ];
+        printf "%s: one pure project with no required tools\n" id
+      | _ -> failwithf "%s helper inventory does not match its actual project" id ());
+    let selected = resource ~id:"goal-requests" () in
+    let entry = "examples/libraries/goal-requests/chatml.project.json" in
+    [%test_eq: string]
+      (Source.Portable_path.to_string (Sources.Resource.entry selected))
+      entry;
+    let canonical =
+      [ ( entry
+        , [%blob "../../docs-src/examples/libraries/goal-requests/chatml.project.json"] )
+      ; ( "examples/libraries/goal-requests/src/goal_requests.chatml"
+        , [%blob
+            "../../docs-src/examples/libraries/goal-requests/src/goal_requests.chatml"] )
+      ; ( "examples/libraries/goal-requests/src/goal_requests.chatmli"
+        , [%blob
+            "../../docs-src/examples/libraries/goal-requests/src/goal_requests.chatmli"] )
+      ; ( "guide/native-goal-metadata.md"
+        , [%blob "../../docs-src/guide/native-goal-metadata.md"] )
+      ]
+    in
+    List.iter canonical ~f:(fun (name, expected) ->
+      let member = Sources.Resource.member selected (path name) |> source_ok in
+      [%test_eq: string] (Sources.Member.contents member) expected);
+    print_endline
+      "goal-requests: exact canonical project, implementation, interface and guide");
   [%expect
-    {| one pure project; explicit request sources and shared recurring automation guide |}]
+    {|
+    goal-requests: one pure project with no required tools
+    recurrence-requests: one pure project with no required tools
+    goal-requests: exact canonical project, implementation, interface and guide
+    |}]
 ;;

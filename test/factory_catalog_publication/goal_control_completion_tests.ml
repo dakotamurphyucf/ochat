@@ -128,15 +128,17 @@ let with_initial_entry daemon f =
    with
    | Ok () -> ()
    | Error error ->
-     entry.close ();
+     Agent_server.Session_registry.close_entry entry;
      raise_s [%sexp (error : P.Error.t)]);
-  protect_cleanup ~finally:entry.close (fun () ->
-    assert (not (Owner.is_loaded entry.runtime));
-    assert (
-      A.Session_state.Runtime_initialization.equal
-        Ready
-        (state entry).runtime_initialization);
-    f entry)
+  protect_cleanup
+    ~finally:(fun () -> Agent_server.Session_registry.close_entry entry)
+    (fun () ->
+       assert (not (Owner.is_loaded entry.runtime));
+       assert (
+         A.Session_state.Runtime_initialization.equal
+           Ready
+           (state entry).runtime_initialization);
+       f entry)
 ;;
 
 (* Retain a genuinely installed checkpoint before capturing the Goal. The
@@ -192,6 +194,9 @@ let with_pending_entry daemon f =
          assert (
            A.Goal_accounting.equal (Goal.accounting expected) (Goal.accounting pending));
          assert (not (Owner.is_loaded entry.runtime)));
+    (* The actual administration ACK emits Stopped and elects asynchronous Owner
+       retirement. Join that setup before entering the selected Goal fault cut. *)
+    Owner.unload_and_wait entry.runtime |> protocol_ok;
     f entry session (Resume.checkpoint entry))
 ;;
 
@@ -403,7 +408,7 @@ let assert_stopped_unbound_goal_denied () =
           [%test_eq: string] "permission_denied" error.message;
           assert (not error.retryable)
         | Ok entry ->
-          entry.close ();
+          Agent_server.Session_registry.close_entry entry;
           failwith "stopped unbound Session_start acquired native Goal authority");
        [%test_eq: int] 0 !providers)
 ;;

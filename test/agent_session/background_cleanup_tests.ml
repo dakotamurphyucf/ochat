@@ -89,6 +89,7 @@ let%expect_test
                     ~event
                     ~snapshot:(fun () -> Ok before)
                     (fun ~executing:_
+                      ~policy_caller:_
                       ~model_jobs:_
                       ~allocate_inference:_
                       ~retirement_reason:_
@@ -160,6 +161,7 @@ let%expect_test
                      })
                 ~snapshot:(fun () -> Ok before)
                 (fun ~executing:_
+                  ~policy_caller:_
                   ~model_jobs:_
                   ~allocate_inference:_
                   ~retirement_reason:_

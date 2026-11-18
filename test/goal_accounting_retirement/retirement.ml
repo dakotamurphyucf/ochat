@@ -244,7 +244,9 @@ let retirement_transactions env entry ~write ~after_revision ~handle =
       let changes = delta transaction in
       let ledgers =
         List.filter_map changes ~f:(function
-          | A.Session_delta.Inference_ledger_changed ledger -> Some ledger
+          | A.Session_delta.Inference_ledger_changed ledger
+          | Delegated_inference_ledger_changed (ledger, _)
+          | Policy_inference_ledger_changed (ledger, _, _) -> Some ledger
           | _ -> None)
       in
       List.filter_map changes ~f:(function

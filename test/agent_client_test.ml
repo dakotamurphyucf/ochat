@@ -1397,7 +1397,7 @@ let%expect_test
   =
   Mirage_crypto_rng_unix.use_default ();
   Eio_main.run (fun env ->
-    let reading, reading_resolver = Eio.Promise.create () in
+    let readers = Eio.Stream.create 1 in
     let notifications = Eio.Stream.create 1 in
     let attachment_id = P.Id.Attachment.of_string "att_nested_cancel" |> protocol_ok in
     let request = function
@@ -1426,7 +1426,7 @@ let%expect_test
       Agent_client.Transport.create
         ~request
         ~next_notification:(fun () ->
-          ignore (Eio.Promise.try_resolve reading_resolver ());
+          Eio.Stream.add readers ();
           Eio.Stream.take notifications)
         ~close:Fn.id
       |> Agent_client.Connection.create
@@ -1442,22 +1442,27 @@ let%expect_test
               ~mode:Read_only
               ()
             |> protocol_ok);
-         Eio.Promise.await reading;
+         Eio.Stream.take readers;
          failwith "cancel nested handle switch")
      with
      | Failure message when String.equal message "cancel nested handle switch" -> ());
-    Eio.Switch.run (fun sw ->
-      let replacement =
-        Agent_client.Session_handle.attach
-          ~sw
-          ~clock:env#clock
-          ~connection
-          ~session_id
-          ~mode:Read_only
-          ()
-        |> protocol_ok
-      in
-      Agent_client.Session_handle.close replacement);
+    let replacement =
+      Eio.Switch.run (fun sw ->
+        let replacement =
+          Agent_client.Session_handle.attach
+            ~sw
+            ~clock:env#clock
+            ~connection
+            ~session_id
+            ~mode:Read_only
+            ()
+          |> protocol_ok
+        in
+        Eio.Stream.take readers;
+        Agent_client.Session_handle.close replacement;
+        replacement)
+    in
+    assert (Option.is_none (Agent_client.Session_handle.last_error replacement));
     Agent_client.Connection.close connection;
     print_endline
       "cancelled blocked reader; replacement handle admitted without old close");

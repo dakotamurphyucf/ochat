@@ -7,11 +7,20 @@ module I = Recurrence_identity
 module F = Recurrence_definition
 
 module Pause = struct
+  module Target = struct
+    type t =
+      | Removed
+      | Superseded
+      | Source_retired
+    [@@deriving equal, sexp_of]
+  end
+
   type t =
     | Operator_pause
     | Controller_stop
     | Source_review
     | Recovery_review
+    | Target_invalidated of Target.t
   [@@deriving equal, sexp_of]
 
   let to_string = function
@@ -19,6 +28,9 @@ module Pause = struct
     | Controller_stop -> "controller_stop"
     | Source_review -> "source_review"
     | Recovery_review -> "recovery_review"
+    | Target_invalidated Removed -> "target_removed"
+    | Target_invalidated Superseded -> "target_changed"
+    | Target_invalidated Source_retired -> "source_retired"
   ;;
 
   let of_json =
@@ -28,6 +40,9 @@ module Pause = struct
       ; "controller_stop", Controller_stop
       ; "source_review", Source_review
       ; "recovery_review", Recovery_review
+      ; "target_removed", Target_invalidated Removed
+      ; "target_changed", Target_invalidated Superseded
+      ; "source_retired", Target_invalidated Source_retired
       ]
   ;;
 end
@@ -94,6 +109,8 @@ type projection =
 type t = projection C.t
 
 let definitions t = (C.value t).definitions
+let max_definitions = 8
+let has_definition_slot t = List.length (definitions t) < max_definitions
 let current_projection p = List.last_exn p.definitions
 let current t = current_projection (C.value t)
 let id t = I.Definition.recurrence_id (F.key (current t))
@@ -214,7 +231,7 @@ let validate_projection p =
               || P.Run_source.equal source old))
       in
       if
-        count >= 8
+        count >= max_definitions
         || (not (Int64.equal (I.Definition.revision candidate) (Int64.of_int count)))
         || (not
               (P.Id.Recurrence.equal
@@ -229,6 +246,7 @@ let validate_projection p =
               (P.Session_lifecycle.Revision.equal
                  (F.birth_lifecycle_revision first)
                  (F.birth_lifecycle_revision definition)))
+        || (not (F.Goal_binding.equal (F.goal_binding first) (F.goal_binding definition)))
         || not source_valid
       then invalid "recurrence immutable revision history is inconsistent"
       else Ok (count + 1, Some definition))
@@ -294,7 +312,7 @@ let decode json =
   in
   let%bind definitions =
     List.fold_result raw ~init:(0, []) ~f:(fun (count, acc) json ->
-      if count >= 8
+      if count >= max_definitions
       then invalid "recurrence definition retention is saturated"
       else (
         let%bind f = X.object_ json in
@@ -393,6 +411,7 @@ let future_controls =
   ; Paused Controller_stop
   ; Paused Source_review
   ; Paused Recovery_review
+  ; Paused (Target_invalidated Source_retired)
   ; Retired Retirement.Operator_retire
   ; Retired Lifecycle_changed
   ]
@@ -586,6 +605,8 @@ let enable_projection p =
   let open Result.Let_syntax in
   match p.control with
   | Retired _ -> invalid "retired recurrence cannot be enabled"
+  | Paused (Target_invalidated _) ->
+    invalid "recurrence with an invalidated target requires a new definition"
   | Enabled -> Ok p
   | Paused reason ->
     if Int64.equal p.control_revision Int64.max_value
@@ -603,7 +624,7 @@ let enable_projection p =
           if exact_basis
           then (
             match reason with
-            | Source_review | Recovery_review ->
+            | Source_review | Recovery_review | Target_invalidated _ ->
               invalid
                 "review-held completed recurrence requires explicit definition recovery"
             | Operator_pause | Controller_stop ->
@@ -892,6 +913,7 @@ let enable t =
 let pause t ~reason =
   match control t with
   | Retired _ -> invalid "retired recurrence cannot be paused"
+  | Paused (Target_invalidated _) -> Ok t
   | Enabled | Paused _ ->
     change t ~definitions:(definitions t) ~control:(Paused reason) ~cursor:(cursor t)
 ;;

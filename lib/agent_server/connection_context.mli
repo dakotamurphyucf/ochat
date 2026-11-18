@@ -105,6 +105,8 @@ val register_reserved_attachment : t -> Agent_protocol.Session.Attachment.t -> u
 val remove_attachment : t -> Agent_protocol.Id.Attachment.t -> unit
 val remove_session_attachments : t -> Agent_protocol.Id.Session.t -> unit
 
+(** A nonyielding observation of the current connection registration. Session
+    ownership and writer expiry remain independent Actor checks. *)
 val owns_attachment
   :  t
   -> session_id:Agent_protocol.Id.Session.t

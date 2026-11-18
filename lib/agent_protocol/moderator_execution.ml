@@ -128,16 +128,25 @@ module Decision = struct
 end
 
 module Queue_occurrence = struct
+  module Producer = struct
+    type t =
+      | Unknown
+      | Captured of Queue_producer.t option
+    [@@deriving equal, sexp]
+  end
+
   type t =
     { source : Run_source.t
     ; ordinal : int64
     ; origin : Inference_origin.t option
+    ; producer : Producer.t
     }
   [@@deriving equal]
 
   let source t = t.source
   let ordinal t = t.ordinal
   let origin t = t.origin
+  let producer t = t.producer
 
   let validate t =
     let open Result.Let_syntax in
@@ -147,31 +156,49 @@ module Queue_occurrence = struct
       then invalid "negative queue occurrence ordinal"
       else Ok ()
     in
-    match t.origin with
-    | None -> Ok ()
-    | Some origin -> Inference_origin.validate origin
+    let%bind () =
+      match t.origin with
+      | None -> Ok ()
+      | Some origin -> Inference_origin.validate origin
+    in
+    match t.producer with
+    | Unknown | Captured None -> Ok ()
+    | Captured (Some producer) -> Queue_producer.validate producer
   ;;
 
-  let create ~source ~ordinal ~origin =
-    let t = { source; ordinal; origin } in
+  let create ~source ~ordinal ~origin ~producer =
+    let t = { source; ordinal; origin; producer } in
     Result.map (validate t) ~f:(fun () -> t)
   ;;
 
   let to_json t =
     `Object
-      [ "source", Run_source.to_json t.source
-      ; "ordinal", `String (Int64.to_string t.ordinal)
-      ; "origin", Option.value_map t.origin ~default:`Null ~f:Inference_origin.to_json
-      ]
+      ([ "source", Run_source.to_json t.source
+       ; "ordinal", `String (Int64.to_string t.ordinal)
+       ; "origin", Option.value_map t.origin ~default:`Null ~f:Inference_origin.to_json
+       ]
+       @
+       match t.producer with
+       | Unknown -> []
+       | Captured producer ->
+         [ ( "producer"
+           , Option.value_map producer ~default:`Null ~f:Queue_producer.to_jsonaf )
+         ])
   ;;
 
-  let validate_encoded_capacity json = validate_json ~max_bytes:4096 ~max_depth:8 json
+  let validate_encoded_capacity json =
+    let open Result.Let_syntax in
+    let%bind () = validate_json ~max_bytes:4096 ~max_depth:8 json in
+    match Document_schema.Json.field json ~name:"producer" with
+    | Absent | Null -> Ok ()
+    | Value producer -> Queue_producer.of_jsonaf producer |> Result.map ~f:ignore
+  ;;
 
   let of_json json =
     let open Result.Let_syntax in
     let%bind () = validate_encoded_capacity json in
     let%bind fields = Json_codec.fields json in
-    let%bind () = closed fields [ "source"; "ordinal"; "origin" ] in
+    let%bind () = closed fields [ "source"; "ordinal"; "origin"; "producer" ] in
     let%bind source =
       Json_codec.required_as fields "source" (fun json ->
         let%bind fields = Json_codec.fields json in
@@ -196,7 +223,15 @@ module Queue_occurrence = struct
         | `Null -> Ok None
         | json -> Inference_origin.of_json json |> Result.map ~f:Option.some)
     in
-    create ~source ~ordinal ~origin
+    let%bind producer =
+      match Json_codec.optional fields "producer" with
+      | None -> Ok Producer.Unknown
+      | Some `Null -> Ok (Producer.Captured None)
+      | Some json ->
+        Queue_producer.of_jsonaf json
+        |> Result.map ~f:(fun producer -> Producer.Captured (Some producer))
+    in
+    create ~source ~ordinal ~origin ~producer
   ;;
 
   let sexp_of_t t = Jsonaf.sexp_of_t (to_json t)
@@ -563,7 +598,10 @@ let to_json t =
     ([ ( "schema_version"
        , `Number
            (match t.queue_occurrence, t.delegation, c.job with
-            | Some _, _, _ -> "5"
+            | Some occurrence, _, _ ->
+              (match Queue_occurrence.producer occurrence with
+               | Unknown -> "5"
+               | Captured _ -> "6")
             | None, Some _, _ -> "4"
             | None, None, None -> "2"
             | None, None, Some _ -> "3") )
@@ -698,7 +736,7 @@ let of_json json =
       ]
   in
   let%bind version =
-    Json_codec.required_as fields "schema_version" (Json_codec.bounded_int ~min:1 ~max:5)
+    Json_codec.required_as fields "schema_version" (Json_codec.bounded_int ~min:1 ~max:6)
   in
   let%bind () =
     if
@@ -709,10 +747,16 @@ let of_json json =
     else Ok ()
   in
   let%bind queue_occurrence =
-    if version = 5
-    then
-      Json_codec.required_as fields "queue_occurrence" Queue_occurrence.of_json
-      |> Result.map ~f:Option.some
+    if version >= 5
+    then (
+      let%bind occurrence =
+        Json_codec.required_as fields "queue_occurrence" Queue_occurrence.of_json
+      in
+      match version, Queue_occurrence.producer occurrence with
+      | 5, Unknown | 6, Captured _ -> Ok (Some occurrence)
+      | 5, Captured _ -> invalid "queue producer capture requires schema version 6"
+      | 6, Unknown -> invalid "schema version 6 requires an explicit queue producer"
+      | _ -> invalid "invalid queue occurrence schema version")
     else (
       match Json_codec.optional fields "queue_occurrence" with
       | None -> Ok None

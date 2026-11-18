@@ -94,13 +94,83 @@ type launch_owner =
   | Moderator_event of Id.Moderator_execution.t
 [@@deriving equal, sexp]
 
+module Birth_parent = struct
+  type view =
+    | Callback of launch_owner
+    | Job_attempt of
+        { id : Id.Job.t
+        ; attempt : int
+        }
+  [@@deriving equal, sexp]
+
+  type t = view [@@deriving equal, sexp]
+
+  let callback owner = Callback owner
+  let view t = t
+
+  let callback_owner = function
+    | Callback owner -> Some owner
+    | Job_attempt _ -> None
+  ;;
+
+  let job_attempt id ~attempt =
+    let open Result.Let_syntax in
+    let%bind _ = Id.Job.of_string (Id.Job.to_string id) in
+    if attempt > 0
+    then Ok (Job_attempt { id; attempt })
+    else
+      Error (Protocol_error.invalid_request "job birth parent attempt must be positive")
+  ;;
+
+  let t_of_sexp_generated = t_of_sexp
+
+  let t_of_sexp sexp =
+    match t_of_sexp_generated sexp with
+    | Callback owner -> callback owner
+    | Job_attempt { id; attempt } ->
+      (match job_attempt id ~attempt with
+       | Ok t -> t
+       | Error error -> Sexplib.Conv.of_sexp_error error.message sexp)
+  ;;
+end
+
 type launch =
-  { owner : launch_owner
+  { owner : Birth_parent.t
   ; parent_job : (Id.Job.t * int) option [@sexp.option]
   ; nested_depth : int
   ; moderator_source : Invocation.observer option [@sexp.option]
   }
 [@@deriving equal, sexp]
+
+let launch_of_sexp_generated = launch_of_sexp
+let sexp_of_launch_generated = sexp_of_launch
+
+let launch_of_sexp sexp =
+  let sexp =
+    match sexp with
+    | Sexp.List fields ->
+      Sexp.List
+        (List.map fields ~f:(function
+           | Sexp.List
+               [ Atom "owner"
+               ; (List [ Atom ("Invocation" | "Moderator_event"); _ ] as owner)
+               ] -> Sexp.List [ Atom "owner"; List [ Atom "Callback"; owner ] ]
+           | field -> field))
+    | other -> other
+  in
+  launch_of_sexp_generated sexp
+;;
+
+let sexp_of_launch launch =
+  match sexp_of_launch_generated launch with
+  | Sexp.List fields ->
+    Sexp.List
+      (List.map fields ~f:(function
+         | Sexp.List [ Atom "owner"; List [ Atom "Callback"; owner ] ] ->
+           Sexp.List [ Atom "owner"; owner ]
+         | field -> field))
+  | other -> other
+;;
 
 module Inference_origin = Inference_origin
 
@@ -131,16 +201,19 @@ let optional_field name value encode =
 
 let launch_to_json launch =
   let kind, id =
-    match launch.owner with
-    | Invocation id -> "invocation", Id.Invocation.to_json id
-    | Moderator_event id -> "moderator_event", Id.Moderator_execution.to_json id
+    match Birth_parent.view launch.owner with
+    | Callback (Invocation id) -> "invocation", Id.Invocation.to_json id
+    | Callback (Moderator_event id) ->
+      "moderator_event", Id.Moderator_execution.to_json id
+    | Job_attempt { id; _ } -> "job", Id.Job.to_json id
   in
   `Object
     ([ ( "schema_version"
        , `Number
-           (match launch.moderator_source with
-            | None -> "1"
-            | Some _ -> "2") )
+           (match Birth_parent.view launch.owner, launch.moderator_source with
+            | Job_attempt _, _ -> "3"
+            | Callback _, None -> "1"
+            | Callback _, Some _ -> "2") )
      ; "owner_type", `String kind
      ; "owner_id", id
      ; "nested_depth", `Number (Int.to_string launch.nested_depth)
@@ -182,7 +255,7 @@ let launch_of_json json =
   in
   let%bind () =
     match version with
-    | 1 | 2 -> Ok ()
+    | 1 | 2 | 3 -> Ok ()
     | _ ->
       Error
         (Protocol_error.create
@@ -212,18 +285,8 @@ let launch_of_json json =
   in
   let%bind () =
     match version, moderator_source with
-    | 1, None | 2, Some _ -> Ok ()
+    | 1, None | 2, Some _ | 3, _ -> Ok ()
     | _ -> Error (Protocol_error.invalid_request "job launch source requires schema 2")
-  in
-  let%bind owner =
-    match kind with
-    | "invocation" ->
-      Json_codec.required_as fields "owner_id" Id.Invocation.of_json
-      |> Result.map ~f:(fun id -> Invocation id)
-    | "moderator_event" ->
-      Json_codec.required_as fields "owner_id" Id.Moderator_execution.of_json
-      |> Result.map ~f:(fun id -> Moderator_event id)
-    | _ -> Error (Protocol_error.invalid_request "unknown job launch owner")
   in
   let%bind parent_job =
     Json_codec.optional_as fields "parent_job" (fun json ->
@@ -237,6 +300,24 @@ let launch_of_json json =
           (Json_codec.bounded_int ~min:1 ~max:Int.max_value)
       in
       id, attempt)
+  in
+  let%bind owner =
+    match version, kind with
+    | (1 | 2), "invocation" ->
+      Json_codec.required_as fields "owner_id" Id.Invocation.of_json
+      |> Result.map ~f:(fun id -> Birth_parent.callback (Invocation id))
+    | (1 | 2), "moderator_event" ->
+      Json_codec.required_as fields "owner_id" Id.Moderator_execution.of_json
+      |> Result.map ~f:(fun id -> Birth_parent.callback (Moderator_event id))
+    | 3, "job" ->
+      let%bind id = Json_codec.required_as fields "owner_id" Id.Job.of_json in
+      (match parent_job with
+       | Some (parent_id, attempt) when Id.Job.equal id parent_id ->
+         Birth_parent.job_attempt id ~attempt
+       | Some _ | None ->
+         Error
+           (Protocol_error.invalid_request "job birth owner differs from parent attempt"))
+    | _ -> Error (Protocol_error.invalid_request "job launch owner differs from schema")
   in
   let%bind nested_depth =
     Json_codec.required_as
@@ -295,6 +376,25 @@ let validate_delivery t =
 
 let validate_result t =
   let open Result.Let_syntax in
+  let%bind () =
+    match t.launch with
+    | None -> Ok ()
+    | Some launch ->
+      (match Birth_parent.view launch.owner with
+       | Callback _ -> Ok ()
+       | Job_attempt { id; attempt } ->
+         if
+           equal_kind t.kind Model_call
+           && (not (Id.Job.equal id t.id))
+           && attempt > 0
+           && launch.nested_depth > 0
+           && Option.equal
+                (fun (a, x) (b, y) -> Id.Job.equal a b && Int.equal x y)
+                launch.parent_job
+                (Some (id, attempt))
+         then Ok ()
+         else Error (Protocol_error.invalid_request "invalid direct Job birth parent"))
+  in
   let%bind () = validate_delivery t in
   match t.kind, t.result with
   | Async_tool, Some (`Object fields as encoded)

@@ -103,6 +103,48 @@ let%expect_test
       |> A.Session_state_document.Admitted.document
     in
     [%test_eq: string] (D.Document.to_string durable) (D.Document.to_string shared);
+    (* A fresh final decoder must restore the same pending custody after
+       successful prefix-field reuse and an actual Created preservation merge. *)
+    let prefix =
+      A.Session_document_transition.admit_prefix_encoded
+        admitted
+        ~delta
+        ~next
+        ~limits:document_limits
+      |> document_ok
+    in
+    let captured =
+      A.Session_state_document.decode ~limits:document_limits shared |> document_ok
+    in
+    let prefix =
+      A.Session_state_document.Prefix.merge_created
+        prefix
+        ~captured
+        ~limits:document_limits
+      |> document_ok
+    in
+    let final_document = A.Session_state_document.Prefix.document prefix in
+    let reused =
+      A.Session_state_document.Prefix.materialize
+        prefix
+        ~limits:document_limits
+        final_document
+      |> document_ok
+    in
+    let cold =
+      A.Session_state_document.decode ~limits:document_limits final_document
+      |> document_ok
+    in
+    A.Session_state_document.Prefix.validate_publication
+      prefix
+      ~revision:(A.Session_state_document.value cold).counters.revision
+    |> document_ok;
+    let encode value =
+      A.Session_state_document.encode value ~limits:document_limits
+      |> document_ok
+      |> D.Document.to_string
+    in
+    [%test_eq: string] (encode cold) (encode reused);
     let restarted =
       A.Session_state_document.decode ~limits:document_limits shared |> document_ok
     in

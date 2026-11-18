@@ -7,6 +7,7 @@ type sweep =
 
 type t =
   { closed : bool Atomic.t
+  ; loop_wait_deadline : Mtime.t option Atomic.t
   ; mutable busy : Session_registry.entry list
   ; mutable sweeps : sweep list
   ; idle : Eio.Condition.t
@@ -65,11 +66,13 @@ let drain_idle_moderator factory entry =
 ;;
 
 let deliver_claimed factory entry observed (schedule : Agent_protocol.Schedule.t) =
-  match Runtime_owner.deliver_schedule entry.Session_registry.runtime schedule with
-  | Error { code = Interrupted; _ } ->
-    (* Runtime retirement can interrupt a delivery before its checkpoint commit.
-       Preserve it for a later runtime/restart. A committed or cancelled schedule
-       rejects retry, so this cannot undo a terminal delivery or explicit stop. *)
+  match
+    Runtime_owner.deliver_schedule_attempt entry.Session_registry.runtime schedule
+  with
+  | Ok (Runtime_owner.Schedule_delivery.Deferred _) | Error { code = Interrupted; _ } ->
+    (* Preserve a clean admission deferral or interrupted delivery for a later
+       runtime/restart. A committed or cancelled schedule rejects retry, so this
+       cannot undo a terminal delivery or explicit stop. *)
     ignore
       (Agent_session.Session_actor.retry_schedule
          entry.actor
@@ -80,7 +83,7 @@ let deliver_claimed factory entry observed (schedule : Agent_protocol.Schedule.t
   | Error error ->
     fail_claim entry schedule error;
     unload_if_stopped entry observed
-  | Ok () ->
+  | Ok Runtime_owner.Schedule_delivery.Delivered ->
     drain_idle_moderator factory entry;
     unload_if_stopped entry observed
 ;;
@@ -216,13 +219,22 @@ let rec run t sw clock registry =
   if not (Atomic.get t.closed)
   then (
     process t sw registry;
-    Eio.Time.Mono.sleep clock 0.05;
+    (match
+       Mtime.add_span (Eio.Time.Mono.now clock) (Mtime.Span.of_uint64_ns 50_000_000L)
+     with
+     | None -> Eio.Fiber.await_cancel ()
+     | Some deadline ->
+       Atomic.set t.loop_wait_deadline (Some deadline);
+       Exn.protect
+         ~finally:(fun () -> Atomic.set t.loop_wait_deadline None)
+         ~f:(fun () -> Eio.Time.Mono.sleep_until clock deadline));
     run t sw clock registry)
 ;;
 
 let start_controlled ?recurrence_dispatcher ~factory ~enabled ~sw ~clock ~registry () =
   let t =
     { closed = Atomic.make (not enabled)
+    ; loop_wait_deadline = Atomic.make None
     ; busy = []
     ; sweeps = []
     ; idle = Eio.Condition.create ()
@@ -263,3 +275,9 @@ let rec await_idle t =
 ;;
 
 let is_running t = not (Atomic.get t.closed)
+
+module For_testing = struct
+  let loop_wait_deadline t =
+    if Atomic.get t.closed then None else Atomic.get t.loop_wait_deadline
+  ;;
+end

@@ -23,6 +23,9 @@
   run_views
   conversation_search
   blob_download
+  instruction_controls
+  goal_controls
+  recurrence_controls
   session_handle
   completion_view
   canonical_export

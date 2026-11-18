@@ -100,3 +100,42 @@ let%expect_test "resume identity retains every original fence and rejects invali
   [%expect
     {| resume identity preserves every fence; invalid bounds or source are rejected |}]
 ;;
+
+let%expect_test "Resume wire rejects malformed fields before an owner is acquired" =
+  let request = request () |> ok in
+  let wire = Request.to_json request in
+  let object_fields = function
+    | `Object fields -> fields
+    | _ -> failwith "expected request object"
+  in
+  let fields = object_fields wire in
+  let source = Jsonaf.member_exn "source" wire |> object_fields in
+  let changed name value =
+    `Object (List.Assoc.add fields name value ~equal:String.equal)
+  in
+  assert (Request.equal request (Request.of_json wire |> ok));
+  List.iter
+    [ `Object (("extra", `Null) :: fields)
+    ; `Object (("key", `String "duplicate") :: fields)
+    ; changed "source" (`Object (("extra", `Null) :: source))
+    ; changed "source" (`Object (("generation", `Number "0") :: source))
+    ; changed "generation" (`Number "0")
+    ; changed
+        "source"
+        (`Object (List.Assoc.add source "generation" (`String "0") ~equal:String.equal))
+    ; changed "expected_run_revision" (`String "01")
+    ; changed "expected_goal_revision" (`String "9223372036854775808")
+    ; changed "kind" (`String "goal_resume_episode_v2")
+    ; changed "key" (`String (String.make Request.max_bytes 'a'))
+    ; changed
+        "source"
+        (List.init Request.max_depth ~f:Fn.id
+         |> List.fold ~init:`Null ~f:(fun json _ -> `Array [ json ]))
+    ]
+    ~f:(fun invalid ->
+      match Request.of_json invalid with
+      | Error error -> [%test_eq: P.Error.code] Invalid_request error.code
+      | Ok _ -> failwith "invalid Resume wire decoded");
+  print_endline "closed shape, canonical counters and request bounds";
+  [%expect {| closed shape, canonical counters and request bounds |}]
+;;

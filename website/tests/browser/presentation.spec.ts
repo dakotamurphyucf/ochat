@@ -67,9 +67,9 @@ test('404 adapts to both themes, reflows and provides working search and navigat
   }
   await page.getByRole('button', { name: 'Search documentation' }).click();
   await page.locator('dialog input').fill('install');
-  await expect(page.locator('.pagefind-ui__result-link').first()).toContainText(
-    'Build and configure',
-  );
+  await expect(
+    page.locator('.pagefind-ui__result-link').first(),
+  ).toHaveAttribute('href', '/docs/start/installation/');
   await page.keyboard.press('Escape');
   await page.getByRole('link', { name: 'Explore documentation' }).click();
   await expect(page).toHaveURL(/\/docs\/$/);

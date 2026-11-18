@@ -252,7 +252,7 @@ let%expect_test
                   Owner.Prepared.check_basis prepared |> protocol_ok;
                   (match Source.selection (Existing.source prepared) with
                    | Authored selected -> assert (phys_equal selected revision)
-                   | Captured _ | Authored_child _ | Generated _ ->
+                   | Captured _ | Authored_child _ | Generated _ | Generated_artifact _ ->
                      failwith "ordinary source changed family");
                   closed_prepared := Some prepared;
                   Ok ())

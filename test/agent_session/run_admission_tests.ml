@@ -52,7 +52,7 @@ let with_startup_actor
           | None ->
             { A.Session_actor.archive_reference
             ; commit =
-                (fun ~command_audit:_ ~previous:_ _ ->
+                (fun ?observation:_ ~command_audit:_ ~previous:_ _ ->
                   if !reject_commit
                   then
                     Error
@@ -352,7 +352,10 @@ let%test_unit "authenticated authored startup preserves first ACK across lifecyc
     let make_persistence _env _sw _initial =
       { A.Session_actor.archive_reference
       ; commit =
-          (fun ~command_audit:_ ~previous:_ (candidate : A.Session_transition.t) ->
+          (fun ?observation:_
+            ~command_audit:_
+            ~previous:_
+            (candidate : A.Session_transition.t) ->
             let has_run =
               Option.exists candidate.state.run_state ~f:(fun index ->
                 not (List.is_empty (A.Run_state.runs index)))
@@ -462,7 +465,10 @@ let%test_unit "authenticated authored startup preserves first ACK across lifecyc
     let make_persistence _env _sw _initial =
       { A.Session_actor.archive_reference
       ; commit =
-          (fun ~command_audit:_ ~previous:_ (candidate : A.Session_transition.t) ->
+          (fun ?observation:_
+            ~command_audit:_
+            ~previous:_
+            (candidate : A.Session_transition.t) ->
             if
               Option.exists candidate.state.run_state ~f:(fun index ->
                 not (List.is_empty (A.Run_state.runs index)))
@@ -857,6 +863,7 @@ let%expect_test
           ~event:Session_start
           ~snapshot:(fun () -> Ok before)
           (fun ~executing
+            ~policy_caller:_
             ~model_jobs:_
             ~allocate_inference:_
             ~retirement_reason:_
@@ -1783,7 +1790,7 @@ let%expect_test "actual exact job and timer wakes consume once under current aut
         ~make_persistence:(fun _ _ _ ->
           { A.Session_actor.archive_reference
           ; commit =
-              (fun ~command_audit:_ ~previous:_ _ ->
+              (fun ?observation:_ ~command_audit:_ ~previous:_ _ ->
                 incr writes;
                 if !reject_claim then Error claim_failure else Ok ())
           })
@@ -1814,6 +1821,7 @@ let%expect_test "actual exact job and timer wakes consume once under current aut
                ~event:Session_start
                ~snapshot:(fun () -> Ok before)
                (fun ~executing
+                 ~policy_caller:_
                  ~model_jobs:_
                  ~allocate_inference:_
                  ~retirement_reason:_
@@ -2080,6 +2088,7 @@ let%expect_test "actual exact job and timer wakes consume once under current aut
                  claim_scope
                    (fun
                        ~executing
+                        ~policy_caller:_
                         ~model_jobs
                         ~allocate_inference:_
                         ~retirement_reason
@@ -2477,6 +2486,7 @@ let%expect_test "unbounded inline job Wait rejects before staged work publicatio
         ~event:Session_start
         ~snapshot:(fun () -> Ok before)
         (fun ~executing
+          ~policy_caller:_
           ~model_jobs:_
           ~allocate_inference:_
           ~retirement_reason:_
@@ -2563,6 +2573,7 @@ let%expect_test "actual retry retains failed attempt and wakes its callback once
          ~event:Session_start
          ~snapshot:(fun () -> Ok before)
          (fun ~executing
+           ~policy_caller:_
            ~model_jobs:_
            ~allocate_inference:_
            ~retirement_reason:_
@@ -2783,6 +2794,27 @@ let%expect_test "actual retry retains failed attempt and wakes its callback once
          ~after:(A.Moderator_checkpoint.encode after)
        |> protocol_ok;
        let enqueued_state = A.Session_actor.state actor |> protocol_ok |> round_trip in
+       let queue =
+         A.Moderator_checkpoint.queue enqueued_state.moderator
+         |> protocol_ok
+         |> Option.value_exn
+       in
+       let occurrence = List.last_exn (A.Moderator_queue.entries queue) in
+       assert (
+         Option.equal
+           P.Inference_origin.equal
+           (A.Moderator_queue.Entry.origin occurrence)
+           (Some (Run (A.Run_job_delivery.run_id delivery))));
+       assert (
+         P.Run_source.equal
+           (A.Moderator_queue.source queue)
+           (A.Run_job_delivery.source delivery));
+       (match A.Moderator_queue.Entry.producer occurrence with
+        | Some (Job_completion { id; generation; attempt }) ->
+          assert (P.Id.Job.equal id frame.job_id);
+          assert (Int.equal generation frame.generation);
+          assert (Int.equal attempt 1)
+        | _ -> failwith "retained first attempt lost its actual queued producer");
        let recovered_enqueued =
          A.Run_retirement.recover
            (Option.value_exn enqueued_state.run_state)
@@ -2810,6 +2842,7 @@ let%expect_test "actual retry retains failed attempt and wakes its callback once
          ~snapshot:after
          (fun
              ~executing
+              ~policy_caller:_
               ~model_jobs:_
               ~allocate_inference:_
               ~retirement_reason
@@ -2921,6 +2954,7 @@ let%test_unit
          ~event:Session_start
          ~snapshot:(fun () -> Ok before)
          (fun ~executing
+           ~policy_caller:_
            ~model_jobs:_
            ~allocate_inference:_
            ~retirement_reason:_
@@ -3079,6 +3113,7 @@ let%test_unit "actual callback cancellation retires run with original reason" =
          ~event:Session_start
          ~snapshot:(fun () -> Ok before)
          (fun ~executing
+           ~policy_caller:_
            ~model_jobs:_
            ~allocate_inference:_
            ~retirement_reason:_
@@ -3125,6 +3160,7 @@ let stage_bounded_owned_wait actor manager =
     ~event:Session_start
     ~snapshot:(fun () -> Ok before)
     (fun ~executing
+      ~policy_caller:_
       ~model_jobs:_
       ~allocate_inference:_
       ~retirement_reason:_
@@ -3232,9 +3268,11 @@ let%expect_test "owned nested cancellation settles both exact Job occurrences on
          let child = Option.value_exn !selected in
          [%test_eq: int] 0 child.attempt;
          (match child.status, child.launch with
-          | Queued, Some { owner = Invocation owner; parent_job = Some (id, attempt); _ }
-            ->
-            assert (P.Id.Invocation.equal owner invocation.context.id);
+          | Queued, Some { owner; parent_job = Some (id, attempt); _ } ->
+            assert (
+              P.Job.Birth_parent.equal
+                owner
+                (P.Job.Birth_parent.callback (Invocation invocation.context.id)));
             assert (P.Id.Job.equal id parent.id);
             [%test_eq: int] parent.attempt attempt
           | _ -> raise_s [%sexp (child : P.Job.t)]);
@@ -3367,6 +3405,7 @@ let%expect_test "owned nested cancellation settles both exact Job occurrences on
            ~snapshot:queued
            (fun
                ~executing
+                ~policy_caller:_
                 ~model_jobs:_
                 ~allocate_inference:_
                 ~retirement_reason
@@ -3560,6 +3599,7 @@ let%expect_test "owned job cancellation and interruption preserve actual custody
             ~snapshot:queued
             (fun
                 ~executing
+                 ~policy_caller:_
                  ~model_jobs:_
                  ~allocate_inference:_
                  ~retirement_reason
@@ -3663,6 +3703,7 @@ let%expect_test "unavailable legacy lookalike cannot consume a registered timer 
       ~event:Session_start
       ~snapshot:(fun () -> Ok before)
       (fun ~executing
+        ~policy_caller:_
         ~model_jobs:_
         ~allocate_inference:_
         ~retirement_reason:_
@@ -3736,10 +3777,28 @@ let%expect_test "unavailable legacy lookalike cannot consume a registered timer 
     M.enqueue_internal_event_entries
       manager
       ~event:frame
-      ~prepare:(fun ~before:_ ~snapshot ->
-        A.Session_actor.change_moderator
-          actor
-          (Some (A.Moderator_checkpoint.encode snapshot))
+      ~prepare:(fun ~before ~snapshot ->
+        let state = A.Session_actor.state actor |> protocol_ok in
+        let metadata =
+          assert_moderator_checkpoint state ~snapshot:before |> Option.value_exn
+        in
+        let metadata =
+          A.Moderator_queue.advance
+            metadata
+            ~before:before.queued_internal_events
+            ~after:snapshot.queued_internal_events
+            ~consume:Keep
+            ~appended:[ A.Moderator_queue.Capture.unavailable ]
+          |> protocol_ok
+        in
+        let checkpoint =
+          A.Moderator_checkpoint.update_with_queue
+            state.moderator
+            ~snapshot
+            ~queue:metadata
+          |> protocol_ok
+        in
+        A.Session_actor.change_moderator actor (Some checkpoint)
         |> Result.map ~f:ignore
         |> Result.map_error ~f:(fun error -> error.P.Error.message))
     |> Result.ok_or_failwith
@@ -3843,6 +3902,71 @@ let%expect_test "unavailable legacy lookalike cannot consume a registered timer 
   [%expect {|raw lookalike runs without consuming Wait or lending Run actions|}]
 ;;
 
+let%expect_test "fresh host Model retry policies validate before classification" =
+  let fresh retry_policy : P.Job.t =
+    { id = P.Id.Job.create ()
+    ; session_id
+    ; generation = 0
+    ; kind = Model_call
+    ; payload = `Null
+    ; status = Queued
+    ; retry_policy
+    ; attempt = 0
+    ; created_at = timestamp
+    ; started_at = None
+    ; next_run_at = None
+    ; completed_at = None
+    ; result = None
+    ; delivery = Pending
+    ; launch = None
+    ; inference_origin = None
+    ; progress = None
+    }
+  in
+  List.iter
+    [ P.Job.Never
+    ; Safe_retry { max_attempts = 1; backoff_ms = 0 }
+    ; Safe_retry { max_attempts = Int.max_value; backoff_ms = Int.max_value }
+    ]
+    ~f:(fun retry_policy ->
+      let job = fresh retry_policy in
+      let prepared =
+        A.Model_job_admission.prepare job ~session_id ~generation:0 ~origin:Unbound
+        |> protocol_ok
+      in
+      assert (
+        Jsonaf.exactly_equal
+          (P.Job.retry_to_json retry_policy)
+          (P.Job.retry_to_json prepared.retry_policy));
+      assert (Option.is_none job.inference_origin);
+      assert (
+        Option.equal P.Inference_origin.equal prepared.inference_origin (Some Unbound)));
+  List.iter
+    [ P.Job.Safe_retry { max_attempts = 0; backoff_ms = 0 }
+    ; Safe_retry { max_attempts = -1; backoff_ms = 0 }
+    ; Safe_retry { max_attempts = 1; backoff_ms = -1 }
+    ; Idempotent
+        { key = P.Idempotency_key.of_string "not-a-new-Model-semantics" |> protocol_ok
+        ; max_attempts = 2
+        ; backoff_ms = 0
+        }
+    ]
+    ~f:(fun retry_policy ->
+      match
+        A.Model_job_admission.prepare
+          (fresh retry_policy)
+          ~session_id
+          ~generation:0
+          ~origin:Unbound
+      with
+      | Error failure -> assert (P.Error.equal_code failure.code Invalid_request)
+      | Ok _ -> failwith "unsupported or invalid retry policy was classified");
+  print_endline
+    "fresh Never and bounded Safe_retry classify; invalid bounds and Idempotent reject";
+  [%expect
+    {| fresh Never and bounded Safe_retry classify; invalid bounds and Idempotent reject |}]
+;;
+
 let%test_unit
     "actual Model children settle Runs by completion order and acknowledged attempts"
   =
@@ -3850,6 +3974,7 @@ let%test_unit
     [ `Child_first
     ; `Root_first_ack_retry
     ; `Safe_retry
+    ; `Safe_retry_overflow
     ; `Workflow_success
     ; `Queued_cancel
     ; `Current_cancel
@@ -3867,7 +3992,10 @@ let%test_unit
       in
       let actor_ref = ref None in
       let backend_ref = ref None in
+      let backend_commits = ref 0 in
       let reject_terminal = ref false in
+      let reject_birth = ref false in
+      let reject_retry = ref false in
       let rejected = ref false in
       let handler_completed = ref false in
       let within = ref (fun (f : unit -> unit) -> f ()) in
@@ -3893,8 +4021,41 @@ let%test_unit
         let persistence = A.Memory_backend.persistence backend in
         { persistence with
           commit =
-            (fun ~command_audit ~previous (candidate : A.Session_transition.t) ->
+            (fun ?observation
+              ~command_audit
+              ~previous
+              (candidate : A.Session_transition.t) ->
               if
+                (!reject_birth || !reject_retry)
+                && List.exists candidate.state.jobs ~f:(fun job ->
+                  match job.P.Job.kind, job.status with
+                  | Model_call, Queued ->
+                    (!reject_birth && Int.equal job.attempt 0)
+                    || (!reject_retry && Int.equal job.attempt 1)
+                  | Model_call, Failed _ ->
+                    !reject_retry
+                    &&
+                      (match case with
+                      | `Safe_retry_overflow -> true
+                      | _ -> false)
+                  | _ -> false)
+              then
+                let open Result.Let_syntax in
+                let%bind () =
+                  Option.value_map observation ~default:(Ok ()) ~f:(fun observation ->
+                    A.Session_commit_observation.Host.observe_entry
+                      observation
+                      ~previous
+                      ~candidate
+                    |> Result.map ~f:ignore)
+                in
+                Error
+                  (P.Error.create
+                     Persistence_error
+                     ~message:"injected Model pre-writer failure"
+                     ~retryable:true
+                     ())
+              else if
                 !reject_terminal
                 && List.exists candidate.state.jobs ~f:(fun job ->
                   match job.P.Job.kind, job.status with
@@ -3908,7 +4069,9 @@ let%test_unit
                      ~message:"injected final Model completion ACK failure"
                      ~retryable:true
                      ()))
-              else persistence.commit ~command_audit ~previous candidate)
+              else (
+                Int.incr backend_commits;
+                persistence.commit ?observation ~command_audit ~previous candidate))
         }
       in
       let make_worker manager =
@@ -3924,6 +4087,7 @@ let%test_unit
                     Chat_response.Moderator_manager.identity_snapshot manager
                     |> Result.map_error ~f:P.Error.invalid_request)
                   (fun ~executing
+                    ~policy_caller:_
                     ~model_jobs
                     ~allocate_inference:_
                     ~retirement_reason
@@ -3935,11 +4099,54 @@ let%test_unit
                        (Some input.operation.id)
                        executing.context.operation_id;
                      let current = A.Session_actor.state actor |> protocol_ok in
+                     let fresh = Inference_target_tests.job current in
+                     let fresh =
+                       match case with
+                       | `Safe_retry | `Safe_retry_overflow ->
+                         { fresh with
+                           retry_policy =
+                             Safe_retry
+                               { max_attempts = 2
+                               ; backoff_ms =
+                                   (match case with
+                                    | `Safe_retry_overflow -> Int.max_value
+                                    | _ -> 0)
+                               }
+                         }
+                       | `Child_first
+                       | `Root_first_ack_retry
+                       | `Workflow_success
+                       | `Queued_cancel
+                       | `Current_cancel
+                       | `Current_interrupt -> fresh
+                     in
+                     (match case with
+                      | `Safe_retry | `Safe_retry_overflow ->
+                        let before_commits = !backend_commits in
+                        reject_birth := true;
+                        (match A.Model_job_admission.admit model_jobs fresh with
+                         | Error failure ->
+                           assert (P.Error.equal_code failure.code Persistence_error);
+                           [%test_eq: string]
+                             "injected Model pre-writer failure"
+                             failure.message
+                         | Ok _ -> failwith "rejected Model birth was admitted");
+                        reject_birth := false;
+                        [%test_eq: int] before_commits !backend_commits;
+                        assert (
+                          phys_equal current (A.Session_actor.state actor |> protocol_ok));
+                        assert (
+                          phys_equal
+                            current
+                            (A.Memory_backend.state (Option.value_exn !backend_ref)))
+                      | `Child_first
+                      | `Root_first_ack_retry
+                      | `Workflow_success
+                      | `Queued_cancel
+                      | `Current_cancel
+                      | `Current_interrupt -> ());
                      let admitted =
-                       A.Model_job_admission.admit
-                         model_jobs
-                         (Inference_target_tests.job current)
-                       |> protocol_ok
+                       A.Model_job_admission.admit model_jobs fresh |> protocol_ok
                      in
                      [%test_eq: int] 0 admitted.attempt;
                      child := Some admitted;
@@ -4055,25 +4262,8 @@ let%test_unit
                    Exn.raise_with_original_backtrace exn backtrace
                in
                assert !handler_completed;
-               (* Generic Model admission deliberately starts with Never. Only the
-                  existing authorized host update configures this retry case,
-                  after its real Event ACK and before any attempt is claimed. *)
-               (match case with
-                | `Safe_retry ->
-                  A.Session_actor.change_job
-                    actor
-                    ~attachment_id:attachment.id
-                    { admitted with
-                      retry_policy = Safe_retry { max_attempts = 2; backoff_ms = 0 }
-                    }
-                  |> protocol_ok
-                  |> ignore
-                | `Child_first
-                | `Root_first_ack_retry
-                | `Workflow_success
-                | `Queued_cancel
-                | `Current_cancel
-                | `Current_interrupt -> ());
+               (* Retry policy was selected once through the actual Event port.
+                  Changing an admitted Job would retire its exact original. *)
                let queued =
                  List.find_exn (state ()).jobs ~f:(fun job ->
                    P.Id.Job.equal job.id admitted.id)
@@ -4091,6 +4281,7 @@ let%test_unit
                  | `Child_first
                  | `Root_first_ack_retry
                  | `Safe_retry
+                 | `Safe_retry_overflow
                  | `Workflow_success
                  | `Current_cancel
                  | `Current_interrupt ->
@@ -4201,6 +4392,29 @@ let%test_unit
                  proof current root_work Succeeded;
                  current
                in
+               let callback_original job =
+                 let observed = ref None in
+                 let resolved =
+                   Job_fixtures.with_job actor job (fun ~job:_ ~execute ->
+                     execute
+                       ~invocation:(Job_fixtures.root job)
+                       (fun ~dispatched ~capabilities ->
+                          let proof =
+                            capabilities.borrow_agent_actor ~invocation:dispatched
+                            |> protocol_ok
+                            |> Option.value_exn
+                          in
+                          assert (Operator_authorization.is_current proof);
+                          observed := Some proof;
+                          Ok (P.Invocation.Complete `Null)))
+                   |> protocol_ok
+                 in
+                 (match resolved.P.Invocation.status with
+                  | Resolved (Complete `Null) -> ()
+                  | _ -> failwith "Model original callback did not complete");
+                 assert (
+                   not (Operator_authorization.is_current (Option.value_exn !observed)))
+               in
                let final, expected_work =
                  match case with
                  | `Child_first | `Workflow_success ->
@@ -4244,7 +4458,69 @@ let%test_unit
                     | Ok _ -> failwith "duplicate terminal completion was accepted");
                    unchanged current;
                    current, [ root_work; child_work ]
+                 | `Safe_retry_overflow ->
+                   callback_original child;
+                   let before_terminal = state () in
+                   let before_commits = !backend_commits in
+                   reject_retry := true;
+                   (match finish child (Model_failed "actual unrepresentable retry") with
+                    | Error failure ->
+                      assert (P.Error.equal_code failure.code Persistence_error);
+                      [%test_eq: string]
+                        "injected Model pre-writer failure"
+                        failure.message
+                    | Ok _ -> failwith "rejected terminal completion was acknowledged");
+                   reject_retry := false;
+                   [%test_eq: int] before_commits !backend_commits;
+                   unchanged before_terminal;
+                   callback_original child;
+                   let completed =
+                     finish child (Model_failed "actual unrepresentable retry")
+                     |> protocol_ok
+                   in
+                   (match completed.status with
+                    | Failed failure ->
+                      assert (P.Error.equal_code failure.code Internal_error);
+                      [%test_eq: string] "actual unrepresentable retry" failure.message;
+                      assert (not failure.retryable)
+                    | _ -> failwith "unrepresentable retry did not finish the attempt");
+                   [%test_eq: int] 1 completed.attempt;
+                   assert (Option.is_none completed.next_run_at);
+                   assert (Option.is_some completed.completed_at);
+                   assert (Option.is_none completed.result);
+                   let pending = state () in
+                   proof pending child_work Failed;
+                   live pending;
+                   [%test_eq: int] 2 (List.length (run pending).owned_work);
+                   let final = root_done () in
+                   (match
+                      Job_fixtures.with_job actor completed (fun ~job:_ ~execute:_ ->
+                        failwith "failed Model lent fresh execution")
+                    with
+                    | Error failure -> assert (P.Error.equal_code failure.code Conflict)
+                    | Ok _ -> failwith "failed Model acquired a callback");
+                   (match finish child (Model_failed "late retry overwrite") with
+                    | Error failure ->
+                      assert (P.Error.equal_code failure.code Already_resolved)
+                    | Ok _ -> failwith "failed Model accepted duplicate completion");
+                   unchanged final;
+                   final, [ root_work; child_work ]
                  | `Safe_retry ->
+                   callback_original child;
+                   let before_retry = state () in
+                   let before_commits = !backend_commits in
+                   reject_retry := true;
+                   (match finish child (Model_failed "actual attempt one failed") with
+                    | Error failure ->
+                      assert (P.Error.equal_code failure.code Persistence_error);
+                      [%test_eq: string]
+                        "injected Model pre-writer failure"
+                        failure.message
+                    | Ok _ -> failwith "rejected Model retry changed attempt");
+                   reject_retry := false;
+                   [%test_eq: int] before_commits !backend_commits;
+                   unchanged before_retry;
+                   callback_original child;
                    let queued =
                      finish child (Model_failed "actual attempt one failed")
                      |> protocol_ok
@@ -4269,6 +4545,9 @@ let%test_unit
                      |> Option.value_exn
                    in
                    [%test_eq: int] 2 next.attempt;
+                   (* The foreground original has retired; only the independently
+                      retained Job loan can lend the second callback's original. *)
+                   callback_original next;
                    let before_obsolete = state () in
                    (match
                       finish child (Model_succeeded (`String "obsolete attempt one"))
@@ -4276,7 +4555,15 @@ let%test_unit
                     | Error error -> assert (P.Error.equal_code error.code Conflict)
                     | Ok _ -> failwith "obsolete attempt completed the successor");
                    unchanged before_obsolete;
-                   ignore (success next : P.Job.t);
+                   let completed = success next in
+                   let after_terminal = state () in
+                   (match
+                      Job_fixtures.with_job actor completed (fun ~job:_ ~execute:_ ->
+                        failwith "terminal Model lent fresh execution")
+                    with
+                    | Error failure -> assert (P.Error.equal_code failure.code Conflict)
+                    | Ok _ -> failwith "terminal Model acquired a callback");
+                   unchanged after_terminal;
                    proof (state ()) next_work Succeeded;
                    state (), [ root_work; child_work; next_work ]
                  | `Queued_cancel | `Current_cancel | `Current_interrupt ->
@@ -4297,6 +4584,7 @@ let%test_unit
                      | `Child_first
                      | `Root_first_ack_retry
                      | `Safe_retry
+                     | `Safe_retry_overflow
                      | `Workflow_success ->
                        failwith "non-control scenario reached control writer"
                    in
@@ -4324,6 +4612,7 @@ let%test_unit
                     | `Child_first
                     | `Root_first_ack_retry
                     | `Safe_retry
+                    | `Safe_retry_overflow
                     | `Workflow_success ->
                       failwith "non-control scenario reached control duplicate check");
                    (match
@@ -4355,6 +4644,10 @@ let%test_unit
                       Jsonaf.exactly_equal
                       saved_child.result
                       (Some (`String "actual child result")))
+                | `Safe_retry_overflow, Failed failure ->
+                  [%test_eq: int] 1 saved_child.attempt;
+                  [%test_eq: string] "actual unrepresentable retry" failure.message;
+                  assert (Option.is_none saved_child.next_run_at)
                 | (`Queued_cancel | `Current_cancel), Cancelled -> ()
                 | `Current_interrupt, Interrupted reason ->
                   [%test_eq: string] "actual Model attempt interrupted" reason
@@ -4370,7 +4663,7 @@ let%test_unit
                   assert (List.is_empty (terminal_receipts final));
                   assert (
                     List.is_empty (A.Run_state.intents (Option.value_exn final.run_state)))
-                | `Safe_retry, Terminal (Failed _) ->
+                | (`Safe_retry | `Safe_retry_overflow), Terminal (Failed _) ->
                   [%test_eq: int] 1 (List.length (terminal_receipts final))
                 | (`Child_first | `Root_first_ack_retry), Terminal (Completed _) ->
                   [%test_eq: int] 1 (List.length (terminal_receipts final))

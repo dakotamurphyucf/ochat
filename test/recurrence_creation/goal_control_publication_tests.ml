@@ -47,6 +47,7 @@ let%expect_test "same-value explicit Goal Hold revokes before publication yields
   let published, published_u = Eio.Promise.create () in
   let finish_publish, finish_publish_u = Eio.Promise.create () in
   let checked, checked_u = Eio.Promise.create () in
+  let worker_failed, worker_failed_u = Eio.Promise.create () in
   let prefix = ref 0 in
   let expected_receipt = ref None in
   let selected_handle = ref None in
@@ -57,6 +58,20 @@ let%expect_test "same-value explicit Goal Hold revokes before publication yields
   let release_all () =
     release continue_check continue_check_u;
     release finish_publish finish_publish_u
+  in
+  let report_worker_errors f () =
+    match f () with
+    | value -> value
+    | exception exn ->
+      let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+      ignore (Eio.Promise.try_resolve worker_failed_u (exn, backtrace) : bool);
+      release_all ();
+      Exn.raise_with_original_backtrace exn backtrace
+  in
+  let await_worker checkpoint =
+    Eio.Fiber.first checkpoint (fun () ->
+      let exn, backtrace = Eio.Promise.await worker_failed in
+      Exn.raise_with_original_backtrace exn backtrace)
   in
   let on_published (current : A.Session_state.t) =
     match !expected_receipt with
@@ -73,6 +88,9 @@ let%expect_test "same-value explicit Goal Hold revokes before publication yields
         Eio.Promise.await finish_publish)
   in
   Own_ack_tests.with_controller
+    (* This controller is born in this test. Its count budget uses the same
+       initialized descendant accounting as a newly created Factory session. *)
+    ~initialize_state:(fun state -> initialize_new_unrelated_child state ~server_id)
     ~published:on_published
     (fun fixture actor source owner _intent _attempt ->
        Eio.Time.with_timeout_exn (Eio.Stdenv.clock fixture.env) 30. (fun () ->
@@ -85,28 +103,31 @@ let%expect_test "same-value explicit Goal Hold revokes before publication yields
               let worker =
                 A.Operation_worker.create ~run:(fun ~sw:_ ~input caps ->
                   let graph =
-                    Actor.open_inference_owner
-                      actor
-                      ~source:
-                        (Transcript.Source_id.of_string "goal-publication-operation"
-                         |> Result.ok_or_failwith)
-                    |> protocol_ok
+                    report_worker_errors
+                      (fun () ->
+                         Actor.open_inference_owner
+                           actor
+                           ~source:
+                             (Transcript.Source_id.of_string "goal-publication-operation"
+                              |> Result.ok_or_failwith)
+                         |> protocol_ok)
+                      ()
                   in
                   let allocated = ref None in
                   Handoff_tests.protect_cleanup
-                    ~finally:(fun () ->
-                      (* The publisher is deliberately still blocked when the result
-                       is observed. All factual mailbox cleanup waits until release. *)
-                      Eio.Promise.await finish_publish;
-                      Option.iter !allocated ~f:(fun allocation ->
-                        Actor.release_inference
-                          actor
-                          ~owner:graph
-                          ~handle:(A.Inference_allocation.handle allocation)
-                        |> protocol_ok);
-                      Actor.seal_inference_owner actor ~owner:graph |> protocol_ok;
-                      Actor.finish_inference_owner actor ~owner:graph |> protocol_ok)
-                    (fun () ->
+                    ~finally:
+                      (report_worker_errors (fun () ->
+                         (* Factual mailbox cleanup waits until the publisher is released. *)
+                         Eio.Promise.await finish_publish;
+                         Option.iter !allocated ~f:(fun allocation ->
+                           Actor.release_inference
+                             actor
+                             ~owner:graph
+                             ~handle:(A.Inference_allocation.handle allocation)
+                           |> protocol_ok);
+                         Actor.seal_inference_owner actor ~owner:graph |> protocol_ok;
+                         Actor.finish_inference_owner actor ~owner:graph |> protocol_ok))
+                    (report_worker_errors (fun () ->
                        let configuration = configuration () in
                        let first =
                          caps.allocate_inference ~graph ~relation:Root ~configuration
@@ -141,7 +162,7 @@ let%expect_test "same-value explicit Goal Hold revokes before publication yields
                          with
                          | A.Inference_allocation.Rejected error -> Error error
                        in
-                       Eio.Promise.resolve checked_u result);
+                       Eio.Promise.resolve checked_u result));
                   A.Operation_worker.Completed
                     { final_history = input.history
                     ; moderator_snapshot = (state actor).moderator
@@ -158,7 +179,16 @@ let%expect_test "same-value explicit Goal Hold revokes before publication yields
               in
               let submitted = Goal.start actor source owner ~budget ~worker in
               let operation_id = Option.value_exn submitted.operation_id in
-              Eio.Promise.await refreshed;
+              await_worker (fun () ->
+                Eio.Fiber.first
+                  (fun () -> Eio.Promise.await refreshed)
+                  (fun () ->
+                     match Eio.Promise.await checked with
+                     | Error error ->
+                       raise_s
+                         [%sexp
+                           "worker guard returned before refresh", (error : P.Error.t)]
+                     | Ok () -> failwith "worker guard completed before refresh"));
               let held = state actor in
               assert (
                 G.State.equal
@@ -175,8 +205,16 @@ let%expect_test "same-value explicit Goal Hold revokes before publication yields
                     ~key:"publication-explicit-hold"
                     (Hold (Goal.goal_id, Budget_gate Admitted_attempts)))
               in
-              joins := [ (fun () -> Eio.Promise.await_exn holding |> ignore) ];
-              Eio.Promise.await published;
+              joins := [ (fun () -> Eio.Promise.await holding |> ignore) ];
+              await_worker (fun () ->
+                Eio.Fiber.first
+                  (fun () -> Eio.Promise.await published)
+                  (fun () ->
+                     Eio.Promise.await_exn holding |> ignore;
+                     if not (Eio.Promise.is_resolved published)
+                     then
+                       failwith
+                         "Hold command completed before acknowledgement publication"));
               let acknowledged = Option.value_exn !callback_state in
               assert (
                 G.State.equal
@@ -195,7 +233,7 @@ let%expect_test "same-value explicit Goal Hold revokes before publication yields
                 (Ledger.Handle.operation_id handle);
               [%test_eq: int] 0 !prefix;
               release continue_check continue_check_u;
-              (match Eio.Promise.await checked with
+              (match await_worker (fun () -> Eio.Promise.await checked) with
                | Error error ->
                  [%test_eq: P.Error.code] Permission_denied error.code;
                  [%test_eq: bool] false error.retryable

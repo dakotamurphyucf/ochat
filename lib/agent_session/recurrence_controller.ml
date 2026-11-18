@@ -110,6 +110,7 @@ let automatic t =
 
 let is_current t = S.Lifecycle.Current.is_current t.current t.handle
 let same_store a b = phys_equal a.store b.store
+let owns_removal t removal = S.Command_receipts.Removal.belongs_to removal t.store
 
 let resolve_delegation t reference =
   if not (S.owns_handle t.store t.handle)

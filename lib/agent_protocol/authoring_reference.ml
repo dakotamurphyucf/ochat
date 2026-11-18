@@ -38,9 +38,9 @@ let matches_response t json =
 
 let matches_output t = function
   | `String encoded ->
-    (match Result.try_with (fun () -> Jsonaf.of_string encoded) with
-     | Ok json -> matches_response t json
-     | Error _ -> false)
+    (match Result.try_with (fun () -> Document_schema.Json.parse_syntax encoded) with
+     | Ok (Ok json) -> matches_response t json
+     | Ok (Error _) | Error _ -> false)
   | json -> matches_response t json
 ;;
 

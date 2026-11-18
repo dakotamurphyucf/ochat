@@ -100,14 +100,11 @@ let request_sha256 t =
     in
     hash_json (P.Run_start.to_json request)
   | Headless_command ->
-    hash_json
-      (`Object
-          [ "kind", `String "headless_command"
-          ; "session_id", P.Id.Session.to_json t.session_id
-          ; "generation", `Number (Int.to_string t.generation)
-          ; "expected_revision", `String (Int64.to_string t.expected_revision)
-          ; "mode", P.Run.Mode.to_json t.mode
-          ; "input", P.Run_start.Input.to_json t.input
-          ; "key", `String (P.Idempotency_key.to_string t.key)
-          ])
+    P.Run_start.headless_request_sha256
+      ~session_id:t.session_id
+      ~generation:t.generation
+      ~expected_revision:t.expected_revision
+      ~mode:t.mode
+      ~input:t.input
+      ~key:t.key
 ;;

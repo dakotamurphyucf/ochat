@@ -58,7 +58,7 @@ let%expect_test
            ; progress = None
            ; launch =
                Some
-                 { owner = Invocation root.context.id
+                 { owner = P.Job.Birth_parent.callback (Invocation root.context.id)
                  ; parent_job = None
                  ; nested_depth = 0
                  ; moderator_source = Some source

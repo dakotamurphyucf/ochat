@@ -1,6 +1,17 @@
 open Core
 open Fixtures
 
+let assert_no_source_installation (state : Agent_session.Session_state.t) =
+  let installation =
+    Agent_session.Run_state.installation
+      (Option.value state.run_state ~default:Agent_session.Run_state.empty)
+  in
+  assert (
+    Agent_session.Run_source_installation.equal
+      Agent_session.Run_source_installation.initial
+      installation)
+;;
+
 let%test_unit "actor handoff persists actual manager state and resolution atomically" =
   let done_, done_u = Eio.Promise.create () in
   let reject_once = ref true in
@@ -24,10 +35,22 @@ let%test_unit "actor handoff persists actual manager state and resolution atomic
       let manager, invocation = handoff_manager env in
       Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input caps ->
         let actor = Eio.Promise.await actor_ready in
+        let successful_captures = ref 0 in
+        let handlers_started = ref 0 in
         let invoke () =
           caps.with_moderator_invocation
+            ~snapshot:(fun () ->
+              let open Result.Let_syntax in
+              let%map snapshot =
+                Chat_response.Moderator_manager.identity_snapshot manager
+                |> Result.map_error ~f:handoff_error
+              in
+              Int.incr successful_captures;
+              snapshot)
             ~invocation:(invocation ())
             (fun ~dispatched ~capabilities:_ ~commit ->
+               [%test_eq: int] (!handlers_started + 1) !successful_captures;
+               Int.incr handlers_started;
                Chat_response.Moderator_manager.handle_invocation_entries
                  manager
                  ~invocation:dispatched
@@ -48,9 +71,39 @@ let%test_unit "actor handoff persists actual manager state and resolution atomic
                |> Result.map ~f:(fun _ -> ())
                |> Result.map_error ~f:handoff_error)
         in
+        let before_capture = Agent_session.Session_actor.state actor |> protocol_ok in
+        let manager_before =
+          Chat_response.Moderator_manager.identity_snapshot manager
+          |> Result.ok_or_failwith
+        in
+        let capture_calls = ref 0 in
+        let handler_ran = ref false in
+        let capture_error = handoff_error "pre-handler capture failed" in
+        (match
+           caps.with_moderator_invocation
+             ~snapshot:(fun () ->
+               Int.incr capture_calls;
+               Error capture_error)
+             ~invocation:(invocation ())
+             (fun ~dispatched:_ ~capabilities:_ ~commit:_ ->
+                handler_ran := true;
+                Ok ())
+         with
+         | Error error ->
+           [%test_eq: Agent_protocol.Error.code] capture_error.code error.code;
+           [%test_eq: string] capture_error.message error.message
+         | Ok () -> failwith "failed pre-handler capture admitted an invocation");
+        [%test_eq: int] 1 !capture_calls;
+        assert (not !handler_ran);
+        assert_same_session_snapshot
+          before_capture
+          (Agent_session.Session_actor.state actor |> protocol_ok);
         assert (Result.is_error (invoke ()));
         let failed = Agent_session.Session_actor.state actor |> protocol_ok in
         assert (Option.is_none failed.moderator);
+        assert_no_source_installation failed;
+        [%test_eq: int] 1 !successful_captures;
+        [%test_eq: int] 1 !handlers_started;
         assert (
           match (List.hd_exn failed.invocations).status with
           | Resolved (Fail _) -> true
@@ -61,18 +114,46 @@ let%test_unit "actor handoff persists actual manager state and resolution atomic
         in
         assert (Poly.equal snapshot.current_state (Session.Snapshot.Array [ Int 0 ]));
         assert (List.is_empty snapshot.queued_internal_events);
+        [%test_eq: string]
+          (Agent_session.Moderator_checkpoint.digest manager_before)
+          (Agent_session.Moderator_checkpoint.digest snapshot);
         invoke () |> protocol_ok;
+        [%test_eq: int] 2 !successful_captures;
+        [%test_eq: int] 2 !handlers_started;
         let snapshot =
           Chat_response.Moderator_manager.identity_snapshot manager
           |> Result.ok_or_failwith
         in
-        let encoded =
-          Some (Agent_session.Runtime_builder.encode_moderator_snapshot snapshot)
-        in
         assert (Poly.equal snapshot.current_state (Session.Snapshot.Array [ Int 1 ]));
         assert (List.length snapshot.queued_internal_events = 1);
         let saved = Agent_session.Session_actor.state actor |> protocol_ok in
-        assert (Poly.equal saved.moderator encoded);
+        let durable_snapshot =
+          Agent_session.Moderator_checkpoint.decode saved.moderator
+          |> protocol_ok
+          |> Option.value_exn
+        in
+        [%test_eq: string]
+          (Agent_session.Moderator_checkpoint.digest snapshot)
+          (Agent_session.Moderator_checkpoint.digest durable_snapshot);
+        let encoded = saved.moderator in
+        let other_manager, other_invocation = handoff_manager env in
+        let mismatch_handler_ran = ref false in
+        (match
+           caps.with_moderator_invocation
+             ~snapshot:(fun () ->
+               Chat_response.Moderator_manager.identity_snapshot other_manager
+               |> Result.map_error ~f:handoff_error)
+             ~invocation:(other_invocation ())
+             (fun ~dispatched:_ ~capabilities:_ ~commit:_ ->
+                mismatch_handler_ran := true;
+                Ok ())
+         with
+         | Error error -> [%test_eq: Agent_protocol.Error.code] Conflict error.code
+         | Ok () -> failwith "different before snapshot bypassed the retained checkpoint");
+        assert (not !mismatch_handler_ran);
+        assert_same_session_snapshot
+          saved
+          (Agent_session.Session_actor.state actor |> protocol_ok);
         Eio.Promise.resolve done_u encoded;
         Completed
           { final_history = input.history
@@ -146,7 +227,27 @@ let%test_unit
                |> protocol_ok
              in
              saved_resolution := Some resolved;
-             commit ~resolved ~snapshot:(handoff_snapshot 1) |> protocol_ok;
+             (* This trusted bare first checkpoint has no captured before. Its
+                DATA save remains compatible and lends no queue original. *)
+             let bare_snapshot =
+               { (handoff_snapshot 1) with
+                 queued_internal_events = [ Session.Snapshot.Int 1 ]
+               }
+             in
+             commit ~resolved ~snapshot:bare_snapshot |> protocol_ok;
+             let saved = Agent_session.Session_actor.state actor |> protocol_ok in
+             let queue =
+               Agent_session.Moderator_checkpoint.queue saved.moderator |> protocol_ok
+             in
+             assert (Option.is_none queue);
+             assert_no_source_installation saved;
+             assert (
+               Option.equal
+                 Jsonaf.exactly_equal
+                 (Some
+                    (Agent_session.Runtime_builder.encode_moderator_snapshot
+                       bare_snapshot))
+                 saved.moderator);
              assert (Result.is_error (commit ~resolved ~snapshot:(handoff_snapshot 2)));
              Ok ())
         |> protocol_ok;
@@ -339,6 +440,7 @@ let%test_unit "independent worker calls queue before actor admission" =
             (Some
                (Agent_session.Runtime_builder.encode_moderator_snapshot
                   (handoff_snapshot 2))));
+        assert_no_source_installation state;
         Eio.Promise.resolve done_u ();
         Completed
           { final_history = input.history

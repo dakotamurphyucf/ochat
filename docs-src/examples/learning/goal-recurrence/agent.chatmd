@@ -1,0 +1,21 @@
+<developer>
+<doc src="builtin:goals"/>
+<doc src="builtin:recurrence"/>
+<doc src="builtin:lifecycle"/>
+<doc src="builtin:skills"/>
+<doc src="builtin:project-instructions"/>
+Coordinate two recurring release-note reviews. The controller's initial turn
+prepares the reviews. The lifecycle script checks the two captured workers'
+actual retained outcomes before asking the host to complete the Goal.
+</developer>
+<tool name="goal_get"/>
+<tool name="goal_create"/>
+<tool name="goal_start"/>
+<tool name="recurrence_list"/>
+<tool name="recurrence_get"/>
+<tool name="recurrence_create"/>
+<tool name="recurrence_resume"/>
+<tool name="recurrence_history"/>
+<tool name="instructions_status"/>
+<tool name="review_worker" agent="worker.chatmd" local persistence="persistent"/>
+<script id="goal_recurrence" language="chatml" kind="moderator" api="extensibility-v1" project="chatml.project.json" src="moderator.chatml"/>

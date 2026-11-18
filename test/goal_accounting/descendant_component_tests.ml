@@ -1210,6 +1210,8 @@ let%expect_test
   in
   assert (initial_depth >= minimum_depth (own_json alternative));
   let raw = own_json closed in
+  let exported_closed = GD.Export.prepare closed |> protocol in
+  assert (D.Json.equal raw (D.Document.json (GD.Export.document exported_closed)));
   let payload = member raw "payload" in
   let roots =
     member payload "roots"
@@ -1238,7 +1240,22 @@ let%expect_test
       set root "branches" branches)
   in
   let carried = set raw "payload" (set payload "roots" roots) |> own_restore in
+  let exported_carried = GD.Export.prepare carried |> protocol in
+  let carried_raw = D.Document.json (GD.Export.document exported_carried) in
+  assert (D.Json.equal (own_json carried) carried_raw);
+  assert (not (D.Json.equal raw carried_raw));
+  (* A new raw carrier cannot alter an earlier immutable export. *)
+  assert (D.Json.equal raw (D.Document.json (GD.Export.document exported_closed)));
   let required = GD.required_depth carried |> protocol in
+  [%test_eq: int] required (GD.Export.required_depth exported_carried);
+  let expected_growth = GD.reserved_growth carried |> protocol in
+  let exported_growth = GD.Export.reserved_growth exported_carried in
+  let module Growth = Agent_session.Capacity_growth in
+  [%test_eq: int]
+    (Growth.encoded_bytes expected_growth)
+    (Growth.encoded_bytes exported_growth);
+  [%test_eq: int] (Growth.fields expected_growth) (Growth.fields exported_growth);
+  [%test_eq: int] (Growth.nodes expected_growth) (Growth.nodes exported_growth);
   assert (required >= minimum_depth (own_json carried));
   assert (
     Result.is_error
@@ -1294,6 +1311,9 @@ let%expect_test
   let required_children = C.required_depth children |> protocol in
   let observed_children, _ = C.replace children ~snapshot:observed |> protocol in
   let observed_raw = C.to_jsonaf observed_children |> protocol in
+  let exported_observed = C.Export.prepare observed_children |> protocol in
+  assert (
+    D.Json.equal observed_raw (D.Document.json (C.Export.document exported_observed)));
   assert (minimum_depth (C.to_jsonaf children |> protocol) < required_children);
   assert (required_children >= minimum_depth observed_raw);
   ignore (boundary "child_contributions" observed_raw : int);
@@ -1318,7 +1338,21 @@ let%expect_test
     set observed_raw "payload" (set payload "children" slots) |> C.of_jsonaf |> protocol
   in
   let required_children = C.required_depth observed_children |> protocol in
+  let exported_children = C.Export.prepare observed_children |> protocol in
+  let carried_raw = D.Document.json (C.Export.document exported_children) in
+  assert (not (D.Json.equal observed_raw carried_raw));
+  assert (
+    D.Json.equal observed_raw (D.Document.json (C.Export.document exported_observed)));
+  [%test_eq: int] required_children (C.Export.required_depth exported_children);
+  let expected_growth = C.reserved_growth observed_children |> protocol in
+  let exported_growth = C.Export.reserved_growth exported_children in
+  [%test_eq: int]
+    (Growth.encoded_bytes expected_growth)
+    (Growth.encoded_bytes exported_growth);
+  [%test_eq: int] (Growth.fields expected_growth) (Growth.fields exported_growth);
+  [%test_eq: int] (Growth.nodes expected_growth) (Growth.nodes exported_growth);
   let observed_raw = C.to_jsonaf observed_children |> protocol in
+  assert (D.Json.equal observed_raw carried_raw);
   assert (required_children >= minimum_depth observed_raw);
   D.Json.validate
     (embedded "child_contributions" observed_raw)

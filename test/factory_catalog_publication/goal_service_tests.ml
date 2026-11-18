@@ -168,6 +168,14 @@ let await_input env entry counters =
 let%expect_test "actual Goal create starts one public episode and retains its association"
   =
   with_fixture (fun env _sw daemon entry runtime _ counters ->
+    let attach mode =
+      let attachment, _ =
+        Actor.attach entry.Registry.actor ~mode ~subscribe:false |> protocol_ok
+      in
+      attachment.id
+    in
+    let reader = attach Read_only in
+    let writer = attach Read_write in
     let session, before = create_goal daemon entry in
     let created = goal before in
     let ports = !(counters.inference_ports) in
@@ -196,14 +204,33 @@ let%expect_test "actual Goal create starts one public episode and retains its as
         ~request
       |> protocol_ok
     in
-    let requested = activation ~goal_id ~expected_goal_revision:(G.revision created) in
+    let implicit_intent =
+      activation ~goal_id ~expected_goal_revision:(G.revision created)
+    in
+    let source = G.source created in
+    let requested =
+      A.Goal_activation_request.with_expected_source implicit_intent source
+    in
+    let other_source =
+      P.Run_source.create
+        ~observer:source.observer
+        ~generation:source.generation
+        ~installation_epoch:(Int64.succ source.installation_epoch)
+      |> protocol_ok
+    in
     let public =
       Service.create ~factory:(Daemon.factory daemon) ~authorize:(fun _ -> authorize)
     in
-    let call request =
-      Service.start_episode public ~entry ~actor:original ~session ~request
+    let call writer request =
+      Service.start_episode ~writer public ~entry ~actor:original ~session ~request
     in
-    let admission = call requested |> protocol_ok |> activated in
+    let refused writer expected =
+      match call writer requested with
+      | Error failure -> [%test_eq: P.Error.code] expected failure.code
+      | Ok _ -> failwith "Goal request returned data to an inactive or read-only writer"
+    in
+    refused reader Permission_denied;
+    let admission = call writer requested |> protocol_ok |> activated in
     let final = await_input env entry counters in
     let index = Option.value_exn final.run_state in
     let run = A.Run_state.find index admission.run_id |> Option.value_exn in
@@ -278,12 +305,17 @@ let%expect_test "actual Goal create starts one public episode and retains its as
       assert (phys_equal runtime actual);
       Ok ())
     |> protocol_ok;
+    Actor.detach entry.actor writer |> protocol_ok;
+    let replacement = attach Read_write in
+    let reconnected = Actor.state entry.actor |> protocol_ok in
     let frames = Existing.frames env entry in
+    refused writer Invalid_request;
+    refused reader Permission_denied;
     let counts = !(counters.providers), !(counters.inference_ports) in
-    (match call requested |> protocol_ok with
+    (match call replacement requested |> protocol_ok with
      | Retained retained -> assert (P.Run_receipt.equal admission retained)
      | Attempted _ -> failwith "Goal replay acquired another source attempt");
-    Existing.assert_same final entry;
+    Existing.assert_same reconnected entry;
     [%test_eq: string list] frames (Existing.frames env entry);
     [%test_eq: int * int] counts (!(counters.providers), !(counters.inference_ports));
     (match ordinary daemon entry request with
@@ -292,22 +324,24 @@ let%expect_test "actual Goal create starts one public episode and retains its as
        assert (not error.retryable)
      | Admitted _ | Uncertain _ ->
        failwith "ordinary same-key command removed the original Goal association");
-    Existing.assert_same final entry;
+    Existing.assert_same reconnected entry;
     [%test_eq: string list] frames (Existing.frames env entry);
     [%test_eq: int * int] counts (!(counters.providers), !(counters.inference_ports));
     List.iter
-      [ activation ~goal_id ~expected_goal_revision:(Int64.succ (G.revision created))
+      [ implicit_intent
+      ; A.Goal_activation_request.with_expected_source implicit_intent other_source
+      ; activation ~goal_id ~expected_goal_revision:(Int64.succ (G.revision created))
       ; activation
           ~goal_id:(P.Id.Goal.of_string "goal_other_association" |> protocol_ok)
           ~expected_goal_revision:(G.revision created)
       ]
       ~f:(fun changed ->
-        (match call changed with
+        (match call replacement changed with
          | Error error ->
            [%test_eq: P.Error.code] Conflict error.code;
            assert (not error.retryable)
          | Ok _ -> failwith "same Run key changed its original Goal association");
-        Existing.assert_same final entry;
+        Existing.assert_same reconnected entry;
         [%test_eq: string list] frames (Existing.frames env entry);
         [%test_eq: int * int] counts (!(counters.providers), !(counters.inference_ports)));
     print_endline

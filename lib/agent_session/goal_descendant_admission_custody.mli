@@ -100,6 +100,23 @@ module Descendant_preparation : sig
     :  t
     -> owner:unit ref
     -> (Closed_before_writer.t, Agent_protocol.Error.t) result
+
+  (** Only the same Combined Attempt plan can use an observed pre-writer failure
+      after its attempted flag was set. Domain/issuer and original physical
+      State/candidate/context must match the sealed commit attempt. The actual
+      Attempt Handle/occurrence is checked against those original ledgers.
+      Never runs fresh permission checks or resets [writer_attempted]; unknown,
+      acknowledged, Host_turn and unrelated/equal candidates reject. *)
+  val seal_observed_attempt_before_writer
+    :  t
+    -> owner:unit ref
+    -> slot:unit ref
+    -> preparation:unit ref
+    -> attempt:Session_commit_attempt.t
+    -> candidate:Session_transition.t
+    -> canonical:Goal_descendants.Canonical.t
+    -> closed:Session_commit_attempt.No_writer.t
+    -> (Closed_before_writer.t, Agent_protocol.Error.t) result
 end
 
 module Descendant_admission_data : sig
@@ -326,9 +343,27 @@ module Descendant_admission_slot : sig
   end
 
   module Cleanup : sig
+    (** SAME existing scheduler owns this report on its creating Eio domain.
+        Actual outcome and SAME-attempt release boundary are written once before
+        clearing Running or resolving the legacy projection, and remain
+        immutable after completion. Observation grants no execution authority. *)
+    module Attempt : sig
+      type t =
+        { finished : (unit, Agent_protocol.Error.t) result Eio.Promise.t
+        ; mutable outcome : Retirement_cleanup_completion.t option
+        }
+
+      type issuance =
+        | Scheduled of t
+        | Launch_failed of
+            { attempt : t
+            ; legacy : unit Actor_reply.t
+            }
+    end
+
     type t =
       | Idle
-      | Running of (unit, Agent_protocol.Error.t) result Eio.Promise.t
+      | Running of Attempt.t
   end
 
   type t =

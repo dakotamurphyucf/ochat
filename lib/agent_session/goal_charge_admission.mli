@@ -40,7 +40,7 @@ val hold_delta
   -> reason:Agent_protocol.Goal.Hold.t
   -> (Session_delta.t option, Agent_protocol.Error.t) result
 
-(** NEW activation policy using actual accepted root-scoped descendants. No count
+(** NEW activation policy using actual accepted local, physical and causal totals. No count
     check/charge, authority, epoch or root is created. An absent historical child
     component contributes labelled Unknown coverage, never exact historical zero.
     Existing account/ledger evidence is checked even without a token ceiling. *)

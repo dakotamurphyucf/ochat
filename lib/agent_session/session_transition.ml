@@ -138,6 +138,7 @@ let apply_internal ?inherited_turn ~now state ~delta ~payloads =
   in
   let%bind () = Session_delta.validate_goal_accounts delta ~previous ~next:state in
   let%bind () = Session_delta.validate_goal_descendants delta ~previous ~next:state in
+  let%bind () = Session_delta.validate_goal_policy delta ~previous ~next:state in
   let payloads = projected_payloads ~previous state payloads in
   let instruction_status state =
     Instruction_selection.summary
@@ -197,6 +198,9 @@ let apply_internal ?inherited_turn ~now state ~delta ~payloads =
   in
   let%bind revision = increment "session revision" state.counters.revision in
   let%bind () = Session_delta.validate_descendant_publication delta ~revision in
+  let%bind () =
+    Session_delta.validate_policy_usage delta ~previous ~next:state ~revision
+  in
   let%bind transaction_sequence =
     increment "transaction sequence" state.counters.transaction_sequence
   in

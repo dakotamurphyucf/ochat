@@ -51,11 +51,12 @@ type post_stream =
   -> Openai.Responses.Response_stream.t Seq.t
 
 module Tool_dispatch : sig
-  (** Trusted driver adapter. Invoke only after revalidating the selected native
-      binding and authorizing its effects. Executes that binding with the driver's
-      progress/trace observer and legacy fork handler; it performs no admission. *)
+  (** Trusted driver adapter. The host supplies its original, revalidated
+      binding with invocation-local effect checks as one value. This adapter
+      neither admits tools nor grants authority. Use [Tool_call.run_tool] to
+      preserve currentness checks, observers and built-in fork substitution. *)
   type native_runner =
-    Ochat_function.t -> payload:string -> Openai.Responses.Tool_output.Output.t
+    Tool_call.Native.t -> payload:string -> Openai.Responses.Tool_output.Output.t
 
   type rejection =
     | Invalid_input

@@ -189,7 +189,7 @@ let create_actor
   let persistence : A.Session_actor.persistence =
     { archive_reference
     ; commit =
-        (fun ~command_audit ~previous transition ->
+        (fun ?observation ~command_audit ~previous transition ->
           if !(t.reject)
           then
             Error
@@ -200,7 +200,12 @@ let create_actor
                  ())
           else (
             before_commit ();
-            A.Session_persistence.commit t.durable ~command_audit ~previous transition))
+            A.Session_persistence.commit
+              t.durable
+              ?observation
+              ~command_audit
+              ~previous
+              transition))
     }
   in
   let actor =

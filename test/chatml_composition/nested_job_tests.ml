@@ -40,7 +40,10 @@ let%expect_test "nested standalone Pending is an acknowledgement backed by its o
           assert (Agent_protocol.Id.Job.equal job.id id)
         | status -> raise_s [%sexp (status : I.status)]);
        let launch = Option.value_exn job.launch in
-       assert (J.equal_launch_owner launch.owner (Invocation nested.context.id));
+       assert (
+         J.Birth_parent.equal
+           launch.owner
+           (J.Birth_parent.callback (Invocation nested.context.id)));
        [%test_eq: int] 0 launch.nested_depth;
        assert (Option.is_some nested.context.parent_invocation);
        assert (Option.is_none nested.output_entry_id);

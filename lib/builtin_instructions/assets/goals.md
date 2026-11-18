@@ -23,6 +23,9 @@ explicit abandonment. Use only the tools actually declared and supplied.
 Echo the actual observed generation, source and expected revisions, and preserve
 an exact request/key for retries. Mutation replies report local staging; the
 actual callback ACK accepts their command receipts. Nested rollback removes
-speculative changes. These metadata controls do not start/resume an episode or
-prove achievement. Use the separately selected checked `Goal.finish` action for
-an actual supported completion, preserving its owned-work settlement checks.
+speculative changes. Select `goal_start` for a new episode or `goal_resume` for
+a held nonterminal episode with a verified current Run revision. Native Resume
+requires its original source and cannot clear an operator pause. Start and Resume
+stage requests. Report actual continuation and completion only from their owner
+facts. Use the checked `Goal.finish` action for a supported completion with its
+owned-work settlement checks.

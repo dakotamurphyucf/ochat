@@ -472,6 +472,7 @@ let create
         ( Moderator_tool_dispatch.Dispatch_error failure
         | Native_tool_dispatch.Dispatch_error failure
         | Standalone_tool_dispatch.Dispatch_error failure
+        | Inference_allocation.Rejected failure
         | Chat_response.Ctx.Effect_rejected failure ) -> Operation_worker.Failed failure
     | exception Chat_response.In_memory_stream.Post_tool_moderation_failed (entry, _) ->
       Operation_worker.Failed

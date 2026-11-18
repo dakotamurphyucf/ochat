@@ -1,0 +1,271 @@
+type session = {server_id:string; session_id:string}
+type source = {script_id:string; source_sha256:string; generation:string; installation_epoch:string}
+type basis = {generation:string; catalog_revision:string; key:string}
+type goal_basis = {basis:basis; goal_id:string; goal_revision:string}
+type 'a setting = [ `Unset | `Set('a) ]
+type token_component = [ `Input | `Output | `Reported_total | `Cached_input | `Cache_write_input | `Reasoning_output ]
+type token_limit = {component:token_component; ceiling:string}
+type budget = {admitted_turns:string setting; admitted_attempts:string setting; observed_tokens:token_limit setting; deadline:string setting}
+type content_kind = [ `Plain_text | `Chatmd ]
+type submission = {kind:content_kind; text:string; attachments:json array}
+type start_input = [ `Authored_start | `User_submission(submission) ]
+type error = [ `Invalid_identity | `Mismatched_episode | `Invalid_revision | `Invalid_source | `Invalid_key | `Invalid_text | `Invalid_budget | `Invalid_input ]
+type 'a checked = [ `Ok('a) | `Error(error) ]
+type catalog = {session:session; generation:string; revision:string; source:source}
+type goal = {id:string; session:session; revision:string; source:source}
+type episode = {goal_id:string; session:session; run_id:string; revision:string; source:source}
+
+let failure : fun(error) -> error = fun error -> error
+let digits = "0123456789"
+let id_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"
+
+let characters = fun text allowed ->
+  let size = String.length(text) in
+  let rec visit = fun index ->
+    if index == size then true
+    else if String.contains(allowed, String.slice(text, index, 1)) then visit(index + 1)
+    else false in
+  visit(0)
+
+let decimal_at_most = fun text maximum ->
+  let size = String.length(text) in
+  let bound_size = String.length(maximum) in
+  let rec compare_digits = fun index ->
+    if index == size then true
+    else
+      let current = String.slice(text, index, 1) in
+      let bound = String.slice(maximum, index, 1) in
+      if current == bound then compare_digits(index + 1)
+      else match String.find(digits, current) with
+      | `None -> false
+      | `Some(current) -> match String.find(digits, bound) with
+        | `None -> false
+        | `Some(bound) -> current < bound in
+  if size == 0 then false
+  else if size > bound_size then false
+  else if size > 1 then
+    if String.starts_with(text, "0") then false
+    else if characters(text, digits) == false then false
+    else if size == bound_size then compare_digits(0)
+    else true
+  else characters(text, digits)
+
+let revision = fun text -> decimal_at_most(text, "9223372036854775807")
+let exact_generation = fun text -> decimal_at_most(text, "9007199254740991")
+
+let id = fun value prefix ->
+  if String.length(value) <= String.length(prefix) then false
+  else if String.length(value) > 96 then false
+  else if String.starts_with(value, prefix) == false then false
+  else characters(value, id_chars)
+
+let bounded_text = fun value max allow_blank ->
+  if String.length(value) > max then false
+  else if allow_blank then true
+  else String.is_empty(String.trim(value)) == false
+
+let valid_key = fun key ->
+  if String.is_empty(key) then false
+  else if String.length(key) > 256 then false
+  else characters(key, String.concat(id_chars, ".:/"))
+
+let valid_source : fun(source) -> bool = fun source ->
+  if String.is_empty(source.script_id) then false
+  else if String.length(source.script_id) > 256 then false
+  else if (String.length(source.source_sha256) == 64) == false then false
+  else if characters(source.source_sha256, "0123456789abcdef") == false then false
+  else if exact_generation(source.generation) == false then false
+  else if source.installation_epoch == "0" then false
+  else revision(source.installation_epoch)
+
+let field = fun value key -> match Json.get_field(value, key) with
+  | `Some(value) -> value
+  | `None -> `Null
+
+let source_of_view : fun(json) -> source checked = fun view ->
+  let observed = field(view, "source") in
+  match (|field(view, "generation"), field(observed, "generation"),
+         field(observed, "script_id"), field(observed, "source_sha256"),
+         field(observed, "installation_epoch")|) with
+  | (|`String(generation), `Number(source_generation), `String(script_id),
+     `String(source_sha256), `String(installation_epoch)|) ->
+      let source = {script_id = script_id; source_sha256 = source_sha256;
+                    generation = generation; installation_epoch = installation_epoch} in
+      if valid_source(source) == false then `Error(failure(`Invalid_source))
+      else (match Json.parse(generation) with
+        | `Number(expected) ->
+            if source_generation == expected then `Ok(source)
+            else `Error(failure(`Invalid_source))
+        | _ -> `Error(failure(`Invalid_source)))
+  | _ -> `Error(failure(`Invalid_source))
+
+let source_json : fun(source) -> json = fun source -> `Object([
+  {key = "script_id"; value = `String(source.script_id)},
+  {key = "source_sha256"; value = `String(source.source_sha256)},
+  {key = "generation"; value = Json.parse(source.generation)},
+  {key = "installation_epoch"; value = `String(source.installation_epoch)}])
+
+let list = fun () -> `Object([{key = "goal_id"; value = `Null}])
+let get = fun goal_id ->
+  if id(goal_id, "goal_") then `Ok(`Object([{key = "goal_id"; value = `String(goal_id)}]))
+  else `Error(failure(`Invalid_identity))
+
+let basis_fields = fun basis goal_id ->
+  if id(goal_id, "goal_") == false then `Error(failure(`Invalid_identity))
+  else if decimal_at_most(basis.generation, "4611686018427387903") == false
+    then `Error(failure(`Invalid_revision))
+  else if revision(basis.catalog_revision) == false then `Error(failure(`Invalid_revision))
+  else if valid_key(basis.key) == false then `Error(failure(`Invalid_key))
+  else `Ok([
+    {key = "generation"; value = `String(basis.generation)},
+    {key = "goal_id"; value = `String(goal_id)},
+    {key = "expected_catalog_revision"; value = `String(basis.catalog_revision)},
+    {key = "key"; value = `String(basis.key)}])
+
+let goal_fields = fun goal ->
+  if revision(goal.goal_revision) == false then `Error(failure(`Invalid_revision))
+  else match basis_fields(goal.basis, goal.goal_id) with
+    | `Error(error) -> `Error(error)
+    | `Ok(fields) -> `Ok(Array.append(fields, [
+        {key = "expected_goal_revision"; value = `String(goal.goal_revision)}]))
+
+let with_source = fun fields generation source ->
+  if valid_source(source) == false then `Error(failure(`Invalid_source))
+  else if (source.generation == generation) == false then `Error(failure(`Invalid_source))
+  else `Ok(Array.append(fields, [{key = "source"; value = source_json(source)}]))
+
+let nullable_text = fun value -> match value with
+  | `Unset -> `Null
+  | `Set(text) -> `String(text)
+
+let valid_optional = fun setting validate -> match setting with
+  | `Unset -> true
+  | `Set(value) -> validate(value)
+
+let token_component = fun value -> match value with
+  | `Input -> "input"
+  | `Output -> "output"
+  | `Reported_total -> "reported_total"
+  | `Cached_input -> "cached_input"
+  | `Cache_write_input -> "cache_write_input"
+  | `Reasoning_output -> "reasoning_output"
+
+let budget_json = fun budget ->
+  if valid_optional(budget.admitted_turns, revision) == false then `Error(failure(`Invalid_budget))
+  else if valid_optional(budget.admitted_attempts, revision) == false then `Error(failure(`Invalid_budget))
+  else if valid_optional(budget.observed_tokens, fun limit -> revision(limit.ceiling)) == false
+    then `Error(failure(`Invalid_budget))
+  else
+    let tokens = match budget.observed_tokens with
+      | `Unset -> `Null
+      | `Set(limit) -> `Object([
+          {key = "component"; value = `String(token_component(limit.component))},
+          {key = "ceiling"; value = `String(limit.ceiling)}]) in
+    `Ok(`Object([
+      {key = "admitted_turns"; value = nullable_text(budget.admitted_turns)},
+      {key = "admitted_attempts"; value = nullable_text(budget.admitted_attempts)},
+      {key = "observed_tokens"; value = tokens},
+      {key = "deadline"; value = nullable_text(budget.deadline)}]))
+
+let create : fun(basis, source, string, string, budget) -> json checked =
+  fun basis source goal_id objective budget ->
+    if bounded_text(objective, 8192, false) == false then `Error(failure(`Invalid_text))
+    else match basis_fields(basis, goal_id) with
+      | `Error(error) -> `Error(error)
+      | `Ok(fields) -> match with_source(fields, basis.generation, source) with
+        | `Error(error) -> `Error(error)
+        | `Ok(fields) -> match budget_json(budget) with
+          | `Error(error) -> `Error(error)
+          | `Ok(budget) -> `Ok(`Object(Array.append(fields, [
+              {key = "objective"; value = `String(objective)},
+              {key = "budget"; value = budget}])))
+
+let start_input_json : fun(start_input) -> json checked = fun input ->
+  match input with
+  | `Authored_start -> `Ok(`Object([{key = "kind"; value = `String("authored_start")}]))
+  | `User_submission(input) ->
+      let count = Array.length(input.attachments) in
+      if String.length(input.text) > 1048576 then `Error(failure(`Invalid_input))
+      else if count > 4096 then `Error(failure(`Invalid_input))
+      else if (if count == 0 then String.is_empty(input.text) else false)
+        then `Error(failure(`Invalid_input))
+      else `Ok(`Object([
+        {key = "kind"; value = `String("user_submission")},
+        {key = "content"; value = `Object([
+          {key = "kind"; value = `String(match input.kind with | `Plain_text -> "plain_text" | `Chatmd -> "chatmd")},
+          {key = "text"; value = `String(input.text)},
+          {key = "attachments"; value = `Array(input.attachments)}])}]))
+
+let start : fun(goal_basis, source, start_input) -> json checked = fun goal source input ->
+  match goal_fields(goal) with
+  | `Error(error) -> `Error(error)
+  | `Ok(fields) -> match with_source(fields, goal.basis.generation, source) with
+    | `Error(error) -> `Error(error)
+    | `Ok(fields) -> match start_input_json(input) with
+      | `Error(error) -> `Error(error)
+      | `Ok(input) -> `Ok(`Object(Array.append(fields, [
+          {key = "kind"; value = `String("goal_start_episode_v1")},
+          {key = "input"; value = input}])))
+
+let edit = fun goal source kind value ->
+  match goal_fields(goal) with
+  | `Error(error) -> `Error(error)
+  | `Ok(fields) -> match with_source(fields, goal.basis.generation, source) with
+    | `Error(error) -> `Error(error)
+    | `Ok(fields) -> `Ok(`Object(Array.append(fields, [
+        {key = "kind"; value = `String(kind)},
+        {key = "value"; value = `String(value)}])))
+
+let objective = fun goal source value ->
+  if bounded_text(value, 8192, false) then edit(goal, source, "objective", value)
+  else `Error(failure(`Invalid_text))
+
+let progress = fun goal source value ->
+  if bounded_text(value, 16384, true) then edit(goal, source, "progress", value)
+  else `Error(failure(`Invalid_text))
+
+let control = fun goal kind reason ->
+  if bounded_text(reason, 4096, false) == false then `Error(failure(`Invalid_text))
+  else match goal_fields(goal) with
+    | `Error(error) -> `Error(error)
+    | `Ok(fields) -> `Ok(`Object(Array.append(fields, [
+        {key = "kind"; value = `String(kind)},
+        {key = "reason"; value = `String(reason)}])))
+
+let hold = fun goal reason -> control(goal, "hold", reason)
+let abandon = fun goal reason -> control(goal, "abandon", reason)
+
+let same_session : fun(session, session) -> bool = fun left right ->
+  if left.server_id == right.server_id then left.session_id == right.session_id
+  else false
+
+let same_source : fun(source, source) -> bool = fun left right ->
+  if (left.script_id == right.script_id) == false then false
+  else if (left.source_sha256 == right.source_sha256) == false then false
+  else if (left.generation == right.generation) == false then false
+  else left.installation_epoch == right.installation_epoch
+
+let resume : fun(catalog, goal, episode, string) -> json checked =
+  fun catalog goal episode key ->
+    if id(catalog.session.server_id, "srv_") == false then `Error(failure(`Invalid_identity))
+    else if id(catalog.session.session_id, "ses_") == false then `Error(failure(`Invalid_identity))
+    else if id(goal.id, "goal_") == false then `Error(failure(`Invalid_identity))
+    else if id(episode.run_id, "run_") == false then `Error(failure(`Invalid_identity))
+    else if same_session(catalog.session, goal.session) == false then `Error(failure(`Mismatched_episode))
+    else if same_session(goal.session, episode.session) == false then `Error(failure(`Mismatched_episode))
+    else if (goal.id == episode.goal_id) == false then `Error(failure(`Mismatched_episode))
+    else if same_source(catalog.source, goal.source) == false then `Error(failure(`Invalid_source))
+    else if same_source(goal.source, episode.source) == false then `Error(failure(`Invalid_source))
+    else if revision(episode.revision) == false then `Error(failure(`Invalid_revision))
+    else
+      let basis = {generation = catalog.generation; catalog_revision = catalog.revision; key = key} in
+      let selected = {basis = basis; goal_id = goal.id; goal_revision = goal.revision} in
+      match goal_fields(selected) with
+      | `Error(error) -> `Error(error)
+      | `Ok(fields) -> match with_source(fields, catalog.generation, catalog.source) with
+        | `Error(error) -> `Error(error)
+        | `Ok(fields) -> `Ok(`Object(Array.append(fields, [
+            {key = "kind"; value = `String("goal_resume_episode_v1")},
+            {key = "session_id"; value = `String(catalog.session.session_id)},
+            {key = "run_id"; value = `String(episode.run_id)},
+            {key = "expected_run_revision"; value = `String(episode.revision)}])))

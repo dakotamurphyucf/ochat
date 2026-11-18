@@ -230,6 +230,7 @@ let%expect_test "real Run event and deferred observer preserve terminal Run orig
         ~event:Session_start
         ~snapshot:(fun () -> Ok snapshot)
         (fun ~executing
+          ~policy_caller:_
           ~model_jobs:_
           ~allocate_inference:_
           ~retirement_reason:_
@@ -392,6 +393,7 @@ let%expect_test "live Workflow observation owns actual direct and native Model c
            ~event:Session_start
            ~snapshot:(fun () -> Ok snapshot)
            (fun ~executing
+             ~policy_caller:_
              ~model_jobs:_
              ~allocate_inference:_
              ~retirement_reason:_
@@ -625,7 +627,14 @@ let%expect_test "genuine unavailable parent allows native work without inventing
     let after = A.Session_actor.state actor |> protocol_ok in
     [%test_eq: int] 3 (List.length after.jobs);
     assert (List.for_all after.jobs ~f:(fun job -> Option.is_none job.inference_origin));
-    assert (Option.is_none after.run_state);
+    Agent_session.Session_state.validate after |> protocol_ok;
+    Option.iter after.run_state ~f:(fun index ->
+      assert (List.is_empty (A.Run_state.runs index));
+      assert (List.is_empty (A.Run_state.intents index));
+      assert (List.is_empty (A.Run_state.receipts index));
+      assert (List.is_empty (A.Run_state.goal_links index));
+      assert (List.is_empty (A.Run_state.recurrence_origins index));
+      assert (List.is_empty (A.Run_state.job_deliveries index)));
     [%test_eq: int] 0 (List.length (A.Inference_ledger.rows after.inference_ledger));
     let owner = P.Job.Invocation root.context.id in
     assert (
@@ -741,7 +750,9 @@ let%expect_test
   (* Context-free evidence fixtures only. Named Run retention and actual head
      admission belong to the complete carrier checks; these confer no authority. *)
   List.iter [ None; Some P.Inference_origin.Unbound; Some (Run run_id) ] ~f:(fun origin ->
-    let occurrence = Q.create ~source ~ordinal:7L ~origin |> protocol_ok in
+    let occurrence =
+      Q.create ~source ~ordinal:7L ~origin ~producer:Unknown |> protocol_ok
+    in
     let admitted = E.create_queued ~queue_occurrence:occurrence context |> protocol_ok in
     let wire = E.to_json admitted in
     assert (D.Json.equal (member wire "schema_version") (`Number "5"));
@@ -765,7 +776,7 @@ let%expect_test
       Q.to_json occurrence |> fun json -> set json "ordinal" (`String "-1")
     in
     assert (Exn.does_raise (fun () -> Q.t_of_sexp (Jsonaf.sexp_of_t malformed) |> ignore));
-    let other = Q.create ~source ~ordinal:8L ~origin |> protocol_ok in
+    let other = Q.create ~source ~ordinal:8L ~origin ~producer:Unknown |> protocol_ok in
     let reassigned = E.create_queued ~queue_occurrence:other context |> protocol_ok in
     List.iter
       [ historical, admitted; admitted, historical; admitted, reassigned ]
@@ -798,7 +809,68 @@ let%expect_test
       |> fun json -> set json "schema_version" (`Number (Int.to_string version))
     in
     assert (Option.is_none (E.of_json old |> protocol_ok).queue_occurrence));
-  assert (Result.is_error (Q.create ~source ~ordinal:(-1L) ~origin:None));
+  assert (Result.is_error (Q.create ~source ~ordinal:(-1L) ~origin:None ~producer:Unknown));
+  let producer =
+    P.Queue_producer.Job_completion
+      { id = P.Id.Job.of_string "job_captured_wire" |> protocol_ok
+      ; generation = 0
+      ; attempt = 2
+      }
+  in
+  List.iter [ None; Some producer ] ~f:(fun producer ->
+    let capture =
+      Q.create ~source ~ordinal:7L ~origin:None ~producer:(Captured producer)
+      |> protocol_ok
+    in
+    let receipt = E.create_queued ~queue_occurrence:capture context |> protocol_ok in
+    let wire = E.to_json receipt in
+    assert (D.Json.equal (member wire "schema_version") (`Number "6"));
+    assert (E.equal receipt (E.of_json wire |> protocol_ok));
+    assert (Q.Producer.equal (Q.producer capture) (Captured producer));
+    (match producer with
+     | Some (P.Queue_producer.Job_completion { id; generation; attempt }) ->
+       List.iter
+         [ P.Queue_producer.Job_completion { id; generation; attempt = attempt + 1 }
+         ; Job_completion { id; generation = generation + 1; attempt }
+         ]
+         ~f:(fun producer ->
+           let changed =
+             Q.create
+               ~source
+               ~ordinal:7L
+               ~origin:None
+               ~producer:(Captured (Some producer))
+             |> protocol_ok
+           in
+           let changed =
+             E.create_queued ~queue_occurrence:changed context |> protocol_ok
+           in
+           assert (
+             Result.is_error (E.validate_transition ~previous:(Some receipt) changed)))
+     | None -> ()
+     | Some
+         ( Event _
+         | Invocation _
+         | Invocation_at_source _
+         | Schedule_delivery _
+         | Ingress_delivery _
+         | Source_setup _ ) ->
+       failwith "wire fixture unexpectedly selected a different producer family");
+    let old_capture =
+      Q.create ~source ~ordinal:7L ~origin:None ~producer:Unknown |> protocol_ok
+    in
+    let old_receipt =
+      E.create_queued ~queue_occurrence:old_capture context |> protocol_ok
+    in
+    assert (Result.is_error (E.validate_transition ~previous:(Some old_receipt) receipt));
+    List.iter
+      [ set wire "schema_version" (`Number "5")
+      ; set wire "queue_occurrence" (remove (Q.to_json capture) "producer")
+      ]
+      ~f:(fun malformed ->
+        match E.of_json malformed with
+        | Error error -> assert (P.Error.equal_code error.code Invalid_request)
+        | Ok _ -> failwith "producer presence/schema fence accepted malformed receipt"));
   print_endline "strict v5 capture; unknown stays unknown; immutable through completion";
   [%expect {| strict v5 capture; unknown stays unknown; immutable through completion |}]
 ;;

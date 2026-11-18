@@ -5,11 +5,20 @@
 type t
 
 module Pause : sig
+  module Target : sig
+    type t =
+      | Removed
+      | Superseded
+      | Source_retired
+    [@@deriving equal, sexp_of]
+  end
+
   type t =
     | Operator_pause
     | Controller_stop
     | Source_review
     | Recovery_review
+    | Target_invalidated of Target.t
   [@@deriving equal, sexp_of]
 end
 
@@ -33,6 +42,7 @@ val create : Recurrence_definition.t -> (t, Agent_protocol.Error.t) result
 val id : t -> Agent_protocol.Id.Recurrence.t
 val controller : t -> Agent_protocol.Session_ref.t
 val definitions : t -> Recurrence_definition.t list
+val has_definition_slot : t -> bool
 val current : t -> Recurrence_definition.t
 val control : t -> control
 val control_revision : t -> int64

@@ -4,6 +4,8 @@ open! Core
     makes no source, actor admission or permission decision and has no codec. *)
 type t
 
+module Policy_source = Policy_standalone_source.Classification
+
 module Row : sig
   type t
 
@@ -11,6 +13,10 @@ module Row : sig
   val transfer : t -> (Execution_custody.Admission.t, Agent_protocol.Error.t) result
 
   val check : t -> (unit, Agent_protocol.Error.t) result
+
+  (** Exact completed-Job no-Cause DATA association, never a loan or permission.
+      Selected together with this actual physical row, not reconstructed cold. *)
+  val policy_source : t -> Policy_source.t
 end
 
 val empty : t
@@ -62,6 +68,28 @@ val stage
   -> parent:Execution_custody.Admission.t
   -> (t, Agent_protocol.Error.t) result
 
+(** Stage independent completed-producer continuations from the exact parent.
+    Current admission transfers normally; a closed/expired parent remains an
+    explicit Expired negative fact and never renews permission. Partial failure
+    retires staged children. The caller owns the successful speculative rows
+    until the same checkpoint ACK installation or explicit retirement. A later
+    new-work claim still uses strict [Row.transfer] and denies Expired. *)
+val stage_completed
+  :  manager:Chat_response.Moderator_manager.t
+  -> source:Agent_protocol.Run_source.t
+  -> entries:Moderator_queue.Entry.t list
+  -> parent:Execution_custody.Admission.t
+  -> (t, Agent_protocol.Error.t) result
+
+(** Stage only explicit Expired rows when the actual completed producer already
+    has known expired custody. This creates no admission. Missing original
+    custody must instead remain [empty], not be reclassified as admitted. *)
+val stage_expired
+  :  manager:Chat_response.Moderator_manager.t
+  -> source:Agent_protocol.Run_source.t
+  -> entries:Moderator_queue.Entry.t list
+  -> t
+
 (** Pure retained/staged reconciliation with the existing 256-row ordinal bound. *)
 val candidate
   :  t
@@ -79,7 +107,35 @@ val stage_delivery
   -> source:Agent_protocol.Run_source.t
   -> entry:Moderator_queue.Entry.t
   -> continuation:Execution_custody.Continuation.t
+  -> policy_source:Policy_source.t
   -> t
+
+module Update : sig
+  type inventory := t
+  type t
+
+  (** Own the speculative rows, including on failure. Prepare one candidate from
+      the exact current inventory and same physical Manager/full metadata. No
+      admission is created or refreshed. *)
+  val prepare
+    :  inventory
+    -> manager:Chat_response.Moderator_manager.t
+    -> metadata:Moderator_queue.t
+    -> staged:inventory
+    -> (t, Agent_protocol.Error.t) result
+
+  (** Callback-free exact physical basis check, repeated immediately before the
+      writer after any policy/capacity waits. Only a Staged update can commit. *)
+  val check_basis : t -> current:inventory -> (unit, Agent_protocol.Error.t) result
+
+  (** Retire only speculative children before ACK; inert after installation,
+      including when later publication fails or cancellation reaches cleanup. *)
+  val discard : t -> unit
+
+  (** Nonyielding, infallible SAME State ACK installation after [check_basis].
+      Marks the update installed before old-row retirement/publication. *)
+  val install : t -> inventory
+end
 
 (** Validate only the actual constructor's acknowledged selected ordinals.
     Missing rows remain unavailable; contradictory retained rows reject.

@@ -45,6 +45,14 @@ let instruction_members =
     ]
 ;;
 
+let goal_members =
+  [ "examples/libraries/goal-requests/chatml.project.json"
+  ; "examples/libraries/goal-requests/src/goal_requests.chatml"
+  ; "examples/libraries/goal-requests/src/goal_requests.chatmli"
+  ; "guide/native-goal-metadata.md"
+  ]
+;;
+
 let recurrence_members =
   [ "examples/libraries/recurrence-requests/chatml.project.json"
   ; "examples/libraries/recurrence-requests/src/recurrence_requests.chatml"
@@ -61,6 +69,13 @@ let installed ~limits ~checkpoint =
       ; members =
           List.filter Bundled_capability_sources.documents ~f:(fun (path, _) ->
             List.mem lifecycle_members path ~equal:String.equal)
+      }
+    ; { id = "goal-requests"
+      ; title = "Pure persistent Goal request constructors"
+      ; entry = "examples/libraries/goal-requests/chatml.project.json"
+      ; members =
+          List.filter Bundled_capability_sources.documents ~f:(fun (path, _) ->
+            List.mem goal_members path ~equal:String.equal)
       }
     ; { id = "recurrence-requests"
       ; title = "Pure explicit recurring automation request constructors"

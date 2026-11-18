@@ -216,7 +216,7 @@ let stage_observer env daemon child (artifact : Artifact.Artifact.t) =
                   with
                   | Ui -> ()
                   | Headless -> failwith "captured specialist lost child Ui role")
-               | Authored _ | Authored_child _ | Generated _ ->
+               | Authored _ | Authored_child _ | Generated _ | Generated_artifact _ ->
                  failwith
                    "cold source was relabeled instead of retaining captured custody");
               match Source.moderator source with
@@ -459,6 +459,127 @@ let ready_input_attempt daemon parent ~clock child source =
     |> protocol_ok
   in
   intent, attempt
+;;
+
+(* This phase starts only after the original physical captured-child/Run
+   assertions. A genuine Owned grandchild makes that captured specialist the
+   selected native source, rather than treating its artifact as a root. *)
+let captured_native_parent env root daemon child ~providers =
+  Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 15. (fun () ->
+    assert (Owner.is_loaded child.Registry.runtime);
+    let definition =
+      Owner.with_background_runtime child.runtime (fun runtime ->
+        let native = Option.value_exn runtime.A.Runtime_builder.native_runtime in
+        let open Result.Let_syntax in
+        let%bind capabilities =
+          Lazy.force native.capabilities
+          |> Result.map_error ~f:(fun error ->
+            P.Error.invalid_request error.Chat_response.Tool_capability.message)
+        in
+        let%bind bundle =
+          Chatmd_source_bundle.create
+            ~root_file:"grandchild.chatmd"
+            ~sources:
+              [ ( "grandchild.chatmd"
+                , {|<config model="fixture-model"/><developer>Actual captured specialist native owner.</developer>
+<script id="grandchild" language="chatml" kind="moderator" api="extensibility-v1">
+let initial_state = 0
+let on_event ctx state event = Task.pure(state)
+</script>|}
+                )
+              ]
+            ()
+          |> Result.map_error ~f:P.Error.invalid_request
+        in
+        A.Generated_definition.prepare
+          ~env
+          ~dir:Eio.Path.(Eio.Stdenv.fs env / root)
+          ~revision_id:(P.Id.Prompt_revision.create ())
+          ~created_at:(P.Timestamp.now ())
+          ~current_capabilities:(fun () -> capabilities)
+          ~references:[]
+          bundle
+        |> Result.map_error ~f:(fun diagnostics ->
+          P.Error.invalid_request
+            (List.map diagnostics ~f:Chatmd_shell_spec.Diagnostic.to_string
+             |> String.concat ~sep:"\n")))
+      |> protocol_ok
+    in
+    let parent_id = (state child).identity.session_id in
+    let key =
+      P.Idempotency_key.of_string "635-captured-native-grandchild" |> protocol_ok
+    in
+    let rec create () =
+      match
+        Factory.create_generated_session
+          ~start_immediately:true
+          (Daemon.factory daemon)
+          ~parent_session_id:parent_id
+          ~idempotency_key:key
+          ~display_name:None
+          definition
+      with
+      | Error { code = Conflict; retryable = true; _ } ->
+        Eio.Fiber.yield ();
+        create ()
+      | result -> result
+    in
+    let grandchild = create () |> protocol_ok in
+    protect_cleanup
+      ~finally:(fun () -> Owner.unload_and_wait grandchild.runtime |> protocol_ok)
+      (fun () ->
+         let rec started () =
+           let current = Dispatch_captured_tests.healthy grandchild in
+           if
+             Option.is_none current.active_operation
+             && T.observed_idle current.lifecycle.observed
+             && List.exists current.moderator_executions ~f:(fun receipt ->
+               P.Moderator_execution.equal_phase receipt.context.phase Session_start
+               &&
+               match receipt.status with
+               | Completed _ -> true
+               | Running | Failed _ | Interrupted _ -> false)
+           then ()
+           else (
+             Eio.Fiber.yield ();
+             started ())
+         in
+         started ();
+         let reference = Option.value_exn (state grandchild).spec.delegation in
+         let record =
+           Ledger.resolve (S.delegations (Daemon.store daemon)) reference |> store_ok
+         in
+         assert (P.Id.Session.equal record.key.parent_session_id parent_id);
+         (match record.admission.lifetime with
+          | Owned -> ()
+          | Invocation_owned _ | Independent _ ->
+            failwith "635 grandchild did not use genuine Owned admission");
+         Owner.drain_idle_moderator grandchild.runtime |> protocol_ok |> ignore;
+         let before = state child in
+         let installation index = Option.map index ~f:A.Run_state.installation in
+         let calls = !providers in
+         Owner.unload_and_wait grandchild.runtime |> protocol_ok;
+         Owner.unload_and_wait child.runtime |> protocol_ok;
+         assert (not (Owner.is_loaded grandchild.runtime));
+         assert (not (Owner.is_loaded child.runtime));
+         Owner.ensure_loaded grandchild.runtime |> protocol_ok;
+         assert (Owner.is_loaded grandchild.runtime);
+         assert (not (Owner.is_loaded child.runtime));
+         let after = state child in
+         assert (
+           A.Session_state.Runtime_initialization.equal Ready after.runtime_initialization);
+         assert (
+           List.equal
+             P.Moderator_execution.equal
+             before.moderator_executions
+             after.moderator_executions);
+         assert (Option.equal Jsonaf.exactly_equal before.moderator after.moderator);
+         assert (
+           Option.equal
+             A.Run_source_installation.equal
+             (installation before.run_state)
+             (installation after.run_state));
+         [%test_eq: int] calls !providers))
 ;;
 
 let initialized_restart
@@ -741,7 +862,8 @@ let initialized_restart
           | Attempted _ -> failwith "initialized duplicate recreated runtime authority");
          let saved, builds, calls = stable in
          assert (Jsonaf.exactly_equal saved (document child));
-         [%test_eq: int * int] (builds, calls) (!constructions, !providers)))
+         [%test_eq: int * int] (builds, calls) (!constructions, !providers);
+         captured_native_parent env root daemon child ~providers))
 ;;
 
 let run env (cut : Cut.t) =

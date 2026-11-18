@@ -1,7 +1,7 @@
 {
   "version": 1,
   "sourceRun": "https://github.com/dakotamurphyucf/ochat/actions/runs/38361762906",
-  "metric": "test CPU seconds by Dune directory; scheduling hints only",
+  "metric": "Scheduling hints in seconds. Factory uses measured serial macOS wall time. Other weights use historical test CPU time by Dune directory.",
   "weights": {
     "bin": 1.019,
     "lib": 0.013,
@@ -92,7 +92,7 @@
     "test/dependency_administration": 0.051,
     "test/document_schema": 0.114,
     "test/document_schema_responses": 0.018,
-    "test/factory_catalog_publication": 0.91,
+    "test/factory_catalog_publication": 2340,
     "test/frontend_transcript": 0.441,
     "test/helper_qualification": 270.034,
     "test/history_identity": 0.108,

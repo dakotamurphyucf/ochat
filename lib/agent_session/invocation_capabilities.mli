@@ -20,6 +20,12 @@ type t =
   ; borrow_agent_actor :
       invocation:Agent_protocol.Invocation.t
       -> (Operator_authorization.t option, Agent_protocol.Error.t) result
+  ; policy_caller :
+      invocation:Agent_protocol.Invocation.t
+      -> (Delegated_policy_caller.t, Agent_protocol.Error.t) result
+    (** Opaque view of this SAME actual dispatched owner's original admission,
+        for pre-tool parent policy preparation. No candidate native admission,
+        fresh authentication or effect permission is created. Close after use. *)
   ; allocate_inference : Inference_allocation.Port.t
   ; model_jobs : Model_job_admission.t
   }

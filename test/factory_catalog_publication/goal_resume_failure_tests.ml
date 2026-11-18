@@ -230,6 +230,7 @@ let reopen
       primary
   =
   let old_store = Daemon.store daemon in
+  Uncertain_writer_test_support.close_uncertain_entry entry ~env ~store:old_store;
   (match Daemon.shutdown daemon with
    | Ok () -> ()
    | Error cleanup ->
@@ -485,7 +486,7 @@ let%expect_test "Goal resume retains its command ACK across later root writer un
     "durable unacknowledged root reopens Interrupted with unconfirmed work; retained \
      replay has no effects";
   [%expect
-    {| 
+    {|
     later Administrative write failures retain the command ACK and confirmed original episode
     durable unacknowledged root reopens Interrupted with unconfirmed work; retained replay has no effects
     |}]

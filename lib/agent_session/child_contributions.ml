@@ -361,9 +361,8 @@ let reserved_growth t =
   reserved_growth_of_document t document
 ;;
 
-let validate_capacity t ~current document =
+let validate_capacity_with_growth t document growth =
   let open Result.Let_syntax in
-  let%bind growth = reserved_growth_of_document t current in
   let%bind remaining = Capacity_growth.remaining_limits growth limits in
   let%bind () = D.Document.validate document ~limits:remaining |> domain in
   let%bind measured = Capacity_growth.measure (D.Document.json document) ~limits in
@@ -382,11 +381,35 @@ let validate_capacity t ~current document =
   else Ok ()
 ;;
 
+let validate_capacity t ~current document =
+  let%bind.Result growth = reserved_growth_of_document t current in
+  validate_capacity_with_growth t document growth
+;;
+
+module Export = struct
+  type source = t
+
+  type t =
+    { document : D.Document.t
+    ; capacity : capacity
+    }
+
+  let prepare source =
+    let open Result.Let_syntax in
+    let%bind document = encode_document source in
+    let%bind capacity = capacity_of_document source document in
+    let%map () = validate_capacity_with_growth source document capacity.growth in
+    { document; capacity }
+  ;;
+
+  let document t = t.document
+  let reserved_growth t = t.capacity.growth
+  let required_depth t = t.capacity.required_depth
+end
+
 let to_jsonaf t =
-  let open Result.Let_syntax in
-  let%bind document = encode_document t in
-  let%map () = validate_capacity t ~current:document document in
-  D.Document.json document
+  Result.map (Export.prepare t) ~f:(fun exported ->
+    D.Document.json (Export.document exported))
 ;;
 
 let of_jsonaf raw =

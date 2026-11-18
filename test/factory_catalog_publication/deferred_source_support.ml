@@ -21,7 +21,13 @@ let protect_cleanup = Creation_tests.protect_cleanup
 (* One actual Factory-created runtime, with its own hidden issuer association.
    The loaded resource snapshot is DATA; tests obtain admission only through the
    real Factory/Actor APIs. Every user callback stays inside this joined lifetime. *)
-let with_loaded_entry daemon f =
+let with_loaded_entry
+      ?observe_close
+      ?(before_close = ignore)
+      ?(drive_startup = false)
+      daemon
+      f
+  =
   let factory = Daemon.factory daemon in
   let entry =
     Factory.create_session
@@ -31,6 +37,17 @@ let with_loaded_entry daemon f =
       (create_request ~start_immediately:true ())
     |> protocol_ok
   in
+  let close () =
+    protect_cleanup
+      ~finally:(fun () ->
+        match observe_close with
+        | None -> Agent_server.Session_registry.close_entry entry
+        | Some observe ->
+          let report = Agent_server.Session_registry.close_entry_reported entry in
+          assert (Agent_server.Session_disposal_report.disposed report);
+          observe report)
+      before_close
+  in
   (match
      Agent_server.Session_registry.add
        (Daemon.registry daemon)
@@ -39,9 +56,13 @@ let with_loaded_entry daemon f =
    with
    | Ok () -> ()
    | Error error ->
-     entry.close ();
+     close ();
      raise_s [%sexp (error : P.Error.t)]);
-  protect_cleanup ~finally:entry.close (fun () ->
+  protect_cleanup ~finally:close (fun () ->
+    (* A parked scheduler cannot consume the pending initial lifecycle. Use its
+       exact Factory driver when the caller explicitly owns that scheduling cut. *)
+    if drive_startup
+    then Factory.drain_idle_moderator factory entry |> protocol_ok |> ignore;
     (* Join real startup, including silent factual ACKs, before selecting
     an admission basis. This does not run another lifecycle event. *)
     let rec await_idle () =
@@ -49,6 +70,18 @@ let with_loaded_entry daemon f =
         Actor.with_moderator_checkpoint entry.actor (fun () -> Actor.state entry.actor)
         |> protocol_ok
       in
+      (* A terminal startup failure cannot satisfy the successful-idle predicate.
+         Report it directly instead of spinning until an enclosing deadline. *)
+      Option.iter current.failure ~f:(fun failure ->
+        raise_s [%sexp "source startup failed", (failure : P.Error.t)]);
+      List.iter current.moderator_executions ~f:(fun receipt ->
+        match receipt.P.Moderator_execution.status with
+        | Running | Completed _ -> ()
+        | Failed failure ->
+          raise_s
+            [%sexp "source startup callback failed", (failure : P.Invocation.tool_error)]
+        | Interrupted reason ->
+          raise_s [%sexp "source startup callback interrupted", (reason : string)]);
       match
         ( current.active_operation
         , current.lifecycle.observed

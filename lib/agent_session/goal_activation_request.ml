@@ -22,5 +22,9 @@ let create ~goal_id ~expected_goal_revision ~expected_catalog_revision ~request 
   { request; intent }
 ;;
 
+let with_expected_source t source =
+  { t with intent = Goal_episode_admission.with_expected_source t.intent source }
+;;
+
 let request t = t.request
 let intent t = t.intent

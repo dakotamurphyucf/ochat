@@ -7,6 +7,125 @@ module Manual = Goal_job_runtime_tests
 module Source = Deferred_source_support
 module G = P.Goal
 
+module Replay_diagnostic = struct
+  let fields = function
+    | `Object fields -> fields
+    | _ -> []
+  ;;
+
+  let changed_fields before after =
+    let before = fields (Document_schema.Document.payload before) in
+    let after = fields (Document_schema.Document.payload after) in
+    List.map (before @ after) ~f:fst
+    |> List.dedup_and_sort ~compare:String.compare
+    |> List.filter ~f:(fun key ->
+      not
+        (Option.equal
+           Jsonaf.exactly_equal
+           (List.Assoc.find before ~equal:String.equal key)
+           (List.Assoc.find after ~equal:String.equal key)))
+  ;;
+
+  let delta_kinds document =
+    let payload = fields (Document_schema.Document.payload document) in
+    let kind fields =
+      match List.Assoc.find fields ~equal:String.equal "kind" with
+      | Some (`String kind) -> Some kind
+      | Some _ | None -> None
+    in
+    match List.Assoc.find payload ~equal:String.equal "changes" with
+    | Some (`Array changes) ->
+      List.filter_map changes ~f:(fun change -> kind (fields change))
+    | Some _ | None -> Option.to_list (kind payload)
+  ;;
+
+  let journal_window env entry ~session ~lower ~upper =
+    if Int64.equal lower upper
+    then Ok (0, [])
+    else
+      Result.try_with (fun () ->
+        let transactions =
+          Existing.journal_entries env entry
+          |> List.filter_map ~f:(fun (entry : Agent_store.Journal.entry) ->
+            if Int.equal (Agent_store.Frame.flags entry.frame) 0
+            then (
+              let txn =
+                Agent_store.Transaction.decode (Agent_store.Frame.payload entry.frame)
+                |> Existing.store_ok
+              in
+              Option.some_if
+                (P.Id.Session.equal txn.session_id session
+                 && Int64.(lower < txn.transaction_sequence)
+                 && Int64.(txn.transaction_sequence <= upper))
+                txn)
+            else None)
+          |> List.sort ~compare:(fun (left : Agent_store.Transaction.t) right ->
+            Int64.compare left.transaction_sequence right.transaction_sequence)
+        in
+        let selected =
+          List.take transactions 8
+          |> List.map ~f:(fun txn ->
+            let kinds = delta_kinds txn.delta in
+            let events =
+              List.take txn.durable_events 32
+              |> List.map ~f:(fun document ->
+                A.Durable_event_document.decode
+                  ~limits:Document_schema.Limits.default
+                  document
+                |> Result.ok
+                |> Option.map ~f:(fun event ->
+                  (A.Durable_event_document.value event).kind))
+            in
+            [%sexp
+              { sequence = (txn.transaction_sequence : int64)
+              ; revision = (txn.session_revision : int64)
+              ; hash = (Agent_store.Transaction.hash txn : string)
+              ; total_changes = (List.length kinds : int)
+              ; changes = (List.take kinds 32 : string list)
+              ; event_count = (List.length txn.durable_events : int)
+              ; events : P.Event.Durable.kind option list
+              }])
+        in
+        List.length transactions, selected)
+      |> Result.map_error ~f:(fun _ -> ())
+  ;;
+
+  let assert_same env entry ~before ~before_counts ~counts ~retryable_conflicts =
+    let after = Existing.state entry in
+    let document state = state_document state |> Existing.store_ok in
+    let before_document = document before in
+    let after_document = document after in
+    let before_json = Document_schema.Document.json before_document in
+    let after_json = Document_schema.Document.json after_document in
+    if not (Jsonaf.exactly_equal before_json after_json)
+    then (
+      let after_counts = counts () in
+      let digest json = Chatmd_shell_spec.Source_ref.digest (Jsonaf.to_string json) in
+      let changed = changed_fields before_document after_document in
+      let journal =
+        journal_window
+          env
+          entry
+          ~session:before.identity.session_id
+          ~lower:before.counters.transaction_sequence
+          ~upper:after.counters.transaction_sequence
+      in
+      raise_s
+        [%sexp
+          "completed Goal Job replay changed canonical state"
+        , { before_counters = (before.counters : A.Session_state.Counters.t)
+          ; after_counters = (after.counters : A.Session_state.Counters.t)
+          ; document_digests = ((digest before_json, digest after_json) : string * string)
+          ; changed_field_count = (List.length changed : int)
+          ; changed_fields = (List.take changed 32 : string list)
+          ; before_counts : int * int * int * int
+          ; after_counts : int * int * int * int
+          ; retryable_conflicts : int
+          ; journal : (int * Sexp.t list, unit) Result.t
+          }])
+  ;;
+end
+
 let effect_file = "545-background.effect"
 let effect_text = "545 actual background write"
 
@@ -572,6 +691,14 @@ let run (residency : Residency.t) =
                               failwith "terminal Job delivery lost its actual claim ACK");
                            assert (Option.is_none final.active_operation);
                            let before = Resume.settled_snapshot entry in
+                           let counts () =
+                             ( !(counters.inference_ports)
+                             , !(counters.providers)
+                             , List.length !(counters.transcripts)
+                             , !hits )
+                           in
+                           let before_counts = counts () in
+                           let retryable_conflicts = ref 0 in
                            let wake =
                              match wait.action with
                              | Wait wake -> wake
@@ -587,6 +714,7 @@ let run (residency : Residency.t) =
                              | Error error
                                when P.Error.equal_code Conflict error.code
                                     && error.retryable ->
+                               Int.incr retryable_conflicts;
                                Eio.Fiber.yield ();
                                reject_replay ()
                              | Error error -> raise_s [%sexp (error : P.Error.t)]
@@ -595,7 +723,13 @@ let run (residency : Residency.t) =
                                failwith "completed Job wake replayed its callback"
                            in
                            reject_replay ();
-                           Existing.assert_same before entry);
+                           Replay_diagnostic.assert_same
+                             env
+                             entry
+                             ~before
+                             ~before_counts
+                             ~counts
+                             ~retryable_conflicts:!retryable_conflicts);
                         let stable = Resume.checkpoint entry in
                         let refusal =
                           match

@@ -1,12 +1,13 @@
 # Persistent goals and owned execution
 
-Status: accepted engineering direction with a persistent actor-owned metadata
-catalog, internal authenticated operator commands, immutable episode-association
-planning and actual Run terminal convergence. Authenticated controller execution
-admission, full authored goal workflows and cumulative goal accounting remain
-separate integration work. Existing Run lifecycle, actor receipts, bounded inference accounting
-and continuation scheduling are the foundations. This document does not claim a
-passing authored goal workflow or full context-window rollover support.
+Persistent Goals use an actor-owned catalog, authenticated operator and selected
+native controls, immutable Run episodes, and cumulative Goal accounting.
+[Native Goal requests](../guide/native-goal-metadata.md) describe the authoring
+contract. The [recurring release-note review](../tutorials/goal-recurrence.md)
+shows how an authored Workflow requests completion and how its actual terminal
+Run receipt settles the Goal. [Session lifecycle and recovery](../guide/chatml-session-lifecycle.md)
+covers recovery from saved checkpoints and receipts. Full context-window rollover
+requires a separate context-transition contract.
 
 ## One objective owner
 
@@ -226,10 +227,9 @@ already claimed Jobs use their normal non-execution failure completion. Legacy
 Pending initialization over a retained moderator checkpoint joins `Session_resume`;
 the installed v1 authored path joins its genuine `Session_start`. A first Goal
 cannot be attached before the fresh legacy callback installs its actual source.
-The remaining fresh startup integration must join native Create inside that
-callback to native Start after callback release. Published source metadata cannot
-replace actual installation. Public checked helpers and the complete authored
-integration remain separate work. The [episode and settlement contract](../lib/agent_session/goal_runs.doc.md)
+The authored startup path stages native Create and Start under the actual callback
+owner. Callback release lets the host admit the associated Workflow using its
+actual source installation. The [episode and settlement contract](../lib/agent_session/goal_runs.doc.md)
 details these boundaries. The
 [metadata command contract](../lib/agent_session/goal_catalog.doc.md) specifies the
 16-goal/256-receipt finite retention policy, source/reset/recovery holds and complete

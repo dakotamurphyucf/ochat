@@ -93,10 +93,13 @@ let test env environment =
        | ( Queued
          , 0
          , None
-         , Some { owner = Invocation owner; _ }
+         , Some { owner; _ }
          , Resolved (Pending (Job id, `String "accepted")) ) ->
          F.require
-           (P.Id.Invocation.equal owner invocation.context.id && P.Id.Job.equal id job.id)
+           (P.Job.Birth_parent.equal
+              owner
+              (P.Job.Birth_parent.callback (Invocation invocation.context.id))
+            && P.Id.Job.equal id job.id)
            "job intent and owner outcome disagree"
        | _ -> F.fail "missed the committed intent before launch boundary");
       F.require

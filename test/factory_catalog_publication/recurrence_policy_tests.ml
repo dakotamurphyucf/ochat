@@ -42,8 +42,13 @@ let invoke actor (caps : W.Capabilities.t) dispatch ~raw ~id ~name json =
     }
   in
   assert (dispatch.Dispatch.commit_call request);
-  let run_native implementation ~payload =
-    let output = implementation.Ochat_function.run payload in
+  let run_native native ~payload =
+    let output =
+      Chat_response.Tool_call.Native.run
+        native
+        ~invocation:Ochat_function.Invocation.silent
+        payload
+    in
     (match output with
      | Openai.Responses.Tool_output.Output.Text text ->
        raw := Some (P.Invocation.outcome_of_json (Jsonaf.of_string text) |> protocol_ok)
@@ -90,7 +95,7 @@ let%expect_test "native target disclosure repeats actual host policy after index
                (* Close the actual target, then index its actual durable projection.
                  No replacement owner, source or decoded authority is invented. *)
                let target_id = (state target).identity.session_id in
-               target.close ();
+               Agent_server.Session_registry.close_entry target;
                let removed =
                  Registry.remove (Daemon.registry daemon) target_id |> Option.value_exn
                in

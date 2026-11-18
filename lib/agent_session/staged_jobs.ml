@@ -17,7 +17,11 @@ type 'payload t = 'payload entry list ref
 
 let create () = ref []
 let is_empty t = List.is_empty !t
-let owner entry = Option.map entry.job.launch ~f:(fun launch -> launch.owner)
+
+let owner entry =
+  Option.bind entry.job.launch ~f:(fun launch ->
+    P.Job.Birth_parent.callback_owner launch.owner)
+;;
 
 let owned entry expected =
   Option.exists (owner entry) ~f:(P.Job.equal_launch_owner expected)
@@ -28,6 +32,8 @@ let invalid message = Error (P.Error.invalid_request message)
 let stage t ~job ~payload ~capacity =
   match job.P.Job.launch with
   | None -> invalid "staged job requires an owning launch"
+  | Some launch when Option.is_none (P.Job.Birth_parent.callback_owner launch.owner) ->
+    invalid "staged background job requires a callback owner"
   | Some _ ->
     (match List.exists !t ~f:(fun entry -> P.Id.Job.equal entry.job.id job.id) with
      | true -> invalid "job is already staged"

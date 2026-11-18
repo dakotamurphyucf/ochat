@@ -1,4 +1,4 @@
-(** Immutable explicit operator-decision DATA for the current nonterminal Goal
+(** Immutable explicit Resume decision DATA for the current nonterminal Goal
     episode. It grants no Run, source, constructor or continuation authority and
     never describes a new Run admission. The actual Actor authenticates the
     retained physical binding and both original authorizations separately. *)
@@ -37,4 +37,8 @@ val digest : t -> (string, Error.t) result
 (** Bounded complete immutable request; decoding calls the same constructor. *)
 val to_json : t -> Jsonaf.t
 
+val max_bytes : int
+val max_depth : int
+
+(** Closed request and source objects. Enforces the encoded size and depth above. *)
 val of_json : Jsonaf.t -> (t, Error.t) result

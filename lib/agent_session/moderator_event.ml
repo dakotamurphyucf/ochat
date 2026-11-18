@@ -5,6 +5,7 @@ module M = Chat_response.Moderator_manager
 type claim =
   snapshot:(unit -> (Session.Moderator_state.Identity_snapshot.t, P.Error.t) result)
   -> (executing:P.Moderator_execution.t
+      -> policy_caller:Delegated_policy_caller.t option
       -> model_jobs:Model_job_admission.t
       -> allocate_inference:Inference_allocation.Port.t
       -> retirement_reason:string option
@@ -52,6 +53,7 @@ let run
       claim
         ~snapshot:(fun () -> M.identity_snapshot manager |> Result.map_error ~f:failed)
         (fun ~(executing : P.Moderator_execution.t)
+          ~policy_caller
           ~model_jobs
           ~allocate_inference:_
           ~retirement_reason
@@ -141,6 +143,7 @@ let run
                     match script_tools with
                     | Some script_tools ->
                       Script_tool_calls.with_event
+                        ?policy_caller
                         script_tools
                         ~definition
                         ~execute
@@ -281,6 +284,7 @@ type delegated_claim =
   notifications:(unit -> string list)
   -> snapshot:(unit -> (Session.Moderator_state.Identity_snapshot.t, P.Error.t) result)
   -> (executing:P.Moderator_execution.t
+      -> policy_caller:Delegated_policy_caller.t option
       -> model_jobs:Model_job_admission.t
       -> allocate_inference:Inference_allocation.Port.t
       -> event:Session.Snapshot.t
@@ -337,10 +341,17 @@ let run_delegated
       claim
         ~notifications:(fun () -> !notifications)
         ~snapshot
-        (fun ~executing ~model_jobs ~allocate_inference ~event ~execute ~commit ->
+        (fun ~executing
+          ~policy_caller
+          ~model_jobs
+          ~allocate_inference
+          ~event
+          ~execute
+          ~commit ->
            ran := true;
            f
              ~executing
+             ~policy_caller
              ~model_jobs
              ~allocate_inference
              ~retirement_reason:None
@@ -385,6 +396,13 @@ module Lifecycle = struct
     | Completed
     | Failed of P.Error.t
 
+  module Status = struct
+    type t = state =
+      | Ready
+      | Completed
+      | Failed of P.Error.t
+  end
+
   type t =
     { manager : M.t
     ; event : Chat_response.Moderation.Event.t
@@ -407,6 +425,8 @@ module Lifecycle = struct
     ; state = Atomic.make Ready
     }
   ;;
+
+  let status t = Atomic.get t.state
 
   let pending t =
     match Atomic.get t.state with

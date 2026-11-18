@@ -8,10 +8,26 @@ module A = Agent_session.Session_actor
 let%expect_test
     "foreground native adapter preserves events and revalidates before effects"
   =
-  List.iter [ `Returned; `Raised; `Denied; `Revoked ] ~f:(fun mode ->
+  List.iter [ `Returned; `Raised; `Denied; `Revoked; `Revoked_at_start ] ~f:(fun mode ->
     let calls = ref 0 in
+    let retained_check = ref None in
     let selected =
       native_registry
+        ~on_invocation:(fun invocation ->
+          let current =
+            Ochat_function.Invocation.effect_check invocation |> Option.value_exn
+          in
+          Ochat_function.Invocation.Effect_check.refresh current;
+          Ochat_function.Invocation.Effect_check.check current;
+          let foreign_refused =
+            Stdlib.Domain.spawn (fun () ->
+              match Ochat_function.Invocation.Effect_check.check current with
+              | () -> false
+              | exception Chat_response.Ctx.Effect_rejected _ -> true)
+            |> Stdlib.Domain.join
+          in
+          assert foreign_refused;
+          retained_check := Some current)
         calls
         ~raises:
           (match mode with
@@ -19,6 +35,12 @@ let%expect_test
            | _ -> false)
     in
     let current = ref selected in
+    let revoke () =
+      current
+      := C.select selected ~names:[]
+         |> Result.map_error ~f:(fun error -> error.C.message)
+         |> Result.ok_or_failwith
+    in
     let events = ref [] in
     let finished = ref false in
     let outcome_code = ref "unresolved" in
@@ -31,8 +53,10 @@ let%expect_test
           let reference, invocation = native_context selected invocation in
           caps.commit_invocation_call ~invocation call |> protocol_ok;
           let resolved =
-            N.run_in_driver
-              ~run_native:(fun implementation ~payload ->
+            N.run_in_driver_current
+              ~execution_check:
+                (N.Execution_check.with_local_default N.Execution_check.unavailable)
+              ~run_native:(fun native ~payload ->
                 incr adapted;
                 (match N.current_scope () with
                  | Active active ->
@@ -49,8 +73,14 @@ let%expect_test
                        [ ( reference.name
                          , fun ~invocation:_ _ -> failwith "stale driver table used" )
                        ])
-                  ~runner:implementation.run_with_progress
+                  ~native
                   ~on_fork:None
+                  ~on_execution_event:(function
+                    | Started _ ->
+                      (match mode with
+                       | `Revoked_at_start -> revoke ()
+                       | `Returned | `Raised | `Denied | `Revoked -> ())
+                    | Progress _ | Finished _ | Trace _ -> ())
                   ~on_tool_execution:(fun event ->
                     let name =
                       match event with
@@ -70,20 +100,21 @@ let%expect_test
               ~is_halted:(fun () -> false)
               ~authorize:(fun _ _ ->
                 match mode with
-                | `Returned | `Raised -> Ok ()
+                | `Returned | `Raised | `Revoked_at_start -> Ok ()
                 | `Denied ->
                   Error (Agent_protocol.Error.invalid_request "private policy diagnostic")
                 | `Revoked ->
-                  current
-                  := C.select selected ~names:[]
-                     |> Result.map_error ~f:(fun error -> error.C.message)
-                     |> Result.ok_or_failwith;
+                  revoke ();
                   Ok ())
               ~prepare_output:(function
                 | Text text -> Ok (`String text)
                 | _ -> assert false)
             |> protocol_ok
           in
+          Option.iter !retained_check ~f:(fun current ->
+            match Ochat_function.Invocation.Effect_check.check current with
+            | () -> failwith "admitted check survived actual invocation exit"
+            | exception Chat_response.Ctx.Effect_rejected _ -> ());
           let outcome =
             match resolved.status with
             | Resolved outcome -> outcome
@@ -125,7 +156,7 @@ let%expect_test
          assert_same_session_snapshot state (Agent_session.Memory_backend.state backend);
          print_s
            [%sexp
-             (mode : [ `Returned | `Raised | `Denied | `Revoked ])
+             (mode : [ `Returned | `Raised | `Denied | `Revoked | `Revoked_at_start ])
            , (!outcome_code : string)
            , (!adapted : int)
            , (!calls : int)
@@ -136,6 +167,7 @@ let%expect_test
     (Raised invocation.handler_failed 1 1 (started raised))
     (Denied invocation.permission_denied 0 0 ())
     (Revoked invocation.stale_binding 0 0 ())
+    (Revoked_at_start invocation.stale_binding 1 0 (started raised))
     |}]
 ;;
 

@@ -24,16 +24,18 @@ let actual_run index episode =
   | None | Some _ -> invalid "goal episode lacks its actual retained Workflow"
 ;;
 
-let episode index goal episode =
+let episode_run index goal episode =
   let open Result.Let_syntax in
-  let%bind _ = actual_run index episode in
+  let%bind run = actual_run index episode in
   let%bind () = retained_receipt index (E.admission episode) in
   match Run_state.goal_link index (E.admission episode).run_id with
   | Some link
     when P.Id.Goal.equal (Run_goal_link.goal_id link) (G.id goal)
-         && E.equal (Run_goal_link.episode link) episode -> Ok ()
+         && E.equal (Run_goal_link.episode link) episode -> Ok run
   | None | Some _ -> invalid "goal episode differs from its permanent Run association"
 ;;
+
+let episode index goal episode = Result.map (episode_run index goal episode) ~f:ignore
 
 let settlement index goal proof =
   let open Result.Let_syntax in

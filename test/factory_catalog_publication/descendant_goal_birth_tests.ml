@@ -16,38 +16,45 @@ let on_event ctx state event = Task.pure(state + 1)
 </script>|}
 ;;
 
-let creation_request ?(tools = []) sources =
+let creation_request ?(tools = []) ?(key = "554-native-goal-birth") ?lifetime sources =
   `Object
-    [ "version", `Number "1"
-    ; "root_file", `String "child.chatmd"
-    ; ( "sources"
-      , `Array
-          (List.map sources ~f:(fun (path, text) ->
-             `Object [ "path", `String path; "text", `String text ])) )
-    ; "tools", `Array (List.map tools ~f:(fun name -> `String name))
-    ; "start_immediately", `False
-    ; "idempotency_key", `String "554-native-goal-birth"
-    ]
+    ([ "version", `Number "1"
+     ; "root_file", `String "child.chatmd"
+     ; ( "sources"
+       , `Array
+           (List.map sources ~f:(fun (path, text) ->
+              `Object [ "path", `String path; "text", `String text ])) )
+     ; "tools", `Array (List.map tools ~f:(fun name -> `String name))
+     ; "start_immediately", `False
+     ; "idempotency_key", `String key
+     ]
+     @ Option.to_list
+         (Option.map lifetime ~f:(fun (lifetime : A.Generated_session_request.lifetime) ->
+            ( "lifetime"
+            , `String
+                (match lifetime with
+                 | Owned -> "owned"
+                 | Independent -> "independent") ))))
 ;;
 
-let create_response ?tools sources =
+let create_response ?tools ?key ?lifetime ?(call_id = "554-native-goal-create") sources =
   let open Openai.Responses.Response_stream in
   let call arguments status : Item.t =
     Function_call
       { name = "agent_create"
       ; arguments
-      ; call_id = "554-native-goal-create"
+      ; call_id
       ; _type = "function_call"
-      ; id = Some "554-native-goal-create-item"
+      ; id = Some (call_id ^ "-item")
       ; status
       }
   in
-  let arguments = Jsonaf.to_string (creation_request ?tools sources) in
+  let arguments = Jsonaf.to_string (creation_request ?tools ?key ?lifetime sources) in
   [ Output_item_added
       { item = call "" None; output_index = 0; type_ = "response.output_item.added" }
   ; Function_call_arguments_done
       { arguments
-      ; item_id = "554-native-goal-create-item"
+      ; item_id = call_id ^ "-item"
       ; output_index = 0
       ; type_ = "response.function_call_arguments.done"
       }
@@ -89,6 +96,10 @@ let native_effect_registry calls =
 ;;
 
 let with_native_goal_child
+      ?(parent_prompt_text = Deferred_source_support.prompt_text)
+      ?sources
+      ?chatml_runtime_policy
+      ?independent_lifetime_policy
       ?test_root
       ?timeout
       ?(parent_extra_tools = [])
@@ -102,11 +113,14 @@ let with_native_goal_child
   =
   let first = ref true in
   with_recoverable_fixture
+    ?sources
+    ?chatml_runtime_policy
+    ?independent_lifetime_policy
     ?test_root
     ?timeout
     ~wrap_env
     ~prompt_text:
-      (Deferred_source_support.prompt_text
+      (parent_prompt_text
        ^ String.concat
            (List.map ("agent_create" :: parent_extra_tools) ~f:(fun name ->
               let escaped =
@@ -184,7 +198,7 @@ let with_native_goal_child
          |> protocol_ok
          |> Goal.activated
        in
-       let rec await_created () =
+       let rec await_created ~require_idle () =
          let current = state parent in
          let invocation =
            List.find current.invocations ~f:(fun invocation ->
@@ -192,15 +206,22 @@ let with_native_goal_child
          in
          match invocation with
          | Some { status = Published (Complete value); _ }
-           when Option.is_none current.active_operation -> current, value
+           when (not require_idle) || Option.is_none current.active_operation ->
+           current, value
          | Some { status = Resolved (Fail failure) | Published (Fail failure); _ } ->
            raise_s
              [%sexp "native child creation failed", (failure : P.Invocation.tool_error)]
          | Some _ | None ->
            Eio.Fiber.yield ();
-           await_created ()
+           await_created ~require_idle ()
        in
-       let current, value = within "child creation" await_created in
+       (* Publishing the child and completing the parent's next model response
+          are separate operations. Bound each phase while retaining the exact
+          original publication-plus-quiescence predicate at the final handoff. *)
+       let _ = within "child publication" (await_created ~require_idle:false) in
+       let current, value =
+         within "parent turn completion" (await_created ~require_idle:true)
+       in
        let child_id =
          Jsonaf.member_exn "session_id" value
          |> Jsonaf.string_exn
@@ -256,6 +277,59 @@ let with_native_goal_child
            A.Child_usage_snapshot.Partition.empty);
        [%test_eq: int] 2 !(counters.providers);
        f env sw daemon parent child scope reference counters)
+;;
+
+let assert_management_birth_unrelated env daemon parent ~root ~counters =
+  Actor.with_moderator_checkpoint parent.Registry.actor (fun () -> Ok ()) |> protocol_ok;
+  let before = state parent in
+  assert (G.State.equal (Open Enabled) (G.state (Goal.goal before)));
+  assert (Option.is_some (G.episode (Goal.goal before)));
+  let providers = !(counters.providers) in
+  let definition =
+    Owner.with_loaded_runtime parent.runtime (fun runtime ->
+      Ok
+        (Child_usage_fault_tests.definition env (Agent_store.Data_root.path root) runtime))
+    |> protocol_ok
+  in
+  let sibling =
+    Factory.create_generated_session
+      ~start_immediately:false
+      (Daemon.factory daemon)
+      ~parent_session_id:before.identity.session_id
+      ~idempotency_key:
+        (P.Idempotency_key.of_string "554-ordinary-management-sibling" |> protocol_ok)
+      ~display_name:None
+      definition
+    |> protocol_ok
+  in
+  let sibling_state = state sibling in
+  let reference = Option.value_exn sibling_state.spec.delegation in
+  let record =
+    Delegations.resolve
+      (Agent_store.Session_store.delegations (Daemon.store daemon))
+      reference
+    |> Source_preparation_tests.store_ok
+  in
+  assert (Delegations.equal_stage record.stage Linked);
+  assert (Delegations.Reference.equal reference (Delegations.reference record));
+  assert (Option.equal Origin.equal (Some Origin.unrelated) record.admission.goal_origin);
+  assert (
+    Option.equal
+      Origin.equal
+      (Some Origin.unrelated)
+      (GD.origin (Option.value_exn sibling_state.goal_descendants)));
+  assert (not (Owner.is_loaded sibling.runtime));
+  assert (List.is_empty sibling_state.moderator_executions);
+  let after = state parent in
+  assert (G.equal (Goal.goal before) (Goal.goal after));
+  assert (A.Goal_accounting.equal (Goal.accounting before) (Goal.accounting after));
+  let branches current =
+    GD.branches
+      (Option.value_exn current.A.Session_state.goal_descendants)
+      ~goal_id:Goal.goal_id
+  in
+  assert (List.equal GD.Branch.equal (branches before) (branches after));
+  [%test_eq: int] providers !(counters.providers)
 ;;
 
 let%expect_test
@@ -366,6 +440,7 @@ let%expect_test
        in
        let child_id = (state child).identity.session_id in
        let root = Agent_store.Session_store.data_root (Daemon.store daemon) in
+       assert_management_birth_unrelated env daemon parent ~root ~counters;
        let record_name =
          Delegations.Key.sexp_of_t reference.key
          |> Sexp.to_string_mach

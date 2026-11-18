@@ -292,10 +292,16 @@ let%expect_test
           let persistence : A.Session_actor.persistence =
             { archive_reference
             ; commit =
-                (fun ~command_audit ~previous transition ->
+                (fun ?observation ~command_audit ~previous transition ->
                   if !reject || (!reject_stop && has_stop transition.delta)
                   then fail "definite no-write fixture failure"
-                  else Persistence.commit durable ~command_audit ~previous transition)
+                  else
+                    Persistence.commit
+                      durable
+                      ?observation
+                      ~command_audit
+                      ~previous
+                      transition)
             }
           in
           let actor =

@@ -1,0 +1,8 @@
+<developer>
+<doc src="builtin:goals"/>
+Prepare a release-note review. OChat tracks the review Goal and its accounting.
+</developer>
+<tool name="goal_get"/>
+<tool name="goal_create"/>
+<tool name="goal_start"/>
+<script id="release_review" language="chatml" kind="moderator" api="extensibility-v1" project="chatml.project.json" src="moderator.chatml"/>

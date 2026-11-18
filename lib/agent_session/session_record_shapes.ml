@@ -475,8 +475,12 @@ let moderator_execution =
           ] )
     ; "decision", decision
     ; ( "queue_occurrence"
-      , o [ "source", Run_record_shapes.source; "ordinal", v; "origin", inference_origin ]
-      )
+      , o
+          [ "source", Run_record_shapes.source
+          ; "ordinal", v
+          ; "origin", inference_origin
+          ; "producer", Document_schema.Shape.nullable Queue_producer.shape
+          ] )
     ; ( "intent"
       , tag
           "kind"

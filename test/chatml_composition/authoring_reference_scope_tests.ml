@@ -184,3 +184,105 @@ let%expect_test
   [%expect
     {| overlapping generations and host budgets isolated; nested helper retains owner; duplicate reads coalesce; late borrows and collectors expire |}]
 ;;
+
+let%expect_test "native domains retain independent exact authoring output receipts" =
+  let selected = capabilities () in
+  let fixture name character =
+    let ctx = context selected ("inv_parallel_reference_" ^ name) 1 in
+    let payload = String.make 16_384 character in
+    let encoded =
+      sprintf
+        {| { "name":"%s", "text":"%s\u00e9\"\\", "number":+01.20e+2, "name":"last" } |}
+        name
+        payload
+    in
+    let response =
+      `Object
+        [ "name", `String name
+        ; "text", `String (payload ^ "é\"\\")
+        ; "number", `Number "+01.20e+2"
+        ; "name", `String "last"
+        ]
+    in
+    let identity = String.make 64 'a' in
+    let response_sha256 =
+      Digestif.SHA256.(digest_string (Jsonaf.to_string response) |> to_hex)
+    in
+    let reference =
+      R.create
+        ~query_identity:identity
+        ~host_identity:identity
+        ~capability_fingerprint:ctx.capability_fingerprint
+        ~scope:(R.scope_for ~session_id:ctx.session_id ~generation:ctx.generation)
+        ~surface_id:"tool_v1"
+        ~corpus_identity:identity
+        ~response_sha256
+        ~topics:
+          [ { topic =
+                { id = "fixture.reference"
+                ; document_sha256 = identity
+                ; source = Installed identity
+                ; complete = true
+                }
+            ; total_parts = 1
+            ; parts = [ { index = 0; item_sha256 = identity } ]
+            }
+          ]
+      |> protocol_ok
+    in
+    let invocation =
+      let dispatched =
+        I.create { ctx with input = `Number "01" }
+        |> protocol_ok
+        |> I.dispatch
+        |> protocol_ok
+      in
+      I.resolve
+        dispatched
+        ~authoring_reference:reference
+        ~session_id:ctx.session_id
+        ~generation:ctx.generation
+        (Complete (`String encoded))
+      |> protocol_ok
+    in
+    reference, encoded, invocation, I.Storage.to_json invocation
+  in
+  let left = fixture "left" 'L' in
+  let right = fixture "right" 'R' in
+  let arrived = Atomic.make 0 in
+  let check (_, _, invocation, stored) =
+    ignore (Atomic.fetch_and_add arrived 1 : int);
+    while Atomic.get arrived < 2 do
+      Stdlib.Domain.cpu_relax ()
+    done;
+    for _iteration = 1 to 64 do
+      I.validate invocation |> protocol_ok;
+      let restored = I.Storage.of_json stored |> protocol_ok in
+      assert (Jsonaf.exactly_equal stored (I.Storage.to_json restored))
+    done
+  in
+  let worker = Stdlib.Domain.spawn (fun () -> check right) in
+  Exn.protect ~f:(fun () -> check left) ~finally:(fun () -> Stdlib.Domain.join worker);
+  let left_reference, left_output, _, _ = left in
+  let _, right_output, _, _ = right in
+  assert (not (R.matches_output left_reference (`String right_output)));
+  assert (not (R.matches_output left_reference (`String (left_output ^ " null"))));
+  let number_result value =
+    I.validate_outcome (Complete (`Number value))
+    |> Result.map_error ~f:(fun (error : P.Error.t) -> error.message)
+  in
+  List.iter [ "+01.20e+2"; " \t-0"; "1e-999" ] ~f:(fun number ->
+    [%test_eq: (unit, string) Result.t] (Ok ()) (number_result number));
+  List.iter [ "1_000"; "0x1p-1" ] ~f:(fun number ->
+    [%test_eq: (unit, string) Result.t]
+      (Error "invalid JSON number")
+      (number_result number));
+  List.iter [ "1e999"; "1 " ] ~f:(fun number ->
+    [%test_eq: (unit, string) Result.t]
+      (Error "extension JSON requires finite numbers")
+      (number_result number));
+  print_endline
+    "both domains retained exact authoring receipts through storage and validation";
+  [%expect
+    {| both domains retained exact authoring receipts through storage and validation |}]
+;;

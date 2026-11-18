@@ -147,7 +147,7 @@ let%expect_test "idle moderator tools preserve authority, outcomes and scope lif
              A.with_idle_moderator_observation_tools
                actor
                ~observer
-               (fun ~observing ~capabilities:_ ~execute ~commit ->
+               (fun ~observing ~capabilities:invocation_capabilities ~execute ~commit ->
                   let reference = List.hd_exn (C.references !registry) in
                   let child () =
                     I.create
@@ -182,6 +182,7 @@ let%expect_test "idle moderator tools preserve authority, outcomes and scope lif
                   Agent_session.Script_tool_calls.with_observation
                     tools
                     ~definition
+                    ~capabilities:invocation_capabilities
                     ~execute
                     ~observing
                     (fun call ->
@@ -548,6 +549,145 @@ let%test_unit "compiled moderator Tool.call uses persisted scoped native routing
                    ~output:result.output)
             in
             (Option.value_exn result.commit_output) output;
+            let source_less_success =
+              match mode with
+              | `Success -> not observe_nested
+              | `Custom
+              | `Denied
+              | `Revoked
+              | `Replaced
+              | `Requires_moderator
+              | `Self
+              | `Unknown
+              | `Unselected
+              | `Observation_failed
+              | `Observation_raised
+              | `Invalid
+              | `Disclosure
+              | `Output_limit
+              | `Parent_failed -> false
+            in
+            if source_less_success
+            then (
+              let module S = Agent_session in
+              let module P = Agent_protocol in
+              let saved = S.Session_actor.state actor |> protocol_ok in
+              let parent =
+                match
+                  List.filter saved.invocations ~f:(fun invocation ->
+                    Option.is_none invocation.P.Invocation.context.parent_invocation)
+                with
+                | [ parent ] -> parent
+                | _ -> failwith "actual dispatch did not retain one parent invocation"
+              in
+              assert (Option.is_none parent.observation);
+              (match parent.status with
+               | Published (Complete _) -> ()
+               | Admitted | Dispatching | Resolved _
+               | Published (Pending _ | Fail _ | Cancelled _) ->
+                 failwith "actual source-less parent was not published complete");
+              assert (
+                Option.equal
+                  P.Inference_origin.equal
+                  (Some P.Inference_origin.Unbound)
+                  parent.inference_origin);
+              let queue =
+                S.Moderator_checkpoint.queue saved.moderator
+                |> protocol_ok
+                |> Option.value_exn
+              in
+              let entry =
+                match S.Moderator_queue.entries queue with
+                | [ entry ] -> entry
+                | _ -> failwith "one committed Runtime.emit did not retain one entry"
+              in
+              let _, source =
+                S.Moderator_source_installation.capture saved |> protocol_ok
+              in
+              assert (P.Run_source.equal source (S.Moderator_queue.source queue));
+              (match S.Moderator_queue.Entry.producer entry with
+               | Some (Invocation_at_source { id; source = captured }) ->
+                 assert (P.Id.Invocation.equal id parent.context.id);
+                 assert (P.Run_source.equal captured source)
+               | Some
+                   ( Event _
+                   | Invocation _
+                   | Job_completion _
+                   | Schedule_delivery _
+                   | Source_setup _
+                   | Ingress_delivery _ )
+               | None -> failwith "source-less emit lost its actual producer and source");
+              assert (
+                Option.equal
+                  P.Inference_origin.equal
+                  parent.inference_origin
+                  (S.Moderator_queue.Entry.origin entry));
+              let encode state =
+                S.Session_state_document.authored state
+                |> S.Session_state_document.encode ~limits:document_limits
+              in
+              let document = encode saved |> document_ok in
+              let restored =
+                S.Session_state_document.decode ~limits:document_limits document
+                |> document_ok
+                |> S.Session_state_document.value
+              in
+              assert_same_session_snapshot saved restored;
+              (* Mutate only the new entry, retaining the real receipt, queue
+                 source and complete surrounding State as independent evidence. *)
+              let map_field json name f =
+                match json with
+                | `Object fields ->
+                  assert (List.mem (List.map fields ~f:fst) name ~equal:String.equal);
+                  `Object
+                    (List.map fields ~f:(fun (key, value) ->
+                       key, if String.equal key name then f value else value))
+                | _ -> failwith "expected structured checkpoint field"
+              in
+              let map_entry checkpoint f =
+                map_field checkpoint "queue_provenance" (fun queue ->
+                  map_field queue "entries" (function
+                    | `Array [ entry ] -> `Array [ f entry ]
+                    | _ -> failwith "expected one exact emitted entry"))
+              in
+              let map_source entry f =
+                map_field entry "producer" (fun producer -> map_field producer "source" f)
+              in
+              let checkpoint = Option.value_exn saved.moderator in
+              List.iter
+                [ map_entry checkpoint (fun entry ->
+                    map_source entry (fun source_json ->
+                      map_field source_json "installation_epoch" (fun _ ->
+                        `String (Int64.to_string (Int64.succ source.installation_epoch)))))
+                ; map_entry checkpoint (fun entry ->
+                    map_field entry "origin" (fun _ -> `Null))
+                ]
+                ~f:(fun moderator ->
+                  assert (
+                    Result.is_error (encode { saved with moderator = Some moderator })));
+              let extended =
+                map_entry checkpoint (fun entry ->
+                  map_source entry (function
+                    | `Object fields ->
+                      `Object (fields @ [ "future_source", `Object [ "retained", `True ] ])
+                    | _ -> failwith "expected actual captured source object"))
+              in
+              let extended_document =
+                encode { saved with moderator = Some extended } |> document_ok
+              in
+              let roundtrip =
+                S.Session_state_document.decode ~limits:document_limits extended_document
+                |> document_ok
+                |> S.Session_state_document.encode ~limits:document_limits
+                |> document_ok
+              in
+              assert (
+                Document_schema.Json.equal
+                  (Document_schema.Document.json extended_document)
+                  (Document_schema.Document.json roundtrip));
+              assert_same_session_snapshot
+                saved
+                (S.Session_actor.state actor |> protocol_ok));
             let snapshot =
               Chat_response.Moderator_manager.identity_snapshot manager
               |> Result.ok_or_failwith
@@ -717,12 +857,13 @@ let%test_unit "script call scopes bound attempts and reject escaped or closed pa
         in
         caps.with_moderator_invocation
           ~invocation:parent
-          (fun ~dispatched ~capabilities:_ ~commit ->
+          (fun ~dispatched ~capabilities:invocation_capabilities ~commit ->
              let scope f =
                Agent_session.Script_tool_calls.with_invocation
                  tools
                  ~prepared
                  ~capabilities:caps
+                 ~invocation_capabilities
                  ~parent:dispatched
                  f
              in

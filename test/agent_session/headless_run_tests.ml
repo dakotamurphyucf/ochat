@@ -7,6 +7,8 @@ module Service = Agent_server.Run_start_service
 
 type fixture =
   { actor : A.Session_actor.t
+  ; runtime_owner : Agent_server.Runtime_owner.t
+  ; attachment_id : P.Id.Attachment.t
   ; proof : Operator_authorization.t
   ; principal : P.Principal.t
   ; scope : A.Run_admission.Scope.t
@@ -121,7 +123,7 @@ let with_service
                { pending = (fun () -> A.Moderator_event.Lifecycle.pending lifecycle)
                ; startup_pending =
                    (fun () -> A.Moderator_event.Lifecycle.startup_pending lifecycle)
-               ; run = activate
+               ; run = (fun ?capture_cleanup:_ () -> activate ())
                }
          ; parse_user_content =
              (fun ~id content ->
@@ -158,7 +160,7 @@ let with_service
          ; store_handle = None
          ; expire_permissions = (fun ~now:_ -> ())
          ; collect_results = (fun () -> Ok None)
-         ; close = (fun () -> ())
+         ; close = Agent_server.Session_registry.Entry_close.legacy (fun () -> ())
          }
        in
        let service =
@@ -244,6 +246,8 @@ let with_service
          ~f:(fun () ->
            f
              { actor
+             ; runtime_owner = owner
+             ; attachment_id = attachment.id
              ; proof
              ; principal
              ; scope
@@ -532,7 +536,7 @@ let%expect_test "cancelled queued writer and headless acquisition release actor 
     let make_persistence _env _sw _initial : A.Session_actor.persistence =
       { archive_reference = Fixtures.archive_reference
       ; commit =
-          (fun ~command_audit:_ ~previous:_ _transition ->
+          (fun ?observation:_ ~command_audit:_ ~previous:_ _transition ->
             if !gate
             then (
               gate := false;

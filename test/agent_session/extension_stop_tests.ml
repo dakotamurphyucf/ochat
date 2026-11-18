@@ -98,6 +98,7 @@ let%expect_test
              ~event:Session_start
              ~snapshot:(fun () -> Ok (snapshot ()))
              (fun ~executing
+               ~policy_caller:_
                ~model_jobs:_
                ~allocate_inference:_
                ~retirement_reason:_
@@ -242,6 +243,7 @@ let%expect_test
                     actor
                     ~snapshot:(fun () -> Ok (snapshot ()))
                     (fun ~executing:_
+                      ~policy_caller:_
                       ~model_jobs:_
                       ~allocate_inference:_
                       ~retirement_reason:_

@@ -20,7 +20,7 @@ let prepare (job : Agent_protocol.Job.t) ~session_id ~generation ~origin =
       P.Id.Session.equal job.session_id session_id
       && Int.equal job.generation generation
       && (match job.kind, job.status, job.retry_policy, job.delivery with
-          | Model_call, Queued, Never, (Pending | Not_required) -> true
+          | Model_call, Queued, (Never | Safe_retry _), (Pending | Not_required) -> true
           | _, _, _, _ -> false)
       && Int.equal job.attempt 0
       && Option.is_none job.started_at
@@ -36,6 +36,7 @@ let prepare (job : Agent_protocol.Job.t) ~session_id ~generation ~origin =
         (P.Error.invalid_request
            "model admission requires a fresh unclassified queued recipe Job")
   in
+  let%bind _ = P.Job.retry_of_json (P.Job.retry_to_json job.retry_policy) in
   let%map () = P.Job.validate_result job in
   { job with inference_origin = Some origin }
 ;;

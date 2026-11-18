@@ -13,6 +13,7 @@ module Services = struct
     ; schedules : schedules
     ; execute : Native_tool_invocation.executor
     ; executing : Agent_protocol.Moderator_execution.t
+    ; policy_caller : unit -> (Delegated_policy_caller.t, Agent_protocol.Error.t) result
     ; check_current : unit -> (unit, Agent_protocol.Error.t) result
     ; is_halted : unit -> bool
     ; checkpoint : unit -> (Jsonaf.t option, Agent_protocol.Error.t) result
@@ -80,6 +81,7 @@ let run
               Script_tool_calls.with_lifecycle script_tools ~is_halted:services.is_halted
             in
             Script_tool_calls.with_legacy_event
+              ~capture_caller:services.policy_caller
               scoped_tools
               ~selected
               ~execute:services.execute

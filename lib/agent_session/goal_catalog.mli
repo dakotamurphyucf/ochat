@@ -11,6 +11,16 @@ val find : t -> Agent_protocol.Id.Goal.t -> Agent_protocol.Goal.t option
 val document : t -> Agent_protocol.Id.Goal.t -> Goal_document.t option
 val receipts : t -> Goal_command_receipt.t list
 
+(** Hard catalog bounds for an advisory read or a fresh commit. A new Goal
+    needs a [has_goal_slot], and fresh metadata and Resume need a
+    [has_command_slot]. All fresh catalog transitions need revision capacity.
+    The transition still checks its actual preserved document and remaining
+    reserved revision headroom. Retained lookups do not consume capacity. *)
+val has_goal_slot : t -> bool
+
+val has_command_slot : t -> bool
+val can_advance_revision : t -> bool
+
 val receipt
   :  t
   -> principal_id:Agent_protocol.Id.Principal.t

@@ -41,6 +41,11 @@ module Non_history = struct
     | Session_list _
     | Session_configuration_get _
     | Session_configuration_update _
+    | Instructions _
+    | Goal_query _
+    | Goal_control _
+    | Recurrence_query _
+    | Recurrence_control _
     | Session_inference_summary _
     | Session_inference_observations _
     | Session_detach _

@@ -297,7 +297,7 @@ let%expect_test
            , (O.Transport_selection.fallback actual
               : O.Transport_selection.fallback_reason option)]
        | _ -> assert false);
-      runtime.close ();
+      B.close runtime;
       print_s [%sexp (!opened : int), (!closed : int)];
       match Inference_client.Execution.run execution ~sw ~request ~on_event:ignore with
       | Error error -> print_s [%sexp (error : Inference_client.Error.t)]

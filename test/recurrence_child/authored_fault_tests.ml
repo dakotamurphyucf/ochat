@@ -6,10 +6,20 @@ module Held = Actor.Held_run
 module Res = Openai.Responses
 
 module Ack_cut = struct
+  type lifecycle =
+    | Extension
+    | Legacy
+  [@@deriving sexp_of]
+
   type t =
     | First_lifecycle
-    | Final_aggregate
+    | Final_aggregate of lifecycle
   [@@deriving sexp_of]
+
+  let authored_case = function
+    | First_lifecycle | Final_aggregate Extension -> Fixtures.Authored_case.V1_children
+    | Final_aggregate Legacy -> Fixtures.Authored_case.Legacy_empty
+  ;;
 end
 
 let rec atoms = function
@@ -34,7 +44,7 @@ let selected_candidate
     match cut, delta with
     | First_lifecycle, Lifecycle_changed { desired = Running; observed = Starting } ->
       true
-    | Final_aggregate, Run_state_changed index ->
+    | Final_aggregate _, Run_state_changed index ->
       (match A.Run_state.find index admission.run_id with
        | Some run ->
          P.Id.Session.equal (P.Session_ref.session_id run.session) session
@@ -130,6 +140,40 @@ let assert_unconfirmed_run child held ~intent ~attempt =
   current, run
 ;;
 
+let assert_completed_startup (current : A.Session_state.t) (run : P.Run.t) =
+  let startup =
+    match
+      List.filter current.moderator_executions ~f:(fun receipt ->
+        P.Moderator_execution.equal_phase receipt.context.phase Session_start)
+    with
+    | [ receipt ] -> receipt
+    | receipts -> raise_s [%sexp (receipts : P.Moderator_execution.t list)]
+  in
+  (match startup.status with
+   | Completed _ -> ()
+   | _ -> raise_s [%sexp (startup : P.Moderator_execution.t)]);
+  assert (P.Id.Session.equal startup.context.session_id current.identity.session_id);
+  assert (P.Invocation.equal_observer startup.context.source run.source.observer);
+  [%test_eq: int] run.source.generation startup.context.generation;
+  startup
+;;
+
+let assert_completed_legacy (current : A.Session_state.t) (run : P.Run.t) =
+  let startup = assert_completed_startup current run in
+  assert (Option.is_none startup.context.operation_id);
+  assert (Option.is_none startup.context.job);
+  let snapshot =
+    A.Moderator_checkpoint.decode current.moderator |> protocol_ok |> Option.value_exn
+  in
+  (* Legacy_empty increments once at its original startup checkpoint. *)
+  (match snapshot.current_state with
+   | Int 1 -> ()
+   | state -> raise_s [%sexp (state : Session.Snapshot.t)]);
+  assert (List.is_empty current.jobs);
+  assert (List.is_empty current.invocations);
+  assert (List.is_empty run.terminal_work)
+;;
+
 let assert_completed_children child held (current : A.Session_state.t) (run : P.Run.t) =
   [%test_eq: int] 2 (List.length current.jobs);
   List.iter current.jobs ~f:(fun job ->
@@ -151,19 +195,7 @@ let assert_completed_children child held (current : A.Session_state.t) (run : P.
     with
     | [ proof ] -> assert (P.Run_work.Terminal.equal_outcome proof.outcome Succeeded)
     | proofs -> raise_s [%sexp (proofs : P.Run_work.Terminal.t list)]);
-  let startup =
-    match
-      List.filter current.moderator_executions ~f:(fun receipt ->
-        P.Moderator_execution.equal_phase receipt.context.phase Session_start)
-    with
-    | [ receipt ] -> receipt
-    | receipts -> raise_s [%sexp (receipts : P.Moderator_execution.t list)]
-  in
-  (match startup.status with
-   | Completed _ -> ()
-   | _ -> raise_s [%sexp (startup : P.Moderator_execution.t)]);
-  assert (P.Invocation.equal_observer startup.context.source run.source.observer);
-  [%test_eq: int] run.source.generation startup.context.generation;
+  let startup = assert_completed_startup current run in
   [%test_eq: int] 2 (List.length current.invocations);
   List.iter current.invocations ~f:(fun invocation ->
     assert (
@@ -208,8 +240,7 @@ let initial_state = 0
 let on_event ctx state event = Task.pure(state)
 </script>|}
                )
-             ; ( child_prompt
-               , Fixtures.Authored_case.prompt Fixtures.Authored_case.V1_children )
+             ; child_prompt, Fixtures.Authored_case.prompt (Ack_cut.authored_case cut)
              ; ( Filename.concat root "activation-recipe.chatmd"
                , "<developer>520_CONSTRUCTOR_RECIPE. Return the offline fixture \
                   response.</developer>" )
@@ -284,9 +315,9 @@ let on_event ctx state event = Task.pure(state)
                          true)
                      in
                      let confirmed = ref None in
-                     let child =
+                     let source_scope =
                        with_planner env sw daemon parent (fun () ->
-                         Fixtures.with_cold_held
+                         Fixtures.with_cold_held_result
                            ~catalog_target:true
                            env
                            daemon
@@ -347,7 +378,7 @@ let on_event ctx state event = Task.pure(state)
                                  assert (List.is_empty current.invocations);
                                  assert (List.is_empty current.moderator_executions);
                                  assert (List.is_empty run.terminal_work)
-                               | Final_aggregate ->
+                               | Final_aggregate lifecycle ->
                                  assert (
                                    P.Session.equal_desired_state
                                      current.lifecycle.desired
@@ -356,10 +387,17 @@ let on_event ctx state event = Task.pure(state)
                                   | Idle -> ()
                                   | observed ->
                                     raise_s [%sexp (observed : P.Session.observed_state)]);
-                                 [%test_eq: int]
-                                   (snd before_counts + 3)
-                                   !(counters.providers);
-                                 assert_completed_children child held current run);
+                                 (match lifecycle with
+                                  | Extension ->
+                                    [%test_eq: int]
+                                      (snd before_counts + 3)
+                                      !(counters.providers);
+                                    assert_completed_children child held current run
+                                  | Legacy ->
+                                    [%test_eq: int]
+                                      (snd before_counts)
+                                      !(counters.providers);
+                                    assert_completed_legacy current run));
                               let stable_counts =
                                 !(counters.constructions), !(counters.providers)
                               in
@@ -384,27 +422,61 @@ let on_event ctx state event = Task.pure(state)
                                 Jsonaf.exactly_equal
                                   (state_json current)
                                   (state_json (state child)));
-                              confirmed := Some current;
-                              Ok child))
+                              confirmed
+                              := Some
+                                   ( child
+                                   , current
+                                   , stable_counts
+                                   , preserve_durable_bytes env child );
+                              Ok ()))
                      in
                      (* Failed sync poisons the writer. Later interruption/observer
                         cleanup cannot ACK; do not claim absent bytes, rollback,
                         terminal interruption or observed native delivery. *)
+                     let child, current, counts, check_bytes =
+                       Option.value_exn !confirmed
+                     in
+                     let original_end =
+                       match source_scope with
+                       | Ok () ->
+                         failwith "uncertain startup reported successful source cleanup"
+                       | Error failure ->
+                         [%test_eq: P.Error.code] Persistence_error failure.code;
+                         failure
+                     in
+                     check_bytes ();
+                     let disposal = Owner.close_and_wait_reported child.runtime in
+                     (match Owner.Disposal_report.disposition disposal with
+                      | Joined -> ()
+                      | Retained ->
+                        failwith "uncertain authored startup retained physical custody");
+                     assert (
+                       List.exists (Owner.Disposal_report.failures disposal) ~f:(function
+                         | Protocol error -> phys_equal error original_end
+                         | Raised _ -> false));
                      assert (not (Owner.is_loaded child.runtime));
                      assert (
                        Jsonaf.exactly_equal
-                         (state_json (Option.value_exn !confirmed))
+                         (state_json current)
                          (state_json (state child)));
-                     Fixtures.assert_saved_child env child)))))
+                     assert (Actor.is_startup_disposal_only child.actor);
+                     assert (
+                       phys_equal disposal (Owner.close_and_wait_reported child.runtime));
+                     close_uncertain_entry env child;
+                     check_bytes ();
+                     [%test_eq: int * int]
+                       counts
+                       (!(counters.constructions), !(counters.providers)))))))
 ;;
 
-let%test_unit "held authored first and final ACK failures retain only confirmed truth" =
-  List.iter
-    Ack_cut.[ First_lifecycle; Final_aggregate ]
-    ~f:(fun cut ->
-      try run cut with
-      | exn ->
-        Exn.reraise
-          exn
-          (Sexp.to_string_hum [%sexp "held authored writer fault", (cut : Ack_cut.t)]))
+let%test_unit "held authored first lifecycle ACK failure retains confirmed truth" =
+  run First_lifecycle
+;;
+
+let%test_unit "held authored final aggregate ACK failure retains confirmed truth" =
+  run (Final_aggregate Extension)
+;;
+
+let%test_unit "held legacy authored final aggregate releases quiescent custody" =
+  run (Final_aggregate Legacy)
 ;;

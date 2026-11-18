@@ -660,7 +660,7 @@ let snapshot_files environment fixture session =
   |> List.filter ~f:(String.is_prefix ~prefix:"snapshot-")
 ;;
 
-let advance_snapshots environment fixture connection session =
+let advance_snapshots env environment fixture connection session =
   let before = snapshot_files environment fixture session in
   require (not (List.is_empty before)) "archive fixture has no ordinary snapshot";
   for index = 1 to 12 do
@@ -676,11 +676,18 @@ let advance_snapshots environment fixture connection session =
        |> mutation_session
        : Agent_protocol.Session.t)
   done;
-  let after = snapshot_files environment fixture session in
-  require (List.length after <= 2) "ordinary snapshot pruning did not run";
-  require
-    (not (List.exists before ~f:(fun name -> List.mem after name ~equal:String.equal)))
-    "ordinary snapshots from before administration were not pruned"
+  (* The writer requests retention after publishing a snapshot. The separate
+     worker can prune only after the last administrative operation releases it. *)
+  let rec await_pruned () =
+    let after = snapshot_files environment fixture session in
+    match after with
+    | [ _; _ ] when not (List.exists before ~f:(List.mem after ~equal:String.equal)) ->
+      ()
+    | _ ->
+      Eio.Time.sleep (Eio.Stdenv.clock env) 0.05;
+      await_pruned ()
+  in
+  Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. await_pruned
 ;;
 
 let check_admin_archive_restart env environment fixture session history prefix =
@@ -732,7 +739,7 @@ let test_reset env environment =
         session
         session.revision
         connection;
-      advance_snapshots environment fixture connection session;
+      advance_snapshots env environment fixture connection session;
       require_archive connection session session.revision history;
       session, history)
   in
@@ -780,7 +787,7 @@ let test_rebuild env environment =
         (not (String.is_substring actual ~substring:"administration revision A"))
         "rebuild kept obsolete prompt messages";
       require_archive connection session session.revision history;
-      advance_snapshots environment fixture connection session;
+      advance_snapshots env environment fixture connection session;
       require_archive connection session session.revision history;
       session, history)
   in

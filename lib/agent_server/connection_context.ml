@@ -36,8 +36,9 @@ type t =
   ; mutable authoring_closed : bool
   ; mutable developer_event_failure : (exn * Stdlib.Printexc.raw_backtrace) option
   ; mutable reserved_attachments : int
-  ; mutable attachments :
+  ; attachments :
       (Agent_protocol.Id.Attachment.t, Agent_protocol.Session.Attachment.t) Map.Poly.t
+        Atomic.t
   }
 
 let create_authenticated
@@ -64,7 +65,7 @@ let create_authenticated
   ; authoring_closed = false
   ; developer_event_failure = None
   ; reserved_attachments = 0
-  ; attachments = Map.Poly.empty
+  ; attachments = Atomic.make Map.Poly.empty
   }
 ;;
 
@@ -183,7 +184,7 @@ let attachment_limit_error () =
 
 let reserve_attachment t =
   Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
-    if Map.length t.attachments + t.reserved_attachments >= t.max_attachments
+    if Map.length (Atomic.get t.attachments) + t.reserved_attachments >= t.max_attachments
     then Error (attachment_limit_error ())
     else (
       t.reserved_attachments <- t.reserved_attachments + 1;
@@ -202,31 +203,32 @@ let register_reserved_attachment t attachment =
     if t.reserved_attachments <= 0
     then invalid_arg "connection attachment registration has no reservation";
     t.reserved_attachments <- t.reserved_attachments - 1;
-    t.attachments
-    <- Map.set
-         t.attachments
+    Atomic.set
+      t.attachments
+      (Map.set
+         (Atomic.get t.attachments)
          ~key:attachment.Agent_protocol.Session.Attachment.id
-         ~data:attachment)
+         ~data:attachment))
 ;;
 
 let remove_attachment t attachment_id =
   Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
-    t.attachments <- Map.remove t.attachments attachment_id)
+    Atomic.set t.attachments (Map.remove (Atomic.get t.attachments) attachment_id))
 ;;
 
 let remove_session_attachments t session_id =
   Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
-    t.attachments
-    <- Map.filter t.attachments ~f:(fun attachment ->
-         Agent_protocol.Id.Session.compare attachment.session_id session_id <> 0))
+    Atomic.set
+      t.attachments
+      (Map.filter (Atomic.get t.attachments) ~f:(fun attachment ->
+         not (Agent_protocol.Id.Session.equal attachment.session_id session_id))))
 ;;
 
 let owns_attachment t ~session_id ~attachment_id =
-  Eio.Mutex.use_ro t.mutex (fun () ->
-    Map.find t.attachments attachment_id
-    |> Option.exists ~f:(fun attachment ->
-      Agent_protocol.Id.Session.compare attachment.session_id session_id = 0))
+  Map.find (Atomic.get t.attachments) attachment_id
+  |> Option.exists ~f:(fun attachment ->
+    Agent_protocol.Id.Session.equal attachment.session_id session_id)
 ;;
 
-let attachments t = Eio.Mutex.use_ro t.mutex (fun () -> Map.data t.attachments)
+let attachments t = Map.data (Atomic.get t.attachments)
 let publish_notification t envelope = t.publish_notification envelope

@@ -6,6 +6,7 @@ Select only the native tools that the authored workflow needs:
 <tool name="goal_get"/>
 <tool name="goal_create"/>
 <tool name="goal_start"/>
+<tool name="goal_resume"/>
 <tool name="goal_objective"/>
 <tool name="goal_progress"/>
 <tool name="goal_hold"/>
@@ -26,7 +27,10 @@ Call `goal_get` with `{"goal_id":null}` for all retained Goals, or with an actua
 Goal ID string to select one. The `goal_id` field is required, including for the
 all-Goals request. The result has `session`, `generation`, `catalog_revision`,
 `source` and `goals`. Each row contains the canonical `goal` and either its
-canonical `accounting` projection or null when no account exists.
+canonical `accounting` projection or null when no account exists. The row also
+contains `current_run` with `run_id` and decimal-string `revision` when its open
+Goal has a nonterminal Workflow on the unchanged installed source. Otherwise
+`current_run` is null. This field is an observation for optimistic concurrency.
 
 Generation and revision fields at the top level are canonical nonnegative decimal
 strings. `source` is the actual Run source object, whose own generation remains
@@ -39,6 +43,40 @@ canonical usage representation. Missing or unknown usage is not zero. The Goal
 contains its actual budget, objective, progress, state and episode attribution.
 Get returns at most the bounded sixteen-entry catalog, not the raw Session state,
 provider records, runtime handles or command receipt history.
+
+## Read Goal usage and pending work
+
+Each row's `accounting` describes its local Goal account. Read `governance`
+to see the usage and admission counts attributed to the Goal across work
+scopes. Both fields are null when the Goal has no retained account.
+
+- `admitted_attempts` and `admitted_turns` count committed admissions. Attempts
+  include local, physical descendant and causal policy work. Turns include
+  local and physical descendant host turns.
+- `pending_attempts` and `pending_turns` count outstanding reservations
+  separately. A pending reservation can occupy budget capacity before an
+  admission commits. All four counts are decimal strings.
+- `local_usage` is the usage in `accounting.usage`. `physical_usage` is usage
+  attributed through the Goal's delegated descendants. `causal_usage` is usage
+  attributed through policy calls, including eligible calls executed in the
+  Goal's own session. `total_usage` already combines these disjoint partitions
+  component by component.
+
+Use `physical_unknown` to identify incomplete descendant usage coverage and
+`historical_causal_unknown` to identify incomplete policy-call history. Even
+with both flags clear, an individual token component can have unknown usage.
+Each component reports `actual` and `estimated` sums with their attempt counts,
+`unknown` counts by reason, and `untracked_attempts`. A sum with
+`"kind":"overflow"` has a null amount. Preserve those labels and the
+`mixed_estimators` flag when reporting estimates.
+
+For example, `admitted_attempts` of `"3"` and `pending_attempts` of `"1"`
+represent three recorded admissions and one outstanding reservation. If
+`total_usage.output.actual.amount` is `"0"`, check `actual_attempts`,
+`estimated_attempts`, `unknown` and `untracked_attempts` before describing
+the output usage. A zero sum with zero actual attempts contains no measured
+output values. If `physical_unknown` is true, describe the descendant
+coverage as incomplete and the overall totals as recorded work only.
 
 ## Stage a held Goal
 
@@ -168,6 +206,30 @@ let stage_created_goal goal_id input key =
     {key = "key"; value = key}
   ]))
 ```
+
+## Resume a held episode
+
+Select `goal_resume` to continue the same held nonterminal Workflow episode.
+Read the selected Goal with `goal_get`. Take `run_id` and
+`expected_run_revision` from `current_run.run_id` and `current_run.revision` in
+that row. Use the same row's Goal ID and revision and the same read's session,
+generation, catalog revision and source. The episode's embedded Admission
+revision is historical. If `current_run` or the source is null, leave the episode
+held.
+
+The request has exactly `kind` (`goal_resume_episode_v1`), `session_id`,
+`generation`, `goal_id`, `run_id`, `source`, `expected_goal_revision`,
+`expected_catalog_revision`, `expected_run_revision` and `key`. The top-level
+generation and expected revisions are canonical decimal strings. Copy the exact
+source object, including its JSON integer generation and installation epoch.
+Retry the identical full request with the same key.
+
+Native Resume cannot clear an operator pause. A terminal predecessor requires
+Start for a new episode. The response `{"staged":true,"effect":"goal_resume"}`
+reports local staging. After the owning callback commits and its source leases
+join, the schedule host can continue the original Run. An accepted Invocation,
+a command receipt and completed work are distinct observations. A stopped or
+unavailable host can leave continuation pending.
 
 ## Edit or control the observed Goal
 

@@ -63,7 +63,7 @@ let assert_captured_source env daemon (child : Registry.entry) =
                 Result.is_error
                   (A.Runtime_builder.Source.validate_target source (state parent)));
               Ok ()
-            | Authored _ | Authored_child _ | Generated _ ->
+            | Authored _ | Authored_child _ | Generated _ | Generated_artifact _ ->
               failwith "captured recurrence source lost its real admission")
        |> protocol_ok);
   assert (not (Agent_server.Runtime_owner.is_loaded child.runtime));
@@ -109,7 +109,7 @@ let on_event ctx state event = Task.pure(state)
                    T.initialize connection;
                    let created, _ = T.create_session ~start_immediately:true connection in
                    let parent = loaded daemon created.id in
-                   await_ready env parent |> ignore;
+                   start_parent_settled env sw connection parent;
                    let handle =
                      Agent_client.Session_handle.attach
                        ~sw
@@ -120,16 +120,20 @@ let on_event ctx state event = Task.pure(state)
                        ()
                      |> protocol_ok
                    in
-                   protect_cleanup
-                     ~finally:(fun () -> Agent_client.Session_handle.close handle)
-                     (fun () ->
-                        Agent_client.Session_handle.stop handle ~mode:Cancel
-                        |> protocol_ok
-                        |> ignore;
-                        Agent_client.Session_handle.start handle ~queue_if_limited:false
-                        |> protocol_ok
-                        |> ignore);
-                   let before = await_ready env parent in
+                   let before =
+                     protect_cleanup
+                       ~finally:(fun () -> Agent_client.Session_handle.close handle)
+                       (fun () ->
+                          Agent_client.Session_handle.stop handle ~mode:Cancel
+                          |> protocol_ok
+                          |> ignore;
+                          (* Join the restart callback before capturing the parent snapshot. *)
+                          let previous = moderator_execution_ids (state parent) in
+                          Agent_client.Session_handle.start handle ~queue_if_limited:false
+                          |> protocol_ok
+                          |> ignore;
+                          await_parent_start_settled env parent ~previous)
+                   in
                    assert (Int64.(before.stop_epoch > 0L));
                    with_planner env sw daemon parent (fun () ->
                      let captured = target env daemon parent ~root_file:prompt in

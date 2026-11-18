@@ -434,7 +434,7 @@ let%expect_test
         }]);
   [%expect
     {|
-    ((schema 27)
+    ((schema 29)
      (recovered
       ((mex_failed failed) (mex_pending completed.pending)
        (mex_running interrupted) (mex_waiting completed.waiting_compaction)))
@@ -736,7 +736,7 @@ let%expect_test
          : bool)]);
   [%expect
     {|
-    ((version 27) (records 0))
+    ((version 29) (records 0))
     true
     true
     true
@@ -1099,7 +1099,7 @@ let%expect_test "named compaction archives admit typed state and preserve captur
           }];
       Agent_store.Session_store.close_session store handle |> store_ok;
       Agent_store.Session_store.close store |> store_ok));
-  [%expect {| ((version 27) (records 0)) |}]
+  [%expect {| ((version 29) (records 0)) |}]
 ;;
 
 let%expect_test
@@ -1302,7 +1302,7 @@ let%expect_test "named invocation snapshots preserve pending publication" =
         ((List.hd_exn restored.invocations).status : Agent_protocol.Invocation.status)]);
   [%expect
     {|
-    ((version 27) (invocations 1) (subscriptions 0) (deliveries 0))
+    ((version 29) (invocations 1) (subscriptions 0) (deliveries 0))
     (Resolved (Complete Null))
     |}]
 ;;
@@ -1329,7 +1329,7 @@ let%expect_test
           ~persistence:
             { archive_reference
             ; commit =
-                (fun ~command_audit:_ ~previous:_ _ ->
+                (fun ?observation:_ ~command_audit:_ ~previous:_ _ ->
                   if !fail_commit
                   then
                     Error

@@ -503,13 +503,16 @@ let%expect_test "idle observations own state without starting a model operation"
                Agent_protocol.History.equal_entry
                initial.conversation.canonical_history
                state.conversation.canonical_history);
-           assert (
-             Option.equal
-               Jsonaf.exactly_equal
-               state.moderator
-               (Some
-                  (Agent_session.Runtime_builder.encode_moderator_snapshot
-                     (M.identity_snapshot manager |> Result.ok_or_failwith))));
+           let metadata =
+             assert_moderator_checkpoint
+               state
+               ~snapshot:(M.identity_snapshot manager |> Result.ok_or_failwith)
+           in
+           assert_moderator_queue_frontier
+             metadata
+             ~required:(count > 0)
+             ~head:0L
+             ~next:0L;
            assert_same_session_snapshot state (Agent_session.Memory_backend.state backend);
            let mode =
              match mode with

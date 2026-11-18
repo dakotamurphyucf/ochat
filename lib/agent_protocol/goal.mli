@@ -22,6 +22,9 @@ module Hold : sig
     | Deadline_reached
     | Source_review
   [@@deriving equal, sexp_of]
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
 end
 
 module Closure : sig

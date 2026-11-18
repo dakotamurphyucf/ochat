@@ -72,9 +72,10 @@ val reclaim_token : t -> string option
 val projection : t -> Projection.t
 val last_error : t -> Agent_protocol.Error.t option
 
-(** Closure means notification/renewal reduction has stopped; a stream error
-    retains a stale snapshot and requires repair. This does not mean the server
-    attachment was detached. [close] still attempts detach exactly once. *)
+(** An explicit close releases a blocked notification reader and preserves its
+    last projection and error. Unexpected stream closure records an error and
+    marks the projection stale. [close] attempts server detach once, including
+    for a handle already closed by a stream error. *)
 val await_closed : t -> unit
 
 val is_closed : t -> bool
@@ -252,6 +253,17 @@ val update_metadata
 val configuration
   :  t
   -> (Agent_protocol.Session_configuration.t, Agent_protocol.Error.t) Result.t
+
+(** Explicit authorized instruction identity/control requests. This bound view
+    has no local selection mirror; activation/removal retain caller-supplied
+    keys for exact lost-reply retry. Refresh is discovery-only. *)
+val instructions : t -> Instruction_controls.t
+
+(** Authorized Goal operator calls bound to this handle's current attachment.
+    Take a fresh Goal view after attaching before constructing a new control. *)
+val goals : t -> (Goal_controls.t, Agent_protocol.Error.t) result
+
+val recurrences : t -> (Recurrence_controls.t, Agent_protocol.Error.t) result
 
 val update_configuration
   :  t

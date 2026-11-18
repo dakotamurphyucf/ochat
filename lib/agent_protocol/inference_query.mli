@@ -89,6 +89,9 @@ module Metric : sig
     -> mixed_estimators:bool
     -> unknown:unknown_counts
     -> (t, Error.t) Result.t
+
+  (** Number of actual, estimated and provider-reported unknown contributions. *)
+  val count : t -> (int64, Error.t) Result.t
 end
 
 module Summary : sig
@@ -123,6 +126,9 @@ module Summary : sig
     -> accounting_revision:int64
     -> (t, Error.t) Result.t
 
+  val component_metrics : components -> Metric.t list
+  val components_to_json : components -> Jsonaf.t
+  val components_of_json : Jsonaf.t -> (components, Error.t) Result.t
   val retained_attempts : t -> int64
   val turns : t -> turns
   val components : t -> components

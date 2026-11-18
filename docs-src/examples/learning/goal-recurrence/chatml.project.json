@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "namespace": "ochat.examples.goal-recurrence",
+  "dependencies": {
+    "goals": {
+      "source": { "kind": "local", "path": "../../libraries/goal-requests" },
+      "project": "chatml.project.json",
+      "environment": "pure"
+    },
+    "recurrence": {
+      "source": { "kind": "local", "path": "../../libraries/recurrence-requests" },
+      "project": "chatml.project.json",
+      "environment": "pure"
+    },
+    "instructions": {
+      "source": { "kind": "local", "path": "../../libraries/instruction-requests" },
+      "project": "chatml.project.json",
+      "environment": "pure"
+    },
+    "lifecycle": {
+      "source": { "kind": "local", "path": "../../libraries/lifecycle" },
+      "project": "chatml.project.json",
+      "environment": "pure"
+    },
+    "lifecycle_run": {
+      "source": { "kind": "local", "path": "../../libraries/lifecycle-run" },
+      "project": "chatml.project.json",
+      "environment": "moderator"
+    }
+  },
+  "environments": {
+    "default": {
+      "modules": {
+        "Goal_requests": "goals.Goal_requests",
+        "Recurrence_requests": "recurrence.Recurrence_requests",
+        "Instruction_requests": "instructions.Instruction_requests",
+        "Lifecycle": "lifecycle.Lifecycle",
+        "Lifecycle_run": "lifecycle_run.Lifecycle_run"
+      },
+      "requires": { "targets": ["moderator_v1"] }
+    }
+  }
+}

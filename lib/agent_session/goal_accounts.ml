@@ -107,7 +107,7 @@ let projection_shape =
     ]
 ;;
 
-let codec =
+let codec_for ~validate ~decode ~encode =
   match
     D.Domain_codec.create_validated
       ~version:1
@@ -115,13 +115,65 @@ let codec =
       ~kind:"ochat.goal_accounts"
       ~shape:projection_shape
       ~supported_semantics:[]
-      ~validate:(fun entries -> validate_projection entries |> X.document_result)
+      ~validate:(fun entries -> validate entries |> X.document_result)
       ~decode:(fun raw -> decode raw |> X.document_result)
       ~encode:(fun entries -> encode entries |> X.document_result)
   with
   | Ok codec -> codec
   | Error error -> raise_s [%sexp "invalid accounting catalog codec", (error : D.Error.t)]
 ;;
+
+let codec = codec_for ~validate:validate_projection ~decode ~encode
+
+(* A serializer call owns these lazy exports. They are forced in the original
+   eager child-encoding positions, after the catalog codec's own checks. The
+   decoded/adopted carrier continues to contain only the original children. *)
+module Encoding = struct
+  type child =
+    { source : Child.t
+    ; exported : (Child.Export.t, P.Error.t) result Lazy.t
+    }
+
+  type t =
+    { sources : Child.t list
+    ; children : child list
+    }
+
+  let create sources =
+    { sources
+    ; children =
+        List.map sources ~f:(fun source ->
+          { source; exported = lazy (Child.Export.prepare source) })
+    }
+  ;;
+
+  let encode t =
+    let%map.Result entries =
+      List.map t.children ~f:(fun child ->
+        let%map.Result exported = Lazy.force child.exported in
+        `Object
+          [ "id", P.Id.Goal.to_json (id child.source)
+          ; "document", D.Document.json (Child.Export.document exported)
+          ])
+      |> Result.all
+    in
+    `Object [ "accounts", `Array entries ]
+  ;;
+
+  let codec =
+    codec_for
+      ~validate:(fun t -> validate_projection t.sources)
+      ~decode:(fun raw -> Result.map (decode raw) ~f:create)
+      ~encode
+  ;;
+
+  let reserved_growth t =
+    List.fold_result t.children ~init:Capacity_growth.zero ~f:(fun growth child ->
+      let open Result.Let_syntax in
+      let%bind exported = Lazy.force child.exported in
+      Capacity_growth.add growth (Child.Export.reserved_growth exported))
+  ;;
+end
 
 (* The parent owns this complete child as one value. This codec, not the parent,
    alone preserves the child envelope and unknown paths. *)
@@ -143,18 +195,27 @@ let reserved_growth t =
     Capacity_growth.add growth next)
 ;;
 
-let validate_encoded_capacity t raw =
+let validate_capacity_with_growth raw growth =
   let open Result.Let_syntax in
-  let%bind growth = reserved_growth t in
   let%bind remaining = Capacity_growth.remaining_limits growth limits in
   D.Json.validate ~limits:remaining raw |> domain
 ;;
 
+let validate_encoded_capacity t raw =
+  let open Result.Let_syntax in
+  let%bind growth = reserved_growth t in
+  validate_capacity_with_growth raw growth
+;;
+
 let to_jsonaf t =
   let open Result.Let_syntax in
-  let%bind doc = D.Domain_codec.encode codec t |> domain in
+  let encoding = Encoding.create (documents t) in
+  let%bind doc =
+    D.Domain_codec.encode Encoding.codec (C.with_value t encoding) |> domain
+  in
   let raw = D.Document.json doc in
-  let%map () = validate_encoded_capacity t raw in
+  let%bind growth = Encoding.reserved_growth encoding in
+  let%map () = validate_capacity_with_growth raw growth in
   raw
 ;;
 

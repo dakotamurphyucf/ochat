@@ -1,9 +1,11 @@
 open! Core
 module P = Agent_protocol
 
-let capture (state : Session_state.t) =
+let capture_checkpoint (state : Session_state.t) ~checkpoint =
   let open Result.Let_syntax in
-  let%bind observer = Moderator_checkpoint.observer state.moderator in
+  let%bind observer =
+    Moderator_checkpoint.observer (Some (Moderator_checkpoint.encode checkpoint))
+  in
   let%bind observer =
     Result.of_option
       observer
@@ -40,4 +42,20 @@ let capture (state : Session_state.t) =
       ~generation:state.identity.generation
   in
   index, source
+;;
+
+let capture (state : Session_state.t) =
+  let open Result.Let_syntax in
+  let%bind checkpoint = Moderator_checkpoint.decode state.moderator in
+  let%bind checkpoint =
+    Result.of_option
+      checkpoint
+      ~error:
+        (P.Error.create
+           Invalid_state
+           ~message:"moderator capture requires an actually installed source"
+           ~retryable:false
+           ())
+  in
+  capture_checkpoint state ~checkpoint
 ;;

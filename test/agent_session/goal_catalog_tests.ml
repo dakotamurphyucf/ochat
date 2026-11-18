@@ -221,6 +221,9 @@ let%expect_test
       |> fst)
   in
   assert (List.length (C.receipts catalog) = 256);
+  assert (not (C.has_command_slot catalog));
+  assert (C.has_goal_slot catalog);
+  assert (C.can_advance_revision catalog);
   assert (
     Result.is_error
       (apply catalog (request catalog "saturated" (Hold (id, Operator_pause)))));
@@ -241,6 +244,8 @@ let%expect_test
   in
   let last_hold = C.hold_for_review near_max |> protocol_ok |> Option.value_exn in
   [%test_eq: int64] (C.revision last_hold) Int64.max_value;
+  assert (C.can_advance_revision near_max);
+  assert (not (C.can_advance_revision last_hold));
   assert (
     Result.is_error
       (C.to_jsonaf enabled
@@ -258,6 +263,8 @@ let%expect_test
       (Create
          { id = goal_id "extra"; objective = objective "x"; budget = G.Budget.unlimited })
   in
+  assert (not (C.has_goal_slot sixteen));
+  assert (C.has_command_slot sixteen);
   assert (Result.is_error (apply sixteen rejected));
   let one = enable_fixture sixteen (goal_id "bounded0") in
   let second =
@@ -317,7 +324,7 @@ let%expect_test
       let persistence : A.Session_actor.persistence =
         { archive_reference
         ; commit =
-            (fun ~command_audit:_ ~previous:_ _ ->
+            (fun ?observation:_ ~command_audit:_ ~previous:_ _ ->
               if !fail
               then
                 Error
@@ -833,9 +840,14 @@ let%expect_test
           let persistence : A.Session_actor.persistence =
             { archive_reference
             ; commit =
-                (fun ~command_audit ~previous transition ->
+                (fun ?observation ~command_audit ~previous transition ->
                   let%bind.Result () =
-                    Persistence.commit durable ~command_audit ~previous transition
+                    Persistence.commit
+                      durable
+                      ?observation
+                      ~command_audit
+                      ~previous
+                      transition
                   in
                   Error
                     (P.Error.create
@@ -999,7 +1011,9 @@ let%expect_test
           env
           sw
           initial
-          { archive_reference; commit = (fun ~command_audit:_ ~previous:_ _ -> Ok ()) }
+          { archive_reference
+          ; commit = (fun ?observation:_ ~command_audit:_ ~previous:_ _ -> Ok ())
+          }
       in
       Exn.protect
         ~finally:(fun () -> A.Session_actor.shutdown actor)

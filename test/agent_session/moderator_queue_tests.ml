@@ -656,7 +656,14 @@ module Consumed_receipt = struct
     let snapshot =
       A.Moderator_checkpoint.decode basis.moderator |> protocol_ok |> Option.value_exn
     in
-    let queue = values 2 in
+    let queue =
+      List.init 2 ~f:(fun _ ->
+        Chatml.Chatml_lang.VVariant ("String", [ VString "equal" ])
+        |> Chat_response.Moderator_invocation.internal_event
+        |> Result.ok_or_failwith
+        |> Session.Snapshot.of_value
+        |> Result.ok_or_failwith)
+    in
     let producer =
       Q.Capture.create ~producer:(Invocation invocation.context.id) ~origin |> protocol_ok
     in
@@ -703,6 +710,7 @@ module Consumed_receipt = struct
         ~source:(Q.source metadata)
         ~ordinal:(Q.Entry.ordinal entry)
         ~origin:(Q.Entry.origin entry)
+        ~producer:(Captured (Q.Entry.producer entry))
       |> protocol_ok
     in
     E.create_queued
@@ -825,6 +833,7 @@ let%expect_test
         ; runs
         ; jobs = basis.jobs
         ; schedules = timer :: basis.schedules
+        ; ingress_registrations = basis.ingress_registrations
         ; invocations = basis.invocations
         ; events = basis.moderator_executions
         }
@@ -849,6 +858,57 @@ let%expect_test
       ~f:(fun origin ->
         let before, _ = F.before basis source operation origin in
         let running = F.running before (Some operation) in
+        let snapshot =
+          A.Moderator_checkpoint.decode before.moderator
+          |> protocol_ok
+          |> Option.value_exn
+        in
+        let claimed, _ =
+          A.Queued_moderator_event.claim_foreground
+            ~operation_id:operation
+            ~state:before
+            ~id:running.context.id
+            ~snapshot
+            ~now:timestamp
+          |> protocol_ok
+        in
+        assert (E.equal claimed running);
+        let head =
+          A.Moderator_checkpoint.queue before.moderator
+          |> protocol_ok
+          |> Option.value_exn
+          |> Q.entries
+          |> List.hd_exn
+        in
+        let occurrence = Option.value_exn claimed.queue_occurrence in
+        assert (
+          C.Producer.equal (C.producer occurrence) (Captured (Q.Entry.producer head)));
+        let wrong_producers =
+          [ None
+          ; Some
+              (A.Queue_producer.Invocation
+                 (P.Id.Invocation.of_string "inv_wrong_queue_producer" |> protocol_ok))
+          ]
+        in
+        List.iter wrong_producers ~f:(fun producer ->
+          let occurrence =
+            C.create
+              ~source
+              ~ordinal:(Q.Entry.ordinal head)
+              ~origin
+              ~producer:(Captured producer)
+            |> protocol_ok
+          in
+          let wrong =
+            E.create_queued ~queue_occurrence:occurrence running.context |> protocol_ok
+          in
+          match A.Session_delta.apply before (Moderator_execution_changed wrong) with
+          | Error error ->
+            assert (P.Error.equal_code error.code Invalid_request);
+            [%test_eq: string]
+              "captured queue claim differs from head producer"
+              error.message
+          | Ok _ -> failwith "wrong exact queue producer admitted");
         let completed, moderator = F.completion before running in
         let transition =
           A.Session_transition.apply
@@ -891,7 +951,10 @@ let%expect_test
         contradict running;
         contradict (E.interrupt running ~reason:"honest failed callback" |> protocol_ok);
         let occurrence = Option.value_exn completed.queue_occurrence in
-        let wrong = C.create ~source ~ordinal:1L ~origin |> protocol_ok in
+        let wrong =
+          C.create ~source ~ordinal:1L ~origin ~producer:(C.producer occurrence)
+          |> protocol_ok
+        in
         let wrong =
           E.create_queued ~queue_occurrence:wrong running.context
           |> protocol_ok
@@ -949,8 +1012,20 @@ let%expect_test
         let historical =
           { before with moderator = Some (A.Moderator_checkpoint.encode snapshot) }
         in
+        assert (
+          Result.is_error
+            (A.Session_delta.apply historical (Moderator_execution_changed running)));
+        let historical_occurrence =
+          C.create ~source ~ordinal:0L ~origin ~producer:Unknown |> protocol_ok
+        in
+        let historical_running =
+          E.create_queued ~queue_occurrence:historical_occurrence running.context
+          |> protocol_ok
+        in
         let admitted =
-          A.Session_delta.apply historical (Moderator_execution_changed running)
+          A.Session_delta.apply
+            historical
+            (Moderator_execution_changed historical_running)
         in
         assert (Bool.equal (Result.is_ok admitted) (Option.is_none origin));
         let foreign_checkpoint =
@@ -1013,7 +1088,14 @@ let%expect_test
             ~installation_epoch:Int64.(source.installation_epoch + 1L)
           |> protocol_ok
         in
-        let future = C.create ~source:future_source ~ordinal:0L ~origin |> protocol_ok in
+        let future =
+          C.create
+            ~source:future_source
+            ~ordinal:0L
+            ~origin
+            ~producer:(C.producer occurrence)
+          |> protocol_ok
+        in
         let future =
           E.create_queued ~queue_occurrence:future running.context
           |> protocol_ok
@@ -1109,7 +1191,98 @@ let%expect_test
         ~payloads:[]
       |> protocol_ok
     in
-    let raw = F.document transition.state |> D.Document.json in
+    let state_document = F.document transition.state in
+    let marker = P.Session_storage_semantics.queue_occurrence_producer in
+    let strip_marker document =
+      let markers =
+        D.Document.required_semantics document
+        |> List.filter ~f:(fun name -> not (String.equal name marker))
+      in
+      set
+        (D.Document.json document)
+        "required_semantics"
+        (`Array (List.map markers ~f:(fun name -> `String name)))
+      |> D.Document.inspect ~limits:document_limits
+      |> document_ok
+    in
+    let missing_marker = function
+      | Error (D.Error.Required_semantics_unknown name) ->
+        [%test_eq: string] ("missing " ^ marker) name
+      | Error error -> raise_s [%sexp (error : D.Error.t)]
+      | Ok _ -> failwith "producer semantics marker missing but accepted"
+    in
+    assert (
+      List.mem (D.Document.required_semantics state_document) marker ~equal:String.equal);
+    SD.decode ~limits:document_limits (strip_marker state_document) |> missing_marker;
+    List.iter
+      [ A.Session_delta.Moderator_execution_changed completed
+      ; Moderator_execution_reconciled completed
+      ; Created transition.state
+      ]
+      ~f:(fun delta ->
+        let document =
+          A.Session_delta_document.create
+            delta
+            ~limits:document_limits
+            ~state_document:SD.authored
+          |> document_ok
+          |> A.Session_delta_document.document
+        in
+        assert (
+          List.mem (D.Document.required_semantics document) marker ~equal:String.equal);
+        A.Session_delta_document.decode ~limits:document_limits (strip_marker document)
+        |> missing_marker);
+    let old_supported =
+      List.filter A.Session_storage_semantics.supported ~f:(fun name ->
+        not (String.equal name marker))
+    in
+    let old_reader =
+      D.Domain_codec.create
+        ~limits:document_limits
+        ~kind:(D.Document.kind state_document)
+        ~version:(D.Document.version state_document)
+        ~shape:SD.shape
+        ~supported_semantics:old_supported
+        ~decode:(fun _ -> Ok ())
+        ~encode:(fun () -> Ok (`Object []))
+      |> document_ok
+    in
+    (match D.Domain_codec.decode old_reader state_document with
+     | Error (D.Error.Required_semantics_unknown name) -> [%test_eq: string] marker name
+     | Error error -> raise_s [%sexp (error : D.Error.t)]
+     | Ok _ -> failwith "reader without producer support accepted new DATA");
+    let raw = D.Document.json state_document in
+    List.iter
+      [ C.Producer.Unknown
+      ; Captured None
+      ; Captured (Some (A.Queue_producer.Source_setup { basis_revision = 0L }))
+      ]
+      ~f:(fun producer ->
+        let occurrence = Option.value_exn completed.queue_occurrence in
+        let changed =
+          C.create
+            ~source
+            ~ordinal:(C.ordinal occurrence)
+            ~origin:(C.origin occurrence)
+            ~producer
+          |> protocol_ok
+        in
+        let alternative =
+          E.create_queued ~queue_occurrence:changed running.context
+          |> protocol_ok
+          |> fun event ->
+          E.complete
+            event
+            ~checkpoint_sha256:
+              (A.Moderator_checkpoint.digest
+                 (A.Moderator_checkpoint.decode transition.state.moderator
+                  |> protocol_ok
+                  |> Option.value_exn))
+            ~requests:F.empty_requests
+          |> protocol_ok
+        in
+        assert (
+          Result.is_error (E.validate_transition ~previous:(Some completed) alternative)));
     let map_receipt raw ~f =
       let payload = member raw "payload" in
       let receipts =
@@ -1128,6 +1301,24 @@ let%expect_test
       in
       set raw "payload" (set payload "moderator_executions" (`Array receipts))
     in
+    let null_producer =
+      map_receipt raw ~f:(fun receipt ->
+        set
+          receipt
+          "queue_occurrence"
+          (set (member receipt "queue_occurrence") "producer" `Null))
+    in
+    let null_document =
+      D.Document.inspect ~limits:document_limits null_producer |> document_ok
+    in
+    SD.decode ~limits:document_limits (strip_marker null_document) |> missing_marker;
+    let mislabeled =
+      map_receipt raw ~f:(fun receipt -> set receipt "schema_version" (`Number "5"))
+    in
+    (match F.decode mislabeled with
+     | Error (D.Error.Invalid_field _) -> ()
+     | Error error -> raise_s [%sexp (error : D.Error.t)]
+     | Ok _ -> failwith "old-labeled producer capture survived projection");
     let future raw value =
       map_receipt raw ~f:(fun receipt ->
         set
@@ -1135,7 +1326,19 @@ let%expect_test
           "queue_occurrence"
           (set (member receipt "queue_occurrence") "future_occurrence" value))
     in
-    let retained = future raw (`String "retained") in
+    let producer_future raw value =
+      map_receipt raw ~f:(fun receipt ->
+        let capture = member receipt "queue_occurrence" in
+        let producer = member capture "producer" in
+        set
+          receipt
+          "queue_occurrence"
+          (set capture "producer" (set producer "future_producer" value)))
+    in
+    let retained =
+      future raw (`String "retained")
+      |> fun raw -> producer_future raw (`String "same-producer")
+    in
     let carrier = F.decode retained |> document_ok in
     assert (
       D.Json.equal
@@ -1148,8 +1351,22 @@ let%expect_test
     |> ignore;
     let conflict = F.decode (future raw (`String "conflicting")) |> document_ok in
     assert (Result.is_error (SD.adopt carrier ~limits:document_limits conflict));
+    let conflict =
+      F.decode (producer_future retained (`String "different")) |> document_ok
+    in
+    assert (Result.is_error (SD.adopt carrier ~limits:document_limits conflict));
     assert (Result.is_error (F.decode (future raw (`String (String.make 4096 'x')))));
-    let changed = C.create ~source ~ordinal:0L ~origin:(Some Unbound) |> protocol_ok in
+    (* Known projection fits; the original producer exceeds its node/field profile. *)
+    let large = `Array (List.init 65 ~f:(fun _ -> `Null)) in
+    assert (Result.is_error (F.decode (producer_future raw large)));
+    let changed =
+      C.create
+        ~source
+        ~ordinal:0L
+        ~origin:(Some Unbound)
+        ~producer:(C.producer (Option.value_exn running.queue_occurrence))
+      |> protocol_ok
+    in
     let changed =
       E.create_queued ~queue_occurrence:changed running.context
       |> protocol_ok

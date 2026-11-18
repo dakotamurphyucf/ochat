@@ -109,6 +109,22 @@ module Trace : sig
 end
 
 module Invocation : sig
+  (** Negative checks forwarded by trusted host wiring from the same actual
+      admitted invocation. These callbacks do not authorize, authenticate or
+      create a tool permit. Their producer owns exact domain/scope/admission
+      validation and expiry. Neither discovery nor a native pool retains them. *)
+  module Effect_check : sig
+    type t
+
+    val create : refresh:(unit -> unit) -> check:(unit -> unit) -> t
+
+    (** [refresh] may yield, outside host/cache locks; [check] must not yield.
+        Exceptions/cancellation propagate rather than becoming observer errors. *)
+    val refresh : t -> unit
+
+    val check : t -> unit
+  end
+
   type t
 
   (** [silent] discards progress and reports that the invocation is unobserved. *)
@@ -152,6 +168,13 @@ module Invocation : sig
 
   (** [is_observed t] is [true] for either protected or strict observation. *)
   val is_observed : t -> bool
+
+  (** Call-local transport; observer/inference data remains unchanged. Absence
+      is direct compatibility. An expired/invalid present check must reject and
+      must never be interpreted as absence. No grant is inferred from presence. *)
+  val with_effect_check : t -> check:Effect_check.t -> t
+
+  val effect_check : t -> Effect_check.t option
 end
 
 type runner = invocation:Invocation.t -> string -> Openai.Responses.Tool_output.Output.t

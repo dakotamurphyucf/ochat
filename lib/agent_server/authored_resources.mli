@@ -54,6 +54,54 @@ val resolve
    retain that same physical function and never use a model-supplied name as
    authority. Resume returns no fresh code; new admission installs before stage. *)
 
+module Source_plan : sig
+  (** Immutable captured declaration forest, factored from the literal planning
+      phase of [Authored_resources.prepare]. No index, resource owner, switch,
+      public/private registry, native registration, Startup or callback retained.
+      This is source provenance, not current wrapper visibility or authority. *)
+  type t
+
+  (** Capture the complete bounded forest with the SAME existing cycle/depth,
+      parser-owned declaration and delegated program-role checks. [capture]
+      borrows the caller's one lexical Startup/accounting context. No [build],
+      service, source-registration or [install] operation runs. Original callback
+      Error/exceptions/cancellation are preserved. Existing prepare uses this
+      exact producer before its existing children-first construction. *)
+  val capture
+    :  max_depth:int
+    -> revision:Agent_session.Prompt_revision.t
+    -> capture:
+         (parent_revision:Agent_session.Prompt_revision.t
+          -> tool_name:string
+          -> (Agent_session.Authored_source_preparation.t, Agent_protocol.Error.t) result)
+    -> (t, Agent_protocol.Error.t) result
+
+  (** Find an exact immutable declaration by BOTH recorded name and full source
+      fingerprint, including its original defining publication and selected
+      program/content custody. Equivalent repeated matches retain the first
+      existing forest-preorder entry
+      only after all matches agree on Source.Identity, full fingerprint, and
+      selected revision ID/manifest. Any disagreement returns typed ambiguity;
+      never choose a first differing member or infer physical-owner equality.
+      Search only this actual captured forest; never
+      the live Authored_resources index, ambient catalog, files, capabilities or
+      a same-name fallback. Nested/inherited declarations retain their original
+      defining revision. This supplies no current capability-visibility proof. *)
+  val find
+    :  t
+    -> selector:Agent_store.Captured_source_kind.Authored_tool.t
+    -> (Agent_session.Authored_source_preparation.t, Agent_protocol.Error.t) result
+
+  (** Select an exact direct declaration of the immediate defining parent.
+      Returns the original preparation and only its direct descendant plan.
+      This corresponds to the original private registry's declaration scope and
+      grants no wrapper or capability visibility. *)
+  val find_direct
+    :  t
+    -> selector:Agent_store.Captured_source_kind.Authored_tool.t
+    -> (Agent_session.Authored_source_preparation.t * t, Agent_protocol.Error.t) result
+end
+
 (** Prepare captured nested declarations from leaves to root. Validate all source
     edges, cycles and [max_depth] before calling [build], which may perform native
     setup effects. [capture] selects each final source/revision once; recursive

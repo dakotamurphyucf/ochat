@@ -24,7 +24,7 @@ type post_stream =
   -> Openai.Responses.Response_stream.t Seq.t
 
 module Tool_dispatch = struct
-  type native_runner = Ochat_function.t -> payload:string -> Output.t
+  type native_runner = Tool_call.Native.t -> payload:string -> Output.t
 
   type rejection =
     | Invalid_input
@@ -1535,7 +1535,7 @@ let dispatch_tool
       ~synthetic_result
       ~rejection
       ~runtime_requests
-      (run_native : ?runner:Ochat_function.runner -> payload:string -> unit -> Output.t)
+      (run_native : ?native:Tool_call.Native.t -> payload:string -> unit -> Output.t)
   =
   let halted () =
     Option.value_map c.moderator ~default:false ~f:(fun moderator ->
@@ -1567,8 +1567,7 @@ let dispatch_tool
             History_entry.Id.equal (History_entry.id entry) id))
       in
       dispatch.run
-        ~run_native:(fun implementation ~payload ->
-          run_native ~runner:implementation.Ochat_function.run_with_progress ~payload ())
+        ~run_native:(fun native ~payload -> run_native ~native ~payload ())
         Tool_dispatch.
           { kind
           ; original_name
@@ -2016,7 +2015,7 @@ let accept_inference_candidate
           ~synthetic_result:moderated.synthetic_result
           ~rejection
           ~runtime_requests:moderated.runtime_requests
-          (fun ?runner ~payload () ->
+          (fun ?native ~payload () ->
              let on_fork =
                match kind with
                | Function ->
@@ -2039,7 +2038,7 @@ let accept_inference_candidate
                ~kind
                ~name:moderated.name
                ~payload
-               ?runner
+               ?native
                ~call_id
                ~tool_tbl:c.tool_tbl
                ?on_tool_execution:c.on_tool_execution

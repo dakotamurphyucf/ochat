@@ -82,6 +82,14 @@ type t =
 
 let create ~factory ~authorize = { factory; authorize }
 
+let authorize_registered_owner t (entry : Session_registry.entry) ~actor ~session state =
+  let open Result.Let_syntax in
+  let check_owner () = Factory.check_registered_owner t.factory entry ~session in
+  let%bind () = check_owner () in
+  let%bind () = t.authorize actor state in
+  check_owner ()
+;;
+
 module Context = struct
   type service = t
 
@@ -98,19 +106,14 @@ module Context = struct
   ;;
 
   let authorize t state =
-    let open Result.Let_syntax in
-    let check_owner () =
-      Factory.check_registered_owner t.service.factory t.entry ~session:t.session
-    in
-    let%bind () = check_owner () in
-    let%bind () = t.service.authorize t.actor state in
-    check_owner ()
+    authorize_registered_owner t.service t.entry ~actor:t.actor ~session:t.session state
   ;;
 
-  let receipt t =
+  let receipt ?writer t =
     let open Result.Let_syntax in
     let%bind () = check_entry t in
     Actor.goal_run_receipt
+      ?writer
       t.entry.actor
       ~actor:t.actor
       ~authorize:(authorize t)
@@ -118,8 +121,8 @@ module Context = struct
       ~session:t.session
   ;;
 
-  let validate_retained t admission =
-    let%bind.Result actual = receipt t in
+  let validate_retained ?writer t admission =
+    let%bind.Result actual = receipt ?writer t in
     if Option.exists actual ~f:(P.Run_receipt.equal admission)
     then Ok admission
     else
@@ -159,11 +162,22 @@ let activate
            Factory.prepare_held_input factory ~entry ~runtime ~scope))
 ;;
 
-let admit_selected factory entry ~check_entry ~session ~intent ~input fact prepared =
+let admit_selected
+      ?writer
+      factory
+      entry
+      ~check_entry
+      ~session
+      ~intent
+      ~input
+      fact
+      prepared
+  =
   let open Result.Let_syntax in
   let%bind () = check_entry () in
   let%bind decision =
     Actor.admit_held_goal_run
+      ?writer
       entry.Session_registry.actor
       ~binding:(Runtime_owner.Prepared.binding prepared)
       ~intent
@@ -195,10 +209,10 @@ let admit_selected factory entry ~check_entry ~session ~intent ~input fact prepa
        Callback_success.Settled { admission; settlement })
 ;;
 
-let start_episode service ~entry ~actor ~session ~request =
+let start_episode ?writer service ~entry ~actor ~session ~request =
   let open Result.Let_syntax in
   let context = { Context.service; entry; actor; session; request } in
-  let%bind receipt = Context.receipt context in
+  let%bind receipt = Context.receipt ?writer context in
   match receipt with
   | Some admission -> Ok (Outcome.Retained admission)
   | None ->
@@ -212,6 +226,7 @@ let start_episode service ~entry ~actor ~session ~request =
         ~request:(A.Goal_activation_request.request request)
         (fun _deferred prepared ->
            admit_selected
+             ?writer
              service.factory
              entry
              ~check_entry:(fun () -> Context.check_entry context)
@@ -223,14 +238,14 @@ let start_episode service ~entry ~actor ~session ~request =
     in
     (match outcome with
      | Retained admission ->
-       let%map admission = Context.validate_retained context admission in
+       let%map admission = Context.validate_retained ?writer context admission in
        Outcome.Retained admission
      | Attempted actual -> Ok (Outcome.Attempted { Attempt.actual; fact = !fact }))
 ;;
 
 module Resume_result = Actor.Goal_resume_result
 
-let resume_from_source (entry : Session_registry.entry) ~check_entry ~with_source =
+let resume_from_source ?writer (entry : Session_registry.entry) ~check_entry ~with_source =
   let module Source = Factory.Goal_resume_source in
   let open Result.Let_syntax in
   let uncertain = ref false in
@@ -239,6 +254,7 @@ let resume_from_source (entry : Session_registry.entry) ~check_entry ~with_sourc
       let%bind () = check_entry () in
       let%bind decision =
         Actor.admit_goal_resume
+          ?writer
           entry.actor
           ~binding:(Runtime_owner.Prepared_goal_continuation.binding prepared)
       in
@@ -275,37 +291,51 @@ let resume_from_source (entry : Session_registry.entry) ~check_entry ~with_sourc
           else Resume_result.Rejected error))
 ;;
 
-let resume_episode service ~entry ~actor ~session ~request =
+let resume_episode ?writer service ~entry ~actor ~session ~request =
   let open Result.Let_syntax in
   let check_entry () = Factory.check_registered_entry service.factory entry ~session in
-  let authorize state =
-    let%bind () = check_entry () in
-    let%bind () = service.authorize actor state in
-    check_entry ()
-  in
+  let authorize state = authorize_registered_owner service entry ~actor ~session state in
   let%bind () = check_entry () in
-  let%bind retained =
+  let lookup () =
     Actor.goal_resume_receipt
+      ?writer
       entry.Session_registry.actor
       ~actor
       ~authorize
       ~session
       ~request
   in
+  let%bind retained = lookup () in
   match retained with
   | Some receipt -> Ok (Resume_result.Retained receipt)
   | None ->
-    resume_from_source
-      entry
-      ~check_entry
-      ~with_source:
-        (Factory.with_goal_resume_source_reported
-           service.factory
-           entry
-           ~actor
-           ~authorize
-           ~session
-           ~request)
+    let%bind result =
+      resume_from_source
+        ?writer
+        entry
+        ~check_entry
+        ~with_source:
+          (Factory.with_goal_resume_source_reported
+             service.factory
+             entry
+             ~actor
+             ~authorize
+             ~session
+             ~request)
+    in
+    (match writer, result with
+     | Some _, Resume_result.Retained receipt ->
+       let%bind observed = lookup () in
+       if Option.exists observed ~f:(A.Goal_command_receipt.equal receipt)
+       then Ok result
+       else
+         Error
+           (P.Error.create
+              Conflict
+              ~message:"retained Goal Resume receipt changed"
+              ~retryable:false
+              ())
+     | _ -> Ok result)
 ;;
 
 let resume_native_episode factory ~entry ~selection =

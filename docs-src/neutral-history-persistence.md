@@ -159,23 +159,41 @@ validated suffix. Unequal carriers continue ordinary replay.
 
 Each loaded persistence owner also owns one `Recovery.Retention_preflight`
 scope with fixed session, journal, limits and conversion policy. Every check
-rereads and validates the original stored records and all anchors, restores every
-retained checkpoint and validates every transaction. A route can resume from a
+rereads and validates the original stored records and all anchors. Within that
+same owner, exact original flags, digest and bytes can reuse a successful pure
+snapshot or transaction conversion; snapshots also require the same route.
+Every transaction validator and every original checkpoint and final fallback
+state still receives its normal validation, including bounded archive reads.
+
+A loaded retention worker may warm this same scope outside its Actor mailbox.
+That read-only check is not an atomic filesystem capture or pruning authority.
+The worker retains its actual resources until the entire attempt is joined.
+Before accepting the preliminary result it reacquires quiescent lifecycle
+exclusion and checks the same State, restored carrier, transaction hash and live
+owner tuple, with an available writer. A changed basis defers without pruning;
+an unchanged failure remains the original error. A successful preliminary check
+still requires a second complete fresh check under exclusion, followed by the
+unchanged checkpoint validation, snapshot/journal pruning and seal sequence.
+
+Restoration reuse is separate from replay permission. A route can resume from a
 previously validated replay result only when the checkpoint's original bytes
 still match and the freshly verified original-byte journal chain reaches the
 exact previously certified head. New or changed checkpoints and unreachable
 proof heads use full replay; newly appended transactions always replay normally.
-Shared replay compares states at their effective anchors, so a cached head is never
-mistaken for its older checkpoint's position. Every original checkpoint and final
-fallback state still receives its normal validation, including bounded archive
-reads. A failed check never publishes a new replay proof or repairs disk data.
+Shared replay compares states at their effective anchors, so a cached head is
+never mistaken for its older checkpoint's position.
 
-The scope retains only the last successful check's immutable snapshot routes
-and head; reopening a session constructs a fresh scope. Memory use therefore
-scales with the retained routes and their bounded state documents. Reuse requires
-pure deterministic replay and immutable state under that fixed policy; it does
-not authorize skipping integrity, conversion, transaction or archive checks.
-Ordinary loading keeps its sequential replay and original outer snapshot carrier.
+The scope atomically retains only the last successful check's immutable replay
+proof and a bounded subset of currently observed restorations. The explicit
+restoration budget defaults to 128 entries and 16 MiB of aggregate original
+record bytes; zero disables restoration reuse. These allowances bound entry
+count and original bytes, not decoded OCaml heap. Cache misses and eviction
+change performance only. A failed or cancelled check publishes neither a new
+proof nor new restorations and never repairs disk data. Reopening constructs a
+fresh scope. Restoration, replay and equivalence require pure deterministic
+operations and immutable state under that fixed policy; dynamic validators
+remain fresh. Ordinary loading keeps its sequential replay and original outer
+snapshot carrier.
 Preflight cost still scales with stored bytes and new replay work, and reopening
 requires complete validation again. This is not a production latency guarantee.
 Snapshot pruning validates every complete retained document and CURRENT before

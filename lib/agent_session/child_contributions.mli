@@ -93,6 +93,25 @@ val aggregate_root
   -> goal_id:Agent_protocol.Id.Goal.t
   -> (Child_usage_snapshot.Descendants.t, Agent_protocol.Error.t) result
 
+(** Immutable storage projection for one exact component value, including its
+    retained raw document and existing future-capacity proof. This has no host
+    admission or execution authority. No cross-value or lifetime cache is used. *)
+module Export : sig
+  type source = t
+  type t
+
+  (** Same intrinsic serialization/capacity checks and error order as the
+      ordinary serializer. Does not validate enclosing host limits. *)
+  val prepare : source -> (t, Agent_protocol.Error.t) result
+
+  val document : t -> Document_schema.Document.t
+  val reserved_growth : t -> Capacity_growth.t
+
+  (** Full component-document depth, root depth1. The enclosing host must add
+      its actual path length and validate cumulative remaining host limits. *)
+  val required_depth : t -> int
+end
+
 val of_jsonaf : Jsonaf.t -> (t, Agent_protocol.Error.t) result
 val to_jsonaf : t -> (Jsonaf.t, Agent_protocol.Error.t) result
 val adopt : t -> incoming:t -> (t, Agent_protocol.Error.t) result

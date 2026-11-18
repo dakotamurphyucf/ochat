@@ -161,10 +161,164 @@ let input_unknown current expected =
     |> Result.ok_or_failwith
   in
   let metric = Usage.component usage Input in
+  let equal_sum = P.Inference_query.Metric.equal_sum in
+  assert (equal_sum (Tokens 0L) (Usage.Metric.actual metric));
+  assert (equal_sum (Tokens 0L) (Usage.Metric.estimated metric));
   [%test_eq: int64]
     expected
     (Usage.Unknown.count (Usage.Metric.unknown metric) Not_reported);
   [%test_eq: int64] 0L (Usage.Metric.untracked_attempts metric)
+;;
+
+let%expect_test "recurrence Goal capture uses the actual admitted local Workflow" =
+  let module Capture = A.Recurrence_goal_capture in
+  let module Binding = A.Recurrence_definition.Goal_binding.Capture in
+  let module Request = A.Recurrence_command.Goal_owner_request in
+  let deadline = ref timestamp in
+  Goal.with_worker
+    ~budget:(fun fixture ->
+      deadline := P.Timestamp.add_ms !(fixture.wall) 1000 |> protocol_ok;
+      budget ~deadline:!deadline ())
+    ~run:(fun fixture actor ~sw:_ ~input:_ _caps ->
+      let before = state actor in
+      let goal = Goal.goal before in
+      let episode = G.episode goal |> Option.value_exn in
+      let source = G.source goal in
+      let goal_id = G.id goal in
+      let revision = G.revision goal in
+      let now = !(fixture.wall) in
+      let request expected_goal_revision =
+        Request.create ~goal_id ~expected_goal_revision |> protocol_ok
+      in
+      let capture state request =
+        Capture.capture state ~owner:session ~source ~selection:(Operator request) ~now
+      in
+      let binding = capture before (request revision) |> protocol_ok in
+      assert (P.Session_ref.equal (Binding.owner binding) session);
+      assert (P.Id.Goal.equal (Binding.goal_id binding) goal_id);
+      assert (P.Goal_episode.equal (Binding.creator_episode binding) episode);
+      assert (Int64.equal (Binding.goal_revision_at_capture binding) revision);
+      let assert_denied code = function
+        | Error (actual : P.Error.t) -> assert (P.Error.equal_code actual.code code)
+        | Ok _ -> failwith "unexpected recurrence Goal eligibility"
+      in
+      capture before (request (Int64.succ revision)) |> assert_denied Conflict;
+      let run =
+        A.Run_state.find
+          (Option.value_exn before.run_state)
+          (P.Goal_episode.admission episode).run_id
+        |> Option.value_exn
+      in
+      let attribution =
+        A.Goal_work_attribution.of_run before run |> protocol_ok |> Option.value_exn
+      in
+      let native =
+        Capture.capture before ~owner:session ~source ~selection:(Native attribution) ~now
+        |> protocol_ok
+      in
+      assert (Binding.equal native binding);
+      let stale_source =
+        P.Run_source.create
+          ~observer:source.observer
+          ~generation:source.generation
+          ~installation_epoch:(Int64.succ source.installation_epoch)
+        |> protocol_ok
+      in
+      Capture.check_current binding before ~owner:session ~source:stale_source ~now
+      |> assert_denied Conflict;
+      Capture.check_current binding before ~owner:session ~source ~now:!deadline
+      |> assert_denied Permission_denied;
+      assert (equal_state before (state actor));
+      let schedule = interval ~first_due:(P.Timestamp.to_time_ns now) () in
+      let recurrence_id = id "actual-goal-capture" in
+      let mutation =
+        A.Recurrence_command.Mutation.Create
+          ( recurrence_id
+          , { schedule
+            ; target = fresh_target before.spec.workspace_instance
+            ; policy = A.Recurrence_policy.default
+            } )
+      in
+      let command =
+        Creation_support.request actor "actual-goal-recurrence-create" mutation
+      in
+      let bind revision =
+        A.Recurrence_command.with_goal_owner command (request revision) |> protocol_ok
+      in
+      let publish request =
+        Actor.recurrence_command actor ~actor:proof ~authorize ~request
+      in
+      publish (bind (Int64.succ revision)) |> assert_denied Conflict;
+      assert (equal_state before (state actor));
+      let original = bind revision in
+      let receipt = publish original |> protocol_ok in
+      let created_state = state actor in
+      let created =
+        C.find (Option.value_exn created_state.recurrence_catalog) recurrence_id
+        |> Option.value_exn
+      in
+      assert (
+        F.Goal_binding.equal
+          (F.goal_binding (E.current created))
+          (Controller_goal binding));
+      let ordinary_id = id "ordinary-with-enabled-goal" in
+      mutate
+        actor
+        "ordinary-with-enabled-goal"
+        (Create
+           ( ordinary_id
+           , { schedule
+             ; target = fresh_target before.spec.workspace_instance
+             ; policy = A.Recurrence_policy.default
+             } ))
+      |> ignore;
+      let ordinary =
+        C.find (Option.value_exn (state actor).recurrence_catalog) ordinary_id
+        |> Option.value_exn
+      in
+      assert (F.Goal_binding.equal (F.goal_binding (E.current ordinary)) Unbound);
+      Goal.command
+        actor
+        ~key:"recurrence-goal-progress"
+        (Record_progress
+           (goal_id, G.Progress.of_string "preserve the birth association" |> protocol_ok))
+      |> ignore;
+      let advanced = state actor in
+      let advanced_revision = G.revision (Goal.goal advanced) in
+      assert (Int64.(advanced_revision > revision));
+      Capture.retain
+        binding
+        advanced
+        ~owner:session
+        ~source
+        ~request:(request revision)
+        ~now
+      |> assert_denied Conflict;
+      let retained =
+        Capture.retain
+          binding
+          advanced
+          ~owner:session
+          ~source
+          ~request:(request advanced_revision)
+          ~now
+        |> protocol_ok
+      in
+      assert (Binding.equal binding retained);
+      Capture.check_current binding advanced ~owner:session ~source ~now |> protocol_ok;
+      Goal.command actor ~key:"recurrence-goal-hold" (Hold (goal_id, Operator_pause))
+      |> ignore;
+      let held = state actor in
+      Capture.check_current binding held ~owner:session ~source ~now
+      |> assert_denied Permission_denied;
+      let replay = publish original |> protocol_ok in
+      assert (A.Recurrence_command_receipt.equal receipt replay);
+      assert (equal_state held (state actor));
+      publish (bind advanced_revision) |> assert_denied Conflict);
+  print_endline
+    "actual Goal episode captured once; edit preserves it and held work cannot start";
+  [%expect
+    {| actual Goal episode captured once; edit preserves it and held work cannot start |}]
 ;;
 
 let%expect_test
@@ -300,7 +454,14 @@ let%expect_test
       then Some (G.Budget.Token_stop.create ~component:Input ~ceiling:5L |> protocol_ok)
       else None
     in
-    Goal.with_worker
+    Goal.with_worker_on_initial_state
+      ~initialize_state:(fun initial ->
+        (* Start from new-session inventory so only provider usage becomes unknown. *)
+        A.Child_accounting.initialize_new
+          initial
+          ~max_children:4
+          ~max_encoded_bytes:1048576
+        |> protocol_ok)
       ~budget:(fun _ -> budget ?observed_tokens ())
       ~run:(fun _fixture actor ~sw ~input caps ->
         with_graph actor (fun graph ->

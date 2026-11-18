@@ -1,0 +1,7 @@
+(library
+ (name eio_release_reporting_tests)
+ (modules release_reporting_tests)
+ (libraries core eio eio_main)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))

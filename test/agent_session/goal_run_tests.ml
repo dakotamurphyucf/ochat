@@ -189,6 +189,22 @@ let%expect_test
     "pure association requires Enabled fresh admission and reciprocal immutable custody"
   =
   with_model (fun ~basis ~held ~admission ~intent ~delta state ->
+    let source = (A.Run_admission.run admission).source in
+    let stale =
+      P.Run_source.create
+        ~observer:source.observer
+        ~generation:source.generation
+        ~installation_epoch:(Int64.succ source.installation_epoch)
+      |> protocol_ok
+    in
+    (match
+       A.Goal_episode_admission.prepare
+         basis
+         ~admission
+         ~intent:(A.Goal_episode_admission.with_expected_source intent stale)
+     with
+     | Error error -> [%test_eq: P.Error.code] Conflict error.code
+     | Ok _ -> failwith "stale observed source admitted a new Goal episode");
     assert (
       Result.is_error
         (A.Goal_episode_admission.prepare
@@ -431,7 +447,7 @@ let%expect_test
             let persistence : A.Session_actor.persistence =
               { archive_reference
               ; commit =
-                  (fun ~command_audit ~previous transition ->
+                  (fun ?observation ~command_audit ~previous transition ->
                     if !reject
                     then
                       Error
@@ -442,7 +458,12 @@ let%expect_test
                            ())
                     else (
                       let%bind.Result () =
-                        Persistence.commit durable ~command_audit ~previous transition
+                        Persistence.commit
+                          durable
+                          ?observation
+                          ~command_audit
+                          ~previous
+                          transition
                       in
                       Error
                         (P.Error.create

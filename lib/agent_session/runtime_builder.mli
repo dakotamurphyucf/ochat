@@ -1,4 +1,51 @@
 open! Core
+module Close = Runtime_close
+
+(** Read-only facts retained by the actual physical Product attachment. No
+    allocation, enrollment, execution or cleanup authority is public. *)
+module Product_callbacks : sig
+  type t
+
+  module Operation_snapshot : sig
+    type t
+
+    val receipt : t -> Callback_cleanup.Operation.t
+    val registration_closed : t -> bool
+
+    (** None means the Product genuinely has no Manager. Some filters only
+        children of its actual Manager; registration/terminal are original. *)
+    val callbacks : t -> Callback_cleanup.Cleanup_snapshot.t option
+
+    val terminal : t -> Callback_cleanup.Operation.terminal_outcome option
+    val terminal_diagnostic : t -> Cleanup_diagnostic.t option
+
+    (** Frozen lookup. SAME original Completion and write-once slot returns SAME
+        carrier; unknown or Manager-filtered claims return None. *)
+    val completion_diagnostic
+      :  t
+      -> completion:Callback_cleanup.Completion.t
+      -> slot:Callback_cleanup.Completion_snapshot.Failure_slot.kind
+      -> Cleanup_diagnostic.t option
+
+    val diagnostics : t -> Cleanup_diagnostic.t list
+
+    (** Domain-checked fresh view of THIS captured original Operation only. It
+        cannot enroll a later Product operation or mutate the old snapshot. *)
+    val refresh : t -> (t, Agent_protocol.Error.t) Result.t
+  end
+
+  module Snapshot : sig
+    type t
+
+    val operations : t -> Operation_snapshot.t list
+  end
+
+  (** Domain-checked live read, including after Product physical close. No Actor
+      RPC or cleanup runs. Frozen facts/carriers are immutable. Only genuinely
+      positive parents compact; missing/failed raw terminal remains retained. *)
+  val snapshot : t -> (Snapshot.t, Agent_protocol.Error.t) Result.t
+end
+
 module Source = Runtime_source_preparation
 
 (** Constructs the live ChatMD runtime shared by daemon and embedded session
@@ -15,6 +62,34 @@ type model_job_outcome =
   | Model_succeeded of Jsonaf.t
   | Model_failed of string
 
+(** Retained ancestor bindings under the original ancestor scope. Normal use
+    checks strict resource custody. Policy restoration may compare only opaque
+    evidence for the exact promoting owner, with strict custody for other owners. *)
+type ancestor_capabilities =
+  { for_execution :
+      Agent_protocol.Id.Session.t
+      -> (Chat_response.Tool_capability.t, Agent_protocol.Error.t) result
+  ; for_policy_restoration :
+      promoting:Agent_protocol.Id.Session.t
+      -> Agent_protocol.Id.Session.t
+      -> (Delegation_authority.Binding_evidence.t, Agent_protocol.Error.t) result
+  }
+
+(** Retained physical Source lookup under the actual ancestor native scopes.
+    A callback receives the SAME selected Source while its existing custody is
+    current. This is neither path permission nor policy admission. It retains no
+    first dependent's execution check and performs no load or preparation.
+    Custody checks may wait. A callback Error or original exception remains
+    primary if the physical view expires; only callback success is postchecked.
+    Sources delivered here still need current membership/policy validation. *)
+type ancestor_sources =
+  { with_source :
+      'a.
+      Agent_protocol.Id.Session.t
+      -> f:(source:Source.t -> ('a, Agent_protocol.Error.t) result)
+      -> ('a, Agent_protocol.Error.t) result
+  }
+
 (** Native resources and compiled, non-evaluated extension definitions. No
     operation worker, moderator manager, history or actor service is installed. *)
 type resources = private
@@ -23,6 +98,8 @@ type resources = private
   ; definition : Chat_response.Extension_compiler.definition option
   ; managed : Chat_response.Managed_tool_registry.t option
   ; authoring : Authoring_runtime.t option
+  ; ancestor_capabilities : ancestor_capabilities option
+  ; ancestor_sources : ancestor_sources option
   }
 
 (** Explicit host compilation/planning/restoration policy, shared by resource
@@ -86,13 +163,288 @@ val prepare_resources
   -> approval_store:Shell_access.Approval.store
   -> (resources, Agent_protocol.Error.t) result
 
+(** The specialist's original successful preparation. [prepared_revision] is
+    immutable Source classification captured in that SAME program preparation,
+    before any future child Reference. It supplies no source or execution grant
+    and adds no physical owner; later binding requires the actual admitted input. *)
 type authored_resources = private
   { source : Authored_agent_source.t
   ; revision : Prompt_revision.t
+  ; prepared_revision : Source.Prepared_revision.t
   ; resources : resources
   ; agent_source : Captured_agent_runner.Source_binding.t option
   ; code_authorizer : Prompt_revision.t -> Shell_runtime.Manifest_authorizer.t
   }
+
+(** Captured standalone implementations and a live lookup of the parent's checked
+    execution registry. The host retains parent resources and mediates policy. *)
+type inherited_managed =
+  { delegation : Chat_response.Managed_tool_registry.delegation
+  ; current : unit -> Chat_response.Tool_capability.t
+  }
+
+module Native_identity : sig
+  type t
+
+  (** Issued privately once at actual prepared entry-unit allocation. Product
+      identity is a later attachment identity; it cannot substitute for this. *)
+  val equal : t -> t -> bool
+end
+
+(** Lexical validation purpose; grants no execution or effect authority. Every resource
+    operation revalidates exact prefix, original authority/family and caller
+    checkpoint. No successful validation is cached. *)
+module Native_preparation : sig
+  type t =
+    | Original_execution
+    | Resource_setup of
+        { prefix : Delegation_authority.Resource_path.Prefix.t
+        ; check_resource : unit -> (unit, Agent_protocol.Error.t) result
+        }
+end
+
+module Native_input : sig
+  (** Closed source families with their EXISTING admitted borrowed values.
+      These inputs and Source.t are not consumer authorization. Captured carries
+      the real retained recurrence source and its existing preparation authority;
+      artifact metadata alone cannot create a captured executable input. Generated
+      source_lease is the actual parent's source view retained under the same CPS
+      as parent_runtime. Preparation borrows that view without claiming or closing
+      the parent's root, and preserves missing/unavailable/revoked source state. *)
+  type family =
+    | Authored of
+        { revision : Prompt_revision.t
+        ; root_invocation :
+            Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.t
+        ; agent_source : Captured_agent_runner.Source_binding.t option
+        ; script_preparation : Script_preparation.t option
+        ; native_registrations : Chat_response.Agent_runtime.native_registration list
+        }
+    | Captured of
+        { captured : Captured_recurrence_source.t
+        ; script_preparation : Script_preparation.t option
+        ; authority : Delegation_authority.t
+        ; agent_source : Captured_agent_runner.Source_binding.t option
+        ; native_registrations : Chat_response.Agent_runtime.native_registration list
+        }
+    | Generated of
+        { definition : Generated_definition.t
+        ; artifact_store : Agent_store.Prompt_artifact_store.t
+        ; parent_runtime : Chat_response.Agent_runtime.t
+        ; source_lease : Prompt_source_lease.t
+        ; inherited_managed : inherited_managed option
+        ; authority : Delegation_authority.t
+        }
+    | Authored_child of
+        { revision : Prompt_revision.t
+        ; prepared : authored_resources
+        ; code : Authored_code_preparation.t option
+        ; authority : Delegation_authority.t
+        }
+
+  type t
+
+  (** Validate the selected executable family, exact artifact publication and
+      invocation, including the actual child Reference when the selection carries
+      one. Authored_child can also bind a genuine Captured Authored_tool selection
+      only with its exact specialist selector, artifact, actual Ui child root, Delegated_ui runtime
+      invocation and full private authority Reference. It retains the borrowed specialist
+      preparation and captured Product family; it is never an Artifact/root
+      input or a new source-loan association. Physical preparation checks the actual target session/profile, tree,
+      capabilities and original authority. This creates no permission and does
+      not admit Generated_artifact DATA as an executable definition. *)
+  val create : source:Source.t -> family:family -> (t, Agent_protocol.Error.t) result
+end
+
+module Native_host : sig
+  type t =
+    { preparation : Native_preparation.t
+      (** Lexical construction purpose only. Not retained in Prepared_native,
+          resources, original authority, Ctx, registered functions or Use. *)
+    ; check_source : unit -> (unit, Agent_protocol.Error.t) result
+      (** Lexical actual setup/per-consumer guard. Call before/after constructor
+          waits; never retain it in Prepared_native, Ctx, native bindings,
+          Product or future consumer guards after this setup stage ends. *)
+    ; startup : Chat_response.Startup_compilation.t option
+    ; env : Eio_unix.Stdenv.base
+    ; inference_context : Inference_runtime.Context.t
+    ; inference_identity : Chat_response.Neutral_turn.Identity.t
+    ; bind_inference_identity :
+        Inference_allocation.Port.t -> Chat_response.Neutral_turn.Identity.t
+    ; on_inference_attempt : Inference_runtime.Attempt.t -> unit
+    ; on_inference_completion : Inference_client.Completion.t -> unit
+    ; on_inference_observation : Inference.Observation.t -> unit
+    ; paths : Runtime_paths.t
+    ; storage_paths : Runtime_paths.t
+    ; session_id : Agent_protocol.Id.Session.t
+    ; permission_profile : Permission_policy.t
+    ; native_service_revision : string option
+    ; one_off_policy : Chat_response.One_off_request.policy option
+    ; authoring_validation_host : Chat_response.Authoring_validation.host option
+    ; initial_agent_guidance : Chat_response.Agent_guidance.t option
+    ; ancestor_capabilities : ancestor_capabilities option
+      (** Original actual retained capability lookup, owned by the common native
+          lifetime across adoption. Never the lexical [check_source] closure. *)
+    ; ancestor_sources : ancestor_sources option
+      (** Matching physical Source scopes under that SAME retained lifetime.
+          Root hosts without an ancestor scope supply [None]. *)
+    ; manifest_authorizer : Shell_runtime.Manifest_authorizer.t
+    ; approval_provider : Shell_runtime.Approval_broker.provider
+    ; approval_store : Shell_access.Approval.store
+    }
+end
+
+module Prepared_native : sig
+  (** One entry-owned native unit: existing resources record, original selected
+      family, entry cache/Ctx/Inference Session/Root_binding and actual graph
+      callback provenance. It does not copy or rebind an ancestor/specialist's
+      native closures to the entry context. Their original authority/context and
+      actual ancestor CPS loans remain live for the complete dependent lifetime.
+
+      Generated authoring setup is retained in the final resources record and
+      is not repeated by attachment. Initial guidance is installed in the entry
+      Ctx before native closures are created. No Manager/history/worker/lifecycle/
+      Task/provider execution is added by this preparation. Existing authorized shell/MCP/native setup may do IO.
+      A Pending source is not made Ready. The caller attaches partial scope and
+      graph and Construction custody to the Cell before invoking this yielding
+      operation. On
+      Error/exception/cancellation the caller still owns that scope and must join
+      it; preparation does not release borrowed ancestor resources. *)
+  type t
+
+  module Construction : sig
+    (** Partial common-leg custody inside the same Cell owner. Capture this
+        actual holder in the Factory close-attempt closure before prepare can
+        yield. It binds one creating domain/switch, permits one preparation, and
+        survives Error/exception/cancellation without losing close-leg receipts. *)
+    type t
+
+    val create : sw:Eio.Switch.t -> t
+
+    (** Trusted final common cleanup after preparation has joined. Same closer
+        as the returned prepared unit; successful Root/Session/cache legs are
+        never repeated, failed legs remain available for explicit serial retry,
+        including after Eio has consumed switch finalizers. Concurrent prepared-
+        unit close and switch finalization join the same close attempt. Raises
+        for a foreign domain or close while preparation is still running. Does
+        not stop/join the switch or release the actual ancestor loans/graph. *)
+    val close : t -> unit
+
+    (** SAME actual shared release attempt, observed before raw projection.
+        Concurrent callers receive the same immutable observation/carriers;
+        a later failed retry has its own actual carrier. Domain/preparation
+        invariant failures retain the same raising behavior as [close]. *)
+    val close_reported : t -> unit Close_observation.t
+  end
+
+  val prepare
+    :  Native_input.t
+    -> construction:Construction.t
+    -> host:Native_host.t
+    -> (t, Agent_protocol.Error.t) result
+
+  val identity : t -> Native_identity.t
+
+  (** SAME already validated executable Native_input source, with creating-domain
+      and actual common-unit liveness checks. No source IO, recompile, native
+      capability, permission or closer. Ordinary private units with no retained
+      selection reject. Factory must still compare the current metadata/private
+      source, profile and actual native key before every promotion. *)
+  val selected_source : t -> (Source.t, Agent_protocol.Error.t) result
+
+  (** Pure domain/open-unit/exact selected-source association, not current
+      consumer/grant authorization. Every borrow and promotion separately uses
+      the fresh Owner admission plus fixed Factory Store/source checks. *)
+  val check
+    :  t
+    -> source:Source.t
+    -> session_id:Agent_protocol.Id.Session.t
+    -> permission_profile_digest:string
+    -> (unit, Agent_protocol.Error.t) result
+
+  module Delegation : sig
+    (** SAME original prepared execution/source context, never lexical
+        Native_setup or a new consumer's authority. These native bindings and
+        inherited managed registry remain backed by the unit's retained complete
+        ancestor CPS until final Cell release. No cleanup ownership is supplied. *)
+    type t = private
+      { authority : Delegation_authority.t
+      ; selected : Chat_response.Tool_capability.t
+      ; inherited_managed : inherited_managed option
+      }
+  end
+
+  (** Creating domain and actual common-unit liveness, then the original closed
+      source context. None is authored root only. Caller must hold actual native/
+      promotion custody throughout use, repeat current private/source/grant checks
+      around waits and use [check_execution] for current original authority. The
+      projection alone grants no effect, disclosure, Caller or policy permission;
+      it never reconstructs Independent ancestry or rebinds inherited closures. *)
+  val with_delegation
+    :  t
+    -> f:(Delegation.t option -> ('a, Agent_protocol.Error.t) result)
+    -> ('a, Agent_protocol.Error.t) result
+
+  (** Trusted Cell CPS with an actual active Native_lease. No Manager/runtime or
+      execution capability is supplied; callers retain the loan through all use.
+      The original resources record is not rebuilt or mirrored. *)
+  val with_resources
+    :  t
+    -> f:(resources -> ('a, Agent_protocol.Error.t) result)
+    -> ('a, Agent_protocol.Error.t) result
+
+  (** Trusted Factory prepublication association with the actual authored/captured-root
+      source loan, using the existing one-time attachment claim. Same domain and
+      open unit are required. Mutates this SAME prepared unit; native, identity,
+      context and release holder are unchanged. A successful nonlegacy attachment
+      is visible to every alias; every second association, including legacy,
+      rejects. Failed checks or claim leave the unit unchanged. The actual root
+      remains owned/closed by its physical child switch; this unit holds only a
+      borrowed view with no root-close responsibility. Legacy/absent intent stays legacy and never
+      gains live-root authority. The actual source switch owns root lifetime;
+      this operation does not close/reopen it or authorize source reads. Generated
+      and authored-child units preserve their original borrowed source loan and
+      reject this root-only method before any claim. Captured roots require the
+      actual Captured_recurrence_source and existing preparation authority at
+      Native_input creation/preparation; root association creates no occurrence
+      Run or lifecycle authority. *)
+  val attach_source_lease : t -> source_lease:Prompt_source_lease.t -> unit Or_error.t
+
+  (** Trusted final Cell election only, after all native/Product refs and actual
+      borrowers join. Owns the one shared physical release; all original close
+      legs attempted independently, first exception/rawtrace preserved. Ordinary
+      wrappers with no external native loans retain their existing grouped
+      attachment/cache close sequence at the Product election. Not callable by failed promotion cleanup
+      while another native loan survives. Source/switch/graph joins stay with the
+      actual Cell/Factory lifetime holder, not an escaped lexical switch. *)
+  val close : t -> unit
+
+  (** Observation of the SAME common release used by Construction and switch
+      finalization. Reading/projecting it never repeats successful physical legs
+      or consumes diagnostic delivery. Foreign-domain misuse still raises. *)
+  val close_reported : t -> unit Close_observation.t
+end
+
+module Product_attachment : sig
+  (** Partial attachment custody inside the SAME Cell. Allocate and attach to
+      Promotion before the yielding Builder call. The holder records the actual
+      moderator executor before Manager construction can yield. No shared native
+      resources or second physical owner are created. *)
+  type t
+
+  (** Domain/open-native checks and local allocation only. No callback or IO. *)
+  val create : Prepared_native.t -> (t, Agent_protocol.Error.t) result
+
+  val native_identity : t -> Native_identity.t
+
+  (** Trusted Cell cleanup, after attachment construction and installed work
+      have joined. Only the actual attachment-local executor wakeup registration
+      is removed; the Manager has no close primitive and the worker is an inert
+      record. Idempotent after success. Does not close common native resources,
+      cache, Session, Root_binding, switch, graph or ancestor loans. Raises on a
+      foreign domain or an attempt before construction has joined. *)
+  val close : t -> unit
+end
 
 (** The actual constructor's original source loan and root-authorized specialist
     manifest policy. These borrow the same existing resource lifetime. Selected
@@ -271,7 +623,13 @@ type extension_services =
 type moderator_activation =
   { pending : unit -> bool
   ; startup_pending : unit -> bool
-  ; run : unit -> (bool, Agent_protocol.Error.t) result
+  ; run :
+      ?capture_cleanup:(Callback_cleanup.Completion.t -> unit)
+      -> unit
+      -> (bool, Agent_protocol.Error.t) result
+    (** This invocation's actual legacy claims only. Forward to the current
+        lifetime owner; never retain the capture for a later activation. Extension
+        activation has no legacy Completion to capture. *)
   }
 
 type background_executor =
@@ -351,9 +709,65 @@ module Runtime_resume : sig
     -> (unit, Agent_protocol.Error.t) result
 end
 
+(** Verified Builder classification and immutable Actor installation affinity.
+    No raw issuer is exported. These facts grant no permission or execution. *)
+module Unmoderated_source : sig
+  type t
+
+  module Binding : sig
+    type source = t
+    type t
+
+    (** Pure domain-first same-worker and complete accepted Spec basis check. *)
+    val check
+      :  t
+      -> state:Session_state.t
+      -> worker:Operation_worker.t
+      -> manager:Chat_response.Moderator_manager.t option
+      -> (Policy_cause_data.Caller_source.t, Agent_protocol.Error.t) result
+
+    (** Read-only warm no-op validation of the SAME original Builder fact.
+        Never replaces or reissues the current binding. *)
+    val check_source
+      :  t
+      -> source
+      -> state:Session_state.t
+      -> worker:Operation_worker.t
+      -> manager:Chat_response.Moderator_manager.t option
+      -> (unit, Agent_protocol.Error.t) result
+
+    (** Prepare the exact checked configuration transition's replacement before
+        persistence. Installation belongs to its same known State ACK; an old
+        Caller/Bound is never renewed. No callback, mutation or authority. *)
+    val reconfigure
+      :  t
+      -> previous:Session_state.t
+      -> candidate:Session_state.t
+      -> worker:Operation_worker.t
+      -> manager:Chat_response.Moderator_manager.t option
+      -> (t, Agent_protocol.Error.t) result
+  end
+
+  (** Bind a verified actual Artifact/final-worker fact to the Actor's accepted
+      install State. All existing source/owner/Stop/admission checks remain
+      mandatory. Manager absence alone cannot issue this value. *)
+  val bind
+    :  t
+    -> state:Session_state.t
+    -> worker:Operation_worker.t
+    -> manager:Chat_response.Moderator_manager.t option
+    -> (Binding.t, Agent_protocol.Error.t) result
+end
+
 type t =
   { source_lease : Prompt_source_lease.t
   ; worker : Operation_worker.t
+  ; product_callbacks : Product_callbacks.t option
+    (** SAME attachment-owned original Operation observer across retained bindings
+        and convenience builds. None is actual non-Product compatibility. *)
+  ; unmoderated_source : Unmoderated_source.t option
+    (** Actual verified absence and this final physical worker; None remains
+        unknown. Cold/warm Builder bindings issue their own matching fact. *)
   ; inference_execution : Inference_client.Execution.t
   ; now : unit -> Agent_protocol.Timestamp.t
     (** Host wall clock shared by foreground, idle and delegated moderation and
@@ -410,14 +824,14 @@ type t =
         runtime's real resource lease. May yield; invoke outside Actor mailboxes
         and Owner/Registry locks. None for ordinary/root constructors, never
         evidence that a delegated Spec has no inherited governance. *)
-  ; ancestor_capabilities :
-      (Agent_protocol.Id.Session.t
-       -> (Chat_response.Tool_capability.t, Agent_protocol.Error.t) result)
-        option
+  ; ancestor_capabilities : ancestor_capabilities option
     (** Internal factory lookup of the retained original ancestor bindings. Allows
         descendants below an independent lifetime to validate against reconstructed
         resources without activating stopped ancestors. Use only under this runtime's
         lease; the lookup supplies resources, not permission to execute them. *)
+  ; retained_ancestor_sources : ancestor_sources option
+    (** Immutable ancestor sources from the same prepared native resources. Use
+        each source inside its callback while holding this runtime's lease. *)
   ; activity : Runtime_activity.t option
     (** Generated execution belongs to the runtime's construction switch even
         when invoked by a foreground/scheduler fiber from another switch. The
@@ -448,11 +862,14 @@ type t =
         runtime value conversion or [prepare]. Rejection leaves the live moderator
         snapshot/queue unchanged and uses the existing Invalid_state error mapping. *)
   ; legacy_events :
-      (max_events:int
+      (capture_cleanup:(Callback_cleanup.Completion.t -> unit) option
+       -> max_events:int
        -> history:History_entry.t list
        -> (Chat_response.Moderation.Outcome.t list, Agent_protocol.Error.t) result)
         option
-    (** Installed legacy idle adapter: each exact head has its own Event ACK.
+    (** The current optional capture belongs only to this invocation's actual
+        acquired claims; adapters must not retain it across calls.
+        Installed legacy idle adapter: each exact head has its own Event ACK.
         Notifications/request intents are already durable. No foreground
         operation, constructor fallback or provider-before-model hook is exposed.
         None retains explicit standalone embedding behavior. *)
@@ -470,10 +887,17 @@ type t =
       ?prepare:prepare_enqueue
       -> Agent_protocol.Job.t
       -> (Jsonaf.t option, Agent_protocol.Error.t) result
-  ; close : unit -> unit
+  ; close : Close.t
     (** Caller cancels/drains foreground and borrowed background workers first.
         Closes and joins graph-owned inference channels, then persists cache. *)
   }
+
+(** Execute the runtime's sole closer and preserve its actual raw exception.
+    Reporting forwards the same invocation's immutable groups and primary;
+    neither accessor consumes diagnostic presentation or changes custody. *)
+val close : t -> unit
+
+val close_reported : t -> unit Close_observation.t
 
 (** Select the actual runtime-bound startup DATA. Does not load,
     initialize or admit work; absence is represented as No_callback and does not
@@ -507,6 +931,7 @@ type legacy_callback_services = Legacy_callback_runtime.Services.t =
   ; schedules : schedule_services
   ; execute : Native_tool_invocation.executor
   ; executing : Agent_protocol.Moderator_execution.t
+  ; policy_caller : unit -> (Delegated_policy_caller.t, Agent_protocol.Error.t) result
   ; check_current : unit -> (unit, Agent_protocol.Error.t) result
   ; is_halted : unit -> bool
   ; checkpoint : unit -> (Jsonaf.t option, Agent_protocol.Error.t) result
@@ -538,10 +963,324 @@ type legacy_construction =
   { startup : Legacy_startup.t
   ; claim : legacy_callback_claim
   ; installed_claim :
-      operation_id:Agent_protocol.Id.Operation.t option -> legacy_callback_claim
+      ?capture_cleanup:(Callback_cleanup.Completion.t -> unit)
+      -> operation_id:Agent_protocol.Id.Operation.t option
+      -> legacy_callback_claim
+    (** Forward the current option to the SAME Actor's actual claim transport.
+        Foreground callbacks use their original Operation owner; idle callers
+        retain acquired Completions in their own invocation lifetime. No capture
+        is synthesized for rejection without an actual installed claim. *)
   ; history : unit -> (History_entry.t list, Agent_protocol.Error.t) result
   ; script_tools : Chat_response.Agent_runtime.t -> Script_tool_calls.t
   }
+
+type runtime = t
+
+module Product_identity : sig
+  (** Physical resource identity, never an execution grant or resource lease. *)
+  type t
+
+  val equal : t -> t -> bool
+end
+
+(** Factual completion of one still-live retained binding. No execution grant,
+    callback runner, decoder or public issuer. *)
+module Retained_lifecycle : sig
+  type t
+
+  (** Pure same-domain negative check against the actual binding/Product,
+      completed lifecycle owner and SAME prepared source/worker/Manager.
+      Full source/generation and target must match the Actor's actual State.
+      Does not refresh Store, run callbacks or prove current Goal/Run authority. *)
+  val check
+    :  t
+    -> source:Source.t
+    -> expected:Session_state.t
+    -> worker:Operation_worker.t
+    -> manager:Chat_response.Moderator_manager.t option
+    -> (unit, Agent_protocol.Error.t) result
+end
+
+module Pending_legacy_resume : sig
+  type t
+
+  module Inference : sig
+    (** One genuine current initialization graph supplies the identity, exact
+        allocator binding and all factual callbacks together. This record grants
+        no inference authority; the actual allocation port is still mandatory. *)
+    type t =
+      { identity : Inference_client.Identity.t
+      ; bind_identity : Inference_allocation.Port.t -> Inference_client.Identity.t
+      ; on_attempt : Inference_runtime.Attempt.t -> unit
+      ; on_observation : Inference.Observation.t -> unit
+      ; on_completion : Inference_client.Completion.t -> unit
+      }
+  end
+
+  (** Consume the original pending gate under the genuine current scoped
+      Constructor host. Installed_resume is rejected. Only the winning actual
+      checkpoint ACK completes the shared owner, without yielding; failure is
+      sticky and cancellation propagates. No Manager, allocator, source or
+      callback principal is reconstructed from stored data. The lexical inference
+      binding is forced only inside the same-gate Ready callback and is never
+      retained after this call. Cached scoped ACK/ordinary winner/Failed does not
+      force it; the Factory must own any graph before its creation can yield. *)
+  val run_scoped
+    :  t
+    -> host:legacy_construction
+    -> inference:(Inference.t, Agent_protocol.Error.t) result Lazy.t
+    -> (Runtime_resume.t, Agent_protocol.Error.t) result
+end
+
+module Attachment : sig
+  type t
+
+  type origin =
+    | Cold
+    | Retained
+
+  module Resume : sig
+    type t =
+      | Continue_live
+      | Pending of Runtime_resume.t
+      | Pending_legacy of Pending_legacy_resume.t
+  end
+
+  (** Invoke this attachment's ONE stored actual closer once. Joins/retained
+      retries follow that closer's existing contract. The immutable observation
+      forwards actual diagnostic groups and exact raw exit, never custody. The
+      runtime's legacy [close] projects this SAME implementation. *)
+  val close_reported : t -> unit Close_observation.t
+
+  val runtime : t -> runtime
+  val origin : t -> origin
+  val product : t -> Product_identity.t option
+
+  (** Actual Product-backed native affinity while its binding is live. Raw cold
+      adapters return None. No native resource or execution grant is supplied. *)
+  val native_identity : t -> Native_identity.t option
+
+  (** Legacy host adaptation states only cold behavior. It cannot manufacture
+      retained resource identity or skip an actual pending callback. *)
+  val cold : runtime -> t
+
+  (** Factual selection of the original lifecycle owner, bound to this worker.
+      Completed ordinary activation selects [Continue_live]. A completed scoped
+      legacy Resume retains the same worker-bound factual [Pending] result until
+      installation; reading it does not consume it. Failure preserves its original
+      error. Ready remains its actual callback kind, never converted from start
+      to resume. *)
+  val runtime_resume : t -> (Resume.t, Agent_protocol.Error.t) result
+
+  (** Only the actual retained Binding can issue this witness. Ready/scoped ACK
+      return None; Failed preserves its original error. Cold adapters never
+      issue one. A completed owner is read directly; no callback/cache forcing.
+      Closing its binding irreversibly retires every witness before yielding. *)
+  val retained_lifecycle
+    :  t
+    -> (Retained_lifecycle.t option, Agent_protocol.Error.t) result
+end
+
+(** Factual affinity of one still-open physical policy Product. It is independent
+    of retired worker bindings and grants no original or execution admission. *)
+module Policy_access : sig
+  type t
+
+  (** Pure same-domain, completed extension lifecycle and exact current
+      session/generation/spec/full installed source/Stop basis check. No Manager
+      snapshot, lock, source preparation, callback forcing or legacy check. *)
+  val check : t -> expected:Session_state.t -> (unit, Agent_protocol.Error.t) result
+end
+
+(** Affinity of an explicitly restored physical extension Product whose genuine
+    ordinary Session_resume remains pending. This is distinct from an actually
+    Completed in-memory lifecycle and grants no source or execution admission. *)
+module Restored_policy_access : sig
+  type t
+
+  val product_identity : t -> Product_identity.t
+  val basis : t -> Policy_restore_basis.t
+
+  (** Same domain, still-open actual Product and pending resume owner, and SAME
+      current selected lifecycle/source/resource/Stop DATA. No Manager read or
+      callback execution; the actual serialized claim checks current checkpoint. *)
+  val check : t -> expected:Session_state.t -> (unit, Agent_protocol.Error.t) result
+end
+
+module Product : sig
+  type t
+
+  module Identity = Product_identity
+
+  val identity : t -> Identity.t
+  val native_identity : t -> Native_identity.t
+
+  (** Same-domain/open Product and the SAME actual preattached holder after
+      successful construction. Physical association, not permission or lifecycle
+      completion. A different attachment sharing the native unit is rejected. *)
+  val check_attachment
+    :  t
+    -> attachment:Product_attachment.t
+    -> (unit, Agent_protocol.Error.t) result
+
+  (** Same-domain/open Product and its SAME common native unit's immutable
+      selected Source. Caller retains the actual Cell loan during dependent use.
+      Missing selection is typed unavailable, never No_moderator; no source IO,
+      preparation, source grant or cleanup owner is created. *)
+  val selected_source : t -> (Source.t, Agent_protocol.Error.t) result
+
+  (** Loaded-first bridge over this Product's actual common resources. The
+      trusted Cell caller retains its real Product lease throughout the callback.
+      Checks the Product and common unit remain open; no common closer or new
+      unit escapes and no admission is supplied. *)
+  val with_native_resources
+    :  t
+    -> f:(resources -> ('a, Agent_protocol.Error.t) result)
+    -> ('a, Agent_protocol.Error.t) result
+
+  (** Trusted Factory factual issuer from its SAME physical Cell runtime, after
+      exact Cell lease/key/profile validation. Requires original extension owner
+      Completed; Ready cannot activate and Failed preserves its original error.
+      No snapshot is read here: actual serialized event capture/claim validates
+      Manager checkpoint identity. This is no source or permission grant and does
+      not validate arbitrary manufactured runtime-record closures. *)
+  val policy_access
+    :  t
+    -> runtime:runtime
+    -> expected:Session_state.t
+    -> (Policy_access.t, Agent_protocol.Error.t) result
+
+  (** Factory-only factual issuer after actual policy construction admission.
+      Checks this physical Product's exact prepared source/target, worker and
+      extension Manager, genuinely pending Session_resume, original complete raw
+      checkpoint basis and current known Manager snapshot. No callback, new Init
+      ACK, worker installation or permission is supplied. Existing constructors
+      and their real lifecycle state are unchanged. The Factory separately owns
+      the actual source stage, writer/Handle and final Cell publication. *)
+  val restored_policy_access
+    :  t
+    -> runtime:runtime
+    -> source:Source.t
+    -> basis:Policy_restore_basis.t
+    -> expected:Session_state.t
+    -> (Restored_policy_access.t, Agent_protocol.Error.t) result
+
+  module Binding : sig
+    type t
+
+    (** Raw actual binding for Factory preparation only. Before publication,
+        Factory must attach the exact resource-lease finalizer below. *)
+    val runtime : t -> runtime
+
+    (** Checked actual Product identity, requiring its creating domain, open
+        Product and live binding. Pending ordinary initialization is permitted;
+        this is affinity only, never lifecycle completion or admission. *)
+    val product_identity : t -> (Product_identity.t, Agent_protocol.Error.t) result
+
+    (** Preserve the actual Factory source/guard wrappers on this same worker,
+        Manager and native runtime, and install its resource finalizer before
+        escape. This is trusted Factory wrapping: physical worker, Manager and
+        native identity are checked, not every runtime record closure or source
+        field. Final Factory/source/ACK validation is still required. A foreign
+        physical view is rejected. [close] only releases the actual host
+        binding/resource lease; it is not an admission callback. *)
+    val attach
+      :  t
+      -> runtime:runtime
+      -> close:(unit -> unit)
+      -> (Attachment.t, Agent_protocol.Error.t) result
+
+    (** Same factual Binding checks and retirement position as [attach], with
+        ONLY one actual reported closer. No second raw callback or observer is
+        stored. Factory forwards the original Cell/stage groups unchanged;
+        simple [attach] adapts its single raw closer to this implementation. *)
+    val attach_reported
+      :  t
+      -> runtime:runtime
+      -> close:(unit -> unit Close_observation.t)
+      -> (Attachment.t, Agent_protocol.Error.t) result
+  end
+
+  (** New worker view of the same physical services and allocator. Checks the
+      known Manager identity state against the supplied checkpoint without
+      restoring it, and retains the supplied full checkpoint unchanged. Factory
+      must establish custody of that checkpoint, including its queue metadata
+      and unknown fields. [source] and [expected] are the actual Factory-selected
+      construction source and State: target, construction family/artifact/session
+      must match this Product. They are factual affinity, never permission.
+      Does not compile, reserve history, run Init, rotate source or grant execution. Factory must separately
+      retain and validate its exact source/Init ACK and actual resource lease. *)
+  val bind
+    :  t
+    -> source:Source.t
+    -> expected:Session_state.t
+    -> history:History_entry.t list
+    -> moderator_checkpoint:Jsonaf.t option
+    -> (Binding.t, Agent_protocol.Error.t) result
+
+  (** Ordinary authored-root counterpart using the actual verified retained
+      revision rather than a fabricated deferred Source.t. Same physical
+      Manager/checkpoint/new-worker checks as [bind], no compile, restore, Init,
+      history reservation or original grant. The factual lifecycle basis must
+      match an actual authored Source at any later native installation; other
+      source families retain their existing exact prepared-source identity. *)
+  val bind_authored
+    :  t
+    -> revision:Prompt_revision.t
+    -> expected:Session_state.t
+    -> history:History_entry.t list
+    -> moderator_checkpoint:Jsonaf.t option
+    -> (Binding.t, Agent_protocol.Error.t) result
+
+  (** Close this Product once. A shared native promotion closes attachment-local
+      state only; the Cell's last combined reference owns common native release.
+      Existing nonshared constructors retain their full physical close sequence.
+      Factory owns election/private-switch join and graph factual finish retries. *)
+  val close : t -> unit
+
+  (** SAME cached original physical Product producer, including when called
+      through a first/rebound binding or retained Cell partial fallback. Joins
+      do not run another physical close or mint another diagnostic carrier. *)
+  val close_reported : t -> unit Close_observation.t
+end
+
+(** Attach Manager/history/script services and a dormant worker to the SAME
+    prepared entry resources/context/Session/Root_binding/graph. Native creation,
+    inherited preparation, Generated authoring setup and initial guidance are
+    not repeated. Borrowed ancestor closures keep their originating context and
+    existing authority, including Generated inherited currentness.
+
+    The actual Cell Promotion must own [attachment] before this call can yield.
+    Error/exception/cancellation leaves partial attachment and shared native
+    custody with that Cell; no common close or replacement construction occurs.
+    Each holder permits one construction attempt. The actual Factory checkpoint
+    and source/session/profile association are checked before attachment; this
+    does not replace ordinary initialization or genuine policy restoration
+    admission. Existing module/initial-state expression semantics are retained.
+    Worker allocation does not install or execute it. A shared Product's close
+    releases attachment-local state only, after all its work joins.
+    The initial runtime carries the SAME prepared resource's borrowed source view;
+    it neither claims nor closes another root owner. Retained binding creation
+    keeps its existing separate Factory source-attachment contract. *)
+val build_product_from_native
+  :  Prepared_native.t
+  -> attachment:Product_attachment.t
+  -> source:Source.t
+  -> construction_checkpoint:(unit -> (unit, Agent_protocol.Error.t) result)
+  -> legacy_construction:legacy_construction option
+  -> services:extension_services option
+  -> history_namespace:string
+  -> next_history_sequence:int
+  -> existing_history:History_entry.t list option
+  -> existing_moderator_snapshot:Jsonaf.t option
+  -> moderator_reservation_size:int
+  -> permission_profile:Permission_policy.t
+  -> review_permission:
+       (Permission_policy.invocation
+        -> (Permission_reviewer.Decision.t, Permission_reviewer.Error.t) result)
+  -> schedule_services:schedule_services
+  -> job_services:job_services
+  -> (Product.t * Product.Binding.t, Agent_protocol.Error.t) result
 
 (** Encode an already prepared identity snapshot in the durable moderator
     envelope, without re-entering the live manager. *)
@@ -660,13 +1399,6 @@ val build_with_extensions
   -> schedule_services:schedule_services
   -> job_services:job_services
   -> (t, Agent_protocol.Error.t) result
-
-(** Captured standalone implementations and a live lookup of the parent's checked
-    execution registry. The host retains parent resources and mediates policy. *)
-type inherited_managed =
-  { delegation : Chat_response.Managed_tool_registry.delegation
-  ; current : unit -> Chat_response.Tool_capability.t
-  }
 
 (** Build a captured Artifact with its defining root grammar and actual private
     delegation authority. The captured origin must match that authority's actual
@@ -856,9 +1588,222 @@ val with_authored_source_lease
   -> source_lease:Prompt_source_lease.t
   -> authored_resources Or_error.t
 
-(** The existing exact Model completion event payload, shared by runtime enqueue
-    and Actor's factual queue-append validator. This allocates no execution or
-    continuation authority. Caller selects an actual terminal Model Job. *)
+(** Compatibility alias for {!Model_job_event.legacy}. Runtime enqueue selects
+    {!Model_job_event.render}'s format from its actual compiled Manager; the
+    Actor independently uses the same projection for its exact queue append.
+    This allocates no execution or continuation authority. *)
 val model_job_event
   :  Agent_protocol.Job.t
   -> (Chatml.Chatml_lang.value, Agent_protocol.Error.t) result
+
+(** Product-returning siblings share the sole implementation of the existing
+    build families and source checks. [ancestor_capabilities] is the original
+    retained higher-ancestor binding view supplied by the host, preserved through
+    every Product binding; [None] supplies no higher-ancestor view. It does not
+    replace current delegation authorization. [ancestor_sources] retains matching
+    physical Source scopes on that SAME Product, including later native loans;
+    [None] supplies no higher Source view. Required [selected_source] Some is
+    checked against the actual family/artifact before allocation and retained at
+    construction; None preserves direct callers but [Product.selected_source]
+    then returns unavailable.
+    Existing build functions retain sole-product close ownership; these host
+    siblings return the actual first binding for Factory lease attachment. *)
+val build_product
+  :  ancestor_capabilities:ancestor_capabilities option
+  -> ancestor_sources:ancestor_sources option
+  -> selected_source:Source.t option
+  -> construction_checkpoint:(unit -> (unit, Agent_protocol.Error.t) result) option
+  -> startup:Chat_response.Startup_compilation.t option
+  -> legacy_construction:legacy_construction option
+  -> agent_source:Captured_agent_runner.Source_binding.t option
+  -> root_invocation:
+       Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.t
+  -> script_preparation:Script_preparation.t option
+  -> sw:Eio.Switch.t
+  -> env:Eio_unix.Stdenv.base
+  -> inference_context:Inference_runtime.Context.t
+  -> inference_identity:Chat_response.Neutral_turn.Identity.t
+  -> bind_inference_identity:
+       (Inference_allocation.Port.t -> Chat_response.Neutral_turn.Identity.t)
+  -> on_inference_attempt:(Inference_runtime.Attempt.t -> unit)
+  -> on_inference_completion:(Inference_client.Completion.t -> unit)
+  -> on_inference_observation:(Inference.Observation.t -> unit)
+  -> paths:Runtime_paths.t
+  -> storage_paths:Runtime_paths.t
+  -> revision:Prompt_revision.t
+  -> session_id:Agent_protocol.Id.Session.t
+  -> history_namespace:string
+  -> next_history_sequence:int
+  -> existing_history:History_entry.t list option
+  -> existing_moderator_snapshot:Jsonaf.t option
+  -> moderator_reservation_size:int
+  -> manifest_authorizer:Shell_runtime.Manifest_authorizer.t
+  -> approval_provider:Shell_runtime.Approval_broker.provider
+  -> approval_store:Shell_access.Approval.store
+  -> permission_profile:Permission_policy.t
+  -> review_permission:
+       (Permission_policy.invocation
+        -> (Permission_reviewer.Decision.t, Permission_reviewer.Error.t) result)
+  -> schedule_services:schedule_services
+  -> job_services:job_services
+  -> (Product.t * Product.Binding.t, Agent_protocol.Error.t) result
+
+val build_product_with_extensions
+  :  ancestor_capabilities:ancestor_capabilities option
+  -> ancestor_sources:ancestor_sources option
+  -> selected_source:Source.t option
+  -> construction_checkpoint:(unit -> (unit, Agent_protocol.Error.t) result) option
+  -> startup:Chat_response.Startup_compilation.t option
+  -> legacy_construction:legacy_construction option
+  -> agent_source:Captured_agent_runner.Source_binding.t option
+  -> root_invocation:
+       Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.t
+  -> script_preparation:Script_preparation.t option
+  -> native_registrations:Chat_response.Agent_runtime.native_registration list
+  -> services:extension_services
+  -> sw:Eio.Switch.t
+  -> env:Eio_unix.Stdenv.base
+  -> inference_context:Inference_runtime.Context.t
+  -> inference_identity:Chat_response.Neutral_turn.Identity.t
+  -> bind_inference_identity:
+       (Inference_allocation.Port.t -> Chat_response.Neutral_turn.Identity.t)
+  -> on_inference_attempt:(Inference_runtime.Attempt.t -> unit)
+  -> on_inference_completion:(Inference_client.Completion.t -> unit)
+  -> on_inference_observation:(Inference.Observation.t -> unit)
+  -> paths:Runtime_paths.t
+  -> storage_paths:Runtime_paths.t
+  -> revision:Prompt_revision.t
+  -> session_id:Agent_protocol.Id.Session.t
+  -> history_namespace:string
+  -> next_history_sequence:int
+  -> existing_history:History_entry.t list option
+  -> existing_moderator_snapshot:Jsonaf.t option
+  -> moderator_reservation_size:int
+  -> manifest_authorizer:Shell_runtime.Manifest_authorizer.t
+  -> approval_provider:Shell_runtime.Approval_broker.provider
+  -> approval_store:Shell_access.Approval.store
+  -> permission_profile:Permission_policy.t
+  -> review_permission:
+       (Permission_policy.invocation
+        -> (Permission_reviewer.Decision.t, Permission_reviewer.Error.t) result)
+  -> schedule_services:schedule_services
+  -> job_services:job_services
+  -> (Product.t * Product.Binding.t, Agent_protocol.Error.t) result
+
+val build_product_captured_artifact
+  :  ancestor_capabilities:ancestor_capabilities option
+  -> ancestor_sources:ancestor_sources option
+  -> selected_source:Source.t option
+  -> captured:Captured_recurrence_source.t
+  -> authority:Delegation_authority.t
+  -> construction_checkpoint:(unit -> (unit, Agent_protocol.Error.t) result) option
+  -> startup:Chat_response.Startup_compilation.t option
+  -> legacy_construction:legacy_construction option
+  -> agent_source:Captured_agent_runner.Source_binding.t option
+  -> script_preparation:Script_preparation.t option
+  -> native_registrations:Chat_response.Agent_runtime.native_registration list
+  -> services:extension_services option
+  -> sw:Eio.Switch.t
+  -> env:Eio_unix.Stdenv.base
+  -> inference_context:Inference_runtime.Context.t
+  -> inference_identity:Chat_response.Neutral_turn.Identity.t
+  -> bind_inference_identity:
+       (Inference_allocation.Port.t -> Chat_response.Neutral_turn.Identity.t)
+  -> on_inference_attempt:(Inference_runtime.Attempt.t -> unit)
+  -> on_inference_completion:(Inference_client.Completion.t -> unit)
+  -> on_inference_observation:(Inference.Observation.t -> unit)
+  -> paths:Runtime_paths.t
+  -> storage_paths:Runtime_paths.t
+  -> session_id:Agent_protocol.Id.Session.t
+  -> history_namespace:string
+  -> next_history_sequence:int
+  -> existing_history:History_entry.t list option
+  -> existing_moderator_snapshot:Jsonaf.t option
+  -> moderator_reservation_size:int
+  -> manifest_authorizer:Shell_runtime.Manifest_authorizer.t
+  -> approval_provider:Shell_runtime.Approval_broker.provider
+  -> approval_store:Shell_access.Approval.store
+  -> permission_profile:Permission_policy.t
+  -> review_permission:
+       (Permission_policy.invocation
+        -> (Permission_reviewer.Decision.t, Permission_reviewer.Error.t) result)
+  -> schedule_services:schedule_services
+  -> job_services:job_services
+  -> (Product.t * Product.Binding.t, Agent_protocol.Error.t) result
+
+val build_product_generated
+  :  ancestor_capabilities:ancestor_capabilities option
+  -> ancestor_sources:ancestor_sources option
+  -> selected_source:Source.t option
+  -> construction_checkpoint:(unit -> (unit, Agent_protocol.Error.t) result) option
+  -> services:extension_services
+  -> definition:Generated_definition.t
+  -> artifact_store:Agent_store.Prompt_artifact_store.t
+  -> parent_runtime:Chat_response.Agent_runtime.t
+  -> inherited_managed:inherited_managed option
+  -> authority:Delegation_authority.t
+  -> sw:Eio.Switch.t
+  -> env:Eio_unix.Stdenv.base
+  -> inference_context:Inference_runtime.Context.t
+  -> inference_identity:Chat_response.Neutral_turn.Identity.t
+  -> bind_inference_identity:
+       (Inference_allocation.Port.t -> Chat_response.Neutral_turn.Identity.t)
+  -> on_inference_attempt:(Inference_runtime.Attempt.t -> unit)
+  -> on_inference_completion:(Inference_client.Completion.t -> unit)
+  -> on_inference_observation:(Inference.Observation.t -> unit)
+  -> paths:Runtime_paths.t
+  -> storage_paths:Runtime_paths.t
+  -> session_id:Agent_protocol.Id.Session.t
+  -> history_namespace:string
+  -> next_history_sequence:int
+  -> existing_history:History_entry.t list option
+  -> existing_moderator_snapshot:Jsonaf.t option
+  -> moderator_reservation_size:int
+  -> manifest_authorizer:Shell_runtime.Manifest_authorizer.t
+  -> approval_provider:Shell_runtime.Approval_broker.provider
+  -> approval_store:Shell_access.Approval.store
+  -> permission_profile:Permission_policy.t
+  -> review_permission:
+       (Permission_policy.invocation
+        -> (Permission_reviewer.Decision.t, Permission_reviewer.Error.t) result)
+  -> schedule_services:schedule_services
+  -> job_services:job_services
+  -> (Product.t * Product.Binding.t, Agent_protocol.Error.t) result
+
+val build_product_authored_child
+  :  ancestor_capabilities:ancestor_capabilities option
+  -> ancestor_sources:ancestor_sources option
+  -> selected_source:Source.t option
+  -> construction_checkpoint:(unit -> (unit, Agent_protocol.Error.t) result) option
+  -> services:extension_services
+  -> revision:Prompt_revision.t
+  -> prepared:authored_resources
+  -> code:Authored_code_preparation.t option
+  -> authority:Delegation_authority.t
+  -> existing_history:History_entry.t list option
+  -> sw:Eio.Switch.t
+  -> env:Eio_unix.Stdenv.base
+  -> inference_context:Inference_runtime.Context.t
+  -> inference_identity:Chat_response.Neutral_turn.Identity.t
+  -> bind_inference_identity:
+       (Inference_allocation.Port.t -> Chat_response.Neutral_turn.Identity.t)
+  -> on_inference_attempt:(Inference_runtime.Attempt.t -> unit)
+  -> on_inference_completion:(Inference_client.Completion.t -> unit)
+  -> on_inference_observation:(Inference.Observation.t -> unit)
+  -> paths:Runtime_paths.t
+  -> storage_paths:Runtime_paths.t
+  -> session_id:Agent_protocol.Id.Session.t
+  -> history_namespace:string
+  -> next_history_sequence:int
+  -> existing_moderator_snapshot:Jsonaf.t option
+  -> moderator_reservation_size:int
+  -> manifest_authorizer:Shell_runtime.Manifest_authorizer.t
+  -> approval_provider:Shell_runtime.Approval_broker.provider
+  -> approval_store:Shell_access.Approval.store
+  -> permission_profile:Permission_policy.t
+  -> review_permission:
+       (Permission_policy.invocation
+        -> (Permission_reviewer.Decision.t, Permission_reviewer.Error.t) result)
+  -> schedule_services:schedule_services
+  -> job_services:job_services
+  -> (Product.t * Product.Binding.t, Agent_protocol.Error.t) result

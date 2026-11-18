@@ -6,7 +6,9 @@ test('documentation paths lead through search setup to labeled sample output', a
 }) => {
   await page.goto('/docs/');
   const paths = page.getByRole('navigation', { name: 'Documentation paths' });
-  await expect(paths.getByRole('link')).toHaveCount(4);
+  await expect(
+    paths.getByRole('link', { name: /Run a recurring release-note review/ }),
+  ).toHaveAttribute('href', '/docs/tutorials/goal-recurrence/');
   await page
     .getByRole('navigation', { name: 'Applications and reference' })
     .getByRole('link', { name: 'Explore applications →' })

@@ -4,72 +4,96 @@ module D = Document_schema
 module X = Persistence_codec
 module C = D.Extension_carrier
 module I = Recurrence_identity
+module Schedule = P.Recurrence_schedule
 
-module Schedule = struct
-  type t =
-    | Interval of
-        { rule : Recurrence_rules.Rule.Interval.t
-        ; first_due : Time_ns.Alternate_sexp.t
-        }
-    | Calendar of Recurrence_rules.Rule.Calendar.t
-  [@@deriving sexp_of]
+module Goal_binding = struct
+  module Capture = struct
+    type t =
+      { owner : P.Session_ref.t
+      ; goal_id : P.Id.Goal.t
+      ; creator_episode : P.Goal_episode.t
+      ; goal_revision_at_capture : int64
+      }
+    [@@deriving equal]
 
-  let rule = function
-    | Interval { rule; _ } -> Recurrence_rules.Rule.Interval rule
-    | Calendar rule -> Recurrence_rules.Rule.Calendar rule
-  ;;
+    let owner t = t.owner
+    let goal_id t = t.goal_id
+    let creator_episode t = t.creator_episode
+    let goal_revision_at_capture t = t.goal_revision_at_capture
 
-  let to_json t =
-    match t with
-    | Interval { first_due; _ } ->
+    let create ~owner ~goal_id ~creator_episode ~goal_revision_at_capture =
+      let open Result.Let_syntax in
+      let%bind _ = P.Id.Goal.of_json (P.Id.Goal.to_json goal_id) in
+      if
+        P.Session_ref.equal owner (P.Goal_episode.session creator_episode)
+        && Int64.(goal_revision_at_capture >= 0L)
+      then Ok { owner; goal_id; creator_episode; goal_revision_at_capture }
+      else
+        Error
+          (P.Error.invalid_request
+             "recurrence Goal capture differs from its owner or revision")
+    ;;
+
+    let to_json t =
       `Object
-        [ "kind", `String "interval"
-        ; "rule", Recurrence_rules.Rule.to_json (rule t)
-        ; "first_due", P.Timestamp.to_json (P.Timestamp.of_time_ns first_due)
+        [ "owner", P.Session_ref.to_json t.owner
+        ; "goal_id", P.Id.Goal.to_json t.goal_id
+        ; "creator_episode", P.Goal_episode.to_json t.creator_episode
+        ; "goal_revision_at_capture", X.int64_json t.goal_revision_at_capture
         ]
-    | Calendar _ ->
-      `Object
-        [ "kind", `String "calendar"; "rule", Recurrence_rules.Rule.to_json (rule t) ]
+    ;;
+
+    let of_json json =
+      let open Result.Let_syntax in
+      let%bind fields = X.object_ json in
+      let%bind owner = X.required fields "owner" P.Session_ref.of_json in
+      let%bind goal_id = X.required fields "goal_id" P.Id.Goal.of_json in
+      let%bind creator_episode =
+        X.required fields "creator_episode" P.Goal_episode.of_json
+      in
+      let%bind goal_revision_at_capture =
+        X.required fields "goal_revision_at_capture" (function
+          | `String text when String.length text <= 19 ->
+            X.nonnegative_int64 (`String text)
+          | _ ->
+            Error (P.Error.invalid_request "invalid recurrence Goal capture revision"))
+      in
+      create ~owner ~goal_id ~creator_episode ~goal_revision_at_capture
+    ;;
+  end
+
+  type t =
+    | Unbound
+    | Controller_goal of Capture.t
+  [@@deriving equal]
+
+  let semantics = P.Session_storage_semantics.recurrence_controller_goal
+  let field = "goal_binding"
+
+  let decode json =
+    match D.Json.field json ~name:field with
+    | Absent -> Ok Unbound
+    | Null -> Error (P.Error.invalid_request "recurrence Goal binding cannot be null")
+    | Value json ->
+      Result.map (Capture.of_json json) ~f:(fun value -> Controller_goal value)
   ;;
 
-  let limits =
-    D.Limits.create ~max_bytes:65536 ~max_depth:24 ~max_fields:256 ~max_nodes:512
-    |> Result.map_error ~f:(fun error -> Sexp.to_string_hum (D.Error.sexp_of_t error))
-    |> Result.ok_or_failwith
-  ;;
-
-  let of_json json =
-    let open Result.Let_syntax in
-    let%bind () =
-      D.Json.validate ~limits json
-      |> Result.map_error ~f:(fun error ->
-        P.Error.invalid_request (Sexp.to_string_hum (D.Error.sexp_of_t error)))
+  let check_document document =
+    let present =
+      match D.Json.field (D.Document.payload document) ~name:field with
+      | Absent -> false
+      | Null | Value _ -> true
     in
-    let%bind f = X.object_ json in
-    let%bind kind = X.required f "kind" P.Json_codec.string in
-    let%bind rule =
-      X.required f "rule" (fun json ->
-        Recurrence_rules.Rule.of_json json
-        |> Result.map_error ~f:(fun error ->
-          P.Error.invalid_request
-            (Sexp.to_string_hum (Recurrence_rules.Timing_error.sexp_of_t error))))
+    let marked =
+      List.mem (D.Document.required_semantics document) semantics ~equal:String.equal
     in
-    match kind, rule with
-    | "interval", Recurrence_rules.Rule.Interval rule ->
-      let%map first_due = X.required f "first_due" P.Timestamp.of_json in
-      Interval { rule; first_due = P.Timestamp.to_time_ns first_due }
-    | "calendar", Recurrence_rules.Rule.Calendar rule -> Ok (Calendar rule)
-    | _, (Recurrence_rules.Rule.Interval _ | Recurrence_rules.Rule.Calendar _) ->
-      Error (P.Error.invalid_request "recurrence schedule and rule kind differ")
-  ;;
-
-  let shape =
-    let v = D.Shape.value in
-    X.tagged_shape_exn
-      ~discriminator:"kind"
-      [ "interval", X.fields_shape [ "kind"; "rule"; "first_due" ]
-      ; "calendar", X.shape_exn [ "kind", v; "rule", v ]
-      ]
+    match present, marked with
+    | true, false -> Error (D.Error.Required_semantics_unknown ("missing " ^ semantics))
+    | false, true ->
+      Agent_store.Document_fields.invalid
+        field
+        "required recurrence Goal binding is absent"
+    | true, true | false, false -> Ok ()
   ;;
 end
 
@@ -82,6 +106,7 @@ type projection =
   ; target : Recurrence_target.t
   ; policy : Recurrence_policy.t
   ; created_at : P.Timestamp.t
+  ; goal_binding : Goal_binding.t
   }
 
 type t =
@@ -98,6 +123,7 @@ let schedule t = t.projection.schedule
 let target t = t.projection.target
 let policy t = t.projection.policy
 let created_at t = t.projection.created_at
+let goal_binding t = t.projection.goal_binding
 let digest t = t.sha256
 let to_document t = t.document
 
@@ -133,13 +159,27 @@ let validate (t : projection) =
   let%bind _ = P.Timestamp.of_json (P.Timestamp.to_json t.created_at) in
   let%bind _ = Schedule.of_json (Schedule.to_json t.schedule) in
   let%bind _ = Recurrence_policy.of_json (Recurrence_policy.to_json t.policy) in
-  let%map _ = Recurrence_target.to_document t.target |> protocol in
-  ()
+  let%bind _ = Recurrence_target.to_document t.target |> protocol in
+  match t.goal_binding, Recurrence_target.view t.target with
+  | Unbound, _ -> Ok ()
+  | Controller_goal _, Existing_session _ ->
+    Error (P.Error.invalid_request "recurrence Goal binding requires a fresh child")
+  | Controller_goal capture, Fresh_child _ ->
+    let owner = Goal_binding.Capture.owner capture in
+    let episode = Goal_binding.Capture.creator_episode capture in
+    if
+      P.Session_ref.equal owner (I.Definition.controller t.key)
+      && P.Run_source.equal (P.Goal_episode.admission episode).source t.source
+    then Ok ()
+    else
+      Error
+        (P.Error.invalid_request
+           "recurrence Goal binding differs from the definition owner or source")
 ;;
 
 let encode (t : projection) =
   let%map.Result target = Recurrence_target.to_document t.target |> protocol in
-  `Object
+  let base =
     [ "key", I.Definition.to_json t.key
     ; "creator", P.Id.Principal.to_json t.creator
     ; "source", P.Run_source.to_json t.source
@@ -150,6 +190,11 @@ let encode (t : projection) =
     ; "policy", Recurrence_policy.to_json t.policy
     ; "created_at", P.Timestamp.to_json t.created_at
     ]
+  in
+  match t.goal_binding with
+  | Unbound -> `Object base
+  | Controller_goal capture ->
+    `Object (base @ [ Goal_binding.field, Goal_binding.Capture.to_json capture ])
 ;;
 
 let decode json =
@@ -177,6 +222,7 @@ let decode json =
   in
   let%bind policy = X.required f "policy" Recurrence_policy.of_json in
   let%bind created_at = X.required f "created_at" P.Timestamp.of_json in
+  let%bind goal_binding = Goal_binding.decode json in
   let t =
     { key
     ; creator
@@ -186,6 +232,7 @@ let decode json =
     ; target
     ; policy
     ; created_at
+    ; goal_binding
     }
   in
   let%map () = validate t in
@@ -203,6 +250,7 @@ let shape =
     ; "target", v
     ; "policy", Recurrence_policy.shape
     ; "created_at", v
+    ; Goal_binding.field, v
     ]
 ;;
 
@@ -212,7 +260,7 @@ let codec =
     ~kind:"ochat.recurrence_definition"
     ~version:1
     ~shape
-    ~supported_semantics:[]
+    ~supported_semantics:[ Goal_binding.semantics ]
     ~validate:(fun t -> X.document_result (validate t))
     ~decode:(fun json -> X.document_result (decode json))
     ~encode:(fun t -> X.document_result (encode t))
@@ -229,11 +277,13 @@ let admitted projection document =
 
 let of_document document =
   let open Result.Let_syntax in
+  let%bind () = Goal_binding.check_document document in
   let%bind carrier = D.Domain_codec.decode codec document in
   admitted (C.value carrier) document
 ;;
 
-let create
+let create_with_binding
+      ~goal_binding
       ~key
       ~creator
       ~source
@@ -253,10 +303,29 @@ let create
     ; target
     ; policy
     ; created_at
+    ; goal_binding
     }
   in
   let%bind document =
     D.Domain_codec.encode codec (C.of_authored_value projection) |> protocol
   in
+  let%bind document =
+    match goal_binding with
+    | Unbound -> Ok document
+    | Controller_goal _ ->
+      (match D.Document.json document with
+       | `Object fields ->
+         let fields = List.Assoc.remove fields ~equal:String.equal "required_semantics" in
+         D.Document.inspect
+           ~limits
+           (`Object
+               (fields
+                @ [ "required_semantics", `Array [ `String Goal_binding.semantics ] ]))
+         |> protocol
+       | _ -> assert false)
+  in
   admitted projection document |> protocol
 ;;
+
+let create = create_with_binding ~goal_binding:Unbound
+let create_bound ~binding = create_with_binding ~goal_binding:(Controller_goal binding)

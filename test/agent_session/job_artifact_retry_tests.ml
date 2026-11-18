@@ -174,3 +174,107 @@ let%expect_test
     explicit stop won; selected completion did not resurrect the cancelled job
     |}]
 ;;
+
+let%expect_test
+    "late completion recovery retains original time when no retry instant fits"
+  =
+  let now = ref timestamp in
+  let reject_save = ref false in
+  let storage = ref None in
+  with_actor
+    ~now:(fun () -> !now)
+    ~reject_save:(fun _ -> !reject_save)
+    ~make_job_results:(fun env sw initial ->
+      let actual = Job_artifact_fixtures.create env sw initial in
+      storage := Some actual;
+      Some actual.publisher)
+    (fun _env _sw actor _writer backend ->
+       let storage = Option.value_exn !storage in
+       let job =
+         add_claimed_job
+           actor
+           ~retry_policy:(Safe_retry { max_attempts = 2; backoff_ms = 1 })
+       in
+       let completion = Background_completion_tests.failure ~retryable:true in
+       let selected = ref None in
+       let before = A.state actor |> protocol_ok in
+       (* The real Publisher has durably prepared this exact failed attempt, but
+          its host persistence callback has not committed a terminal Job. *)
+       (match
+          Results.Publisher.publish
+            storage.publisher
+            ~storage:Artifact
+            ~jobs:before.jobs
+            ~job
+            ~now:timestamp
+            completion
+            ~persist:(fun stored ->
+              selected := Some stored;
+              Error
+                (P.Error.create
+                   Persistence_error
+                   ~message:"injected prepared completion save failure"
+                   ~retryable:true
+                   ()))
+        with
+        | Error failure -> assert (P.Error.equal_code failure.code Persistence_error)
+        | Ok _ -> failwith "prepared completion unexpectedly committed");
+       assert (phys_equal before (A.state actor |> protocol_ok));
+       assert (phys_equal before (Agent_session.Memory_backend.state backend));
+       let selected =
+         match Option.value_exn !selected with
+         | P.Stored_completion.Artifact { reference; _ } -> reference
+         | Inline _ -> failwith "expected actual prepared artifact"
+       in
+       let recover () =
+         A.recover_background_results actor ~max_count:8 ~max_total_bytes:4096
+       in
+       now := P.Timestamp.of_time_ns (Time_ns.of_int63_ns_since_epoch Int63.max_value);
+       assert (Result.is_error (P.Timestamp.add_ms !now 1));
+       (* Using the original artifact time to decide the retry would incorrectly
+          queue; recovery must use the actual late observation instead. *)
+       assert (Result.is_ok (P.Timestamp.add_ms timestamp 1));
+       reject_save := true;
+       (match recover () with
+        | Error failure ->
+          assert (P.Error.equal_code failure.code Internal_error);
+          [%test_eq: string] "injected job transition failure" failure.message
+        | Ok () -> failwith "rejected recovery acknowledged the terminal attempt");
+       assert (phys_equal before (A.state actor |> protocol_ok));
+       assert (phys_equal before (Agent_session.Memory_backend.state backend));
+       reject_save := false;
+       recover () |> protocol_ok;
+       let terminal = Background_scheduler_tests.current backend job in
+       (match terminal.status with
+        | Failed failure ->
+          [%test_eq: string] "Try later" failure.message;
+          assert failure.retryable
+        | _ -> failwith "late recovered failure did not finish the attempt");
+       [%test_eq: int] job.attempt terminal.attempt;
+       assert (Option.is_none terminal.next_run_at);
+       assert (Option.equal P.Timestamp.equal terminal.completed_at (Some timestamp));
+       let actual =
+         J.terminal_completion
+           ~load_artifact:(Results.Publisher.load storage.publisher)
+           terminal
+         |> protocol_ok
+         |> Option.value_exn
+       in
+       assert (P.Completion.equal completion actual);
+       (match J.terminal_result terminal |> protocol_ok with
+        | Some (Artifact { reference; _ }) ->
+          assert (P.Id.Blob.equal selected.blob.id reference.blob.id)
+        | _ -> failwith "recovery replaced the prepared completion reference");
+       assert (
+         Option.is_none
+           (Results.Publisher.pending_completion storage.publisher ~job:terminal));
+       let committed = A.state actor |> protocol_ok in
+       recover () |> protocol_ok;
+       assert (phys_equal committed (A.state actor |> protocol_ok));
+       assert (phys_equal committed (Agent_session.Memory_backend.state backend));
+       print_endline
+         "late recovery retained exact failure, artifact and original completed_at; \
+          rejected save stayed running, terminal save did not retry");
+  [%expect
+    {| late recovery retained exact failure, artifact and original completed_at; rejected save stayed running, terminal save did not retry |}]
+;;

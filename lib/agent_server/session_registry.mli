@@ -2,6 +2,13 @@ open! Core
 
 (** Loaded-session registry. Actor state remains authoritative. *)
 
+module Entry_close : sig
+  type t
+
+  val legacy : (unit -> unit) -> t
+  val reported : (unit -> Session_disposal_report.t) -> t
+end
+
 type entry =
   { actor : Agent_session.Session_actor.t
   ; history_ids : Agent_session.History_id_source.t
@@ -15,8 +22,16 @@ type entry =
       -> ( Agent_store.Job_result_store.Publisher.collection_stats option
            , Agent_protocol.Error.t )
            result
-  ; close : unit -> unit
+  ; close : Entry_close.t
   }
+
+(** Invoke this actual transported entry closer outside Registry locks. Successful
+    disposal is cached; reported reads preserve all immutable diagnostic groups.
+    Legacy delivery reports each actual group's diagnostic once. A retained
+    closer remains retained even after its diagnostics have been delivered. *)
+val close_entry_reported : entry -> Session_disposal_report.t
+
+val close_entry : entry -> unit
 
 (** Recovery publication carries execution selection alongside the same actual
     entry. Metadata recovery remains unselected until that actual Owner records
@@ -84,6 +99,57 @@ val read_state
   -> authorize:(Agent_protocol.Session.t -> (unit, Agent_protocol.Error.t) result)
   -> Agent_protocol.Id.Session.t
   -> (Agent_session.Session_state.t, Agent_protocol.Error.t) result
+
+module Read_origin : sig
+  type t =
+    | Selected
+    | Loaded_unselected
+    | Indexed
+end
+
+(** [read_state_with_execution] uses the same admitted immutable read and
+    distinguishes indexed reads from loaded bindings and captures whether a
+    loaded binding is selected for ordinary execution.
+    A change in selection across the snapshot returns Conflict. Selection
+    is an advisory observation and does not grant execution authority. *)
+val read_state_with_execution
+  :  t
+  -> authorize:(Agent_protocol.Session.t -> (unit, Agent_protocol.Error.t) result)
+  -> Agent_protocol.Id.Session.t
+  -> (Agent_session.Session_state.t * Read_origin.t, Agent_protocol.Error.t) result
+
+module Recurrence_read : sig
+  type t
+
+  val state : t -> Agent_session.Session_state.t
+  val snapshot : t -> Agent_session.Recurrence_query.snapshot
+  val origin : t -> Read_origin.t
+  val same_basis : t -> t -> bool
+end
+
+(** Loaded query and state share one mailbox turn. An indexed callback runs
+    under the same immutable Registry read admission and must use a genuine,
+    temporary Store Handle, with no runtime load, activation or recovery repair. *)
+val read_recurrences
+  :  t
+  -> actor:Operator_authorization.t
+  -> authorize:(Agent_protocol.Session.t -> (unit, Agent_protocol.Error.t) result)
+  -> read_indexed:
+       (Agent_store.Session_index.Entry.t
+        -> ( Agent_session.Session_state.t * Agent_session.Recurrence_query.snapshot
+             , Agent_protocol.Error.t )
+             result)
+  -> request:Agent_session.Recurrence_query.request
+  -> Agent_protocol.Id.Session.t
+  -> (Recurrence_read.t, Agent_protocol.Error.t) result
+
+(** Final denial-only binding and live Actor observation check. Synchronous,
+    called on the Registry's domain after a fresh read and before disclosure.
+    An indexed read has no retained Handle after its checked read lifetime. *)
+val check_recurrence_read
+  :  t
+  -> Recurrence_read.t
+  -> (unit, Agent_protocol.Error.t) result
 
 (** Startup-only immutable indexed read. Requires no loaded entries, no installed
     loader or active lifecycle reservations, and a live registry. The supplied
@@ -162,8 +228,10 @@ val load : t -> Agent_protocol.Id.Session.t -> (entry, Agent_protocol.Error.t) r
 (** Retain a loaded entry for one bounded read, lazily reconstructing an indexed
     session without loading its execution runtime. Wait cancellably for existing
     per-ID lifecycle admission, then recheck membership and shutdown. The callback
-    runs once on successful load, outside the global mutex, under per-ID exclusion; cancellation
-    or exceptions release that exclusion. Failed cleanup remains an error.
+    runs once after the loaded tuple is current, outside the global mutex, under
+    per-ID exclusion. Cancellation or exceptions release that exclusion. Failed
+    cleanup remains an error. Existing owned execution and committed metadata
+    observation may continue on the exact tuple during the callback.
     Callers must establish authority before admission and revalidate it before
     disclosure. The callback must not reserve/load/remove this same ID, shut down
     the registry, or wait for work requiring this ID's lifecycle admission. Do not
@@ -173,6 +241,22 @@ val with_loaded_read
   -> Agent_protocol.Id.Session.t
   -> (entry -> ('a, Agent_protocol.Error.t) Result.t)
   -> ('a, Agent_protocol.Error.t) Result.t
+
+(** Retain the exact loaded Actor, Owner and Handle for work in its quiescent
+    Actor callback. Admission is fail-fast and provides per-ID exclusion from
+    lifecycle work. A missing or mismatched tuple returns [Ok None]. The callback
+    runs outside the registry mutex and returns its outcome inside [Ok (Some _)].
+    Closing, failed cleanup and another reservation prevent admission. Committed
+    native metadata observation of the same tuple remains available. The caller
+    supplies quiescent Actor admission and limits the callback to persistence
+    work on that owner. *)
+val with_loaded_retention
+  :  t
+  -> actor:Agent_session.Session_actor.t
+  -> runtime:Runtime_owner.t
+  -> handle:Agent_store.Session_store.Handle.t
+  -> (unit -> 'a)
+  -> ('a option, Agent_protocol.Error.t) Result.t
 
 val entries : t -> entry list
 val stats : t -> stats
@@ -188,7 +272,11 @@ val summaries : t -> Agent_protocol.Session.t list
     projection enter exclusive admission; each is then reserved and its actor fenced before
     inactivity is rechecked. Eviction permanently closes runtime/resource admission
     and closes the entry outside the global mutex before committing its unchanged
-    durable projection. Failed closure retains the retired owner for recovery. *)
+    durable projection. Failed closure retains the retired owner for recovery.
+
+    Each call makes one pass over a snapshot of loaded session IDs using the
+    supplied durable index. Closing a later candidate can make an earlier ancestor
+    eligible; further passes require a fresh durable index. *)
 val unload_inactive : t -> index_entries:Agent_store.Session_index.Entry.t list -> int
 
 (** Reject new registration/loading/read lifetimes, drain admitted reservations
@@ -276,6 +364,30 @@ val commit_retired
     creation coordinators check this under their own creation lock before reserve. *)
 val lifecycle_reserved : t -> Agent_protocol.Id.Session.t -> bool
 
+(** Negative-only observation for continuing an already owned invocation.
+    Closing, failed cleanup, a missing or unavailable Handle, a changed
+    Actor/Owner/Handle tuple, and exclusive lifecycle, loading or loaded
+    retention reservations block it. A qualified read of the same tuple is
+    compatible. The caller must retain and authorize its own execution. *)
+val blocks_owned_execution : t -> entry -> bool
+
+(** Negative-only observation for reading committed native ancestry metadata.
+    Also permits an exact loaded retention reservation, whose work operates on
+    persistence behind the Actor mailbox. The caller must read Actor state and
+    revalidate the tuple. Runtime and source authorization remain with their
+    respective owners. *)
+val blocks_native_metadata_read : t -> entry -> bool
+
+(** Final nonyielding, creating-domain check for committed native metadata.
+    Checks the same exact loaded tuple and compatible reservation phases.
+    Contention or an exclusive reservation rejects without awaiting the
+    Registry mutex. The mutex is released before returning. This supplies
+    neither permission nor a lease across a subsequent wait. *)
+val check_native_metadata_publication
+  :  t
+  -> entry
+  -> (unit, Agent_protocol.Error.t) result
+
 (** Negative-only observation of retained failed cleanup for this session ID,
     independent of a transient lifecycle/read reservation. It supplies no
     admission or cleanup-completion proof. Same creating Eio domain only. *)
@@ -322,6 +434,19 @@ val cleanup_owner : Cleanup_owner.t -> (unit, Agent_protocol.Error.t) Result.t
 
 (** Shutdown preserves a retained expected cleanup failure through this exception. *)
 exception Cleanup_failed of Cleanup_failure.t
+
+(** Own the actual not-yet-published Entry through initialization. A failure
+    closes the SAME runtime and entry under cancellation protection. If cleanup
+    fails, retain that owner and both diagnostics in existing failed cleanup;
+    same-ID fresh admission stays excluded until actual retry succeeds. Preserve
+    the primary Error or exception/backtrace unchanged. This does not publish an
+    executable binding or authorize fresh work. *)
+val close_provisional
+  :  t
+  -> session_id:Agent_protocol.Id.Session.t
+  -> entry
+  -> (unit -> ('a, Agent_protocol.Error.t) Result.t)
+  -> ('a, Agent_protocol.Error.t) Result.t
 
 (** Own all partial concrete reconstruction capabilities through the callback.
     On success ownership transfers into the actual returned entry's close closure.
@@ -440,3 +565,16 @@ val select_loaded
   -> entry
   -> authorize:(Agent_protocol.Session.t -> (unit, Agent_protocol.Error.t) result)
   -> (unit, Agent_protocol.Error.t) result
+
+(** Same actual graph-wide runtime barrier, then adopted resource release.
+    Recovery owners participate in the barrier alongside all loaded/failed entries.
+    Retained keeps unfinished owners and their dependencies alive. *)
+val shutdown_reported : t -> Session_disposal_report.t
+
+(** Retain a SAME actual failed Recovery owner/report after its real close attempt;
+    no cleanup execution or fresh owner creation. Called outside Registry locks. *)
+val retain_recovery_owner_reported
+  :  t
+  -> Session_recovery_owner.t
+  -> Session_disposal_report.t
+  -> unit

@@ -3,7 +3,9 @@
 type t
 
 val prepare
-  :  Inference_ledger.t
+  :  ?policy_usage:Policy_canonical_usage.t
+  -> ?policy_admission:Policy_canonical_usage.Admission.t
+  -> Inference_ledger.t
   -> after:Inference_ledger.t
   -> accounts:Goal_accounts.t option
   -> catalog:Goal_catalog.t option
@@ -15,11 +17,14 @@ val ledger : t -> Inference_ledger.t
 val accounts : t -> Goal_accounts.t option
 val accounts_changed : t -> bool
 val delegated_usage : t -> Delegated_usage.t option
+val policy_usage : t -> Policy_canonical_usage.t option
+val policy_update : t -> Policy_canonical_usage.Update.t option
 
 (** Union of actual Goal and delegated-partition carrier retention deny-sets.
     Only actually ended rows are added; live work remains owned by the ledger. *)
 val protected_ordinals
-  :  Inference_ledger.t
+  :  ?policy_usage:Policy_canonical_usage.t
+  -> Inference_ledger.t
   -> accounts:Goal_accounts.t option
   -> delegated_usage:Delegated_usage.t option
   -> (Core.Int64.Set.t, Agent_protocol.Error.t) result

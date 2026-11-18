@@ -1,4 +1,9 @@
 open! Core
+module Sources = Capability_sources
+
+let source_ok result =
+  Result.map_error result ~f:Sources.Error.message |> Result.ok_or_failwith
+;;
 
 let () =
   Eio_main.run (fun env ->
@@ -32,73 +37,48 @@ let () =
           output, Buffer.contents stderr
         in
         let listed, _ = run [ "list" ] in
-        let lines = String.split_lines listed in
-        [%test_eq: int] 2 (List.length lines);
-        List.iter [ "lifecycle"; "instruction-selection" ] ~f:(fun id ->
-          assert (
-            List.exists lines ~f:(fun line -> String.is_prefix line ~prefix:(id ^ "\t"))));
-        let manifest, _ = run [ "show"; "lifecycle" ] in
+        let listed_ids =
+          String.split_lines listed
+          |> List.map ~f:(fun line -> String.lsplit2_exn line ~on:'\t' |> fst)
+          |> List.sort ~compare:String.compare
+        in
+        [%test_eq: string list]
+          listed_ids
+          [ "goal-requests"; "instruction-selection"; "lifecycle"; "recurrence-requests" ];
         let inventory =
-          Capability_sources.installed
-            ~limits:Capability_sources.Limits.default
-            ~checkpoint:Eio.Fiber.check
-          |> Result.map_error ~f:Capability_sources.Error.message
-          |> Result.ok_or_failwith
+          Sources.installed ~limits:Sources.Limits.default ~checkpoint:Eio.Fiber.check
+          |> source_ok
         in
-        let resource =
-          Capability_sources.find
-            inventory
-            (Capability_sources.Id.of_string "lifecycle"
-             |> Result.map_error ~f:Capability_sources.Error.message
-             |> Result.ok_or_failwith)
-          |> Result.map_error ~f:Capability_sources.Error.message
-          |> Result.ok_or_failwith
+        let member_path member =
+          Source.Portable_path.to_string (Sources.Member.path member)
         in
-        [%test_eq: string]
-          (String.strip manifest)
-          (Jsonaf.to_string (Capability_sources.Resource.manifest resource));
-        let member = "examples/libraries/lifecycle/src/lifecycle.chatmli" in
-        let exact, _ = run [ "show"; "lifecycle"; "-member"; member ] in
-        let selected =
-          Capability_sources.Resource.member
-            resource
-            (Source.Portable_path.create member |> Or_error.ok_exn)
-          |> Result.map_error ~f:Capability_sources.Error.message
-          |> Result.ok_or_failwith
-        in
-        [%test_eq: string] exact (Capability_sources.Member.contents selected);
-        let exported, _ =
-          run
-            [ "export"
-            ; "lifecycle"
-            ; "-parent"
-            ; Eio.Path.native_exn root
-            ; "-directory"
-            ; "copied"
-            ]
-        in
-        assert (String.is_prefix exported ~prefix:"Exported lifecycle (");
-        List.iter (Capability_sources.Resource.members resource) ~f:(fun member ->
+        List.iter listed_ids ~f:(fun id ->
+          let resource =
+            Sources.find inventory (Sources.Id.of_string id |> source_ok) |> source_ok
+          in
+          let manifest, _ = run [ "show"; id ] in
           [%test_eq: string]
-            (Eio.Path.load
-               Eio.Path.(
-                 root
-                 / "copied"
-                 / Source.Portable_path.to_string (Capability_sources.Member.path member)))
-            (Capability_sources.Member.contents member));
-        let _, rejected =
-          run
-            ~is_success:(fun code -> not (Int.equal code 0))
-            [ "export"
-            ; "lifecycle"
-            ; "-parent"
-            ; Eio.Path.native_exn root
-            ; "-directory"
-            ; "copied"
-            ]
-        in
-        assert (String.is_substring rejected ~substring:"destination was not created");
+            (String.strip manifest)
+            (Jsonaf.to_string (Sources.Resource.manifest resource));
+          let members = Sources.Resource.members resource in
+          let selected =
+            List.find_exn members ~f:(fun member ->
+              String.is_suffix (member_path member) ~suffix:".chatmli")
+          in
+          let exact, _ = run [ "show"; id; "-member"; member_path selected ] in
+          [%test_eq: string] exact (Sources.Member.contents selected);
+          let export =
+            [ "export"; id; "-parent"; Eio.Path.native_exn root; "-directory"; id ]
+          in
+          let exported, _ = run export in
+          assert (String.is_prefix exported ~prefix:("Exported " ^ id ^ " ("));
+          List.iter members ~f:(fun member ->
+            [%test_eq: string]
+              (Eio.Path.load Eio.Path.(root / id / member_path member))
+              (Sources.Member.contents member));
+          let _, rejected = run ~is_success:(fun code -> not (Int.equal code 0)) export in
+          assert (String.is_substring rejected ~substring:"destination was not created"));
         print_endline
-          "installed CLI: list/show/exact-read/create-only export from an unrelated \
-           empty cwd"))
+          "installed CLI: list/show/exact-read/create-only export of all four resources \
+           from an unrelated cwd"))
 ;;

@@ -46,6 +46,12 @@ export const verificationSchema = z
     hashes: z.record(relative, z.string().regex(/^[a-f0-9]{64}$/)),
   })
   .strict();
+// Only declared project dependencies may select a sibling tree inside an
+// archive. The referenced member still needs its own exact download approval.
+const projectReference = text.refine(
+  (reference) => relative.safeParse(reference.replace(/^(?:\.\.\/)+/, '')).success,
+  'Expected a relative project dependency',
+);
 const fileSchema = z
   .object({
     source: relative,
@@ -71,10 +77,14 @@ export const exampleSchema = z.array(
           .object({
             fromPath: relative,
             toPath: relative,
-            reference: relative,
+            reference: projectReference,
             kind: z.enum(['agent', 'script', 'import', 'project']),
           })
-          .strict(),
+          .strict()
+          .refine(
+            (edge) => edge.kind === 'project' || relative.safeParse(edge.reference).success,
+            { path: ['reference'], message: 'Expected a contained relative file path' },
+          ),
       ),
       illustrationSource: relative.optional(),
       verification: verificationSchema,

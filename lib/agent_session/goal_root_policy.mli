@@ -59,3 +59,27 @@ val admitted
   -> state:Session_state.t
   -> now:Agent_protocol.Timestamp.t
   -> (unit, Agent_protocol.Error.t) result
+
+(** Causal checks reuse this same strict root policy cell. A genuine newly
+    created local Goal already has its GD root, even when its causal route has
+    no inherited Scope. These helpers issue neither reservations nor authority. *)
+module Causal : sig
+  (** Before reserving: current exact Goal/account plus complete combined count,
+      pending, control, deadline and selected-token coverage. Includes all
+      existing pending; this new attempt has not reserved yet. *)
+  val before_reserve
+    :  t
+    -> state:Session_state.t
+    -> now:Agent_protocol.Timestamp.t
+    -> (Goal_admission_policy.scoped_decision, Agent_protocol.Error.t) result
+
+  (** After reserve and before callee writer: current exact Goal/account plus
+      activation control/deadline/selected-token policy, with NO second count
+      availability check. Caller separately verifies the SAME exact reservation.
+      After canonical ACK use [admitted], never either causal helper. *)
+  val reserved_before_writer
+    :  t
+    -> state:Session_state.t
+    -> now:Agent_protocol.Timestamp.t
+    -> (Goal_admission_policy.decision, Agent_protocol.Error.t) result
+end

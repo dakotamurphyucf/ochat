@@ -146,7 +146,9 @@ let%expect_test "permission requests persist before wait and resolve by generati
                ~liveness:Process_bound
                ~start_immediately:false)
           ~persistence:
-            { archive_reference; commit = (fun ~command_audit:_ ~previous:_ _ -> Ok ()) }
+            { archive_reference
+            ; commit = (fun ?observation:_ ~command_audit:_ ~previous:_ _ -> Ok ())
+            }
           ~operation_worker:None
           ~services:
             { now = (fun () -> timestamp)
@@ -237,7 +239,9 @@ let%expect_test "session approval creates a durable invocation grant" =
                ~liveness:Process_bound
                ~start_immediately:false)
           ~persistence:
-            { archive_reference; commit = (fun ~command_audit:_ ~previous:_ _ -> Ok ()) }
+            { archive_reference
+            ; commit = (fun ?observation:_ ~command_audit:_ ~previous:_ _ -> Ok ())
+            }
           ~operation_worker:None
           ~services:
             { now = (fun () -> timestamp)
@@ -326,7 +330,9 @@ let%expect_test "permission timeout applies configured unattended fallback" =
                ~liveness:Process_bound
                ~start_immediately:false)
           ~persistence:
-            { archive_reference; commit = (fun ~command_audit:_ ~previous:_ _ -> Ok ()) }
+            { archive_reference
+            ; commit = (fun ?observation:_ ~command_audit:_ ~previous:_ _ -> Ok ())
+            }
           ~operation_worker:None
           ~services:
             { now = (fun () -> Agent_protocol.Timestamp.now ())
@@ -375,7 +381,9 @@ let%expect_test "fresh approval at the deadline cannot race queued expiry into a
                ~liveness:Process_bound
                ~start_immediately:false)
           ~persistence:
-            { archive_reference; commit = (fun ~command_audit:_ ~previous:_ _ -> Ok ()) }
+            { archive_reference
+            ; commit = (fun ?observation:_ ~command_audit:_ ~previous:_ _ -> Ok ())
+            }
           ~operation_worker:None
           ~services:
             { now = (fun () -> !now)

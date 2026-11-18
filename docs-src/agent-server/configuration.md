@@ -101,6 +101,37 @@ exports, and indexes. Only one daemon process may own it. Store and session
 lock contention returns a typed error; library code does not terminate the
 process to resolve contention.
 
+### Recurrence planning and execution
+
+`recurrence_automation` selects the principal and exact controller sessions that
+may plan future occurrences. `recurrence_execution` separately selects the
+principal, each controller's allowed existing targets, and whether it may launch
+its authorized captured child. A planning grant alone does not dispatch work.
+Configure both on a daemon that executes recurring automation. Each principal and
+target still needs the runtime's ordinary current permissions.
+
+For a controller that creates only captured workers, these fields can appear in
+`server` after you replace the example principal and controller with their actual
+IDs:
+
+```lisp
+(recurrence_automation
+ ((principal_id pri_example_operator)
+  (controllers (ses_release_notes))))
+(recurrence_execution
+ ((principal_id pri_example_operator)
+  (controllers
+   (((session_id ses_release_notes)
+     (existing_targets ())
+     (captured_children true))))))
+```
+
+Both fields accept an optional UTC `expires_at` value. Calendar planning uses the
+optional `zone_directory` under `recurrence_automation` with its explicit source
+and finite UTC coverage. Fixed intervals do not need a zone directory. See
+[recurring automation](recurring-automation.md) for timing, target capture,
+retained outcomes and the behavior of stopped or unavailable hosts.
+
 `authoring_packages` optionally lists version-1 JSON files of custom documentation
 packages. Paths resolve relative to this configuration, and validation captures
 the complete file contents. See the [authoring package format](../guide/authoring-context-tool.md).

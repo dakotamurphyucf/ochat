@@ -19,7 +19,9 @@ let with_actor ?(prepare = Fn.id) f =
                   ~liveness:Process_bound
                   ~start_immediately:false))
           ~persistence:
-            { archive_reference; commit = (fun ~command_audit:_ ~previous:_ _ -> Ok ()) }
+            { archive_reference
+            ; commit = (fun ?observation:_ ~command_audit:_ ~previous:_ _ -> Ok ())
+            }
           ~operation_worker:None
           ~services:
             { now = (fun () -> timestamp)

@@ -163,8 +163,10 @@ let check_json env root documents =
       let rpc =
         match json with
         | `Object fields ->
-          List.exists fields ~f:(fun (key, _) ->
-            List.mem [ "jsonrpc"; "method"; "id" ] key ~equal:String.equal)
+          let has key = List.Assoc.mem fields key ~equal:String.equal in
+          has "jsonrpc"
+          || has "method"
+          || (has "id" && List.exists [ "params"; "result"; "error" ] ~f:has)
         | _ -> false
       in
       if rpc

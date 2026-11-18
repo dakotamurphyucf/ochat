@@ -87,6 +87,28 @@ val data_root : t -> Data_root.t
 val server_id : t -> Agent_protocol.Id.Server.t
 val session_index : t -> Session_index.t
 
+module Command_receipts : sig
+  type store = t
+
+  (** The existing daemon command receipt cache opened under this owned Store's
+      canonical root. Open once at daemon composition and share [cache].
+      An unrelated cache cannot be attached to this owner. *)
+  type t
+
+  val open_or_create : store -> (t, Store_error.t) result
+  val cache : t -> Idempotency_store.t
+
+  module Removal : sig
+    (** Verified protected receipt from one exact open Store owner. *)
+    type t
+
+    val fact : t -> Idempotency_store.Removal.t
+    val belongs_to : t -> store -> bool
+  end
+
+  val removal : t -> session_id:Agent_protocol.Id.Session.t -> Removal.t option
+end
+
 (** Open one durable authoring-upload child using THIS Store's live exclusive
     daemon lock and Data_root. The lock remains privately owned here; no caller
     may reacquire it or supply an unrelated root. Reject a closed Store and a
@@ -443,6 +465,8 @@ val finish_removal
 val pending_removal_ids : t -> (Agent_protocol.Id.Session.t list, Store_error.t) Result.t
 
 (** Acquire terminal source ownership, or admit a retired cleanup container.
+    An exact terminal source may lack its nested workspace. A present workspace
+    must be a non-symlink directory.
     Never manufacture a Handle from a partially removed payload. *)
 val open_removal
   :  t

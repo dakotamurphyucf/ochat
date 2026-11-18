@@ -210,8 +210,10 @@ let validate
            let%bind job = job jobs id in
            (match job.launch with
             | None -> Ok ()
-            | Some { owner = Invocation owner; _ }
-              when P.Id.Invocation.equal owner i.context.id -> Ok ()
+            | Some launch
+              when P.Job.Birth_parent.equal
+                     launch.owner
+                     (P.Job.Birth_parent.callback (Invocation i.context.id)) -> Ok ()
             | Some _ -> invalid "pending job belongs to another launch owner")
          | Subscription id ->
            let%bind s = subscription subscriptions id in

@@ -15,6 +15,9 @@ type t =
   ; borrow_agent_actor :
       invocation:Agent_protocol.Invocation.t
       -> (Operator_authorization.t option, Agent_protocol.Error.t) result
+  ; policy_caller :
+      invocation:Agent_protocol.Invocation.t
+      -> (Delegated_policy_caller.t, Agent_protocol.Error.t) result
   ; allocate_inference : Inference_allocation.Port.t
   ; model_jobs : Model_job_admission.t
   }
@@ -30,6 +33,7 @@ let unavailable =
   { refresh_effect_current = (fun ~invocation:_ -> Ok ())
   ; check_effect_current = (fun ~invocation:_ -> Ok ())
   ; borrow_agent_actor = (fun ~invocation:_ -> Ok None)
+  ; policy_caller = (fun ~invocation:_ -> Error (denied ()))
   ; allocate_inference = (fun ~graph:_ ~relation:_ ~configuration:_ -> Error (denied ()))
   ; model_jobs = Model_job_admission.Host.create ~admit:(fun _ -> Error (denied ()))
   }

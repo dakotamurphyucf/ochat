@@ -546,3 +546,68 @@ let%expect_test "unknown first Goal resume writer releases no acknowledged owner
     uncertain first writer yields no command ACK or executable continuation
     |}]
 ;;
+
+let%expect_test "Goal Resume preserves its Actor ACK when the continuation handoff fails" =
+  with_episode (fun env daemon entry _runtime counters session admission _old_live held ->
+    let actor = guarded resume_principal (ref true) in
+    let request = exact_request held ~key:"goal-resume-accepted-no-continuation" in
+    let failure =
+      P.Error.create
+        Interrupted
+        ~message:"fixture stopped the handoff after Goal Resume acknowledgement"
+        ~retryable:true
+        ()
+    in
+    let accepted = ref None in
+    let counts = !(counters.providers), !(counters.inference_ports) in
+    let report =
+      stage daemon entry session ~actor request (fun prepared ->
+        let binding = Owner.Prepared_goal_continuation.binding prepared in
+        let%bind.Result outcome = Actor.admit_goal_resume entry.actor ~binding in
+        match outcome with
+        | Ready continuation ->
+          let receipt = Continuation.receipt continuation in
+          assert_receipt request held receipt;
+          accepted := Some receipt;
+          (* Fail the caller's handoff of the real acknowledged continuation. *)
+          Error failure
+        | Retained _ | Waiting _ | Rejected _ | Uncertain _ | Resume_failed _ ->
+          failwith "Goal Resume did not acknowledge its actual continuation")
+    in
+    assert_error failure (Report.result report |> rejected);
+    (match Owner.Scope_outcome.Cleanup.status (Report.cleanup report) with
+     | Joined -> ()
+     | Never_acquired | Failed _ -> failwith "acknowledged source scope did not join");
+    let receipt = Option.value_exn !accepted in
+    assert (
+      Option.exists (Report.receipt report) ~f:(A.Goal_command_receipt.equal receipt));
+    assert (
+      Option.exists
+        (historical entry session ~actor request)
+        ~f:(A.Goal_command_receipt.equal receipt));
+    let current = state entry in
+    assert_existing_episode held current;
+    assert (G.State.equal (Open Enabled) (G.state (Goal.goal current)));
+    let episode = G.episode (Goal.goal current) |> Option.value_exn in
+    assert (P.Run_receipt.equal admission (P.Goal_episode.admission episode));
+    let index = Option.value_exn current.run_state in
+    let link = A.Run_state.goal_link index admission.run_id |> Option.value_exn in
+    assert (P.Goal_episode.equal episode (A.Run_goal_link.episode link));
+    let frames = Existing.frames env entry in
+    let service =
+      Service.create ~factory:(Daemon.factory daemon) ~authorize:(fun actor ->
+        authorize_as (Operator_authorization.principal actor))
+    in
+    (match
+       Service.resume_episode service ~entry ~actor ~session ~request |> protocol_ok
+     with
+     | Retained actual -> assert (A.Goal_command_receipt.equal receipt actual)
+     | _ -> failwith "retained Goal Resume tried to hand off the continuation again");
+    Existing.assert_same current entry;
+    [%test_eq: string list] frames (Existing.frames env entry);
+    [%test_eq: int * int] counts (!(counters.providers), !(counters.inference_ports)));
+  print_endline
+    "acknowledged Resume kept its original Run and replayed without continuation";
+  [%expect
+    {| acknowledged Resume kept its original Run and replayed without continuation |}]
+;;

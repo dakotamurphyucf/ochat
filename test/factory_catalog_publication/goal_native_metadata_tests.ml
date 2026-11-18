@@ -60,6 +60,13 @@ let on_event ctx state event = match event with
     let create_request = create(before, goal_id, "metadata-create") in
     let* created = call("goal_create", create_request) in
     let* first = call("goal_get", get_input) in
+    let* missing_run = match field(first, "goals") with
+      | `Array(rows) -> if Array.length(rows) == 1 then
+          (match Json.get_field(rows[0], "current_run") with
+           | `Some(`Null) -> Task.pure(())
+           | _ -> Task.fail("A Goal without an episode must have a null current Run"))
+        else Task.fail("Expected one Goal row")
+      | _ -> Task.fail("Expected a Goal read") in
     let* objective = call("goal_objective", (edit(first, "objective", "metadata-objective", "native revised objective"))) in
     let* second = call("goal_get", get_input) in
     let* progress = call("goal_progress", (edit(second, "progress", "metadata-progress", "native durable progress"))) in

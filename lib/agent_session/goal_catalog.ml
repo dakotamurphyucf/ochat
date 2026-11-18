@@ -68,6 +68,11 @@ let empty = { revision = 0L; entries = []; receipts = [] }
 let revision t = t.revision
 let goals t = List.map t.entries ~f:Entry.value
 let receipts t = t.receipts
+let max_goals = 16
+let max_command_receipts = 256
+let has_goal_slot t = List.length t.entries < max_goals
+let has_command_slot t = List.length t.receipts < max_command_receipts
+let can_advance_revision t = Int64.(t.revision < max_value)
 
 let entry t id =
   List.find t.entries ~f:(fun e -> P.Id.Goal.equal (G.id (Entry.value e)) id)
@@ -176,7 +181,10 @@ let validate_structure t =
      needs its own immutable terminal association. Unrelated commands cannot
      consume those promised internal transitions. *)
   let reserve = pending + if enabled then 1 else 0 in
-  if Int64.(t.revision < 0L) || List.length t.entries > 16 || List.length t.receipts > 256
+  if
+    Int64.(t.revision < 0L)
+    || List.length t.entries > max_goals
+    || List.length t.receipts > max_command_receipts
   then full "goal catalog or retained command receipt capacity exhausted"
   else if Int64.(t.revision > max_value - of_int reserve)
   then full "goal catalog revision lacks reserved pending settlement headroom"
@@ -226,12 +234,12 @@ let of_jsonaf raw =
     | `Array xs when List.length xs <= max -> List.map xs ~f:decode |> Result.all
     | _ -> full "goal catalog array bound exceeded"
   in
-  let%bind entries = X.required f "goals" (bounded_list 16 Entry.of_json) in
+  let%bind entries = X.required f "goals" (bounded_list max_goals Entry.of_json) in
   let%bind receipts =
     X.required
       f
       "receipts"
-      (bounded_list 256 (fun json ->
+      (bounded_list max_command_receipts (fun json ->
          let%bind f = X.object_ json in
          let%bind id = X.required f "id" P.Json_codec.string in
          let%bind r = X.required f "receipt" R.of_json in
@@ -341,7 +349,7 @@ let commit t ~goal ~(receipt : R.t) =
   let open Result.Let_syntax in
   let value = Goal_document.value goal in
   let%bind () =
-    if List.length t.receipts >= 256 || Int64.equal t.revision Int64.max_value
+    if not (has_command_slot t && can_advance_revision t)
     then
       full
         "goal command receipt capacity exhausted; existing controls require a retained \
@@ -358,7 +366,7 @@ let commit t ~goal ~(receipt : R.t) =
     match entry t (G.id value) with
     | Some old -> Goal_document.adopt old.goal ~incoming:goal |> domain
     | None ->
-      if List.length t.entries >= 16
+      if not (has_goal_slot t)
       then full "goal catalog is full; retained goals cannot be evicted"
       else (
         let%map () =
@@ -384,7 +392,7 @@ let commit t ~goal ~(receipt : R.t) =
 let advance_existing_many t ~goals =
   let open Result.Let_syntax in
   let%bind () =
-    if List.length goals > 16
+    if List.length goals > max_goals
     then full "internal goal update exceeds catalog bound"
     else Ok ()
   in
@@ -411,7 +419,7 @@ let advance_existing_many t ~goals =
   | [] -> Ok None
   | _ :: _ ->
     let%bind () =
-      if Int64.equal t.revision Int64.max_value
+      if not (can_advance_revision t)
       then full "goal catalog revision exhausted during internal update"
       else Ok ()
     in
@@ -443,7 +451,7 @@ let hold_for_review t =
   in
   if not changed
   then Ok None
-  else if Int64.equal t.revision Int64.max_value
+  else if not (can_advance_revision t)
   then full "goal catalog revision exhausted during hold"
   else (
     let%bind entries =

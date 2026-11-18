@@ -3,8 +3,25 @@ module P = Agent_protocol
 module I = Instruction_content
 module Port = Instruction_source_port
 module Request = Instruction_source_request
-module Admission = Instruction_native_admission
+module Admission = Instruction_admission
 module Command = Instruction_command
+
+module Inspection = struct
+  type t =
+    { session_id : P.Id.Session.t
+    ; generation : int
+    ; summary : P.Instruction_status.t
+    ; project : Instruction_capture.t option
+    ; skills : I.Loaded.t list
+    }
+end
+
+module Discovery = struct
+  type t =
+    { roots : I.Root_id.t list
+    ; discovery : Request.Discovery.t option
+    }
+end
 
 type t =
   { state : unit -> (Session_state.t, P.Error.t) result
@@ -17,7 +34,7 @@ type t =
   ; selection_current : Session_state.t -> bool
   }
 
-let create ~state ~apply ~sources ~selection_current =
+let create_shared ~state ~apply ~sources ~selection_current =
   { state; apply; sources; selection_current }
 ;;
 
@@ -75,49 +92,79 @@ let observation_json observed =
     ]
 ;;
 
-let refresh t ~admission ~selection =
-  with_source t ~admission ~effect_kind:Refresh (fun use ->
+let inspect t ~admission =
+  with_source t ~admission ~effect_kind:Status (fun use ->
     let open Result.Let_syntax in
-    let%map discovery =
+    let%bind state = checked_state t ~admission ~effect_kind:Status in
+    let selected = selection state in
+    let project = Instruction_selection.project_capture selected in
+    let skills = Instruction_selection.skills selected in
+    let roots =
+      Option.to_list (Option.bind project ~f:Instruction_capture.root)
+      @ List.map skills ~f:(fun loaded ->
+        I.Id.root (I.Observed.id (I.Loaded.observed loaded)))
+      |> List.dedup_and_sort ~compare:I.Root_id.compare
+    in
+    let%map () = Port.Use.check_now use ~roots in
+    Inspection.
+      { session_id = state.identity.session_id
+      ; generation = state.identity.generation
+      ; summary = Instruction_selection.summary selected
+      ; project
+      ; skills
+      })
+;;
+
+let discover t ~admission ~selection =
+  with_source t ~admission ~effect_kind:Refresh (fun use ->
+    let%map.Result discovery =
       match selection with
       | None -> Ok None
       | Some selection ->
         Port.refresh use ~selection ~checkpoint:Eio.Fiber.check
         |> Result.map ~f:Option.some
     in
-    let roots = Port.Use.roots use in
-    `Object
-      [ "roots", `Array (List.map roots ~f:(fun id -> `String (I.Root_id.to_string id)))
-      ; ( "members"
-        , `Array
-            (Option.value_map discovery ~default:[] ~f:(fun d ->
-               List.map (Request.Discovery.observations d) ~f:observation_json)) )
-      ; ( "issues"
-        , `Array
-            (Option.value_map discovery ~default:[] ~f:(fun d ->
-               List.map (Request.Discovery.issues d) ~f:(fun (root, member, code) ->
-                 `Object
-                   [ "root", `String (I.Root_id.to_string root)
-                   ; "member", `String (Source.Portable_path.to_string member)
-                   ; "code", `String code
-                   ]))) )
-      ])
+    Discovery.{ roots = Port.Use.roots use; discovery })
+;;
+
+let refresh t ~admission ~selection =
+  let%map.Result { Discovery.roots; discovery } = discover t ~admission ~selection in
+  `Object
+    [ "roots", `Array (List.map roots ~f:(fun id -> `String (I.Root_id.to_string id)))
+    ; ( "members"
+      , `Array
+          (Option.value_map discovery ~default:[] ~f:(fun d ->
+             List.map (Request.Discovery.observations d) ~f:observation_json)) )
+    ; ( "issues"
+      , `Array
+          (Option.value_map discovery ~default:[] ~f:(fun d ->
+             List.map (Request.Discovery.issues d) ~f:(fun (root, member, code) ->
+               `Object
+                 [ "root", `String (I.Root_id.to_string root)
+                 ; "member", `String (Source.Portable_path.to_string member)
+                 ; "code", `String code
+                 ]))) )
+    ]
+;;
+
+let capture t ~admission ~request =
+  with_source t ~admission ~effect_kind:Read (fun use ->
+    let%map.Result captured = Port.capture use ~request ~checkpoint:Eio.Fiber.check in
+    Port.Captured.contents captured)
 ;;
 
 let read t ~admission ~request =
-  with_source t ~admission ~effect_kind:Read (fun use ->
-    let%map.Result captured = Port.capture use ~request ~checkpoint:Eio.Fiber.check in
-    let contents = Port.Captured.contents captured in
-    `Object
-      [ "capture_id", `String (Instruction_capture.id contents)
-      ; ( "members"
-        , `Array
-            (List.map (Instruction_capture.loaded contents) ~f:(fun loaded ->
-               `Object
-                 [ "source", observation_json (I.Loaded.observed loaded)
-                 ; "contents", `String (I.Loaded.contents loaded)
-                 ])) )
-      ])
+  let%map.Result contents = capture t ~admission ~request in
+  `Object
+    [ "capture_id", `String (Instruction_capture.id contents)
+    ; ( "members"
+      , `Array
+          (List.map (Instruction_capture.loaded contents) ~f:(fun loaded ->
+             `Object
+               [ "source", observation_json (I.Loaded.observed loaded)
+               ; "contents", `String (I.Loaded.contents loaded)
+               ])) )
+    ]
 ;;
 
 let command state ~change ~expected_revision ~key =
@@ -234,6 +281,65 @@ let remove_skills t ~admission ~members ~expected_revision ~key =
       |> Result.all
     in
     deactivate t ~admission ~change:(Remove_skills ids) ~expected_revision ~key)
+;;
+
+module Shared = struct
+  type nonrec t = t
+
+  let create = create_shared
+  let inspect = inspect
+  let discover = discover
+  let capture = capture
+  let activate = activate
+  let deactivate = deactivate
+  let remove_skills = remove_skills
+end
+
+let create ~state ~apply ~sources ~selection_current =
+  create_shared
+    ~state
+    ~apply:(fun ~admission ~source ~request ->
+      match Admission.native admission with
+      | Some admission -> apply ~admission ~source ~request
+      | None ->
+        Error
+          (P.Error.invalid_request
+             "native instruction service cannot consume operator admission"))
+    ~sources
+    ~selection_current
+;;
+
+let refresh t ~admission ~selection =
+  refresh t ~admission:(Admission.of_native admission) ~selection
+;;
+
+let read t ~admission ~request =
+  read t ~admission:(Admission.of_native admission) ~request
+;;
+
+let activate t ~admission ~request ~capture_id ~expected_revision ~key =
+  activate
+    t
+    ~admission:(Admission.of_native admission)
+    ~request
+    ~capture_id
+    ~expected_revision
+    ~key
+;;
+
+let deactivate t ~admission ~change ~expected_revision ~key =
+  deactivate t ~admission:(Admission.of_native admission) ~change ~expected_revision ~key
+;;
+
+let status t ~admission = status t ~admission:(Admission.of_native admission)
+
+let remove_skills t ~admission ~members ~expected_revision ~key =
+  remove_skills
+    t
+    ~admission:(Admission.of_native admission)
+    ~members
+    ~expected_revision
+    ~key
 ;;
 
 let agent_guidance t ~borrow_actor : Chat_response.Agent_guidance.t =

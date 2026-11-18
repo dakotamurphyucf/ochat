@@ -11,10 +11,11 @@ type t =
   ; edit : admission:A.t -> request:P.Goal_edit.t -> (unit, P.Error.t) result
   ; start :
       admission:A.t -> request:P.Goal_native_start_request.t -> (unit, P.Error.t) result
+  ; resume : admission:A.t -> request:P.Goal_resume_request.t -> (unit, P.Error.t) result
   }
 
-let create ~get ~create_goal ~control ~edit ~start =
-  { get; create_goal; control; edit; start }
+let create ~get ~create_goal ~control ~edit ~start ~resume =
+  { get; create_goal; control; edit; start; resume }
 ;;
 
 let get t = t.get
@@ -22,3 +23,4 @@ let create_goal t = t.create_goal
 let control t = t.control
 let edit t = t.edit
 let start t = t.start
+let resume t = t.resume

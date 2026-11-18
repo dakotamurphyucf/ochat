@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "namespace": "ochat.examples.goal-requests",
+  "dependencies": {
+    "requests": {
+      "source": { "kind": "local", "path": "../../libraries/goal-requests" },
+      "project": "chatml.project.json",
+      "environment": "pure"
+    }
+  },
+  "environments": {
+    "default": {
+      "modules": { "Requests": "requests.Goal_requests" },
+      "requires": { "targets": ["moderator_v1"] }
+    }
+  }
+}

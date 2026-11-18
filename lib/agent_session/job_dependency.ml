@@ -66,9 +66,10 @@ let validate ~invocations ~events ~jobs ~subscriptions (parent : J.t) =
                ~error:(P.Error.invalid_request "job dependency target is missing")
         in
         (match child.kind, child.launch with
-         | ( Async_tool
-           , Some { owner = Invocation owner; parent_job = Some (id, attempt); _ } )
-           when P.Id.Invocation.equal owner invocation.context.id
+         | Async_tool, Some { owner; parent_job = Some (id, attempt); _ }
+           when P.Job.Birth_parent.equal
+                  owner
+                  (P.Job.Birth_parent.callback (Invocation invocation.context.id))
                 && P.Id.Job.equal id parent.id
                 && Int.equal attempt parent.attempt
                 && not (P.Id.Job.equal child.id parent.id) ->

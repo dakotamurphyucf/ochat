@@ -74,6 +74,10 @@ let%expect_test "custom host without seed Factory omits discovery and denies see
           ~blob_store:(S.Daemon.blob_store daemon)
           ~session_store:store
           ~authoring:None
+          ~recurrence_read:None
+          ~recurrence_operator:None
+          ~goal_read:None
+          ~goal_operator:None
           ~lifecycle_service
           ~retained:
             (S.Retained_session.create

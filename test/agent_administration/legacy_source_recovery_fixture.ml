@@ -313,8 +313,8 @@ let initialize_prior_layout ~sw ~env document ~staging_directory =
         Agent_store.Durable_file.sync_directory ~env ~path:staging_directory
       in
       Store.Initial_projection.create
-        ~metadata:(Agent_server.Session_projection.metadata transition.state)
-        ~entry:(Agent_server.Session_projection.index_entry transition.state))
+        ~metadata:(Agent_server.Session_factory.metadata transition.state)
+        ~entry:(Agent_server.Session_factory.index_entry transition.state))
 ;;
 
 let install_prior ~sw ~env ~data_dir prior =

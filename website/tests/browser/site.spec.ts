@@ -197,7 +197,7 @@ test('installation, troubleshooting, and first-agent pages form a complete readi
   await expect(startLinks).toHaveText([
     'Explore Ochat',
     "How Ochat's pieces fit together",
-    'Build and configure Ochat',
+    'Install and configure Ochat',
     'Build troubleshooting',
     'Run your first local agent',
     'Learn Ochat: tutorial curriculum',

@@ -108,7 +108,7 @@ let prepare
                (Goal_accounts.find accounts id)
                ~error:(P.Error.invalid_request "new Goal accounting is absent")
            in
-           let%map descendants =
+           let%bind descendants =
              Goal_descendants.register_new_root
                state.goal_descendants
                ~host_profile:descendant_profile
@@ -118,8 +118,17 @@ let prepare
                ~account
                ~before_ledger:state.inference_ledger
            in
+           let%map causal =
+             Goal_policy_contributions.initialize_goal
+               state.goal_policy_contributions
+               ~owner:session
+               ~goal
+               ~account
+               ~before_ledger:state.inference_ledger
+           in
            [ Session_delta.Goal_accounts_changed accounts
            ; Goal_descendants_changed descendants
+           ; Goal_policy_contributions_changed causal
            ]
          | Revise_objective _
          | Record_progress _

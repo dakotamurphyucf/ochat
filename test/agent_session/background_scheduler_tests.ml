@@ -117,7 +117,7 @@ let with_capacity_scheduler
       ; store_handle = None
       ; expire_permissions = (fun ~now:_ -> ())
       ; collect_results = (fun () -> Ok None)
-      ; close = ignore
+      ; close = Agent_server.Session_registry.Entry_close.legacy ignore
       }
     in
     Registry.add registry ~session_id entry |> protocol_ok;

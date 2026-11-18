@@ -309,11 +309,12 @@ let with_records t ~max_records ~max_bytes ~f =
   locked t (fun () -> Result.bind (records_locked t ~max_records ~max_bytes) ~f)
 ;;
 
-let save t record =
+let save ?before_write t record =
   let open Result.Let_syntax in
   let%bind contents = encode record in
   let%bind () = ensure_directory t in
   Durable_file.replace
+    ?before_rename:before_write
     ~env:t.env
     ~durability:Flush_file_and_directory
     ~path:(path t record.key)
@@ -450,7 +451,7 @@ let admit_candidate (scan : Scan.t) candidate =
   Result.map (charge remaining candidate_bytes) ~f:ignore
 ;;
 
-let reserve t ~key ~request_sha256 ~admission ~max_records ~max_bytes =
+let reserve ?before_write t ~key ~request_sha256 ~admission ~max_records ~max_bytes =
   locked t (fun () ->
     let open Result.Let_syntax in
     let candidate =
@@ -482,7 +483,7 @@ let reserve t ~key ~request_sha256 ~admission ~max_records ~max_bytes =
                 admission.goal_origin
                 record.admission.goal_origin
            && same_invocation_scope admission.lifetime record.admission.lifetime ->
-      let%map () = save t record in
+      let%map () = save ?before_write t record in
       Replay record
     | Some record -> Ok (Conflict record)
     | None ->
@@ -493,7 +494,7 @@ let reserve t ~key ~request_sha256 ~admission ~max_records ~max_bytes =
       in
       let%bind () = validate_record_identities (candidate :: records) in
       let%bind () = admit_candidate scan candidate in
-      let%map () = save t candidate in
+      let%map () = save ?before_write t candidate in
       New candidate)
 ;;
 
@@ -533,17 +534,26 @@ let advance t expected stage =
       next)
 ;;
 
-let revoke t expected reason =
+let set_revocation t expected reason ~preserve_linked =
   locked t (fun () ->
     let open Result.Let_syntax in
     let%bind record = current t expected in
-    let next =
-      match record.revocation with
-      | Some _ -> record
-      | None -> { record with revocation = Some reason }
-    in
-    let%map () = save t next in
-    next)
+    if preserve_linked && equal_stage record.stage Linked
+    then Ok record
+    else (
+      let next =
+        match record.revocation with
+        | Some _ -> record
+        | None -> { record with revocation = Some reason }
+      in
+      let%map () = save t next in
+      next))
+;;
+
+let revoke t expected reason = set_revocation t expected reason ~preserve_linked:false
+
+let revoke_unfinished t expected reason =
+  set_revocation t expected reason ~preserve_linked:true
 ;;
 
 let discard_uninstalled_staging t expected =

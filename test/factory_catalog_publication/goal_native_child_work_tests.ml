@@ -294,6 +294,7 @@ let%expect_test "Tool_observed native Hold and staged child share the projected 
                             M.identity_snapshot manager
                             |> Result.map_error ~f:P.Error.invalid_request)
                           (fun ~executing
+                            ~policy_caller:_
                             ~model_jobs:_
                             ~allocate_inference:_
                             ~retirement_reason:_
@@ -495,4 +496,265 @@ let%expect_test "Tool_observed native Hold and staged child share the projected 
      advance";
   [%expect
     {| actual observation Hold; old Continue retired; selected child retained in same Run advance |}]
+;;
+
+module Caused_async = struct
+  include Caused_async_support
+
+  let model_marker = "597_CAUSED_ASYNC_INVOCATION_MODEL"
+  let model_recipe = "597-caused-async-model.chatmd"
+  let model_output = "actual caused Async Invocation Model result"
+
+  let parent_prompt =
+    {|<developer>One real caused Async Job for the actual trusted Job host.</developer>
+<tool name="async_model_recipe" agent="597-caused-async-model.chatmd" local/>
+<script id="parent-async-policy" language="chatml" kind="moderator" api="extensibility-v1">
+let initial_state = 0
+let on_event ctx state event = match event with
+| `Pre_tool_call(p) ->
+  if (if state == 0 then p.name == "read_file" else false) then
+    let* job = Tool.spawn("async_model_probe", `Object([])) in Task.pure(state + 1)
+  else Task.pure(state)
+| `Tool_invoked(p) ->
+  if p.context.tool_name == "async_model_probe" then
+    let* result = Model.call("agent_prompt_v1", `Object([
+      {key = "prompt"; value = `String("597-caused-async-model.chatmd")},
+      {key = "input"; value = `String("597_CAUSED_ASYNC_INVOCATION_MODEL")},
+      {key = "is_local"; value = `Bool(true)}
+    ])) in
+    (match result with
+    | `Ok(value) ->
+      let* ignored = Invocation.resolve(p.context.invocation_id, `Complete(value)) in
+      Task.pure(state + 1)
+    | `Refused(message) -> Task.fail(message)
+    | `Error(message) -> Task.fail(message))
+  else Task.pure(state)
+| _ -> Task.pure(state)
+</script>
+<tool name="async_model_probe" type="moderator" moderator="parent-async-policy" input_schema="597-async-model-input.json" output_schema="597-async-model-output.json"/>|}
+  ;;
+
+  type model_chain =
+    { job : P.Job.t
+    ; invocation : P.Invocation.t
+    ; background : P.Invocation.t
+    }
+
+  let model_job parent =
+    List.filter parent.A.Session_state.jobs ~f:(fun job ->
+      P.Job.equal_kind Model_call job.kind
+      && Option.equal
+           String.equal
+           (Jsonaf.member "payload" job.payload
+            |> Option.bind ~f:(Jsonaf.member "input")
+            |> Option.bind ~f:Jsonaf.string)
+           (Some model_marker))
+    |> Model.only "actual Invocation-owned Model Job"
+  ;;
+
+  let observe_model (t : probe) =
+    let model = model_job (state t.parent) in
+    let observed = observe_attempt t model in
+    let parent = state t.parent in
+    let rows = Model.new_rows t.before_parent parent in
+    let cause = observed.cause in
+    let accounting = Option.value_exn parent.policy_canonical_usage in
+    let job = List.find_exn parent.jobs ~f:(fun job -> P.Id.Job.equal job.id t.job.id) in
+    let launch = Option.value_exn job.launch in
+    let prior = List.hd_exn t.observed in
+    assert (Cause.equal prior.cause cause);
+    let previous =
+      List.find_exn rows ~f:(fun row ->
+        Ledger.Handle.equal prior.handle (Ledger.Row.handle row))
+    in
+    (match Inference.Observation.Attempt_record.state (Ledger.Row.record previous) with
+     | Terminal terminal ->
+       (match Inference.Event.Terminal.outcome terminal with
+        | Completed -> ()
+        | Refused | Incomplete _ | Failed _ -> failwith "direct Async H did not complete")
+     | Prepared | Running | Interrupted _ -> failwith "direct Async H did not settle");
+    assert (not (P.Id.Job.equal model.id job.id));
+    assert (P.Id.Session.equal parent.identity.session_id model.session_id);
+    [%test_eq: int] parent.identity.generation model.generation;
+    [%test_eq: int] 1 model.attempt;
+    (match model.status with
+     | Running -> ()
+     | Queued
+     | Waiting_permission _
+     | Waiting_completion _
+     | Succeeded
+     | Failed _
+     | Cancelled
+     | Interrupted _ -> failwith "Model provider lost its actual Running Job");
+    let model_launch = Option.value_exn model.launch in
+    let invocation =
+      match P.Job.Birth_parent.view model_launch.owner with
+      | Callback (Invocation id) ->
+        List.find_exn parent.invocations ~f:(fun invocation ->
+          P.Id.Invocation.equal invocation.context.id id)
+      | Callback (Moderator_event _) | Job_attempt _ ->
+        failwith "Model birth lost its actual Invocation owner"
+    in
+    [%test_eq: string] "async_model_probe" invocation.context.tool_name;
+    assert (P.Invocation.equal_origin Script invocation.context.origin);
+    assert (Option.is_none invocation.context.parent_job);
+    assert (Option.is_none invocation.parent_event);
+    let background =
+      let id = Option.value_exn invocation.context.parent_invocation in
+      List.find_exn parent.invocations ~f:(fun invocation ->
+        P.Id.Invocation.equal invocation.context.id id)
+    in
+    [%test_eq: string] "chatml.background" background.context.tool_name;
+    assert (P.Invocation.equal_origin Script background.context.origin);
+    assert (Option.is_none background.context.parent_invocation);
+    assert (Option.is_none background.parent_event);
+    assert (Option.equal P.Id.Job.equal (Some job.id) background.context.parent_job);
+    List.iter [ invocation; background ] ~f:(fun invocation ->
+      assert (P.Id.Session.equal parent.identity.session_id invocation.context.session_id);
+      [%test_eq: int] parent.identity.generation invocation.context.generation;
+      match invocation.status with
+      | Dispatching -> ()
+      | Admitted | Resolved _ | Published _ ->
+        failwith "Model provider lost its actual dispatched Invocation chain");
+    (match model_launch.parent_job with
+     | Some (id, attempt) ->
+       assert (P.Id.Job.equal job.id id);
+       [%test_eq: int] job.attempt attempt
+     | None -> failwith "Model launch lost its actual Async ancestor");
+    [%test_eq: int] (launch.nested_depth + 1) model_launch.nested_depth;
+    assert (
+      Option.equal
+        P.Invocation.equal_observer
+        model_launch.moderator_source
+        (Option.map invocation.observation ~f:(fun observation -> observation.observer)));
+    assert (Option.is_some model_launch.moderator_source);
+    assert (
+      Option.equal P.Inference_origin.equal job.inference_origin model.inference_origin);
+    let _, source = A.Moderator_source_installation.capture parent |> protocol_ok in
+    assert (P.Run_source.equal source (Cause.callee_source cause));
+    let prefix =
+      PC.Source.Native_prefix.create
+        ~session_id:parent.identity.session_id
+        ~generation:parent.identity.generation
+        ~current_source:(Some source)
+        ~events:parent.moderator_executions
+        ~invocations:parent.invocations
+        ~jobs:parent.jobs
+        ~runs:parent.run_state
+      |> protocol_ok
+    in
+    let members =
+      [ Cause.Member.async_job job.id ~generation:job.generation
+      ; Cause.Member.invocation
+          background.context.id
+          ~generation:background.context.generation
+      ; Cause.Member.invocation
+          invocation.context.id
+          ~generation:invocation.context.generation
+      ; Cause.Member.model_job model.id ~generation:model.generation
+      ]
+    in
+    List.iter members ~f:(fun member ->
+      let actual =
+        PC.Source.cause (Some accounting) ~prefix ~member:(protocol_ok member)
+        |> protocol_ok
+        |> Option.value_exn
+      in
+      assert (Cause.equal cause actual));
+    observed, { job = model; invocation; background }
+  ;;
+end
+
+let%expect_test "real caused Async direct H confirms both genuine Goals before provider" =
+  let module T = Caused_async in
+  let model_providers = ref 0 in
+  let modeled = ref None in
+  T.with_claimed_async
+    ~scenario:T.Invocation_model
+    ~parent_prompt_text:T.parent_prompt
+    ~sources:
+      [ T.original_file, "real delegated read"
+      ; ( T.model_recipe
+        , "<developer>597 actual caused Async Invocation Model recipe.</developer>" )
+      ; "597-async-model-input.json", {|{"type":"object","additionalProperties":false}|}
+      ; ( "597-async-model-output.json"
+        , {|{"type":"object","required":["final_text"],"properties":{"final_text":{"type":"string"}}}|}
+        )
+      ]
+    ~model_marker:T.model_marker
+    ~at_model:(fun failure subject ->
+      T.Failure.guard failure (fun () ->
+        Int.incr model_providers;
+        assert (Option.is_none !modeled);
+        modeled := Some (T.observe_model subject);
+        completed_response T.model_output))
+    (fun env sw daemon fixture ->
+       T.run_direct sw fixture;
+       [%test_eq: int] 0 !model_providers;
+       let parent = fixture.probe.parent in
+       T.execute_async daemon fixture ~check_completion:(function
+         | Succeeded value ->
+           assert (
+             Option.equal
+               String.equal
+               (Some T.model_output)
+               (Jsonaf.member "final_text" value |> Option.bind ~f:Jsonaf.string));
+           assert (
+             Option.equal
+               String.equal
+               (Some "agent_prompt_v1")
+               (Jsonaf.member "recipe" value |> Option.bind ~f:Jsonaf.string));
+           assert (
+             Option.equal
+               String.equal
+               (Some T.model_recipe)
+               (Jsonaf.member "prompt" value |> Option.bind ~f:Jsonaf.string));
+           assert (
+             Option.equal
+               String.equal
+               (Some T.model_recipe)
+               (Jsonaf.member "session_id" value |> Option.bind ~f:Jsonaf.string));
+           assert (Jsonaf.exactly_equal `True (Jsonaf.member_exn "is_local" value));
+           assert (
+             Jsonaf.exactly_equal `True (Jsonaf.member_exn "terminated_normally" value));
+           let _, chain = Option.value_exn !modeled in
+           let current = state parent in
+           let model = T.model_job current in
+           assert (P.Id.Job.equal chain.job.id model.id);
+           [%test_eq: int] chain.job.attempt model.attempt;
+           assert (Option.equal P.Job.equal_launch chain.job.launch model.launch);
+           assert (Option.is_some model.completed_at);
+           assert (Option.equal Jsonaf.exactly_equal (Some value) model.result);
+           (match model.status with
+            | Succeeded -> ()
+            | Queued
+            | Running
+            | Waiting_permission _
+            | Waiting_completion _
+            | Failed _
+            | Cancelled
+            | Interrupted _ -> failwith "actual Model did not succeed");
+           List.iter [ chain.invocation; chain.background ] ~f:(fun before ->
+             let invocation =
+               List.find_exn current.invocations ~f:(fun invocation ->
+                 P.Id.Invocation.equal before.context.id invocation.context.id)
+             in
+             assert (P.Invocation.equal_context before.context invocation.context);
+             match invocation.status with
+             | Resolved (Complete actual) -> assert (Jsonaf.exactly_equal value actual)
+             | Admitted | Dispatching | Resolved _ | Published _ ->
+               failwith "actual Async Invocation chain did not resolve Model output")
+         | completion -> raise_s [%sexp (completion : P.Completion.t)]);
+       let final_parent = T.finish_child env fixture in
+       [%test_eq: int] 1 !model_providers;
+       let direct = List.hd_exn fixture.probe.observed in
+       let modeled, _ = Option.value_exn !modeled in
+       assert (not (T.Ledger.Handle.equal direct.handle modeled.handle));
+       List.iter fixture.probe.observed ~f:(fun observed ->
+         T.row final_parent observed.handle |> T.assert_completed));
+  print_endline
+    "actual caused Async and Invocation Model Handles confirmed both Goals before \
+     providers; real Async Job completed";
+  [%expect
+    {| actual caused Async and Invocation Model Handles confirmed both Goals before providers; real Async Job completed |}]
 ;;

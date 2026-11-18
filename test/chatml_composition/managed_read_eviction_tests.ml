@@ -4,6 +4,7 @@ module Team = Documentation_agent_team_tests
 module P = Agent_protocol
 module D = Agent_server.Daemon
 module R = Agent_server.Session_registry
+module Actor = Agent_session.Session_actor
 module Owner = Agent_server.Runtime_owner
 module H = Agent_client.Session_handle
 
@@ -38,6 +39,14 @@ let%expect_test "managed child read overlaps a stopped-session eviction" =
         |> ignore;
         let before = state child_id in
         let registry = D.registry daemon in
+        let expect_publication_blocked entry =
+          match R.check_native_metadata_publication registry entry with
+          | Error { code = Conflict; retryable = true; _ } -> ()
+          | Error error ->
+            raise_s [%sexp "unexpected publication error", (error : P.Error.t)]
+          | Ok () ->
+            failwith "native metadata publication requires the exact available owner"
+        in
         let original = R.load registry child_id |> protocol_ok in
         Owner.unload_and_wait original.runtime |> protocol_ok;
         assert (not (Owner.is_loaded original.runtime));
@@ -56,10 +65,10 @@ let%expect_test "managed child read overlaps a stopped-session eviction" =
             ~session_id:child_id
             { original with
               close =
-                (fun () ->
+                Agent_server.Session_registry.Entry_close.legacy (fun () ->
                   Eio.Promise.resolve entered_u ();
                   Eio.Promise.await release;
-                  original.close ())
+                  Agent_server.Session_registry.close_entry original)
             }
           |> protocol_ok;
           Exn.protect ~finally:release_once ~f:(fun () ->
@@ -76,6 +85,8 @@ let%expect_test "managed child read overlaps a stopped-session eviction" =
             Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 15. (fun () ->
               Eio.Promise.await entered;
               assert (R.lifecycle_reserved registry child_id);
+              assert (R.blocks_owned_execution registry original);
+              assert (R.blocks_native_metadata_read registry original);
               let read, read_u = Eio.Promise.create () in
               Eio.Fiber.fork ~sw (fun () ->
                 Eio.Promise.resolve read_u (invoke parent "agent_read" (`Object query)));
@@ -94,6 +105,12 @@ let%expect_test "managed child read overlaps a stopped-session eviction" =
               [%test_eq: int] before.identity.generation after.identity.generation;
               let reloaded = R.load registry child_id |> protocol_ok in
               assert (not (Owner.is_loaded reloaded.runtime));
+              R.check_native_metadata_publication registry reloaded |> protocol_ok;
+              R.with_lifecycle registry child_id (fun _ ->
+                (* Exercise the Registry-only interval before any Actor fence. *)
+                expect_publication_blocked reloaded;
+                Ok ())
+              |> protocol_ok;
               (* The read lifetime excludes a second eviction without activating
                  execution; release restores normal inactive eviction. *)
               let indexes () =
@@ -105,9 +122,33 @@ let%expect_test "managed child read overlaps a stopped-session eviction" =
               in
               R.with_loaded_read registry child_id (fun retained ->
                 assert (phys_equal retained.actor reloaded.actor);
+                assert (R.lifecycle_reserved registry child_id);
+                assert (not (R.blocks_owned_execution registry retained));
+                assert (not (R.blocks_native_metadata_read registry retained));
+                assert (R.blocks_owned_execution registry original);
+                assert (R.blocks_native_metadata_read registry original);
+                R.check_native_metadata_publication registry retained |> protocol_ok;
+                expect_publication_blocked original;
                 [%test_eq: int] (R.unload_inactive registry ~index_entries:(indexes ())) 0;
                 Ok ())
               |> protocol_ok;
+              let handle = Option.value_exn reloaded.store_handle in
+              let retained =
+                Actor.with_quiescent_state reloaded.actor ~f:(fun _ ->
+                  R.with_loaded_retention
+                    registry
+                    ~actor:reloaded.actor
+                    ~runtime:reloaded.runtime
+                    ~handle
+                    (fun () ->
+                       assert (R.lifecycle_reserved registry child_id);
+                       assert (R.blocks_owned_execution registry reloaded);
+                       assert (not (R.blocks_native_metadata_read registry reloaded));
+                       R.check_native_metadata_publication registry reloaded
+                       |> protocol_ok))
+                |> protocol_ok
+              in
+              [%test_eq: unit option option] (Some (Some ())) retained;
               (* Cancellation inside an admitted callback releases its exclusion
                  without closing or activating the retained session. *)
               (try

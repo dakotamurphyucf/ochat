@@ -14,7 +14,7 @@ Then choose the capabilities your project needs:
 | Learning path | Progression |
 | --- | --- |
 | Shell access | [Inspect a real project](../agent-server/tutorials/shell-agent.md), then [run checks with separate runtimes and approved report writes](../tutorials/shell-guardrails.md). |
-| ChatML | [Compute over reports](../tutorials/chatml-program.md), [package a reusable tool](../tutorials/chatml-tool.md), then [control a conversation](../tutorials/workflow.md). |
+| ChatML | [Compute over reports](../tutorials/chatml-program.md), [package a reusable tool](../tutorials/chatml-tool.md), [control a conversation](../tutorials/workflow.md), then [run a recurring review](../tutorials/goal-recurrence.md). |
 | Agent teams | [Choose a delegation pattern](../guide/subagents.md), from a one-off specialist to persistent or generated children. |
 | Run and operate | [Batch requests](../cli/chat-completion.md), [durable daemon sessions](../agent-server/tutorials/unix-daemon.md), and [background scheduling](../agent-server/tutorials/background-agent.md). |
 | External clients | [Local stdio](../agent-server/tutorials/stdio-client.md) and [authenticated HTTP](../agent-server/tutorials/http-client.md). |

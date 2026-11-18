@@ -10,5 +10,9 @@ val create
   -> request:Run_admission_request.Headless.t
   -> (t, Agent_protocol.Error.t) result
 
+(** Add the source the caller observed before issuing Start. The admission
+    owner compares it with the installed source when committing the episode. *)
+val with_expected_source : t -> Agent_protocol.Run_source.t -> t
+
 val request : t -> Run_admission_request.Headless.t
 val intent : t -> Goal_episode_admission.intent

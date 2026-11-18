@@ -30,3 +30,22 @@ val create
        (Openai.Responses.Tool_output.Output.t
         -> (Jsonaf.t, Agent_protocol.Error.t) result)
   -> Chat_response.In_memory_stream.Tool_dispatch.t
+
+(** Same adapter with exact actual-source negative currentness, used by the
+    runtime services. Neither the field nor its presence admits an invocation. *)
+val create_current
+  :  execution_check:Native_tool_invocation.Execution_check.t
+  -> input:Operation_worker.Input.t
+  -> capabilities:Operation_worker.Capabilities.t
+  -> declared:Chat_response.Tool_capability.t
+  -> registry:(unit -> Chat_response.Tool_capability.t)
+  -> now:(unit -> Agent_protocol.Timestamp.t)
+  -> is_halted:(unit -> bool)
+  -> admit:
+       (Agent_protocol.Invocation.t
+        -> Chat_response.Tool_capability.binding
+        -> (unit, Agent_protocol.Error.t) result)
+  -> prepare_output:
+       (Openai.Responses.Tool_output.Output.t
+        -> (Jsonaf.t, Agent_protocol.Error.t) result)
+  -> Chat_response.In_memory_stream.Tool_dispatch.t

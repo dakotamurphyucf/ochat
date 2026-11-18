@@ -4,5 +4,15 @@
 val delegated_usage : string
 
 val goal_descendants : string
+val policy_canonical_usage : string
+val goal_policy_contributions : string
 val recurrence_run_origin : string
+val ingress_provenance : string
+val queue_occurrence_producer : string
 val supported_children : string list
+
+(** Captured current-installation lifecycle pointer; no execution authority. *)
+val moderator_lifecycle : string
+
+(** Durable immutable Goal association on a captured recurrence definition. *)
+val recurrence_controller_goal : string

@@ -44,17 +44,19 @@ achievement request leaves the objective Open. Objective edits reject while an
 achievement request is unresolved; progress, budgets and explicit controls keep
 their own rules.
 
-This primitive and its checked staging adapter are foundations for controller
-integration. The current metadata operator commands do not enable a goal or
-admit associated execution. The owning controller must supply authenticated
-Enabled admission and bind the goal in the same real Run admission transaction.
-A complete authored goal workflow, including actual worker join and controller
-controls, still requires that integration qualification. A script cannot
-bootstrap it by inventing an association or starting held goal work.
+## Start a Goal and observe completion
 
-Checked compiler/native staging and Catch rollback are covered in
-`test/lifecycle_helpers/staging_tests.ml`; receipt custody is covered in
-`test/agent_session/run_action_scope_tests.ml`. Pure reciprocal association and
-terminal classification, plus actual actor recovery persistence, are covered in
-`test/agent_session/goal_run_tests.ml`. These fixtures do not claim a passing
-controller-admitted authored goal workflow.
+Select `goal_create`, `goal_get` and `goal_start` in the ChatMD definition.
+Create the objective, read its revisions and source, then stage its first
+Workflow from a moderator callback with `goal_start`. The host associates the
+Goal with the admitted Run. Subsequent callbacks in that Run can call
+`Goal.finish` once their completion condition holds.
+[Native Goal requests and receipts](native-goal-metadata.md)
+
+For example, the controller in
+`docs-src/examples/learning/goal-recurrence/agent.chatmd` schedules two
+release-note reviews. Its moderator waits for a retained Completed result from
+each of two distinct worker sessions and Runs before requesting completion.
+The host's Goal view then identifies the achievement and its terminal receipt.
+An operator can inspect that view through `session.goal`.
+[Shared Goal inspection and controls](../agent-server/protocol.md#inspect-and-control-persistent-goals)

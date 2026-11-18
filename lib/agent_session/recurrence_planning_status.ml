@@ -9,6 +9,7 @@ module Reason = struct
     | Lifecycle_not_automatic
     | Controller_not_running
     | Source_unavailable
+    | Controller_not_loaded
   [@@deriving equal, sexp_of]
 end
 

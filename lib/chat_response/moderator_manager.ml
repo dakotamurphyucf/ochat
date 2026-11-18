@@ -1730,17 +1730,27 @@ let handle_event_entries_transactional_unlocked
         |> Result.map ~f:(fun value -> Moderation.Event.Internal_event value)
       | _ -> Ok event
     in
+    let checked = Moderator_invocation.snapshot_state ?control ~limits:script.limits in
     let%bind event =
       match event with
       | Moderation.Event.Internal_event
           (Chatml.Chatml_lang.VVariant ("Internal_event", [ payload ])) ->
-        Moderator_invocation.internal_event ?control payload
+        let%bind event = Moderator_invocation.internal_event ?control payload in
+        let%map _ = checked event in
+        event
       | Internal_event _ ->
         Error "event.invalid_internal_event: requires a v1 Internal_event envelope"
-      | _ -> Ok (Moderation.Event.to_value_with_control ~control event)
+      | Session_start
+      | Session_resume
+      | Turn_start
+      | Item_appended _
+      | Pre_tool_call _
+      | Post_tool_response _
+      | Turn_end ->
+        (* Host observations use the live observer budget. The declaration's
+           snapshot limits still bound retained state and internal events. *)
+        Ok (Moderation.Event.to_value_with_control ~control event)
     in
-    let checked = Moderator_invocation.snapshot_state ?control ~limits:script.limits in
-    let%bind _ = checked event in
     let context =
       Moderation.Entry_projection.project_context_with_control
         ~control
@@ -2217,7 +2227,7 @@ let handle_observation_entries
             ] )
       in
       let checked = Moderator_invocation.snapshot_state ?control ~limits:script.limits in
-      let%bind _ = checked event in
+      Option.iter control ~f:(fun c -> c.L.check_value event);
       let context =
         Moderation.Entry_projection.project_context_with_control
           ~control

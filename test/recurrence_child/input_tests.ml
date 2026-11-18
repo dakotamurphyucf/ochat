@@ -298,8 +298,7 @@ let with_loaded_held daemon ~clock controller target ~original f =
                    Actor.check_recurrence_activation controller.actor permit ~observation
                    |> protocol_ok
                  in
-                 f prepared held checked intent attempt))
-       |> protocol_ok)
+                 f prepared held checked intent attempt)))
 ;;
 
 let finish_cold
@@ -323,6 +322,7 @@ let finish_cold
       ~marker_path
       ~fault_operation
       ~fault_loaded
+      ~source_result
   =
   let parsed = Option.value_exn parsed in
   let escaped = Option.value_exn escaped_execution in
@@ -575,26 +575,84 @@ let finish_cold
     (match cut with
      | Adopt -> "\n535 native after lexical close"
      | Revoke_after_lexical_exit | Root_sync_failure -> "");
-  (* At the fault cut the root bytes were written before sync and are uncertain.
-     Check confirmed factual cleanup, never assert absent disk bytes or NoEffects. *)
-  let directory = Option.value_exn target.store_handle |> S.Handle.snapshot_directory in
-  target.close ();
-  let restored =
-    Agent_store.Snapshot.load_current
-      ~env
-      ~directory
-      ~max_payload_length:(64 * 1024 * 1024)
-    |> store_ok
-    |> Option.value_exn
-    |> fun (installed : Agent_store.Snapshot.installed) ->
-    A.Session_state_document.decode ~limits:D.Limits.default installed.snapshot.payload
-    |> document_ok
-    |> A.Session_state_document.value
-  in
-  assert (
-    Jsonaf.exactly_equal
-      (T.state_document settled |> store_ok |> D.Document.json)
-      (T.state_document restored |> store_ok |> D.Document.json))
+  match cut with
+  | Root_sync_failure ->
+    (* The root bytes were written before sync and remain uncertain. Strict
+       close must not initiate disposal-only release; the exact Reported path
+       may settle custody without writing or changing the unknown Run. *)
+    let original_end =
+      match source_result with
+      | Some (Error error) -> error
+      | None | Some (Ok ()) -> failwith "failed original End report was lost"
+    in
+    let check_bytes = preserve_durable_bytes env target in
+    assert (not (Actor.is_startup_disposal_only target.actor));
+    (match Owner.close_and_wait target.runtime with
+     | () -> failwith "Strict close released failed startup custody"
+     | exception Owner.Cleanup_failed _ -> ());
+    assert (not (Actor.is_startup_disposal_only target.actor));
+    check_bytes ();
+    let disposed = Owner.close_and_wait_reported target.runtime in
+    (match Owner.Disposal_report.disposition disposed with
+     | Joined -> ()
+     | Retained -> failwith "exact failed startup custody was not released");
+    assert (Actor.is_startup_disposal_only target.actor);
+    let checkpoint_calls = ref 0 in
+    (match
+       Actor.checkpoint target.actor ~persist:(fun _ ->
+         Int.incr checkpoint_calls;
+         Ok ())
+     with
+     | Error error -> [%test_eq: P.Error.code] Conflict error.code
+     | Ok () -> failwith "disposal-only Actor executed a checkpoint callback");
+    [%test_eq: int] 0 !checkpoint_calls;
+    assert (
+      List.exists (Owner.Disposal_report.failures disposed) ~f:(function
+        | Protocol error -> phys_equal error original_end
+        | Raised _ -> false));
+    assert (phys_equal disposed (Owner.close_and_wait_reported target.runtime));
+    (* The Actor is still present until real Entry disposal. Its readable state
+       still has no ACKed root or terminal Run receipt after custody release. *)
+    let released = state target in
+    assert (Option.is_none released.active_operation);
+    let released_index = Option.value_exn released.run_state in
+    let released_run =
+      A.Run_state.find released_index receipt.run_id |> Option.value_exn
+    in
+    (match released_run.lifecycle with
+     | Admitted | Active -> ()
+     | Waiting _ | Terminal _ -> failwith "custody release acknowledged the failed Run");
+    assert (
+      not
+        (List.exists (A.Run_state.receipts released_index) ~f:(fun saved ->
+           P.Id.Run.equal saved.run_id receipt.run_id
+           && P.Run_receipt.Kind.equal saved.kind Terminal)));
+    [%test_eq: string list] [ "A"; "B" ] !calls;
+    [%test_eq: int] 0 !root_calls;
+    check_bytes ();
+    (* Existing real closer proves checkpoint refusal, Handle/Actor closure and
+       second legacy delivery without rerunning actual completed stages. *)
+    close_uncertain_entry env target;
+    check_bytes ()
+  | Adopt | Revoke_after_lexical_exit ->
+    let directory = Option.value_exn target.store_handle |> S.Handle.snapshot_directory in
+    Agent_server.Session_registry.close_entry target;
+    let restored =
+      Agent_store.Snapshot.load_current
+        ~env
+        ~directory
+        ~max_payload_length:(64 * 1024 * 1024)
+      |> store_ok
+      |> Option.value_exn
+      |> fun (installed : Agent_store.Snapshot.installed) ->
+      A.Session_state_document.decode ~limits:D.Limits.default installed.snapshot.payload
+      |> document_ok
+      |> A.Session_state_document.value
+    in
+    assert (
+      Jsonaf.exactly_equal
+        (T.state_document settled |> store_ok |> D.Document.json)
+        (T.state_document restored |> store_ok |> D.Document.json))
 ;;
 
 let run (cut : Cut.t) =
@@ -629,6 +687,7 @@ let run (cut : Cut.t) =
          let fault_owner = ref None in
          let fault_armed = ref false in
          let fault_operation = ref None in
+         let fault_journal = ref None in
          let fault_loaded = ref false in
          let original_live = ref true in
          let first, first_u = Eio.Promise.create () in
@@ -766,6 +825,8 @@ let run (cut : Cut.t) =
                     | Some operation ->
                       fault_armed := false;
                       fault_operation := Some operation;
+                      fault_journal
+                      := Some (path, Eio.Path.load Eio.Path.(Eio.Stdenv.fs env / path));
                       fault_loaded := Owner.is_loaded (Option.value_exn !fault_owner);
                       assert !fault_loaded;
                       raise
@@ -835,6 +896,7 @@ let run (cut : Cut.t) =
                      let escaped_execution = ref None in
                      let admission = ref None in
                      let input_result = ref None in
+                     let source_result = ref None in
                      let held_facts = ref None in
                      (* The entire source/held scope is supervised. Stop cancels that
                    actual lease; the observer must remain outside its context. *)
@@ -968,7 +1030,9 @@ let run (cut : Cut.t) =
                                 input_result := Some result;
                                 Ok ())
                          with
-                         | () -> `Joined
+                         | result ->
+                           source_result := Some result;
+                           `Joined
                          | exception (Eio.Cancel.Cancelled _ as exn) ->
                            (match cut with
                             | Stop_after_first -> `Cancelled
@@ -984,9 +1048,11 @@ let run (cut : Cut.t) =
                            (match Eio.Promise.peek worker with
                             | Some _ ->
                               ignore (Eio.Promise.await_exn worker);
-                              (match !input_result with
-                               | Some (Error error) -> raise_s [%sexp (error : P.Error.t)]
-                               | Some (Ok ()) | None -> failwith description)
+                              (match !source_result, !input_result with
+                               | Some (Error error), _ | _, Some (Error error) ->
+                                 raise_s [%sexp (error : P.Error.t)]
+                               | (None | Some (Ok ())), (None | Some (Ok ())) ->
+                                 failwith description)
                             | None ->
                               Eio.Fiber.yield ();
                               await ())
@@ -1060,7 +1126,10 @@ let run (cut : Cut.t) =
                         , `Joined
                         , Some (Ok ()) ) -> ()
                       | Cold Root_sync_failure, `Joined, Some (Error error) ->
-                        if not (P.Error.equal_code error.code Persistence_error)
+                        if
+                          not
+                            (P.Error.equal_code error.code Persistence_error
+                             && error.retryable)
                         then raise_s [%sexp (error : P.Error.t)]
                       | Revoke_between_agents, `Joined, Some (Error error) ->
                         if not (P.Error.equal_code error.code Permission_denied)
@@ -1072,6 +1141,29 @@ let run (cut : Cut.t) =
                       | Stop_after_first, `Cancelled, _ -> ()
                       | _, _, Some (Error error) -> raise_s [%sexp (error : P.Error.t)]
                       | _ -> failwith "input scope outcome disagrees with the actual cut");
+                     (* The input primary is independent from the actual outer
+                        Factory source projection. Failed factual End is retained
+                        even though this fixture records the input Error as data. *)
+                     (match cut, outcome, !source_result with
+                      | Cold Root_sync_failure, `Joined, Some (Error error) ->
+                        if
+                          not
+                            (P.Error.equal_code error.code Persistence_error
+                             && not error.retryable)
+                        then raise_s [%sexp (error : P.Error.t)];
+                        let path, written = Option.value_exn !fault_journal in
+                        (* The actual root bytes were present before failed sync.
+                           Source cleanup must not append another transaction. *)
+                        [%test_eq: string]
+                          written
+                          (Eio.Path.load Eio.Path.(Eio.Stdenv.fs env / path))
+                      | Stop_after_first, `Cancelled, None -> ()
+                      | ( ( Complete | Revoke_between_agents | Stop_after_first | Handoff
+                          | Cold (Adopt | Revoke_after_lexical_exit) )
+                        , `Joined
+                        , Some (Ok ()) ) -> ()
+                      | _, _, Some (Error error) -> raise_s [%sexp (error : P.Error.t)]
+                      | _ -> failwith "source result disagrees with the actual cut");
                      match cut with
                      | Cold cold_cut ->
                        (match cold_cut with
@@ -1098,6 +1190,7 @@ let run (cut : Cut.t) =
                          ~marker_path:(Filename.concat root "post-scope.txt")
                          ~fault_operation:!fault_operation
                          ~fault_loaded:!fault_loaded
+                         ~source_result:!source_result
                      | Complete | Revoke_between_agents | Stop_after_first | Handoff ->
                        (* Joining the whole worker includes source lease cancellation
                    and all held/input/graph cleanup, before any final oracle. *)
@@ -1344,7 +1437,7 @@ let run (cut : Cut.t) =
                             Option.value_exn target.store_handle
                             |> S.Handle.snapshot_directory
                           in
-                          target.close ();
+                          Agent_server.Session_registry.close_entry target;
                           let restored =
                             Agent_store.Snapshot.load_current
                               ~env

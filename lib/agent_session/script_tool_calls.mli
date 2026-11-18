@@ -47,19 +47,26 @@ val check_current_metadata_admission
   -> Chat_response.Tool_capability.binding
   -> (unit, Agent_protocol.Error.t) result
 
+module Inference_tracking : sig
+  type t =
+    { bind_identity : Inference_allocation.Port.t -> Inference_client.Identity.t
+    ; on_attempt : Inference_runtime.Attempt.t -> unit
+    ; on_observation : Inference.Observation.t -> unit
+    ; on_completion : Inference_client.Completion.t -> unit
+    }
+end
+
 (** Bind native Agent inference to the exact invoking handler's expiring
-    actor-issued allocator, using this runtime's existing graph identity.
-    The binding creates no authority and leaves unbound/selected contexts alone. *)
-val with_inference_identity_binding
-  :  t
-  -> bind:(Inference_allocation.Port.t -> Inference_client.Identity.t)
-  -> t
+    actor-issued allocator. The identity and all callbacks belong to the same
+    graph. This installs tracking for that graph without granting authority. *)
+val with_inference_tracking : t -> Inference_tracking.t -> t
 
 (** Rebind native Agent inference and eligible agent-conversation guidance to the existing actual native
     invocation's checked borrow. Constructor contexts cannot lend their expired
     initialization owner to a later child. Guidance exclusions remain sticky
-    independently of inference binding; unbound contexts acquire no session port.
-    An expired native services binding never falls back to an unbound identity. *)
+    independently of inference binding. An unbound context acquires no session
+    port. An active scope requires its graph binding and an expired scope
+    rejects, so neither can fall back to an unrelated graph. *)
 val agent_context
   :  Eio_unix.Stdenv.base Chat_response.Ctx.t
   -> Eio_unix.Stdenv.base Chat_response.Ctx.t
@@ -283,6 +290,11 @@ type preparation =
   ; session_id : Agent_protocol.Id.Session.t
   ; generation : int
   ; owner : preparation_owner
+  ; caller : Delegated_policy_caller.t option
+    (** Borrowed SAME-owner transport, valid only during preparation and checked
+        again at parent transfer. The issuing adapter closes it on exit. None is
+        absent transport, not a genuine admitted None original or permission to
+        use an ambient owner. Capture itself grants no execution admission. *)
   ; selected : Chat_response.Tool_capability.t
   ; call : Chat_response.Moderation.Tool_call.t
   }
@@ -305,6 +317,7 @@ val with_preparation : t -> prepare:preparation_policy -> t
     kind. No policy installed leaves the dispatcher unchanged. *)
 val with_model_preparation
   :  t
+  -> capture_caller:(unit -> (Delegated_policy_caller.t, Agent_protocol.Error.t) result)
   -> selected:Chat_response.Tool_capability.t
   -> input:Operation_worker.Input.t
   -> Chat_response.In_memory_stream.Tool_dispatch.t
@@ -415,6 +428,7 @@ val with_invocation
   :  t
   -> prepared:Chat_response.Extension_compiler.t
   -> capabilities:Operation_worker.Capabilities.t
+  -> invocation_capabilities:Invocation_capabilities.t
   -> parent:Agent_protocol.Invocation.t
   -> ((name:string
        -> args:Jsonaf.t
@@ -445,12 +459,17 @@ val with_managed_invocation
     targets must remain in the captured subset and pass schema/authority
     checks after approval. Rejections never reach native authorization or effects.
     The host supplies current admission through [authorize] and owns observation
-    draining. This primitive does not install moderation or public dispatch. *)
+    draining. [invocation_capabilities] must be the SAME executor-issued bundle
+    for [parent]; nested host preparation captures its Caller directly without
+    requiring or rediscovering an ambient native scope. Its existing physical
+    execution and original-admission guards remain current at use. This primitive
+    does not install moderation or public dispatch. *)
 val with_standalone
   :  ?observer:Agent_protocol.Invocation.observer
   -> t
   -> prepared:Chat_response.Extension_compiler.t
   -> capabilities:Operation_worker.Capabilities.t
+  -> invocation_capabilities:Invocation_capabilities.t
   -> parent:Agent_protocol.Invocation.t
   -> moderate:
        (Chat_response.Moderation.Tool_call.t
@@ -524,6 +543,7 @@ val with_observation
   :  t
   -> definition:Chat_response.Extension_compiler.definition
   -> execute:Native_tool_invocation.executor
+  -> capabilities:Invocation_capabilities.t
   -> observing:Agent_protocol.Invocation.t
   -> ((name:string
        -> args:Jsonaf.t
@@ -540,7 +560,8 @@ val with_observation
     field; event cancellation and deadlines remain the host's responsibility.
     No active-moderator authorizing decision may be deferred until after effects. *)
 val with_event
-  :  t
+  :  ?policy_caller:Delegated_policy_caller.t
+  -> t
   -> definition:Chat_response.Extension_compiler.definition
   -> execute:Native_tool_invocation.executor
   -> executing:Agent_protocol.Moderator_execution.t
@@ -557,7 +578,8 @@ val with_event
     call-scope guard remain enforced. This does not impose v1 script limits or
     replace the actual Manager's execution policy. Escaped calls expire on return. *)
 val with_legacy_event
-  :  t
+  :  ?capture_caller:(unit -> (Delegated_policy_caller.t, Agent_protocol.Error.t) result)
+  -> t
   -> selected:Chat_response.Tool_capability.t
   -> execute:Native_tool_invocation.executor
   -> executing:Agent_protocol.Moderator_execution.t
@@ -566,3 +588,8 @@ val with_legacy_event
        -> (Chat_response.Moderation.Capabilities.tool_call_result, string) result)
       -> 'a)
   -> 'a
+
+(** Actual nondelegated authored/root source wiring only. Installs no permission
+    and preserves an already retained delegated/current guard. Missing modern
+    provenance is otherwise unavailable, never implicitly local. *)
+val with_local_execution_current : t -> t

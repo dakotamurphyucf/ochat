@@ -49,6 +49,9 @@ val retain_owner : t -> observation -> (Retained_owner.t, Agent_protocol.Error.t
 (** Actual shared root identity, never an ID-based reconstruction or grant. *)
 val same_store : t -> t -> bool
 
+(** Pure identity check against the actual open controller Store. *)
+val owns_removal : t -> Agent_store.Session_store.Command_receipts.Removal.t -> bool
+
 (** Resolve through this controller's existing shared delegation owner while its
     genuine Handle is owned. Returns immutable data, including revoked records;
     the caller must check disposition, state and a fresh lifecycle observation. *)

@@ -160,6 +160,50 @@ let command_audit ~principal_id ~session_id request_digest =
   |> store_ok
 ;;
 
+(* A live Manager exposes the known identity snapshot, while State owns the
+   complete checkpoint carrier. Keep both comparisons and its queue/source laws. *)
+let assert_moderator_checkpoint (state : Agent_session.Session_state.t) ~snapshot =
+  let module Checkpoint = Agent_session.Moderator_checkpoint in
+  let module Snapshot = Session.Moderator_state.Identity_snapshot in
+  let raw = Option.value_exn state.moderator in
+  let checkpoint = Checkpoint.of_jsonaf raw |> protocol_ok in
+  assert (Jsonaf.exactly_equal raw (Checkpoint.to_jsonaf checkpoint));
+  [%test_eq: Sexp.t]
+    (Snapshot.sexp_of_t snapshot)
+    (Snapshot.sexp_of_t (Checkpoint.snapshot checkpoint));
+  Agent_session.Session_state.validate state |> protocol_ok;
+  let metadata = Checkpoint.queue state.moderator |> protocol_ok in
+  Option.iter metadata ~f:(fun metadata ->
+    let index = Option.value_exn state.run_state in
+    let source =
+      Agent_session.Run_source_installation.captured
+        (Agent_session.Run_state.installation index)
+        ~generation:state.identity.generation
+      |> protocol_ok
+    in
+    assert (
+      Agent_protocol.Run_source.equal
+        source
+        (Agent_session.Moderator_queue.source metadata));
+    Agent_session.Moderator_queue.validate_queue metadata snapshot.queued_internal_events
+    |> protocol_ok);
+  metadata
+;;
+
+(* Absence is allowed only when the case has no positive checkpoint ACK yet.
+   A prior inner ACK can still have captured metadata after an outer failure. *)
+let assert_moderator_queue_frontier metadata ~required ~head ~next =
+  match metadata with
+  | None -> assert (not required)
+  | Some metadata ->
+    let module Queue = Agent_session.Moderator_queue in
+    [%test_eq: int64] head (Queue.head_ordinal metadata);
+    [%test_eq: int64] next (Queue.next_ordinal metadata);
+    [%test_eq: int]
+      (Int64.to_int_exn Int64.(next - head))
+      (List.length (Queue.entries metadata))
+;;
+
 (* Compare the complete snapshots, including counters and recovery metadata. *)
 let assert_same_session_snapshot expected actual =
   [%test_eq: Sexp.t]
@@ -592,7 +636,20 @@ let handoff_snapshot count =
     }
 ;;
 
-let with_handoff_actor ?(reject = fun _ -> false) ?inference ~make_worker f =
+module Handoff_runtime = struct
+  type t =
+    | Worker of
+        { worker : Agent_session.Operation_worker.t
+        ; inference : Inference_client.Execution.t option
+        }
+    | Moderator of
+        { worker : Agent_session.Operation_worker.t
+        ; inference : Inference_client.Execution.t
+        ; manager : Chat_response.Moderator_manager.t
+        }
+end
+
+let with_handoff_runtime ?(reject = fun _ -> false) ~make_runtime f =
   with_actor_workspace (fun env workspace_instance ->
     Eio.Switch.run (fun sw ->
       let actor_ready, actor_ready_u = Eio.Promise.create () in
@@ -603,7 +660,12 @@ let with_handoff_actor ?(reject = fun _ -> false) ?inference ~make_worker f =
         Agent_session.Memory_backend.create ~event_capacity:128 ~initial_state:initial
       in
       let persistence = Agent_session.Memory_backend.persistence backend in
-      let worker = make_worker env actor_ready in
+      let runtime = make_runtime env actor_ready in
+      let worker =
+        match runtime with
+        | Handoff_runtime.Worker { worker; _ } -> Some worker
+        | Moderator _ -> None
+      in
       let actor =
         Agent_session.Session_actor.create
           ~sw
@@ -611,14 +673,14 @@ let with_handoff_actor ?(reject = fun _ -> false) ?inference ~make_worker f =
           ~mailbox_capacity:32
           ~compaction_env:None
           ~initial_state:initial
-          ~operation_worker:(Some worker)
+          ~operation_worker:worker
           ~persistence:
             { archive_reference
             ; commit =
-                (fun ~command_audit ~previous next ->
+                (fun ?observation ~command_audit ~previous next ->
                   if reject next
                   then Error (handoff_error "injected invocation save failure")
-                  else persistence.commit ~command_audit ~previous next)
+                  else persistence.commit ?observation ~command_audit ~previous next)
             }
           ~services:
             { now = Agent_protocol.Timestamp.now
@@ -634,16 +696,33 @@ let with_handoff_actor ?(reject = fun _ -> false) ?inference ~make_worker f =
             ; state_committed = (fun _ _ -> ())
             }
       in
-      Option.iter inference ~f:(fun inference ->
-        Agent_session.Session_actor.set_runtime_worker
-          actor
-          ~worker:(Some worker)
-          ~inference:(Some inference)
-        |> protocol_ok);
-      Eio.Promise.resolve actor_ready_u actor;
       Exn.protect
         ~finally:(fun () -> Agent_session.Session_actor.shutdown actor)
         ~f:(fun () ->
+          (match runtime with
+           | Handoff_runtime.Worker { worker; inference } ->
+             Option.iter inference ~f:(fun inference ->
+               Agent_session.Session_actor.set_runtime_worker
+                 actor
+                 ~worker:(Some worker)
+                 ~inference:(Some inference)
+               |> protocol_ok)
+           | Moderator { worker; inference; manager } ->
+             let snapshot =
+               Chat_response.Moderator_manager.identity_snapshot manager
+               |> Result.ok_or_failwith
+               |> Agent_session.Runtime_builder.encode_moderator_snapshot
+             in
+             Agent_session.Session_actor.change_moderator actor (Some snapshot)
+             |> protocol_ok
+             |> ignore;
+             Agent_session.Session_actor.set_runtime_worker
+               actor
+               ~moderator_manager:manager
+               ~worker:(Some worker)
+               ~inference:(Some inference)
+             |> protocol_ok);
+          Eio.Promise.resolve actor_ready_u actor;
           Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 15. (fun () ->
             let writer, _ =
               Agent_session.Session_actor.attach actor ~mode:Read_write ~subscribe:false
@@ -664,6 +743,14 @@ let with_handoff_actor ?(reject = fun _ -> false) ?inference ~make_worker f =
             |> protocol_ok
             |> ignore;
             f env actor writer backend))))
+;;
+
+let with_handoff_actor ?reject ?inference ~make_worker f =
+  with_handoff_runtime
+    ?reject
+    ~make_runtime:(fun env actor_ready ->
+      Handoff_runtime.Worker { worker = make_worker env actor_ready; inference })
+    f
 ;;
 
 let publication_call caps ?(custom = false) () =
@@ -753,7 +840,13 @@ let resolve_publication caps invocation =
        commit ~resolved ~snapshot:(handoff_snapshot 1))
 ;;
 
-let native_registry ?(custom = false) ?(on_call = fun () -> ()) calls ~raises =
+let native_registry
+      ?(custom = false)
+      ?(on_call = fun () -> ())
+      ?(on_invocation = fun _ -> ())
+      calls
+      ~raises
+  =
   let module Definition = struct
     type input = string
 
@@ -765,9 +858,10 @@ let native_registry ?(custom = false) ?(on_call = fun () -> ()) calls ~raises =
   end
   in
   let implementation =
-    Ochat_function.create_function
+    Ochat_function.create_streaming_function
       (module Definition)
-      (fun input ->
+      (fun ~invocation input ->
+         on_invocation invocation;
          Int.incr calls;
          on_call ();
          assert (String.equal input "{}");
@@ -993,7 +1087,7 @@ let audit_actor
                    ())
             else archive_reference ~previous ~kind operation_id)
       ; commit =
-          (fun ~command_audit ~previous transition ->
+          (fun ?observation ~command_audit ~previous transition ->
             if
               reject_archive
               && List.length
@@ -1007,7 +1101,7 @@ let audit_actor
                    ~message:"injected archive failure"
                    ~retryable:false
                    ())
-            else persistence.commit ~command_audit ~previous transition)
+            else persistence.commit ?observation ~command_audit ~previous transition)
       }
   in
   let actor =

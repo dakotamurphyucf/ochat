@@ -414,6 +414,11 @@ type t =
   | Session_work of Session_work.t Page.t
   | Session_configuration_get of Session_configuration.t
   | Session_configuration_update of Session_configuration.t
+  | Instructions of (Instruction_control.Result.t[@sexp.opaque])
+  | Goal_query of (Goal_query.Result.t[@sexp.opaque])
+  | Goal_control of (Goal_control.Result.t[@sexp.opaque])
+  | Recurrence_query of (Recurrence_query.Result.t[@sexp.opaque])
+  | Recurrence_control of (Recurrence_control.Result.t[@sexp.opaque])
   | Session_get of Snapshot.t
   | Session_inference_summary of Inference_query.Summary.t
   | Session_inference_observations of Inference_query.Response.t
@@ -499,6 +504,11 @@ let method_name = function
   | Activity_list _ -> "activity.list"
   | Session_work _ -> "session.work"
   | Session_configuration_get _ -> "session.configuration_get"
+  | Instructions result -> Instruction_control.Result.method_name result
+  | Goal_query result -> Goal_query.Result.method_name result
+  | Goal_control result -> Goal_control.Result.method_name result
+  | Recurrence_query result -> Recurrence_query.Result.method_name result
+  | Recurrence_control result -> Recurrence_control.Result.method_name result
   | Session_configuration_update _ -> "session.configuration_update"
   | Session_get _ -> "session.get"
   | Session_inference_summary _ -> "session.inference_summary"
@@ -587,6 +597,11 @@ let to_json = function
   | Session_search_navigate value -> Search_navigation.Response.to_json value
   | Activity_list value -> Page.to_json Session_activity.to_json value
   | Session_work value -> Page.to_json Session_work.to_json value
+  | Instructions result -> Instruction_control.Result.payload result
+  | Goal_query result -> Goal_query.Result.payload result
+  | Goal_control result -> Goal_control.Result.payload result
+  | Recurrence_query result -> Recurrence_query.Result.payload result
+  | Recurrence_control result -> Recurrence_control.Result.payload result
   | Session_configuration_get value | Session_configuration_update value ->
     Session_configuration.to_json value
   | Session_get value -> Snapshot.to_json value
@@ -792,6 +807,31 @@ let decoders =
   ; "schedule.cancel", map Schedule.Mutation_response.of_json (fun x -> Schedule_cancel x)
   ; "ingress.submit", map Ingress.Acknowledgement.of_json (fun x -> Ingress_submit x)
   ]
+  @ List.map Instruction_control.Request.methods ~f:(fun method_ ->
+    ( method_
+    , fun result ->
+        Instruction_control.Result.of_method_and_result ~method_ ~result
+        |> Result.map ~f:(fun response -> Instructions response) ))
+  @ List.map Goal_query.Request.methods ~f:(fun method_ ->
+    ( method_
+    , fun result ->
+        Goal_query.Result.of_method_and_result ~method_ ~result
+        |> Result.map ~f:(fun result -> Goal_query result) ))
+  @ List.map Goal_control.Request.methods ~f:(fun method_ ->
+    ( method_
+    , fun result ->
+        Goal_control.Result.of_method_and_result ~method_ ~result
+        |> Result.map ~f:(fun result -> Goal_control result) ))
+  @ List.map Recurrence_query.Request.methods ~f:(fun method_ ->
+    ( method_
+    , fun result ->
+        Recurrence_query.Result.of_method_and_result ~method_ ~result
+        |> Result.map ~f:(fun result -> Recurrence_query result) ))
+  @ List.map Recurrence_control.Request.methods ~f:(fun method_ ->
+    ( method_
+    , fun result ->
+        Recurrence_control.Result.of_method_and_result ~method_ ~result
+        |> Result.map ~f:(fun result -> Recurrence_control result) ))
   @ List.map Authoring_wire.Response.supported_methods ~f:(fun method_ ->
     ( method_
     , fun json ->

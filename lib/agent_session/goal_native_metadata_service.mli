@@ -5,8 +5,8 @@ type t
     authorizers check the actual supplied transferred original, immutable
     principal/session/generation and current profile/state. Existing Actor
     stage/commit paths own callback, source and command-loan checks. The native
-    token is not retained or extended. Start is staged under the same owner,
-    never executed by this port; no resume. *)
+    token is not retained or extended. Start and Resume are staged under the
+    same owner. The existing dispatcher executes accepted intents after release. *)
 val create
   :  get:
        (admission:Goal_native_admission.t
@@ -27,6 +27,10 @@ val create
   -> start:
        (admission:Goal_native_admission.t
         -> request:Agent_protocol.Goal_native_start_request.t
+        -> (unit, Agent_protocol.Error.t) result)
+  -> resume:
+       (admission:Goal_native_admission.t
+        -> request:Agent_protocol.Goal_resume_request.t
         -> (unit, Agent_protocol.Error.t) result)
   -> t
 
@@ -60,4 +64,12 @@ val start
   :  t
   -> admission:Goal_native_admission.t
   -> request:Agent_protocol.Goal_native_start_request.t
+  -> (unit, Agent_protocol.Error.t) result
+
+(** Stage continuation of an existing episode under the exact selected Resume
+    admission. Local Complete describes staging until the owning callback ACK. *)
+val resume
+  :  t
+  -> admission:Goal_native_admission.t
+  -> request:Agent_protocol.Goal_resume_request.t
   -> (unit, Agent_protocol.Error.t) result

@@ -27,6 +27,7 @@
   ../../dune-project
   ../../ochat.opam
   ../../DEVELOPMENT.md
+  ../../tooling/opam-overlay/README.md
   (source_tree ../../assets))
  (action
   (run %{exe:docs_check.exe} %{workspace_root}

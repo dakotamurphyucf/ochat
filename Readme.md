@@ -103,23 +103,31 @@ if your account uses a different supported model.
 
 Open a terminal in the **Ochat checkout**. If you have not installed OCaml and
 opam, follow the [OCaml installation instructions](https://ocaml.org/install#linux_mac_bsd)
-first. Current project requirements include OCaml 5.1+ and Dune 3.21+.
+first. Source setup uses OCaml 5.3.0, opam 2.5.2, Node.js 18+ and Dune 3.21+.
 
-If you do not already have a suitable opam switch, create one here:
+Create a new isolated compiler environment for this checkout:
 
 ```sh
-opam switch create .
+node scripts/bootstrap-opam.mjs scratch/ochat-toolchain
 ```
 
-Then install dependencies and build the command-line tools into your active
-opam switch:
+The bootstrap refuses an existing destination and leaves other opam roots and
+switches unchanged. It selects the small [Eio source overlay](tooling/opam-overlay/README.md),
+which provides the public release-reporting API used by Ochat. If opam 2.5.2 is
+available at a separate path, pass that binary as the second argument. Load the
+explicit environment command printed by bootstrap, then install and build:
 
 ```sh
-eval "$(opam env)"
 opam install . --deps-only
 dune build @install
 dune install
 ```
+
+The committed Linux lock starts from the [recorded upstream dependency baseline](https://github.com/dakotamurphyucf/ochat/actions/runs/34188359989)
+and now selects the patched Eio family. This changed candidate awaits final Linux
+qualification. `opam install . --deps-only --with-test --locked` reproduces that
+candidate; other POSIX platforms resolve the declared dependencies in their
+isolated switch.
 
 Keep this terminal open: its environment now lets you run `chat-tui` and `ochat`
 from another project directory. Check the installation with:

@@ -18,18 +18,22 @@ let denied () =
        ())
 ;;
 
-let create principal ~server_id ~read ~pagination =
-  if
-    P.Principal.has_scope principal View_session_transcript
-    && P.Principal.has_scope principal View_security_state
-  then Ok { principal; server_id; read; pagination }
-  else denied ()
+let has_scope principal =
+  P.Principal.has_scope principal View_session_transcript
+  && P.Principal.has_scope principal View_security_state
 ;;
 
-let visible t (run : P.Run.t) =
-  P.Id.Principal.equal run.principal_id t.principal.id
-  || P.Principal.has_scope t.principal Administer_configuration
+let can_view principal ~run_owner =
+  has_scope principal
+  && (P.Id.Principal.equal run_owner principal.P.Principal.id
+      || P.Principal.has_scope principal Administer_configuration)
 ;;
+
+let create principal ~server_id ~read ~pagination =
+  if has_scope principal then Ok { principal; server_id; read; pagination } else denied ()
+;;
+
+let visible t (run : P.Run.t) = can_view t.principal ~run_owner:run.principal_id
 
 let read t reference =
   let open Result.Let_syntax in

@@ -134,6 +134,20 @@ The worker's live resource/source authority is checked again at construction and
 effect boundaries. Replacing its defining source, changing a private binding,
 stopping an owning parent, or revoking current authority can deny a later launch.
 
+### Schedules created by a Goal-owned Workflow
+
+When a Goal-owned Workflow creates a schedule for a fresh child through the
+native recurrence tool, the controller records the originating Goal and Workflow
+admission in the definition. Later occurrences use that original Goal, even
+after the creating Run finishes. An ordinary call outside that Goal's Workflow
+creates an unbound schedule. Scheduling work in an existing target session keeps
+the target's own session and Goal rules.
+
+Holding the original Goal prevents fresh occurrence work. Resuming eligible work
+still requires the controller's current source and target permissions. An exact
+retry of a successful creation can return its original receipt while the Goal
+is held. Reading that receipt does not start another occurrence.
+
 ## Timing, missed work and host absence
 
 Fixed-rate intervals retain their nominal series. Fixed-delay intervals choose the
@@ -154,6 +168,14 @@ pauses its recurrences and does not automatically re-enable them on restart.
 Process death preserves interrupted/unconfirmed evidence rather than replaying an
 in-flight handler. There is no external exactly-once, rollback, external
 cancellation or unbounded catch-up guarantee.
+
+A configured host pauses future launches when it verifies that an existing
+target was permanently removed or that the captured target generation or
+source installation was superseded or retired. Status and history report
+`target_review` without exposing private target evidence. Edit the definition
+with a current target before resuming it. Already admitted or uncertain work
+retains its existing disposition. A busy target or temporarily unavailable host
+or target does not establish a permanent change.
 
 ## Inspect status and retained history
 
@@ -180,6 +202,34 @@ actual local original, binding, generation, profile, stop and cancellation check
 remain at the writer boundary. This is not an atomic cross-Actor policy transaction
 during writer IO. A real ACK stays acknowledged. Every future launch and target
 effect needs its own genuine current authority; stored metadata grants none.
+
+## Inspect a controller from a headless client
+
+Use the controller's host and session reference. A read-only client can list
+definitions and inspect status or history without attaching a writer. With
+an existing session handle, the OCaml client can inspect a named schedule:
+
+```ocaml
+let inspect handle recurrence_id =
+  let open Core.Result.Let_syntax in
+  let%bind recurrences = Agent_client.Session_handle.recurrences handle in
+  Agent_client.Recurrence_controls.status recurrences recurrence_id
+;;
+```
+
+Negotiate `sessions.recurrences` for inspection and `sessions.recurrence_control`
+for definition changes. Read the returned controller generation, catalog
+revision, and the definition's control revision before editing. A stopped
+controller can have a retained schedule with no active planner. The status
+and history views identify target details the current operator may see.
+
+To create or edit a schedule, the writer supplies either a target session and
+its input, or the declared name and Run mode of an authored worker. OChat
+captures the target on the controller's host. Keep the original intent and key
+until the host acknowledges it. If the connection drops, acquire a writer
+attachment on the same controller and resubmit that intent through
+`Agent_client.Recurrence_controls.command`. Its receipt confirms the definition
+change. Read occurrence history for admission and execution results.
 
 ## Use the pure request package from ChatML
 

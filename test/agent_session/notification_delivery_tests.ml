@@ -54,6 +54,7 @@ let%expect_test
            ~event:Chat_response.Moderation.Event.Turn_end
            ~snapshot:(fun () -> Ok Setup.before)
            (fun ~executing
+             ~policy_caller:_
              ~model_jobs:_
              ~allocate_inference:_
              ~retirement_reason:_

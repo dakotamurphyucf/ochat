@@ -70,7 +70,10 @@ let check ~invocations ~jobs ~events (delivery : P.Delivery.t) =
     let%bind () = same_session value.session_id value.generation in
     match value.launch with
     | None -> Ok ()
-    | Some launch -> owner seen launch.owner
+    | Some launch ->
+      (match P.Job.Birth_parent.view launch.owner with
+       | Callback creator -> owner seen creator
+       | Job_attempt { id; _ } -> job seen id)
   and event seen id =
     let%bind seen = enter seen ("event:" ^ P.Id.Moderator_execution.to_string id) in
     let%bind value =

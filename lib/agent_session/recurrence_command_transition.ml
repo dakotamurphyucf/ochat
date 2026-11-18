@@ -6,6 +6,10 @@ module F = Recurrence_definition
 module I = Recurrence_identity
 module R = Recurrence_command_receipt
 
+type producer =
+  | Operator
+  | Native
+
 type decision =
   | Retained of R.t
   | Commit of
@@ -16,6 +20,8 @@ type decision =
 let conflict message = Error (P.Error.create Conflict ~message ~retryable:false ())
 
 let prepare
+      ?(producer = Operator)
+      ?goal_binding
       catalog
       ~(request : C.t)
       ~principal_id
@@ -26,13 +32,45 @@ let prepare
       ~now
   =
   let open Result.Let_syntax in
-  let%bind request_sha256 = C.digest request in
+  let%bind request_sha256 =
+    match producer with
+    | Operator -> C.digest request
+    | Native ->
+      let binding =
+        Option.value_map goal_binding ~default:F.Goal_binding.Unbound ~f:(fun binding ->
+          F.Goal_binding.Controller_goal binding)
+      in
+      C.digest_native request ~binding
+  in
   let%bind retained =
     Recurrence_catalog.receipt catalog ~principal_id ~key:request.key ~request_sha256
   in
   match retained with
   | Some receipt -> Ok (Retained receipt)
   | None ->
+    let%bind () =
+      match producer, request.goal_owner, goal_binding with
+      | (Operator | Native), None, None -> Ok ()
+      | Native, None, Some _ ->
+        (match request.mutation with
+         | Create _ | Edit _ -> Ok ()
+         | Enable _ | Pause _ | Retire _ ->
+           Error (P.Error.invalid_request "unexpected native Goal capture"))
+      | Operator, Some requested, Some binding
+        when P.Id.Goal.equal requested.goal_id (F.Goal_binding.Capture.goal_id binding)
+             &&
+             match request.mutation with
+             | Create _ ->
+               Int64.equal
+                 requested.expected_goal_revision
+                 (F.Goal_binding.Capture.goal_revision_at_capture binding)
+             | Edit _ -> true
+             | Enable _ | Pause _ | Retire _ -> false -> Ok ()
+      | (Operator | Native), (None | Some _), (None | Some _) ->
+        Error
+          (P.Error.invalid_request
+             "recurrence Goal capture differs from the original request")
+    in
     let needs_source = C.Mutation.needs_source request.mutation in
     let%bind () =
       if
@@ -93,7 +131,12 @@ let prepare
       let%bind key =
         I.Definition.create ~controller:session ~recurrence_id:id ~revision
       in
-      F.create
+      let create =
+        match goal_binding with
+        | None -> F.create
+        | Some binding -> F.create_bound ~binding
+      in
+      create
         ~key
         ~creator
         ~source

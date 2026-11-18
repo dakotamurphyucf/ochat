@@ -42,6 +42,9 @@ runs:
         opam-pin: false
         opam-repositories: |
           default: ${{ steps.key.outputs.repository }}
+    - name: Select reviewed Eio overlay in this switch
+      shell: bash
+      run: node .github/scripts/toolchain.mjs overlay
     - name: Install locked system dependencies
       shell: bash
       run: opam install . --deps-only --with-test --locked --depext-only --yes

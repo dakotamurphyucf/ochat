@@ -47,6 +47,22 @@ let to_json t =
     ]
 ;;
 
+let headless_request_sha256 ~session_id ~generation ~expected_revision ~mode ~input ~key =
+  let%map.Result encoded =
+    J.canonical_string
+      (`Object
+          [ "kind", `String "headless_command"
+          ; "session_id", Id.Session.to_json session_id
+          ; "generation", `Number (Int.to_string generation)
+          ; "expected_revision", `String (Int64.to_string expected_revision)
+          ; "mode", Run.Mode.to_json mode
+          ; "input", Input.to_json input
+          ; "key", Idempotency_key.to_json key
+          ])
+  in
+  Digestif.SHA256.(digest_string encoded |> to_hex)
+;;
+
 let of_json json =
   let open Result.Let_syntax in
   let%bind () =

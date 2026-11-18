@@ -86,6 +86,9 @@ type counters =
   }
 
 let with_recoverable_fixture
+      ?chatml_runtime_policy
+      ?independent_lifetime_policy
+      ?sources
       ?test_root
       ?(timeout = 30.)
       ?(prompt_text = Source.prompt_text)
@@ -112,6 +115,9 @@ let with_recoverable_fixture
     }
   in
   Creation_tests.with_daemon
+    ?chatml_runtime_policy
+    ?independent_lifetime_policy
+    ?sources
     ?test_root
     ~prompt_text
     ~qualify_chatml_extensions:true

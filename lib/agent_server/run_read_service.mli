@@ -28,3 +28,10 @@ val lookup
   :  t
   -> Agent_protocol.Run_query.Lookup_request.t
   -> (Agent_protocol.Run_query.Outcome.t, Agent_protocol.Error.t) result
+
+(** Run-read disclosure scopes plus original Run principal or administrator.
+    The caller also checks current authentication and visibility of its session. *)
+val can_view
+  :  Agent_protocol.Principal.t
+  -> run_owner:Agent_protocol.Id.Principal.t
+  -> bool

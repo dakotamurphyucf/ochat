@@ -39,6 +39,7 @@ let setup
       ?(capabilities = Chat_response.Moderation.Capabilities.default)
       ?(events = "| _ -> Task.pure(state)")
       ?(script_limits = "")
+      ?execution_policy
       body
   =
   let dir = Eio.Stdenv.cwd env in
@@ -81,7 +82,9 @@ let setup
   let allocator =
     History_entry.Allocator.create ~namespace:"invocation-fixture" ~next_sequence:0 |> ok
   in
-  let manager = M.create_entries ~env ~artifact ~capabilities ~allocator () |> ok in
+  let manager =
+    M.create_entries ~env ?execution_policy ~artifact ~capabilities ~allocator () |> ok
+  in
   let prepared = List.hd_exn (EC.prepared_tools definition) in
   let make ?(input = `Null) () =
     I.create

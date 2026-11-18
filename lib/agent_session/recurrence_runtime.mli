@@ -183,12 +183,14 @@ val release : t -> preparation -> unit
 
 (** Admission-time grace for an exact retained selected row. Live interval
     anchors follow elapsed time across cursor advance, Ready-to-protected moves
-    and unresolved execution recording. Calendar, or recovered intervals lacking such an anchor, explicitly
-    reconcile the current wall against the retained UTC nominal. A failed live
-    anchor never falls back to wall/zero. No authority is granted. *)
-val selection_lateness
+    and unresolved execution recording. Calendar rules and recovered intervals
+    without an anchor compare the current wall against the retained UTC nominal
+    and return false before it. The grace limit in [policy] is inclusive. An
+    invalid live anchor returns an error. The predicate grants no authority. *)
+val within_selection_grace
   :  t
   -> entry:Recurrence_entry.t
   -> nominal:Recurrence_nominal.t
   -> snapshot:Recurrence_phase.Snapshot.t
-  -> (int64 option, Agent_protocol.Error.t) result
+  -> policy:Recurrence_policy.t
+  -> (bool, Agent_protocol.Error.t) result

@@ -72,6 +72,117 @@ module Limits = struct
   let max_nodes t = t.max_nodes
 end
 
+(* Private, scan-derived measurements. No caller can supply these facts through
+   the public interface, and the ordinary byte-only validator allocates none. *)
+module Json_measurement = struct
+  type t =
+    { bytes : int
+    ; fields : int
+    ; nodes : int
+    ; depth : int
+    }
+
+  type envelope =
+    { outside : t
+    ; payload : t
+    }
+
+  type admission =
+    { whole : t
+    ; envelope : envelope option
+    }
+
+  let add left right =
+    if left < 0 || right < 0 || left > Int.max_value - right
+    then None
+    else Some (left + right)
+  ;;
+
+  let compose envelope payload =
+    let open Option.Let_syntax in
+    let%bind bytes = add envelope.outside.bytes payload.bytes in
+    let%bind fields = add envelope.outside.fields payload.fields in
+    let%bind nodes = add envelope.outside.nodes payload.nodes in
+    let%map depth = add payload.depth 1 in
+    { whole = { bytes; fields; nodes; depth = Int.max envelope.outside.depth depth }
+    ; envelope = Some { envelope with payload }
+    }
+  ;;
+
+  let fits t (limits : Limits.t) =
+    t.bytes <= limits.max_bytes
+    && t.fields <= limits.max_fields
+    && t.nodes <= limits.max_nodes
+    && t.depth <= limits.max_depth
+  ;;
+
+  module Capture = struct
+    type mode =
+      | Payload
+      | Document_envelope
+
+    type measurement = t
+
+    type t =
+      { mode : mode
+      ; mutable depth : int
+      ; mutable outside_depth : int
+      ; mutable payload_depth : int
+      ; mutable in_payload : bool
+      ; mutable payload : measurement option
+      ; mutable result : admission option
+      }
+
+    let create mode =
+      { mode
+      ; depth = 0
+      ; outside_depth = 0
+      ; payload_depth = 0
+      ; in_payload = false
+      ; payload = None
+      ; result = None
+      }
+    ;;
+
+    let observe_depth t depth =
+      t.depth <- Int.max t.depth depth;
+      if t.in_payload
+      then t.payload_depth <- Int.max t.payload_depth (depth - 1)
+      else t.outside_depth <- Int.max t.outside_depth depth
+    ;;
+
+    let finish t ~bytes ~fields ~nodes =
+      let whole = { bytes; fields; nodes; depth = t.depth } in
+      let envelope =
+        match t.payload with
+        | Some payload
+          when bytes >= payload.bytes
+               && fields >= payload.fields
+               && nodes >= payload.nodes ->
+          Some
+            { payload
+            ; outside =
+                { bytes = bytes - payload.bytes
+                ; fields = fields - payload.fields
+                ; nodes = nodes - payload.nodes
+                ; depth = t.outside_depth
+                }
+            }
+        | None | Some _ -> None
+      in
+      t.result <- Some { whole; envelope }
+    ;;
+
+    (* Only read after the same synchronous scan returned Ok. Error/exception
+       never publishes an admission, including a partially visited payload. *)
+    let result_exn t =
+      match t.result with
+      | Some result -> result
+      | None -> raise_s [%sexp "successful JSON scan did not publish its measurement"]
+    ;;
+  end
+end
+
 module Json = struct
   type t = Jsonaf.t
 
@@ -207,7 +318,7 @@ module Json = struct
     ;;
   end
 
-  let validate_and_measure_with_checkpoint ~limits ~checkpoint t =
+  let validate_and_measure_internal ?capture ~limits ~checkpoint t =
     (* Keep the per-node walk allocation-light. This private escape preserves the
        first validation error without allocating Result callbacks at every field;
        callers still receive the same bounded byte count or structured error. *)
@@ -226,41 +337,46 @@ module Json = struct
       in
       (* Match compact string encoding while rejecting before any byte-budget
          overflow. The same scan proves UTF-8 validity for ASCII strings. *)
+      (* Pass per-string invariants explicitly so one scanner closure serves
+         every key and value in this validation invocation. *)
+      let rec scan_string text length available index encoded_bytes seen_bits =
+        if index >= length
+        then (
+          charge_bytes encoded_bytes;
+          seen_bits land 0x80 = 0)
+        else (
+          let byte = String.get text index in
+          let seen_bits = seen_bits lor Char.to_int byte in
+          let width =
+            match byte with
+            | '"' | '\\' | '\b' | '\012' | '\n' | '\r' | '\t' -> 2
+            | '\000' .. '\031' -> 6
+            | _ -> 1
+          in
+          let fits = width <= available - encoded_bytes in
+          let encoded_bytes = if fits then encoded_bytes + width else encoded_bytes in
+          let index = index + 1 in
+          (* A processed boundary byte checkpoints even when it first exceeds
+             the budget. Preserve cancellation before that byte-limit error. *)
+          if index land 0xffff = 0 then checkpoint ();
+          if fits
+          then scan_string text length available index encoded_bytes seen_bits
+          else fail (Error.Limit_exceeded "bytes"))
+      in
       let charge_string text =
         let available = limits.Limits.max_bytes - !bytes_seen in
         if available < 2 then fail (Error.Limit_exceeded "bytes");
         let length = String.length text in
-        let rec scan index encoded_bytes seen_bits =
-          if index >= length
-          then (
-            charge_bytes encoded_bytes;
-            seen_bits land 0x80 = 0)
-          else (
-            let byte = String.get text index in
-            let seen_bits = seen_bits lor Char.to_int byte in
-            let width =
-              match byte with
-              | '"' | '\\' | '\b' | '\012' | '\n' | '\r' | '\t' -> 2
-              | '\000' .. '\031' -> 6
-              | _ -> 1
-            in
-            let fits = width <= available - encoded_bytes in
-            let encoded_bytes = if fits then encoded_bytes + width else encoded_bytes in
-            let index = index + 1 in
-            (* A processed boundary byte checkpoints even when it first exceeds
-               the budget. Preserve cancellation before that byte-limit error. *)
-            if index land 0xffff = 0 then checkpoint ();
-            if fits
-            then scan index encoded_bytes seen_bits
-            else fail (Error.Limit_exceeded "bytes"))
-        in
-        scan 0 2 0
+        scan_string text length available 0 2 0
       in
       let rec walk t depth rev_path =
         incr nodes_seen;
         if !nodes_seen land 0xff = 0 then checkpoint ();
         if depth > limits.Limits.max_depth then fail (Error.Limit_exceeded "depth");
         if !nodes_seen > limits.max_nodes then fail (Error.Limit_exceeded "nodes");
+        (match capture with
+         | None -> ()
+         | Some capture -> Json_measurement.Capture.observe_depth capture depth);
         match t with
         | `Object fields ->
           charge_bytes 2;
@@ -278,7 +394,28 @@ module Json = struct
               fail
                 (Error.Duplicate_key
                    (Measurement_path.to_list (Measurement_path.Field (key, rev_path))));
-            walk value (depth + 1) (Measurement_path.Field (key, rev_path));
+            (match capture with
+             | Some capture
+               when (match capture.Json_measurement.Capture.mode with
+                     | Document_envelope -> true
+                     | Payload -> false)
+                    && depth = 1
+                    && String.equal key "payload" ->
+               let bytes = !bytes_seen in
+               let fields = !fields_seen in
+               let nodes = !nodes_seen in
+               capture.in_payload <- true;
+               walk value (depth + 1) (Measurement_path.Field (key, rev_path));
+               capture.in_payload <- false;
+               capture.payload
+               <- Some
+                    { bytes = !bytes_seen - bytes
+                    ; fields = !fields_seen - fields
+                    ; nodes = !nodes_seen - nodes
+                    ; depth = capture.payload_depth
+                    }
+             | None | Some _ ->
+               walk value (depth + 1) (Measurement_path.Field (key, rev_path)));
             seen := Set.add !seen key)
         | `Array values ->
           charge_bytes 2;
@@ -297,7 +434,32 @@ module Json = struct
         | `False -> charge_bytes 5
       in
       walk t 1 Measurement_path.Root;
+      (match capture with
+       | None -> ()
+       | Some capture ->
+         Json_measurement.Capture.finish
+           capture
+           ~bytes:!bytes_seen
+           ~fields:!fields_seen
+           ~nodes:!nodes_seen);
       Ok !bytes_seen)
+  ;;
+
+  let validate_and_measure_with_checkpoint ~limits ~checkpoint t =
+    validate_and_measure_internal ~limits ~checkpoint t
+  ;;
+
+  type measured_payload =
+    { limits : Limits.t
+    ; measurement : Json_measurement.t
+    }
+
+  let measure_payload ~limits json =
+    let capture = Json_measurement.Capture.create Payload in
+    let%map.Result _ =
+      validate_and_measure_internal ~capture ~limits ~checkpoint:(fun () -> ()) json
+    in
+    { limits; measurement = (Json_measurement.Capture.result_exn capture).whole }
   ;;
 
   let validate_and_measure ~limits t =
@@ -318,15 +480,29 @@ module Json = struct
     | _ -> false
   ;;
 
-  let decode ~limits text =
+  let parse_syntax text =
+    (* Jsonaf's reusable parser closes over a mutable string buffer and state.
+       Give each complete input its own parser, including across native domains. *)
+    let parser : t Angstrom.t =
+      Jsonaf_kernel.Expert.Parser.create (fun number -> Ok number)
+    in
+    Angstrom.parse_string ~consume:All parser text
+  ;;
+
+  let decode_internal ?capture ~limits text =
     let open Result.Let_syntax in
     let%bind () = guard_text limits text in
-    match Jsonaf.parse text with
+    let parsed = parse_syntax text |> Result.map_error ~f:Core.Error.of_string in
+    match parsed with
     | Error message -> Error (Error.Malformed (Core.Error.to_string_hum message))
     | Ok json ->
-      let%map () = validate ~limits json in
+      let%map _ =
+        validate_and_measure_internal ?capture ~limits ~checkpoint:(fun () -> ()) json
+      in
       json
   ;;
+
+  let decode ~limits text = decode_internal ~limits text
 end
 
 module Document = struct
@@ -337,6 +513,7 @@ module Document = struct
     ; payload : Json.t
     ; required_semantics : string list
     ; admitted_limits : Limits.t
+    ; measurement : Json_measurement.admission option
     }
 
   let format = "ochat.document"
@@ -347,15 +524,20 @@ module Document = struct
   let json t = t.json
   let to_string t = Jsonaf.to_string t.json
 
+  let compatible_limits (limits : Limits.t) (admitted : Limits.t) =
+    limits.max_bytes >= admitted.max_bytes
+    && limits.max_depth >= admitted.max_depth
+    && limits.max_fields >= admitted.max_fields
+    && limits.max_nodes >= admitted.max_nodes
+  ;;
+
   let validate t ~limits =
-    let admitted = t.admitted_limits in
-    if
-      limits.Limits.max_bytes >= admitted.max_bytes
-      && limits.max_depth >= admitted.max_depth
-      && limits.max_fields >= admitted.max_fields
-      && limits.max_nodes >= admitted.max_nodes
+    if compatible_limits limits t.admitted_limits
     then Ok ()
-    else Json.validate ~limits t.json
+    else (
+      match t.measurement with
+      | Some measurement when Json_measurement.fits measurement.whole limits -> Ok ()
+      | None | Some _ -> Json.validate ~limits t.json)
   ;;
 
   let string_field json name =
@@ -368,7 +550,7 @@ module Document = struct
      input uses Json.validate; scalar edits may preserve an admitted tree's
      structural totals and prove nonincreasing compact bytes after independently
      validating each replacement. No caller-supplied certificate is accepted. *)
-  let inspect_validated ~limits json =
+  let inspect_validated ?measurement ~limits json =
     let open Result.Let_syntax in
     let%bind () =
       match json with
@@ -418,14 +600,25 @@ module Document = struct
         |> Result.map ~f:(fun (names, _) -> List.rev names)
       | Null | Value _ -> invalid [ "required_semantics" ] "expected array"
     in
-    { json; kind; version; payload; required_semantics; admitted_limits = limits }
+    { json
+    ; kind
+    ; version
+    ; payload
+    ; required_semantics
+    ; admitted_limits = limits
+    ; measurement
+    }
   ;;
 
   let inspect_with_checkpoint ~limits ~checkpoint json =
+    let capture = Json_measurement.Capture.create Document_envelope in
     let%bind.Result _ =
-      Json.validate_and_measure_with_checkpoint ~limits ~checkpoint json
+      Json.validate_and_measure_internal ~capture ~limits ~checkpoint json
     in
-    inspect_validated ~limits json
+    inspect_validated
+      ~measurement:(Json_measurement.Capture.result_exn capture)
+      ~limits
+      json
   ;;
 
   let inspect ~limits json =
@@ -442,7 +635,12 @@ module Document = struct
       else (
         match String.get text 0 with
         | '{' | '[' | '"' | 'n' | 't' | 'f' | '-' | '0' .. '9' ->
-          Result.bind (Json.decode ~limits bytes) ~f:(inspect_validated ~limits)
+          let capture = Json_measurement.Capture.create Document_envelope in
+          Result.bind (Json.decode_internal ~capture ~limits bytes) ~f:(fun json ->
+            inspect_validated
+              ~measurement:(Json_measurement.Capture.result_exn capture)
+              ~limits
+              json)
         | _ -> Error Error.Unsupported_beta_format))
   ;;
 
@@ -462,20 +660,46 @@ module Document = struct
     create_with_checkpoint ~limits ~checkpoint:(fun () -> ()) ~kind ~version ~payload
   ;;
 
+  let replacement_json t ~version ~payload =
+    match t.json with
+    | `Object fields ->
+      `Object
+        (List.map fields ~f:(fun (name, value) ->
+           if String.equal name "payload"
+           then name, payload
+           else if String.equal name "schema_version"
+           then name, `Number (Int.to_string version)
+           else name, value))
+    | _ -> assert false
+  ;;
+
   let replace_payload t ~limits ~version ~payload =
-    let json =
-      match t.json with
-      | `Object fields ->
-        `Object
-          (List.map fields ~f:(fun (name, value) ->
-             if String.equal name "payload"
-             then name, payload
-             else if String.equal name "schema_version"
-             then name, `Number (Int.to_string version)
-             else name, value))
-      | _ -> assert false
-    in
-    inspect ~limits json
+    inspect ~limits (replacement_json t ~version ~payload)
+  ;;
+
+  (* The sole caller establishes metric equivalence during preservation merge.
+     Its actual payload can reorder the previously measured known JSON. *)
+  let replace_payload_measured
+        t
+        ~limits
+        ~version
+        ~payload
+        (measured : Json.measured_payload)
+    =
+    if version <> t.version || not (Limits.equal limits measured.limits)
+    then None
+    else (
+      match t.measurement, payload with
+      | Some { envelope = Some envelope; _ }, (`Object _ as json) ->
+        (match Json_measurement.compose envelope measured.measurement with
+         | Some measurement when Json_measurement.fits measurement.whole limits ->
+           inspect_validated
+             ~measurement
+             ~limits
+             (replacement_json t ~version ~payload:json)
+           |> Result.ok
+         | None | Some _ -> None)
+      | None, _ | Some _, _ -> None)
   ;;
 
   let replace_payload_scalars t ~limits ~updates =
@@ -1085,7 +1309,13 @@ module Domain_codec = struct
     | (_, Unknown _) :: _, _ | [], _ :: _ | _ :: _, [] -> false
   ;;
 
-  let rec merge (shape : Shape.t) (retained : retained) (known : Json.t) path =
+  let rec merge
+            ~preserves_metrics
+            (shape : Shape.t)
+            (retained : retained)
+            (known : Json.t)
+            path
+    =
     let open Result.Let_syntax in
     match retained, shape, known with
     | Empty, _, _ -> Ok known
@@ -1102,13 +1332,13 @@ module Domain_codec = struct
       in
       if
         String.equal previous.discriminator discriminator && String.equal previous.tag tag
-      then merge selected previous.child known path
+      then merge ~preserves_metrics selected previous.child known path
       else if has_unknown previous.child
       then Error (Error.Extension_conflict path)
       else Ok known
     | _, Shape.Nullable _, `Null ->
       if has_unknown retained then Error (Error.Extension_conflict path) else Ok known
-    | _, Shape.Nullable shape, _ -> merge shape retained known path
+    | _, Shape.Nullable shape, _ -> merge ~preserves_metrics shape retained known path
     | ( Array
           { original_known = _
           ; identity_field = previous_identity
@@ -1130,7 +1360,14 @@ module Domain_codec = struct
         match previous, fields with
         | [], [] -> Ok (`Object (List.rev result))
         | (_, Known tree) :: previous, (name, value) :: fields ->
-          (match merge (Map.find_exn owned name) tree value (path @ [ name ]) with
+          (match
+             merge
+               ~preserves_metrics
+               (Map.find_exn owned name)
+               tree
+               value
+               (path @ [ name ])
+           with
            | Error error -> Error error
            | Ok value -> merge_ordered previous fields ((name, value) :: result))
         | (_, Unknown _) :: _, (name, _) :: _ ->
@@ -1139,6 +1376,9 @@ module Domain_codec = struct
       in
       merge_ordered previous fields []
     | Object previous, Shape.Object owned, `Object fields ->
+      (* Reordering known members preserves all four measurements. Direct
+         retained unknowns add unmeasured data; child merges retain their own
+         sticky proof. The actual merged member order remains unchanged. *)
       (* Both lists originate in duplicate-checked JSON trees. Indexing keeps
          large named-field objects bounded by O(n log n), including templates. *)
       let previous_by_name = String.Map.of_alist_exn previous in
@@ -1148,7 +1388,9 @@ module Domain_codec = struct
           match field with
           | Unknown _ when Map.mem owned name || Map.mem fields_by_name name ->
             Error (Error.Extension_conflict (path @ [ name ]))
-          | Unknown _ -> Ok ()
+          | Unknown _ ->
+            preserves_metrics := false;
+            Ok ()
           | Known tree ->
             if has_unknown tree && not (Map.mem fields_by_name name)
             then Error (Error.Extension_conflict (path @ [ name ]))
@@ -1158,7 +1400,8 @@ module Domain_codec = struct
         List.fold_result fields ~init:[] ~f:(fun result (name, value) ->
           let%map value =
             match Map.find previous_by_name name, Map.find owned name with
-            | Some (Known tree), Some shape -> merge shape tree value (path @ [ name ])
+            | Some (Known tree), Some shape ->
+              merge ~preserves_metrics shape tree value (path @ [ name ])
             | Some (Known tree), None when has_unknown tree ->
               Error (Error.Extension_conflict (path @ [ name ]))
             | Some (Unknown _), _ -> Error (Error.Extension_conflict (path @ [ name ]))
@@ -1188,13 +1431,13 @@ module Domain_codec = struct
       then Error (Error.Extension_conflict path)
       else if not (has_unknown retained)
       then Ok known
-      else
+      else (
+        preserves_metrics := false;
         List.map2 entries values ~f:(fun (_, retained) value ->
-          merge element retained value path)
-        |> (function
-         | List.Or_unequal_lengths.Unequal_lengths ->
-           Error (Error.Extension_conflict path)
-         | Ok results -> Result.map (Result.all results) ~f:(fun values -> `Array values))
+          merge ~preserves_metrics element retained value path)
+        |> function
+        | List.Or_unequal_lengths.Unequal_lengths -> Error (Error.Extension_conflict path)
+        | Ok results -> Result.map (Result.all results) ~f:(fun values -> `Array values))
     | ( Array { original_known = _; identity_field = _; allow_empty_identity = _; entries }
       , Shape.Array { element; identity_field = Some key; allow_empty_identity }
       , `Array values ) ->
@@ -1223,7 +1466,8 @@ module Domain_codec = struct
              let%bind id = identity ~allow_empty:allow_empty_identity value key path in
              match Map.find by_identity id with
              | None -> Ok value
-             | Some retained -> merge element retained value (path @ [ id ])))
+             | Some retained ->
+               merge ~preserves_metrics element retained value (path @ [ id ])))
       in
       `Array values
     | (Object _ | Array _ | Tagged _), _, _ ->
@@ -1243,7 +1487,7 @@ module Domain_codec = struct
       | Original validate -> validate carrier.value
     in
     let%bind known = t.encode_value carrier.value in
-    let%bind () = Json.validate ~limits:t.limits known in
+    let%bind measured = Json.measure_payload ~limits:t.limits known in
     let%bind projection, unexpected = split t.shape known [ "payload" ] in
     let%bind () =
       if has_unknown unexpected
@@ -1255,11 +1499,30 @@ module Domain_codec = struct
       | Roundtrip -> t.decode_value projection |> Result.map ~f:(fun _ -> ())
       | Original _ -> Ok ()
     in
-    let%bind payload = merge t.shape carrier.retained known [ "payload" ] in
+    let preserves_metrics = ref true in
+    let%bind payload =
+      merge ~preserves_metrics t.shape carrier.retained known [ "payload" ]
+    in
     match carrier.template with
     | None -> Document.create ~limits:t.limits ~kind:t.kind ~version:t.version ~payload
     | Some template ->
-      Document.replace_payload template ~limits:t.limits ~version:t.version ~payload
+      (* Merge proved metric equivalence, not raw member-order equality. Pair
+         the known measurements with the actual preserved payload. *)
+      let composed =
+        if !preserves_metrics
+        then
+          Document.replace_payload_measured
+            template
+            ~limits:t.limits
+            ~version:t.version
+            ~payload
+            measured
+        else None
+      in
+      (match composed with
+       | Some document -> Ok document
+       | None ->
+         Document.replace_payload template ~limits:t.limits ~version:t.version ~payload)
   ;;
 
   let combine_fields previous incoming ~f =

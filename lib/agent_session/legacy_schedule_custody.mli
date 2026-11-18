@@ -80,3 +80,73 @@ val without_constructor
   -> source:Agent_protocol.Run_source.t
   -> ids:Agent_protocol.Id.Schedule.t list
   -> t
+
+(** Process-local independent original from the actual new creator. DATA grants
+    no admission. Failed/unselected stage retires the child; SAME ACK installs it. *)
+module Fresh : sig
+  type t
+
+  val stage
+    :  manager:Chat_response.Moderator_manager.t
+    -> source:Agent_protocol.Run_source.t
+    -> schedule:Agent_protocol.Schedule.t
+    -> parent:Execution_custody.Admission.t
+    -> (t, Agent_protocol.Error.t) result
+
+  val discard : t -> unit
+end
+
+module Staged : sig
+  type t
+
+  val create : unit -> t
+
+  val attach
+    :  t
+    -> owner:Agent_protocol.Job.launch_owner
+    -> receipt:int
+    -> fresh:Fresh.t
+    -> (unit, Agent_protocol.Error.t) result
+
+  (** Only actual selected DATA-stager receipts may be supplied by the Actor. *)
+  val selected
+    :  t
+    -> owner:Agent_protocol.Job.launch_owner
+    -> receipts:int list
+    -> (Agent_protocol.Schedule.t * Fresh.t) list
+
+  (** Called only after successful actual DATA receipt abort; installed Fresh is inert. *)
+  val abort : t -> owner:Agent_protocol.Job.launch_owner -> receipt:int -> unit
+
+  val release_owner : t -> owner:Agent_protocol.Job.launch_owner -> unit
+  val abort_all : t -> unit
+end
+
+module Update : sig
+  type inventory := t
+  type t
+
+  (** The Actor supplies each exact creation followed by its actual validated
+      selected DATA transitions in execution order; install retains the final
+      value without inventing a direct creation-to-final transition. [changes]
+      is the complete ordered validated selection: existing creator rows advance
+      through those same edges without transferring or renewing their admission. *)
+  val prepare_selected
+    :  inventory
+    -> selected:(Agent_protocol.Schedule.t list * Fresh.t) list
+    -> changes:Agent_protocol.Schedule.t list
+    -> (t, Agent_protocol.Error.t) result
+
+  (** Pure physical inventory/fullsource/Manager + strict original check before writer. *)
+  val check_before_commit
+    :  t
+    -> current:inventory
+    -> manager:Chat_response.Moderator_manager.t option
+    -> source:Agent_protocol.Run_source.t
+    -> (unit, Agent_protocol.Error.t) result
+
+  (** Marks exact Fresh installed before any parent release/publication. *)
+  val install : t -> inventory
+
+  val discard : t -> unit
+end

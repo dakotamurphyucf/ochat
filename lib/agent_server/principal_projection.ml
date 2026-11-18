@@ -259,6 +259,20 @@ let attach principal (attached : P.Method_result.Attach.t) =
     }
 ;;
 
+let operator_result value ~has_required_scope =
+  if has_required_scope
+  then
+    Result.map (P.Public.Result.Non_history.of_internal value) ~f:(fun value ->
+      P.Public.Result.Non_history value)
+  else
+    Error
+      (P.Error.create
+         Permission_denied
+         ~message:"Operator result scope is unavailable"
+         ~retryable:false
+         ())
+;;
+
 let project_result principal = function
   | P.Method_result.Provider_login_challenge value ->
     if P.Principal.has_scope principal Provider_manage
@@ -301,6 +315,31 @@ let project_result principal = function
     in
     Result.map (P.Public.Result.Non_history.of_internal value) ~f:(fun value ->
       P.Public.Result.Non_history value)
+  | Instructions result as value ->
+    let scope =
+      match result with
+      | P.Instruction_control.Result.Inspect _ | Refresh _ | Capture _ ->
+        P.Scope.View_session_transcript
+      | Activate _ | Remove _ -> Send_messages
+    in
+    if has principal scope
+    then
+      Result.map (P.Public.Result.Non_history.of_internal value) ~f:(fun value ->
+        P.Public.Result.Non_history value)
+    else
+      Error
+        (P.Error.create
+           Permission_denied
+           ~message:"instruction result scope is unavailable"
+           ~retryable:false
+           ())
+  | (Goal_query _ | Recurrence_query _) as value ->
+    operator_result value ~has_required_scope:(has principal View_session_transcript)
+  | (Goal_control _ | Recurrence_control _) as value ->
+    operator_result
+      value
+      ~has_required_scope:
+        (has principal View_session_transcript && has principal Send_messages)
   | Session_pending_inputs value ->
     let%bind.Result value = Pending_projection.view principal value in
     P.Public.Result.Non_history.of_internal (P.Method_result.Session_pending_inputs value)

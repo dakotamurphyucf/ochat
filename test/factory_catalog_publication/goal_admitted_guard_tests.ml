@@ -113,7 +113,8 @@ module Fault = struct
          in
          List.iter (atoms delta) ~f:(function
            | Inference_ledger_changed ledger
-           | Delegated_inference_ledger_changed (ledger, _) ->
+           | Delegated_inference_ledger_changed (ledger, _)
+           | Policy_inference_ledger_changed (ledger, _, _) ->
              (match
                 List.find (Ledger.rows ledger) ~f:(fun row ->
                   let handle = Ledger.Row.handle row in

@@ -194,11 +194,18 @@ let%expect_test "ordinary moderator events own foreground calls and preserve que
            let snapshot = M.identity_snapshot manager |> Result.ok_or_failwith in
            assert_same_session_snapshot final (Agent_session.Memory_backend.state backend);
            [%test_eq: int] 1 (List.length final.conversation.canonical_history);
-           assert (
-             Option.equal
-               Jsonaf.exactly_equal
-               final.moderator
-               (Some (Agent_session.Runtime_builder.encode_moderator_snapshot snapshot)));
+           let metadata = assert_moderator_checkpoint final ~snapshot in
+           let completed =
+             match mode with
+             | `Success -> true
+             | `Handler_failure | `Save_failure | `Terminal_save_failure | `Cancel ->
+               false
+           in
+           assert_moderator_queue_frontier
+             metadata
+             ~required:completed
+             ~head:0L
+             ~next:(if completed then 3L else 1L);
            assert (Result.is_ok (A.set_operation_worker actor None));
            let pending =
              List.count

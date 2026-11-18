@@ -3429,6 +3429,11 @@ type t =
   | Session_work of Session_work.Query.t
   | Session_configuration_get of Session_configuration.Get_request.t
   | Session_configuration_update of Session_configuration.Update_request.t
+  | Instructions of (Instruction_control.Request.t[@sexp.opaque])
+  | Goal_query of (Goal_query.Request.t[@sexp.opaque])
+  | Goal_control of (Goal_control.Request.t[@sexp.opaque])
+  | Recurrence_query of (Recurrence_query.Request.t[@sexp.opaque])
+  | Recurrence_control of (Recurrence_control.Request.t[@sexp.opaque])
   | Session_get of Session.Get_request.t
   | Session_inference_summary of Inference_query.Summary_request.t
   | Session_inference_observations of Inference_query.Request.t
@@ -6883,6 +6888,1258 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 val list_of_json : Jsonaf.t -> (t list, Error.t) result
 ```
 
+## goal
+
+[implementation](../../lib/agent_protocol/goal.ml) · [interface](../../lib/agent_protocol/goal.mli)
+
+```ocaml
+(** Pure persistent objective domain. This module performs no IO and grants no
+    execution authority. The actor authenticates all supplied Run evidence. Goal
+    identity is its stable accounting scope; objective edits never replace it.
+    Construction, mutation and decoding enforce a 128 KiB owned JSON projection
+    at depth 64; independently valid Run proofs can exceed this embedding bound. *)
+module Objective = Goal_text.Objective
+
+module Progress = Goal_text.Progress
+module Reason = Goal_text.Reason
+module Budget = Goal_budget
+module Episode = Goal_episode
+module Achievement_request = Goal_achievement.Request
+module Achievement = Goal_achievement
+module Capacity = Goal_capacity
+
+module Hold : sig
+  type t =
+    | Operator_pause
+    | Needs_input of Reason.t
+    | Budget_gate of Budget.Dimension.t
+    | Usage_uncertain of Inference.Observation.Usage.Component.t
+    | Deadline_reached
+    | Source_review
+  [@@deriving equal, sexp_of]
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+module Closure : sig
+  type t =
+    | Achieved of Achievement.t
+    | Abandoned of Reason.t
+  [@@deriving equal, sexp_of]
+end
+
+module State : sig
+  type admission =
+    | Enabled
+    | Held of Hold.t
+  [@@deriving equal, sexp_of]
+
+  type t =
+    | Open of admission
+    | Closed of Closure.t
+  [@@deriving equal, sexp_of]
+end
+
+type t [@@deriving equal, sexp_of]
+
+(** New goals start held for explicit source review, with empty progress and
+    revision zero. Source identity does not authorize running the goal. *)
+val create
+  :  id:Id.Goal.t
+  -> session:Session_ref.t
+  -> creator:Id.Principal.t
+  -> source:Run_source.t
+  -> objective:Objective.t
+  -> budget:Budget.t
+  -> (t, Error.t) result
+
+val id : t -> Id.Goal.t
+val session : t -> Session_ref.t
+val creator : t -> Id.Principal.t
+val source : t -> Run_source.t
+val objective : t -> Objective.t
+val progress : t -> Progress.t
+val budget : t -> Budget.t
+val state : t -> State.t
+val episode : t -> Episode.t option
+val achievement_request : t -> Achievement_request.t option
+
+(** Optional immutable terminal association resolving the latest request. Its
+    disposition is derived from actual Run evidence, not a writable status. *)
+val request_terminal : t -> Run_receipt.t option
+
+val request_settlement : t -> Episode.Settlement.t option
+
+(** At most one immutable predecessor proof is retained. Other evidence remains
+    Run-owned under its existing retention policy. *)
+val previous_episode_settlement : t -> Episode.Settlement.t option
+
+val revision : t -> int64
+
+(** An unresolved achievement request freezes the objective whose completion
+    was requested. Progress, holds, budgets and abandonment remain available. *)
+val revise_objective : t -> Objective.t -> (t, Error.t) result
+
+val record_progress : t -> Progress.t -> (t, Error.t) result
+val change_budget : t -> Budget.t -> (t, Error.t) result
+val hold : t -> Hold.t -> (t, Error.t) result
+
+(** Pure policy change only. Actor authorization must reject clearing operator
+    holds by a model and must recheck actual execution/source custody. *)
+val resume : t -> (t, Error.t) result
+
+(** Replacing an episode requires matching terminal evidence for the old one.
+    An unresolved achievement request must first settle or be explicitly retired.
+    When that Run already has a retained request settlement, the predecessor must
+    reuse that exact settlement, including the original admission association. *)
+val bind_episode
+  :  t
+  -> Episode.t
+  -> previous:(Run.t * Run_receipt.t) option
+  -> (t, Error.t) result
+
+(** Enable and bind a new episode atomically, advancing the Goal revision
+    exactly once. All [bind_episode] association and predecessor requirements
+    apply. This pure transition grants no admission or execution authority. *)
+val activate_episode
+  :  t
+  -> Episode.t
+  -> previous:(Run.t * Run_receipt.t) option
+  -> (t, Error.t) result
+
+val request_achievement : t -> Achievement_request.t -> (t, Error.t) result
+
+(** Retain adverse terminal association, preserving any existing hold (including
+    an operator pause); enabled work becomes held for review. Completed evidence
+    must use [achieve], never a fabricated failed request disposition. *)
+val retire_request : t -> run:Run.t -> receipt:Run_receipt.t -> (t, Error.t) result
+
+(** Settle the exact pending request, or atomically retain its embedded request
+    and achievement when the actual Finish completed in the same transaction. *)
+val achieve : t -> Achievement.t -> (t, Error.t) result
+
+val abandon : t -> Reason.t -> (t, Error.t) result
+
+(** Monotone installation/generation change; retains old episode/request sources
+    verbatim and leaves the goal held. No source authority is reconstructed. *)
+val adopt_source : t -> Run_source.t -> (t, Error.t) result
+
+(** Structural update fence for persistence adoption: bounded projection, retained
+    evidence, current-episode association for newly introduced requests, exact
+    checked revision advance, identity and source invariants. The actor must
+    authenticate evidence against its authoritative retained Run/receipt index. *)
+val validate_update : t -> incoming:t -> (unit, Error.t) result
+
+(** Storage-accounting upper bound, not domain state or authority. For an open
+    goal retaining a request, reserves all bounded mutable metadata and receipt
+    slots needed for completion, retirement and next-episode binding. Request
+    admission rejects when this exceeds [Capacity.max_projection_bytes]. The
+    actor must preflight the complete [Goal_document] carrier before staging the
+    corresponding Run Finish; this pure projection cannot charge unknown data. *)
+val reserved_capacity : t -> (Capacity.t, Error.t) result
+
+val to_json : t -> Jsonaf.t
+
+(** Required nullable fields stay distinct from malformed absent fields. Decoding
+    validates stored relationships; it does not certify host receipt authenticity. *)
+val of_json : Jsonaf.t -> (t, Error.t) result
+```
+
+## goal_achievement
+
+[implementation](../../lib/agent_protocol/goal_achievement.ml) · [interface](../../lib/agent_protocol/goal_achievement.mli)
+
+```ocaml
+(** Achievement requests retain action receipt associations, never another Run
+    lifecycle. Constructors validate evidence relationships, not host authority. *)
+module Intent : sig
+  (** Untrusted scoped native input, not a receipt or authorization. The actor
+      resolves the goal from its actual Run association, never a supplied ID. *)
+  type t [@@deriving equal, sexp_of]
+
+  val create
+    :  expected_goal_revision:int64
+    -> evidence:Goal_text.Reason.t
+    -> action:Run_action.t
+    -> (t, Error.t) result
+
+  val expected_goal_revision : t -> int64
+  val evidence : t -> Goal_text.Reason.t
+  val action : t -> Run_action.t
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+module Request : sig
+  type t [@@deriving equal, sexp_of]
+
+  val create
+    :  episode:Goal_episode.t
+    -> run:Run.t
+    -> receipt:Run_receipt.t
+    -> action:Run_action.t
+    -> evidence:Goal_text.Reason.t
+    -> (t, Error.t) result
+
+  val episode : t -> Goal_episode.t
+  val receipt : t -> Run_receipt.t
+  val evidence : t -> Goal_text.Reason.t
+  val requested_result : t -> Run_result_reference.t option
+  val action : t -> Run_action.t
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+type t [@@deriving equal, sexp_of]
+
+(** Requires actual matching Completed terminal evidence. An accepted Finish
+    alone cannot construct achievement. The actor authenticates this evidence. *)
+val create : Request.t -> run:Run.t -> receipt:Run_receipt.t -> (t, Error.t) result
+
+(** Reconstitutes immutable proof by hashing canonical Completed(requested_result)
+    against the exact terminal receipt. No caller authority is inferred. *)
+val of_evidence : Request.t -> Goal_episode.Settlement.t -> (t, Error.t) result
+
+val request : t -> Request.t
+val receipt : t -> Run_receipt.t
+val settlement : t -> Goal_episode.Settlement.t
+val to_json : t -> Jsonaf.t
+
+(** Decoding validates stored associations but grants no completion authority. *)
+val of_json : Jsonaf.t -> (t, Error.t) result
+```
+
+## goal_budget
+
+[implementation](../../lib/agent_protocol/goal_budget.ml) · [interface](../../lib/agent_protocol/goal_budget.mli)
+
+```ocaml
+(** Goal admission ceilings, independent of host/runtime limits. No usage or
+    billing observations are retained here. Zero permits no new admission. *)
+module Dimension : sig
+  type t =
+    | Admitted_turns
+    | Admitted_attempts
+    | Observed_tokens
+  [@@deriving equal, sexp_of]
+end
+
+module Token_stop : sig
+  type t = private
+    { component : Inference.Observation.Usage.Component.t
+    ; ceiling : int64
+    }
+  [@@deriving equal, sexp_of]
+
+  val create
+    :  component:Inference.Observation.Usage.Component.t
+    -> ceiling:int64
+    -> (t, Error.t) result
+end
+
+type t [@@deriving equal, sexp_of]
+
+val create
+  :  admitted_turns:int64 option
+  -> admitted_attempts:int64 option
+  -> observed_tokens:Token_stop.t option
+  -> deadline:Timestamp.t option
+  -> (t, Error.t) result
+
+val unlimited : t
+val admitted_turns : t -> int64 option
+val admitted_attempts : t -> int64 option
+val observed_tokens : t -> Token_stop.t option
+val deadline : t -> Timestamp.t option
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
+```
+
+## goal_capacity
+
+[implementation](../../lib/agent_protocol/goal_capacity.ml) · [interface](../../lib/agent_protocol/goal_capacity.mli)
+
+```ocaml
+(** Storage reservation only, never a hypothetical domain state or proof. All
+    measurements include compact JSON escaping. Bounds are finite engineering
+    limits independent of provider billing or execution policy. *)
+type t
+
+val max_projection_bytes : int
+val max_document_bytes : int
+val encoded_bytes : t -> int
+val fields : t -> int
+val nodes : t -> int
+val measure : Jsonaf.t -> (t, Error.t) result
+
+(** Upper bound for any goal projection retaining this request, including maximum
+    bounded mutable text, budget/source/revisions and current/predecessor terminal
+    receipt slots. The request is retained exactly once in the Goal wire format.
+    Reject before staging its Run Finish if this exceeds the projection limit. *)
+val for_request : Goal_achievement.Request.t -> (t, Error.t) result
+```
+
+## goal_command
+
+[implementation](../../lib/agent_protocol/goal_command.ml) · [interface](../../lib/agent_protocol/goal_command.mli)
+
+```ocaml
+(** Bounded operator-command data. Decoded IDs and source claims grant
+    no authority. The actor authenticates the original caller and current host
+    policy independently. No command enables or schedules execution. *)
+module Mutation : sig
+  type t =
+    | Create of
+        { id : Id.Goal.t
+        ; objective : Goal.Objective.t
+        ; budget : Goal.Budget.t
+        }
+    | Revise_objective of Id.Goal.t * Goal.Objective.t
+    | Record_progress of Id.Goal.t * Goal.Progress.t
+    | Hold of Id.Goal.t * Goal.Hold.t
+    | Change_budget of Id.Goal.t * Goal.Budget.t
+    | Adopt_source of Id.Goal.t
+    | Abandon of Id.Goal.t * Goal.Reason.t
+  [@@deriving sexp_of]
+
+  val goal_id : t -> Id.Goal.t
+  val needs_source : t -> bool
+end
+
+type t = private
+  { session_id : Id.Session.t
+  ; generation : int
+  ; source : Run_source.t option
+  ; expected_catalog_revision : int64
+  ; expected_goal_revision : int64 option
+  ; key : Idempotency_key.t
+  ; mutation : Mutation.t
+  }
+
+(** Source is required for create/edits/adoption and absent for safe Hold/Abandon.
+    Safe controls therefore remain usable after moderator removal. Their generation
+    and both applicable CAS frontiers still refer to the actual current actor.
+    Abandon changes objective disposition; it does not cancel outstanding Run work. *)
+val create
+  :  session_id:Id.Session.t
+  -> generation:int
+  -> source:Run_source.t option
+  -> expected_catalog_revision:int64
+  -> expected_goal_revision:int64 option
+  -> key:Idempotency_key.t
+  -> mutation:Mutation.t
+  -> (t, Error.t) result
+
+val digest : t -> (string, Error.t) result
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
+```
+
+## goal_command_receipt
+
+[implementation](../../lib/agent_protocol/goal_command_receipt.ml) · [interface](../../lib/agent_protocol/goal_command_receipt.mli)
+
+```ocaml
+(** Immutable metadata acceptance evidence, never execution authority. A safe
+    control has no source claim. Historical receipts survive source/reset changes.
+    No full mutable goal snapshot is duplicated in the receipt. *)
+type t = private
+  { principal_id : Id.Principal.t
+  ; key : Idempotency_key.t
+  ; request_sha256 : string
+  ; goal_id : Id.Goal.t
+  ; goal_revision : int64
+  ; catalog_revision : int64
+  ; source : Run_source.t option
+  ; accepted_at : Timestamp.t
+  }
+[@@deriving equal, sexp_of]
+
+val create
+  :  principal_id:Id.Principal.t
+  -> key:Idempotency_key.t
+  -> request_sha256:string
+  -> goal_id:Id.Goal.t
+  -> goal_revision:int64
+  -> catalog_revision:int64
+  -> source:Run_source.t option
+  -> accepted_at:Timestamp.t
+  -> (t, Error.t) result
+
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
+```
+
+## goal_control
+
+[implementation](../../lib/agent_protocol/goal_control.ml) · [interface](../../lib/agent_protocol/goal_control.mli)
+
+```ocaml
+(** Shared execution and metadata requests. Transport attachment lives only in
+    [Request]; replace it after a reconnect while keeping the original
+    immutable intent, key and revisions for retained replay. *)
+module Features : sig
+  val control : string
+end
+
+module Start : sig
+  (** Immutable intent for a new Goal episode. The actual owner compares this
+      source and the session, Goal and catalog revisions under its writer fence. *)
+  type t = private
+    { generation : int
+    ; expected_revision : int64
+    ; source : Run_source.t
+    ; goal_id : Id.Goal.t
+    ; expected_goal_revision : int64
+    ; expected_catalog_revision : int64
+    ; input : Run_input.t
+    ; key : Idempotency_key.t
+    }
+
+  val create
+    :  generation:int
+    -> expected_revision:int64
+    -> source:Run_source.t
+    -> goal_id:Id.Goal.t
+    -> expected_goal_revision:int64
+    -> expected_catalog_revision:int64
+    -> input:Run_input.t
+    -> key:Idempotency_key.t
+    -> (t, Error.t) result
+
+  val run_request_sha256 : t -> session_id:Id.Session.t -> (string, Error.t) result
+
+  (** Exact durable Goal association identity, including the Goal and catalog
+      fences. Internal starts created before source fencing use [None]. *)
+  val association_sha256
+    :  goal_id:Id.Goal.t
+    -> expected_goal_revision:int64
+    -> expected_catalog_revision:int64
+    -> expected_source:Run_source.t option
+    -> string
+end
+
+module Request : sig
+  type 'intent target = private
+    { session : Session_ref.t
+    ; attachment_id : Id.Attachment.t
+    ; intent : 'intent
+    }
+
+  type t =
+    | Command of Goal_command.t target
+    | Start of Start.t target
+    | Resume of Goal_resume_request.t target
+
+  val command
+    :  session:Session_ref.t
+    -> attachment_id:Id.Attachment.t
+    -> Goal_command.t
+    -> (t, Error.t) result
+
+  val start
+    :  session:Session_ref.t
+    -> attachment_id:Id.Attachment.t
+    -> Start.t
+    -> (t, Error.t) result
+
+  val resume
+    :  session:Session_ref.t
+    -> attachment_id:Id.Attachment.t
+    -> Goal_resume_request.t
+    -> (t, Error.t) result
+
+  val session : t -> Session_ref.t
+  val attachment_id : t -> Id.Attachment.t
+  val methods : string list
+  val method_name : t -> string
+  val params : t -> Jsonaf.t
+  val of_method_and_params : method_:string -> params:Jsonaf.t -> (t, Error.t) result
+end
+
+module Callback_control : sig
+  type disposition =
+    | Held of Goal.Reason.t
+    | Abandoned of Goal.Reason.t
+
+  (** Factual joined callback ACK, with its Goal revisions and waiting state. *)
+  type t =
+    { goal_id : Id.Goal.t
+    ; goal_revision : int64
+    ; catalog_revision : int64
+    ; disposition : disposition
+    ; waiting : bool
+    }
+end
+
+module Start_result : sig
+  module Admission : sig
+    (** Both digests identify the exact immutably committed Start. The Run
+        receipt binds input and session fences. The association binds the Goal
+        and catalog fences and source. Neither grants execution authority. *)
+    type t = private
+      { receipt : Run_receipt.t
+      ; association_sha256 : string
+      }
+
+    val create : Run_receipt.t -> association_sha256:string -> (t, Error.t) result
+  end
+
+  (** [Activated] describes real handoff. Retained replay supplies historical
+      admission. Known admission survives subsequent failure. *)
+  type t =
+    | Activated of Admission.t
+    | Controlled of
+        { admission : Admission.t
+        ; control : Callback_control.t
+        }
+    | Settled of
+        { admission : Admission.t
+        ; run_revision : int64
+        }
+    | Retained of Admission.t
+    | Admission_uncertain of Error.t
+    | Activation_failed of
+        { admission : Admission.t
+        ; error : Error.t
+        }
+end
+
+module Resume_result : sig
+  type continuation =
+    | Started of
+        { operation_id : Id.Operation.t
+        ; generation : int
+        }
+    | Waiting
+    | Settled of
+        { run_id : Id.Run.t
+        ; run_revision : int64
+        }
+    | Controlled of Callback_control.t
+
+  (** Acknowledgement binds the original command to the same Run. A retained
+      receipt does not restore runtime custody. [Rejected] precedes a writer
+      ACK and [Uncertain] leaves the first ACK unknown. *)
+  type t =
+    | Resumed of
+        { receipt : Goal_command_receipt.t
+        ; continuation : continuation
+        }
+    | Retained of Goal_command_receipt.t
+    | Resume_failed of
+        { receipt : Goal_command_receipt.t
+        ; error : Error.t
+        }
+    | Rejected of Error.t
+    | Uncertain of Error.t
+end
+
+module Result : sig
+  type t =
+    | Command of Goal_command_receipt.t
+    | Start of Start_result.t
+    | Resume of Resume_result.t
+
+  val method_name : t -> string
+  val payload : t -> Jsonaf.t
+  val of_method_and_result : method_:string -> result:Jsonaf.t -> (t, Error.t) result
+end
+```
+
+## goal_edit
+
+[implementation](../../lib/agent_protocol/goal_edit.ml) · [interface](../../lib/agent_protocol/goal_edit.mli)
+
+```ocaml
+(** Immutable native objective/progress intent. Session and principal are
+    host-derived. Generation and full source are frozen expected-fence DATA from
+    an authenticated get; fresh staging compares them with the actual selected
+    execution before translating this data to Goal_command. No enable, accounting
+    charge or execution permission is represented here. *)
+module Mutation : sig
+  type t =
+    | Revise_objective of Goal.Objective.t
+    | Record_progress of Goal.Progress.t
+  [@@deriving sexp_of]
+end
+
+type t
+
+(** Generation and counters are nonnegative; full source generation must match.
+    The key and goal identifier use their existing
+    validated constructors. Wire decoding must call this same constructor. *)
+val create
+  :  generation:int
+  -> source:Run_source.t
+  -> goal_id:Id.Goal.t
+  -> expected_catalog_revision:int64
+  -> expected_goal_revision:int64
+  -> key:Idempotency_key.t
+  -> mutation:Mutation.t
+  -> (t, Error.t) result
+
+val generation : t -> int
+val source : t -> Run_source.t
+val goal_id : t -> Id.Goal.t
+val expected_catalog_revision : t -> int64
+val expected_goal_revision : t -> int64
+val key : t -> Idempotency_key.t
+val mutation : t -> Mutation.t
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
+```
+
+## goal_episode
+
+[implementation](../../lib/agent_protocol/goal_episode.ml) · [interface](../../lib/agent_protocol/goal_episode.mli)
+
+```ocaml
+(** Immutable reference to an actual Workflow admission. Stored values convey no
+    authority; the actor authenticates the supplied Run and receipt. *)
+type t [@@deriving equal, sexp_of]
+
+val create : run:Run.t -> admission:Run_receipt.t -> (t, Error.t) result
+val admission : t -> Run_receipt.t
+val session : t -> Session_ref.t
+val matches_run : t -> Run.t -> bool
+val validate_terminal : t -> run:Run.t -> receipt:Run_receipt.t -> (unit, Error.t) result
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
+
+(** Action and Terminal receipts strictly advance the original Admission Run
+    revision; an immediate Terminal may share its Action revision.
+
+    Immutable bounded terminal evidence for a retired episode. This is evidence
+    retained from one terminal commit, not a writable copy of Run lifecycle. *)
+type episode = t [@@deriving equal, sexp_of]
+
+module Settlement : sig
+  type t [@@deriving equal, sexp_of]
+
+  val create : episode -> run:Run.t -> receipt:Run_receipt.t -> (t, Error.t) result
+  val episode : t -> episode
+  val receipt : t -> Run_receipt.t
+  val to_json : t -> Jsonaf.t
+
+  (** Stores only an exact terminal receipt association, never an outcome or
+      achievement classification. Decoding checks episode/source/revisions; the
+      actor authenticates the receipt. [create] additionally checks its digest
+      against the supplied actual terminal Run. *)
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+```
+
+## goal_native_action_intent
+
+[implementation](../../lib/agent_protocol/goal_native_action_intent.ml) · [interface](../../lib/agent_protocol/goal_native_action_intent.mli)
+
+```ocaml
+(** Canonical single native Goal action slot. This envelope changes no existing
+    Resume request/intent encoding, digest or lifecycle. *)
+type t =
+  | Start of Goal_native_start_intent.t
+  | Resume of Goal_native_resume_intent.t
+[@@deriving equal, sexp]
+
+val validate_update : t -> incoming:t -> (unit, Error.t) result
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
+val persistence_semantics : t -> string
+
+(** Structured tagged ownership: compatible unknown intent/phase fields survive
+    through the universal carrier. Each request remains wholly owned by its
+    strict current codec. This shape creates no runtime custody. *)
+val shape : Document_schema.Shape.t
+
+(** Capacity DATA only: finite later-phase alternatives with frozen immutable
+    request/principal/source/key. Includes conservative byte/field/node/depth
+    witnesses for bounded diagnostic subtrees and future admission receipt
+    envelopes; these witnesses must never be decoded as domain evidence.
+    Terminal phases have no later growth. The Session owner must merge each
+    projection with the complete actual carrier and take componentwise maximum
+    growth across alternatives, adding across separate actions. Whole containing
+    document limits always win. *)
+val capacity_projections : t -> Jsonaf.t list
+```
+
+## goal_native_control_request
+
+[implementation](../../lib/agent_protocol/goal_native_control_request.ml) · [interface](../../lib/agent_protocol/goal_native_control_request.mli)
+
+```ocaml
+(** Native safe controls only. Identity/current actor are host-derived.
+    This does not expose automatic/operator Hold reasons, budget relaxation,
+    source adoption, an Enabled mutation, or achievement. *)
+module Mutation : sig
+  type t =
+    | Hold of Goal.Reason.t
+    | Abandon of Goal.Reason.t
+end
+
+type t
+
+val create
+  :  generation:int
+  -> goal_id:Id.Goal.t
+  -> expected_catalog_revision:int64
+  -> expected_goal_revision:int64
+  -> key:Idempotency_key.t
+  -> mutation:Mutation.t
+  -> (t, Error.t) result
+
+val generation : t -> int
+val goal_id : t -> Id.Goal.t
+val expected_catalog_revision : t -> int64
+val expected_goal_revision : t -> int64
+val key : t -> Idempotency_key.t
+val mutation : t -> Mutation.t
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
+```
+
+## goal_native_create_request
+
+[implementation](../../lib/agent_protocol/goal_native_create_request.ml) · [interface](../../lib/agent_protocol/goal_native_create_request.mli)
+
+```ocaml
+(** Immutable metadata-create DATA. No existing Goal revision, creator,
+    session identity or execution permission is supplied. The Actor derives its
+    real session/principal and captures the actual installed source independently.
+    This request never changes another Goal's budget/account or enables work. *)
+type t
+
+val create
+  :  generation:int
+  -> source:Run_source.t
+  -> goal_id:Id.Goal.t
+  -> expected_catalog_revision:int64
+  -> objective:Goal.Objective.t
+  -> budget:Goal.Budget.t
+  -> key:Idempotency_key.t
+  -> (t, Error.t) result
+
+val generation : t -> int
+val source : t -> Run_source.t
+val goal_id : t -> Id.Goal.t
+val expected_catalog_revision : t -> int64
+val objective : t -> Goal.Objective.t
+val budget : t -> Goal.Budget.t
+val key : t -> Idempotency_key.t
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
+```
+
+## goal_native_request_codec
+
+[implementation](../../lib/agent_protocol/goal_native_request_codec.ml) · [interface](../../lib/agent_protocol/goal_native_request_codec.mli)
+
+```ocaml
+(** Private wire rules shared only by native Goal Create and safe controls.
+    Canonical decimal counters are nonnegative; objects are closed, bounded to
+    32 KiB/depth 16 and reject duplicate fields through Json_codec.fields. *)
+val counter : Jsonaf.t -> (int64, Protocol_error.t) result
+
+val fields : Jsonaf.t -> names:string list -> (Json_codec.fields, Protocol_error.t) result
+```
+
+## goal_native_resume_intent
+
+[implementation](../../lib/agent_protocol/goal_native_resume_intent.ml) · [interface](../../lib/agent_protocol/goal_native_resume_intent.mli)
+
+```ocaml
+(** Bounded immutable command handoff DATA under its actual Invocation owner.
+    No decoder creates custody. Historical absence keeps legacy behavior. *)
+module Phase : sig
+  type t =
+    | Staged
+    | Accepted of Timestamp.t
+    | Dispatch_claimed of
+        { accepted_at : Timestamp.t
+        ; claimed_at : Timestamp.t
+        }
+    | Discarded of string
+    | Rejected of Error.t
+  [@@deriving equal, sexp_of]
+end
+
+type t [@@deriving equal, sexp]
+
+val persistence_semantics : string
+
+val create
+  :  request:Goal_resume_request.t
+  -> principal_id:Id.Principal.t
+  -> (t, Error.t) result
+
+val request : t -> Goal_resume_request.t
+val principal_id : t -> Id.Principal.t
+val phase : t -> Phase.t
+val accept : t -> now:Timestamp.t -> (t, Error.t) result
+val claim : t -> now:Timestamp.t -> (t, Error.t) result
+val discard : t -> reason:string -> (t, Error.t) result
+val reject : t -> Error.t -> (t, Error.t) result
+val validate_update : t -> incoming:t -> (unit, Error.t) result
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
+
+(** Every validated intent reserves 3072 phase bytes within its 8192-byte carrier.
+    Retained phase encodings are bounded to 2048 bytes. [discard] and [reject]
+    preserve a bounded reason/error; oversized error details become an explicit
+    summary preserving code and retryability. Callers retain the original primary
+    error separately. Claim preserves the exact accepted timestamp; wallclock
+    ordering is not an invariant. *)
+```
+
+## goal_native_start_intent
+
+[implementation](../../lib/agent_protocol/goal_native_start_intent.ml) · [interface](../../lib/agent_protocol/goal_native_start_intent.mli)
+
+```ocaml
+(** Bounded native initial-episode handoff DATA. Decoding supplies no custody,
+    admission ACK or execution permission. *)
+module Phase : sig
+  type t =
+    | Staged
+    | Accepted of Timestamp.t
+    | Dispatch_claimed of
+        { accepted_at : Timestamp.t
+        ; claimed_at : Timestamp.t
+        }
+    | Admitted of
+        { accepted_at : Timestamp.t
+        ; claimed_at : Timestamp.t
+        ; admission : Run_receipt.t
+        }
+    | Discarded of string
+    | Rejected of Error.t
+  [@@deriving equal, sexp_of]
+end
+
+type t [@@deriving equal, sexp_of]
+
+val persistence_semantics : string
+
+val create
+  :  request:Goal_native_start_request.t
+  -> principal_id:Id.Principal.t
+  -> (t, Error.t) result
+
+val request : t -> Goal_native_start_request.t
+val principal_id : t -> Id.Principal.t
+val phase : t -> Phase.t
+val accept : t -> now:Timestamp.t -> (t, Error.t) result
+val claim : t -> now:Timestamp.t -> (t, Error.t) result
+
+(** Only Dispatch_claimed -> Admitted, retaining both exact timestamps. Checks
+    Admission kind, command digest, source, key, principal, initial run revision 0
+    and positive Session revision. The Actor must separately prove the actual
+    preparation/Run/link and commit the association in the admission candidate.
+    Wallclock ordering is not required. Admitted cannot discard/reject/rearm;
+    later activation failure is separate Attempt/Status data. *)
+val admit : t -> admission:Run_receipt.t -> (t, Error.t) result
+
+val discard : t -> reason:string -> (t, Error.t) result
+val reject : t -> Error.t -> (t, Error.t) result
+val validate_update : t -> incoming:t -> (unit, Error.t) result
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
+
+(** Real Input remains bounded by its codec. The intent has 12288 bytes beyond
+    that input bound and depth 66, with 6144 phase bytes reserved on every entry;
+    actual phases are at most 4096 bytes/depth 12. Discard/reject bound retained
+    diagnostics, preserving error code/retryability in an explicit summary when
+    necessary. Complete containing document limits remain authoritative. *)
+```
+
+## goal_native_start_request
+
+[implementation](../../lib/agent_protocol/goal_native_start_request.ml) · [interface](../../lib/agent_protocol/goal_native_start_request.mli)
+
+```ocaml
+(** Immutable native initial-episode command DATA. The Actor supplies the session,
+    principal and actual preparation revision; none is caller-supplied here.
+    Generation must match source, revisions are nonnegative. Full input validates
+    through [Run_input], including its 1 MiB/depth 64 bound. The request adds
+    at most 4096 envelope bytes and one depth level. Construction and decoding
+    enforce the same bounds. Unknown request fields reject. *)
+type t [@@deriving equal, sexp_of]
+
+val create
+  :  generation:int
+  -> source:Run_source.t
+  -> goal_id:Id.Goal.t
+  -> expected_goal_revision:int64
+  -> expected_catalog_revision:int64
+  -> input:Run_input.t
+  -> key:Idempotency_key.t
+  -> (t, Error.t) result
+
+val generation : t -> int
+val source : t -> Run_source.t
+val goal_id : t -> Id.Goal.t
+val expected_goal_revision : t -> int64
+val expected_catalog_revision : t -> int64
+val input : t -> Run_input.t
+val key : t -> Idempotency_key.t
+
+(** Canonical SHA256 over the complete version-tagged immutable command.
+    Native Start admission uses this digest, excluding later preparation CAS. *)
+val digest : t -> (string, Error.t) result
+
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
+```
+
+## goal_projection
+
+[implementation](../../lib/agent_protocol/goal_projection.ml) · [interface](../../lib/agent_protocol/goal_projection.mli)
+
+```ocaml
+(** Rendering-neutral goal values. This alias adds a validating JSON-based sexp
+    boundary for existing snapshot carriers; it grants no stored authority. *)
+type t = Goal.t [@@deriving sexp]
+
+(** Rejects an array exceeding sixteen before decoding any child. *)
+val list_of_json : Jsonaf.t -> (t list, Error.t) result
+
+(** At most sixteen retained identities and one enabled foreground goal, all
+    owned by the supplied session with no future adopted source generation. *)
+val validate
+  :  t list
+  -> session_id:Id.Session.t
+  -> generation:int
+  -> (unit, Error.t) result
+```
+
+## goal_query
+
+[implementation](../../lib/agent_protocol/goal_query.ml) · [interface](../../lib/agent_protocol/goal_query.mli)
+
+```ocaml
+(** Bounded, nonactivating Goal inspection. Callers can read without attaching.
+    An optional current attachment informs advisory actions only. *)
+module Features : sig
+  val inspect : string
+end
+
+val max_envelope_bytes : int
+
+module Request : sig
+  type target =
+    | All
+    | One of Id.Goal.t
+  [@@deriving sexp_of]
+
+  type t =
+    { session : Session_ref.t
+    ; attachment_id : Id.Attachment.t option
+    ; target : target
+    }
+  [@@deriving sexp_of]
+
+  val methods : string list
+  val method_name : t -> string
+  val params : t -> Jsonaf.t
+  val of_method_and_params : method_:string -> params:Jsonaf.t -> (t, Error.t) result
+end
+
+module Availability : sig
+  (** [Stopped] reflects the canonical observed Stopped lifecycle. [Active]
+      requires a selected owner on an execution-enabled host. [Unavailable]
+      can carry retained Goal data when no such owner is available. *)
+  type t =
+    | Active
+    | Stopped
+    | Unavailable
+  [@@deriving equal, sexp_of]
+end
+
+module Run_observation : sig
+  type status =
+    | Admitted
+    | Active
+    | Waiting
+    | Retained
+    | Terminal
+  [@@deriving equal, sexp_of]
+
+  (** [Observed] carries the authorized Run revision from the same session
+      snapshot. [Retained] is nonterminal Run evidence on a selected, stopped
+      owner with execution enabled. It can supply a basis for an explicit cold
+      Resume. [Terminal] can also be observed from an indexed snapshot.
+      [Unavailable] makes no claim about termination, retention or authorization.
+      Full Run details are available through the separately authorized [Run_query]. *)
+  type t =
+    | No_episode
+    | Unavailable
+    | Observed of
+        { run_id : Id.Run.t
+        ; revision : int64
+        ; status : status
+        }
+  [@@deriving sexp_of]
+end
+
+module Usage : sig
+  (** An aggregate partition. Counts cover the same attempt set in each metric.
+      Actual, estimated, unknown and untracked contributions remain explicit. *)
+  type t = private
+    { attempts : int64
+    ; untracked_attempts : int64
+    ; components : Inference_query.Summary.components
+    }
+
+  val create
+    :  attempts:int64
+    -> untracked_attempts:int64
+    -> components:Inference_query.Summary.components
+    -> (t, Error.t) result
+end
+
+module Accounting : sig
+  type counts =
+    { turns : int64
+    ; attempts : int64
+    }
+
+  (** Local and descendant partitions come from the Goal accounting owner.
+      Pending counts reserve capacity but do not create observed usage. *)
+  type t =
+    { revision : int64
+    ; local : Usage.t
+    ; physical : Usage.t
+    ; causal : Usage.t
+    ; physical_unknown : bool
+    ; historical_causal_unknown : bool
+    ; admitted : counts
+    ; pending : counts
+    }
+end
+
+module Action : sig
+  type t =
+    | Revise_objective
+    | Record_progress
+    | Change_budget
+    | Adopt_source
+    | Hold
+    | Abandon
+    | Start
+    | Resume
+  [@@deriving compare, equal, sexp_of]
+end
+
+module Goal_summary : sig
+  type state =
+    | Open of Goal.State.admission
+    | Abandoned of Goal.Reason.t
+    | Achieved
+
+  (** Objective metadata for a transcript-authorized operator. Run receipts,
+      source input and achievement command evidence stay with the Run owner. *)
+  type t = private
+    { id : Id.Goal.t
+    ; session : Session_ref.t
+    ; revision : int64
+    ; source : Run_source.t
+    ; objective : Goal.Objective.t
+    ; progress : Goal.Progress.t
+    ; budget : Goal.Budget.t
+    ; state : state
+    ; achievement_pending : bool
+    }
+
+  val of_goal : Goal.t -> t
+end
+
+module Execution_blocker : sig
+  type t =
+    | Stopped
+    | Source_unavailable
+    | Source_changed
+    | Accounting_unavailable
+    | Usage_uncertain
+    | Policy_hold
+    | Active_run
+    | No_current_run
+    | Unavailable
+  [@@deriving compare, sexp_of]
+end
+
+module View : sig
+  type row =
+    { goal : Goal_summary.t
+    ; run : Run_observation.t
+    ; accounting : Accounting.t option
+    ; actions : Action.t list
+    ; execution_blockers : Execution_blocker.t list
+    }
+
+  (** All data is from one captured authorized basis. Missing historical
+      accounting stays absent. The source and actions are advisory observations
+      and carry no read, write or execution authority. *)
+  type t = private
+    { session : Session_ref.t
+    ; generation : int
+    ; session_revision : int64
+    ; catalog_revision : int64
+    ; source : Run_source.t option
+    ; availability : Availability.t
+    ; can_create : bool
+    ; goals : row list
+    }
+
+  val create
+    :  session:Session_ref.t
+    -> generation:int
+    -> session_revision:int64
+    -> catalog_revision:int64
+    -> source:Run_source.t option
+    -> availability:Availability.t
+    -> can_create:bool
+    -> goals:row list
+    -> (t, Error.t) result
+end
+
+module Result : sig
+  type outcome =
+    | Available of View.t
+    | Unavailable of Session_ref.t
+
+  (** An available single-Goal lookup can contain zero rows for an absent Goal.
+      Failure to authorize the session remains an error. *)
+  type t =
+    | List of outcome
+    | Get of outcome
+
+  val session : outcome -> Session_ref.t
+  val method_name : t -> string
+  val payload : t -> Jsonaf.t
+  val of_method_and_result : method_:string -> result:Jsonaf.t -> (t, Error.t) result
+end
+```
+
+## goal_resume_request
+
+[implementation](../../lib/agent_protocol/goal_resume_request.ml) · [interface](../../lib/agent_protocol/goal_resume_request.mli)
+
+```ocaml
+(** Immutable explicit Resume decision DATA for the current nonterminal Goal
+    episode. It grants no Run, source, constructor or continuation authority and
+    never describes a new Run admission. The actual Actor authenticates the
+    retained physical binding and both original authorizations separately. *)
+type t [@@deriving equal, sexp_of]
+
+(** All counters are nonnegative, [source] is validated and its generation must
+    match [generation]. IDs and key use the same validation as their protocol
+    constructors. These request fences remain exact across source preparation;
+    later acknowledged bookkeeping does not rewrite the original request. *)
+val create
+  :  session_id:Id.Session.t
+  -> generation:int
+  -> goal_id:Id.Goal.t
+  -> run_id:Id.Run.t
+  -> source:Run_source.t
+  -> expected_goal_revision:int64
+  -> expected_catalog_revision:int64
+  -> expected_run_revision:int64
+  -> key:Idempotency_key.t
+  -> (t, Error.t) result
+
+val session_id : t -> Id.Session.t
+val generation : t -> int
+val goal_id : t -> Id.Goal.t
+val run_id : t -> Id.Run.t
+val source : t -> Run_source.t
+val expected_goal_revision : t -> int64
+val expected_catalog_revision : t -> int64
+val expected_run_revision : t -> int64
+val key : t -> Idempotency_key.t
+
+(** Domain-separated SHA-256 of the complete canonical request. This is request
+    identity only; no caller principal, receipt or live authority is inferred. *)
+val digest : t -> (string, Error.t) result
+
+(** Bounded complete immutable request; decoding calls the same constructor. *)
+val to_json : t -> Jsonaf.t
+
+val max_bytes : int
+val max_depth : int
+
+(** Closed request and source objects. Enforces the encoded size and depth above. *)
+val of_json : Jsonaf.t -> (t, Error.t) result
+```
+
+## goal_state
+
+[implementation](../../lib/agent_protocol/goal_state.ml) · [interface](../../lib/agent_protocol/goal_state.mli)
+
+```ocaml
+(** Objective disposition and admission policy. This state is independent of
+    execution's Run lifecycle and contains only immutable closure evidence. *)
+module Hold : sig
+  type t =
+    | Operator_pause
+    | Needs_input of Goal_text.Reason.t
+    | Budget_gate of Goal_budget.Dimension.t
+    | Usage_uncertain of Inference.Observation.Usage.Component.t
+    | Deadline_reached
+    | Source_review
+  [@@deriving equal, sexp_of]
+end
+
+module Closure : sig
+  type t =
+    | Achieved of Goal_achievement.t
+    | Abandoned of Goal_text.Reason.t
+  [@@deriving equal, sexp_of]
+end
+
+type admission =
+  | Enabled
+  | Held of Hold.t
+[@@deriving equal, sexp_of]
+
+type t =
+  | Open of admission
+  | Closed of Closure.t
+[@@deriving equal, sexp_of]
+
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
+val hold_to_json : Hold.t -> Jsonaf.t
+val hold_of_json : Jsonaf.t -> (Hold.t, Error.t) result
+```
+
+## goal_text
+
+[implementation](../../lib/agent_protocol/goal_text.ml) · [interface](../../lib/agent_protocol/goal_text.mli)
+
+```ocaml
+(** Validated goal text. Bounds count UTF-8 bytes; text is preserved verbatim.
+    Malformed UTF-8, NUL and controls other than tab/newline are rejected. *)
+module type S = sig
+  type t [@@deriving equal, sexp_of]
+
+  val max_bytes : int
+  val of_string : string -> (t, Error.t) result
+  val to_string : t -> string
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+(** Nonblank, at most 8 KiB. *)
+module Objective : S
+
+(** Progress may be empty, at most 16 KiB. *)
+module Progress : S
+
+(** Nonblank reason or evidence, at most 4 KiB. *)
+module Reason : S
+```
+
 ## grant
 
 [implementation](../../lib/agent_protocol/grant.ml) · [interface](../../lib/agent_protocol/grant.mli)
@@ -7375,6 +8632,11 @@ end
 module Server : S
 module Session : S
 module Run : S
+module Goal : S
+
+(** Controller recurrence identity, distinct from a one-shot Schedule. An ID is
+    comparison data, never admission authority. *)
+module Recurrence : S
 
 (* Developer run ownership, distinct from conversation Run and Session.
    An ID is a comparison coordinate, never authority by possession. *)
@@ -7434,6 +8696,24 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 
 (** [to_json t] encodes a JSON string key. *)
 val to_json : t -> Jsonaf.t
+```
+
+## inference_origin
+
+[implementation](../../lib/agent_protocol/inference_origin.ml) · [interface](../../lib/agent_protocol/inference_origin.mli)
+
+```ocaml
+(** Immutable attribution evidence for an admitted invocation or Job. This is
+    neither execution permission nor live Run ownership. Historical absence is
+    represented by the enclosing optional field, never by [Unbound]. *)
+type t =
+  | Unbound
+  | Run of Id.Run.t
+[@@deriving equal, sexp]
+
+val validate : t -> (unit, Error.t) result
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
 ```
 
 ## inference_query
@@ -7532,6 +8812,9 @@ module Metric : sig
     -> mixed_estimators:bool
     -> unknown:unknown_counts
     -> (t, Error.t) Result.t
+
+  (** Number of actual, estimated and provider-reported unknown contributions. *)
+  val count : t -> (int64, Error.t) Result.t
 end
 
 module Summary : sig
@@ -7566,6 +8849,9 @@ module Summary : sig
     -> accounting_revision:int64
     -> (t, Error.t) Result.t
 
+  val component_metrics : components -> Metric.t list
+  val components_to_json : components -> Jsonaf.t
+  val components_of_json : Jsonaf.t -> (components, Error.t) Result.t
   val retained_attempts : t -> int64
   val turns : t -> turns
   val components : t -> components
@@ -7856,6 +9142,284 @@ module Response : sig
 end
 ```
 
+## instruction_control
+
+[implementation](../../lib/agent_protocol/instruction_control.ml) · [interface](../../lib/agent_protocol/instruction_control.mli)
+
+```ocaml
+open! Core
+
+(** Transport-neutral consistency DATA. No type in this module is source,
+    native execution, operator, capture-use or writer authority. No bodies,
+    host paths, metadata descriptions or unrelated retained captures appear. *)
+module Root_id : sig
+  type t [@@deriving equal, sexp_of]
+
+  (** Same bounded administrative spelling as Instruction_content.Root_id.
+      Protocol cannot depend on that library: it depends on Agent_store.
+      The host validates the conversion again; labels confer no root grant. *)
+  val of_string : string -> (t, Protocol_error.t) result
+
+  val to_string : t -> string
+end
+
+module Member : sig
+  type t = private
+    { root : Root_id.t
+    ; member : Source.Portable_path.t
+    ; digest : Chatml_source.Digest.t
+    }
+  [@@deriving equal, sexp_of]
+
+  val create
+    :  root:Root_id.t
+    -> member:Source.Portable_path.t
+    -> digest:Chatml_source.Digest.t
+    -> t
+end
+
+module Selection : sig
+  type t =
+    | Project of
+        { root : Root_id.t
+        ; scope : Source.Portable_path.t option
+        }
+    | Skills of Root_id.t list
+  [@@deriving sexp_of]
+
+  (** None scope means configured root, not ambient cwd. *)
+  val validate : t -> (unit, Protocol_error.t) result
+end
+
+module Source_request : sig
+  type t [@@deriving sexp_of]
+
+  (** Ordered expected manifest; no contents or asserted host completeness.
+      At most 64 members; project may be empty, skills must be nonempty. *)
+  val create
+    :  selection:Selection.t
+    -> members:Member.t list
+    -> (t, Protocol_error.t) result
+
+  val selection : t -> Selection.t
+  val members : t -> Member.t list
+end
+
+module Capture : sig
+  type t = private
+    { source : Source_request.t
+    ; capture_id : Chatml_source.Digest.t
+    }
+  [@@deriving sexp_of]
+
+  (** Host projects an actual Port.capture result. A wire-decoded instance is
+      only a future comparison request; it is never Port.Captured authority. *)
+  val create : source:Source_request.t -> capture_id:Chatml_source.Digest.t -> t
+end
+
+module Action : sig
+  type t =
+    | Inspect
+    | Refresh
+    | Capture
+    | Activate
+    | Remove
+  [@@deriving equal, sexp_of]
+end
+
+module View : sig
+  type t = private
+    { session_id : Id.Session.t
+    ; generation : int
+    ; summary : Instruction_status.t
+    ; project : Source_request.t option
+    ; skills : Member.t list
+    ; permitted_actions : Action.t list
+    }
+  [@@deriving sexp_of]
+
+  (** Stored selection, not provider activation. Selected identities require
+      current transcript/session visibility and current grants for their roots.
+      Permitted actions are a checked present observation, not future authority
+      or a capacity/CAS promise. Mutating actions require the optional actual
+      connection attachment to pass the Actor's existing writer check. *)
+  val create
+    :  session_id:Id.Session.t
+    -> generation:int
+    -> summary:Instruction_status.t
+    -> project:Source_request.t option
+    -> skills:Member.t list
+    -> permitted_actions:Action.t list
+    -> (t, Protocol_error.t) result
+end
+
+module Discovery : sig
+  type t [@@deriving sexp_of]
+
+  module Issue : sig
+    type code =
+      | Skipped
+      | Unavailable
+    [@@deriving equal, sexp_of]
+
+    type t =
+      { root : Root_id.t
+      ; member : Source.Portable_path.t
+      ; code : code
+      }
+    [@@deriving sexp_of]
+  end
+
+  (** Only granted administrative root IDs and qualified portable member
+      manifests/digests. Reuse existing bounded discovery, not a filesystem scan
+      performed by a client. Issues have a fixed safe tag and portable identity,
+      no raw error/details or host path. *)
+  val roots : t -> Root_id.t list
+
+  val members : t -> Member.t list
+  val issues : t -> Issue.t list
+
+  val create
+    :  roots:Root_id.t list
+    -> members:Member.t list
+    -> issues:Issue.t list
+    -> (t, Protocol_error.t) result
+end
+
+module Receipt : sig
+  type t = private
+    { principal_id : Id.Principal.t
+    ; key : Idempotency_key.t
+    ; request_sha256 : string
+    ; session_id : Id.Session.t
+    ; generation : int
+    ; revision : int64
+    ; accepted_at : Timestamp.t
+    }
+  [@@deriving equal, sexp_of]
+
+  (** Exact projection of Instruction_command.Receipt, with validated decoding.
+      Not another receipt store or generic command-audit record. *)
+  val create
+    :  principal_id:Id.Principal.t
+    -> key:Idempotency_key.t
+    -> request_sha256:string
+    -> session_id:Id.Session.t
+    -> generation:int
+    -> revision:int64
+    -> accepted_at:Timestamp.t
+    -> (t, Protocol_error.t) result
+end
+
+module Request : sig
+  module Inspect : sig
+    type t =
+      { session_id : Id.Session.t
+      ; attachment_id : Id.Attachment.t option
+      }
+    [@@deriving sexp_of]
+  end
+
+  module Refresh : sig
+    type t =
+      { session_id : Id.Session.t
+      ; selection : Selection.t option
+      }
+    [@@deriving sexp_of]
+  end
+
+  module Capture : sig
+    type t =
+      { session_id : Id.Session.t
+      ; source : Source_request.t
+      }
+    [@@deriving sexp_of]
+  end
+
+  module Activate : sig
+    type t =
+      { session_id : Id.Session.t
+      ; attachment_id : Id.Attachment.t
+      ; expected_generation : int
+      ; expected_revision : int64
+      ; source : Source_request.t
+      ; capture_id : Chatml_source.Digest.t
+      ; key : Idempotency_key.t
+      }
+    [@@deriving sexp_of]
+  end
+
+  module Remove : sig
+    type change =
+      | All
+      | Project
+      | Skills of Member.t list
+    [@@deriving sexp_of]
+
+    type t =
+      { session_id : Id.Session.t
+      ; attachment_id : Id.Attachment.t
+      ; expected_generation : int
+      ; expected_revision : int64
+      ; change : change
+      ; key : Idempotency_key.t
+      }
+    [@@deriving sexp_of]
+  end
+
+  type t =
+    | Inspect of Inspect.t
+    | Refresh of Refresh.t
+    | Capture of Capture.t
+    | Activate of Activate.t
+    | Remove of Remove.t
+  [@@deriving sexp_of]
+
+  (** Closed, fully bounded JSON admission before field/list projection;
+      unknown/duplicate fields and malformed IDs/digests/revisions reject.
+      Parameter bound is the accepted 128 KiB native profile. *)
+  val methods : string list
+
+  val session_id : t -> Id.Session.t
+  val method_name : t -> string
+  val params : t -> Jsonaf.t
+
+  val of_method_and_params
+    :  method_:string
+    -> params:Jsonaf.t
+    -> (t, Protocol_error.t) result
+
+  (** Tagged codec is for ordinary tooling/data, not a second dispatcher. *)
+  val to_json : t -> Jsonaf.t
+
+  val of_json : Jsonaf.t -> (t, Protocol_error.t) result
+end
+
+module Result : sig
+  type t =
+    | Inspect of View.t
+    | Refresh of Discovery.t
+    | Capture of Capture.t
+    | Activate of Receipt.t
+    | Remove of Receipt.t
+  [@@deriving sexp_of]
+
+  val method_name : t -> string
+  val payload : t -> Jsonaf.t
+
+  (** Complete result admission is capped at 512 KiB to cover 64 bounded
+      1024-byte portable paths even with JSON escaping, plus safe identities.
+      No input bytes or provider fields are included. *)
+  val of_method_and_result
+    :  method_:string
+    -> result:Jsonaf.t
+    -> (t, Protocol_error.t) result
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Protocol_error.t) result
+end
+```
+
 ## instruction_status
 
 [implementation](../../lib/agent_protocol/instruction_status.ml) · [interface](../../lib/agent_protocol/instruction_status.mli)
@@ -7998,7 +9562,7 @@ type routing =
 [@@deriving equal, sexp]
 
 (** Stable source identity, independent of process-local tool capability IDs. *)
-type observer =
+type observer = Moderator_observer.t =
   { script_id : string
   ; source_sha256 : string
   }
@@ -8067,6 +9631,11 @@ type t = private
   ; authoring_reference : Authoring_reference.t option [@sexp.option]
     (** Host-produced receipt bound to the successful disclosed output. Its
         existence alone does not mean documentation reached provider history. *)
+  ; inference_origin : Inference_origin.t option [@sexp.option]
+  ; native_goal_action : Goal_native_action_intent.t option [@sexp.option]
+    (** Immutable original attribution, outside the authored context ABI. Missing
+        historical evidence is unavailable; terminal Runs stay named. This field
+        grants no live ownership or execution permission. *)
   }
 [@@deriving equal, sexp]
 
@@ -8090,6 +9659,13 @@ val record_handler_intent : t -> requests:follow_up -> (t, Error.t) result
 val apply_handler_intent : t -> (t, Error.t) result
 val accept_handler_compaction : t -> operation_id:Id.Operation.t -> (t, Error.t) result
 val discard_handler_intent : t -> reason:string -> (t, Error.t) result
+
+(** Capture evidence on a fresh, unclassified admitted DTO. The actor must
+    authenticate its actual admitting owner and reject caller-supplied claims;
+    this validated transformation alone grants no authority. Existing records,
+    including historical absence, cannot be retrospectively reclassified. *)
+val capture_inference_origin : t -> Inference_origin.t -> (t, Error.t) result
+
 val dispatch : t -> (t, Error.t) result
 
 (** Records one outcome for a dispatched invocation after checking its owner
@@ -8181,9 +9757,17 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 (** Complete current durable record projection. Required-null option fields;
     independent of the public protocol's historical envelope variants. *)
 module Storage : sig
+  (** Current canonical native_goal_action field only. Older saved records must
+      pass their state/delta schema conversion first; a residual old alias fails. *)
   val to_json : t -> Jsonaf.t
+
   val of_json : Jsonaf.t -> (t, Error.t) result
 end
+
+(** Native action DATA follows the actual successful resolution transition.
+    Updating its phase validates immutable request/principal and monotone status;
+    the Actor must independently authenticate owner, writer and physical custody. *)
+val record_native_goal_action : t -> Goal_native_action_intent.t -> (t, Error.t) result
 ```
 
 ## job
@@ -8274,15 +9858,44 @@ type launch_owner =
   | Moderator_event of Id.Moderator_execution.t
 [@@deriving equal, sexp]
 
+(** Immutable birth provenance, never a callback mutation selector or authority.
+    Callback retains the exact historical invocation/event wire representation.
+    Job_attempt is the immediate native Job producer and its frozen positive
+    attempt; a later retry does not renew this stored birth reference. *)
+module Birth_parent : sig
+  type t [@@deriving equal, sexp]
+
+  type view =
+    | Callback of launch_owner
+    | Job_attempt of
+        { id : Id.Job.t
+        ; attempt : int
+        }
+
+  val callback : launch_owner -> t
+  val job_attempt : Id.Job.t -> attempt:int -> (t, Error.t) result
+  val view : t -> view
+
+  (** Callback-only host protocols reject a direct Job producer; this projection
+      does not select an ancestor callback or grant mutation permission. *)
+  val callback_owner : t -> launch_owner option
+end
+
 type launch =
-  { owner : launch_owner
+  { owner : Birth_parent.t
   ; parent_job : (Id.Job.t * int) option [@sexp.option]
   ; nested_depth : int
   ; moderator_source : Invocation.observer option [@sexp.option]
-    (** Optional schema2 source captured under the creating moderator's live
-        borrow. Absence never acquires the source of a subsequently loaded script. *)
+    (** Optional source captured under the creating owner's live borrow
+        (callback schema2 or direct-Job schema3). Absence never acquires the source of a subsequently loaded script. *)
   }
 [@@deriving equal, sexp]
+
+(** Immutable host-captured inference attribution evidence. A Run reference is
+    resolved through its exact retained occurrence; it is not a Goal selector or
+    execution permission. Missing historical evidence is represented by the
+    enclosing optional field, never by [Unbound]. *)
+module Inference_origin = Inference_origin
 
 type t =
   { id : Id.Job.t
@@ -8301,8 +9914,14 @@ type t =
   ; delivery : delivery
   ; launch : launch option [@sexp.option]
     (** Optional versioned launch provenance. Legacy jobs omit this field.
-        Host admission binds the invocation/event owner and actual parent attempt;
-        user scripts cannot choose their nesting depth. *)
+        Host admission binds the callback or direct Job-attempt producer. Callback
+        schemas1/2 retain their existing encoding; schema3 names a direct Job
+        owner and requires the identical parent_job pair. Only Model_call admits
+        the direct Job form. User scripts cannot choose their nesting depth. *)
+  ; inference_origin : Inference_origin.t option [@sexp.option]
+    (** Absent historical provenance is unavailable. No decoder or ordinary
+        constructor substitutes an unbound origin. A real admission owner must
+        capture new evidence before the first durable Job admission. *)
   ; progress : Job_progress.t option [@sexp.option]
     (** Transient read projection only. Durable job records omit progress, and
         terminal results never depend on retaining these display updates. *)
@@ -8321,6 +9940,15 @@ val validate_result : t -> (unit, Error.t) result
     This checks incremental journal changes; decoding a retained snapshot does not
     require the previous pending record. *)
 val validate_delivery_transition : previous:t option -> t -> (unit, Error.t) result
+
+(** Validate native nominal IDs and immutable origin through all retained Job
+    updates. Historical absence cannot be adopted retroactively; changing or
+    removing an existing origin rejects. Cross-state Run evidence is checked by
+    the complete Session carrier after its ordered batch. *)
+val validate_inference_origin_transition
+  :  previous:t option
+  -> t
+  -> (unit, Error.t) result
 
 (** Read the inline completion or explicit artifact descriptor without loading
     any bytes. Validates exact artifact session/job/generation/attempt ownership. *)
@@ -8735,6 +10363,11 @@ type t =
   | Session_work of Session_work.t Page.t
   | Session_configuration_get of Session_configuration.t
   | Session_configuration_update of Session_configuration.t
+  | Instructions of (Instruction_control.Result.t[@sexp.opaque])
+  | Goal_query of (Goal_query.Result.t[@sexp.opaque])
+  | Goal_control of (Goal_control.Result.t[@sexp.opaque])
+  | Recurrence_query of (Recurrence_query.Result.t[@sexp.opaque])
+  | Recurrence_control of (Recurrence_control.Result.t[@sexp.opaque])
   | Session_get of Snapshot.t
   | Session_inference_summary of Inference_query.Summary.t
   | Session_inference_observations of Inference_query.Response.t
@@ -8947,6 +10580,42 @@ module Decision : sig
   val of_json : Jsonaf.t -> (t, Error.t) result
 end
 
+(** Immutable facts about the consumed queue position. [origin = None] means
+    explicitly unavailable original attribution; it is distinct from a receipt
+    without a capture. These data grant no execution permission or Run work.
+    Source identity and nonnegative ordinal are validated, including on decode. *)
+module Queue_occurrence : sig
+  (** [Unknown] retains absent historical evidence. [Captured None] records an
+      exact head whose producer was unavailable; neither proves unrelatedness. *)
+  module Producer : sig
+    type t =
+      | Unknown
+      | Captured of Queue_producer.t option
+    [@@deriving equal, sexp]
+  end
+
+  type t [@@deriving equal, sexp]
+
+  val create
+    :  source:Run_source.t
+    -> ordinal:int64
+    -> origin:Inference_origin.t option
+    -> producer:Producer.t
+    -> (t, Error.t) result
+
+  val source : t -> Run_source.t
+  val ordinal : t -> int64
+  val origin : t -> Inference_origin.t option
+  val producer : t -> Producer.t
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+
+  (** Bound the complete retained child to the decoder's 4 KiB/depth8 profile
+      and validate its raw producer, including unfamiliar fields, before
+      universal projection. *)
+  val validate_encoded_capacity : Jsonaf.t -> (unit, Error.t) result
+end
+
 type t = private
   { context : context
   ; status : status
@@ -8957,10 +10626,20 @@ type t = private
   ; retirement : retirement option [@sexp.option]
   ; delegation : delegation option [@sexp.option]
   ; decision : Decision.t option [@sexp.option]
+  ; queue_occurrence : Queue_occurrence.t option [@sexp.option]
   }
 [@@deriving equal, sexp]
 
 val create : context -> (t, Error.t) result
+
+(** Create a Running Internal_event receipt with compatible source/generation,
+    no Job or delegation, and an honest optional physical operation drainer.
+    The actor must separately prove the exact previous queue head. Codec5
+    retains an absent producer; codec6 requires its explicit null/value. New
+    claims capture the exact known head producer, without transferring opaque
+    Entry extensions. Older codecs remain absent. Existing receipts cannot
+    adopt, remove or change the capture, including after terminalization. *)
+val create_queued : queue_occurrence:Queue_occurrence.t -> context -> (t, Error.t) result
 
 (** Only pre-tool checks without parent operation/job ownership may carry this
     provenance. Completed checks require a decision in the same receipt as the
@@ -8992,6 +10671,20 @@ val to_json : t -> Jsonaf.t
 val of_json : Jsonaf.t -> (t, Error.t) result
 ```
 
+## moderator_observer
+
+[implementation](../../lib/agent_protocol/moderator_observer.ml) · [interface](../../lib/agent_protocol/moderator_observer.mli)
+
+```ocaml
+(** Immutable moderator source identity. This is selector DATA, not installation
+    custody or source access. Invocation keeps its public manifest alias. *)
+type t =
+  { script_id : string
+  ; source_sha256 : string
+  }
+[@@deriving equal, sexp]
+```
+
 ## mutation_result
 
 [implementation](../../lib/agent_protocol/mutation_result.ml) · [interface](../../lib/agent_protocol/mutation_result.mli)
@@ -9013,6 +10706,23 @@ val of_fields : Json_codec.fields -> (t, Error.t) result
 
 val to_json : t -> Jsonaf.t
 val of_json : Jsonaf.t -> (t, Error.t) result
+```
+
+## native_goal_action_conversion
+
+[implementation](../../lib/agent_protocol/native_goal_action_conversion.ml) · [interface](../../lib/agent_protocol/native_goal_action_conversion.mli)
+
+```ocaml
+(** Pure structural conversion of an OLD Invocation record. The caller supplies
+    the bounded raw record only at its declared old schema boundary. This moves
+    the complete old Resume DATA into the canonical action envelope; it never
+    decodes an intent, issues custody or changes document metadata/hash evidence. *)
+val invocation_record : Jsonaf.t -> (Jsonaf.t, Document_schema.Error.t) result
+
+(** Current readers call this before admitting a known record. Even an otherwise
+    ignored old alias rejects, so missing canonical DATA cannot silently erase a
+    retained command. Unknown unrelated fields remain the carrier's concern. *)
+val reject_old_field : Jsonaf.t -> (unit, Document_schema.Error.t) result
 ```
 
 ## operation
@@ -10641,6 +12351,608 @@ val to_json : t -> Jsonaf.t
 val of_json : Jsonaf.t -> (t, Error.t) result
 ```
 
+## queue_producer
+
+[implementation](../../lib/agent_protocol/queue_producer.ml) · [interface](../../lib/agent_protocol/queue_producer.mli)
+
+```ocaml
+open! Core
+
+(** Bounded data correlations, never execution or continuation authority.
+    Job completion attempt zero records a truthful terminal disposition before
+    the first claim, such as queued cancellation. Final carrier validation still
+    requires the exact retained terminal Delivered Job and same attempt; this
+    data creates no claim, execution or Run obligation.
+
+    [Invocation_at_source] names an actual resolved invocation without deferred
+    observation intent and the full installation at its emitted checkpoint.
+    The carrier must retain that exact receipt and source; this correlation
+    neither manufactures observation work nor lends its original admission.
+    Observer-backed invocations keep the existing [Invocation] representation.
+
+    [Ingress_delivery] correlates one exact retained registration receipt and
+    frame. Source and original inference attribution come from that registration;
+    this DATA correlation supplies no submission or callback permission. *)
+type t =
+  | Event of Id.Moderator_execution.t
+  | Invocation of Id.Invocation.t
+  | Invocation_at_source of
+      { id : Id.Invocation.t
+      ; source : Run_source.t
+      }
+  | Job_completion of
+      { id : Id.Job.t
+      ; generation : int
+      ; attempt : int
+      }
+  | Schedule_delivery of
+      { id : Id.Schedule.t
+      ; generation : int
+      ; delivery_count : int
+      }
+  | Ingress_delivery of
+      { registration_id : Id.Capability.t
+      ; event_id : Id.Ingress_event.t
+      }
+  | Source_setup of { basis_revision : int64 }
+[@@deriving equal, sexp]
+
+val validate : t -> (unit, Protocol_error.t) result
+val to_jsonaf : t -> Jsonaf.t
+val of_jsonaf : Jsonaf.t -> (t, Protocol_error.t) result
+val shape : Document_schema.Shape.t
+```
+
+## recurrence_control
+
+[implementation](../../lib/agent_protocol/recurrence_control.ml) · [interface](../../lib/agent_protocol/recurrence_control.mli)
+
+```ocaml
+(** One immutable shared recurrence command. The selected source/target and all
+    stale-write fences enter the intent digest. The live writer attachment is
+    transport context and may change when replaying the original command. *)
+
+module Features : sig
+  val control : string
+end
+
+module Source_basis : sig
+  type t =
+    { source : Run_source.t
+    ; expected_lifecycle_revision : Session_lifecycle.Revision.t
+    }
+end
+
+module Goal_owner : sig
+  type t = private
+    { goal_id : Id.Goal.t
+    ; expected_goal_revision : int64
+    }
+
+  val create : goal_id:Id.Goal.t -> expected_goal_revision:int64 -> (t, Error.t) result
+end
+
+module Capture : sig
+  (** Selector data only. The Factory captures the actual current source and
+      pins on behalf of the original principal. Existing input is capped at
+      256 KiB including attachments. The authored selector is a declared tool
+      name, not a path, digest, native admission or artifact. *)
+  type selector =
+    | Existing of
+        { session : Session_ref.t
+        ; input : Session.Message_content.t
+        }
+    | Authored_child of
+        { name : string
+        ; mode : Run.Mode.t
+        }
+
+  type t = private
+    { schedule : Recurrence_schedule.t
+    ; policy : Recurrence_policy.t
+    ; selector : selector
+    ; goal_owner : Goal_owner.t option
+    }
+
+  val create
+    :  schedule:Recurrence_schedule.t
+    -> policy:Recurrence_policy.t
+    -> selector:selector
+    -> ?goal_owner:Goal_owner.t
+    -> unit
+    -> (t, Error.t) result
+end
+
+module Verb : sig
+  type t =
+    | Create
+    | Edit
+    | Enable
+    | Pause
+    | Retire
+  [@@deriving equal, compare, sexp_of]
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+module Action : sig
+  type t =
+    | Create of
+        { id : Id.Recurrence.t
+        ; basis : Source_basis.t
+        ; capture : Capture.t
+        }
+    | Edit of
+        { id : Id.Recurrence.t
+        ; expected_control_revision : int64
+        ; basis : Source_basis.t
+        ; capture : Capture.t
+        }
+    | Enable of
+        { id : Id.Recurrence.t
+        ; expected_control_revision : int64
+        ; basis : Source_basis.t
+        }
+    | Pause of
+        { id : Id.Recurrence.t
+        ; expected_control_revision : int64
+        }
+    | Retire of
+        { id : Id.Recurrence.t
+        ; expected_control_revision : int64
+        }
+
+  val id : t -> Id.Recurrence.t
+  val verb : t -> Verb.t
+  val expected_control_revision : t -> int64 option
+end
+
+module Intent : sig
+  type t = private
+    { generation : int
+    ; expected_catalog_revision : int64
+    ; key : Idempotency_key.t
+    ; action : Action.t
+    }
+
+  val create
+    :  generation:int
+    -> expected_catalog_revision:int64
+    -> key:Idempotency_key.t
+    -> Action.t
+    -> (t, Error.t) result
+
+  (** Domain-separated canonical identity of the complete original public
+      request including controller, key and selector. Attachment and captured
+      private storage data are deliberately independent. *)
+  val digest : t -> session:Session_ref.t -> (string, Error.t) result
+end
+
+module Request : sig
+  type t = private
+    { session : Session_ref.t
+    ; attachment_id : Id.Attachment.t
+    ; intent : Intent.t
+    }
+
+  val create
+    :  session:Session_ref.t
+    -> attachment_id:Id.Attachment.t
+    -> Intent.t
+    -> (t, Error.t) result
+
+  val methods : string list
+  val method_name : t -> string
+  val params : t -> Jsonaf.t
+  val of_method_and_params : method_:string -> params:Jsonaf.t -> (t, Error.t) result
+end
+
+module Receipt : sig
+  (** Controller command commitment only. This receipt does not describe an
+      occurrence admission or Run outcome and supplies no continuing authority. *)
+  type t = private
+    { session : Session_ref.t
+    ; generation : int
+    ; principal_id : Id.Principal.t
+    ; key : Idempotency_key.t
+    ; intent_sha256 : string
+    ; recurrence_id : Id.Recurrence.t
+    ; verb : Verb.t
+    ; definition_revision : int64
+    ; control_revision : int64
+    ; catalog_revision : int64
+    ; accepted_at : Timestamp.t
+    }
+
+  val create
+    :  session:Session_ref.t
+    -> generation:int
+    -> principal_id:Id.Principal.t
+    -> key:Idempotency_key.t
+    -> intent_sha256:string
+    -> recurrence_id:Id.Recurrence.t
+    -> verb:Verb.t
+    -> definition_revision:int64
+    -> control_revision:int64
+    -> catalog_revision:int64
+    -> accepted_at:Timestamp.t
+    -> (t, Error.t) result
+
+  (** Verifies canonical original request identity and the revisions the
+      owning command can commit. No-op control changes may retain their old
+      control revision while still recording a new catalog receipt. *)
+  val check_intent
+    :  t
+    -> session:Session_ref.t
+    -> principal_id:Id.Principal.t
+    -> intent:Intent.t
+    -> (unit, Error.t) result
+end
+
+module Result : sig
+  type t = Receipt.t
+
+  val method_name : t -> string
+  val payload : t -> Jsonaf.t
+  val of_method_and_result : method_:string -> result:Jsonaf.t -> (t, Error.t) result
+end
+```
+
+## recurrence_policy
+
+[implementation](../../lib/agent_protocol/recurrence_policy.ml) · [interface](../../lib/agent_protocol/recurrence_policy.mli)
+
+```ocaml
+(** Immutable bounded configuration for the recurrence due owner. This module
+    does not select missed work, compact history, advance a cursor or dispatch.
+    Execution is serial; target admission may impose stricter current ceilings. *)
+type t [@@deriving equal, sexp_of]
+
+type misfire =
+  | Skip
+  | Coalesce
+  | Catch_up of int
+[@@deriving equal, sexp_of]
+
+(** Grace is nonnegative integer milliseconds with a checked exact int64
+    nanosecond representation. Catch_up is 1..32, pending 1..32, detailed history
+    1..256 and calendar steps per pass 1..4096. These are finite supported maxima,
+    not permission to exceed actual host capacity. Due equality remains inclusive. *)
+val create
+  :  misfire:misfire
+  -> grace_ms:int64
+  -> max_pending:int
+  -> max_history:int
+  -> max_calendar_steps:int
+  -> (t, Error.t) result
+
+(** Serial/coalesce, grace 60000 ms, one pending occurrence, detailed history 64 and
+    calendar 256 steps per pass. No implicit infinite queue or lateness window. *)
+val default : t
+
+val misfire : t -> misfire
+val grace_ms : t -> int64
+val grace_ns : t -> int64
+val max_pending : t -> int
+val max_history : t -> int
+val max_calendar_steps : t -> int
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
+val of_public_json : Jsonaf.t -> (t, Error.t) result
+val shape : Document_schema.Shape.t
+```
+
+## recurrence_query
+
+[implementation](../../lib/agent_protocol/recurrence_query.ml) · [interface](../../lib/agent_protocol/recurrence_query.mli)
+
+```ocaml
+(** Nonactivating recurrence inspection on the current authenticated host.
+    A read may omit its attachment. Any reported actions are advisory. *)
+
+val max_envelope_bytes : int
+
+module Features : sig
+  val inspect : string
+end
+
+module Request : sig
+  type selector =
+    | List
+    | Get of Id.Recurrence.t
+    | Status of Id.Recurrence.t
+    | History of Id.Recurrence.t
+
+  type t =
+    { session : Session_ref.t
+    ; attachment_id : Id.Attachment.t option
+    ; selector : selector
+    }
+
+  val methods : string list
+  val method_name : t -> string
+  val params : t -> Jsonaf.t
+  val of_method_and_params : method_:string -> params:Jsonaf.t -> (t, Error.t) result
+end
+
+module Availability : sig
+  type t =
+    | Active
+    | Stopped
+    | Unavailable
+end
+
+module Basis : sig
+  type t =
+    { session : Session_ref.t
+    ; generation : int
+    ; state_revision : int64
+    ; catalog_revision : int64
+    ; lifecycle_revision : Session_lifecycle.Revision.t
+    ; automatic : bool
+    ; source : Run_source.t option
+    ; availability : Availability.t
+    }
+end
+
+module Definition : sig
+  type pause_reason =
+    | Operator_pause
+    | Controller_stop
+    | Source_review
+    | Recovery_review
+    | Target_review
+
+  type retire_reason =
+    | Operator_retire
+    | Lifecycle_changed
+
+  type control =
+    | Enabled
+    | Paused of pause_reason
+    | Retired of retire_reason
+
+  type target_kind =
+    | Existing_session
+    | Fresh_child
+
+  (** [control] is effective controller control. Target details, input and
+      private source pins remain with the target owner. *)
+  type t =
+    { id : Id.Recurrence.t
+    ; controller : Session_ref.t
+    ; definition_revision : int64
+    ; control_revision : int64
+    ; control : control
+    ; source : Run_source.t
+    ; birth_lifecycle_revision : Session_lifecycle.Revision.t
+    ; creator : Id.Principal.t
+    ; created_at : Timestamp.t
+    ; schedule : Recurrence_schedule.t
+    ; target_kind : target_kind
+    ; policy : Recurrence_policy.t
+    ; actions : Recurrence_control.Verb.t list
+    }
+end
+
+module Planning : sig
+  type reason =
+    | Not_configured
+    | Not_granted
+    | Expired
+    | Closing
+    | Lifecycle_not_automatic
+    | Controller_not_running
+    | Source_unavailable
+    | Controller_not_loaded
+    | Controller_not_selected
+
+  type t =
+    | Available
+    | Unavailable of reason
+end
+
+module Totals : sig
+  (** Lifetime controller coverage. Retained ranges/attempts are finite. *)
+  type t =
+    { consumed : int64
+    ; omitted : int64
+    ; withdrawn : int64
+    ; settled : int64
+    }
+end
+
+module Definition_id : sig
+  type t =
+    { controller : Session_ref.t
+    ; recurrence_id : Id.Recurrence.t
+    ; revision : int64
+    }
+end
+
+module Occurrence_id : sig
+  type t =
+    { definition : Definition_id.t
+    ; slot : int64
+    }
+end
+
+module Nominal : sig
+  type t =
+    { occurrence : Occurrence_id.t
+    ; at : Timestamp.t
+    }
+end
+
+module Outcome : sig
+  type t =
+    | Completed
+    | Failed of Error.code option
+    | Cancelled
+    | Limited
+    | Interrupted
+end
+
+module Run_observation : sig
+  type status =
+    | Admitted
+    | Active
+    | Waiting
+    | Terminal of Outcome.t
+
+  type t =
+    { id : Id.Run.t
+    ; revision : int64
+    ; status : status
+    ; retained_outcome : Outcome.t option
+    }
+end
+
+module Target : sig
+  (** Denied carries no target identifier or outcome. A visible session can
+      still omit Run detail when its actual Run is unavailable or not visible. *)
+  type t =
+    | Denied
+    | Unavailable
+    | Visible of
+        { session : Session_ref.t
+        ; session_revision : int64
+        ; run : Run_observation.t option
+        }
+end
+
+module Attempt : sig
+  type t =
+    { number : int
+    ; rejection : Error.code option
+    ; uncertainty : Error.code option
+    ; retry_resolution_recorded : bool
+    ; admission_recorded : bool
+    ; terminal_recorded : bool
+    ; target : Target.t
+    }
+end
+
+module Occurrence : sig
+  type t =
+    { nominal : Nominal.t
+    ; attempts : Attempt.t list
+    }
+end
+
+module Protected_creation : sig
+  type t =
+    { nominal : Nominal.t
+    ; link_recorded : bool
+    ; execution_recorded : bool
+    }
+end
+
+module Status : sig
+  type issue =
+    | Zone_unavailable
+    | Coverage_unavailable
+    | Timing_exhausted
+    | Capacity_saturated
+    | Initial_delay_missed
+    | Delay_nominal_missed
+    | Execution_interrupted
+    | Delay_successor_exhausted
+
+  type t =
+    { entry : Definition.t
+    ; planning : Planning.t
+    ; planning_revision : int64
+    ; pending_count : int
+    ; unresolved_count : int
+    ; issue : issue option
+    ; totals : Totals.t
+    ; ready : Nominal.t list
+    ; lookahead : Nominal.t option
+    ; alarm_due_at : Timestamp.t option
+    ; protected_creations : Protected_creation.t list
+    ; occurrences : Occurrence.t list
+    }
+end
+
+module History : sig
+  type kind =
+    | Skipped
+    | Withdrawn
+
+  type reason =
+    | Expired
+    | Policy_skip
+    | Superseded
+    | Pending_capacity
+    | Control_withdrawal
+
+  type range =
+    { definition : Definition_id.t
+    ; first_slot : int64
+    ; last_slot : int64
+    ; kind : kind
+    ; reason : reason
+    }
+
+  type t =
+    { entry : Definition.t
+    ; totals : Totals.t
+    ; retained_ranges : range list
+    ; protected_creations : Protected_creation.t list
+    ; occurrences : Occurrence.t list
+    }
+end
+
+module Result : sig
+  type 'a view =
+    { basis : Basis.t
+    ; can_create : bool
+    ; value : 'a
+    }
+
+  type 'a outcome =
+    | Available of 'a view
+    | Unavailable of Session_ref.t
+
+  type t =
+    | List of Definition.t list outcome
+    | Get of Definition.t outcome
+    | Status of Status.t outcome
+    | History of History.t outcome
+
+  val session : 'a outcome -> Session_ref.t
+  val method_name : t -> string
+  val payload : t -> Jsonaf.t
+  val of_method_and_result : method_:string -> result:Jsonaf.t -> (t, Error.t) result
+end
+```
+
+## recurrence_schedule
+
+[implementation](../../lib/agent_protocol/recurrence_schedule.ml) · [interface](../../lib/agent_protocol/recurrence_schedule.mli)
+
+```ocaml
+open! Core
+
+(** Interval origin is explicit wall-time metadata, independent of the live
+    elapsed phase. Calendar begins at its actual rule's start date. *)
+type t =
+  | Interval of
+      { rule : Recurrence_rules.Rule.Interval.t
+      ; first_due : Time_ns.Alternate_sexp.t
+      }
+  | Calendar of Recurrence_rules.Rule.Calendar.t
+[@@deriving sexp_of]
+
+val rule : t -> Recurrence_rules.Rule.t
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Protocol_error.t) result
+val of_public_json : Jsonaf.t -> (t, Protocol_error.t) result
+val shape : Document_schema.Shape.t
+```
+
 ## run
 
 [implementation](../../lib/agent_protocol/run.ml) · [interface](../../lib/agent_protocol/run.mli)
@@ -10754,6 +13066,28 @@ val of_json : Jsonaf.t -> (t, Error.t) result
     actions reject before checkpoint persistence. Task.catch discarded actions
     do not participate. *)
 val combine : t option -> t option -> (t option, Error.t) result
+```
+
+## run_input
+
+[implementation](../../lib/agent_protocol/run_input.ml) · [interface](../../lib/agent_protocol/run_input.mli)
+
+```ocaml
+(** Shared immutable Run input DATA and its existing bounded codec. This module
+    depends only on message content, IDs and low-level codec/limit modules;
+    it does not depend on Run, Invocation, Job or native action intent.
+    [Run_start.Input] is a public alias of this same type. *)
+type t =
+  | User_submission of Session.Message_content.t
+  | Authored_start
+[@@deriving sexp]
+
+(** Existing direct content validation used by Run_start.create. This preserves
+    its original behavior; it issues no Run/source/initialization authority. *)
+val validate : t -> (unit, Error.t) result
+
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
 ```
 
 ## run_limits
@@ -10943,14 +13277,14 @@ val of_json : Jsonaf.t -> (t, Error.t) result
     Epoch is monotone within a session and changes on replacement/removal/reset.
     A matching runtime restore does not grant or extend source authority. *)
 type t = private
-  { observer : Invocation.observer
+  { observer : Moderator_observer.t
   ; generation : int
   ; installation_epoch : int64
   }
 [@@deriving equal, sexp]
 
 val create
-  :  observer:Invocation.observer
+  :  observer:Moderator_observer.t
   -> generation:int
   -> installation_epoch:int64
   -> (t, Error.t) result
@@ -10967,15 +13301,7 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 ```ocaml
 (** Explicit host-authorized run start; no caller-supplied source/run identity.
     The actor captures current compiled source and current authorization. *)
-module Input : sig
-  type t =
-    | User_submission of Session.Message_content.t
-    | Authored_start
-  [@@deriving sexp]
-
-  val to_json : t -> Jsonaf.t
-  val of_json : Jsonaf.t -> (t, Error.t) result
-end
+module Input = Run_input
 
 type t = private
   { session_id : Id.Session.t
@@ -11003,6 +13329,17 @@ val create
 
 val to_json : t -> Jsonaf.t
 val of_json : Jsonaf.t -> (t, Error.t) result
+
+(** Durable headless Run admission identity. Transport attachments are separate
+    from this identity, including when a public Goal Start requires a writer. *)
+val headless_request_sha256
+  :  session_id:Id.Session.t
+  -> generation:int
+  -> expected_revision:int64
+  -> mode:Run.Mode.t
+  -> input:Input.t
+  -> key:Idempotency_key.t
+  -> (string, Error.t) result
 ```
 
 ## run_wake
@@ -11163,6 +13500,10 @@ type t =
   ; ownership : ownership option [@sexp.option]
     (** Owned schedules use a version-2 JSON envelope. Legacy records retain
         their original flat encoding; old readers reject the owned envelope. *)
+  ; inference_provenance : Schedule_provenance.t option [@sexp.option]
+    (** Immutable original source and optional inference origin. Historical
+        absence remains unavailable. Positive evidence uses JSON envelope v4;
+        it grants no execution, cancellation or callback authority. *)
   ; delivery_cancellation : string option [@sexp.option]
     (** Immutable cancellation of an enqueued callback, separate from the retained
         Delivered status/count/time. Present only on owned Delivered records with
@@ -11252,6 +13593,32 @@ module Storage : sig
   val to_json : t -> Jsonaf.t
   val of_json : Jsonaf.t -> (t, Error.t) result
 end
+```
+
+## schedule_provenance
+
+[implementation](../../lib/agent_protocol/schedule_provenance.ml) · [interface](../../lib/agent_protocol/schedule_provenance.mli)
+
+```ocaml
+(** Immutable Schedule creator evidence. Historical absence and unavailable
+    origin are distinct from affirmative [Unbound]. No live authority is stored. *)
+type t [@@deriving equal, sexp]
+
+(** Required persistence semantics shared by stored Schedule creator evidence and
+    moderator queue occurrence metadata. Enclosing Store state/delta readers
+    explicitly recognize this feature; it grants no execution permission. *)
+val persistence_semantics : string
+
+val create
+  :  source:Run_source.t
+  -> origin:Inference_origin.t option
+  -> (t, Error.t) result
+
+val source : t -> Run_source.t
+val origin : t -> Inference_origin.t option
+val validate : t -> (unit, Error.t) result
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
 ```
 
 ## scope
@@ -12698,6 +15065,31 @@ module Result : sig
 
   val of_json : Jsonaf.t -> (t, Error.t) Core.Result.t
 end
+```
+
+## session_storage_semantics
+
+[implementation](../../lib/agent_protocol/session_storage_semantics.ml) · [interface](../../lib/agent_protocol/session_storage_semantics.mli)
+
+```ocaml
+(** Explicit feature names understood by stored session state/delta children.
+    Store transaction and snapshot envelopes do not support these semantics on
+    themselves. These constants convey no runtime or admission authority. *)
+val delegated_usage : string
+
+val goal_descendants : string
+val policy_canonical_usage : string
+val goal_policy_contributions : string
+val recurrence_run_origin : string
+val ingress_provenance : string
+val queue_occurrence_producer : string
+val supported_children : string list
+
+(** Captured current-installation lifecycle pointer; no execution authority. *)
+val moderator_lifecycle : string
+
+(** Durable immutable Goal association on a captured recurrence definition. *)
+val recurrence_controller_goal : string
 ```
 
 ## session_work

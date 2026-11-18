@@ -87,7 +87,7 @@ let make_ledger ?(attempts = 3) ?(turns = 3) () =
   L.create ~session_id:sid ~generation:0 ~before_tracking_unknown:false ~limits |> ledger
 ;;
 
-let goal ?(suffix = "one") () =
+let goal ?(suffix = "one") ?(session_revision = 0L) () =
   let run =
     P.Run.create
       ~id:(P.Id.Run.of_string ("run_" ^ suffix) |> protocol)
@@ -113,7 +113,7 @@ let goal ?(suffix = "one") () =
       ~request_sha256:(String.make 64 'a')
       ~kind:Admission
       ~run_revision:0L
-      ~session_revision:0L
+      ~session_revision
       ~committed_at:timestamp
     |> protocol
   in

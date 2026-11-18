@@ -2,11 +2,19 @@
     Preparation may issue an actual store lifecycle observation; the actor must
     repeat [check_write] and [check_current] after preparation and immediately
     before publishing a candidate. It durably reconciles stale births first. *)
-type t =
-  { receipt : Recurrence_command_receipt.t
-  ; delta : Session_delta.t option
-  ; current : Recurrence_controller.observation option
-  }
+type t
+
+val receipt : t -> Recurrence_command_receipt.t
+val delta : t -> Session_delta.t option
+val checks_goal : t -> bool
+
+(** Fresh local Goal checks are sequenced after clock sampling and before the
+    final canonical writer. Retained receipts and ordinary commands skip them. *)
+val check_goal
+  :  t
+  -> Session_state.t
+  -> now:Agent_protocol.Timestamp.t
+  -> (unit, Agent_protocol.Error.t) result
 
 val check_write
   :  Operator_authorization.t
@@ -22,8 +30,12 @@ val check_read
 
 val check_current : t -> (unit, Agent_protocol.Error.t) result
 
+type native_selection =
+  unit -> (Goal_work_attribution.t option, Agent_protocol.Error.t) result
+
 val prepare
-  :  Session_state.t
+  :  ?native:native_selection
+  -> Session_state.t
   -> controller:Recurrence_controller.t
   -> actor:Operator_authorization.t
   -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)

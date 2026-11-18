@@ -196,22 +196,6 @@ let prepare (state : Session_state.t) ~request ~principal_id ~session ~now =
   | None ->
     let%bind catalog, basis = select_basis state ~request ~session in
     let%bind goal = G.resume basis.goal in
-    let%bind eligibility =
-      Goal_charge_admission.check_activation state ~goal ~accounting:basis.accounting ~now
-    in
-    let%bind () =
-      match eligibility with
-      | Allow -> Ok ()
-      | Hold hold ->
-        Error
-          (P.Error.create
-             Permission_denied
-             ~message:
-               ("Goal resume policy denies activation: "
-                ^ Sexp.to_string_hum (G.Hold.sexp_of_t hold))
-             ~retryable:false
-             ())
-    in
     let%bind previous_document =
       Result.of_option
         (Goal_catalog.document catalog (G.id goal))
@@ -241,6 +225,30 @@ let prepare (state : Session_state.t) ~request ~principal_id ~session ~now =
         ~accepted_at:now
     in
     let%bind catalog = Goal_catalog.commit catalog ~goal:document ~receipt in
+    (* Eligibility reads the exact prospective Enabled policy from the checked
+       catalog. The actual basis, usage and publication counters stay unchanged;
+       this immutable planning view does not install or acknowledge the Goal. *)
+    let candidate_state = { state with goal_catalog = Some catalog } in
+    let%bind eligibility =
+      Goal_charge_admission.check_activation
+        candidate_state
+        ~goal
+        ~accounting:basis.accounting
+        ~now
+    in
+    let%bind () =
+      match eligibility with
+      | Allow -> Ok ()
+      | Hold hold ->
+        Error
+          (P.Error.create
+             Permission_denied
+             ~message:
+               ("Goal resume policy denies activation: "
+                ^ Sexp.to_string_hum (G.Hold.sexp_of_t hold))
+             ~retryable:false
+             ())
+    in
     let%map () =
       Goal_run_evidence.validate_transition
         ~previous_runs:state.run_state

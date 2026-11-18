@@ -49,6 +49,14 @@ progress: use the stop result/status instead of treating the acknowledgement as
 a join of every child and process. Replaying an old stop key cannot stop a newly
 started lifetime. See `runtime.delegation.stop-helper` for modes and receipts.
 
+A runtime whose cleanup fails stays retired until an explicit unload or close
+retry succeeds; it cannot be reused as a loaded runtime. Concurrent cleanup
+callers share the same attempt and failure rather than silently retrying it.
+While cleanup is pending, source replacement and new runtime construction remain
+blocked. Read-only status checks do not initiate cleanup. A stop or permanent
+close accepted during administrative cleanup prevents that administration from
+continuing with a commit or rebuilding the runtime.
+
 Graceful stop preserves source-owned subscriptions and timers. Their deadlines
 do not pause or renew just because the conversation stopped; retained timers can
 become due and subscriptions can expire. A queued timer is not proof its moderator
@@ -57,11 +65,14 @@ retires unclaimed callbacks together with the applicable job/lifecycle changes.
 An already claimed handler may instead retain an explicit interruption record.
 Neither mode rewrites an already committed terminal result as a new cancellation.
 
-Stopping a parent is also subject to its children's admitted lifetime policy.
-Do not assume every independent child stops with its parent, or that a linked
-subscription automatically controls the child it watches. Independent children
-still retain their delegated authority/resource relationship. See
-`runtime.delegation.creation` before choosing attached or independent lifetime.
+Stopping a parent propagates to its owned children. An authorized independent
+child can remain running under the original delegated authority, including
+eligible parent policy while the parent stays stopped. If Stop places a governing
+Goal on Hold, new work under that Goal is blocked even when the child remains
+running. The child can be stopped separately through its own lifecycle admission.
+A linked subscription observes its target within the separately admitted
+subscription scope. See `runtime.delegation.creation` for lifetime and authority
+checks.
 
 After host restart, inspect retained work before launching replacements. A job
 waiting on an owned pending dependency can retain that dependency and its original

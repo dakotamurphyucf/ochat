@@ -2,7 +2,6 @@ open Core
 open Agent_server_test_support
 module P = Agent_protocol
 module D = Agent_server.Daemon
-module A = Agent_session.Session_actor
 module H = Agent_client.Session_handle
 module Res = Openai.Responses
 
@@ -173,11 +172,11 @@ let with_team_runtime ?(sources = sources) ?reviewer_provider f =
                 ~f:(fun () ->
                   initialize client;
                   let state id =
-                    let entry =
-                      Agent_server.Session_registry.load (D.registry daemon) id
-                      |> protocol_ok
-                    in
-                    A.state entry.actor |> protocol_ok
+                    Agent_server.Session_registry.read_state
+                      (D.registry daemon)
+                      ~authorize:(fun _ -> Ok ())
+                      id
+                    |> protocol_ok
                   in
                   let create prompt =
                     let spec =

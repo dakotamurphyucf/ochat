@@ -140,7 +140,8 @@ let terminal state name =
   | Terminal _, _ -> raise_s [%sexp (run : P.Run.t)]
 ;;
 
-let configured (config : Agent_server.Config.t) session_id =
+let configured ?targets ?secondary_controller (config : Agent_server.Config.t) session_id =
+  let targets = Option.value targets ~default:[ session_id ] in
   let planning =
     Agent_server.Recurrence_automation_configuration.create
       ~principal_id:(P.Id.Principal.of_string "pri_485_timer_planning" |> protocol_ok)
@@ -149,17 +150,22 @@ let configured (config : Agent_server.Config.t) session_id =
       ~zone_directory:None
     |> protocol_ok
   in
-  let grant =
+  let grant session_id existing_targets =
     Agent_server.Recurrence_execution_configuration.Controller.create
       ~session_id
-      ~existing_targets:[ session_id ]
+      ~existing_targets
       ~captured_children:false
     |> protocol_ok
+  in
+  let controllers =
+    grant session_id targets
+    :: Option.value_map secondary_controller ~default:[] ~f:(fun id ->
+      [ grant id [ id ] ])
   in
   let execution =
     Agent_server.Recurrence_execution_configuration.create
       ~principal_id:(P.Id.Principal.of_string "pri_485_timer_execution" |> protocol_ok)
-      ~controllers:[ grant ]
+      ~controllers
       ~expires_at:None
     |> protocol_ok
   in
@@ -519,6 +525,9 @@ let%expect_test "embedded sole timer imports before a same-target progress senti
                      let receipt = Option.value_exn first.admission_receipt in
                      assert (P.Run.Mode.equal first.run.mode Single_turn);
                      [%test_eq: int] 1 !count;
+                     (* A busy exact target still presents only its admitted Run.
+                        The existing sentinel below proves ordinary progress. *)
+                     [%test_eq: int] 1 (List.length (run_page connection session));
                      release ();
                      (* This second admission is a same-target progress sentinel.
                      The joined immutable read below independently validates
@@ -583,4 +592,410 @@ let%expect_test "embedded sole timer imports before a same-target progress senti
      exact first terminal import";
   [%expect
     {| embedded: same-target admission is a progress sentinel; joined close preserves exact first terminal import |}]
+;;
+
+let%expect_test
+    "real removed, reset and retired-source targets pause independently after restart"
+  =
+  Eio_main.run (fun env ->
+    Mirage_crypto_rng_unix.use_default ();
+    let root = T.temporary_root env in
+    protect_cleanup
+      ~finally:(fun () -> Eio.Path.rmtree ~missing_ok:true Eio.Path.(env#fs / root))
+      (fun () ->
+         let prompt = Filename.concat root "controller.chatmd" in
+         let retired_prompt = Filename.concat root "retired-source.chatmd" in
+         let retired_prompt_id = "retired.source" in
+         let retired_definition =
+           Agent_server.Catalog_identity.prompt_definition retired_prompt_id
+         in
+         let original =
+           {|<developer>Verify permanent target invalidation with the actual host.</developer>
+<script id="controller" language="chatml" kind="moderator" api="extensibility-v1">
+let initial_state = 0
+let on_event ctx state event = Task.pure(state)
+</script>|}
+         in
+         List.iter [ prompt; retired_prompt ] ~f:(fun path ->
+           Eio.Path.save ~create:(`Exclusive 0o600) Eio.Path.(env#fs / path) original);
+         let base = T.config root root prompt in
+         let main_prompt = List.hd_exn base.prompts in
+         let config =
+           { base with
+             prompts =
+               [ main_prompt
+               ; { main_prompt with id = retired_prompt_id; path = retired_prompt }
+               ]
+           ; workspaces =
+               List.map base.workspaces ~f:(fun workspace ->
+                 let limit =
+                   List.hd_exn workspace.Agent_server.Config.Workspace.prompt_limits
+                 in
+                 { workspace with
+                   prompt_limits =
+                     [ { limit with max_root_agents = 3 }
+                     ; { limit with prompt = retired_prompt_id }
+                     ]
+                 })
+           }
+         in
+         let inference_calls = ref 0 in
+         let policy =
+           T.inference_policy
+             ~default_model:"fixture-model"
+             ~post_stream:(fun ~sw:_ ~inputs:_ ->
+               Int.incr inference_calls;
+               completed_response ())
+         in
+         let removed_name = "674_removed" in
+         let reset_name = "674_reset" in
+         let retired_name = "674_source_retired" in
+         let unrelated_name = "674_unrelated" in
+         let key text = P.Idempotency_key.of_string text |> protocol_ok in
+         let controller_id, removed_id, invalidated, unrelated_receipt =
+           with_daemon env root config Execute ~policy (fun _ daemon ->
+             let connection = T.connection daemon (T.principal ()) in
+             protect_cleanup
+               ~finally:(fun () -> Client.Connection.close connection)
+               (fun () ->
+                  T.initialize connection;
+                  let controller, _ =
+                    T.create_session
+                      ~start_immediately:true
+                      ~key:"674-controller"
+                      connection
+                  in
+                  let target, writer =
+                    T.create_session ~start_immediately:true ~key:"674-target" connection
+                  in
+                  let reset_target, reset_writer =
+                    T.create_session
+                      ~start_immediately:true
+                      ~key:"674-reset-target"
+                      connection
+                  in
+                  let retired_target, retired_writer =
+                    let request =
+                      T.create_request
+                        ~start_immediately:true
+                        ~key:"674-retired-target"
+                        ()
+                    in
+                    let spec =
+                      { request.spec with prompt = Catalog retired_definition }
+                    in
+                    match
+                      Client.Connection.request
+                        connection
+                        (Session_create { request with spec })
+                      |> protocol_ok
+                    with
+                    | Session_create result ->
+                      result.session, (Option.value_exn result.attachment).attachment
+                    | _ -> failwith "unexpected source target creation result"
+                  in
+                  let controller_entry = loaded daemon controller.id in
+                  let target_entry = loaded daemon target.id in
+                  let reset_entry = loaded daemon reset_target.id in
+                  let retired_entry = loaded daemon retired_target.id in
+                  let await_idle entry =
+                    await env (fun () ->
+                      let current =
+                        A.Session_actor.with_moderator_checkpoint
+                          entry.Registry.actor
+                          (fun () -> A.Session_actor.state entry.actor)
+                        |> protocol_ok
+                      in
+                      healthy current;
+                      match
+                        current.runtime_initialization, current.lifecycle.observed
+                      with
+                      | Ready, Idle when not current.pending_initial_start -> Some current
+                      | _ -> None)
+                  in
+                  let controller_state = await_idle controller_entry in
+                  let target_state = await_idle target_entry in
+                  let reset_state = await_idle reset_entry in
+                  let retired_state = await_idle retired_entry in
+                  let period =
+                    Recurrence_rules.Rule.Period.create_ms 600_000L
+                    |> Result.map_error ~f:(fun error ->
+                      Sexp.to_string_hum (Recurrence_rules.Timing_error.sexp_of_t error))
+                    |> Result.ok_or_failwith
+                  in
+                  let now = P.Timestamp.to_time_ns (P.Timestamp.now ()) in
+                  let create_for name (target_state : A.Session_state.t) ~first_due =
+                    let _, source =
+                      A.Goal_catalog_source.capture target_state |> protocol_ok
+                    in
+                    let target =
+                      A.Recurrence_target.create_existing
+                        ~session:
+                          (P.Session_ref.create
+                             ~server_id:(S.server_id (Daemon.store daemon))
+                             ~session_id:target_state.identity.session_id)
+                        ~source
+                        ~configuration_revision:target_state.spec.configuration_revision
+                        ~input:
+                          { kind = Plain_text
+                          ; text = "never delivered"
+                          ; attachments = []
+                          }
+                      |> protocol_ok
+                    in
+                    let schedule =
+                      A.Recurrence_definition.Schedule.Interval
+                        { rule =
+                            Recurrence_rules.Rule.Interval.create ~mode:Fixed_rate ~period
+                        ; first_due
+                        }
+                    in
+                    mutate
+                      controller_entry.actor
+                      ("create-" ^ name)
+                      (Create
+                         ( id name
+                         , { schedule; target; policy = A.Recurrence_policy.default } ))
+                    |> ignore;
+                    mutate controller_entry.actor ("enable-" ^ name) (Enable (id name))
+                  in
+                  let removed_receipt =
+                    create_for removed_name target_state ~first_due:now
+                  in
+                  let reset_receipt = create_for reset_name reset_state ~first_due:now in
+                  let retired_receipt =
+                    create_for retired_name retired_state ~first_due:now
+                  in
+                  let unrelated_receipt =
+                    create_for
+                      unrelated_name
+                      controller_state
+                      ~first_due:(Time_ns.add now (Time_ns.Span.of_int_sec 600))
+                  in
+                  let stop ~session_id ~attachment_id ~idempotency_key =
+                    Client.Connection.request
+                      connection
+                      (Session_stop
+                         { session_id; attachment_id; mode = Cancel; idempotency_key })
+                    |> protocol_ok
+                    |> ignore
+                  in
+                  stop
+                    ~session_id:reset_target.id
+                    ~attachment_id:reset_writer.id
+                    ~idempotency_key:(key "674-stop-reset-target");
+                  (match
+                     Client.Connection.request_without_history
+                       connection
+                       (Session_reset
+                          { session_id = reset_target.id
+                          ; attachment_id = reset_writer.id
+                          ; expected_revision =
+                              (state reset_entry.actor).counters.revision
+                          ; keep_history = true
+                          ; keep_tasks = true
+                          ; keep_cache = true
+                          ; keep_workspace = true
+                          ; keep_grants = true
+                          ; keep_labels = true
+                          ; idempotency_key = key "674-replace-target-generation"
+                          })
+                     |> protocol_ok
+                   with
+                   | Session_reset _ ->
+                     assert (
+                       (state reset_entry.actor).identity.generation
+                       > reset_state.identity.generation)
+                   | _ -> failwith "unexpected Reset result");
+                  stop
+                    ~session_id:retired_target.id
+                    ~attachment_id:retired_writer.id
+                    ~idempotency_key:(key "674-stop-retired-target");
+                  let original_installation =
+                    Option.value_exn retired_state.run_state |> A.Run_state.installation
+                  in
+                  assert (Option.is_some original_installation.source);
+                  Eio.Path.save
+                    ~create:(`Or_truncate 0o600)
+                    Eio.Path.(env#fs / retired_prompt)
+                    "<developer>The moderator has been removed from this \
+                     source.</developer>";
+                  let prompts = Daemon.prompts daemon in
+                  let definitions =
+                    List.map (A.Prompt_catalog.entries prompts) ~f:(fun entry ->
+                      entry.definition)
+                  in
+                  A.Prompt_catalog.prepare
+                    prompts
+                    ~transaction_id:(fun _ -> P.Id.Transaction.create ())
+                    ~created_at:(P.Timestamp.now ())
+                    definitions
+                  |> A.Prompt_catalog.install prompts;
+                  let revision =
+                    match
+                      (A.Prompt_catalog.find prompts retired_definition
+                       |> Option.value_exn)
+                        .availability
+                    with
+                    | Ready revision -> A.Prompt_revision.id revision
+                    | Disabled | Unavailable _ ->
+                      failwith "moderator-free prompt is unavailable"
+                  in
+                  (match
+                     Client.Connection.request_without_history
+                       connection
+                       (Session_upgrade_prompt
+                          { session_id = retired_target.id
+                          ; attachment_id = retired_writer.id
+                          ; expected_revision =
+                              (state retired_entry.actor).counters.revision
+                          ; target_revision = revision
+                          ; allow_migration = true
+                          ; idempotency_key = key "674-retire-installed-source"
+                          })
+                     |> protocol_ok
+                   with
+                   | Session_upgrade_prompt _ -> ()
+                   | _ -> failwith "unexpected prompt upgrade result");
+                  let upgraded = state retired_entry.actor in
+                  [%test_eq: int]
+                    retired_state.identity.generation
+                    upgraded.identity.generation;
+                  assert (
+                    P.Id.Prompt_revision.equal upgraded.spec.prompt_revision_id revision);
+                  let installation =
+                    Option.value_exn upgraded.run_state |> A.Run_state.installation
+                  in
+                  assert (Int64.(installation.epoch > original_installation.epoch));
+                  assert (Option.is_none installation.source);
+                  stop
+                    ~session_id:target.id
+                    ~attachment_id:writer.id
+                    ~idempotency_key:(key "674-stop-target");
+                  let directory =
+                    Agent_store.Data_root.session_path
+                      (S.data_root (Daemon.store daemon))
+                      target.id
+                  in
+                  (* Exercise the existing physical retirement case for a session
+                  whose actual workspace is the separate fixture root. *)
+                  let workspace =
+                    Eio.Path.(env#fs / Filename.concat directory "workspace")
+                  in
+                  if Eio.Path.is_directory workspace then Eio.Path.rmdir workspace;
+                  let deleted =
+                    Client.Connection.request_without_history
+                      connection
+                      (Session_delete
+                         { session_id = target.id
+                         ; attachment_id = writer.id
+                         ; expected_revision =
+                             (state target_entry.actor).counters.revision
+                         ; policy = Remove
+                         ; confirmation = P.Id.Session.to_string target.id
+                         ; idempotency_key = key "674-remove-target"
+                         })
+                    |> protocol_ok
+                  in
+                  (match deleted with
+                   | Session_delete result ->
+                     assert (P.Id.Session.equal result.session_id target.id)
+                   | _ -> failwith "unexpected lifecycle result");
+                  assert (not (Eio.Path.is_directory Eio.Path.(env#fs / directory)));
+                  assert (
+                    List.is_empty (S.pending_removal_ids (Daemon.store daemon) |> store_ok));
+                  let invalidated =
+                    [ ( removed_name
+                      , target.id
+                      , E.Pause.Target.Removed
+                      , removed_receipt.control_revision )
+                    ; ( reset_name
+                      , reset_target.id
+                      , Superseded
+                      , reset_receipt.control_revision )
+                    ; ( retired_name
+                      , retired_target.id
+                      , Source_retired
+                      , retired_receipt.control_revision )
+                    ]
+                  in
+                  controller.id, target.id, invalidated, unrelated_receipt))
+         in
+         let config =
+           (* A removed target can also be a configured controller. Its unknown
+              historical occupancy still fences activation, not factual pauses. *)
+           configured
+             ~targets:
+               (controller_id
+                :: List.map invalidated ~f:(fun (_, session_id, _, _) -> session_id))
+             ~secondary_controller:removed_id
+             config
+             controller_id
+         in
+         let assert_paused (controller : Registry.entry) name reason control_revision =
+           let entry =
+             await env (fun () ->
+               let saved = row (state controller.actor) name in
+               match E.control saved with
+               | Paused (Target_invalidated observed)
+                 when E.Pause.Target.equal observed reason -> Some saved
+               | Enabled -> None
+               | other ->
+                 raise_s [%sexp "unexpected recurrence control", (other : E.control)])
+           in
+           [%test_eq: int64] (Int64.succ control_revision) (E.control_revision entry);
+           let frontier = E.frontier entry |> protocol_ok in
+           assert (
+             List.is_empty (H.ready frontier) && List.is_empty (H.executions frontier));
+           List.iter
+             [ A.Recurrence_query.Status (id name); History (id name) ]
+             ~f:(fun request ->
+               let result =
+                 A.Session_actor.query_recurrences
+                   controller.actor
+                   ~actor:proof
+                   ~authorize
+                   ~request
+                 |> protocol_ok
+               in
+               let field json name =
+                 match Document_schema.Json.field json ~name with
+                 | Value json -> json
+                 | Absent | Null -> failwith "controller status field is missing"
+               in
+               let rendered =
+                 A.Recurrence_query.render result ~read_target:(fun _ ->
+                   failwith "pre-admission pause should require no target history read")
+                 |> protocol_ok
+               in
+               let control = field (field (field rendered "result") "entry") "control" in
+               assert (
+                 Jsonaf.exactly_equal (field control "reason") (`String "target_review")))
+         in
+         let assert_recovered daemon =
+           let controller = loaded daemon controller_id in
+           List.iter invalidated ~f:(fun (name, _, reason, revision) ->
+             assert_paused controller name reason revision);
+           let current = state controller.actor in
+           let unrelated = row current unrelated_name in
+           assert (E.equal_control (E.control unrelated) Enabled);
+           let catalog = Option.value_exn current.recurrence_catalog in
+           assert (
+             Option.exists
+               (C.find_receipt
+                  catalog
+                  ~principal_id:unrelated_receipt.principal_id
+                  ~key:unrelated_receipt.key)
+               ~f:(A.Recurrence_command_receipt.equal unrelated_receipt))
+         in
+         with_daemon env root config Execute ~policy (fun _ daemon ->
+           assert_recovered daemon);
+         with_daemon env root config Execute ~policy (fun _ daemon ->
+           assert_recovered daemon);
+         [%test_eq: int] 0 !inference_calls));
+  print_endline
+    "real Remove, Reset and same-generation moderator retirement paused independently \
+     across restart; unrelated receipt retained";
+  [%expect
+    {| real Remove, Reset and same-generation moderator retirement paused independently across restart; unrelated receipt retained |}]
 ;;

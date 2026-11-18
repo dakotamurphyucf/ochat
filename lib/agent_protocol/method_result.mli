@@ -157,6 +157,11 @@ type t =
   | Session_work of Session_work.t Page.t
   | Session_configuration_get of Session_configuration.t
   | Session_configuration_update of Session_configuration.t
+  | Instructions of (Instruction_control.Result.t[@sexp.opaque])
+  | Goal_query of (Goal_query.Result.t[@sexp.opaque])
+  | Goal_control of (Goal_control.Result.t[@sexp.opaque])
+  | Recurrence_query of (Recurrence_query.Result.t[@sexp.opaque])
+  | Recurrence_control of (Recurrence_control.Result.t[@sexp.opaque])
   | Session_get of Snapshot.t
   | Session_inference_summary of Inference_query.Summary.t
   | Session_inference_observations of Inference_query.Response.t

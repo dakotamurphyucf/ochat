@@ -25,10 +25,11 @@ let root_invocation t =
   root_invocation_for_source ~source_kind:(source_kind t) t.definition
 ;;
 
-let matches_record t record =
-  Store.Reference.equal (Store.reference t.record) (Store.reference record)
+let matches_reference t reference =
+  Store.Reference.equal (Store.reference t.record) reference
 ;;
 
+let matches_record t record = matches_reference t (Store.reference record)
 let reservation t = t.reservation
 let definition t = t.definition
 let invalid message = Error (P.Error.invalid_request message)
@@ -107,9 +108,53 @@ let of_record (record : Store.record) =
   else invalid "captured origin differs from delegation admission"
 ;;
 
+let expected_goal_scope definition ~reservation =
+  let module Origin = Agent_store.Delegation_goal_origin in
+  let module Binding = Recurrence_definition.Goal_binding in
+  let open Result.Let_syntax in
+  let%bind () = R.validate reservation ~definition in
+  match Recurrence_definition.goal_binding definition with
+  | Unbound -> Ok None
+  | Controller_goal capture ->
+    let%bind key = R.delegation_key reservation in
+    let%bind branch =
+      Origin.Anchor.create
+        ~parent_session_id:key.parent_session_id
+        ~parent_generation:key.parent_generation
+        ~principal_id:key.principal_id
+        ~key:key.idempotency_key
+        ~child_session_id:(R.child_session_id reservation)
+        ~transaction_id:(R.transaction_id reservation)
+    in
+    let%map scope =
+      Origin.Scope.create
+        ~owner:(Binding.Capture.owner capture)
+        ~goal_id:(Binding.Capture.goal_id capture)
+        ~source:(Recurrence_definition.source definition)
+        ~creator_episode:(Binding.Capture.creator_episode capture)
+        ~branch
+    in
+    Some scope
+;;
+
+let validate_goal_binding t definition =
+  let module Origin = Agent_store.Delegation_goal_origin in
+  let open Result.Let_syntax in
+  let%bind scope = expected_goal_scope definition ~reservation:t.reservation in
+  match scope, t.record.admission.goal_origin with
+  | None, _ -> Ok ()
+  | Some _, None -> invalid "Goal-bound captured recurrence lacks its frozen lower origin"
+  | Some expected, Some origin ->
+    if List.mem (Origin.scopes origin) expected ~equal:Origin.Scope.equal
+    then Ok ()
+    else
+      invalid "captured recurrence Goal origin differs from its actual frozen definition"
+;;
+
 let validate_definition t definition =
   let open Result.Let_syntax in
   let%bind () = R.validate t.reservation ~definition in
+  let%bind () = validate_goal_binding t definition in
   let target = Recurrence_definition.target definition in
   let%bind target_definition = Recurrence_target.fresh_definition_json target in
   match Recurrence_target.view target with

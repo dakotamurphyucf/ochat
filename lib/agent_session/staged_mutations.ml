@@ -127,6 +127,12 @@ module Make (Value : Value) = struct
     |> validate ~lookup ~validate_transition
   ;;
 
+  let selected_receipts t ~owner =
+    List.rev t.entries
+    |> List.filter_map ~f:(fun entry ->
+      Option.some_if (owned entry owner && entry.selected) entry.receipt)
+  ;;
+
   let abort t ~owner ~receipt =
     match List.find t.entries ~f:(fun entry -> Int.equal entry.receipt receipt) with
     | None -> Ok ()

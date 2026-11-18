@@ -347,6 +347,16 @@ module For_testing : sig
       in seconds on the daemon's injected wall clock. The observation grants
       no polling, candidate or claim control. *)
   val job_scheduler_wait_deadline : t -> float option
+
+  (** Read-only deadline of the actual ScheduleScheduler monotonic-clock sleep,
+      after its preceding process pass returned. None outside that sleep or
+      after close. This grants no source, polling or claim control. *)
+  val schedule_scheduler_wait_deadline : t -> Mtime.t option
+
+  (** Join existing schedule deliveries and recurrence sweeps. Does not stop the
+      loop; first establish that it cannot start another pass, and bound this
+      cancellable wait. *)
+  val await_schedule_scheduler_idle : t -> unit
 end
 
 module Developer : sig
@@ -875,13 +885,27 @@ val health : t -> include_details:bool -> Agent_protocol.Health.Response.t
     authority. An unavailable root does not disable interval planning. *)
 val recurrence_zone_status : t -> Recurrence_automation_host.Zone_status.t
 
+(** Actual reported shutdown. Disposed requires the ordered scheduler/service,
+    Registry, source and Store stages to complete. A Retained Registry result
+    retains all later source/Store custody; completed diagnostics alone do not
+    block actual disposal. Original child diagnostic groups are forwarded without
+    consuming legacy delivery. Only actual full disposal sets [Stopped] and
+    caches the immutable final report. Concurrent calls share one protected
+    coordinator; successful stages do not replay after a later stage fails. *)
+val shutdown_reported : t -> Session_disposal_report.t
+
 (** Stops accepting semantic work, terminates loaded sessions, and releases
     the durable data-root lock. It is idempotent.
     Close new scheduler admission and cancel running jobs, allowing already-admitted
     timer and job-completion callbacks to finish within the configured shutdown
     grace. Grace expiry cancels runtimes normally; interrupted handler receipts
     remain non-replayable. Actor/resource cleanup always runs under cancellation
-    protection and can outlive that grace. *)
+    protection and can outlive that grace. Actual diagnostics are delivered once;
+    repeated completed shutdown succeeds while reported diagnostics remain
+    immutable. Expected daemon-stage errors return; Registry cleanup Protocol
+    failures keep their existing raised Cleanup_failed projection, and raw
+    exceptions retain their backtraces. Delivered diagnostics never make
+    retained resources successfully shut down. *)
 val shutdown : t -> (unit, Agent_protocol.Error.t) result
 
 (** Explicit trusted-host execution selection, requiring current retained principal

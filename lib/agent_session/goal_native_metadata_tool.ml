@@ -83,6 +83,21 @@ module Schema = struct
       ]
   ;;
 
+  let resume =
+    object_
+      [ "kind", constant "goal_resume_episode_v1"
+      ; "session_id", text
+      ; "generation", counter
+      ; "goal_id", text
+      ; "run_id", text
+      ; "source", source
+      ; "expected_goal_revision", counter
+      ; "expected_catalog_revision", counter
+      ; "expected_run_revision", counter
+      ; "key", text
+      ]
+  ;;
+
   let create = object_ (basis @ [ "source", source; "objective", text; "budget", budget ])
   let control kind = object_ (basis @ [ revision; "kind", constant kind; "reason", text ])
 
@@ -118,6 +133,14 @@ let limits ~max_bytes ~max_depth ~max_fields ~max_nodes =
 let get_limits = limits ~max_bytes:1024 ~max_depth:2 ~max_fields:4 ~max_nodes:8
 let mutation_limits = limits ~max_bytes:32768 ~max_depth:16 ~max_fields:128 ~max_nodes:512
 
+let resume_limits =
+  limits
+    ~max_bytes:P.Goal_resume_request.max_bytes
+    ~max_depth:P.Goal_resume_request.max_depth
+    ~max_fields:32
+    ~max_nodes:32
+;;
+
 let decode_text_exn effect_kind text =
   let limits =
     match effect_kind with
@@ -126,7 +149,8 @@ let decode_text_exn effect_kind text =
       (* This private decoder is reached only by the metadata registrations below.
          Native Start registration owns its complete input limits separately. *)
       invalid_arg "native Goal Start has no metadata registration"
-    | Create | Hold | Abandon | Objective | Progress | Resume -> mutation_limits
+    | Resume -> resume_limits
+    | Create | Hold | Abandon | Objective | Progress -> mutation_limits
   in
   Document_schema.Json.decode ~limits text
   |> Result.map_error ~f:(fun error ->
@@ -313,3 +337,19 @@ let edit effect_kind kind =
 
 let objective = edit Objective "objective"
 let progress = edit Progress "progress"
+
+let resume =
+  registration
+    Resume
+    ~parameters:Schema.resume
+    ~description:
+      "Stage continuation of this held Goal's existing episode using the exact session, \
+       generation, source, Goal/catalog/current Run revisions and stable key. Native \
+       Resume cannot clear an operator pause. Local success reports staging. The owning \
+       callback must commit and release before the schedule host can resume the Run."
+    ~run:(fun service admission json ->
+      let open Result.Let_syntax in
+      let%bind request = P.Goal_resume_request.of_json json in
+      let%map () = Service.resume service ~admission ~request in
+      staged Resume)
+;;

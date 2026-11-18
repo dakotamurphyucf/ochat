@@ -12,6 +12,7 @@ end
 module Capabilities = struct
   type event_handler =
     executing:Agent_protocol.Moderator_execution.t
+    -> policy_caller:Delegated_policy_caller.t option
     -> model_jobs:Model_job_admission.t
     -> allocate_inference:Inference_allocation.Port.t
     -> retirement_reason:string option
@@ -30,7 +31,10 @@ module Capabilities = struct
 
   type t =
     { id_source : History_entry.Id_source.t
+    ; callback_cleanup :
+        unit -> (Callback_cleanup.Operation.t, Agent_protocol.Error.t) result
     ; allocate_inference : Inference_allocation.Port.t
+    ; policy_caller : unit -> (Delegated_policy_caller.t, Agent_protocol.Error.t) result
     ; original_agent_actor :
         unit -> (Operator_authorization.t option, Agent_protocol.Error.t) result
     ; commit_entry : History_entry.t -> (unit, Agent_protocol.Error.t) result
@@ -55,7 +59,10 @@ module Capabilities = struct
             -> (Agent_protocol.Invocation.outcome, Agent_protocol.Error.t) result)
         -> (Agent_protocol.Invocation.t, Agent_protocol.Error.t) result
     ; with_moderator_invocation :
-        invocation:Agent_protocol.Invocation.t
+        ?snapshot:
+          (unit
+           -> (Session.Moderator_state.Identity_snapshot.t, Agent_protocol.Error.t) result)
+        -> invocation:Agent_protocol.Invocation.t
         -> (dispatched:Agent_protocol.Invocation.t
             -> capabilities:Invocation_capabilities.t
             -> commit:

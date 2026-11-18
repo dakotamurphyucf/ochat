@@ -3,7 +3,7 @@ module P = Agent_protocol
 module Port = Instruction_source_port
 module Command = Instruction_command
 module Request = Instruction_source_request
-module Admission = Instruction_native_admission
+module Admission = Instruction_admission
 
 let invalid message = Error (P.Error.invalid_request message)
 
@@ -38,9 +38,20 @@ let effect_kind request =
   | Remove_project | Remove_skills _ | Clear -> Deactivate
 ;;
 
-let check_now (state : Session_state.t) ~admission ~(source : Source.t option) ~request =
+let check_now_admitted
+      (state : Session_state.t)
+      ~admission
+      ~authorize_writer
+      ~(source : Source.t option)
+      ~request
+  =
   let open Result.Let_syntax in
   let%bind () = Admission.check_now admission state ~effect_kind:(effect_kind request) in
+  let%bind () =
+    match Admission.writer_attachment admission with
+    | None -> Ok ()
+    | Some attachment_id -> authorize_writer attachment_id
+  in
   if
     (not (P.Id.Session.equal (Command.session_id request) state.identity.session_id))
     || not (Int.equal (Command.generation request) state.identity.generation)
@@ -72,9 +83,9 @@ let check_now (state : Session_state.t) ~admission ~(source : Source.t option) ~
       invalid "instruction source/effect mismatch")
 ;;
 
-let prepare state ~admission ~source ~request ~now =
+let prepare_admitted state ~admission ~authorize_writer ~source ~request ~now =
   let open Result.Let_syntax in
-  let%bind () = check_now state ~admission ~source ~request in
+  let%bind () = check_now_admitted state ~admission ~authorize_writer ~source ~request in
   let previous =
     Option.value
       state.Session_state.instruction_selection
@@ -97,4 +108,29 @@ let prepare state ~admission ~source ~request ~now =
        -> invalid "fresh instruction replacement requires a genuine current capture"
      | ( (Replace_project _ | Replace_skills _ | Remove_project | Remove_skills _ | Clear)
        , _ ) -> Ok (Prepared { selection; receipt }))
+;;
+
+let native_writer _ =
+  Error
+    (P.Error.invalid_request
+       "native instruction admission cannot own a writer attachment")
+;;
+
+let check_now state ~admission ~source ~request =
+  check_now_admitted
+    state
+    ~admission:(Admission.of_native admission)
+    ~authorize_writer:native_writer
+    ~source
+    ~request
+;;
+
+let prepare state ~admission ~source ~request ~now =
+  prepare_admitted
+    state
+    ~admission:(Admission.of_native admission)
+    ~authorize_writer:native_writer
+    ~source
+    ~request
+    ~now
 ;;

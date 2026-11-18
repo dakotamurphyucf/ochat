@@ -16,6 +16,7 @@ end
 module Capabilities : sig
   type event_handler =
     executing:Agent_protocol.Moderator_execution.t
+    -> policy_caller:Delegated_policy_caller.t option
     -> model_jobs:Model_job_admission.t
     -> allocate_inference:Inference_allocation.Port.t
     -> retirement_reason:string option
@@ -34,7 +35,20 @@ module Capabilities : sig
 
   type t =
     { id_source : History_entry.Id_source.t
+    ; callback_cleanup :
+        unit -> (Callback_cleanup.Operation.t, Agent_protocol.Error.t) result
+      (** Synchronous creating-domain observation of the SAME original operation
+          receipt selected before this worker launched. Retain it before invoking
+          callbacks or terminal work. It survives current-slot replacement; this
+          grants no execution authority. Missing actual association is an error.
+          Worker cancellation/failure normalization is separate from its raw
+          terminal-handler and callback cleanup facts. *)
     ; allocate_inference : Inference_allocation.Port.t
+    ; policy_caller : unit -> (Delegated_policy_caller.t, Agent_protocol.Error.t) result
+      (** Factual transport tied to this SAME actual operation, not an admission.
+          The preparation host closes its view after use. Currentness/original
+          checks occur at use; unavailable custody stays an error, distinct from
+          a genuine admitted None original. No ambient-owner fallback. *)
     ; original_agent_actor :
         unit -> (Operator_authorization.t option, Agent_protocol.Error.t) result
       (** Checked host-only borrow from this exact admitted operation, not a
@@ -69,7 +83,11 @@ module Capabilities : sig
           Does not execute handlers or post-tool observations. *)
     ; commit_moderator : Jsonaf.t option -> (unit, Agent_protocol.Error.t) result
       (** Checkpoint committed moderator state for this active operation.
-            Identical snapshots are no-ops; stale/cancelled workers are rejected. *)
+          Identical snapshots are no-ops; stale/cancelled workers are rejected.
+          Checkpointing prepopulated queued values does not establish their producer
+          provenance. Execute events through [with_moderator_event] to retain the
+          emitted entries' actual ancestry; existing nonstructural receipt framing
+          is unchanged. *)
     ; with_invocation :
         invocation:Agent_protocol.Invocation.t
         -> (dispatched:Agent_protocol.Invocation.t
@@ -88,7 +106,10 @@ module Capabilities : sig
           for worker/restart cleanup, never retries external work. The host must
           recheck current capability, policy and disclosure in the callback. *)
     ; with_moderator_invocation :
-        invocation:Agent_protocol.Invocation.t
+        ?snapshot:
+          (unit
+           -> (Session.Moderator_state.Identity_snapshot.t, Agent_protocol.Error.t) result)
+        -> invocation:Agent_protocol.Invocation.t
         -> (dispatched:Agent_protocol.Invocation.t
             -> capabilities:Invocation_capabilities.t
             -> commit:
@@ -100,7 +121,13 @@ module Capabilities : sig
       (** Scoped exclusive moderator handoff for an already authorized call.
           Atomically admits/dispatches the invocation, or dispatches an exact
           previously saved model-call intent, then runs the callback outside the
-          actor. [commit] saves the resolution and proposed snapshot
+          actor. Actual Manager-backed callers supply [snapshot]; the handoff
+          captures it once before admission under moderator serialization, outside
+          the mailbox. It must match a persisted checkpoint when present. The
+          capture supplies DATA, not original authorization or Manager installation.
+          Without capture and without a prior checkpoint, the trusted DATA-only
+          first completion retains unavailable queue provenance. Capture errors
+          never downgrade to that compatibility path. [commit] saves the resolution and proposed snapshot
           together before returning; call it from the manager's preparation hook.
           Successful preparation must be followed immediately by infallible,
           non-yielding runtime installation. The borrow remains held until the
@@ -220,6 +247,13 @@ module Summary : sig
     { final_history : History_entry.t list
     ; runtime_requests : Chat_response.Moderation.Runtime_request.t list
     ; moderator_snapshot : Jsonaf.t option
+      (** Optional terminal checkpoint supplied by this worker. [None] preserves
+          the Actor's current acknowledged checkpoint and installed source.
+          [Some checkpoint] retains ordinary ownership, source and complete
+          checkpoint preservation checks; an unchanged bare Manager projection
+          may confirm the retained full carrier. Explicit mutations/removal use
+          [Capabilities.commit_moderator] while running, whose [None] retains
+          its mutation semantics and existing guards. *)
     }
 end
 

@@ -17,6 +17,7 @@ module Model = struct
     | Paused Controller_stop -> Stopped
     | Paused Source_review -> Source
     | Paused Recovery_review -> failwith "unexpected recovery hold"
+    | Paused (Target_invalidated _) -> failwith "bulk-control model never changes targets"
     | Retired _ -> Retired
   ;;
 

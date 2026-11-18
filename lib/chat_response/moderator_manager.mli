@@ -302,6 +302,13 @@ val handle_event_entries
     is required and scoped to this execution, with no legacy callback fallback.
     It must enforce current capabilities, policy and durable child ownership.
 
+    Ordinary host observations are projected under this manager's live execution
+    control, including inherited budgets. A trusted host [execution_policy] may
+    admit a larger observation than the source declaration permits as retained
+    state or callee input/output. Those declaration limits still apply at their
+    respective boundaries. Internal events and queued-event copies retain their
+    existing JSON and declaration bounds.
+
     Local outcome validation precedes [prepare_event], which receives the complete
     prospective state, queued events, halt and identity overlay. The host validates
     its handoff and returns a [prepared_commit] without saving yet. The manager
@@ -445,6 +452,9 @@ val handle_invocation_entries
 
 (** Deliver a source-bound, already claimed nested outcome through Tool_observed.
     It has no provider call ID and cannot resolve the original invocation again.
+    The complete observation envelope uses the live observer execution control,
+    including inherited budgets; the source's retained-state and callee limits
+    remain separate and unchanged.
     The host must hold the exclusive actor borrow and persist [observed] with the
     prospective snapshot using the deferred commit returned by
     [prepare_observation]. Job/subscription selection and the final budget check precede its

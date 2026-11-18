@@ -1,4 +1,5 @@
 open! Core
+module Policy_source = Policy_standalone_source.Classification
 
 module Row = struct
   type t =
@@ -6,10 +7,12 @@ module Row = struct
     ; source : Agent_protocol.Run_source.t
     ; entry : Moderator_queue.Entry.t
     ; continuation : Execution_custody.Continuation.t
+    ; policy_source : Policy_source.t
     }
 
   let transfer t = Execution_custody.Continuation.transfer t.continuation
   let check t = Execution_custody.Continuation.check t.continuation
+  let policy_source t = t.policy_source
 end
 
 type t = Row.t list
@@ -68,7 +71,7 @@ let without t ~selected =
 
 (* On a partial staging failure every speculative loan is closed. The caller
    owns successful loans until it installs them or closes them before ACK. *)
-let stage ~manager ~source ~entries ~parent =
+let stage_continuations ~manager ~source ~entries ~transfer =
   let staged = ref [] in
   let complete = ref false in
   Exn.protect
@@ -77,13 +80,29 @@ let stage ~manager ~source ~entries ~parent =
       let open Result.Let_syntax in
       let%map () =
         List.fold_result entries ~init:() ~f:(fun () entry ->
-          let%map admission = Execution_custody.Admission.transfer parent in
+          let%map continuation = transfer () in
           staged
-          := ({ manager; source; entry; continuation = Current admission } : Row.t)
+          := ({ manager; source; entry; continuation; policy_source = Unknown } : Row.t)
              :: !staged)
       in
       complete := true;
       List.rev !staged)
+;;
+
+let stage ~manager ~source ~entries ~parent =
+  stage_continuations ~manager ~source ~entries ~transfer:(fun () ->
+    Result.map (Execution_custody.Admission.transfer parent) ~f:(fun admission ->
+      Execution_custody.Continuation.Current admission))
+;;
+
+let stage_completed ~manager ~source ~entries ~parent =
+  stage_continuations ~manager ~source ~entries ~transfer:(fun () ->
+    Execution_custody.Continuation.transfer_completed parent)
+;;
+
+let stage_expired ~manager ~source ~entries =
+  List.map entries ~f:(fun entry ->
+    ({ manager; source; entry; continuation = Expired; policy_source = Unknown } : Row.t))
 ;;
 
 let candidate t ~manager ~metadata ~staged =
@@ -105,9 +124,72 @@ let candidate t ~manager ~metadata ~staged =
 
 (* Takes custody of the already staged completed-producer loan. No decoded
    producer/Entry or manager identity creates the supplied continuation. *)
-let stage_delivery ~manager ~source ~entry ~continuation =
-  [ ({ manager; source; entry; continuation } : Row.t) ]
+let stage_delivery ~manager ~source ~entry ~continuation ~policy_source =
+  [ ({ manager; source; entry; continuation; policy_source } : Row.t) ]
 ;;
+
+module Update = struct
+  module Phase = struct
+    type t =
+      | Staged
+      | Installed
+      | Discarded
+  end
+
+  type inventory = t
+
+  type t =
+    { basis : inventory
+    ; incoming : inventory
+    ; staged : inventory
+    ; mutable phase : Phase.t
+    }
+
+  let prepare current ~manager ~metadata ~staged =
+    let candidate =
+      if
+        List.equal
+          phys_equal
+          staged
+          (matching staged ~manager:(Some manager) ~metadata:(Some metadata))
+      then candidate current ~manager ~metadata ~staged
+      else
+        Error
+          (Agent_protocol.Error.invalid_request
+             "external delivery staged custody differs from its actual queue")
+    in
+    match candidate with
+    | Ok incoming -> Ok { basis = current; incoming; staged; phase = Staged }
+    | Error error ->
+      retire staged;
+      Error error
+  ;;
+
+  let check_basis t ~current =
+    match t.phase with
+    | Staged when phys_equal current t.basis -> Ok ()
+    | Staged | Installed | Discarded ->
+      Error
+        (Agent_protocol.Error.create
+           Conflict
+           ~message:"external delivery queue custody changed before ACK"
+           ~retryable:false
+           ())
+  ;;
+
+  let discard t =
+    match t.phase with
+    | Installed | Discarded -> ()
+    | Staged ->
+      t.phase <- Discarded;
+      retire t.staged
+  ;;
+
+  let install t =
+    t.phase <- Installed;
+    install t.basis ~incoming:t.incoming
+  ;;
+end
 
 let validate_constructor_handoff t ~manager ~source ~ordinals =
   if

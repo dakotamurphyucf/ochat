@@ -50,15 +50,29 @@ let probe_codec =
     ~encode:(fun j -> Ok j)
 ;;
 
-let probe_raw t ~ordinal =
+let probe_from_current t current ~ordinal =
   let open Result.Let_syntax in
-  let%bind original = D.Domain_codec.encode codec t in
-  let%bind carrier = D.Domain_codec.decode probe_codec original in
+  let%bind carrier = D.Domain_codec.decode probe_codec current in
   let raw = S.retirement_projection (stored t) ~ordinal in
   D.Domain_codec.encode probe_codec (C.with_value carrier raw)
 ;;
 
-let probe t ~ordinal = probe_raw t ~ordinal |> domain
+let probe_raw t ~ordinal =
+  let open Result.Let_syntax in
+  let%bind current = D.Domain_codec.encode codec t in
+  probe_from_current t current ~ordinal
+;;
+
+let growth_from_current t current =
+  if List.is_empty (S.ordinals (stored t))
+  then Ok Capacity_growth.zero
+  else
+    let open Result.Let_syntax in
+    let%bind future = probe_from_current t current ~ordinal:None |> domain in
+    let%bind before = Capacity_growth.measure (D.Document.json current) ~limits in
+    let%map after = Capacity_growth.measure (D.Document.json future) ~limits in
+    Capacity_growth.positive_difference after ~previous:before
+;;
 
 let reserved_growth t =
   if List.is_empty (S.ordinals (stored t))
@@ -66,19 +80,41 @@ let reserved_growth t =
   else
     let open Result.Let_syntax in
     let%bind current = D.Domain_codec.encode codec t |> domain in
-    let%bind future = probe t ~ordinal:None in
-    let%bind before = Capacity_growth.measure (D.Document.json current) ~limits in
-    let%map after = Capacity_growth.measure (D.Document.json future) ~limits in
-    Capacity_growth.positive_difference after ~previous:before
+    growth_from_current t current
+;;
+
+let validate_capacity_with_growth document growth =
+  let open Result.Let_syntax in
+  let%bind remaining = Capacity_growth.remaining_limits growth limits in
+  D.Document.validate document ~limits:remaining |> domain
 ;;
 
 let validate_capacity t =
   let open Result.Let_syntax in
   let%bind document = D.Domain_codec.encode codec t |> domain in
-  let%bind growth = reserved_growth t in
-  let%bind remaining = Capacity_growth.remaining_limits growth limits in
-  D.Document.validate document ~limits:remaining |> domain
+  let%bind growth = growth_from_current t document in
+  validate_capacity_with_growth document growth
 ;;
+
+module Export = struct
+  type source = t
+
+  type t =
+    { document : D.Document.t
+    ; growth : Capacity_growth.t
+    }
+
+  let prepare source =
+    let open Result.Let_syntax in
+    let%bind document = D.Domain_codec.encode codec source |> domain in
+    let%bind growth = growth_from_current source document in
+    let%map () = validate_capacity_with_growth document growth in
+    { document; growth }
+  ;;
+
+  let document t = t.document
+  let reserved_growth t = t.growth
+end
 
 let of_document document =
   let open Result.Let_syntax in
@@ -87,11 +123,7 @@ let of_document document =
   t
 ;;
 
-let to_document t =
-  let open Result.Let_syntax in
-  let%bind () = validate_capacity t in
-  D.Domain_codec.encode codec t |> domain
-;;
+let to_document t = Result.map (Export.prepare t) ~f:Export.document
 
 let create goal ~ledger =
   let open Result.Let_syntax in

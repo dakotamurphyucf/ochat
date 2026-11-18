@@ -623,11 +623,13 @@ let on_event ctx state event = match event with
                   String.is_substring (rendered second) ~substring:"specialist-count-12");
                 let saved = runtime.start_moderator () |> protocol_ok in
                 let fresh = build () |> protocol_ok in
-                Exn.protect ~finally:fresh.close ~f:(fun () ->
-                  [%test_eq: int] 0 (count fresh));
+                Exn.protect
+                  ~finally:(fun () -> B.close fresh)
+                  ~f:(fun () -> [%test_eq: int] 0 (count fresh));
                 let restored = build ~snapshot:saved () |> protocol_ok in
-                Exn.protect ~finally:restored.close ~f:(fun () ->
-                  [%test_eq: int] 12 (count restored));
+                Exn.protect
+                  ~finally:(fun () -> B.close restored)
+                  ~f:(fun () -> [%test_eq: int] 12 (count restored));
                 [%test_eq: int] 4 !requests;
                 save "data/value.txt" "must-not-be-disclosed-after-revocation";
                 revoke_during_read := true;

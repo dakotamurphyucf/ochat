@@ -326,6 +326,48 @@ type t =
   ; mutable closed : bool
   }
 
+module Command_receipts = struct
+  type store = t
+
+  type t =
+    { owner : store
+    ; cache : Idempotency_store.t
+    }
+
+  let open_or_create owner =
+    let open Result.Let_syntax in
+    if owner.closed
+    then Error (Store_error.Corrupt "command receipt Store owner is closed")
+    else (
+      let%map cache =
+        Idempotency_store.open_or_create
+          ~env:owner.env
+          ~path:(Filename.concat (Data_root.indexes_path owner.root) "idempotency.sexp")
+      in
+      { owner; cache })
+  ;;
+
+  let cache t = t.cache
+
+  module Removal = struct
+    type t =
+      { owner : store
+      ; fact : Idempotency_store.Removal.t
+      }
+
+    let fact t = t.fact
+    let belongs_to t owner = phys_equal t.owner owner && not owner.closed
+  end
+
+  let removal t ~session_id =
+    if t.owner.closed
+    then None
+    else
+      Option.map (Idempotency_store.removal t.cache ~session_id) ~f:(fun fact ->
+        { Removal.owner = t.owner; fact })
+  ;;
+end
+
 let owns_handle t handle = phys_equal t.owner_token handle.Handle.store_owner
 
 let check_handle t handle =
@@ -608,15 +650,20 @@ let require_kind ~env path expected =
   let actual = Eio.Path.kind ~follow:false Eio.Path.(Eio.Stdenv.fs env / path) in
   match actual, expected with
   | `Directory, `Directory | `Regular_file, `Regular_file -> Ok ()
+  | (`Directory | `Not_found), `Optional_directory -> Ok ()
   | _ -> Error (Store_error.Corrupt ("invalid session layout path: " ^ path))
 ;;
 
-let validate_layout ~env directory =
+let validate_layout ?(workspace_kind = `Directory) ~env directory =
   let open Result.Let_syntax in
+  let workspace = Filename.concat directory "workspace" in
   let%bind () =
     Result.all_unit
       (List.map (directory :: session_directories directory) ~f:(fun path ->
-         require_kind ~env path `Directory))
+         let expected =
+           if String.equal path workspace then workspace_kind else `Directory
+         in
+         require_kind ~env path expected))
   in
   require_kind ~env (metadata_path directory) `Regular_file
 ;;
@@ -727,13 +774,24 @@ let project_lifecycle entry document =
     Session_index.Entry.with_lifecycle entry lifecycle |> Result.map ~f:Option.some
 ;;
 
+let is_terminal_removal document =
+  let module R = Session_archive_record in
+  R.Status.equal (R.status (Session_archive_document.value document)) Removed
+;;
+
 let recover_index_entry ~env sessions_directory name =
   let open Result.Let_syntax in
   let directory = Filename.concat sessions_directory name in
-  let%bind () = validate_layout ~env directory in
+  let%bind () = require_kind ~env directory `Directory in
   let%bind metadata = load_metadata_at ~env (metadata_path directory) in
   let%bind () = validate_metadata ~require_durable:true name metadata in
   let%bind document = archive_carrier ~env directory metadata.session.id in
+  let workspace_kind =
+    if Option.exists document ~f:is_terminal_removal
+    then `Optional_directory
+    else `Directory
+  in
+  let%bind () = validate_layout ~workspace_kind ~env directory in
   match document with
   | None -> Ok (Some (index_entry metadata))
   | Some document -> project_lifecycle (index_entry metadata) document
@@ -1877,7 +1935,16 @@ let open_removal t ~sw ~actor_lock_nonce session_id =
         }
     | None ->
       let directory = Data_root.session_path t.root session_id in
-      let%bind () = validate_layout ~env:t.env directory in
+      let%bind () = require_kind ~env:t.env directory `Directory in
+      let%bind document = archive_carrier ~env:t.env directory session_id in
+      let%bind () =
+        if Option.exists document ~f:is_terminal_removal
+        then Ok ()
+        else Error (Store_error.Corrupt "removal namespace lacks terminal authority")
+      in
+      let%bind () =
+        validate_layout ~workspace_kind:`Optional_directory ~env:t.env directory
+      in
       let%bind metadata = load_metadata_at ~env:t.env (metadata_path directory) in
       let%bind () =
         validate_metadata (Agent_protocol.Id.Session.to_string session_id) metadata

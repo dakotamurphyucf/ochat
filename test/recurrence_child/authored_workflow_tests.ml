@@ -451,5 +451,5 @@ let on_event ctx state event = Task.pure(state)
                            assert (Owner.is_loaded child.runtime);
                            (* Closing the fixture may then interrupt this live
                                Workflow; no Finish or terminal receipt is invented. *)
-                           child.close ()))))))))
+                           Agent_server.Session_registry.close_entry child))))))))
 ;;

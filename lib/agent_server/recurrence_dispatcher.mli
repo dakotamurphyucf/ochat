@@ -13,7 +13,8 @@ val create
 (** Scan at most 32 distinct occurrence candidates from a rotating immutable-key
     cursor. Reconcile each pending occurrence before any retry of that occurrence;
     a nonterminal, absent, busy or denied row does not starve independent targets.
-    At most one activation/retry action occurs per pass. Only the actual completed
+    At most one activation, retry or verified target pause occurs per pass.
+    Only the actual completed
     Factory envelope supplies live NoEffects or frozen Retry custody; recovered
     rows reconcile without replay. Unreadable historical occupancy conservatively defers local new work.
 

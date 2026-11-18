@@ -134,5 +134,5 @@ let%expect_test "organization and content revision conversions compose in order"
       , (Result.is_error
            (A.Session_state_document.decode (document 7) ~limits:document_limits)
          : bool)]);
-  [%expect {| (12 true true true true true true) |}]
+  [%expect {| (14 true true true true true true) |}]
 ;;

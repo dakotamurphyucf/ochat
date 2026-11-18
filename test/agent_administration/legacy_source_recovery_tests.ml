@@ -108,7 +108,12 @@ let%expect_test
                           })
                    with
                    | Error error ->
-                     assert (P.Error.equal_code error.code Migration_required)
+                     if not (P.Error.equal_code error.code Migration_required)
+                     then
+                       raise_s
+                         [%sexp
+                           "expected migration-required start rejection"
+                         , (error : P.Error.t)]
                    | Ok _ -> failwith "old checkpoint started");
                   assert (!constructor_calls = 0);
                   assert (!provider_calls = 0);
@@ -151,11 +156,15 @@ let%expect_test
                   in
                   match preservation, declared_child, rebuild with
                   | Protected_unknown, _, Error failure ->
-                    assert (P.Error.equal_code failure.code Persistence_error);
+                    if not (P.Error.equal_code failure.code Invalid_state)
+                    then
+                      raise_s
+                        [%sexp
+                          "expected protected-checkpoint native rejection"
+                        , (failure : P.Error.t)];
                     let expected =
-                      Agent_store.Store_error.Document
-                        (D.Error.Extension_conflict [ "payload"; "moderator" ])
-                      |> Agent_store.Store_error.sexp_of_t
+                      D.Error.Extension_conflict [ "payload"; "checkpoint" ]
+                      |> D.Error.sexp_of_t
                     in
                     assert (Sexp.equal (Sexp.of_string failure.message) expected);
                     let after = A.state entry.actor |> ok in

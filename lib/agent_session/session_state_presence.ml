@@ -15,6 +15,8 @@ type t =
   ; delegated_usage_absent : bool
   ; child_contributions_absent : bool
   ; goal_descendants_absent : bool
+  ; policy_canonical_usage_absent : bool
+  ; goal_policy_contributions_absent : bool
   ; instruction_selection_absent : bool
   ; recurrence_catalog_absent : bool
   ; delivery_bindings : bool Map.M(Delivery_id).t
@@ -27,6 +29,8 @@ let authored =
   ; delegated_usage_absent = false
   ; child_contributions_absent = false
   ; goal_descendants_absent = false
+  ; policy_canonical_usage_absent = true
+  ; goal_policy_contributions_absent = true
   ; instruction_selection_absent = false
   ; recurrence_catalog_absent = false
   ; delivery_bindings = Map.empty (module Delivery_id)
@@ -39,6 +43,8 @@ let goal_accounts_is_absent t = t.goal_accounts_absent
 let delegated_usage_is_absent t = t.delegated_usage_absent
 let child_contributions_is_absent t = t.child_contributions_absent
 let goal_descendants_is_absent t = t.goal_descendants_absent
+let policy_canonical_usage_is_absent t = t.policy_canonical_usage_absent
+let goal_policy_contributions_is_absent t = t.goal_policy_contributions_absent
 let instruction_selection_is_absent t = t.instruction_selection_absent
 let recurrence_catalog_is_absent t = t.recurrence_catalog_absent
 
@@ -93,6 +99,16 @@ let of_document document ~limits =
     | Absent -> true
     | Null | Value _ -> false
   in
+  let policy_canonical_usage_absent =
+    match D.Json.field payload ~name:"policy_canonical_usage" with
+    | Absent -> true
+    | Null | Value _ -> false
+  in
+  let goal_policy_contributions_absent =
+    match D.Json.field payload ~name:"goal_policy_contributions" with
+    | Absent -> true
+    | Null | Value _ -> false
+  in
   let recurrence_catalog_absent =
     match D.Json.field payload ~name:"recurrence_catalog" with
     | Absent -> true
@@ -138,6 +154,8 @@ let of_document document ~limits =
   ; delegated_usage_absent
   ; child_contributions_absent
   ; goal_descendants_absent
+  ; policy_canonical_usage_absent
+  ; goal_policy_contributions_absent
   ; instruction_selection_absent
   ; recurrence_catalog_absent
   ; delivery_bindings

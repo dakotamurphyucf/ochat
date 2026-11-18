@@ -44,7 +44,17 @@ let native_complete test_root =
              Actor.stage_native_goal_resume entry.actor ~admission ~authorize ~request)
        in
        assert (Result.is_error result);
-       let primary = Option.value_exn !native_failure in
+       let primary =
+         match !native_failure, result with
+         | Some failure, _ -> failure
+         | None, Error failure ->
+           raise_s
+             [%sexp
+               "callback failed before native Complete"
+             , (failure.code : P.Error.code)
+             , (failure.message : string)]
+         | None, Ok _ -> failwith "native Complete fault did not run"
+       in
        [%test_eq: P.Error.code] Persistence_error primary.code;
        let transaction : Agent_store.Transaction.t = Fault.await fault in
        [%test_eq: int] 1 fault.hits;
@@ -87,5 +97,34 @@ let () =
     Legacy_idle_completion_fault_tests.run_child root
   | [ _; root; "legacy-idle-compaction-unknown" ] ->
     Legacy_idle_completion_fault_tests.run_compaction_child root
+  | [ _; root; "root-confirmation-before-sync" ] ->
+    Descendant_root_confirmation_fault_tests.run_child
+      Descendant_root_confirmation_fault_tests.Boundary.Before_sync
+      root
+  | [ _; root; "root-confirmation-after-sync" ] ->
+    Descendant_root_confirmation_fault_tests.run_child
+      Descendant_root_confirmation_fault_tests.Boundary.After_sync
+      root
+  | [ _; root; "constructor-model-claim-publication" ] ->
+    Constructor_model_fault_tests.run_claim_publication_child root
+  | [ _; root; "constructor-model-terminal-unknown" ] ->
+    Constructor_model_fault_tests.run_terminal_child root
+  | [ _; root; "goal-finish-checkpoint-unknown" ] -> Goal_finish_tests.run_child root
+  | [ _; root; "callback-terminal-writer-unknown" ] ->
+    Callback_retirement_fault_tests.run_child root
+  | [ _; root; "callback-cancelled-publication" ] ->
+    Callback_retirement_fault_tests.run_cancelled_publication_child root
+  | [ _; root; "delegated-policy-canonical-unknown" ] ->
+    Delegated_policy_model_fault_tests.run_child root
+  | [ _; root; "delegated-parent-claim-unknown" ] ->
+    Delegated_policy_claim_fault_tests.run_child root
+  | [ _; root; "unmoderated-configuration-unknown" ] ->
+    Runtime_unmoderated_source_fault_tests.run_child
+      Runtime_unmoderated_source_fault_tests.Boundary.Writer_unknown
+      root
+  | [ _; root; "unmoderated-configuration-publication" ] ->
+    Runtime_unmoderated_source_fault_tests.run_child
+      Runtime_unmoderated_source_fault_tests.Boundary.Publication
+      root
   | _ -> failwith "native fault child requires its parent-owned root and closed mode"
 ;;

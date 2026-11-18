@@ -59,9 +59,22 @@ let%expect_test
                  })))
        |> protocol_ok;
        let request () =
-         A.change_moderator actor (Some (Setup.encode Setup.before))
-         |> protocol_ok
-         |> ignore;
+         let current = A.state actor |> protocol_ok in
+         let checkpoint =
+           match current.moderator with
+           | None -> Setup.encode Setup.before
+           | Some raw ->
+             let checkpoint =
+               Agent_session.Moderator_checkpoint.of_jsonaf raw |> protocol_ok
+             in
+             Agent_session.Moderator_checkpoint.update
+               checkpoint
+               ~snapshot:Setup.before
+               ~queue:Keep
+             |> protocol_ok
+             |> Agent_session.Moderator_checkpoint.to_jsonaf
+         in
+         A.change_moderator actor (Some checkpoint) |> protocol_ok |> ignore;
          let parent = Job_fixtures.add_claimed_job actor in
          let event_id = ref None in
          Schedule_transaction_tests.with_event actor parent (fun owner commit ->

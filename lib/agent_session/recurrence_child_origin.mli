@@ -40,6 +40,11 @@ val source_kind : t -> Agent_store.Captured_source_kind.t
     resolves a current record nor grants runtime authority. *)
 val matches_record : t -> Agent_store.Delegation_store.record -> bool
 
+(** Same complete immutable locator comparison without resolving a record.
+    Used to bind an actual captured authored specialist to its existing private
+    preparation authority. Reservation/origin DATA is not current permission. *)
+val matches_reference : t -> Agent_store.Delegation_store.Reference.t -> bool
+
 (** Actual child root family derived from this origin's validated source kind.
     The retained defining metadata remains the original parent provenance. *)
 val root_invocation
@@ -47,13 +52,21 @@ val root_invocation
   -> Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.t
 
 (** Validate against an actual full controller definition supplied by its owner:
-    exact reservation/target, source kind and original Prompt_definition. Neither
+    exact reservation/target, source kind, original Prompt_definition and bound
+    local Goal scope in the actual lower admission. Neither
     this comparison nor of_record authenticates that definition or grants effects.
     of_record alone cannot compare to a full definition it does not retain. *)
 val validate_definition
   :  t
   -> Recurrence_definition.t
   -> (unit, Agent_protocol.Error.t) result
+
+(** Derive the exact local Goal scope from the validated frozen reservation.
+    This carries no process-local original, effect or freshness authority. *)
+val expected_goal_scope
+  :  Recurrence_definition.t
+  -> reservation:Recurrence_child_reservation.t
+  -> (Agent_store.Delegation_goal_origin.Scope.t option, Agent_protocol.Error.t) result
 
 val reservation : t -> Recurrence_child_reservation.t
 val definition : t -> Prompt_definition.t

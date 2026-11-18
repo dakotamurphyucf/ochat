@@ -17,7 +17,13 @@ let field json name = Jsonaf.member_exn name json
 let text json name = field json name |> Jsonaf.string_exn
 
 let state daemon id =
-  let entry = R.load (D.registry daemon) id |> protocol_ok in
+  let registry = D.registry daemon in
+  (* Observing the canonical actor does not acquire a new lifecycle reservation. *)
+  let entry =
+    match R.find registry id with
+    | Some entry -> entry
+    | None -> R.load registry id |> protocol_ok
+  in
   A.state entry.actor |> protocol_ok
 ;;
 
@@ -169,7 +175,7 @@ let assert_authored_source env daemon id =
                  (Agent_session.Prompt_revision.artifact revision).root_chatmd
                  ~substring:"AUTHORED_SPECIALIST");
              Ok ()
-           | Authored _ | Captured _ | Generated _ ->
+           | Authored _ | Captured _ | Generated _ | Generated_artifact _ ->
              failwith "authored child source was reclassified")
       |> protocol_ok);
   assert (

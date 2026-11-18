@@ -431,6 +431,7 @@ let%expect_test
           { closed with
             goal_accounts = initial.goal_accounts
           ; goal_descendants = initial.goal_descendants
+          ; goal_policy_contributions = initial.goal_policy_contributions
           }
         in
         List.iter
@@ -657,6 +658,41 @@ let%test_unit "descendant roots require their actual ordered Create and retained
     let initial = A.Session_actor.state actor |> protocol_ok in
     let held, creation = create initial ~session goal_id "descendant-boundary-create" in
     let descendants = Option.value_exn held.goal_descendants in
+    (* Native27 already supports positive descendant/Headless data. Its upgrade
+       must insert only an absent causal component, not rerun older feature guards.
+       Actual envelope key/version assertions keep the old-label oracle honest. *)
+    let native =
+      { held with
+        schema_version = 27
+      ; policy_canonical_usage = None
+      ; goal_policy_contributions = None
+      }
+    in
+    [%test_eq: int] 27 native.schema_version;
+    let restored = A.Session_state.upgrade_schema native |> protocol_ok in
+    [%test_eq: int] 29 restored.schema_version;
+    assert (Option.is_none restored.policy_canonical_usage);
+    assert (D.Json.equal (descendants_json held) (descendants_json restored));
+    let universal =
+      SD.authored { held with goal_policy_contributions = None }
+      |> fun t -> SD.encode t ~limits:document_limits |> document_ok |> D.Document.json
+    in
+    assert (D.Json.equal (`Number "14") (member universal "schema_version"));
+    let old = set universal "schema_version" (`Number "12") in
+    let old = D.Document.inspect old ~limits:document_limits |> document_ok in
+    [%test_eq: int] 12 (D.Document.version old);
+    let restored = SD.decode old ~limits:document_limits |> document_ok |> SD.value in
+    assert (Option.is_none restored.policy_canonical_usage);
+    assert (D.Json.equal (descendants_json held) (descendants_json restored));
+    let old = D.Document.json old in
+    let positive =
+      set old "payload" (set (member old "payload") "policy_canonical_usage" (`Object []))
+    in
+    assert (
+      Result.is_error
+        (D.Document.inspect positive ~limits:document_limits
+         |> document_ok
+         |> SD.decode ~limits:document_limits));
     assert (Option.is_none (Descendants.origin descendants));
     assert (
       Descendants.Profile.equal goal_descendant_profile (Descendants.profile descendants));
@@ -856,11 +892,12 @@ let%test_unit "descendant roots require their actual ordered Create and retained
       let old =
         set raw "payload" payload
         |> fun raw ->
-        set raw "version" (`Number "11")
+        set raw "schema_version" (`Number "11")
         |> D.Document.inspect ~limits:document_limits
         |> document_ok
-        |> SD.decode ~limits:document_limits
-        |> document_ok
+        |> fun document ->
+        [%test_eq: int] (D.Document.version document) 11;
+        SD.decode ~limits:document_limits document |> document_ok
       in
       assert (Option.is_none (SD.value old).goal_descendants);
       let delta = A.Session_delta.Halt_changed (Some "unrelated historical write") in
@@ -881,4 +918,607 @@ let%test_unit "descendant roots require their actual ordered Create and retained
       | Null -> assert explicit_null
       | Absent -> assert (not explicit_null)
       | Value _ -> failwith "historical write invented descendant accounting"))
+;;
+
+let%test_unit "ordinary absent policy accounting adds no causal birth-window limit" =
+  with_actor_workspace (fun _env workspace_instance ->
+    let initial =
+      actor_state ~workspace_instance ~liveness:Detached ~start_immediately:false
+    in
+    let executions =
+      List.init 1025 ~f:(fun index ->
+        let context : P.Moderator_execution.context =
+          { id =
+              P.Id.Moderator_execution.of_string ("mex_absent_" ^ Int.to_string index)
+              |> protocol_ok
+          ; session_id = initial.identity.session_id
+          ; generation = initial.identity.generation
+          ; source = { script_id = "ordinary-absent"; source_sha256 = String.make 64 'a' }
+          ; operation_id = None
+          ; job = None
+          ; phase = Internal_event
+          ; event = `Null
+          ; checkpoint_sha256 = String.make 64 'b'
+          ; created_at = timestamp
+          }
+        in
+        P.Moderator_execution.create context |> protocol_ok)
+    in
+    let delta =
+      A.Session_delta.Batch
+        (List.concat_map executions ~f:(fun receipt ->
+           let completed =
+             P.Moderator_execution.complete
+               receipt
+               ~checkpoint_sha256:receipt.context.checkpoint_sha256
+               ~requests:
+                 { request_turn = false; request_compaction = false; end_session = None }
+             |> protocol_ok
+           in
+           (* Preserve the existing one-running-callback invariant while exercising
+              more births than the optional causal cursor's window. *)
+           [ A.Session_delta.Moderator_execution_changed receipt
+           ; Moderator_execution_changed completed
+           ]))
+    in
+    assert (
+      not
+        (A.Session_delta.requires_policy_tracking
+           delta
+           ~previous:initial.policy_canonical_usage));
+    let transition =
+      A.Session_transition.apply ~now:timestamp initial ~delta ~payloads:[] |> protocol_ok
+    in
+    [%test_eq: int] 1025 (List.length transition.state.moderator_executions);
+    assert (Option.is_none transition.state.policy_canonical_usage);
+    let admitted =
+      A.Session_document_transition.admit_encoded
+        (SD.authored initial)
+        ~delta
+        ~next:transition.state
+        ~limits:document_limits
+      |> document_ok
+      |> SD.Admitted.state_document
+    in
+    let final = SD.value admitted in
+    [%test_eq: int] 1025 (List.length final.moderator_executions);
+    assert (Option.is_none final.policy_canonical_usage);
+    assert (
+      List.equal
+        P.Moderator_execution.equal
+        transition.state.moderator_executions
+        final.moderator_executions))
+;;
+
+let%test_unit "ordered policy seed uses current native and universal reader fences" =
+  Run_admission_tests.with_startup_actor (fun actor _ _ _ _ _ _ session _ ->
+    let module PC = A.Policy_canonical_usage in
+    let module Cause = A.Policy_cause_data in
+    let initial = A.Session_actor.state actor |> protocol_ok in
+    let index, source = A.Goal_catalog_source.capture initial |> protocol_ok in
+    let before = A.Session_delta.apply initial (Run_state_changed index) |> protocol_ok in
+    let child_id = P.Id.Session.of_string "ses_policy_codec_child" |> protocol_ok in
+    let caller =
+      P.Session_ref.create
+        ~session_id:child_id
+        ~server_id:(P.Session_ref.server_id session)
+    in
+    let caller_source =
+      P.Run_source.create
+        ~observer:{ script_id = "policy-codec-child"; source_sha256 = String.make 64 'c' }
+        ~generation:0
+        ~installation_epoch:1L
+      |> protocol_ok
+    in
+    (* Validated lower Reference DATA is not runtime ancestry or permission. The
+       empty governance vector is deliberate: this case qualifies storage, while
+       pure subset trajectories independently prove actual Goal attribution. *)
+    let reference =
+      Store.Delegation_store.reference_of_jsonaf
+        (`Object
+            [ ( "key"
+              , `Object
+                  [ "parent_session_id", P.Id.Session.to_json initial.identity.session_id
+                  ; ( "parent_generation"
+                    , `Number (Int.to_string initial.identity.generation) )
+                  ; "principal_id", P.Id.Principal.to_json principal_id
+                  ; "idempotency_key", `String "policy-codec"
+                  ] )
+            ; "child_session_id", P.Id.Session.to_json child_id
+            ; "revision_id", `String "prv_policy_codec"
+            ; "request_sha256", `String (String.make 64 'a')
+            ; "admission_sha256", `String (String.make 64 'b')
+            ])
+      |> store_ok
+    in
+    let event =
+      P.Moderator_execution.create_delegated
+        ~delegation:
+          { child_session_id = child_id
+          ; child_generation = 0
+          ; child_invocation_id =
+              P.Id.Invocation.of_string "inv_policy_codec" |> protocol_ok
+          ; admission_sha256 = String.make 64 'b'
+          }
+        { id = P.Id.Moderator_execution.of_string "mex_policy_codec" |> protocol_ok
+        ; session_id = initial.identity.session_id
+        ; generation = initial.identity.generation
+        ; source = source.observer
+        ; operation_id = None
+        ; job = None
+        ; phase = Pre_tool_call
+        ; event = `Null
+        ; checkpoint_sha256 = String.make 64 'a'
+        ; created_at = timestamp
+        }
+      |> protocol_ok
+    in
+    let cause =
+      Cause.create
+        ~parent:event
+        ~callee:session
+        ~callee_source:source
+        ~caller
+        ~caller_source:(Cause.Caller_source.installed caller_source |> protocol_ok)
+        ~caller_origin:(Some Unbound)
+        ~path:[ reference ]
+        ~targets:[]
+        ~max_inherited_scopes:4
+      |> protocol_ok
+    in
+    let after =
+      A.Session_delta.apply before (Moderator_execution_changed event) |> protocol_ok
+    in
+    let update =
+      PC.register_event
+        None
+        ~before:(A.Session_state.policy_context before |> protocol_ok)
+        ~after:(A.Session_state.policy_context after |> protocol_ok)
+        ~ledger:before.inference_ledger
+        ~cause
+      |> protocol_ok
+    in
+    (* Only the optional component changes: an unrelated source/queue/account
+       mismatch cannot hide a missing final absence guard. *)
+    let absent =
+      SD.Transaction.begin_absent_policy (SD.authored after) ~limits:document_limits
+      |> document_ok
+    in
+    let positive =
+      { after with policy_canonical_usage = Some (PC.Update.candidate update) }
+    in
+    assert (
+      Result.is_error
+        (SD.Transaction.finish_encoded
+           (SD.Transaction.with_value absent positive)
+           ~next:positive
+           ~limits:document_limits));
+    let delta =
+      A.Session_delta.Batch
+        [ Run_state_changed index
+        ; Moderator_execution_changed event
+        ; Policy_cause_changed update
+        ]
+    in
+    assert (
+      A.Session_delta.requires_policy_tracking
+        delta
+        ~previous:initial.policy_canonical_usage);
+    let transition =
+      A.Session_transition.apply ~now:timestamp initial ~delta ~payloads:[] |> protocol_ok
+    in
+    let admitted =
+      A.Session_document_transition.admit_encoded
+        (carried initial)
+        ~delta
+        ~next:transition.state
+        ~limits:document_limits
+      |> document_ok
+      |> SD.Admitted.document
+    in
+    [%test_eq: int] 14 (D.Document.version admitted);
+    assert (
+      List.mem
+        (D.Document.required_semantics admitted)
+        P.Session_storage_semantics.policy_canonical_usage
+        ~equal:String.equal);
+    let restored =
+      SD.decode admitted ~limits:document_limits |> document_ok |> SD.value
+    in
+    let component state =
+      Option.value_exn state.A.Session_state.policy_canonical_usage
+      |> PC.to_document
+      |> protocol_ok
+      |> D.Document.json
+    in
+    assert (D.Json.equal (component transition.state) (component restored));
+    (* One actual H traverses the new paired canonical leaf in both native and
+       carried-document owners. The seed remains pure DATA, not admission to IO. *)
+    let module L = A.Inference_ledger in
+    let module Canonical = A.Canonical_usage_update in
+    let module Occurrence = A.Goal_descendant_occurrence in
+    let after, handle, tracking =
+      Inference_ledger_state_tests.admit restored restored.inference_ledger
+    in
+    assert (L.equal_tracking tracking Tracked);
+    let revision = Int64.succ restored.counters.revision in
+    let occurrence =
+      Occurrence.Frame.create
+        ~session
+        ~generation:restored.identity.generation
+        ~candidate_session_revision:revision
+      |> protocol_ok
+      |> fun frame ->
+      Occurrence.attempt
+        frame
+        ~ordinal:(L.Handle.ordinal handle)
+        ~operation_id:(L.Handle.operation_id handle)
+        ~invocation_id:(L.Handle.invocation_id handle)
+      |> protocol_ok
+    in
+    let policy_admission =
+      PC.Admission.create
+        ~cause:(Cause.key cause)
+        ~work:(Event event.context.id)
+        ~live_prefix:(A.Session_state.policy_context restored |> protocol_ok)
+        ~descendants_after:restored.goal_descendants
+        ~canonical:(Attempt (handle, tracking))
+        ~occurrence
+      |> protocol_ok
+    in
+    let canonical =
+      Canonical.prepare
+        ~policy_usage:(Option.value_exn restored.policy_canonical_usage)
+        ~policy_admission
+        restored.inference_ledger
+        ~after
+        ~accounts:restored.goal_accounts
+        ~catalog:restored.goal_catalog
+        ~delegated_usage:restored.delegated_usage
+        ~admission:None
+      |> protocol_ok
+    in
+    assert (not (Canonical.accounts_changed canonical));
+    let paired_delta =
+      A.Session_delta.Policy_inference_ledger_changed
+        ( Canonical.ledger canonical
+        , Canonical.delegated_usage canonical
+        , Option.value_exn (Canonical.policy_update canonical) )
+    in
+    let paired_transition =
+      A.Session_transition.apply ~now:timestamp restored ~delta:paired_delta ~payloads:[]
+      |> protocol_ok
+    in
+    [%test_eq: int64] revision paired_transition.state.counters.revision;
+    let paired_document =
+      A.Session_document_transition.admit_encoded
+        (SD.decode admitted ~limits:document_limits |> document_ok)
+        ~delta:paired_delta
+        ~next:paired_transition.state
+        ~limits:document_limits
+      |> document_ok
+      |> SD.Admitted.document
+    in
+    let paired_restored =
+      SD.decode paired_document ~limits:document_limits |> document_ok |> SD.value
+    in
+    [%test_eq: int64] revision paired_restored.counters.revision;
+    assert (D.Json.equal (component paired_transition.state) (component paired_restored));
+    let ledger_document state =
+      L.to_document state.A.Session_state.inference_ledger
+      |> Inference_ledger_state_tests.ledger_ok
+      |> D.Document.json
+    in
+    assert (
+      D.Json.equal
+        (ledger_document paired_transition.state)
+        (ledger_document paired_restored));
+    List.iter [ paired_transition.state; paired_restored ] ~f:(fun state ->
+      let row =
+        L.find state.inference_ledger ~ordinal:(L.Handle.ordinal handle)
+        |> Option.value_exn
+      in
+      assert (L.Handle.equal handle (L.Row.handle row));
+      let binding =
+        match PC.bindings (Option.value_exn state.policy_canonical_usage) with
+        | [ binding ] -> binding
+        | [] | _ :: _ :: _ ->
+          failwith "paired H did not retain its one exact causal binding"
+      in
+      [%test_eq: int64] (L.Handle.ordinal handle) (PC.Binding.ordinal binding);
+      assert (Cause.Key.equal (Cause.key cause) (PC.Binding.cause binding)));
+    (* The paired leaf composes both feature fences. This is a codec check of
+       the actual candidate above; partition DATA never grants execution. *)
+    let encoded_pair usage =
+      A.Session_delta_document.create
+        (A.Session_delta.Policy_inference_ledger_changed
+           ( Canonical.ledger canonical
+           , usage
+           , Option.value_exn (Canonical.policy_update canonical) ))
+        ~limits:document_limits
+        ~state_document:SD.authored
+      |> document_ok
+      |> A.Session_delta_document.document
+    in
+    let partition_marker = P.Session_storage_semantics.delegated_usage in
+    let policy_marker = P.Session_storage_semantics.policy_canonical_usage in
+    let without_partition = encoded_pair None in
+    assert (
+      List.mem
+        (D.Document.required_semantics without_partition)
+        policy_marker
+        ~equal:String.equal);
+    assert (
+      not
+        (List.mem
+           (D.Document.required_semantics without_partition)
+           partition_marker
+           ~equal:String.equal));
+    let partition =
+      A.Delegated_usage.create
+        ~reference:Delegated_usage_persistence_tests.reference
+        ~ledger:initial.inference_ledger
+      |> protocol_ok
+      |> fun partition ->
+      A.Delegated_usage.reconcile
+        partition
+        ~before:initial.inference_ledger
+        ~after:(Canonical.ledger canonical)
+      |> protocol_ok
+    in
+    A.Delegated_usage.validate partition ~ledger:(Canonical.ledger canonical)
+    |> protocol_ok;
+    let with_partition = encoded_pair (Some partition) in
+    let semantics = D.Document.required_semantics with_partition in
+    assert (List.mem semantics policy_marker ~equal:String.equal);
+    assert (List.mem semantics partition_marker ~equal:String.equal);
+    A.Session_delta_document.decode with_partition ~limits:document_limits
+    |> document_ok
+    |> ignore;
+    let missing_partition_marker =
+      set
+        (D.Document.json with_partition)
+        "required_semantics"
+        (`Array
+            (List.filter_map semantics ~f:(fun name ->
+               if String.equal name partition_marker then None else Some (`String name))))
+      |> D.Document.inspect ~limits:document_limits
+      |> document_ok
+    in
+    assert (
+      List.mem
+        (D.Document.required_semantics missing_partition_marker)
+        policy_marker
+        ~equal:String.equal);
+    assert (
+      Result.is_error
+        (A.Session_delta_document.decode missing_partition_marker ~limits:document_limits));
+    (* Generation changes require ended physical attempts. Commit interruption
+       through the same paired canonical edge before testing reset conservation. *)
+    let paired_restored, paired_document =
+      let after =
+        L.set_state
+          paired_restored.inference_ledger
+          handle
+          (Interrupted { reason = Host_interrupted; delivery = Definitely_not_submitted })
+        |> Inference_ledger_state_tests.ledger_ok
+      in
+      let update =
+        Canonical.prepare
+          ~policy_usage:(Option.value_exn paired_restored.policy_canonical_usage)
+          paired_restored.inference_ledger
+          ~after
+          ~accounts:paired_restored.goal_accounts
+          ~catalog:paired_restored.goal_catalog
+          ~delegated_usage:paired_restored.delegated_usage
+          ~admission:None
+        |> protocol_ok
+      in
+      let delta =
+        A.Session_delta.inference_ledger_update
+          ?policy_update:(Canonical.policy_update update)
+          after
+          ~delegated_usage:(Canonical.delegated_usage update)
+      in
+      let transition =
+        A.Session_transition.apply ~now:timestamp paired_restored ~delta ~payloads:[]
+        |> protocol_ok
+      in
+      let document =
+        A.Session_document_transition.admit_encoded
+          (SD.decode paired_document ~limits:document_limits |> document_ok)
+          ~delta
+          ~next:transition.state
+          ~limits:document_limits
+        |> document_ok
+        |> SD.Admitted.document
+      in
+      let decoded =
+        SD.decode document ~limits:document_limits |> document_ok |> SD.value
+      in
+      assert (D.Json.equal (component transition.state) (component decoded));
+      assert (D.Json.equal (ledger_document transition.state) (ledger_document decoded));
+      decoded, document
+    in
+    (* Reset the actual admitted H as well as its cause, preserving factual usage. *)
+    let reset =
+      A.Administration.reset
+        paired_restored
+        { keep_history = true
+        ; keep_tasks = true
+        ; keep_grants = true
+        ; keep_labels = true
+        ; workspace_instance = None
+        }
+      |> protocol_ok
+    in
+    let reset_delta = A.Session_delta.Created reset in
+    let reset_transition =
+      A.Session_transition.apply
+        ~now:timestamp
+        paired_restored
+        ~delta:reset_delta
+        ~payloads:[]
+      |> protocol_ok
+    in
+    let reset_document =
+      A.Session_document_transition.admit_encoded
+        (SD.decode paired_document ~limits:document_limits |> document_ok)
+        ~delta:reset_delta
+        ~next:reset_transition.state
+        ~limits:document_limits
+      |> document_ok
+      |> SD.Admitted.state_document
+      |> SD.value
+    in
+    [%test_eq: int]
+      (paired_restored.identity.generation + 1)
+      reset_document.identity.generation;
+    assert (D.Json.equal (component reset) (component reset_document));
+    let generation_delta =
+      A.Session_delta.Reset_generation (paired_restored.identity.generation + 1)
+    in
+    let generation_transition =
+      A.Session_transition.apply
+        ~now:timestamp
+        paired_restored
+        ~delta:generation_delta
+        ~payloads:[]
+      |> protocol_ok
+    in
+    let generation_document =
+      A.Session_document_transition.admit_encoded
+        (SD.decode paired_document ~limits:document_limits |> document_ok)
+        ~delta:generation_delta
+        ~next:generation_transition.state
+        ~limits:document_limits
+      |> document_ok
+      |> SD.Admitted.state_document
+      |> SD.value
+    in
+    assert (
+      D.Json.equal (component generation_transition.state) (component generation_document));
+    assert (
+      Result.is_error
+        (A.Session_state.upgrade_schema { restored with schema_version = 27 }));
+    let delta_document =
+      A.Session_delta_document.create
+        delta
+        ~limits:document_limits
+        ~state_document:SD.authored
+      |> document_ok
+      |> A.Session_delta_document.document
+    in
+    [%test_eq: int] 10 (D.Document.version delta_document);
+    assert (
+      List.mem
+        (D.Document.required_semantics delta_document)
+        P.Session_storage_semantics.policy_canonical_usage
+        ~equal:String.equal);
+    let remove json name =
+      match json with
+      | `Object fields -> `Object (List.Assoc.remove fields name ~equal:String.equal)
+      | _ -> failwith "expected object"
+    in
+    let inspect raw = D.Document.inspect raw ~limits:document_limits |> document_ok in
+    let old_state =
+      set (D.Document.json admitted) "schema_version" (`Number "12") |> inspect
+    in
+    [%test_eq: int] 12 (D.Document.version old_state);
+    assert (Result.is_error (SD.decode old_state ~limits:document_limits));
+    let old_delta =
+      set (D.Document.json delta_document) "schema_version" (`Number "8") |> inspect
+    in
+    [%test_eq: int] 8 (D.Document.version old_delta);
+    assert (
+      Result.is_error (A.Session_delta_document.decode old_delta ~limits:document_limits));
+    let unmarked = remove (D.Document.json admitted) "required_semantics" |> inspect in
+    assert (Result.is_error (SD.decode unmarked ~limits:document_limits));
+    let unmarked_delta =
+      remove (D.Document.json delta_document) "required_semantics" |> inspect
+    in
+    assert (
+      Result.is_error
+        (A.Session_delta_document.decode unmarked_delta ~limits:document_limits));
+    let marker = P.Session_storage_semantics.policy_canonical_usage in
+    let old_reader =
+      D.Domain_codec.create
+        ~limits:document_limits
+        ~kind:(D.Document.kind admitted)
+        ~version:(D.Document.version admitted)
+        ~shape:SD.shape
+        ~supported_semantics:
+          (List.filter P.Session_storage_semantics.supported_children ~f:(fun name ->
+             not (String.equal name marker)))
+        ~decode:(fun _ -> Ok ())
+        ~encode:(fun () -> Ok (`Object []))
+      |> document_ok
+    in
+    (match D.Domain_codec.decode old_reader admitted with
+     | Error (D.Error.Required_semantics_unknown actual) ->
+       [%test_eq: string] marker actual
+     | Error error -> raise_s [%sexp (error : D.Error.t)]
+     | Ok _ -> failwith "reader without causal semantics accepted positive accounting");
+    let created =
+      A.Session_delta_document.create
+        (A.Session_delta.Created transition.state)
+        ~limits:document_limits
+        ~state_document:SD.authored
+      |> document_ok
+      |> A.Session_delta_document.document
+    in
+    assert (List.mem (D.Document.required_semantics created) marker ~equal:String.equal);
+    let old_created =
+      set (D.Document.json created) "schema_version" (`Number "8") |> inspect
+    in
+    [%test_eq: int] 8 (D.Document.version old_created);
+    assert (
+      Result.is_error
+        (A.Session_delta_document.decode old_created ~limits:document_limits));
+    (* Like Fixtures.snapshot_of_state, this codec-only wrapper uses a fixture
+       anchor for progressed State. It is not a physical journal/ACK proof. *)
+    let snapshot =
+      Store.Snapshot.create
+        ~limits:document_limits
+        ~session_id:restored.identity.session_id
+        ~transaction_sequence:restored.counters.transaction_sequence
+        ~transaction_hash:
+          (if Int64.equal restored.counters.transaction_sequence 0L
+           then None
+           else Some (String.make 64 'a'))
+        ~event_sequence:restored.counters.event_sequence
+        ~created_at:timestamp
+        ~prompt_artifact:(P.Id.Prompt_revision.to_string restored.spec.prompt_revision_id)
+        ~workspace_identity:restored.spec.workspace_instance.conflict_domain
+        ~payload:admitted
+      |> store_ok
+    in
+    let snapshot =
+      Store.Snapshot.restore (Store.Snapshot.stored snapshot) ~limits:document_limits
+      |> store_ok
+    in
+    assert (D.Json.equal (D.Document.json snapshot.payload) (D.Document.json admitted));
+    let transaction =
+      Store.Transaction.create
+        ~limits:document_limits
+        ~session_id:restored.identity.session_id
+        ~generation:restored.identity.generation
+        ~transaction_sequence:1L
+        ~previous_transaction_hash:None
+        ~session_revision:1L
+        ~first_event_sequence:None
+        ~last_event_sequence:None
+        ~accepted_at_ns:0L
+        ~command_audit:None
+        ~delta:delta_document
+        ~durable_events:[]
+      |> store_ok
+    in
+    let decoded =
+      Store.Transaction.decode (Store.Transaction.encode transaction) |> store_ok
+    in
+    [%test_eq: string]
+      (Store.Transaction.hash transaction)
+      (Store.Transaction.hash decoded);
+    assert (D.Json.equal (D.Document.json decoded.delta) (D.Document.json delta_document)))
 ;;

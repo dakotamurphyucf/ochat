@@ -354,6 +354,10 @@ let run boundary ~initial =
                  (A.Child_contributions.snapshot children ~reference |> protocol_ok));
              current)
          in
+         Uncertain_writer_test_support.close_uncertain_entry
+           parent
+           ~env
+           ~store:(Daemon.store daemon);
          reopen
            env
            sw
@@ -534,6 +538,10 @@ let run_import boundary =
          assert (D.Reference.equal reference (Option.value_exn fault.reference));
          Existing.assert_same seven parent;
          [%test_eq: int] 1 !(counters.providers);
+         Uncertain_writer_test_support.close_uncertain_entry
+           parent
+           ~env
+           ~store:(Daemon.store daemon);
          with_reopened env sw root daemon policy (fun recovered ->
            let parent =
              Registry.load (Daemon.registry recovered) parent_id |> protocol_ok
@@ -806,8 +814,8 @@ module Historical_unrelated = struct
         S.Durable_file.sync_directory ~env ~path:staging_directory |> Existing.store_ok;
         let current = A.Session_persistence.Restored.state restored in
         S.Session_store.Initial_projection.create
-          ~metadata:(Agent_server.Session_projection.metadata current)
-          ~entry:(Agent_server.Session_projection.index_entry current))
+          ~metadata:(Agent_server.Session_factory.metadata current)
+          ~entry:(Agent_server.Session_factory.index_entry current))
     |> Existing.store_ok
   ;;
 
@@ -871,6 +879,10 @@ let%expect_test
                (Agent_store.Delegation_goal_origin.equal
                   Agent_store.Delegation_goal_origin.unrelated));
          let original_admission = Historical_unrelated.admission original in
+         Uncertain_writer_test_support.close_uncertain_entry
+           parent
+           ~env
+           ~store:(Daemon.store daemon);
          with_reopened env sw root daemon policy (fun recovered ->
            let store = Daemon.store recovered in
            let parent =

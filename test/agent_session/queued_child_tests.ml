@@ -414,17 +414,48 @@ let%expect_test
          List.iter (Eio.Path.read_dir root) ~f:(fun name ->
            Eio.Path.rmtree Eio.Path.(root / name));
          Agent_session.Prompt_source_lease.close lease;
-         let tools =
-           Background_execution_tests.tools (fun () -> registry)
-           |> fun tools ->
-           Agent_session.Script_tool_calls.with_admission_check tools ~check:(fun _ _ ->
-             Ok ())
+         let module Graph = Agent_server.Graph_tracking in
+         let module Calls = Agent_session.Script_tool_calls in
+         (* The hand-built scheduler runtime still uses the actor's admitted
+            inference allocator for each captured agent invocation. *)
+         let graph =
+           Graph.create
+             actor
+             ~source:
+               (Transcript.Source_id.of_string "queued-child" |> Result.ok_or_failwith)
+             ~upstream:
+               { new_preparation_id =
+                   (Inference_fixture.identity inference).new_preparation_id
+               ; on_admitted = (fun ~scope:_ ~accounting_id:_ -> ())
+               ; on_attempt = ignore
+               ; on_observation = ignore
+               ; on_completion = ignore
+               }
+           |> protocol_ok
          in
-         (match
-            Queued_source_tests.dispatch env sw actor backend staged request tools
-          with
+         let completion =
+           Exn.protect
+             ~finally:(fun () ->
+               Graph.seal graph |> protocol_ok;
+               Graph.finish graph |> protocol_ok)
+             ~f:(fun () ->
+               let tools = Background_execution_tests.tools (fun () -> registry) in
+               let tools = Calls.with_admission_check tools ~check:(fun _ _ -> Ok ()) in
+               let tools =
+                 Calls.with_inference_tracking
+                   tools
+                   { bind_identity = (fun allocate -> Graph.bind_identity graph ~allocate)
+                   ; on_attempt = Graph.on_attempt graph
+                   ; on_observation = Graph.on_observation graph
+                   ; on_completion = Graph.on_completion graph
+                   }
+               in
+               Queued_source_tests.dispatch env sw actor backend staged request tools)
+         in
+         (match completion with
           | Succeeded (`String "selected answer") -> ()
-          | _ -> failwith "selected queued child failed");
+          | completion ->
+            raise_s [%sexp "selected queued child failed", (completion : P.Completion.t)]);
          [%test_eq: string list list]
            [ [ "C own" ]
            ; [ "B selected"; "content answer"; "go" ]

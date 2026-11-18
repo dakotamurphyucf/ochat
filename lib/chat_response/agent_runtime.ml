@@ -816,6 +816,7 @@ let create_with
 ;;
 
 let create
+      ?mcp_checks
       ?native_service_revision
       ?startup
       ?agent_source_runner
@@ -846,6 +847,7 @@ let create
     ~env:(Ctx.env ctx)
     ~create_pool:(fun ~admin_policy ~shell ->
       Native_tool_pool.create
+        ?mcp_checks
         ~sw
         ~ctx
         ~host
@@ -1054,6 +1056,7 @@ let prepare_extensions_with
 ;;
 
 let prepare_extensions
+      ?mcp_checks
       ?native_service_revision
       ?startup
       ?tool_contract
@@ -1090,6 +1093,7 @@ let prepare_extensions
     ~env:(Ctx.env ctx)
     ~create_pool:(fun ~admin_policy ~shell ->
       Native_tool_pool.create
+        ?mcp_checks
         ~sw
         ~ctx
         ~host

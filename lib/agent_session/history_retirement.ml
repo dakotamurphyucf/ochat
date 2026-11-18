@@ -151,6 +151,9 @@ let admit previous ~delta ~next ~limits =
     | Model_job_target_captured _
     | Model_job_recipe_target_captured _
     | Model_job_target_restored _
+    | Goal_policy_contributions_changed _
+    | Policy_cause_changed _
+    | Policy_inference_ledger_changed _
     | Delegated_inference_ledger_changed _
     | Child_contributions_changed _
     | Goal_descendants_changed _
@@ -163,6 +166,7 @@ let admit previous ~delta ~next ~limits =
     | Managed_stop_admitted _
     | Invocation_reconciled _
     | Moderator_execution_changed _
+    | Moderator_lifecycle_claimed _
     | Moderator_execution_reconciled _
     | Subscription_changed _
     | Subscription_expired _

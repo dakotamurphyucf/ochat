@@ -106,10 +106,26 @@ unsupported schemas fail closed. A validated fallback snapshot plus retained
 journal allows recovery if the current checkpoint is incomplete. These paths do
 not promise automatic repair of arbitrary storage damage.
 
+A failed session initializer can still retain its actual runtime, actor, writer
+and store handle while cleanup needs a retry. The original initialization failure
+remains primary, and fresh same-ID ownership stays excluded until that retained
+owner closes. Outer creation, seed and import cleanup does not release its actor
+lock or remove its durable data. Shutdown retries the same owner without replaying
+initialization or provider work.
+
 Nonterminal foreground operations and non-redeliverable work are classified as
 interrupted, not blindly rerun. Durable jobs/schedules include their own delivery
 state. External side effects may be uncertain; reconcile before retrying them.
 See [orchestration](chatml-orchestration.md).
+
+An ordinary one-shot timer can defer at the initial pure ordinary-preparation
+busy guard, before preparation starts, or when the runtime rejects its actual
+delivery lease with a transient conflict and admission cleanup finishes without
+acquiring the lease. Later preparation failures retain their original error and
+cleanup behavior. The scheduler preserves a deferred timer for a later pass, as it
+does after an interrupted delivery. A retryable callback error after admission is
+not a deferral. The actor still checks the generation and saved delivery state;
+a committed, cancelled or terminal timer is never rolled back for retry.
 
 For retained extension invocations, daemon recovery restores missing initial tool
 outputs from recorded results and marks unfinished invocations interrupted. It
@@ -117,6 +133,31 @@ does not rerun their handlers. Removed calls receive an explicit discarded-outpu
 disposition. Conflicting output evidence fails recovery. See the
 [invocation recovery contract](extensibility-foundations.md#invocation-recovery-at-daemon-restart)
 for exact history bindings, allocation and worker/reset recovery behavior.
+
+Session-retention recovery runs its fixed snapshot restore, transaction replay,
+complete encoded-document comparison and native validation in a separate CPU
+domain, with one such computation at a time per Factory. This keeps that pure
+compute off the original event loop. Storage and fresh archive reads remain on
+the original domain, in their existing order, under the same journal and session
+owners. Retention proofs and caches stay with those owners; the CPU adapter grants
+no storage or execution authority. Complete carrier checks and error ordering are
+unchanged. Loaded retention first captures its actual State and persistence basis
+in a brief quiescent Actor request. Preliminary recovery work then runs outside
+the Actor mailbox and per-session lifecycle reservation. A second quiescent request
+requires the same live owners, available writer, State, restored carrier and
+transaction hash before acting on that result. A changed basis defers the attempt;
+an unchanged failed check retains its original error. Successful preparation still
+runs the complete fresh excluded preflight and original pruning sequence. Entry
+closure joins the whole retention attempt before releasing its Actor, writer or
+Handle. This does not promise preemption or execution continuity after restart.
+
+Replay retains successful immutable wire-field decodes from its final ordered
+prefix encoding for the final full State decode. Reuse requires exact complete
+field JSON and unchanged State limits; changed fields are decoded normally.
+Created merges refresh this evidence from their last actual encoding. Full raw
+admission, native validation, pending custody restoration, capacity and final
+publication checks still run. These decoder results carry data, without granting
+storage, custody or execution authority.
 
 ## Backup and restore
 
@@ -187,7 +228,10 @@ pruning occurs behind installed snapshots, retaining a validated fallback.
 Stopped inactive actors unload while their sessions remain indexed; running
 intent, owner grace, runnable jobs and schedules can keep/load actors.
 
-Managed job-result preparations have separate cleanup. Maintenance preserves
+Managed job-result preparations have separate cleanup. Their temporary expiry is
+one day after creation, capped at the greatest representable timestamp; at that
+limit expiry can equal creation. Expiry permits an ownership check and does not
+release a private preparation or a retained result. Maintenance preserves
 referenced artifacts, validates retained session/history/cache/blob consumers, and
 removes only private preparations proved unreferenced. It can load an indexed
 stopped session for this work. Loaded runtimes and active execution, uploads or

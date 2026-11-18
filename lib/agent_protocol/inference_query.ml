@@ -371,6 +371,24 @@ module Summary = struct
     ]
   ;;
 
+  let component_metrics t = List.map (all t) ~f:snd
+
+  let components_to_json t =
+    obj (List.map (all t) ~f:(fun (name, value) -> name, Metric.to_json value))
+  ;;
+
+  let components_of_json json =
+    let* fields = Json_codec.fields json in
+    let* input = get fields "input" Metric.of_json in
+    let* output = get fields "output" Metric.of_json in
+    let* reported_total = get fields "reported_total" Metric.of_json in
+    let* cached_input = get fields "cached_input" Metric.of_json in
+    let* cache_write_input = get fields "cache_write_input" Metric.of_json in
+    let* reasoning_output = get fields "reasoning_output" Metric.of_json in
+    Ok
+      { input; output; reported_total; cached_input; cache_write_input; reasoning_output }
+  ;;
+
   let to_json t =
     obj
       [ "retained_attempts", dec t.retained_attempts
@@ -382,10 +400,7 @@ module Summary = struct
             ; "cancelled", dec t.turns.cancelled
             ; "interrupted", dec t.turns.interrupted
             ] )
-      ; ( "components"
-        , obj
-            (List.map (all t.components) ~f:(fun (name, value) ->
-               name, Metric.to_json value)) )
+      ; "components", components_to_json t.components
       ; "coverage", Coverage.to_json t.coverage
       ; "accounting_revision", dec t.accounting_revision
       ]
@@ -429,25 +444,11 @@ module Summary = struct
     let* failed = get turns "failed" decimal in
     let* cancelled = get turns "cancelled" decimal in
     let* interrupted = get turns "interrupted" decimal in
-    let* raw_components = Json_codec.required fields "components" in
-    let* components = Json_codec.fields raw_components in
-    let* input = get components "input" Metric.of_json in
-    let* output = get components "output" Metric.of_json in
-    let* reported_total = get components "reported_total" Metric.of_json in
-    let* cached_input = get components "cached_input" Metric.of_json in
-    let* cache_write_input = get components "cache_write_input" Metric.of_json in
-    let* reasoning_output = get components "reasoning_output" Metric.of_json in
+    let* components = get fields "components" components_of_json in
     create
       ~retained_attempts
       ~turns:{ pending; completed; failed; cancelled; interrupted }
-      ~components:
-        { input
-        ; output
-        ; reported_total
-        ; cached_input
-        ; cache_write_input
-        ; reasoning_output
-        }
+      ~components
       ~coverage
       ~accounting_revision
   ;;

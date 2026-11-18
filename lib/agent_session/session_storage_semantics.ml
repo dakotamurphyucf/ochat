@@ -66,6 +66,51 @@ let require document ~name ~required ~limits =
     | _ -> assert false)
 ;;
 
+(* Null is an explicit captured unavailable producer, not historical absence.
+   Schema6 also requires the marker even if malformed input omits the field. *)
+let queue_receipt_requires receipt =
+  (match D.Json.field receipt ~name:"schema_version" with
+   | Value (`Number "6") -> true
+   | Value _ | Absent | Null -> false)
+  ||
+  match D.Json.field receipt ~name:"queue_occurrence" with
+  | Value capture ->
+    (match D.Json.field capture ~name:"producer" with
+     | Absent -> false
+     | Null | Value _ -> true)
+  | Absent | Null -> false
+;;
+
+let queue_receipt_state_requires payload =
+  match D.Json.field payload ~name:"moderator_executions" with
+  | Value (`Array receipts) -> List.exists receipts ~f:queue_receipt_requires
+  | Absent | Null | Value _ -> false
+;;
+
+let queue_receipt_delta_requires payload =
+  match D.Json.field payload ~name:"changes" with
+  | Value (`Array changes) ->
+    List.exists changes ~f:(fun change ->
+      match D.Json.field change ~name:"kind" with
+      | Value
+          (`String
+             ( "moderator_execution_changed"
+             | "moderator_execution_reconciled"
+             | "moderator_lifecycle_claimed" )) ->
+        (match D.Json.field change ~name:"value" with
+         | Value receipt -> queue_receipt_requires receipt
+         | Absent | Null -> false)
+      | Value (`String "created") ->
+        (match D.Json.field change ~name:"state" with
+         | Value state ->
+           (match D.Json.field state ~name:"payload" with
+            | Value payload -> queue_receipt_state_requires payload
+            | Absent | Null -> false)
+         | Absent | Null -> false)
+      | Value _ | Absent | Null -> false)
+  | Value _ | Absent | Null -> false
+;;
+
 let native_invocation_requires invocation ~kind =
   match D.Json.field invocation ~name:"native_goal_action" with
   | Value action ->
@@ -147,6 +192,10 @@ let usage_delta_requires payload =
              ( "delegated_inference_ledger_changed"
              | "child_contributions_changed"
              | "goal_descendants_changed" )) -> true
+      | Value (`String "policy_inference_ledger_changed") ->
+        (match D.Json.field change ~name:"usage" with
+         | Value _ -> true
+         | Absent | Null -> false)
       | Value (`String "created") ->
         (match D.Json.field change ~name:"state" with
          | Value state ->
@@ -210,8 +259,133 @@ let descendant_delta_requires payload =
   | Value _ | Absent | Null -> false
 ;;
 
+(* An old reader supporting queue-provenance.v1 still ignores an optional
+   ingress original. This feature therefore has its own child semantics fence. *)
+let ingress_registration_requires value =
+  match D.Json.field value ~name:"inference_provenance" with
+  | Value _ -> true
+  | Absent | Null -> false
+;;
+
+let ingress_queue_requires moderator =
+  match D.Json.field moderator ~name:"queue_provenance" with
+  | Value metadata ->
+    (match D.Json.field metadata ~name:"entries" with
+     | Value (`Array entries) ->
+       List.exists entries ~f:(fun entry ->
+         match D.Json.field entry ~name:"producer" with
+         | Value producer ->
+           (match D.Json.field producer ~name:"kind" with
+            | Value (`String "ingress_delivery") -> true
+            | Absent | Null | Value _ -> false)
+         | Absent | Null -> false)
+     | Absent | Null | Value _ -> false)
+  | Absent | Null -> false
+;;
+
+let ingress_state_requires payload =
+  (match D.Json.field payload ~name:"ingress_registrations" with
+   | Value (`Array values) -> List.exists values ~f:ingress_registration_requires
+   | Absent | Null | Value _ -> false)
+  ||
+  match D.Json.field payload ~name:"moderator" with
+  | Value moderator -> ingress_queue_requires moderator
+  | Absent | Null -> false
+;;
+
+let ingress_delta_requires payload =
+  match D.Json.field payload ~name:"changes" with
+  | Value (`Array changes) ->
+    List.exists changes ~f:(fun change ->
+      match D.Json.field change ~name:"kind" with
+      | Value (`String "ingress_changed") ->
+        (match D.Json.field change ~name:"value" with
+         | Value value -> ingress_registration_requires value
+         | Absent | Null -> false)
+      | Value (`String "moderator_changed") ->
+        (match D.Json.field change ~name:"moderator" with
+         | Value value -> ingress_queue_requires value
+         | Absent | Null -> false)
+      | Value (`String "created") ->
+        (match D.Json.field change ~name:"state" with
+         | Value state ->
+           (match D.Json.field state ~name:"payload" with
+            | Value payload -> ingress_state_requires payload
+            | Absent | Null -> false)
+         | Absent | Null -> false)
+      | Absent | Null | Value _ -> false)
+  | Absent | Null | Value _ -> false
+;;
+
+let policy_state_requires payload = populated payload "policy_canonical_usage"
+
+let policy_delta_requires payload =
+  match D.Json.field payload ~name:"changes" with
+  | Value (`Array changes) ->
+    List.exists changes ~f:(fun change ->
+      match D.Json.field change ~name:"kind" with
+      | Value (`String ("policy_cause_changed" | "policy_inference_ledger_changed")) ->
+        true
+      | Value (`String "created") ->
+        (match D.Json.field change ~name:"state" with
+         | Value state ->
+           (match D.Json.field state ~name:"payload" with
+            | Value payload -> policy_state_requires payload
+            | Absent | Null -> false)
+         | Absent | Null -> false)
+      | Value _ | Absent | Null -> false)
+  | Value _ | Absent | Null -> false
+;;
+
+let goal_policy_state_requires payload = populated payload "goal_policy_contributions"
+
+let goal_policy_delta_requires payload =
+  match D.Json.field payload ~name:"changes" with
+  | Value (`Array changes) ->
+    List.exists changes ~f:(fun change ->
+      match D.Json.field change ~name:"kind" with
+      | Value (`String "goal_policy_contributions_changed") -> true
+      | Value (`String "created") ->
+        (match D.Json.field change ~name:"state" with
+         | Value state ->
+           (match D.Json.field state ~name:"payload" with
+            | Value payload -> goal_policy_state_requires payload
+            | Absent | Null -> false)
+         | Absent | Null -> false)
+      | Value _ | Absent | Null -> false)
+  | Value _ | Absent | Null -> false
+;;
+
 let require_state document ~limits =
   let open Result.Let_syntax in
+  let%bind document =
+    require
+      document
+      ~name:Agent_protocol.Session_storage_semantics.queue_occurrence_producer
+      ~required:(queue_receipt_state_requires (D.Document.payload document))
+      ~limits
+  in
+  let%bind document =
+    require
+      document
+      ~name:Agent_protocol.Session_storage_semantics.policy_canonical_usage
+      ~required:(policy_state_requires (D.Document.payload document))
+      ~limits
+  in
+  let%bind document =
+    require
+      document
+      ~name:Agent_protocol.Session_storage_semantics.goal_policy_contributions
+      ~required:(goal_policy_state_requires (D.Document.payload document))
+      ~limits
+  in
+  let%bind document =
+    require
+      document
+      ~name:Agent_protocol.Session_storage_semantics.ingress_provenance
+      ~required:(ingress_state_requires (D.Document.payload document))
+      ~limits
+  in
   let%bind document =
     Q.require document ~limits ~required:(Q.state_requires (D.Document.payload document))
   in
@@ -246,7 +420,31 @@ let require_state document ~limits =
 
 let check_state document =
   let open Result.Let_syntax in
+  let%bind () =
+    check
+      document
+      ~name:Agent_protocol.Session_storage_semantics.queue_occurrence_producer
+      ~required:(queue_receipt_state_requires (D.Document.payload document))
+  in
+  let%bind () =
+    check
+      document
+      ~name:Agent_protocol.Session_storage_semantics.policy_canonical_usage
+      ~required:(policy_state_requires (D.Document.payload document))
+  in
+  let%bind () =
+    check
+      document
+      ~name:Agent_protocol.Session_storage_semantics.goal_policy_contributions
+      ~required:(goal_policy_state_requires (D.Document.payload document))
+  in
   let%bind () = check_native_state_fields (D.Document.payload document) in
+  let%bind () =
+    check
+      document
+      ~name:Agent_protocol.Session_storage_semantics.ingress_provenance
+      ~required:(ingress_state_requires (D.Document.payload document))
+  in
   let%bind () =
     Q.check document ~required:(Q.state_requires (D.Document.payload document))
   in
@@ -274,6 +472,34 @@ let check_state document =
 
 let require_delta document ~limits =
   let open Result.Let_syntax in
+  let%bind document =
+    require
+      document
+      ~name:Agent_protocol.Session_storage_semantics.queue_occurrence_producer
+      ~required:(queue_receipt_delta_requires (D.Document.payload document))
+      ~limits
+  in
+  let%bind document =
+    require
+      document
+      ~name:Agent_protocol.Session_storage_semantics.policy_canonical_usage
+      ~required:(policy_delta_requires (D.Document.payload document))
+      ~limits
+  in
+  let%bind document =
+    require
+      document
+      ~name:Agent_protocol.Session_storage_semantics.goal_policy_contributions
+      ~required:(goal_policy_delta_requires (D.Document.payload document))
+      ~limits
+  in
+  let%bind document =
+    require
+      document
+      ~name:Agent_protocol.Session_storage_semantics.ingress_provenance
+      ~required:(ingress_delta_requires (D.Document.payload document))
+      ~limits
+  in
   let%bind document =
     Q.require document ~limits ~required:(Q.delta_requires (D.Document.payload document))
   in
@@ -308,7 +534,31 @@ let require_delta document ~limits =
 
 let check_delta document =
   let open Result.Let_syntax in
+  let%bind () =
+    check
+      document
+      ~name:Agent_protocol.Session_storage_semantics.queue_occurrence_producer
+      ~required:(queue_receipt_delta_requires (D.Document.payload document))
+  in
+  let%bind () =
+    check
+      document
+      ~name:Agent_protocol.Session_storage_semantics.policy_canonical_usage
+      ~required:(policy_delta_requires (D.Document.payload document))
+  in
+  let%bind () =
+    check
+      document
+      ~name:Agent_protocol.Session_storage_semantics.goal_policy_contributions
+      ~required:(goal_policy_delta_requires (D.Document.payload document))
+  in
   let%bind () = check_native_delta_fields (D.Document.payload document) in
+  let%bind () =
+    check
+      document
+      ~name:Agent_protocol.Session_storage_semantics.ingress_provenance
+      ~required:(ingress_delta_requires (D.Document.payload document))
+  in
   let%bind () =
     Q.check document ~required:(Q.delta_requires (D.Document.payload document))
   in
@@ -332,4 +582,179 @@ let check_delta document =
     document
     ~name:Agent_protocol.Session_storage_semantics.goal_descendants
     ~required:(descendant_delta_requires (D.Document.payload document))
+;;
+
+(* Explicit null is a known cleared slot, not historical absence. Old writers
+   must not retain this private eligibility DATA without its invalidation laws. *)
+let lifecycle_index_requires index =
+  match D.Json.field index ~name:"moderator_lifecycle" with
+  | Absent -> false
+  | Null | Value _ -> true
+;;
+
+let lifecycle_state_requires payload =
+  match D.Json.field payload ~name:"run_state" with
+  | Value index -> lifecycle_index_requires index
+  | Absent | Null -> false
+;;
+
+let lifecycle_delta_requires payload =
+  match D.Json.field payload ~name:"changes" with
+  | Value (`Array changes) ->
+    List.exists changes ~f:(fun change ->
+      match D.Json.field change ~name:"kind" with
+      | Value (`String "moderator_lifecycle_claimed") -> true
+      | Value (`String "run_state_changed") ->
+        (match D.Json.field change ~name:"value" with
+         | Value index -> lifecycle_index_requires index
+         | Absent | Null -> false)
+      | Value (`String "created") ->
+        (match D.Json.field change ~name:"state" with
+         | Value state ->
+           (match D.Json.field state ~name:"payload" with
+            | Value payload -> lifecycle_state_requires payload
+            | Absent | Null -> false)
+         | Absent | Null -> false)
+      | Value _ | Absent | Null -> false)
+  | Value _ | Absent | Null -> false
+;;
+
+let recurrence_goal_name =
+  Agent_protocol.Session_storage_semantics.recurrence_controller_goal
+;;
+
+let recurrence_goal_definition_requires definition =
+  (match D.Json.field definition ~name:"required_semantics" with
+   | Value (`Array names) ->
+     List.exists names ~f:(function
+       | `String name -> String.equal name recurrence_goal_name
+       | _ -> false)
+   | Absent | Null | Value _ -> false)
+  ||
+  match D.Json.field definition ~name:"payload" with
+  | Value payload ->
+    (match D.Json.field payload ~name:"goal_binding" with
+     | Value _ | Null -> true
+     | Absent -> false)
+  | Absent | Null -> false
+;;
+
+let recurrence_goal_entry_requires row =
+  match D.Json.field row ~name:"document" with
+  | Value entry ->
+    (match D.Json.field entry ~name:"payload" with
+     | Value payload ->
+       (match D.Json.field payload ~name:"definitions" with
+        | Value (`Array definitions) ->
+          List.exists definitions ~f:(fun row ->
+            match D.Json.field row ~name:"value" with
+            | Value value -> recurrence_goal_definition_requires value
+            | Absent | Null -> false)
+        | Absent | Null | Value _ -> false)
+     | Absent | Null -> false)
+  | Absent | Null -> false
+;;
+
+let recurrence_goal_catalog_requires catalog =
+  match D.Json.field catalog ~name:"entries" with
+  | Value (`Array rows) -> List.exists rows ~f:recurrence_goal_entry_requires
+  | Absent | Null | Value _ -> false
+;;
+
+let recurrence_goal_state_requires payload =
+  match D.Json.field payload ~name:"recurrence_catalog" with
+  | Value catalog -> recurrence_goal_catalog_requires catalog
+  | Absent | Null -> false
+;;
+
+let recurrence_goal_delta_requires payload =
+  match D.Json.field payload ~name:"changes" with
+  | Value (`Array changes) ->
+    List.exists changes ~f:(fun change ->
+      match D.Json.field change ~name:"kind" with
+      | Value (`String "recurrence_catalog_changed") ->
+        (match D.Json.field change ~name:"value" with
+         | Value catalog -> recurrence_goal_catalog_requires catalog
+         | Absent | Null -> false)
+      | Value (`String "created") ->
+        (match D.Json.field change ~name:"state" with
+         | Value state ->
+           (match D.Json.field state ~name:"payload" with
+            | Value payload -> recurrence_goal_state_requires payload
+            | Absent | Null -> false)
+         | Absent | Null -> false)
+      | Absent | Null | Value _ -> false)
+  | Absent | Null | Value _ -> false
+;;
+
+let require_state_without_lifecycle = require_state
+
+let require_state document ~limits =
+  let%bind.Result document = require_state_without_lifecycle document ~limits in
+  let payload = D.Document.payload document in
+  let%bind.Result document =
+    require
+      document
+      ~name:Agent_protocol.Session_storage_semantics.moderator_lifecycle
+      ~required:(lifecycle_state_requires payload)
+      ~limits
+  in
+  require
+    document
+    ~name:recurrence_goal_name
+    ~required:(recurrence_goal_state_requires payload)
+    ~limits
+;;
+
+let check_state_without_lifecycle = check_state
+
+let check_state document =
+  let%bind.Result () = check_state_without_lifecycle document in
+  let payload = D.Document.payload document in
+  let%bind.Result () =
+    check
+      document
+      ~name:Agent_protocol.Session_storage_semantics.moderator_lifecycle
+      ~required:(lifecycle_state_requires payload)
+  in
+  check
+    document
+    ~name:recurrence_goal_name
+    ~required:(recurrence_goal_state_requires payload)
+;;
+
+let require_delta_without_lifecycle = require_delta
+
+let require_delta document ~limits =
+  let%bind.Result document = require_delta_without_lifecycle document ~limits in
+  let payload = D.Document.payload document in
+  let%bind.Result document =
+    require
+      document
+      ~name:Agent_protocol.Session_storage_semantics.moderator_lifecycle
+      ~required:(lifecycle_delta_requires payload)
+      ~limits
+  in
+  require
+    document
+    ~name:recurrence_goal_name
+    ~required:(recurrence_goal_delta_requires payload)
+    ~limits
+;;
+
+let check_delta_without_lifecycle = check_delta
+
+let check_delta document =
+  let%bind.Result () = check_delta_without_lifecycle document in
+  let payload = D.Document.payload document in
+  let%bind.Result () =
+    check
+      document
+      ~name:Agent_protocol.Session_storage_semantics.moderator_lifecycle
+      ~required:(lifecycle_delta_requires payload)
+  in
+  check
+    document
+    ~name:recurrence_goal_name
+    ~required:(recurrence_goal_delta_requires payload)
 ;;

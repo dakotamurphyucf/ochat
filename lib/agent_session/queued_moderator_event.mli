@@ -72,9 +72,11 @@ val claim_foreground
     and retain the callback epoch/physical borrow. Generic claims above remain
     strict extensibility-v1 envelope entry points.
 
-    Retain the exact original metadata head as receipt codec5. Source-only
+    Retain the exact original metadata head and known producer as receipt codec6.
+    Source-only
     bootstrap assigns unavailable structural origin to historical values; no
-    source/ordinal/origin comes from a caller proof. This pure capture still
+    source/ordinal/origin/producer comes from a caller proof. Opaque Entry
+    extensions are not transferred into this newly authored receipt. This pure capture still
     grants no live continuation or permission. Commit the actual source index
     and metadata atomically with this fresh Running receipt. *)
 val claim_legacy

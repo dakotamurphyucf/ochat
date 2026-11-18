@@ -37,6 +37,23 @@ module Scope : sig
   val startup_pending : t -> bool
 end
 
+(** The existing Workflow uniqueness fence for the captured source. *)
+val unfinished_workflow
+  :  Run_state.t
+  -> source:Agent_protocol.Run_source.t
+  -> Agent_protocol.Run.t option
+
+module Held_input_availability : sig
+  type t =
+    | Authored_or_submission
+    | Submission_only
+    | Unavailable
+end
+
+(** Pure lifecycle and operation check used before held admission. This says
+    nothing about authority, actor startup custody, or successful activation. *)
+val held_input_availability : Session_state.t -> Held_input_availability.t
+
 type t
 
 (** New admission constructs only durable facts. The actor supplies its actual

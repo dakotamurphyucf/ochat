@@ -981,12 +981,31 @@ let%expect_test
       [%test_eq: int] 1 !upstream;
       [%test_eq: int] 1 !submission_checks;
       [%test_eq: int] 1 !transports;
-      [%test_eq: int] 4 !dispatch_checks));
+      [%test_eq: int] 4 !dispatch_checks;
+      let replacement_attempts = ref 0 in
+      let rebound =
+        C.Ctx.with_inference_tracking
+          child
+          ~identity:(identity ())
+          ~on_attempt:(fun _ -> Int.incr replacement_attempts)
+          ~on_observation:ignore
+          ~on_completion:ignore
+      in
+      (match complete rebound with
+       | _ -> failwith "graph rebinding dropped an inherited attempt guard"
+       | exception C.Ctx.Inference_admission_rejected -> ());
+      [%test_eq: int] 0 !replacement_attempts;
+      [%test_eq: int] 1 !transports;
+      active := true;
+      [%test_eq: string] "done" (complete rebound);
+      [%test_eq: int] 1 !replacement_attempts;
+      [%test_eq: int] 1 !upstream;
+      [%test_eq: int] 2 !transports));
   print_endline
-    "revoked derived and recipe attempts stop before upstream/transport; live control \
-     dispatches";
+    "revoked derived, recipe and rebound attempts stop before upstream/transport; live \
+     controls dispatch";
   [%expect
-    {| revoked derived and recipe attempts stop before upstream/transport; live control dispatches |}]
+    {| revoked derived, recipe and rebound attempts stop before upstream/transport; live controls dispatch |}]
 ;;
 
 let%expect_test

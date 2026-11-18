@@ -3,6 +3,22 @@ module Spec = Chatmd_shell_spec.Extension_spec
 
 type t
 
+(** Parsed generated source DATA shared with immutable artifact selection.
+    Uses the same generated-only syntax, plain initial messages and no implicit
+    agent rules as [prepare]. No authoring resolution, tool binding, compilation
+    or executable admission is implied. Reads only the supplied source bundle
+    rooted in its caller-verified immutable materialized tree. *)
+module Source : sig
+  type t
+
+  val parse
+    :  dir:Eio.Fs.dir_ty Eio.Path.t
+    -> Chatmd_source_bundle.t
+    -> (t, Chatmd_shell_spec.Diagnostic.t list) result
+
+  val moderator : t -> Spec.script option
+end
+
 (** Parse supplied bytes, bind explicit inherited references, resolve authoring
     policy and compile lifecycle moderators without evaluating or constructing
     tools. [ceiling] must already reflect host/parent delegability decisions.

@@ -30,6 +30,11 @@ type t =
   | Session_work of Session_work.Query.t
   | Session_configuration_get of Session_configuration.Get_request.t
   | Session_configuration_update of Session_configuration.Update_request.t
+  | Instructions of (Instruction_control.Request.t[@sexp.opaque])
+  | Goal_query of (Goal_query.Request.t[@sexp.opaque])
+  | Goal_control of (Goal_control.Request.t[@sexp.opaque])
+  | Recurrence_query of (Recurrence_query.Request.t[@sexp.opaque])
+  | Recurrence_control of (Recurrence_control.Request.t[@sexp.opaque])
   | Session_get of Session.Get_request.t
   | Session_inference_summary of Inference_query.Summary_request.t
   | Session_inference_observations of Inference_query.Request.t
@@ -115,6 +120,11 @@ let method_name = function
   | Activity_list _ -> "activity.list"
   | Session_work _ -> "session.work"
   | Session_configuration_get _ -> "session.configuration_get"
+  | Instructions request -> Instruction_control.Request.method_name request
+  | Goal_query request -> Goal_query.Request.method_name request
+  | Goal_control request -> Goal_control.Request.method_name request
+  | Recurrence_query request -> Recurrence_query.Request.method_name request
+  | Recurrence_control request -> Recurrence_control.Request.method_name request
   | Session_configuration_update _ -> "session.configuration_update"
   | Session_get _ -> "session.get"
   | Session_inference_summary _ -> "session.inference_summary"
@@ -204,6 +214,11 @@ let params = function
   | Activity_list request -> Activity_query.to_json request
   | Session_work request -> Session_work.Query.to_json request
   | Session_configuration_get request -> Session_configuration.Get_request.to_json request
+  | Instructions request -> Instruction_control.Request.params request
+  | Goal_query request -> Goal_query.Request.params request
+  | Goal_control request -> Goal_control.Request.params request
+  | Recurrence_query request -> Recurrence_query.Request.params request
+  | Recurrence_control request -> Recurrence_control.Request.params request
   | Session_configuration_update request ->
     Session_configuration.Update_request.to_json request
   | Session_get request -> Session.Get_request.to_json request
@@ -416,6 +431,31 @@ let decoders =
   ; "schedule.cancel", map Schedule.Cancel_request.of_json (fun x -> Schedule_cancel x)
   ; "ingress.submit", map Ingress.Submit_request.of_json (fun x -> Ingress_submit x)
   ]
+  @ List.map Instruction_control.Request.methods ~f:(fun method_ ->
+    ( method_
+    , fun params ->
+        Instruction_control.Request.of_method_and_params ~method_ ~params
+        |> Result.map ~f:(fun request -> Instructions request) ))
+  @ List.map Goal_query.Request.methods ~f:(fun method_ ->
+    ( method_
+    , fun params ->
+        Goal_query.Request.of_method_and_params ~method_ ~params
+        |> Result.map ~f:(fun request -> Goal_query request) ))
+  @ List.map Goal_control.Request.methods ~f:(fun method_ ->
+    ( method_
+    , fun params ->
+        Goal_control.Request.of_method_and_params ~method_ ~params
+        |> Result.map ~f:(fun request -> Goal_control request) ))
+  @ List.map Recurrence_query.Request.methods ~f:(fun method_ ->
+    ( method_
+    , fun params ->
+        Recurrence_query.Request.of_method_and_params ~method_ ~params
+        |> Result.map ~f:(fun request -> Recurrence_query request) ))
+  @ List.map Recurrence_control.Request.methods ~f:(fun method_ ->
+    ( method_
+    , fun params ->
+        Recurrence_control.Request.of_method_and_params ~method_ ~params
+        |> Result.map ~f:(fun request -> Recurrence_control request) ))
   @ List.map Authoring_wire.Request.supported_methods ~f:(fun method_ ->
     ( method_
     , fun params ->

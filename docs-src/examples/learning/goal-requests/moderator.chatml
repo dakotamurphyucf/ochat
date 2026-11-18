@@ -1,0 +1,74 @@
+let initial_state = false
+let goal_id = "goal_release_review"
+
+let checked = fun result -> match result with
+  | `Ok(value) -> Task.pure(value)
+  | `Error(error) -> Task.fail("Invalid Goal request data: " ++ to_string(error))
+
+let call = fun tool request -> Task.bind(Tool.call(tool, request), fun result ->
+  match result with
+  | `Ok(value) -> Task.pure(value)
+  | `Error(message) -> Task.fail(message))
+
+let field = fun value key -> match Json.get_field(value, key) with
+  | `Some(value) -> value
+  | `None -> `Null
+
+let basis = fun view key ->
+  match (|field(view, "generation"), field(view, "catalog_revision")|) with
+  | (|`String(generation), `String(catalog_revision)|) ->
+      Task.pure({generation = generation; catalog_revision = catalog_revision; key = key})
+  | _ -> Task.fail("Missing Goal catalog basis")
+
+let goal_revision = fun view ->
+  match field(view, "goals") with
+  | `Array(rows) ->
+      if Array.length(rows) == 1 then
+        let goal = field(rows[0], "goal") in
+        (match (|field(goal, "id"), field(goal, "revision")|) with
+         | (|`String(id), `String(revision)|) ->
+             if id == goal_id then Task.pure(revision)
+             else Task.fail("Read returned another Goal")
+         | _ -> Task.fail("Missing Goal revision"))
+      else Task.fail("Expected one selected Goal")
+  | _ -> Task.fail("Missing Goal rows")
+
+let stage = fun before ->
+  let* source = checked(Requests.source_of_view(before)) in
+  let* create_basis = basis(before, "create-release-review") in
+  let budget = {admitted_turns = `Set("4"); admitted_attempts = `Set("8");
+                observed_tokens = `Unset; deadline = `Unset} in
+  let* create = checked(Requests.create(create_basis, source, goal_id,
+    "Review the release notes against accepted changes.", budget)) in
+  let* created = call("goal_create", create) in
+  let* query = checked(Requests.get(goal_id)) in
+  let* projected = call("goal_get", query) in
+  let* source = checked(Requests.source_of_view(projected)) in
+  let* start_basis = basis(projected, "start-release-review") in
+  let* revision = goal_revision(projected) in
+  let selected = {basis = start_basis; goal_id = goal_id; goal_revision = revision} in
+  let input = `User_submission({kind = `Plain_text;
+    text = "Review the release notes against accepted changes."; attachments = []}) in
+  let* start = checked(Requests.start(selected, source, input)) in
+  let* reply = call("goal_start", start) in
+  match (|field(reply, "staged"), field(reply, "effect")|) with
+  | (|`Bool(true), `String("goal_start")|) -> Task.pure(true)
+  | _ -> Task.fail("Goal Start did not confirm staging")
+
+let on_event = fun ctx staged event ->
+  match event with
+  | `Session_start ->
+      if staged then Task.pure(staged)
+      else
+        let* read = Tool.call("goal_get", Requests.list()) in
+        (match read with
+         | `Error(message) ->
+             if message == "permission_denied" then Task.pure(staged)
+             else Task.fail(message)
+         | `Ok(before) ->
+             match field(before, "goals") with
+             | `Array(rows) ->
+                 if Array.length(rows) == 0 then stage(before)
+                 else Task.pure(staged)
+             | _ -> Task.fail("Missing Goal rows"))
+  | _ -> Task.pure(staged)

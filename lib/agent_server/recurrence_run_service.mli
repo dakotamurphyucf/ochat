@@ -119,7 +119,12 @@ end
     imports its opaque target observation, obtains current reciprocal activation
     custody, then invokes the existing rich-input or authored-start consumer.
     No constructor, native setup, implicit Agent, initializer or input work occurs
-    before those acknowledged owners. Existing-session input and both captured
+    before those acknowledged owners. After genuine Held admission, the target's
+    exact live Held/Prepared basis and registered owner remain required; a
+    transient registry reservation alone does not revoke that admitted target.
+    A distinct controller still requires fresh entry validation. Retained receipt
+    reconciliation and all pre-admission checks retain fresh entry validation.
+    Existing-session input and both captured
     Single_turn/Workflow modes retain their existing support.
 
     Every lower domain error remains Error THROUGH the full Factory CPS, even

@@ -296,13 +296,7 @@ let select_standalone_tools definition ~capabilities ~names =
   }
 ;;
 
-let prepare_delegated_definition_in_domain
-      ?(limits = Chatml_compilation.default_limits)
-      ~env
-      ~capabilities
-      ~scripts
-      ()
-  =
+let validate_delegated_source ~(limits : Chatml_compilation.limits) scripts =
   let open Result.Let_syntax in
   let fail code message = Error [ D.error ~code message ] in
   let%bind () =
@@ -325,17 +319,28 @@ let prepare_delegated_definition_in_domain
     List.fold_result scripts ~init:() ~f:(fun () script ->
       validate_script ~max_source_bytes:limits.max_source_bytes script)
   in
+  List.fold_result scripts ~init:() ~f:(fun () script ->
+    require_single_file script
+    |> Result.map_error ~f:(fun (error : Chatml_compilation.error) ->
+      [ D.error ~source:script.source_ref ~code:error.code error.message ]))
+;;
+
+let prepare_delegated_definition_in_domain
+      ?(limits = Chatml_compilation.default_limits)
+      ~env
+      ~capabilities
+      ~scripts
+      ()
+  =
+  let open Result.Let_syntax in
+  let fail code message = Error [ D.error ~code message ] in
+  let%bind () = validate_delegated_source ~limits scripts in
   try
     Eio.Time.Timeout.run_exn
       (Eio.Time.Timeout.seconds (Eio.Stdenv.mono_clock env) limits.wall_seconds)
       (fun () ->
          let%map compiled_scripts =
            List.fold_result scripts ~init:[] ~f:(fun compiled script ->
-             let%bind () =
-               require_single_file script
-               |> Result.map_error ~f:(fun e ->
-                 [ D.error ~source:script.source_ref ~code:e.code e.message ])
-             in
              let%map program =
                Chatml_compilation.compile
                  ~limits

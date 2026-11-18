@@ -147,7 +147,15 @@ let admit_generation (state : Session_state.t) =
       Delegated_usage.reconcile own ~before:state.inference_ledger ~after:inference_ledger
       |> Result.map ~f:Option.some
   in
-  let state = { state with inference_ledger; delegated_usage } in
+  let%bind policy_canonical_usage =
+    Option.value_map state.policy_canonical_usage ~default:(Ok None) ~f:(fun accounting ->
+      Policy_canonical_usage.reconcile_factual
+        accounting
+        ~before:state.inference_ledger
+        ~after:inference_ledger
+      |> Result.map ~f:Option.some)
+  in
+  let state = { state with inference_ledger; delegated_usage; policy_canonical_usage } in
   let%map () = Session_state.validate state in
   state
 ;;

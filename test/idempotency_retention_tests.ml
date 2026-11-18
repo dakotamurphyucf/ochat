@@ -352,3 +352,94 @@ let%expect_test
     | _ -> failwith "interrupted no-op continuation became terminal");
   [%expect {|original outcome remains unknown; no terminal continuation inferred|}]
 ;;
+
+let%expect_test "only a durably applied protected Remove provides a target fact" =
+  with_temp_directory "idempotency-removal-evidence" (fun env root ->
+    let path = Filename.concat root "responses.sexp" in
+    let open_store () = Store.open_or_create ~env ~path |> store_ok in
+    let new_receipt name =
+      let original = receipt name Pending in
+      Store.
+        { original with
+          key =
+            { original.key with
+              session_id = Some (P.Id.Session.create ())
+            ; method_name = "session.delete"
+            }
+        ; retention = Protected
+        }
+    in
+    let pending = new_receipt "pending-remove" in
+    let rejected = new_receipt "rejected-remove" in
+    let old = new_receipt "old-generic-remove" in
+    let applied = new_receipt "applied-remove" in
+    let id (record : Store.record) = Option.value_exn record.key.session_id in
+    let result record =
+      P.Method_result.Delete.
+        { session_id = id record; deleted_at = timestamp; archive = None }
+    in
+    let lookup store record = Store.removal store ~session_id:(id record) in
+    let complete store (record : Store.record) outcome =
+      Store.complete
+        store
+        ~key:record.key
+        ~request_digest:record.request_digest
+        ~accepted_transaction_sequence:None
+        ~outcome
+    in
+    let complete_remove store (record : Store.record) ~request_digest result =
+      Store.complete_remove store ~key:record.key ~request_digest ~generation:17 ~result
+    in
+    let write () =
+      let store = open_store () in
+      List.iter [ pending; rejected; applied ] ~f:(fun record ->
+        Store.record_remove store record |> store_ok |> ignore);
+      Store.record store old |> store_ok |> ignore;
+      assert (Option.is_none (lookup store applied));
+      let public record =
+        Store.Success (P.Method_result.Delete.to_json (result record))
+      in
+      assert (Result.is_error (complete store applied (public applied)));
+      assert (
+        Result.is_error
+          (complete_remove store applied ~request_digest:"other" (result applied)));
+      assert (
+        Result.is_error
+          (complete_remove
+             store
+             applied
+             ~request_digest:applied.request_digest
+             (result pending)));
+      complete
+        store
+        rejected
+        (Failure (P.Error.invalid_request "ordinary rejected removal"))
+      |> store_ok
+      |> ignore;
+      complete_remove store old ~request_digest:old.request_digest (result old)
+      |> store_ok
+      |> ignore;
+      let completed =
+        complete_remove
+          store
+          applied
+          ~request_digest:applied.request_digest
+          (result applied)
+        |> store_ok
+      in
+      match completed.outcome, public applied with
+      | Success json, Success expected -> assert (Jsonaf.exactly_equal json expected)
+      | _ -> failwith "ordinary Delete response changed"
+    in
+    write ();
+    let store = open_store () in
+    List.iter [ pending; rejected; old ] ~f:(fun record ->
+      assert (Option.is_none (lookup store record)));
+    let proof = lookup store applied |> Option.value_exn in
+    assert (P.Id.Session.equal proof.session_id (id applied));
+    [%test_eq: int] 17 proof.generation);
+  print_endline
+    "only a reserved and applied Remove yields exact private evidence after reload";
+  [%expect
+    {| only a reserved and applied Remove yields exact private evidence after reload |}]
+;;

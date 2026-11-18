@@ -28,3 +28,14 @@ val create
 
 val to_json : t -> Jsonaf.t
 val of_json : Jsonaf.t -> (t, Error.t) result
+
+(** Durable headless Run admission identity. Transport attachments are separate
+    from this identity, including when a public Goal Start requires a writer. *)
+val headless_request_sha256
+  :  session_id:Id.Session.t
+  -> generation:int
+  -> expected_revision:int64
+  -> mode:Run.Mode.t
+  -> input:Input.t
+  -> key:Idempotency_key.t
+  -> (string, Error.t) result

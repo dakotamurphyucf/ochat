@@ -122,6 +122,362 @@ let check_produced_run_evidence ~initial ~snapshot ~intent =
   check_terminal (Option.value_exn final.run_state)
 ;;
 
+let check_goal_definition_storage ~initial catalog =
+  let module State = A.Session_state_document in
+  let module Delta = A.Session_delta_document in
+  let module Store = Agent_store in
+  let marker = P.Session_storage_semantics.recurrence_controller_goal in
+  let state = { initial with A.Session_state.recurrence_catalog = Some catalog } in
+  let state_document =
+    State.encode (State.authored state) ~limits:document_limits |> document_ok
+  in
+  let check_marker document ~decode =
+    let markers = D.Document.required_semantics document in
+    assert (List.mem markers marker ~equal:String.equal);
+    let without_marker =
+      List.filter markers ~f:(fun name -> not (String.equal name marker))
+    in
+    let unmarked =
+      set
+        (D.Document.json document)
+        "required_semantics"
+        (`Array (List.map without_marker ~f:(fun name -> `String name)))
+      |> D.Document.inspect ~limits:document_limits
+      |> document_ok
+    in
+    assert (Result.is_error (decode unmarked));
+    let old_codec =
+      D.Domain_codec.create
+        ~limits:document_limits
+        ~kind:(D.Document.kind document)
+        ~version:(D.Document.version document)
+        ~shape:D.Shape.value
+        ~supported_semantics:without_marker
+        ~decode:Result.return
+        ~encode:Result.return
+      |> document_ok
+    in
+    match D.Domain_codec.decode old_codec document with
+    | Error (D.Error.Required_semantics_unknown name) -> assert (String.equal name marker)
+    | Error _ | Ok _ ->
+      failwith "old decoder accepted or misclassified a Goal-bound child"
+  in
+  check_marker state_document ~decode:(State.decode ~limits:document_limits);
+  let snapshot =
+    Store.Snapshot.create
+      ~limits:document_limits
+      ~session_id:state.identity.session_id
+      ~transaction_sequence:0L
+      ~transaction_hash:None
+      ~event_sequence:0L
+      ~created_at:state.identity.updated_at
+      ~prompt_artifact:(P.Id.Prompt_revision.to_string state.spec.prompt_revision_id)
+      ~workspace_identity:state.spec.workspace_instance.conflict_domain
+      ~payload:state_document
+    |> store_ok
+  in
+  let frame =
+    Store.Snapshot.stored snapshot
+    |> Store.Snapshot.Stored.record
+    |> Store.Document_record.document
+    |> Store.Document_record.encode ~limits:document_limits ~flags:0
+    |> Result.map_error ~f:(fun error ->
+      Sexp.to_string_hum (Store.Document_record.Error.sexp_of_t error))
+    |> Result.ok_or_failwith
+  in
+  let restored =
+    Store.Snapshot.decode_file
+      ~max_payload_length:(D.Limits.max_bytes document_limits)
+      frame
+    |> store_ok
+  in
+  assert (D.Json.equal (D.Document.json restored.payload) (D.Document.json state_document));
+  let initial_document =
+    State.encode (State.authored initial) ~limits:document_limits
+    |> document_ok
+    |> State.decode ~limits:document_limits
+    |> document_ok
+  in
+  List.iter
+    [ A.Session_delta.Recurrence_catalog_changed catalog; Created state ]
+    ~f:(fun value ->
+      let delta =
+        Delta.create value ~limits:document_limits ~state_document:State.authored
+        |> document_ok
+        |> Delta.document
+      in
+      check_marker delta ~decode:(Delta.decode ~limits:document_limits);
+      let transaction =
+        Store.Transaction.create
+          ~limits:document_limits
+          ~session_id:state.identity.session_id
+          ~generation:state.identity.generation
+          ~transaction_sequence:1L
+          ~previous_transaction_hash:None
+          ~session_revision:1L
+          ~first_event_sequence:None
+          ~last_event_sequence:None
+          ~accepted_at_ns:0L
+          ~command_audit:None
+          ~delta
+          ~durable_events:[]
+        |> store_ok
+      in
+      let decoded =
+        Store.Transaction.decode (Store.Transaction.encode transaction) |> store_ok
+      in
+      let replayed = Delta.decode ~limits:document_limits decoded.delta |> document_ok in
+      assert (
+        D.Json.equal (D.Document.json (Delta.document replayed)) (D.Document.json delta));
+      let replay =
+        Delta.apply replayed ~limits:document_limits initial_document
+        |> document_ok
+        |> State.value
+      in
+      let restored_catalog = Option.value_exn replay.recurrence_catalog in
+      assert (
+        D.Json.equal
+          (C.to_jsonaf catalog |> protocol_ok)
+          (C.to_jsonaf restored_catalog |> protocol_ok)))
+;;
+
+let check_goal_definition ~initial capture historical old_receipt =
+  let module Binding = F.Goal_binding in
+  let module Request = Command.Goal_owner_request in
+  let module Receipt = A.Recurrence_command_receipt in
+  let marker = P.Session_storage_semantics.recurrence_controller_goal in
+  let source = F.source historical in
+  let key = F.key historical in
+  let goal_id = P.Id.Goal.of_string "goal_recurrence_codec" |> protocol_ok in
+  (* Pure persisted evidence. The actual Actor helper has its own checks. *)
+  let run =
+    P.Run.create
+      ~id:(P.Id.Run.of_string "run_recurrence_goal_codec" |> protocol_ok)
+      ~session
+      ~principal_id
+      ~source
+      ~mode:Workflow
+      ~lifecycle:Admitted
+      ~revision:0L
+      ~owned_work:[]
+      ~relinquished_work:[]
+      ~terminal_work:[]
+      ~created_at:timestamp
+      ~updated_at:timestamp
+    |> protocol_ok
+  in
+  let admission =
+    P.Run_receipt.create
+      ~run_id:run.id
+      ~principal_id
+      ~source
+      ~key:(P.Idempotency_key.of_string "admit-recurrence-codec" |> protocol_ok)
+      ~request_sha256:(String.make 64 'a')
+      ~kind:Admission
+      ~run_revision:0L
+      ~session_revision:1L
+      ~committed_at:timestamp
+    |> protocol_ok
+  in
+  let creator_episode = P.Goal_episode.create ~run ~admission |> protocol_ok in
+  let capture_binding revision =
+    Binding.Capture.create
+      ~owner:session
+      ~goal_id
+      ~creator_episode
+      ~goal_revision_at_capture:revision
+    |> protocol_ok
+  in
+  let binding = capture_binding 1L in
+  let create ~key ~source ~target constructor =
+    constructor
+      ~key
+      ~creator:principal_id
+      ~source
+      ~birth_lifecycle_revision:Lifecycle.zero
+      ~schedule:(F.schedule historical)
+      ~target
+      ~policy:(F.policy historical)
+      ~created_at:timestamp
+  in
+  let target = F.target historical in
+  let positive = create ~key ~source ~target (F.create_bound ~binding) |> protocol_ok in
+  let document = F.to_document positive in
+  assert (List.equal String.equal (D.Document.required_semantics document) [ marker ]);
+  let old_document = F.to_document historical in
+  let target_document = A.Recurrence_target.to_document target |> document_ok in
+  let legacy_document =
+    D.Document.create
+      ~kind:"ochat.recurrence_definition"
+      ~version:1
+      ~limits:document_limits
+      ~payload:
+        (`Object
+            [ "key", A.Recurrence_identity.Definition.to_json key
+            ; "creator", P.Id.Principal.to_json principal_id
+            ; "source", P.Run_source.to_json source
+            ; "birth_lifecycle_revision", `String "0"
+            ; "schedule", F.Schedule.to_json (F.schedule historical)
+            ; "target", D.Document.json target_document
+            ; "policy", A.Recurrence_policy.to_json (F.policy historical)
+            ; "created_at", P.Timestamp.to_json timestamp
+            ])
+    |> document_ok
+  in
+  let canonical_sha256 json =
+    P.Json_codec.canonical_string json
+    |> protocol_ok
+    |> Digestif.SHA256.digest_string
+    |> Digestif.SHA256.to_hex
+  in
+  assert (
+    String.equal
+      (D.Document.to_string old_document)
+      (D.Document.to_string legacy_document));
+  let restored_old = F.of_document legacy_document |> document_ok in
+  assert (
+    String.equal
+      (F.digest restored_old)
+      (canonical_sha256 (D.Document.json legacy_document)));
+  let remove json name =
+    match json with
+    | `Object fields -> `Object (List.Assoc.remove fields ~equal:String.equal name)
+    | _ -> assert false
+  in
+  let without_binding =
+    map_payload (D.Document.json document) ~f:(fun payload ->
+      remove payload "goal_binding")
+    |> fun json -> remove json "required_semantics"
+  in
+  assert (String.equal (F.digest historical) (canonical_sha256 without_binding));
+  assert (Binding.equal (F.goal_binding historical) Unbound);
+  let decoded = F.of_document document |> document_ok in
+  assert (Binding.equal (F.goal_binding decoded) (Controller_goal binding));
+  assert (String.equal (F.digest decoded) (F.digest positive));
+  assert (not (String.equal (F.digest historical) (F.digest positive)));
+  let decode raw =
+    D.Document.inspect ~limits:document_limits raw |> Result.bind ~f:F.of_document
+  in
+  let raw = D.Document.json document in
+  let annotated =
+    map_payload raw ~f:(fun payload ->
+      set
+        payload
+        "goal_binding"
+        (append (field payload "goal_binding") "future" (`Number "1.00e+2")))
+  in
+  let retained = decode annotated |> document_ok in
+  assert (
+    String.equal
+      (D.Document.to_string (F.to_document retained))
+      (Jsonaf.to_string annotated));
+  assert (Binding.equal (F.goal_binding retained) (Controller_goal binding));
+  assert (not (String.equal (F.digest retained) (F.digest positive)));
+  List.iter
+    [ remove raw "required_semantics"
+    ; map_payload raw ~f:(fun payload -> remove payload "goal_binding")
+    ; map_payload raw ~f:(fun payload -> set payload "goal_binding" `Null)
+    ]
+    ~f:(fun json -> assert (Result.is_error (decode json)));
+  let another_owner =
+    P.Session_ref.create
+      ~server_id:(P.Id.Server.of_string "srv_other" |> protocol_ok)
+      ~session_id
+  in
+  let key_for ~owner ~revision =
+    A.Recurrence_identity.Definition.create
+      ~controller:owner
+      ~recurrence_id:(E.id (E.create historical |> protocol_ok))
+      ~revision
+    |> protocol_ok
+  in
+  assert (
+    Result.is_error
+      (create
+         ~key:(key_for ~owner:another_owner ~revision:0L)
+         ~source
+         ~target
+         (F.create_bound ~binding)));
+  assert (
+    Result.is_error
+      (create ~key ~source:(Support.source 2L) ~target (F.create_bound ~binding)));
+  assert (
+    Result.is_error
+      (create ~key ~source ~target:(Support.capture ()).target (F.create_bound ~binding)));
+  let next_key = key_for ~owner:session ~revision:1L in
+  let edit entry constructor =
+    let next = create ~key:next_key ~source ~target constructor |> protocol_ok in
+    E.edit entry next
+  in
+  let entry = E.create positive |> protocol_ok in
+  edit entry (F.create_bound ~binding) |> protocol_ok |> ignore;
+  assert (Result.is_error (edit entry F.create));
+  assert (Result.is_error (edit entry (F.create_bound ~binding:(capture_binding 2L))));
+  assert (
+    Result.is_error (edit (E.create historical |> protocol_ok) (F.create_bound ~binding)));
+  let ordinary = request C.empty "fresh-custody" (Create (E.id entry, capture)) in
+  let legacy_command =
+    `Object
+      [ "kind", `String "recurrence_command_v1"
+      ; "session_id", P.Id.Session.to_json session_id
+      ; "generation", `String "0"
+      ; "source", P.Run_source.to_json source
+      ; "expected_lifecycle_revision", `String "0"
+      ; "expected_catalog_revision", `String "0"
+      ; "expected_control_revision", `Null
+      ; "key", P.Idempotency_key.to_json ordinary.key
+      ; ( "mutation"
+        , `Object
+            [ "kind", `String "create"
+            ; "recurrence_id", P.Id.Recurrence.to_json (E.id entry)
+            ; ( "capture"
+              , `Object
+                  [ "schedule", F.Schedule.to_json (F.schedule historical)
+                  ; ( "target_sha256"
+                    , `String (A.Recurrence_target.digest target |> protocol_ok) )
+                  ; "policy", A.Recurrence_policy.to_json (F.policy historical)
+                  ] )
+            ] )
+      ]
+  in
+  let legacy_digest = canonical_sha256 legacy_command in
+  assert (String.equal (Command.digest ordinary |> protocol_ok) legacy_digest);
+  assert (String.equal legacy_digest old_receipt.Receipt.request_sha256);
+  let with_owner command expected_goal_revision =
+    let goal = Request.create ~goal_id ~expected_goal_revision |> protocol_ok in
+    Command.with_goal_owner command goal
+  in
+  let bound_request = with_owner ordinary 1L |> protocol_ok in
+  let digest = Command.digest bound_request |> protocol_ok in
+  assert (not (String.equal digest old_receipt.request_sha256));
+  assert (
+    not
+      (String.equal
+         digest
+         (Command.digest (with_owner ordinary 2L |> protocol_ok) |> protocol_ok)));
+  let existing =
+    request C.empty "existing-goal-control" (Create (id "existing", Support.capture ()))
+  in
+  assert (Result.is_error (with_owner existing 1L));
+  assert (Result.is_error (apply C.empty bound_request));
+  let ordinary_catalog, retained = apply C.empty ordinary |> committed in
+  (match apply ordinary_catalog ordinary |> protocol_ok with
+   | Retained receipt -> assert (Receipt.equal receipt retained)
+   | Commit _ -> failwith "exact ordinary replay unexpectedly published");
+  assert (Result.is_error (apply ordinary_catalog bound_request));
+  let receipt =
+    Receipt.of_json (set (Receipt.to_json old_receipt) "request_sha256" (`String digest))
+    |> protocol_ok
+  in
+  let catalog = C.commit C.empty ~entry ~receipt |> protocol_ok in
+  let restored = roundtrip catalog in
+  assert (
+    String.equal
+      (F.digest (E.current (C.find restored (E.id entry) |> Option.value_exn)))
+      (F.digest positive));
+  check_goal_definition_storage ~initial catalog
+;;
+
 let check_fresh_custody () =
   with_actor_workspace (fun env workspace_instance ->
     let module Artifact = Agent_store.Prompt_artifact_store.Artifact in
@@ -238,9 +594,15 @@ let check_fresh_custody () =
       ]
       ~f:(fun json -> assert (Result.is_error (decode json)));
     let capture = { (capture ()) with target } in
-    let catalog, _ = fresh C.empty "fresh-custody" (Create (id "fresh", capture)) in
+    let catalog, receipt = fresh C.empty "fresh-custody" (Create (id "fresh", capture)) in
     let restored = roundtrip catalog in
     let retained_definition = E.current (entry restored "fresh") in
+    check_goal_definition
+      ~initial:
+        (actor_state ~workspace_instance ~liveness:Detached ~start_immediately:false)
+      capture
+      retained_definition
+      receipt;
     let restored_target = F.target retained_definition in
     let module Reservation = A.Recurrence_child_reservation in
     let module Association = A.Recurrence_child_association in

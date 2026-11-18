@@ -7,6 +7,7 @@ module GD = A.Goal_descendants
 module Pending = A.Goal_descendant_pending
 module Origin = Agent_store.Delegation_goal_origin
 module Store = Agent_store
+module Cleanup = Actor.Retirement_cleanup
 
 module Close_read_fault = struct
   type phase =
@@ -16,6 +17,13 @@ module Close_read_fault = struct
     | Parked_refresh
     | Reject_close
 
+  type close_gate =
+    { entered : unit Eio.Promise.t
+    ; enter : unit Eio.Promise.u
+    ; release : unit Eio.Promise.t
+    ; resume : unit Eio.Promise.u
+    }
+
   type t =
     { caller_key : unit Eio.Fiber.key
     ; mutable phase : phase
@@ -24,6 +32,8 @@ module Close_read_fault = struct
     ; signal_parked : unit Eio.Promise.u
     ; never : unit Eio.Promise.t
     ; mutable failed_reads : int
+    ; mutable archive_reads : int
+    ; mutable close_gate : close_gate option
     }
 
   let create () =
@@ -36,7 +46,22 @@ module Close_read_fault = struct
     ; signal_parked
     ; never
     ; failed_reads = 0
+    ; archive_reads = 0
+    ; close_gate = None
     }
+  ;;
+
+  let hold_close t =
+    let entered, enter = Eio.Promise.create () in
+    let release, resume = Eio.Promise.create () in
+    let gate = { entered; enter; release; resume } in
+    t.close_gate <- Some gate;
+    gate
+  ;;
+
+  let release_close t =
+    Option.iter t.close_gate ~f:(fun gate ->
+      ignore (Eio.Promise.try_resolve gate.resume ()))
   ;;
 
   let select t ~root ~scope =
@@ -100,6 +125,7 @@ module Close_read_fault = struct
   ;;
 
   let before_stat t path =
+    t.archive_reads <- t.archive_reads + 1;
     match t.phase with
     | Await_refresh when Option.is_some (Eio.Fiber.get t.caller_key) ->
       (* Reserve's own postcommit metadata callback also stats ARCHIVED, on the
@@ -113,6 +139,9 @@ module Close_read_fault = struct
           | Disabled | Await_reserve | Await_refresh | Reject_close -> ())
         ~f:(fun () -> Eio.Promise.await t.never)
     | Reject_close ->
+      Option.iter t.close_gate ~f:(fun gate ->
+        ignore (Eio.Promise.try_resolve gate.enter ());
+        Eio.Promise.await gate.release);
       t.failed_reads <- t.failed_reads + 1;
       raise (Core_unix.Unix_error (EIO, "567 root prewriter close read", path))
     | Disabled | Await_reserve | Await_refresh | Parked_refresh -> ()
@@ -189,12 +218,16 @@ let%expect_test "retained Writer Run and no-Turn input bypass unrelated sealed c
        in
        let caller_context = ref None in
        let unloaded = ref false in
+       let cleanup_attempt = ref None in
        let cancelled = Failure "567 caller cancelled before child canonical writer" in
        protect_cleanup
          ~finally:(fun () ->
+           Close_read_fault.release_close fault;
            Option.iter !caller_context ~f:(fun context ->
              Eio.Cancel.cancel context cancelled);
            fault.phase <- Disabled;
+           Option.iter !cleanup_attempt ~f:(fun task ->
+             ignore (Eio.Promise.await_exn task));
            if not !unloaded
            then (
              within "post-disarm factual unload" (fun () ->
@@ -378,7 +411,95 @@ let%expect_test "retained Writer Run and no-Turn input bypass unrelated sealed c
             submit failed_request (Some failed_entry) |> rejected |> ignore;
             [%test_eq: int] (failures + 1) fault.failed_reads;
             assert_unchanged ();
+            (* A is the real sealed-slot close, held at its existing root read.
+               Capture it while Running, before its negative return can release
+               the original cleanup election. *)
+            let gate = Close_read_fault.hold_close fault in
+            let attempt =
+              Eio.Fiber.fork_promise ~sw (fun () ->
+                match Actor.drain_descendant_cleanup child.actor with
+                | result -> Ok result
+                | exception exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ()))
+            in
+            cleanup_attempt := Some attempt;
+            (match
+               within "same retained A close read" (fun () ->
+                 Eio.Fiber.first
+                   (fun () ->
+                      Eio.Promise.await gate.entered;
+                      `Entered)
+                   (fun () -> `Finished (Eio.Promise.await_exn attempt)))
+             with
+             | `Entered -> ()
+             | `Finished (Error (exn, backtrace)) ->
+               Exn.raise_with_original_backtrace exn backtrace
+             | `Finished (Ok _) -> failwith "actual A close did not reach its root read");
+            let cleanup =
+              Actor.retire_runtime_worker_with_cleanup child.actor ~closing:false
+              |> protocol_ok
+            in
+            let captured = Cleanup.snapshot cleanup |> protocol_ok in
+            assert (
+              Cleanup.Snapshot.equal_progress (Cleanup.Snapshot.progress captured) Pending);
+            assert (List.is_empty (Cleanup.Snapshot.failures captured));
+            Close_read_fault.release_close fault;
+            let original_failure =
+              match
+                within "same retained A failure" (fun () -> Eio.Promise.await_exn attempt)
+              with
+              | Ok (Error actual) -> actual
+              | Ok (Ok ()) -> failwith "selected prewriter read did not fail"
+              | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
+            in
+            assert_unchanged ();
             fault.phase <- Disabled;
+            (* B is a legitimate later public retry of that exact pending root.
+               It succeeds and releases the slot BEFORE the first report advance. *)
+            within "later exact B close" (fun () ->
+              Actor.drain_descendant_cleanup child.actor)
+            |> protocol_ok;
+            let after_b = state parent in
+            let closed_by_b = Adapter.branch parent scope reference in
+            assert (Option.is_none (GD.Branch.pending closed_by_b));
+            (match GD.Branch.last closed_by_b with
+             | Some (No_writer_closed actual) -> assert (Pending.equal pending actual)
+             | None | Some (Included _) ->
+               failwith "B did not close the SAME root pending");
+            let frames () =
+              Source_preparation_tests.journal_entries env parent
+              |> List.map ~f:(fun entry -> Store.Frame.payload entry.Store.Journal.frame)
+            in
+            let after_b_frames = frames () in
+            let root_reads = fault.archive_reads in
+            let failed_reads = fault.failed_reads in
+            let retryable =
+              Cleanup.advance cleanup ~actor:child.actor ~after:captured |> protocol_ok
+            in
+            assert (
+              Cleanup.Snapshot.equal_progress
+                (Cleanup.Snapshot.progress retryable)
+                Retryable);
+            (match Cleanup.Snapshot.failures retryable with
+             | [ Protocol actual ] -> assert (phys_equal original_failure actual)
+             | _ -> failwith "A's own pre-release negative was lost or made terminal");
+            let joined =
+              Cleanup.advance cleanup ~actor:child.actor ~after:retryable |> protocol_ok
+            in
+            assert (
+              Cleanup.Snapshot.equal_progress (Cleanup.Snapshot.progress joined) Joined);
+            assert (List.is_empty (Cleanup.Snapshot.failures joined));
+            assert (
+              Cleanup.Snapshot.equal_progress (Cleanup.Snapshot.progress captured) Pending);
+            assert (List.is_empty (Cleanup.Snapshot.failures captured));
+            (match Cleanup.Snapshot.failures retryable with
+             | [ Protocol actual ] -> assert (phys_equal original_failure actual)
+             | _ -> failwith "original A failure snapshot changed after exact retry");
+            [%test_eq: int] root_reads fault.archive_reads;
+            [%test_eq: int] failed_reads fault.failed_reads;
+            assert (phys_equal after_b (state parent));
+            assert (List.equal String.equal after_b_frames (frames ()));
+            assert (phys_equal before (state child));
+            [%test_eq: int] 1 !provider_calls;
             within "explicit factual unload drain" (fun () ->
               Owner.unload_and_wait child.runtime)
             |> protocol_ok;

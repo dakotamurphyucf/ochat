@@ -31,6 +31,7 @@ type 'env t = private
   { inference_relation : Transcript.Scope.relation
   ; inference_context : Inference_runtime.Context.t
   ; inference_identity : Neutral_turn.Identity.t
+  ; before_inference_attempt : Inference_runtime.Attempt.t -> unit
   ; on_inference_attempt : Inference_runtime.Attempt.t -> unit
   ; on_inference_completion : Inference_client.Completion.t -> unit
   ; on_inference_observation : Inference.Observation.t -> unit
@@ -200,9 +201,9 @@ val with_effect_checkpoint : 'env t -> check:(unit -> unit) -> 'env t
 val check_effect : 'env t -> unit
 
 (** Replace one lexical graph's identity and all of its tracking callbacks
-    together; inherited submission/dispatch/effect guards remain unchanged.
-    The caller selects the graph callbacks explicitly; this is not a way to
-    preserve independent policy checks hidden inside a replaced observer. *)
+    together. Inherited attempt, submission, dispatch and effect guards are
+    preserved. Install policy checks with the guard APIs so their lifetime is
+    independent of the selected graph. *)
 val with_inference_tracking
   :  'env t
   -> identity:Inference_client.Identity.t

@@ -13,6 +13,7 @@ type t =
   { configuration : Configuration.t
   ; factory : Session_factory.t
   ; server_id : P.Id.Server.t
+  ; command_receipts : Agent_store.Session_store.Command_receipts.t option
   ; sw : Eio.Switch.t
   ; now : unit -> P.Timestamp.t
   ; domain : int
@@ -31,13 +32,14 @@ let close t =
   t.closed <- true
 ;;
 
-let create configuration ~factory ~server_id ~sw ~now =
+let create ?command_receipts configuration ~factory ~server_id ~sw ~now =
   let open Result.Let_syntax in
   let%bind () = Configuration.validate configuration in
   let t =
     { configuration
     ; factory
     ; server_id
+    ; command_receipts
     ; sw
     ; now
     ; domain = (Stdlib.Domain.self () :> int)
@@ -480,19 +482,26 @@ let captured_target (controller : Controller.t) ~child ~target =
   Selected_target.create controller target session (Captured captured)
 ;;
 
-let acquire_existing_target (controller : Controller.t) ~session =
+let configured_existing_edge (controller : Controller.t) ~session =
+  if
+    P.Id.Server.equal (P.Session_ref.server_id session) controller.host.server_id
+    && List.mem
+         controller.grant.existing_targets
+         (P.Session_ref.session_id session)
+         ~equal:P.Id.Session.equal
+  then Ok ()
+  else denied "existing recurrence target is not configured on this host"
+;;
+
+let check_existing_edge controller ~session =
   let open Result.Let_syntax in
   let%bind () = Controller.basis controller in
-  let%bind () =
-    if
-      P.Id.Server.equal (P.Session_ref.server_id session) controller.host.server_id
-      && List.mem
-           controller.grant.existing_targets
-           (P.Session_ref.session_id session)
-           ~equal:P.Id.Session.equal
-    then Ok ()
-    else denied "existing recurrence target is not configured on this host"
-  in
+  configured_existing_edge controller ~session
+;;
+
+let acquire_existing_target (controller : Controller.t) ~session =
+  let open Result.Let_syntax in
+  let%bind () = check_existing_edge controller ~session in
   let%bind principal =
     principal controller.host ~scopes:P.Scope.[ Send_messages; View_session_transcript ]
   in
@@ -512,6 +521,72 @@ let acquire_existing_target (controller : Controller.t) ~session =
       ~authorize
   in
   existing_target controller ~target
+;;
+
+type existing_target_observation =
+  | Available of Target.t
+  | Invalidated of
+      { evidence : Actor.Recurrence_target_invalidation.t
+      ; authorize :
+          A.Session_state.t -> A.Recurrence_definition.t -> (unit, P.Error.t) result
+      }
+
+let observe_existing_target (controller : Controller.t) ~definition =
+  let module Invalidation = Actor.Recurrence_target_invalidation in
+  let open Result.Let_syntax in
+  let%bind () = Controller.check_definition controller definition in
+  match A.Recurrence_target.view (A.Recurrence_definition.target definition) with
+  | Fresh_child _ -> denied "durable target observation requires an existing target"
+  | Existing_session { session; _ } ->
+    let authorize state current =
+      let%bind () = Controller.authorize controller state in
+      let%bind () = configured_existing_edge controller ~session in
+      if
+        String.equal
+          (A.Recurrence_definition.digest definition)
+          (A.Recurrence_definition.digest current)
+      then Ok ()
+      else conflict "recurrence definition changed during target observation"
+    in
+    (match acquire_existing_target controller ~session with
+     | Ok target ->
+       let%bind observation = Actor.observe_resource_state target.entry.actor in
+       let check_target () =
+         Target.authorize target (Actor.Resource_observation.state observation)
+       in
+       let%bind () = check_target () in
+       let%map evidence =
+         Invalidation.changed_source
+           ~controller:controller.entry.actor
+           observation
+           definition
+       in
+       (match evidence with
+        | None -> Available target
+        | Some evidence ->
+          let authorize state current =
+            let%bind () = authorize state current in
+            check_target ()
+          in
+          Invalidated { evidence; authorize })
+     | Error error when P.Error.equal_code error.code Session_not_found ->
+       let%bind () = check_existing_edge controller ~session in
+       (match
+          Option.bind controller.host.command_receipts ~f:(fun receipts ->
+            Agent_store.Session_store.Command_receipts.removal
+              receipts
+              ~session_id:(P.Session_ref.session_id session))
+        with
+        | None -> Error error
+        | Some proof ->
+          let%bind () = check_existing_edge controller ~session in
+          let%bind evidence =
+            Invalidation.removed ~controller:controller.entry.actor proof definition
+          in
+          (match evidence with
+           | None -> Error error
+           | Some evidence -> Ok (Invalidated { evidence; authorize })))
+     | Error _ as error -> error)
 ;;
 
 let preview_target_source (target : Target.t) =
@@ -630,7 +705,7 @@ let pending_occupancy host =
   { O.known; unknown = List.rev unknown }
 ;;
 
-let acquire_captured_target (controller : Controller.t) ~occurrence =
+let acquire_captured_target ?fresh_goal (controller : Controller.t) ~occurrence =
   let open Result.Let_syntax in
   let%bind () = Controller.basis controller in
   let%bind () =
@@ -640,6 +715,7 @@ let acquire_captured_target (controller : Controller.t) ~occurrence =
   in
   let%bind child, target =
     Session_factory.acquire_recurrence_child
+      ?fresh_goal
       controller.host.factory
       ~parent:controller.entry
       ~actor:controller.actor

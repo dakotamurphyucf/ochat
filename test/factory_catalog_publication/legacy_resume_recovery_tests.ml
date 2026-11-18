@@ -133,19 +133,21 @@ let with_recovered mode f =
                with
                | Ok () -> ()
                | Error error ->
-                 recovered.close ();
+                 Agent_server.Session_registry.close_entry recovered;
                  raise_s [%sexp (error : P.Error.t)]);
-              protect_cleanup ~finally:recovered.close (fun () ->
-                assert (not (phys_equal old_actor recovered.actor));
-                assert (Owner.is_loaded recovered.runtime);
-                let pending = activation recovered in
-                assert (pending.pending ());
-                assert (not (pending.startup_pending ()));
-                let current = state recovered in
-                assert_original before current;
-                [%test_eq: int] 0 (List.length (receipts current Session_resume));
-                [%test_eq: int] 0 !providers;
-                f env recovered before providers))))
+              protect_cleanup
+                ~finally:(fun () -> Agent_server.Session_registry.close_entry recovered)
+                (fun () ->
+                   assert (not (phys_equal old_actor recovered.actor));
+                   assert (Owner.is_loaded recovered.runtime);
+                   let pending = activation recovered in
+                   assert (pending.pending ());
+                   assert (not (pending.startup_pending ()));
+                   let current = state recovered in
+                   assert_original before current;
+                   [%test_eq: int] 0 (List.length (receipts current Session_resume));
+                   [%test_eq: int] 0 !providers;
+                   f env recovered before providers))))
 ;;
 
 let%expect_test

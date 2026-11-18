@@ -11,6 +11,10 @@ val intent
   -> expected_catalog_revision:int64
   -> (intent, Agent_protocol.Error.t) result
 
+(** Bind the source observed by a client to both first admission and retained
+    replay. Existing source-implicit intents retain their original digest. *)
+val with_expected_source : intent -> Agent_protocol.Run_source.t -> intent
+
 val digest : intent -> string
 
 type t

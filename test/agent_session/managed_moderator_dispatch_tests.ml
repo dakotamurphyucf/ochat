@@ -449,12 +449,12 @@ let run ctx input = Task.bind(Tool.call("review", input), fun result -> match re
                 | Array [ Int n ] -> n
                 | _ -> assert false);
             let state = A.state actor |> protocol_ok in
-            assert (
-              Option.equal
-                (fun left right ->
-                   String.equal (Jsonaf.to_string left) (Jsonaf.to_string right))
-                state.moderator
-                (Some (Agent_session.Runtime_builder.encode_moderator_snapshot snapshot)));
+            let metadata = assert_moderator_checkpoint state ~snapshot in
+            assert_moderator_queue_frontier
+              metadata
+              ~required:(!count > 0)
+              ~head:0L
+              ~next:0L;
             Eio.Promise.resolve finished_u ();
             Completed
               { final_history = input.history

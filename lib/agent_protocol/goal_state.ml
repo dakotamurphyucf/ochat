@@ -60,7 +60,7 @@ let component_decode =
     ]
 ;;
 
-let hold_json = function
+let hold_to_json = function
   | Hold.Operator_pause -> tag "operator_pause" []
   | Needs_input reason -> tag "needs_input" [ "reason", Reason.to_json reason ]
   | Budget_gate dimension ->
@@ -79,7 +79,7 @@ let hold_json = function
   | Source_review -> tag "source_review" []
 ;;
 
-let hold_decode json =
+let hold_of_json json =
   let open Result.Let_syntax in
   let%bind f = J.fields json in
   let%bind kind = J.required_as f "kind" J.string in
@@ -110,7 +110,7 @@ let hold_decode json =
 let to_json = function
   | Open Enabled -> tag "open" [ "admission", tag "enabled" [] ]
   | Open (Held reason) ->
-    tag "open" [ "admission", tag "held" [ "reason", hold_json reason ] ]
+    tag "open" [ "admission", tag "held" [ "reason", hold_to_json reason ] ]
   | Closed (Achieved achievement) ->
     tag "achieved" [ "achievement", Achievement.to_json achievement ]
   | Closed (Abandoned reason) -> tag "abandoned" [ "reason", Reason.to_json reason ]
@@ -129,7 +129,8 @@ let of_json json =
         let%bind kind = J.required_as f "kind" J.string in
         match kind with
         | "enabled" -> Ok Enabled
-        | "held" -> Result.map (J.required_as f "reason" hold_decode) ~f:(fun x -> Held x)
+        | "held" ->
+          Result.map (J.required_as f "reason" hold_of_json) ~f:(fun x -> Held x)
         | _ -> invalid "unknown goal admission policy")
     in
     Ok (Open admission)

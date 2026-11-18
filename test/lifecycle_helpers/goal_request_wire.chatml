@@ -1,0 +1,61 @@
+let require = fun result -> match result with
+  | `Ok(value) -> value
+  | `Error(error) -> fail("Unexpected checked error: " ++ to_string(error))
+
+let checks = fun source basis goal catalog selected episode ->
+  let negative = {generation = basis.generation;
+    catalog_revision = "9223372036854775808"; key = basis.key} in
+  let bad_revision = {basis = negative; goal_id = goal.goal_id; goal_revision = goal.goal_revision} in
+  let wrong_epoch = {script_id = source.script_id; source_sha256 = source.source_sha256;
+    generation = source.generation; installation_epoch = "0"} in
+  let large_source = {script_id = source.script_id; source_sha256 = source.source_sha256;
+    generation = "9007199254740992"; installation_epoch = "1"} in
+  let large_basis = {generation = large_source.generation; catalog_revision = "6"; key = "key"} in
+  let large_goal = {basis = large_basis; goal_id = goal.goal_id; goal_revision = "2"} in
+  let other_run = {goal_id = "goal_elsewhere"; session = episode.session;
+    run_id = episode.run_id; revision = episode.revision; source = source} in
+  let invalid_input = `User_submission({kind = `Plain_text; text = ""; attachments = []}) in
+  let no_source = `Object([{key = "generation"; value = `String("9007199254740991")},
+                           {key = "source"; value = `Null}]) in
+  `Array([
+    `Bool(match Requests.get("run_fixture") with | `Error(`Invalid_identity) -> true | _ -> false),
+    `Bool(match Requests.hold(bad_revision, "approval") with | `Error(`Invalid_revision) -> true | _ -> false),
+    `Bool(match Requests.objective(goal, wrong_epoch, "new") with | `Error(`Invalid_source) -> true | _ -> false),
+    `Bool(match Requests.start(large_goal, large_source, `Authored_start) with | `Error(`Invalid_source) -> true | _ -> false),
+    `Bool(match Requests.resume(catalog, selected, other_run, "resume") with | `Error(`Mismatched_episode) -> true | _ -> false),
+    `Bool(match Requests.resume(catalog, selected, episode, "bad key") with | `Error(`Invalid_key) -> true | _ -> false),
+    `Bool(match Requests.abandon(goal, " ") with | `Error(`Invalid_text) -> true | _ -> false),
+    `Bool(match Requests.start(goal, source, invalid_input) with | `Error(`Invalid_input) -> true | _ -> false),
+    `Bool(match Requests.source_of_view(no_source) with | `Error(`Invalid_source) -> true | _ -> false)])
+
+let main input =
+  let generation = "9007199254740991" in
+  let view = Json.parse("{\"generation\":\"9007199254740991\",\"source\":{\"script_id\":\"fixture\",\"source_sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"generation\":9007199254740991,\"installation_epoch\":\"1\"}}") in
+  let source = require(Requests.source_of_view(view)) in
+  let session = {server_id = "srv_fixture"; session_id = "ses_fixture"} in
+  let basis = {generation = generation; catalog_revision = "6"; key = "case:/1"} in
+  let goal = {basis = basis; goal_id = "goal_fixture"; goal_revision = "2"} in
+  let catalog = {session = session; generation = generation; revision = "6"; source = source} in
+  let selected = {id = "goal_fixture"; session = session; revision = "2"; source = source} in
+  let episode = {goal_id = "goal_fixture"; session = session; run_id = "run_fixture";
+    revision = "9223372036854775807"; source = source} in
+  let budget = {admitted_turns = `Set("3"); admitted_attempts = `Unset;
+    observed_tokens = `Set({component = `Reasoning_output; ceiling = "300"});
+    deadline = `Unset} in
+  let invalid_budget = {admitted_turns = `Set("01"); admitted_attempts = `Unset;
+    observed_tokens = `Unset; deadline = `Unset} in
+  let submission = `User_submission({kind = `Chatmd; text = "<user>Proceed.</user>";
+    attachments = []}) in
+  Task.pure(`Array([
+    Requests.list(), require(Requests.get(goal.goal_id)),
+    require(Requests.create(basis, source, goal.goal_id, "Review", budget)),
+    require(Requests.start(goal, source, submission)),
+    require(Requests.start(goal, source, `Authored_start)),
+    require(Requests.objective(goal, source, "Review again")),
+    require(Requests.progress(goal, source, "")),
+    require(Requests.hold(goal, "approval")),
+    require(Requests.abandon(goal, "superseded")),
+    require(Requests.resume(catalog, selected, episode, "resume")),
+    checks(source, basis, goal, catalog, selected, episode),
+    `Bool(match Requests.create(basis, source, goal.goal_id, "Review", invalid_budget) with
+      | `Error(`Invalid_budget) -> true | _ -> false)]))

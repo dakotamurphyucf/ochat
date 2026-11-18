@@ -269,10 +269,13 @@ let with_episode ?test_root ?(decision = Runtime.Decision.Continue) ?(wrap_env =
 let%expect_test
     "scoped cold Goal Resume joins once and confirms same-Run Turn before provider"
   =
+  let module Barrier = Descendant_history_adapter_tests.Root_barrier in
+  let barrier = Barrier.create () in
   with_episode
+    ~wrap_env:(Barrier.wrap barrier)
     (fun
         env
-         _daemon
+         daemon
          parent
          child
          scope
@@ -334,8 +337,62 @@ let%expect_test
                | Running | Failed _ | Interrupted _ ->
                  failwith "provider preceded joined Resume");
               observed := Some operation);
+       let accounting = Option.value_exn stopped.goal_descendants in
+       let session = GD.session accounting in
+       barrier.target
+       <- Some ((state parent).identity.session_id, scope, Barrier.Kind.Reserve session);
        let receipt, operation =
-         within env "public cold Resume" call |> protocol_ok |> Runtime.started
+         within env "public cold Resume" (fun () ->
+           Eio.Switch.run (fun sw ->
+             let pending = ref None in
+             protect_cleanup
+               ~finally:(fun () ->
+                 Barrier.release barrier;
+                 Option.iter !pending ~f:(fun response ->
+                   within env "join reserved-owner Resume caller" (fun () ->
+                     Eio.Promise.await_exn response)
+                   |> ignore))
+               (fun () ->
+                  let response = Eio.Fiber.fork_promise ~sw call in
+                  pending := Some response;
+                  within env "actual parent continued Turn Reserve" (fun () ->
+                    Eio.Promise.await barrier.entered);
+                  (* Resume already owns its real command ACK. A transient child
+                   reservation excludes fresh admission, not this retained
+                   owner's original authority through ancestor confirmation. *)
+                  Registry.with_lifecycle
+                    (Daemon.registry daemon)
+                    stopped.identity.session_id
+                    (fun _reservation ->
+                       Factory.check_registered_owner
+                         (Daemon.factory daemon)
+                         child
+                         ~session
+                       |> protocol_ok;
+                       (match
+                          Factory.check_registered_entry
+                            (Daemon.factory daemon)
+                            child
+                            ~session
+                        with
+                        | Error error ->
+                          [%test_eq: P.Error.code] Conflict error.code;
+                          assert (not error.retryable)
+                        | Ok () -> failwith "reserved child admitted a fresh entry");
+                       Barrier.release barrier;
+                       let actual =
+                         within env "public cold Resume with retained owner" (fun () ->
+                           Eio.Promise.await_exn response)
+                         |> protocol_ok
+                         |> Runtime.started
+                       in
+                       Factory.check_registered_owner
+                         (Daemon.factory daemon)
+                         child
+                         ~session
+                       |> protocol_ok;
+                       Ok actual)
+                  |> protocol_ok)))
        in
        Staging.assert_receipt request stopped receipt;
        let final = await_turns env child failure 2L in

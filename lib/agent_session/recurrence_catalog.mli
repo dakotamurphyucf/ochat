@@ -11,6 +11,21 @@ val entries : t -> Recurrence_entry.t list
 val find : t -> Agent_protocol.Id.Recurrence.t -> Recurrence_entry.t option
 val receipts : t -> Recurrence_command_receipt.t list
 
+(** Cheap necessary conditions for advice about fresh commands. The actual
+    owner still checks complete carrier capacity and the original request. *)
+val has_entry_slot : t -> bool
+
+val has_command_slot : t -> bool
+
+(** Factual lookup. It does not authenticate the original request fingerprint
+    or caller. Retained native replay must reconstruct its historical capture,
+    then use [receipt] before returning the acknowledged result. *)
+val find_receipt
+  :  t
+  -> principal_id:Agent_protocol.Id.Principal.t
+  -> key:Agent_protocol.Idempotency_key.t
+  -> Recurrence_command_receipt.t option
+
 val receipt
   :  t
   -> principal_id:Agent_protocol.Id.Principal.t
@@ -81,6 +96,14 @@ val pause_for_stop : t -> (t option, Agent_protocol.Error.t) result
 
 val hold_for_source : t -> (t option, Agent_protocol.Error.t) result
 
+(** Pure one-entry candidate. The actual Actor must revalidate the same enabled
+    definition, control basis, and permanent target evidence at publication. *)
+val pause_invalid_target
+  :  t
+  -> recurrence_id:Agent_protocol.Id.Recurrence.t
+  -> reason:Recurrence_entry.Pause.Target.t
+  -> (t, Agent_protocol.Error.t) result
+
 val retire_stale_births
   :  t
   -> current_revision:Agent_protocol.Session_lifecycle.Revision.t
@@ -107,8 +130,10 @@ module Reservation : sig
 end
 
 (** Known durable control and unfinished child-association growth. Numeric
-    credits combine the maximum bulk-control sequence with one independent step
-    per protected child reservation, including paused/retired definitions. Sum
+    credits combine the maximum bulk-control sequence with independent custody
+    for protected child reservations and execution recovery. A new existing
+    target Enable reserves independent verified pauses. A restored historical
+    catalog can still use its original safety reserve. Sum
     these independent obligations at the
     shared actual state/document/journal admission seam; never independently
     spend the same host headroom promised to other owners. Exact journal and

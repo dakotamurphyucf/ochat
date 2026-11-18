@@ -28,6 +28,7 @@ let with_event ?(snapshot = Setup.before) ?(deadline = Some deadline) actor pare
          ~event
          ~snapshot:(fun () -> Ok snapshot)
          (fun ~executing
+           ~policy_caller:_
            ~model_jobs:_
            ~allocate_inference:_
            ~retirement_reason:_

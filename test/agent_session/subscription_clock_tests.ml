@@ -318,6 +318,7 @@ let%expect_test
            actor
            ~snapshot:(fun () -> Ok queued)
            (fun ~executing:_
+             ~policy_caller:_
              ~model_jobs:_
              ~allocate_inference:_
              ~retirement_reason

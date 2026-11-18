@@ -139,6 +139,10 @@ let dispatch
         raise exn
     in
     capabilities.with_moderator_invocation
+      ~snapshot:(fun () ->
+        M.identity_snapshot manager
+        |> Result.map_error ~f:(fun message ->
+          Agent_protocol.Error.create Conflict ~message ~retryable:false ()))
       ~invocation
       (fun ~dispatched ~capabilities:invocation_capabilities ~commit ->
          let authoring_scope =
@@ -289,6 +293,7 @@ let dispatch
                       tools
                       ~prepared
                       ~capabilities
+                      ~invocation_capabilities
                       ~parent:dispatched
                       (fun on_tool_call ->
                          handle

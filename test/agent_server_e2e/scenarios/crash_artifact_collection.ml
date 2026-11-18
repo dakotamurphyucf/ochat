@@ -7,21 +7,34 @@ module D = Agent_store.Delegation_store
 module A = Agent_store.Prompt_artifact_store
 module Daemon = Agent_server.Daemon
 
+let start_daemon env sw root =
+  Daemon.start
+    ~sw
+    ~env
+    ~config:(config root root (Filename.concat root "parent.chatmd"))
+    ~tool_dir:root
+    ~home:root
+    ~process_start_identity:None
+    ~options:
+      { Daemon.default_options with
+        qualify_chatml_extensions = true
+      ; inference_policy =
+          Agent_server_test_support.inference_policy
+            ~default_model:"fixture-model"
+            ~post_stream:(fun ~sw:_ ~inputs:_ -> F.fail "collection invoked model")
+      }
+    ()
+  |> F.protocol_ok
+;;
+
 let run_child env ~root ~boundary ~recover =
-  let data_path = Filename.concat root "data" in
   (match recover with
    | false ->
      Eio.Switch.run (fun sw ->
-       let store =
-         S.create
-           ~env
-           ~sw
-           ~root:data_path
-           ~server_id:(P.Id.Server.create ())
-           ~process_start_identity:None
-           ~lock_nonce:"collection-crash"
-         |> F.store_ok
-       in
+       (* New daemon stores initialize dependency history before any artifact is
+          admitted. A legacy store without that history conservatively retains it. *)
+       let daemon = start_daemon env sw root in
+       let store = Daemon.store daemon in
        let data = S.data_root store in
        let artifacts =
          A.create ~env ~root:(Agent_store.Data_root.prompt_artifacts_path data)
@@ -105,26 +118,7 @@ let run_child env ~root ~boundary ~recover =
      let retained = ref None in
      List.iter [ 1; 2 ] ~f:(fun _ ->
        Eio.Switch.run (fun sw ->
-         let daemon =
-           Daemon.start
-             ~sw
-             ~env
-             ~config:(config root root (Filename.concat root "parent.chatmd"))
-             ~tool_dir:root
-             ~home:root
-             ~process_start_identity:None
-             ~options:
-               { Daemon.default_options with
-                 qualify_chatml_extensions = true
-               ; inference_policy =
-                   Agent_server_test_support.inference_policy
-                     ~default_model:"fixture-model"
-                     ~post_stream:(fun ~sw:_ ~inputs:_ ->
-                       F.fail "collection invoked model")
-               }
-             ()
-           |> F.protocol_ok
-         in
+         let daemon = start_daemon env sw root in
          Exn.protect
            ~finally:(fun () -> Daemon.shutdown daemon |> F.protocol_ok)
            ~f:(fun () ->

@@ -97,7 +97,7 @@ let%expect_test "stale history writer never activates an indexed session" =
                 Agent_server.Session_registry.remove registry session.id
                 |> Option.value_exn
               in
-              removed.close ();
+              Agent_server.Session_registry.close_entry removed;
               Agent_server.Session_registry.index_all registry index_entries;
               let loads = ref 0 in
               Agent_server.Session_registry.install_loader registry (fun _ ->

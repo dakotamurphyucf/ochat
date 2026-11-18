@@ -10,6 +10,7 @@ type claim =
   snapshot:
     (unit -> (Session.Moderator_state.Identity_snapshot.t, Agent_protocol.Error.t) result)
   -> (executing:Agent_protocol.Moderator_execution.t
+      -> policy_caller:Delegated_policy_caller.t option
       -> model_jobs:Model_job_admission.t
       -> allocate_inference:Inference_allocation.Port.t
       -> retirement_reason:string option
@@ -91,6 +92,7 @@ type delegated_claim =
        (unit
         -> (Session.Moderator_state.Identity_snapshot.t, Agent_protocol.Error.t) result)
   -> (executing:Agent_protocol.Moderator_execution.t
+      -> policy_caller:Delegated_policy_caller.t option
       -> model_jobs:Model_job_admission.t
       -> allocate_inference:Inference_allocation.Port.t
       -> event:Session.Snapshot.t
@@ -139,6 +141,18 @@ val run_delegated
     [claim] must bind the event to the actual idle or foreground actor operation. *)
 module Lifecycle : sig
   type t
+
+  module Status : sig
+    type t =
+      | Ready
+      | Completed
+      | Failed of Agent_protocol.Error.t
+  end
+
+  (** Nonblocking factual snapshot of this SAME coordinator. It grants no
+      callback, source/checkpoint installation or execution authority. Current
+      Manager and Actor checks remain required after this snapshot. *)
+  val status : t -> Status.t
 
   type outcome =
     | Unavailable
