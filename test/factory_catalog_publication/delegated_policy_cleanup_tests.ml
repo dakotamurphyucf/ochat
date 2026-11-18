@@ -19,10 +19,12 @@ module Origin = Agent_store.Delegation_goal_origin
 let model_marker = "597_TWO_ROOT_POLICY_MODEL"
 let recipe = "597-two-root-model.chatmd"
 
+(* The actual forwarded provider is held across the two bounded correction
+   sweeps. Keep that controlled hold inside both nested policy budgets. *)
 let root_prompt =
   {|<developer>597 actual upper policy owner Q.</developer>
 <tool name="policy_recipe" agent="597-two-root-model.chatmd" local/>
-<script id="upper-policy" language="chatml" kind="moderator" api="extensibility-v1">
+<script id="upper-policy" language="chatml" kind="moderator" api="extensibility-v1" wall_time="60s">
 let initial_state = 0
 let on_event ctx state event = match event with
 | `Pre_tool_call(p) ->
@@ -46,7 +48,7 @@ let intermediate_prompt =
 <developer>597 actual intermediate P creates C under its own Goal.</developer>
 <tool name="agent_create" type="inherited"/>
 <tool name="read_file" type="inherited"/>
-<script id="middle-policy" language="chatml" kind="moderator" api="extensibility-v1">
+<script id="middle-policy" language="chatml" kind="moderator" api="extensibility-v1" wall_time="60s">
 let initial_state = 0
 let on_event ctx state event = match event with
 | `Pre_tool_call(p) ->
@@ -306,6 +308,7 @@ type tree =
   ; leaf : Registry.entry
   ; counters : counters
   ; released : unit Eio.Promise.t
+  ; provider_exited : unit Eio.Promise.t
   ; model_calls : int ref
   ; before_upper : A.Session_state.t
   ; release : unit -> unit
@@ -330,6 +333,7 @@ let with_tree ?(scenario = Scenario.Cleanup) f =
   in
   let entered, enter = Eio.Promise.create () in
   let released, release_u = Eio.Promise.create () in
+  let provider_exited, exit_provider = Eio.Promise.create () in
   let release () =
     if Option.is_none (Eio.Promise.peek released) then Eio.Promise.resolve release_u ()
   in
@@ -355,8 +359,11 @@ let with_tree ?(scenario = Scenario.Cleanup) f =
         Int.incr model_calls;
         if !model_calls <> 1 then failwith "two-root cleanup replayed the policy Model";
         Eio.Promise.resolve enter ();
-        Eio.Promise.await released;
-        completed_response "597 one actual two-root policy Model completed")
+        Exn.protect
+          ~finally:(fun () -> Eio.Promise.resolve exit_provider ())
+          ~f:(fun () ->
+            Eio.Promise.await released;
+            completed_response "597 one actual two-root policy Model completed"))
       else (
         match !phase with
         | Upper_finished ->
@@ -511,38 +518,42 @@ let with_tree ?(scenario = Scenario.Cleanup) f =
                           ~text:"597 actual inherited two-root read")
                       : P.Run_receipt.t);
                    within env "actual forwarded Model provider entry" (fun () ->
+                     let roots = [ upper, before_upper; middle, before_middle ] in
                      let rec await () =
+                       (* Receipt changes publish Session_updated. Subscribe before
+                          inspecting each Actor, so publication during a state read
+                          can wake this waiter too. *)
+                       let changed =
+                         List.map roots ~f:(fun (entry, _) ->
+                           A.Durable_event_log.changed entry.Registry.durable_events)
+                       in
                        Failure.raise_if_present failure;
                        match Eio.Promise.peek entered with
                        | Some () -> ()
                        | None ->
-                         List.iter
-                           [ upper, before_upper; middle, before_middle ]
-                           ~f:(fun (entry, (before : A.Session_state.t)) ->
-                             List.iter
-                               (state entry).moderator_executions
-                               ~f:(fun receipt ->
-                                 let is_new =
-                                   not
-                                     (List.exists
-                                        before.moderator_executions
-                                        ~f:(fun old ->
-                                          P.Id.Moderator_execution.equal
-                                            old.E.context.id
-                                            receipt.E.context.id))
-                                 in
-                                 if is_new
-                                 then (
-                                   match receipt.status with
-                                   | Failed _ | Interrupted _ ->
-                                     raise_s
-                                       [%sexp
-                                         "actual forwarding callback ended before \
-                                          provider"
-                                       , (receipt.context.id : P.Id.Moderator_execution.t)
-                                       , (receipt.status : E.status)]
-                                   | Running | Completed _ -> ())));
-                         Eio.Fiber.yield ();
+                         List.iter roots ~f:(fun (entry, (before : A.Session_state.t)) ->
+                           List.iter (state entry).moderator_executions ~f:(fun receipt ->
+                             let is_new =
+                               not
+                                 (List.exists before.moderator_executions ~f:(fun old ->
+                                    P.Id.Moderator_execution.equal
+                                      old.E.context.id
+                                      receipt.E.context.id))
+                             in
+                             if is_new
+                             then (
+                               match receipt.status with
+                               | Failed _ | Interrupted _ ->
+                                 raise_s
+                                   [%sexp
+                                     "actual forwarding callback ended before provider"
+                                   , (receipt.context.id : P.Id.Moderator_execution.t)
+                                   , (receipt.status : E.status)]
+                               | Running | Completed _ -> ())));
+                         Eio.Fiber.any
+                           ((fun () -> Failure.await failure)
+                            :: List.map (entered :: changed) ~f:(fun changed () ->
+                              Eio.Promise.await changed));
                          await ()
                      in
                      await ());
@@ -552,6 +563,7 @@ let with_tree ?(scenario = Scenario.Cleanup) f =
                      ; leaf
                      ; counters
                      ; released
+                     ; provider_exited
                      ; model_calls
                      ; before_upper
                      ; release
@@ -713,6 +725,7 @@ let%expect_test "two real policy roots progress independently after the first ro
          [%test_eq: int] providers !(tree.counters.providers);
          [%test_eq: int] 1 !(tree.model_calls);
          assert (Option.is_none (Eio.Promise.peek tree.released));
+         assert (not (Eio.Promise.is_resolved tree.provider_exited));
          (* No re-admission/re-observation authority is constructed: the SAME
            registered duty retries its exact retained source observation/vector. *)
          within env "retry same retained two-root correction vector" (fun () ->
@@ -726,6 +739,7 @@ let%expect_test "two real policy roots progress independently after the first ro
          assert (not (Actor.inference_usage_cleanup_pending tree.upper.actor));
          [%test_eq: int] providers !(tree.counters.providers);
          [%test_eq: int] 1 !(tree.model_calls);
+         assert (not (Eio.Promise.is_resolved tree.provider_exited));
          List.iter
            [ first, before_first; second, before_second; tree.upper, corrected_source ]
            ~f:(fun (entry, before) ->

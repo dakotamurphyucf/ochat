@@ -58,12 +58,22 @@ let on_event ctx state event = match event with
 ;;
 
 module Failure = struct
-  type t = (exn * Stdlib.Printexc.raw_backtrace) option ref
+  type captured = exn * Stdlib.Printexc.raw_backtrace
 
-  let create () = ref None
+  type t =
+    { failure : captured Eio.Promise.t
+    ; record : captured Eio.Promise.u
+    }
+
+  let create () =
+    let failure, record = Eio.Promise.create () in
+    { failure; record }
+  ;;
+
+  let await t = ignore (Eio.Promise.await t.failure)
 
   let raise_if_present t =
-    Option.iter !t ~f:(fun (exn, backtrace) ->
+    Option.iter (Eio.Promise.peek t.failure) ~f:(fun (exn, backtrace) ->
       Exn.raise_with_original_backtrace exn backtrace)
   ;;
 
@@ -75,7 +85,7 @@ module Failure = struct
       Exn.raise_with_original_backtrace exn backtrace
     | exception exn ->
       let backtrace = Stdlib.Printexc.get_raw_backtrace () in
-      if Option.is_none !t then t := Some (exn, backtrace);
+      ignore (Eio.Promise.try_resolve t.record (exn, backtrace) : bool);
       Exn.raise_with_original_backtrace exn backtrace
   ;;
 
