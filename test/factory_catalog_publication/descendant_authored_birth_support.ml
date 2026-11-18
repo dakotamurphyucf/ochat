@@ -13,6 +13,29 @@ module C = Chat_response.Tool_capability
 let tool_name = "subscription_child"
 let child_file = "570-subscription-child.chatmd"
 
+let await_bootstrap (child : Registry.entry) ~receipt_id =
+  let rec loop () =
+    let changed = A.Durable_event_log.changed child.durable_events in
+    let current = state child in
+    let receipt =
+      List.find_exn current.managed_submissions ~f:(fun submission ->
+        P.History.Id.equal submission.A.Managed_submission.history_id receipt_id)
+    in
+    match receipt.status with
+    | Terminal (Some _, Completed) -> current, receipt
+    | Deferred | Ready | Assigned _ ->
+      Eio.Promise.await changed;
+      loop ()
+    | Terminal (None, _)
+    | Terminal (Some _, (Failed | Cancelled | Interrupted | Invalidated)) ->
+      raise_s
+        [%sexp
+          "authored bootstrap lacks actual completed operation"
+        , (receipt : A.Managed_submission.t)]
+  in
+  loop ()
+;;
+
 let assert_source env daemon child reference record ~prompt =
   let current = state child in
   assert (Delegations.Reference.equal reference (Option.value_exn current.spec.delegation));
@@ -159,8 +182,9 @@ let with_child ~phase ~chatml_runtime_policy ~prompt ~post_creation_stream ~wrap
          |> protocol_ok
          |> Goal.activated
        in
-       phase := "actual wrapper and child bootstrap publish terminal receipts";
+       phase := "actual wrapper publishes a managed submission receipt";
        let rec await_created () =
+         let changed = A.Durable_event_log.changed parent.durable_events in
          let current = state parent in
          let invocation =
            List.find current.invocations ~f:(fun invocation ->
@@ -175,13 +199,13 @@ let with_child ~phase ~chatml_runtime_policy ~prompt ~post_creation_stream ~wrap
                "authored Goal child creation failed", (failure : P.Invocation.tool_error)]
          | Some { status = Admitted | Dispatching | Resolved _ | Published _; _ } | None
            ->
-           Eio.Fiber.yield ();
+           Eio.Promise.await changed;
            await_created ()
        in
        let current, value = await_created () in
-       [%test_eq: string]
-         "completed"
-         (Jsonaf.member_exn "status" value |> Jsonaf.string_exn);
+       (match Jsonaf.member_exn "status" value |> Jsonaf.string_exn with
+        | "completed" | "pending" -> ()
+        | status -> raise_s [%sexp "authored bootstrap reply failed", (status : string)]);
        let child_id =
          Jsonaf.member_exn "session_id" value
          |> Jsonaf.string_exn
@@ -189,7 +213,16 @@ let with_child ~phase ~chatml_runtime_policy ~prompt ~post_creation_stream ~wrap
          |> protocol_ok
        in
        let child = Registry.find (Daemon.registry daemon) child_id |> Option.value_exn in
-       let born = state child in
+       let receipt_id =
+         Jsonaf.member_exn "receipt" value
+         |> Jsonaf.member_exn "receipt_id"
+         |> P.History.Id.of_json
+         |> protocol_ok
+       in
+       (* The wrapper's bounded wait can publish pending while the same child
+          runs. The committed receipt is the completion proof for this fixture. *)
+       phase := "actual child bootstrap reaches its completed receipt";
+       let born, bootstrap = await_bootstrap child ~receipt_id in
        assert (Option.is_none born.active_operation);
        (match born.lifecycle.observed with
         | Idle -> ()
@@ -205,25 +238,6 @@ let with_child ~phase ~chatml_runtime_policy ~prompt ~post_creation_stream ~wrap
        (match born.runtime_initialization with
         | Ready -> ()
         | Pending _ -> failwith "actual authored bootstrap did not initialize child");
-       let receipt_id =
-         Jsonaf.member_exn "receipt" value
-         |> Jsonaf.member_exn "receipt_id"
-         |> P.History.Id.of_json
-         |> protocol_ok
-       in
-       let bootstrap =
-         List.find_exn born.managed_submissions ~f:(fun submission ->
-           P.History.Id.equal submission.A.Managed_submission.history_id receipt_id)
-       in
-       (match bootstrap.status with
-        | Terminal (Some _, Completed) -> ()
-        | Deferred | Ready | Assigned _
-        | Terminal (None, _)
-        | Terminal (Some _, (Failed | Cancelled | Interrupted | Invalidated)) ->
-          raise_s
-            [%sexp
-              "authored bootstrap lacks actual completed operation"
-            , (bootstrap : A.Managed_submission.t)]);
        let reference = Option.value_exn born.spec.delegation in
        assert (Delegations.Reference.equal reference bootstrap.reference);
        let record =
