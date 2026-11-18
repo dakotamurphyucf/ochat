@@ -42,6 +42,11 @@ runs:
         opam-pin: false
         opam-repositories: |
           default: ${{ steps.key.outputs.repository }}
+    - name: Use the official opam archive mirror for locked package sources
+      shell: bash
+      # The pinned Git repository omits the archive mirror advertised by the
+      # HTTP repository. Opam still verifies the package's recorded checksums.
+      run: opam option --global 'archive-mirrors=["https://opam.ocaml.org/cache"]'
     - name: Select reviewed Eio overlay in this switch
       shell: bash
       run: node .github/scripts/toolchain.mjs overlay
