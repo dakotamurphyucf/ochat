@@ -120,7 +120,16 @@ let on_event ctx state event = Task.pure(state)
            let configured = List.hd_exn configuration.prompts in
            let configuration =
              { configuration with
-               prompts =
+               (* Elapsed-time snapshot retention can reserve an owner during replay.
+                  Use event-count snapshots for this fixture. *)
+               server =
+                 { configuration.server with
+                   durability =
+                     { configuration.server.durability with
+                       snapshot_every_ms = Int.max_value
+                     }
+                 }
+             ; prompts =
                  configuration.prompts
                  @ [ { configured with id = "cold-activation-target"; path = target_file }
                    ]
