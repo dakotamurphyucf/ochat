@@ -317,6 +317,8 @@ let%expect_test
         []
       | _ -> failwith "unexpected native private execution transcript")
     ~after_turn:(fun env handle parent ->
+      let clock = Eio.Stdenv.clock env in
+      let await_progress f = Eio.Time.with_timeout_exn clock 30. f in
       let mono_clock = Eio.Stdenv.mono_clock env in
       let started = Eio.Time.Mono.now mono_clock in
       let elapsed () =
@@ -387,14 +389,17 @@ let%expect_test
         Agent_server.Recurrence_automation_host.close_and_wait planning
       in
       protect_cleanup ~finally (fun () ->
-        Actor.set_recurrence_planning_host
-          parent.actor
-          (Agent_server.Recurrence_automation_host.planning_host planning)
-        |> protocol_ok;
         try
-          Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 30. (fun () ->
+          (* The child and parent turn have independent progress watchdogs.
+             Bound the remaining actor calls with an emergency watchdog. *)
+          Eio.Time.with_timeout_exn clock 90. (fun () ->
+            Actor.set_recurrence_planning_host
+              parent.actor
+              (Agent_server.Recurrence_automation_host.planning_host planning)
+            |> protocol_ok;
             let acknowledged_child = ref false in
             let selected_child = ref None in
+            (* Private startup acknowledgements need not append a public event. *)
             let rec await_child () =
               Int.incr child_polls;
               let selected =
@@ -481,13 +486,13 @@ let%expect_test
                     | Running | Failed _ | Interrupted _ -> false)
                 then child, current
                 else (
-                  Eio.Fiber.yield ();
+                  Eio.Time.sleep clock 0.02;
                   await_child ())
               | None ->
-                Eio.Fiber.yield ();
+                Eio.Time.sleep clock 0.02;
                 await_child ()
             in
-            let child, current = await_child () in
+            let child, current = await_progress await_child in
             set_phase "verify actual captured child startup";
             actual_child := Some child;
             let native = List.hd_exn current.invocations in
@@ -568,7 +573,7 @@ let%expect_test
                 Eio.Promise.await changed;
                 await_second ())
             in
-            await_second ();
+            await_progress await_second;
             [%test_eq: int] 1 !child_providers;
             let document state =
               state_document state
