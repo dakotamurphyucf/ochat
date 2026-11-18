@@ -821,6 +821,7 @@ let%expect_test "runtime owner drains observation batches and applies durable te
     and nested_calls = ref 0 in
     let registry = native_registry nested_calls ~raises:false in
     with_handoff_actor
+      ~timeout_scope:Per_step
       ~make_worker:(fun env _ ->
         let call =
           {|match p.tool_name with
@@ -902,8 +903,19 @@ let%expect_test "runtime owner drains observation batches and applies durable te
             ; moderator_snapshot = snapshot
             ; runtime_requests = []
             }))
-      (fun _env actor _writer backend ->
-         let initial = await_idle actor in
+      (fun env actor _writer backend ->
+         (* Each poll does durable work and has a separate checkpoint below. Scope
+            the watchdog to each step so their total cost does not decide liveness. *)
+         let with_step_timeout ~step f =
+           match with_handoff_timeout env f with
+           | result -> result
+           | exception Eio.Time.Timeout ->
+             raise_s
+               [%sexp "handoff step timed out", (tool_calls : bool), (step : string)]
+         in
+         let initial =
+           with_step_timeout ~step:"seed invocations" (fun () -> await_idle actor)
+         in
          let manager = Option.value_exn !prepared in
          let snapshot () =
            Some
@@ -1018,18 +1030,21 @@ let%expect_test "runtime owner drains observation batches and applies durable te
            ; queued_internal_events = [ Session.Snapshot.String "wake" ]
            }
          in
-         A.change_moderator actor (Some (B.encode_moderator_snapshot changed_source))
-         |> protocol_ok
-         |> ignore;
-         let changed = A.state actor |> protocol_ok in
-         let stale_source_rejected =
-           Agent_server.Runtime_owner.drain_idle_moderator owner |> Result.is_error
-         in
-         [%test_eq: bool] true stale_source_rejected;
-         assert_same_session_snapshot changed (A.state actor |> protocol_ok);
-         assert_same_session_snapshot changed (Agent_session.Memory_backend.state backend);
-         [%test_eq: int] 0 !nested_calls;
-         A.change_moderator actor initial.moderator |> protocol_ok |> ignore;
+         with_step_timeout ~step:"reject stale moderator" (fun () ->
+           A.change_moderator actor (Some (B.encode_moderator_snapshot changed_source))
+           |> protocol_ok
+           |> ignore;
+           let changed = A.state actor |> protocol_ok in
+           let stale_source_rejected =
+             Agent_server.Runtime_owner.drain_idle_moderator owner |> Result.is_error
+           in
+           [%test_eq: bool] true stale_source_rejected;
+           assert_same_session_snapshot changed (A.state actor |> protocol_ok);
+           assert_same_session_snapshot
+             changed
+             (Agent_session.Memory_backend.state backend);
+           [%test_eq: int] 0 !nested_calls;
+           A.change_moderator actor initial.moderator |> protocol_ok |> ignore);
          let poll () =
            Agent_server.Runtime_owner.drain_idle_moderator owner |> protocol_ok
          in
@@ -1080,8 +1095,11 @@ let%expect_test "runtime owner drains observation batches and applies durable te
                }]
          in
          List.iter
-           (List.range 0 (if tool_calls then 7 else 3))
-           ~f:(fun _ -> summarize (poll ()))));
+           (List.range 1 (if tool_calls then 8 else 4))
+           ~f:(fun batch ->
+             with_step_timeout
+               ~step:(sprintf "drain observation batch %d" batch)
+               (fun () -> summarize (poll ())))));
   [%expect
     {|
     ((tool_calls false) (more true) (observed 32) (awaiting 4) (desired Running)

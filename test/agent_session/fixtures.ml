@@ -649,7 +649,18 @@ module Handoff_runtime = struct
         }
 end
 
-let with_handoff_runtime ?(reject = fun _ -> false) ~make_runtime f =
+type handoff_timeout_scope =
+  | Whole_test
+  | Per_step
+
+let with_handoff_timeout env f = Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 15. f
+
+let with_handoff_runtime
+      ?(reject = fun _ -> false)
+      ?(timeout_scope = Whole_test)
+      ~make_runtime
+      f
+  =
   with_actor_workspace (fun env workspace_instance ->
     Eio.Switch.run (fun sw ->
       let actor_ready, actor_ready_u = Eio.Promise.create () in
@@ -696,34 +707,40 @@ let with_handoff_runtime ?(reject = fun _ -> false) ~make_runtime f =
             ; state_committed = (fun _ _ -> ())
             }
       in
-      Exn.protect
-        ~finally:(fun () -> Agent_session.Session_actor.shutdown actor)
-        ~f:(fun () ->
-          (match runtime with
-           | Handoff_runtime.Worker { worker; inference } ->
-             Option.iter inference ~f:(fun inference ->
-               Agent_session.Session_actor.set_runtime_worker
-                 actor
-                 ~worker:(Some worker)
-                 ~inference:(Some inference)
-               |> protocol_ok)
-           | Moderator { worker; inference; manager } ->
-             let snapshot =
-               Chat_response.Moderator_manager.identity_snapshot manager
-               |> Result.ok_or_failwith
-               |> Agent_session.Runtime_builder.encode_moderator_snapshot
-             in
-             Agent_session.Session_actor.change_moderator actor (Some snapshot)
-             |> protocol_ok
-             |> ignore;
+      let install_runtime () =
+        (match runtime with
+         | Handoff_runtime.Worker { worker; inference } ->
+           Option.iter inference ~f:(fun inference ->
              Agent_session.Session_actor.set_runtime_worker
                actor
-               ~moderator_manager:manager
                ~worker:(Some worker)
                ~inference:(Some inference)
-             |> protocol_ok);
-          Eio.Promise.resolve actor_ready_u actor;
-          Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 15. (fun () ->
+             |> protocol_ok)
+         | Moderator { worker; inference; manager } ->
+           let snapshot =
+             Chat_response.Moderator_manager.identity_snapshot manager
+             |> Result.ok_or_failwith
+             |> Agent_session.Runtime_builder.encode_moderator_snapshot
+           in
+           Agent_session.Session_actor.change_moderator actor (Some snapshot)
+           |> protocol_ok
+           |> ignore;
+           Agent_session.Session_actor.set_runtime_worker
+             actor
+             ~moderator_manager:manager
+             ~worker:(Some worker)
+             ~inference:(Some inference)
+           |> protocol_ok);
+        Eio.Promise.resolve actor_ready_u actor
+      in
+      Exn.protect
+        ~finally:(fun () ->
+          let shutdown () = Agent_session.Session_actor.shutdown actor in
+          match timeout_scope with
+          | Whole_test -> shutdown ()
+          | Per_step -> with_handoff_timeout env shutdown)
+        ~f:(fun () ->
+          let submit () =
             let writer, _ =
               Agent_session.Session_actor.attach actor ~mode:Read_write ~subscribe:false
               |> protocol_ok
@@ -742,12 +759,27 @@ let with_handoff_runtime ?(reject = fun _ -> false) ~make_runtime f =
               entry
             |> protocol_ok
             |> ignore;
-            f env actor writer backend))))
+            writer
+          in
+          match timeout_scope with
+          | Whole_test ->
+            install_runtime ();
+            with_handoff_timeout env (fun () ->
+              let writer = submit () in
+              f env actor writer backend)
+          | Per_step ->
+            let writer =
+              with_handoff_timeout env (fun () ->
+                install_runtime ();
+                submit ())
+            in
+            f env actor writer backend)))
 ;;
 
-let with_handoff_actor ?reject ?inference ~make_worker f =
+let with_handoff_actor ?reject ?inference ?timeout_scope ~make_worker f =
   with_handoff_runtime
     ?reject
+    ?timeout_scope
     ~make_runtime:(fun env actor_ready ->
       Handoff_runtime.Worker { worker = make_worker env actor_ready; inference })
     f
