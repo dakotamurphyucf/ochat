@@ -507,6 +507,15 @@ let observed_scheduler_clocks env ~pause ~resume ~advance ~await_poll =
   end
 ;;
 
+let within_phase env ~seconds phase f =
+  try Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) seconds f with
+  | Eio.Time.Timeout -> failwith ("Goal example timed out while " ^ phase)
+;;
+
+type start_fixture_timeout =
+  | Whole_fixture
+  | Phased of { watchdog_seconds : float }
+
 let with_accepted_start
       ?test_root
       ?(startup = Startup_fixture.inline)
@@ -517,6 +526,7 @@ let with_accepted_start
       ?(later_callback = Later_callback.Disabled)
       ?(recurrence = false)
       ?(timeout_seconds = 30.)
+      ?(timeout_scope = Whole_fixture)
       ~v1
       ~policy
       ~providers
@@ -539,177 +549,193 @@ let with_accepted_start
     ~qualify_chatml_extensions:true
     ~policy
     (fun env sw root daemon ->
+       let within_start phase f =
+         match timeout_scope with
+         | Whole_fixture -> f ()
+         | Phased _ -> within_phase env ~seconds:timeout_seconds phase f
+       in
+       let run () =
+         let entry =
+           within_start "creating the original Factory owner" (fun () ->
+             Factory.create_session_authenticated
+               (Daemon.factory daemon)
+               ~command_audit:None
+               ~actor
+               (create_request ~start_immediately:true ())
+             |> protocol_ok)
+         in
+         protect_cleanup
+           ~finally:(fun () ->
+             !resume ();
+             Registry.close_entry entry)
+           (fun () ->
+              let fixture =
+                within_start "acknowledging the initial native Start intent" (fun () ->
+                  before_initial_drain env sw root daemon entry;
+                  (* This is the genuine host's leased lifecycle drain. Legacy already
+                completed its constructor callback; v1 has installed startup. No
+                replacement Manager, invocation registry or callback issuer. *)
+                  (match Owner.drain_idle_moderator entry.runtime with
+                   | Ok _ -> ()
+                   | Error error ->
+                     let current = state entry in
+                     let calls =
+                       List.map current.invocations ~f:(fun invocation ->
+                         ( invocation.P.Invocation.context.tool_name
+                         , invocation.context.input
+                         , invocation.status ))
+                     in
+                     raise_s
+                       [%sexp
+                         "actual first callback drain failed"
+                       , (error : P.Error.t)
+                       , (current.moderator_executions : P.Moderator_execution.t list)
+                       , (calls : (string * Jsonaf.t * P.Invocation.status) list)]);
+                  let before =
+                    Actor.with_moderator_checkpoint entry.actor (fun () ->
+                      Actor.state entry.actor)
+                    |> protocol_ok
+                  in
+                  completed_callbacks before;
+                  let invocation, accepted = start_invocation before in
+                  (match Intent.phase accepted with
+                   | Accepted _ -> ()
+                   | Staged | Dispatch_claimed _ | Admitted _ | Discarded _ | Rejected _
+                     -> failwith "first callback did not ACK its native Start");
+                  (match invocation.status with
+                   | Resolved (Complete _) | Published (Complete _) -> ()
+                   | Admitted | Dispatching
+                   | Resolved (Pending _ | Fail _ | Cancelled _)
+                   | Published (Pending _ | Fail _ | Cancelled _) ->
+                     failwith "first Start was not a successful actual invocation");
+                  let callback =
+                    List.filter before.moderator_executions ~f:(fun callback ->
+                      P.Moderator_execution.equal_phase
+                        Session_start
+                        callback.context.phase)
+                    |> one "actual first Session_start callback"
+                  in
+                  (match callback.status with
+                   | Completed _ -> ()
+                   | Running | Failed _ | Interrupted _ ->
+                     failwith "initial callback was not complete");
+                  assert (
+                    Option.equal
+                      P.Id.Moderator_execution.equal
+                      (Some callback.context.id)
+                      invocation.parent_event);
+                  assert (Option.is_none callback.context.operation_id);
+                  assert (Option.is_none before.active_operation);
+                  assert (Option.is_none before.failure);
+                  assert (not before.halted);
+                  [%test_eq: int] 0 !providers;
+                  [%test_eq: int] 0 (user_input_count before);
+                  let index = Option.value_exn before.run_state in
+                  assert (List.is_empty (A.Run_state.runs index));
+                  let created = Startup_fixture.goal startup before in
+                  assert (G.State.equal (Open (Held Source_review)) (G.state created));
+                  assert (Option.is_none (G.episode created));
+                  [%test_eq: int64] 0L (G.revision created);
+                  assert (P.Id.Principal.equal principal.id (G.creator created));
+                  assert (P.Id.Principal.equal principal.id (Intent.principal_id accepted));
+                  let request = Intent.request accepted in
+                  assert (P.Run_source.equal (G.source created) (Request.source request));
+                  let installed_source =
+                    A.Run_source_installation.captured
+                      (A.Run_state.installation index)
+                      ~generation:before.identity.generation
+                    |> protocol_ok
+                  in
+                  assert (P.Run_source.equal installed_source (Request.source request));
+                  assert (
+                    P.Moderator_observer.equal
+                      (Request.source request).observer
+                      callback.context.source);
+                  assert (P.Id.Goal.equal startup.goal_id (Request.goal_id request));
+                  [%test_eq: int] before.identity.generation (Request.generation request);
+                  [%test_eq: int64]
+                    (G.revision created)
+                    (Request.expected_goal_revision request);
+                  [%test_eq: int64]
+                    (Catalog.revision (Option.value_exn before.goal_catalog))
+                    (Request.expected_catalog_revision request);
+                  [%test_eq: string]
+                    startup.start_key
+                    (P.Idempotency_key.to_string (Request.key request));
+                  (match Request.input request with
+                   | User_submission content ->
+                     [%test_eq: string] startup.input_text content.text;
+                     assert (List.is_empty content.attachments)
+                   | Authored_start ->
+                     failwith "native first input replayed consumed authored startup");
+                  let initial_account = Startup_fixture.accounting startup before in
+                  [%test_eq: int64 * int64]
+                    (0L, 0L)
+                    ( Accounting.admitted_turns initial_account
+                    , Accounting.admitted_attempts initial_account );
+                  assert (List.is_empty (Accounting.bindings initial_account));
+                  let callback_transaction =
+                    assert_callback_ack
+                      ~created_key:(Some startup.create_key)
+                      env
+                      entry
+                      invocation
+                      accepted
+                      callback
+                  in
+                  let selection =
+                    match Actor.select_native_goal_action entry.actor |> protocol_ok with
+                    | Some (Start selection) -> selection
+                    | Some (Resume _) | None ->
+                      failwith
+                        "released callback/source did not expose its actual Start \
+                         selection"
+                  in
+                  assert (
+                    P.Id.Invocation.equal
+                      invocation.context.id
+                      (Actor.Goal_native_start.Selection.invocation_id selection));
+                  assert (
+                    Request.equal
+                      request
+                      (Actor.Goal_native_start.Selection.request selection));
+                  assert (List.is_empty (Registry.entries (Daemon.registry daemon)));
+                  !await_poll ();
+                  Registry.add
+                    (Daemon.registry daemon)
+                    ~session_id:before.identity.session_id
+                    entry
+                  |> protocol_ok;
+                  let session = Actor.Goal_native_start.Selection.session selection in
+                  { before
+                  ; invocation
+                  ; accepted
+                  ; callback
+                  ; request
+                  ; callback_transaction
+                  ; resume_scheduler = !resume
+                  ; advance_scheduler = !advance
+                  ; selection
+                  ; session
+                  })
+              in
+              let body () = f env sw root daemon entry fixture in
+              match timeout_scope with
+              | Whole_fixture -> body ()
+              | Phased { watchdog_seconds } ->
+                within_phase
+                  env
+                  ~seconds:watchdog_seconds
+                  "running the complete checked Goal example"
+                  body)
+       in
        protect_cleanup
          ~finally:(fun () -> !resume ())
          (fun () ->
-            Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) timeout_seconds (fun () ->
-              let entry =
-                Factory.create_session_authenticated
-                  (Daemon.factory daemon)
-                  ~command_audit:None
-                  ~actor
-                  (create_request ~start_immediately:true ())
-                |> protocol_ok
-              in
-              protect_cleanup
-                ~finally:(fun () ->
-                  !resume ();
-                  Agent_server.Session_registry.close_entry entry)
-                (fun () ->
-                   before_initial_drain env sw root daemon entry;
-                   (* This is the genuine host's leased lifecycle drain. Legacy already
-                completed its constructor callback; v1 has installed startup. No
-                replacement Manager, invocation registry or callback issuer. *)
-                   (match Owner.drain_idle_moderator entry.runtime with
-                    | Ok _ -> ()
-                    | Error error ->
-                      let current = state entry in
-                      let calls =
-                        List.map current.invocations ~f:(fun invocation ->
-                          ( invocation.P.Invocation.context.tool_name
-                          , invocation.context.input
-                          , invocation.status ))
-                      in
-                      raise_s
-                        [%sexp
-                          "actual first callback drain failed"
-                        , (error : P.Error.t)
-                        , (current.moderator_executions : P.Moderator_execution.t list)
-                        , (calls : (string * Jsonaf.t * P.Invocation.status) list)]);
-                   let before =
-                     Actor.with_moderator_checkpoint entry.actor (fun () ->
-                       Actor.state entry.actor)
-                     |> protocol_ok
-                   in
-                   completed_callbacks before;
-                   let invocation, accepted = start_invocation before in
-                   (match Intent.phase accepted with
-                    | Accepted _ -> ()
-                    | Staged | Dispatch_claimed _ | Admitted _ | Discarded _ | Rejected _
-                      -> failwith "first callback did not ACK its native Start");
-                   (match invocation.status with
-                    | Resolved (Complete _) | Published (Complete _) -> ()
-                    | Admitted | Dispatching
-                    | Resolved (Pending _ | Fail _ | Cancelled _)
-                    | Published (Pending _ | Fail _ | Cancelled _) ->
-                      failwith "first Start was not a successful actual invocation");
-                   let callback =
-                     List.filter before.moderator_executions ~f:(fun callback ->
-                       P.Moderator_execution.equal_phase
-                         Session_start
-                         callback.context.phase)
-                     |> one "actual first Session_start callback"
-                   in
-                   (match callback.status with
-                    | Completed _ -> ()
-                    | Running | Failed _ | Interrupted _ ->
-                      failwith "initial callback was not complete");
-                   assert (
-                     Option.equal
-                       P.Id.Moderator_execution.equal
-                       (Some callback.context.id)
-                       invocation.parent_event);
-                   assert (Option.is_none callback.context.operation_id);
-                   assert (Option.is_none before.active_operation);
-                   assert (Option.is_none before.failure);
-                   assert (not before.halted);
-                   [%test_eq: int] 0 !providers;
-                   [%test_eq: int] 0 (user_input_count before);
-                   let index = Option.value_exn before.run_state in
-                   assert (List.is_empty (A.Run_state.runs index));
-                   let created = Startup_fixture.goal startup before in
-                   assert (G.State.equal (Open (Held Source_review)) (G.state created));
-                   assert (Option.is_none (G.episode created));
-                   [%test_eq: int64] 0L (G.revision created);
-                   assert (P.Id.Principal.equal principal.id (G.creator created));
-                   assert (
-                     P.Id.Principal.equal principal.id (Intent.principal_id accepted));
-                   let request = Intent.request accepted in
-                   assert (P.Run_source.equal (G.source created) (Request.source request));
-                   let installed_source =
-                     A.Run_source_installation.captured
-                       (A.Run_state.installation index)
-                       ~generation:before.identity.generation
-                     |> protocol_ok
-                   in
-                   assert (P.Run_source.equal installed_source (Request.source request));
-                   assert (
-                     P.Moderator_observer.equal
-                       (Request.source request).observer
-                       callback.context.source);
-                   assert (P.Id.Goal.equal startup.goal_id (Request.goal_id request));
-                   [%test_eq: int] before.identity.generation (Request.generation request);
-                   [%test_eq: int64]
-                     (G.revision created)
-                     (Request.expected_goal_revision request);
-                   [%test_eq: int64]
-                     (Catalog.revision (Option.value_exn before.goal_catalog))
-                     (Request.expected_catalog_revision request);
-                   [%test_eq: string]
-                     startup.start_key
-                     (P.Idempotency_key.to_string (Request.key request));
-                   (match Request.input request with
-                    | User_submission content ->
-                      [%test_eq: string] startup.input_text content.text;
-                      assert (List.is_empty content.attachments)
-                    | Authored_start ->
-                      failwith "native first input replayed consumed authored startup");
-                   let initial_account = Startup_fixture.accounting startup before in
-                   [%test_eq: int64 * int64]
-                     (0L, 0L)
-                     ( Accounting.admitted_turns initial_account
-                     , Accounting.admitted_attempts initial_account );
-                   assert (List.is_empty (Accounting.bindings initial_account));
-                   let callback_transaction =
-                     assert_callback_ack
-                       ~created_key:(Some startup.create_key)
-                       env
-                       entry
-                       invocation
-                       accepted
-                       callback
-                   in
-                   let selection =
-                     match Actor.select_native_goal_action entry.actor |> protocol_ok with
-                     | Some (Start selection) -> selection
-                     | Some (Resume _) | None ->
-                       failwith
-                         "released callback/source did not expose its actual Start \
-                          selection"
-                   in
-                   assert (
-                     P.Id.Invocation.equal
-                       invocation.context.id
-                       (Actor.Goal_native_start.Selection.invocation_id selection));
-                   assert (
-                     Request.equal
-                       request
-                       (Actor.Goal_native_start.Selection.request selection));
-                   assert (List.is_empty (Registry.entries (Daemon.registry daemon)));
-                   !await_poll ();
-                   Registry.add
-                     (Daemon.registry daemon)
-                     ~session_id:before.identity.session_id
-                     entry
-                   |> protocol_ok;
-                   let session = Actor.Goal_native_start.Selection.session selection in
-                   f
-                     env
-                     sw
-                     root
-                     daemon
-                     entry
-                     { before
-                     ; invocation
-                     ; accepted
-                     ; callback
-                     ; request
-                     ; callback_transaction
-                     ; resume_scheduler = !resume
-                     ; advance_scheduler = !advance
-                     ; selection
-                     ; session
-                     }))))
+            match timeout_scope with
+            | Whole_fixture ->
+              Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) timeout_seconds run
+            | Phased _ -> run ()))
 ;;
 
 let run ?(recurrence = false) ~v1 () =
@@ -1017,6 +1043,7 @@ module Example_recovery = struct
 
   let with_reopened
         ?(configure = fun _root config -> config)
+        ?timeout_seconds
         env
         sw
         root
@@ -1027,9 +1054,14 @@ module Example_recovery = struct
         entry
         f
     =
+    let within phase f =
+      match timeout_seconds with
+      | None -> f ()
+      | Some seconds -> within_phase env ~seconds phase f
+    in
     let session_id = (state entry).identity.session_id in
     let store = Daemon.store daemon in
-    Daemon.shutdown daemon |> protocol_ok;
+    within "joining the original daemon" (fun () -> Daemon.shutdown daemon |> protocol_ok);
     assert (Agent_store.Session_store.is_closed store);
     let prompt =
       Filename.concat root (Option.value_exn startup.Startup_fixture.workspace_prompt)
@@ -1049,26 +1081,28 @@ module Example_recovery = struct
       }
     in
     let reopened =
-      Daemon.start
-        ~sw
-        ~env:(wrap_env (env :> Eio_unix.Stdenv.base))
-        ~config:(configure root config)
-        ~tool_dir:root
-        ~home:root
-        ~process_start_identity:None
-        ~options:
-          { Daemon.default_options with
-            qualify_chatml_extensions = true
-          ; inference_policy = policy
-          }
-        ()
-      |> protocol_ok
+      within "opening the recovered daemon" (fun () ->
+        Daemon.start
+          ~sw
+          ~env:(wrap_env (env :> Eio_unix.Stdenv.base))
+          ~config:(configure root config)
+          ~tool_dir:root
+          ~home:root
+          ~process_start_identity:None
+          ~options:
+            { Daemon.default_options with
+              qualify_chatml_extensions = true
+            ; inference_policy = policy
+            }
+          ()
+        |> protocol_ok)
     in
     protect_cleanup
       ~finally:(fun () -> Daemon.shutdown reopened |> protocol_ok)
       (fun () ->
          let actual =
-           Registry.load (Daemon.registry reopened) session_id |> protocol_ok
+           within "loading the recovered owner" (fun () ->
+             Registry.load (Daemon.registry reopened) session_id |> protocol_ok)
          in
          assert (not (phys_equal actual.actor entry.actor));
          f reopened actual)
@@ -1270,18 +1304,23 @@ let%expect_test "checked Goal requests example stages and admits one real Workfl
          then summary_text
          else "Release review awaits explicit achievement evidence"))
   in
+  let phase_seconds = 30. in
   with_accepted_start
     ~startup
     ~wrap_env
+    ~timeout_scope:(Phased { watchdog_seconds = 120. })
+    ~timeout_seconds:phase_seconds
     ~v1:true
     ~policy
     ~providers
     (fun env sw root daemon entry fixture ->
+       let within phase f = within_phase env ~seconds:phase_seconds phase f in
        let driver = Driver.create ~factory:(Daemon.factory daemon) in
        protect_cleanup
          ~finally:(fun () -> Driver.close driver)
          (fun () ->
-            Driver.process_entry driver entry |> protocol_ok;
+            within "dispatching the first native Start" (fun () ->
+              Driver.process_entry driver entry |> protocol_ok);
             let rec await_account () =
               let current =
                 Actor.with_moderator_checkpoint entry.actor (fun () ->
@@ -1300,7 +1339,7 @@ let%expect_test "checked Goal requests example stages and admits one real Workfl
                 Eio.Fiber.yield ();
                 await_account ())
             in
-            let current = await_account () in
+            let current = within "joining first provider accounting" await_account in
             let invocation, intent = start_invocation current in
             assert (same_invocation fixture.invocation invocation);
             let admission =
@@ -1394,7 +1433,10 @@ let%expect_test "checked Goal requests example stages and admits one real Workfl
               |> A.Goal_native_metadata_view.to_json
               |> protocol_ok
             in
-            let operation, compacted = Example_recovery.compact env sw daemon entry in
+            let operation, compacted =
+              within "compacting the held Goal" (fun () ->
+                Example_recovery.compact env sw daemon entry)
+            in
             assert (Option.is_none compacted.failure);
             [%test_eq: int]
               (held.conversation.compaction_generation + 1)
@@ -1445,6 +1487,7 @@ let%expect_test "checked Goal requests example stages and admits one real Workfl
             Example_recovery.write_revised_source env root startup.goal_id;
             fixture.resume_scheduler ();
             Example_recovery.with_reopened
+              ~timeout_seconds:phase_seconds
               env
               sw
               root
@@ -1490,7 +1533,8 @@ let%expect_test "checked Goal requests example stages and admits one real Workfl
                    Option.is_none
                      (Actor.select_native_goal_action loaded.actor |> protocol_ok));
                  [%test_eq: int] 2 !providers;
-                 Example_recovery.install_revised_source env sw reopened loaded;
+                 within "installing and acknowledging the revised source" (fun () ->
+                   Example_recovery.install_revised_source env sw reopened loaded);
                  let changed = state loaded in
                  let _, source = A.Goal_catalog_source.capture changed |> protocol_ok in
                  assert (not (P.Run_source.equal source (G.source recovered_goal)));
@@ -1550,8 +1594,10 @@ let%expect_test "checked Goal requests example stages and admits one real Workfl
                      protect_cleanup ~finally:reopened_polling.resume (fun () ->
                        (* The revised startup ACK can precede release of its runtime
                           lease. Park the polls and join the scheduler before Start. *)
-                       Polling.park reopened_polling reopened;
-                       Example_recovery.start reopened loaded fixture.session startup)
+                       within "joining the scheduler runtime lease" (fun () ->
+                         Polling.park reopened_polling reopened);
+                       within "starting the revised Goal episode" (fun () ->
+                         Example_recovery.start reopened loaded fixture.session startup))
                    in
                    assert (not (P.Id.Run.equal admission.run_id completion.run_id));
                    assert (P.Run_source.equal completion.source source);
@@ -1564,7 +1610,9 @@ let%expect_test "checked Goal requests example stages and admits one real Workfl
                        Eio.Fiber.yield ();
                        await_pending ())
                    in
-                   let pending = await_pending () in
+                   let pending =
+                     within "reaching the actual response-cache barrier" await_pending
+                   in
                    let pending_goal = Startup_fixture.goal startup pending in
                    assert (G.State.equal (Open Enabled) (G.state pending_goal));
                    let requested =
@@ -1606,7 +1654,9 @@ let%expect_test "checked Goal requests example stages and admits one real Workfl
                        Eio.Fiber.yield ();
                        await_achieved ()
                    in
-                   let final, actual = await_achieved () in
+                   let final, actual =
+                     within "joining the Goal achievement ACK" await_achieved
+                   in
                    let index = Option.value_exn final.run_state in
                    let actual_terminal =
                      Goal_finish_tests.terminal_receipt index completion
