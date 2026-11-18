@@ -80,6 +80,13 @@ source, generation, attachment or configuration changes during it conflict.
 History changes committed by the authorized resume callback are expected.
 There is no failed-command retry with a newer position.
 
+A graceful stop can interrupt an idle moderator’s `Session_resume` callback.
+If the callback had already started, its effects may have happened before OChat
+could save its result. In that case, submitting a new message can report
+`ordinary moderator event was already claimed`. Inspect the session history
+and any external effects before choosing how to continue. Repeating the command
+does not replay the interrupted callback.
+
 To inspect an original managed run, pass both `-session-id` and its reported
 `-run-id`, with the same `-run-mode` that admitted it. This observes the authorized
 original receipt and terminal without starting another run or reloading source.
