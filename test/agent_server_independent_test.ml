@@ -592,7 +592,14 @@ let%expect_test "independent ancestry retains temporary roots across stop and re
         let base = config root root prompt_file in
         let configuration =
           { base with
-            workspaces =
+            (* Use event-count snapshots in this ancestry fixture. A wall-time
+               snapshot can reserve the actor between its explicit lifecycle requests. *)
+            server =
+              { base.server with
+                durability =
+                  { base.server.durability with snapshot_every_ms = Int.max_value }
+              }
+          ; workspaces =
               List.map base.workspaces ~f:(fun workspace ->
                 { workspace with
                   source =
