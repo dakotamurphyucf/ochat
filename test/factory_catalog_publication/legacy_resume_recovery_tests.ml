@@ -264,10 +264,11 @@ let%expect_test
     {| post-install resume ACK is once per runtime; foreground halt precedes provider; no restored original |}]
 ;;
 
-let%expect_test
-    "cold public Start preserves and delivers an ordinary timer claimed during \
-     construction"
-  =
+type cold_start_race =
+  | Timer_claim
+  | Checkpoint_change
+
+let cold_start_with_ordinary_timer ~connect race =
   let prompt_text =
     {|<developer>Schedule one ordinary legacy wake.</developer>
 <script id="owner" language="chatml" kind="moderator">
@@ -306,7 +307,7 @@ let on_event : context -> int -> event -> int task = fun ctx state event ->
          (fun () ->
             Eio.Time.with_timeout_exn env#clock 30. (fun () ->
               Polling.park polling daemon;
-              let client = connection daemon principal in
+              let client = connect daemon in
               protect_cleanup
                 ~finally:(fun () -> Agent_client.Connection.close client)
                 (fun () ->
@@ -334,8 +335,9 @@ let on_event : context -> int -> event -> int task = fun ctx state event ->
                      |> protocol_ok
                    in
                    let claimed = ref None in
-                   (* The normal inference-port supplier is called after selection of
-                   the cold construction State and before source installation. *)
+                   let replacement_checkpoint = ref None in
+                   (* The normal inference-port supplier runs after selecting the cold
+                      State and opening any constructor scope, before source install. *)
                    (before_ports
                     := fun actor ->
                          assert (phys_equal actor entry.actor);
@@ -361,50 +363,118 @@ let on_event : context -> int -> event -> int task = fun ctx state event ->
                                Int64.succ current.counters.owner_lease_generation
                            }
                          in
-                         assert (not (same_basis { current with counters })));
-                   let started =
-                     match
-                       Agent_client.Connection.request_without_history
-                         client
-                         (Session_start
-                            { session_id = session.id
-                            ; attachment_id = writer.id
-                            ; queue_if_limited = false
-                            ; idempotency_key =
-                                P.Idempotency_key.of_string
-                                  "cold-start-with-ordinary-timer"
-                                |> protocol_ok
-                            })
-                       |> protocol_ok
-                     with
-                     | Session_start result -> result.session
-                     | _ -> failwith "public Session_start returned a different result"
+                         assert (not (same_basis { current with counters }));
+                         match race with
+                         | Timer_claim -> ()
+                         | Checkpoint_change ->
+                           let previous = Option.value_exn current.moderator in
+                           let checkpoint =
+                             Checkpoint.of_jsonaf previous |> protocol_ok
+                           in
+                           let snapshot = Checkpoint.snapshot checkpoint in
+                           let next =
+                             Checkpoint.update
+                               checkpoint
+                               ~snapshot:{ snapshot with current_state = Int 42 }
+                               ~queue:Keep
+                             |> protocol_ok
+                             |> Checkpoint.to_jsonaf
+                           in
+                           Actor.change_moderator actor (Some next)
+                           |> protocol_ok
+                           |> ignore;
+                           replacement_checkpoint := Some next);
+                   let result =
+                     Agent_client.Connection.request_without_history
+                       client
+                       (Session_start
+                          { session_id = session.id
+                          ; attachment_id = writer.id
+                          ; queue_if_limited = false
+                          ; idempotency_key =
+                              P.Idempotency_key.of_string "cold-start-with-ordinary-timer"
+                              |> protocol_ok
+                          })
                    in
                    let claimed = Option.value_exn !claimed in
-                   let drain () =
-                     Factory.drain_idle_moderator (Daemon.factory daemon) entry
-                     |> protocol_ok
-                   in
-                   (* Join the cold binding's pending resume before queuing Wake. *)
-                   assert (drain ());
-                   Owner.deliver_schedule entry.runtime claimed |> protocol_ok;
-                   assert (drain ());
-                   assert (Option.is_none (claim ()));
-                   assert (not (drain ()));
-                   let delivered = state entry in
-                   let timer =
-                     match delivered.schedules with
-                     | [ ({ id; status = Delivered; _ } as timer) ] ->
-                       assert (P.Id.Schedule.equal id scheduled.id);
-                       timer
-                     | schedules -> raise_s [%sexp (schedules : P.Schedule.t list)]
-                   in
-                   let snapshot = checkpoint delivered in
-                   assert (List.is_empty snapshot.queued_internal_events);
-                   print_s
-                     [%sexp
-                       (started.desired_state : P.Session.desired_state)
-                     , (timer.delivery_count : int)
-                     , (snapshot.current_state : Session.Snapshot.t)]))));
+                   match race with
+                   | Checkpoint_change ->
+                     let failure =
+                       match result with
+                       | Error failure -> failure
+                       | Ok _ ->
+                         failwith "cold Start installed a stale moderator checkpoint"
+                     in
+                     assert (P.Error.equal_code failure.code Conflict);
+                     assert (not (Owner.is_loaded entry.runtime));
+                     let after = state entry in
+                     assert (Option.is_some !replacement_checkpoint);
+                     assert (
+                       Option.equal
+                         Jsonaf.exactly_equal
+                         after.moderator
+                         !replacement_checkpoint);
+                     print_s
+                       [%sexp
+                         (failure.code : P.Error.code)
+                       , (after.lifecycle.desired : P.Session.desired_state)
+                       , ((checkpoint after).current_state : Session.Snapshot.t)]
+                   | Timer_claim ->
+                     let started =
+                       match result |> protocol_ok with
+                       | Session_start result -> result.session
+                       | _ -> failwith "public Session_start returned a different result"
+                     in
+                     let drain () =
+                       Factory.drain_idle_moderator (Daemon.factory daemon) entry
+                       |> protocol_ok
+                     in
+                     (* The scoped constructor may already have settled resume. *)
+                     ignore (drain () : bool);
+                     (match (checkpoint (state entry)).current_state with
+                      | Int 1 -> ()
+                      | _ -> failwith "unexpected checkpoint before timer wake");
+                     Owner.deliver_schedule entry.runtime claimed |> protocol_ok;
+                     ignore (drain () : bool);
+                     assert (Option.is_none (claim ()));
+                     assert (not (drain ()));
+                     let delivered = state entry in
+                     assert_original ready delivered;
+                     (match receipts delivered Session_resume with
+                      | [ { status = Completed _; _ } ] -> ()
+                      | _ -> failwith "cold Start did not retain exactly one resume ACK");
+                     let timer =
+                       match delivered.schedules with
+                       | [ ({ id; status = Delivered; _ } as timer) ] ->
+                         assert (P.Id.Schedule.equal id scheduled.id);
+                         timer
+                       | schedules -> raise_s [%sexp (schedules : P.Schedule.t list)]
+                     in
+                     let snapshot = checkpoint delivered in
+                     assert (List.is_empty snapshot.queued_internal_events);
+                     print_s
+                       [%sexp
+                         (started.desired_state : P.Session.desired_state)
+                       , (timer.delivery_count : int)
+                       , (snapshot.current_state : Session.Snapshot.t)]))))
+;;
+
+let connect_authenticated daemon =
+  Goal_recurrence_host_support.operator_connection daemon principal
+;;
+
+let%expect_test
+    "cold public Start preserves an ordinary timer claimed during construction"
+  =
+  cold_start_with_ordinary_timer
+    ~connect:(fun daemon -> connection daemon principal)
+    Timer_claim;
+  [%expect {| (Running 1 (Int 11)) |}];
+  cold_start_with_ordinary_timer ~connect:connect_authenticated Timer_claim;
   [%expect {| (Running 1 (Int 11)) |}]
+;;
+
+let%expect_test "authenticated cold Start rejects a changed moderator checkpoint" =
+  cold_start_with_ordinary_timer ~connect:connect_authenticated Checkpoint_change;
+  [%expect {| (Conflict Stopped (Int 42)) |}]
 ;;

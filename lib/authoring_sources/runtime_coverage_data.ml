@@ -932,7 +932,7 @@ let implementation_sources =
   ; ( "lib/agent_session/failed_startup_data.mli"
     , "30a8caafe8f5ffb683f9a00a934110545ef2457ad6829383473738f5b379683f" )
   ; ( "lib/agent_session/session_actor.mli"
-    , "85d49d566e90ace5b0d58f568041e5d2ad60092f7db01b11323e4d315464d0aa" )
+    , "e57abed74c8bc67e5bbb9fbf1e762070e91e33210f22bf1a2e69f5c98cb6514d" )
   ; ( "lib/agent_session/session_persistence.mli"
     , "633923eec551daaa286ecd011bb7ab3b9615e19bc4bf3eb6712a038fc31e107e" )
   ; ( "lib/agent_session/policy_restore_basis.ml"
@@ -1192,7 +1192,7 @@ let implementation_sources =
   ; ( "lib/agent_server/descendant_accounting_host.ml"
     , "3baff14cf9c606e899c08f95805cc3ca9f070827b46ec531e1c230314820b0fd" )
   ; ( "lib/agent_server/session_factory.ml"
-    , "d7aee50a7d94fc96a1a92ef6de03fb33981f92b66aee959a9599dd02b70f19e3" )
+    , "d0e58637be9c6a3b87c992a214534eb565bc6a9f46bc7b1aeda0b2c735aba22c" )
   ; ( "bin/inference_composition.ml"
     , "1f57451d5543a5fe8f2f23dc0e593374b64946d088cba164acd1c087a7cdce18" )
   ; ( "lib/agent_protocol/developer_command_id.ml"
@@ -1506,7 +1506,7 @@ let implementation_sources =
   ; ( "lib/agent_session/goal_continuation_phase.ml"
     , "e24a210492bfcc9e94c7bf472603531eb053eb7654de7c6100083464da9b1b51" )
   ; ( "lib/agent_session/session_actor.ml"
-    , "151bcf7062a7149442925a0d7a58bedd0e30f79be85d9a7f465ab96193090058" )
+    , "700df5c94f8173627498472ad6b83ab14381bef70ac135c54282593b3751db0d" )
   ; ( "lib/agent_session/idle_completion_write.ml"
     , "d427fa80c4346b64f3f9bf4d5025ad2218403278816ade76ff17ba1adaa426d9" )
   ; ( "lib/agent_session/goal_descendant_admission_custody.ml"

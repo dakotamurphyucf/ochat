@@ -8762,14 +8762,7 @@ let prepare_runtime_at_paths
     in
     let host, causal_driver = descendant_host t ~handle ~actor_ref ~check_ancestry in
     let%map binding =
-      match
-        ( source
-        , state
-        , check_ancestry
-        , policy_restoration
-        , !initialization_scope
-        , run_preparation )
-      with
+      match source, state, check_ancestry, policy_restoration, run_preparation with
       | ( Authored _
         , { runtime_initialization = Ready
           ; lifecycle = { desired = Stopped; observed = Stopped }
@@ -8777,10 +8770,10 @@ let prepare_runtime_at_paths
           }
         , None
         , None
-        , None
         , Constructor_owner.Ordinary preparation )
         when phys_equal actor source_target.actor && Option.is_none !preparation ->
         Actor.install_ordinary_ready_descendant_host
+          ?initialization_scope:!initialization_scope
           ~causal_driver
           actor
           ~source_owner:t.runtime_source_owner

@@ -67,6 +67,10 @@ timer comes due while a client starts the stopped session, the start preserves
 the timer and its delivery status. Use `schedule.get` with the original schedule
 ID to check the outcome.
 
+If startup detects that the moderator checkpoint changed while the runtime was
+loading, the host returns `Conflict` and preserves the newer checkpoint. Read
+the current session state before issuing a new start request.
+
 Global/principal/prompt/workspace/session/kind/nested-depth capacity bounds work.
 Jobs are claimed before execution, record terminal state, and release capacity on
 terminal/failed-start paths. Reviewers also use durable, non-redeliverable jobs.

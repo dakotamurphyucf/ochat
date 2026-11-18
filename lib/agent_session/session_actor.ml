@@ -3513,7 +3513,7 @@ end
 module Descendant_host_installation = struct
   type t =
     | Ordinary
-    | Ordinary_ready_reload
+    | Ordinary_ready_reload of Initialization_scope_data.t option
     | Restored of Policy_restoration_data.t
 end
 
@@ -36779,10 +36779,32 @@ let install_descendant_host_internal
       Error (error Conflict "descendant source selection State changed before install")
     in
     match purpose with
-    | Descendant_host_installation.Ordinary_ready_reload ->
+    | Descendant_host_installation.Ordinary_ready_reload scope ->
       let%bind () = require_runtime_admission t in
       let%bind () = require_selected_execution t in
-      if phys_equal expected t.state
+      let unchanged = phys_equal expected t.state in
+      let%bind () =
+        match scope, t.initialization_scope with
+        | None, None -> Ok ()
+        | None, Some _ when unchanged -> Ok ()
+        | ( Some
+              ({ purpose = Runtime_construction
+               ; custody = Ordinary
+               ; callback = Unclaimed
+               ; resource = None
+               ; _
+               } as scope)
+          , Some active )
+          when phys_equal scope active
+               && phys_equal scope.expected expected
+               && Int.equal scope.domain t.runtime_source_domain
+               && Option.is_some
+                    (Execution_custody.Admission.custody scope.agent_admission) ->
+          let%bind () = validate_initialization_owner t scope in
+          check_initialization_agent_actor scope
+        | (None | Some _), (None | Some _) -> changed ()
+      in
+      if unchanged
       then Ok ()
       else (
         match
@@ -36790,16 +36812,14 @@ let install_descendant_host_internal
           , expected.lifecycle.desired
           , expected.lifecycle.observed
           , expected.spec.delegation
-          , t.initialization_scope
           , t.run_preparation )
         with
-        | Ready, Stopped, Stopped, None, None, None
+        | Ready, Stopped, Stopped, None, None
           when runtime_ready t
                && Session_state.same_ordinary_ready_reload_basis t.state ~expected ->
           Ok ()
         | _ -> changed ())
-    | Ordinary | Restored _ ->
-      if phys_equal expected t.state then Ok () else changed ()
+    | Ordinary | Restored _ -> if phys_equal expected t.state then Ok () else changed ()
   in
   let%bind () =
     match expected.spec.delegation, check_ancestry with
@@ -58001,7 +58021,7 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
       let open Result.Let_syntax in
       let%bind () =
         match purpose with
-        | Descendant_host_installation.Ordinary | Ordinary_ready_reload -> Ok ()
+        | Descendant_host_installation.Ordinary | Ordinary_ready_reload _ -> Ok ()
         | Restored restoration -> check_policy_restoration_target t restoration
       in
       install_descendant_host_internal
@@ -62237,9 +62257,16 @@ let install_descendant_host ?policy_restoration =
   install_descendant_host_for purpose
 ;;
 
-let install_ordinary_ready_descendant_host ?causal_driver t ~source_owner ~expected ~host =
+let install_ordinary_ready_descendant_host
+      ?initialization_scope
+      ?causal_driver
+      t
+      ~source_owner
+      ~expected
+      ~host
+  =
   install_descendant_host_for
-    Ordinary_ready_reload
+    (Ordinary_ready_reload initialization_scope)
     ?causal_driver
     t
     ~source_owner

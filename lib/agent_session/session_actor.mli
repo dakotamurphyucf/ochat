@@ -6601,10 +6601,14 @@ val install_descendant_host
 (** Finite Factory install for a cold ordinary authored root reload. A Ready,
     stopped selection compares the exact construction inputs. Schedules remain
     live on the Actor, and their updates can advance the commit stamps while the
-    Factory builds. Both paths require current runtime and ordinary execution
-    admission in addition to the same Factory ownership and lifecycle checks. *)
+    Factory builds. An authenticated reload must supply its exact current Ready
+    construction scope and retain its original admission. An unscoped reload
+    can accept schedule progress only in the absence of an initialization scope.
+    Both require current runtime and ordinary execution admission and the same
+    Factory ownership and lifecycle. *)
 val install_ordinary_ready_descendant_host
-  :  ?causal_driver:Descendant_host.Causal_driver.t
+  :  ?initialization_scope:Initialization_scope.t
+  -> ?causal_driver:Descendant_host.Causal_driver.t
   -> t
   -> source_owner:Runtime_source_owner.t
   -> expected:Session_state.t
