@@ -235,8 +235,12 @@ let self_check_return_to_chat env child =
   Pty.send child "\027";
   F.await env (fun () ->
     let fresh = String.drop_prefix (Pty.output child) offset in
-    if String.is_substring fresh ~substring:"Ready for the next check."
-    then Some ()
+    if not (String.is_substring fresh ~substring:"Ready for the next check.")
+    then None
+    else if String.is_substring fresh ~substring:"-- NORMAL --"
+    then Some `Normal
+    else if String.is_substring fresh ~substring:"-- INSERT --"
+    then Some `Insert
     else None)
 ;;
 
@@ -259,9 +263,13 @@ let self_check ~sw env fixture local provider manual =
   Manual.respond manual ~env ~action:"reply" ~index:0;
   Pty.await_text child ~clock "Ready for the next check.";
   self_check_approval env child provider manual;
-  self_check_return_to_chat env child;
-  Pty.send child "\027";
-  Pty.await_text child ~clock "NORMAL";
+  (match self_check_return_to_chat env child with
+   | `Normal -> ()
+   | `Insert ->
+     let after = String.length (Pty.output child) in
+     Pty.send child "\027";
+     (* The colon must arrive after Escape has been decoded as its own key. *)
+     Pty.await_text child ~after ~clock "-- NORMAL --");
   Pty.send child ":q\r";
   F.require
     (Poly.equal (Pty.await_exit child ~clock) (`Exited 0))

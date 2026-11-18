@@ -539,14 +539,69 @@ module Ui = struct
     Eio.Condition.broadcast presenter.changed
   ;;
 
+  let startup_input_handler input_stream =
+    let input_presented = ref false in
+    let rec discard_startup_input () =
+      match Eio.Stream.take_nonblocking input_stream with
+      | None -> ()
+      | Some (`Key (`Escape, [])) -> Eio.Stream.add input_stream (`Key (`Escape, []))
+      | Some (`Key _ | `Mouse _ | `Paste _) -> discard_startup_input ()
+    in
+    fun (capability : input_capability) ->
+      match capability with
+      | Normal when not !input_presented ->
+        input_presented := true;
+        discard_startup_input ()
+      | Interaction _ -> input_presented := true
+      | Normal | Disabled -> ()
+  ;;
+
+  let%expect_test "only startup Normal can discard queued terminal input" =
+    let input = Eio.Stream.create 8 in
+    let add event = Eio.Stream.add input event in
+    let rec show_input () =
+      match Eio.Stream.take_nonblocking input with
+      | None -> ()
+      | Some event ->
+        print_endline (Live_scroll_trace.event_name event);
+        show_input ()
+    in
+    let present = startup_input_handler input in
+    add (`Key (`ASCII 'x', []));
+    present Disabled;
+    show_input ();
+    [%expect {| key-ascii-78[] |}];
+    add (`Key (`ASCII 'x', []));
+    add (`Key (`Escape, []));
+    present Normal;
+    show_input ();
+    [%expect {| key-escape[] |}];
+    add (`Key (`ASCII 'q', []));
+    add (`Key (`Enter, []));
+    present Normal;
+    show_input ();
+    [%expect
+      {|
+      key-ascii-71[]
+      key-enter[]
+      |}];
+    let present = startup_input_handler input in
+    add (`Key (`Enter, []));
+    present (Interaction "approval");
+    present Disabled;
+    add (`Key (`ASCII 'q', []));
+    present Normal;
+    show_input ();
+    [%expect
+      {|
+      key-enter[]
+      key-ascii-71[]
+      |}]
+  ;;
+
   let spawn_presenter ~sw ~term ~input_stream ~on_presented presenter =
     Fiber.fork_daemon ~sw (fun () ->
-      let rec discard_startup_input () =
-        match Eio.Stream.take_nonblocking input_stream with
-        | None -> ()
-        | Some (`Key (`Escape, [])) -> Eio.Stream.add input_stream (`Key (`Escape, []))
-        | Some (`Key _ | `Mouse _ | `Paste _) -> discard_startup_input ()
-      in
+      let handle_startup_input = startup_input_handler input_stream in
       let rec loop () =
         match presenter.latest with
         | None ->
@@ -592,9 +647,7 @@ module Ui = struct
                  ; "height", `Number (Int.to_string (snd pending.frame.size))
                  ]);
             presenter.previous <- Some pending.frame;
-            (match pending.input_capability with
-             | Normal -> discard_startup_input ()
-             | Disabled | Interaction _ -> ());
+            handle_startup_input pending.input_capability;
             on_presented pending.generation pending.input_capability);
           loop ()
       in
