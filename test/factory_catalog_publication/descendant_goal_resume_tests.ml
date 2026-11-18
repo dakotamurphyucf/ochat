@@ -431,11 +431,25 @@ let%expect_test
     {| real cold Resume callback joins once; same Run owns confirmed Turn and Attempt; replay is factual |}]
 ;;
 
+let with_checked_resume_cleanup ~decision f =
+  match with_episode ~decision f with
+  | () -> ()
+  | exception (Registry.Cleanup_failed failure as exn) ->
+    let error = Registry.Cleanup_failure.error failure in
+    Exn.reraise
+      exn
+      (Sexp.to_string_hum
+         [%sexp
+           "cold Resume cleanup failed"
+         , (decision : Runtime.Decision.t)
+         , (error : P.Error.t)])
+;;
+
 let%expect_test
     "scoped cold Resume retains real Wait or settlement without reserving a Turn"
   =
   List.iter [ Runtime.Decision.Wait; Finish ] ~f:(fun decision ->
-    with_episode
+    with_checked_resume_cleanup
       ~decision
       (fun
           env
