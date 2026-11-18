@@ -28,12 +28,24 @@ let protocol_ok = function
     raise_s [%sexp "protocol operation failed", (error : Agent_protocol.Error.t)]
 ;;
 
+let request_result command = function
+  | Ok value -> value
+  | Error error ->
+    let method_name = Agent_protocol.Command.method_name command in
+    raise_s
+      [%sexp
+        "multi-client request failed"
+      , (method_name : string)
+      , (error : Agent_protocol.Error.t)]
+;;
+
 let request_public connection command =
-  Agent_client.Connection.request connection command |> protocol_ok
+  Agent_client.Connection.request connection command |> request_result command
 ;;
 
 let request connection command =
-  Agent_client.Connection.request_without_history connection command |> protocol_ok
+  Agent_client.Connection.request_without_history connection command
+  |> request_result command
 ;;
 
 let idempotency_key value = Agent_protocol.Idempotency_key.of_string value |> protocol_ok
