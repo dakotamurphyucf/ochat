@@ -298,7 +298,10 @@ jobs:
         environment: [preview, production]
         shard: [1, 2]
     runs-on: ubuntu-24.04
-    # Browser system packages and the test suite share this runner.
+    container:
+      # Keep the preinstalled browsers aligned with website/package-lock.json.
+      image: mcr.microsoft.com/playwright:v1.61.1-noble@sha256:5b8f294aff9041b7191c34a4bab3ac270157a28774d4b0660e9743297b697e48
+      options: --init --shm-size=1g
     timeout-minutes: 40
     env:
       SITE_ENV: ${{ matrix.environment }}
@@ -321,7 +324,6 @@ jobs:
         with:
           name: website-build-${{ matrix.environment }}
           path: website/.release/candidate
-      - run: npx playwright install --with-deps chromium firefox webkit
       - name: Test prepared artifact on shard ${{ matrix.shard }}/2
         timeout-minutes: 20
         run: node scripts/browser-ci.mjs run .release/candidate ${{ matrix.shard }}
