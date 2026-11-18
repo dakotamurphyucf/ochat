@@ -64,6 +64,15 @@ let current handle =
       | Current -> Ok (P.Public.Snapshot.fields (C.Projection.snapshot projection)))
 ;;
 
+let same_observation_source (selected : P.Session.t) (actual : P.Session.t) =
+  P.Id.Session.equal selected.id actual.id
+  && Int.equal selected.generation actual.generation
+  && Option.equal
+       P.Id.Prompt_revision.equal
+       selected.prompt_revision
+       actual.prompt_revision
+;;
+
 let activate handle session activation =
   match session.P.Session.desired_state, session.observed_state, activation with
   | Running, Idle, _ -> Ok session
@@ -183,8 +192,22 @@ let run
           | Some prepare -> prepare handle initial.session
         in
         poll ();
-        let%bind () = await_selected selected in
-        let%bind () = validate_selected selected in
+        let%bind () =
+          match request with
+          | Request.Observe_run admission ->
+            let%bind actual = current handle |> protocol in
+            if
+              same_observation_source initial.session selected
+              && Int64.equal initial.session.revision selected.revision
+              && Int.equal admission.source.generation selected.generation
+              && same_observation_source selected actual.session
+              && Int64.(actual.session.revision >= selected.revision)
+            then Ok ()
+            else Error (Error.Protocol (error Conflict "prepared session anchor changed"))
+          | Authored_start _ | User_submission _ | Foreground_continue _ ->
+            let%bind () = await_selected selected in
+            validate_selected selected
+        in
         let await_run admission expected_mode =
           let views = C.Run_views.create connection ~server_id:initialized.server_id in
           let lookup : P.Run_query.Lookup_request.t =
@@ -279,8 +302,14 @@ let run
             admission.source.generation, terminal.event_sequence
         in
         let%bind () =
+          let source_matches =
+            match request with
+            | Request.Observe_run _ -> same_observation_source selected fields.session
+            | Authored_start _ | User_submission _ | Foreground_continue _ -> true
+          in
           if
-            Int.equal fields.session.generation generation
+            source_matches
+            && Int.equal fields.session.generation generation
             && Int64.equal fields.latest_event_sequence event_sequence
           then Ok ()
           else

@@ -83,7 +83,11 @@ There is no failed-command retry with a newer position.
 To inspect an original managed run, pass both `-session-id` and its reported
 `-run-id`, with the same `-run-mode` that admitted it. This observes the authorized
 original receipt and terminal without starting another run or reloading source.
-Unavailable evidence does not authorize rerunning it.
+Once attached, the command can follow updates from a recovered moderator's resume
+callback within the selected session, generation, and prompt revision. A changed
+generation or prompt revision conflicts. The command exports canonical history
+at the exact revision reported by its terminal lookup. Unavailable evidence does
+not authorize rerunning the original run.
 
 ## Rebuild or import deliberately
 
