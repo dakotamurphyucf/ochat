@@ -411,6 +411,13 @@ let with_tree ?(scenario = Scenario.Cleanup) f =
   (* The enclosing watchdog covers native birth, the controlled correction
        hold and settlement. Their individual deadlines identify a stalled phase. *)
     ~timeout:180.
+    ~entry_cleanup:
+      (match scenario with
+       | Cleanup -> Source.direct_cleanup ()
+       | Completed_vector ->
+         (* The warm assertions finish with the runtime tree live. Let the Daemon
+            join its schedulers and dispose the registered entries together. *)
+         Source.Daemon_shutdown)
     ~wrap_env:(fun env ->
       let env = Root_read.wrap read env in
       match scenario with
