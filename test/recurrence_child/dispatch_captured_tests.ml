@@ -39,14 +39,14 @@ let configured (config : Agent_server.Config.t) session_id =
   }
 ;;
 
-let await env f =
+let await ?(timeout = 15.) ?(interval = 0.01) env f =
   let clock = Eio.Stdenv.clock env in
-  Eio.Time.with_timeout_exn clock 15. (fun () ->
+  Eio.Time.with_timeout_exn clock timeout (fun () ->
     let rec loop () =
       match f () with
       | Some result -> result
       | None ->
-        Eio.Time.sleep clock 0.01;
+        Eio.Time.sleep clock interval;
         loop ()
     in
     loop ())
@@ -63,12 +63,11 @@ let healthy child =
   current
 ;;
 
-let actual_execution parent =
-  Entry.frontier (entry parent)
-  |> protocol_ok
-  |> A.Recurrence_frontier.executions
-  |> List.hd_exn
+let executions parent =
+  Entry.frontier (entry parent) |> protocol_ok |> A.Recurrence_frontier.executions
 ;;
+
+let actual_execution parent = List.hd_exn (executions parent)
 
 let fixture_config env root child_text =
   let prompt = Filename.concat root "parent.chatmd" in
@@ -637,6 +636,9 @@ let assert_one_physical_attempt parent session =
 let%expect_test "captured occurrence spends its original Goal's final Attempt once" =
   Eio_main.run (fun env ->
     let clock = Eio.Stdenv.clock env in
+    (* Independent watchdogs for the durable progress of this fixture. *)
+    let progress_timeout = 60. in
+    let await_progress f = await ~timeout:progress_timeout ~interval:0.25 env f in
     let phase name f =
       let started = Eio.Time.now clock in
       match f () with
@@ -708,8 +710,8 @@ let%expect_test "captured occurrence spends its original Goal's final Attempt on
                    phase "controller Goal Workflow" (fun () ->
                      start_controller_goal env daemon parent session)
                  in
-                 phase "captured source and first Model provider" (fun () ->
-                   Eio.Time.with_timeout_exn clock 60. (fun () ->
+                 phase "capture source and create bound recurrence" (fun () ->
+                   Eio.Time.with_timeout_exn clock 15. (fun () ->
                      let target, _ =
                        Cold.cold_target
                          ~catalog_target:true
@@ -721,7 +723,17 @@ let%expect_test "captured occurrence spends its original Goal's final Attempt on
                      in
                      assert_attempt_availability parent session Available;
                      create_bound_recurrence parent target;
-                     assert_goal_capture parent session episode;
+                     assert_goal_capture parent session episode));
+                 phase "record first controller execution" (fun () ->
+                   (* Recording the execution need not publish a durable event. *)
+                   await_progress (fun () ->
+                     match executions parent with
+                     | [] -> None
+                     | [ _ ] -> Some ()
+                     | _ ->
+                       failwith "captured Goal recurrence recorded multiple executions"));
+                 phase "first captured Model provider" (fun () ->
+                   Eio.Time.with_timeout_exn clock progress_timeout (fun () ->
                      Eio.Promise.await entered));
                  let execution = actual_execution parent in
                  let attempt = Execution.current_attempt execution in
@@ -742,7 +754,7 @@ let%expect_test "captured occurrence spends its original Goal's final Attempt on
                  release_provider ();
                  let execution, terminal =
                    phase "captured terminal import" (fun () ->
-                     await env (fun () ->
+                     await_progress (fun () ->
                        let execution = actual_execution parent in
                        Execution.Attempt.terminal (Execution.current_attempt execution)
                        |> Option.map ~f:(fun terminal -> execution, terminal)))
