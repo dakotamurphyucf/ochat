@@ -719,11 +719,13 @@ val check_execution_selected_owner
 
 (** Pure negative association check against this Factory's actual registry,
     Actor/Owner pairing and owned Handle. [session] is expected-reference DATA,
-    compared with the actual Store server and Handle session. Rejects closing,
-    lifecycle-reserved, foreign or displaced owners without loading a runtime.
-    Stopped/recovered entries remain valid for factual reconciliation. This grants
-    no permission: actual source CPS still requires its private Factory key, and
-    all final authority checks remain in the existing Actor/Runtime_owner ports. *)
+    compared with the actual Store server and Handle session. Closing, failed
+    cleanup, foreign and displaced owners return nonretryable [Conflict].
+    An otherwise current owner with a concurrent lifecycle reservation returns
+    retryable [Conflict]. No runtime is loaded. Stopped/recovered entries remain
+    valid for factual reconciliation. This grants no permission: actual source
+    CPS still requires its private Factory key, and all final authority checks
+    remain in the existing Actor/Runtime_owner ports. *)
 val check_registered_entry
   :  t
   -> Session_registry.entry

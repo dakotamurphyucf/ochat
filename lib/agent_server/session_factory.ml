@@ -14224,19 +14224,23 @@ let owns_handle t handle = Agent_store.Session_store.owns_handle t.store handle
 
 let check_registered_entry t (entry : Session_registry.entry) ~session =
   let open Result.Let_syntax in
+  let reserved =
+    Session_registry.lifecycle_reserved
+      t.registry
+      (Agent_protocol.Session_ref.session_id session)
+  in
+  (* The reservation lookup can yield. Check the exact owner and failed cleanup
+     afterwards, with no further yield before classifying the exclusion. *)
   let%bind () = check_registered_owner t entry ~session in
-  if
-    Option.exists entry.store_handle ~f:(fun handle ->
-      not
-        (Session_registry.lifecycle_reserved
-           t.registry
-           (Agent_store.Session_store.Handle.session_id handle)))
-  then Ok ()
-  else
+  if reserved
+  then
     Error
-      (unavailable
+      (Agent_protocol.Error.create
          Conflict
-         "recurrence entry is not this Factory's current registered owner")
+         ~message:"recurrence entry has a concurrent lifecycle reservation"
+         ~retryable:true
+         ())
+  else Ok ()
 ;;
 
 let qualify_metadata_target t entry =

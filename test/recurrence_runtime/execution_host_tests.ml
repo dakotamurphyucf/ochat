@@ -144,6 +144,28 @@ let on_event ctx state event = Task.pure(state)
                   assert (Option.is_none (Registry.find (Daemon.registry daemon) second));
                   assert (not (Owner.is_loaded selected.runtime));
                   let before = state selected.actor in
+                  let foreign =
+                    P.Session_ref.create
+                      ~server_id:(P.Id.Server.create ())
+                      ~session_id:first
+                  in
+                  let failure = function
+                    | Error (error : P.Error.t) -> error.code, error.retryable
+                    | Ok _ -> failwith "reserved recurrence controller was admitted"
+                  in
+                  Registry.with_lifecycle (Daemon.registry daemon) first (fun _ ->
+                    [%test_eq: P.Error.code * bool]
+                      (Conflict, true)
+                      (Host.controller host selected |> failure);
+                    [%test_eq: P.Error.code * bool]
+                      (Conflict, false)
+                      (Agent_server.Session_factory.check_registered_entry
+                         (Daemon.factory daemon)
+                         selected
+                         ~session:foreign
+                       |> failure);
+                    Ok ())
+                  |> protocol_ok;
                   let controller = Host.controller host selected |> protocol_ok in
                   let target =
                     Host.existing_target controller ~target:selected |> protocol_ok
