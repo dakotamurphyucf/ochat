@@ -102,6 +102,7 @@ let with_native_goal_child
       ?independent_lifetime_policy
       ?test_root
       ?timeout
+      ?entry_cleanup
       ?(parent_extra_tools = [])
       ?(inherited_tools = [])
       ?(wrap_env = Fn.id)
@@ -118,6 +119,7 @@ let with_native_goal_child
     ?independent_lifetime_policy
     ?test_root
     ?timeout
+    ?entry_cleanup
     ~wrap_env
     ~prompt_text:
       (parent_prompt_text

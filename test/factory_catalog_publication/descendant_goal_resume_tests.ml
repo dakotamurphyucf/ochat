@@ -141,7 +141,13 @@ let assert_inherited_reader env daemon parent child =
   [%test_eq: string] selected.fingerprint inherited.fingerprint
 ;;
 
-let with_episode ?test_root ?(decision = Runtime.Decision.Continue) ?(wrap_env = Fn.id) f =
+let with_episode
+      ?test_root
+      ?entry_cleanup
+      ?(decision = Runtime.Decision.Continue)
+      ?(wrap_env = Fn.id)
+      f
+  =
   let observe = ref None in
   let failure = ref None in
   let child_sources =
@@ -165,6 +171,7 @@ let with_episode ?test_root ?(decision = Runtime.Decision.Continue) ?(wrap_env =
   in
   Birth.with_native_goal_child
     ?test_root
+    ?entry_cleanup
     ~timeout:150.
     ~wrap_env
     ~budget
@@ -432,7 +439,7 @@ let%expect_test
 ;;
 
 let with_checked_resume_cleanup ~decision f =
-  match with_episode ~decision f with
+  match with_episode ~decision ~entry_cleanup:Daemon_shutdown f with
   | () -> ()
   | exception (Registry.Cleanup_failed failure as exn) ->
     let error = Registry.Cleanup_failure.error failure in

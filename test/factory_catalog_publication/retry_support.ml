@@ -93,6 +93,7 @@ let with_recoverable_fixture
       ?(timeout = 30.)
       ?(prompt_text = Source.prompt_text)
       ?(wrap_env = Fn.id)
+      ?(entry_cleanup = Source.direct_cleanup ())
       ?(max_root_agents = 1)
       ?(post_stream = fun _ -> completed_response "539 retry complete")
       f
@@ -126,8 +127,11 @@ let with_recoverable_fixture
     ~policy
     (fun env sw root daemon ->
        Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) timeout (fun () ->
-         Source.with_loaded_entry daemon (fun ~entry ~runtime ~revision ->
-           f env sw root daemon policy entry runtime revision counters)))
+         Source.with_loaded_entry_using
+           ~cleanup:entry_cleanup
+           daemon
+           (fun ~entry ~runtime ~revision ->
+              f env sw root daemon policy entry runtime revision counters)))
 ;;
 
 let with_fixture ?timeout ?prompt_text ?wrap_env ?max_root_agents ?post_stream f =
