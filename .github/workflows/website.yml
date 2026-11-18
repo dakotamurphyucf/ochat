@@ -324,6 +324,9 @@ jobs:
         with:
           name: website-build-${{ matrix.environment }}
           path: website/.release/candidate
+      # actions/checkout sets Git trust in its temporary HOME.
+      - name: Trust the runner-owned checkout in the browser container
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: Test prepared artifact on shard ${{ matrix.shard }}/2
         timeout-minutes: 20
         run: node scripts/browser-ci.mjs run .release/candidate ${{ matrix.shard }}
