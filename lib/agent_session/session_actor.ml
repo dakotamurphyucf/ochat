@@ -3513,6 +3513,7 @@ end
 module Descendant_host_installation = struct
   type t =
     | Ordinary
+    | Ordinary_ready_reload
     | Restored of Policy_restoration_data.t
 end
 
@@ -36764,6 +36765,7 @@ let prepare_native_goal_completion t execution outcome resolved =
 
 let install_descendant_host_internal
       t
+      ~purpose
       ~source_owner
       ~expected
       ~check_ancestry
@@ -36773,9 +36775,31 @@ let install_descendant_host_internal
   let open Result.Let_syntax in
   let%bind controller = child_accounting_owner t ~source_owner in
   let%bind () =
-    if phys_equal expected t.state
-    then Ok ()
-    else Error (error Conflict "descendant source selection State changed before install")
+    let changed () =
+      Error (error Conflict "descendant source selection State changed before install")
+    in
+    match purpose with
+    | Descendant_host_installation.Ordinary_ready_reload ->
+      let%bind () = require_runtime_admission t in
+      let%bind () = require_selected_execution t in
+      if phys_equal expected t.state
+      then Ok ()
+      else (
+        match
+          ( expected.runtime_initialization
+          , expected.lifecycle.desired
+          , expected.lifecycle.observed
+          , expected.spec.delegation
+          , t.initialization_scope
+          , t.run_preparation )
+        with
+        | Ready, Stopped, Stopped, None, None, None
+          when runtime_ready t
+               && Session_state.same_ordinary_ready_reload_basis t.state ~expected ->
+          Ok ()
+        | _ -> changed ())
+    | Ordinary | Restored _ ->
+      if phys_equal expected t.state then Ok () else changed ()
   in
   let%bind () =
     match expected.spec.delegation, check_ancestry with
@@ -57977,11 +58001,12 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
       let open Result.Let_syntax in
       let%bind () =
         match purpose with
-        | Descendant_host_installation.Ordinary -> Ok ()
+        | Descendant_host_installation.Ordinary | Ordinary_ready_reload -> Ok ()
         | Restored restoration -> check_policy_restoration_target t restoration
       in
       install_descendant_host_internal
         t
+        ~purpose
         ~source_owner
         ~expected
         ~check_ancestry
@@ -62185,8 +62210,8 @@ module Descendant_host = struct
   end
 end
 
-let install_descendant_host
-      ?policy_restoration
+let install_descendant_host_for
+      purpose
       ?causal_driver
       t
       ~source_owner
@@ -62197,15 +62222,30 @@ let install_descendant_host
   (* Only finite local ownership transfer is protected. The Factory retains the
      returned exact binding before any cancellation/build/Store await. *)
   Eio.Cancel.protect (fun () ->
-    let purpose =
-      match policy_restoration with
-      | None -> Descendant_host_installation.Ordinary
-      | Some restoration -> Restored restoration
-    in
     recurrence_call
       t
       (Install_descendant_host
          (purpose, source_owner, expected, check_ancestry, host, causal_driver)))
+;;
+
+let install_descendant_host ?policy_restoration =
+  let purpose =
+    match policy_restoration with
+    | None -> Descendant_host_installation.Ordinary
+    | Some restoration -> Restored restoration
+  in
+  install_descendant_host_for purpose
+;;
+
+let install_ordinary_ready_descendant_host ?causal_driver t ~source_owner ~expected ~host =
+  install_descendant_host_for
+    Ordinary_ready_reload
+    ?causal_driver
+    t
+    ~source_owner
+    ~expected
+    ~check_ancestry:None
+    ~host
 ;;
 
 (* Closed refresh protocol: only capture/consume enter the Actor; private Store

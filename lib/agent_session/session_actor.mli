@@ -6597,3 +6597,16 @@ val install_descendant_host
          option
   -> host:Descendant_host.t
   -> (Descendant_host.Binding.t, Agent_protocol.Error.t) result
+
+(** Finite Factory install for a cold ordinary authored root reload. A Ready,
+    stopped selection compares the exact construction inputs. Schedules remain
+    live on the Actor, and their updates can advance the commit stamps while the
+    Factory builds. Both paths require current runtime and ordinary execution
+    admission in addition to the same Factory ownership and lifecycle checks. *)
+val install_ordinary_ready_descendant_host
+  :  ?causal_driver:Descendant_host.Causal_driver.t
+  -> t
+  -> source_owner:Runtime_source_owner.t
+  -> expected:Session_state.t
+  -> host:Descendant_host.t
+  -> (Descendant_host.Binding.t, Agent_protocol.Error.t) result

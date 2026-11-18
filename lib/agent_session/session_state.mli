@@ -217,6 +217,11 @@ type 'spec fields =
 
 type t = Spec.t fields [@@deriving sexp]
 
+(** Exact construction inputs for a cold ordinary Ready reload. The Actor owns
+    its live schedule table and commit stamps. Every other field, including the
+    owner lease generation and the selected checkpoints, remains exact. *)
+val same_ordinary_ready_reload_basis : t -> expected:t -> bool
+
 val current_schema_version : int
 
 (** Upgrade supported legacy state before validation/replay. Schema 2 has no

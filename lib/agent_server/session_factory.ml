@@ -8754,6 +8754,7 @@ let prepare_runtime_at_paths
       ~f:Agent_session.Session_actor.Descendant_host.Binding.close
   in
   let install_descendant_binding sw check_ancestry =
+    let module Actor = Agent_session.Session_actor in
     let%bind actor =
       Result.of_option
         !actor_ref
@@ -8761,14 +8762,39 @@ let prepare_runtime_at_paths
     in
     let host, causal_driver = descendant_host t ~handle ~actor_ref ~check_ancestry in
     let%map binding =
-      Agent_session.Session_actor.install_descendant_host
-        ?policy_restoration
-        ~causal_driver
-        actor
-        ~source_owner:t.runtime_source_owner
-        ~expected:state
-        ~check_ancestry
-        ~host
+      match
+        ( source
+        , state
+        , check_ancestry
+        , policy_restoration
+        , !initialization_scope
+        , run_preparation )
+      with
+      | ( Authored _
+        , { runtime_initialization = Ready
+          ; lifecycle = { desired = Stopped; observed = Stopped }
+          ; _
+          }
+        , None
+        , None
+        , None
+        , Constructor_owner.Ordinary preparation )
+        when phys_equal actor source_target.actor && Option.is_none !preparation ->
+        Actor.install_ordinary_ready_descendant_host
+          ~causal_driver
+          actor
+          ~source_owner:t.runtime_source_owner
+          ~expected:state
+          ~host
+      | _ ->
+        Actor.install_descendant_host
+          ?policy_restoration
+          ~causal_driver
+          actor
+          ~source_owner:t.runtime_source_owner
+          ~expected:state
+          ~check_ancestry
+          ~host
     in
     (* Install transfers exact ownership before any cancellable await. Never
        read a later Actor slot from cleanup or retire a replacement source. *)

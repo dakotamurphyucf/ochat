@@ -263,3 +263,148 @@ let%expect_test
   [%expect
     {| post-install resume ACK is once per runtime; foreground halt precedes provider; no restored original |}]
 ;;
+
+let%expect_test
+    "cold public Start preserves and delivers an ordinary timer claimed during \
+     construction"
+  =
+  let prompt_text =
+    {|<developer>Schedule one ordinary legacy wake.</developer>
+<script id="owner" language="chatml" kind="moderator">
+type event = [ `Session_start | `Session_resume | `Wake ]
+let initial_state = 0
+let on_event : context -> int -> event -> int task = fun ctx state event ->
+  match event with
+  | `Session_start ->
+    Task.bind(Schedule.after_ms(0, `Wake), fun ignored -> Task.pure(state + 1))
+  | `Session_resume -> Task.pure(state)
+  | `Wake -> Task.pure(state + 10)
+</script>|}
+  in
+  let module Polling = Ordinary_warm_resource_tests.Polling in
+  let polling = Polling.create () in
+  let before_ports = ref ignore in
+  let base =
+    inference_policy ~default_model:"fixture-model" ~post_stream:(fun ~sw:_ ~inputs:_ ->
+      failwith "legacy timer entered a provider")
+  in
+  let policy =
+    { base with
+      runtime_inference_ports =
+        (fun actor ->
+          !before_ports actor;
+          base.runtime_inference_ports actor)
+    }
+  in
+  Creation_tests.with_daemon
+    ~prompt_text
+    ~wrap_env:(Polling.wrap polling)
+    ~policy
+    (fun env _sw _root daemon ->
+       protect_cleanup
+         ~finally:(fun () -> polling.resume ())
+         (fun () ->
+            Eio.Time.with_timeout_exn env#clock 30. (fun () ->
+              Polling.park polling daemon;
+              let client = connection daemon principal in
+              protect_cleanup
+                ~finally:(fun () -> Agent_client.Connection.close client)
+                (fun () ->
+                   initialize client;
+                   let session, writer = create_session client in
+                   let entry =
+                     Registry.find (Daemon.registry daemon) session.id |> Option.value_exn
+                   in
+                   let ready = state entry in
+                   assert (not (Owner.is_loaded entry.runtime));
+                   (match ready.runtime_initialization, ready.lifecycle.observed with
+                    | Ready, Stopped -> ()
+                    | _ -> failwith "public Create did not retain a cold Ready root");
+                   let scheduled =
+                     match Actor.due_schedules entry.actor |> protocol_ok with
+                     | Stopped, [ scheduled ] -> scheduled
+                     | _ -> failwith "creation did not persist one due timer"
+                   in
+                   assert (Option.is_none scheduled.ownership);
+                   let claim () =
+                     Actor.claim_schedule
+                       entry.actor
+                       ~schedule_id:scheduled.id
+                       ~generation:scheduled.generation
+                     |> protocol_ok
+                   in
+                   let claimed = ref None in
+                   (* The normal inference-port supplier is called after selection of
+                   the cold construction State and before source installation. *)
+                   (before_ports
+                    := fun actor ->
+                         assert (phys_equal actor entry.actor);
+                         before_ports := ignore;
+                         let expected = state entry in
+                         claimed := Some (Option.value_exn (claim ()));
+                         let current = state entry in
+                         let same_basis current =
+                           A.Session_state.same_ordinary_ready_reload_basis
+                             current
+                             ~expected
+                         in
+                         assert (same_basis current);
+                         assert (
+                           not
+                             (same_basis
+                                { current with
+                                  stop_epoch = Int64.succ current.stop_epoch
+                                }));
+                         let counters =
+                           { current.counters with
+                             owner_lease_generation =
+                               Int64.succ current.counters.owner_lease_generation
+                           }
+                         in
+                         assert (not (same_basis { current with counters })));
+                   let started =
+                     match
+                       Agent_client.Connection.request_without_history
+                         client
+                         (Session_start
+                            { session_id = session.id
+                            ; attachment_id = writer.id
+                            ; queue_if_limited = false
+                            ; idempotency_key =
+                                P.Idempotency_key.of_string
+                                  "cold-start-with-ordinary-timer"
+                                |> protocol_ok
+                            })
+                       |> protocol_ok
+                     with
+                     | Session_start result -> result.session
+                     | _ -> failwith "public Session_start returned a different result"
+                   in
+                   let claimed = Option.value_exn !claimed in
+                   let drain () =
+                     Factory.drain_idle_moderator (Daemon.factory daemon) entry
+                     |> protocol_ok
+                   in
+                   (* Join the cold binding's pending resume before queuing Wake. *)
+                   assert (drain ());
+                   Owner.deliver_schedule entry.runtime claimed |> protocol_ok;
+                   assert (drain ());
+                   assert (Option.is_none (claim ()));
+                   assert (not (drain ()));
+                   let delivered = state entry in
+                   let timer =
+                     match delivered.schedules with
+                     | [ ({ id; status = Delivered; _ } as timer) ] ->
+                       assert (P.Id.Schedule.equal id scheduled.id);
+                       timer
+                     | schedules -> raise_s [%sexp (schedules : P.Schedule.t list)]
+                   in
+                   let snapshot = checkpoint delivered in
+                   assert (List.is_empty snapshot.queued_internal_events);
+                   print_s
+                     [%sexp
+                       (started.desired_state : P.Session.desired_state)
+                     , (timer.delivery_count : int)
+                     , (snapshot.current_state : Session.Snapshot.t)]))));
+  [%expect {| (Running 1 (Int 11)) |}]
+;;

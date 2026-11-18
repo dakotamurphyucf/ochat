@@ -62,6 +62,11 @@ immediately, skip if expired, or fail. They are not a cron-expression service.
 Job and schedule methods require message-send scope, and mutations require a
 writable attachment. There is no arbitrary external `job.create` wire method.
 
+A legacy moderator can schedule a one-shot wake during session creation. If that
+timer comes due while a client starts the stopped session, the start preserves
+the timer and its delivery status. Use `schedule.get` with the original schedule
+ID to check the outcome.
+
 Global/principal/prompt/workspace/session/kind/nested-depth capacity bounds work.
 Jobs are claimed before execution, record terminal state, and release capacity on
 terminal/failed-start paths. Reviewers also use durable, non-redeliverable jobs.

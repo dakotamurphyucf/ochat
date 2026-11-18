@@ -13,7 +13,7 @@ module Identity = struct
     ; organization : Agent_protocol.Session_organization.Values.t
           [@sexp.default Agent_protocol.Session_organization.Values.empty]
     }
-  [@@deriving sexp]
+  [@@deriving sexp, fields ~iterators:map_poly]
 end
 
 module Spec = struct
@@ -129,7 +129,7 @@ module Counters = struct
     ; transaction_sequence : int64
     ; owner_lease_generation : int64
     }
-  [@@deriving sexp]
+  [@@deriving equal, sexp]
 end
 
 type 'spec fields =
@@ -175,9 +175,44 @@ type 'spec fields =
   ; failure : Agent_protocol.Error.t option
   ; counters : Counters.t
   }
-[@@deriving sexp]
+[@@deriving sexp, fields ~iterators:map_poly]
 
 type t = Spec.t fields [@@deriving sexp]
+
+let same_ordinary_ready_reload_basis (t : t) ~(expected : t) =
+  let identity = { t.identity with updated_at = expected.identity.updated_at } in
+  let counters =
+    { t.counters with
+      revision = expected.counters.revision
+    ; event_sequence = expected.counters.event_sequence
+    ; transaction_sequence = expected.counters.transaction_sequence
+    }
+  in
+  let current =
+    { t with
+      identity = expected.identity
+    ; schedules = expected.schedules
+    ; counters = expected.counters
+    }
+  in
+  (* Preserve exact construction inputs, including any new fields. The scheduler
+     owns its live table, and commits advance the stamps independently of it. *)
+  List.for_all
+    (Identity.Fields.map_poly
+       { f =
+           (fun field ->
+             phys_equal (Field.get field identity) (Field.get field expected.identity))
+       })
+    ~f:Fn.id
+  && Counters.equal counters expected.counters
+  && List.for_all
+       (Fields_of_fields.map_poly
+          { f =
+              (fun field ->
+                phys_equal (Field.get field current) (Field.get field expected))
+          })
+       ~f:Fn.id
+;;
 
 let execution_migration_required (t : t) =
   match t.lifecycle.observed with
