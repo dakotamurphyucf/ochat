@@ -251,10 +251,89 @@ module Probe = struct
   ;;
 end
 
+module Scheduler_parking = struct
+  type t =
+    { pause : (unit -> unit) ref
+    ; resume : (unit -> unit) ref
+    ; wall_now : (unit -> float) ref
+    ; mono_now : (unit -> Mtime.t) ref
+    }
+
+  let create () =
+    { pause = ref ignore
+    ; resume = ref ignore
+    ; wall_now = ref (fun () -> failwith "actual scheduler wall clock absent")
+    ; mono_now = ref (fun () -> failwith "actual scheduler Mono clock absent")
+    }
+  ;;
+
+  let wrap t env =
+    let env =
+      Goal_background_runtime_tests.with_controlled_polling
+        env
+        ~pause:t.pause
+        ~resume:t.resume
+        ~clock_now:t.wall_now
+    in
+    let mono_clock, pause_mono, resume_mono, _ =
+      controlled_monotonic_clock env#mono_clock
+    in
+    let pause_wall = !(t.pause) in
+    let resume_wall = !(t.resume) in
+    (t.pause
+     := fun () ->
+          pause_wall ();
+          pause_mono ());
+    (t.resume
+     := fun () ->
+          resume_mono ();
+          resume_wall ());
+    (t.mono_now := fun () -> Eio.Time.Mono.now mono_clock);
+    (object
+       method clock = env#clock
+       method mono_clock = mono_clock
+       method domain_mgr = env#domain_mgr
+       method stdin = env#stdin
+       method stdout = env#stdout
+       method stderr = env#stderr
+       method net = env#net
+       method process_mgr = env#process_mgr
+       method fs = env#fs
+       method cwd = env#cwd
+       method secure_random = env#secure_random
+       method debug = env#debug
+       method backend_id = env#backend_id
+     end
+     : Eio_unix.Stdenv.base)
+  ;;
+
+  let resume t = !(t.resume) ()
+
+  let park t daemon ~check =
+    !(t.pause) ();
+    let rec future_waits () =
+      check ();
+      match
+        ( Daemon.For_testing.job_scheduler_wait_deadline daemon
+        , Daemon.For_testing.schedule_scheduler_wait_deadline daemon )
+      with
+      | Some wall, Some mono
+        when Float.(wall > !(t.wall_now) ()) && Mtime.compare mono (!(t.mono_now) ()) > 0
+        -> ()
+      | Some _, Some _ | Some _, None | None, Some _ | None, None ->
+        Eio.Fiber.yield ();
+        future_waits ()
+    in
+    future_waits ();
+    Daemon.For_testing.await_schedule_scheduler_idle daemon
+  ;;
+end
+
 module Waiting_fixture = struct
   type t =
     { env : Eio_unix.Stdenv.base
     ; real_env : Eio_unix.Stdenv.base
+    ; parking : Scheduler_parking.t
     ; sw : Eio.Switch.t
     ; daemon : Daemon.t
     ; parent : Registry.entry
@@ -311,16 +390,125 @@ module Waiting_fixture = struct
     await ()
   ;;
 
+  let initial_terminal events ~after_sequence ~through_sequence ~operation_id ~generation =
+    match A.Durable_event_log.replay events ~after_sequence ~through_sequence with
+    | Snapshot_required -> failwith "initial subscription Turn left the event window"
+    | Available events ->
+      List.find_map events ~f:(fun (event : P.Event.Durable.t) ->
+        match event.kind with
+        | Operation_completed
+        | Operation_failed
+        | Operation_cancelled
+        | Operation_interrupted ->
+          (match
+             P.Event.Durable.Payload.of_json ~kind:event.kind event.payload |> protocol_ok
+           with
+           | Operation_completed operation
+           | Operation_failed operation
+           | Operation_cancelled operation
+           | Operation_interrupted operation ->
+             Option.some_if
+               (P.Id.Operation.equal operation.id operation_id
+                && Int.equal operation.generation generation)
+               operation
+           | _ -> failwith "wrong initial Turn terminal payload")
+        | _ -> None)
+  ;;
+
+  let await_initial_turn env child admission (work : P.Run_work.t) ~after_sequence ~check =
+    let operation_id =
+      match work.key with
+      | Operation id -> id
+      | Retained _ -> failwith "initial subscription work is not a Turn"
+    in
+    let events = child.Registry.durable_events in
+    let last = ref None in
+    let rec await after_sequence =
+      let changed = A.Durable_event_log.changed events in
+      check ();
+      let current = state child in
+      let run = Resume.run current admission in
+      let callbacks =
+        List.filter current.moderator_executions ~f:(fun receipt ->
+          Int.equal receipt.P.Moderator_execution.context.generation work.generation
+          && Option.exists
+               receipt.context.operation_id
+               ~f:(P.Id.Operation.equal operation_id))
+      in
+      last := Some (current, run, callbacks);
+      let through_sequence = current.counters.event_sequence in
+      match
+        initial_terminal
+          events
+          ~after_sequence
+          ~through_sequence
+          ~operation_id
+          ~generation:work.generation
+      with
+      | Some { state = Completed; _ } ->
+        (* The Actor installs this terminal event, the owned-work outcome and
+           the cleared operation in one transition. Its callbacks join before it. *)
+        assert (Option.is_none current.active_operation);
+        assert (
+          List.exists run.terminal_work ~f:(fun terminal ->
+            P.Run_work.equal terminal.P.Run_work.Terminal.work work
+            && P.Run_work.Terminal.equal_outcome terminal.outcome Succeeded));
+        List.iter callbacks ~f:(fun receipt ->
+          match receipt.P.Moderator_execution.status with
+          | Completed _ -> ()
+          | Running | Failed _ | Interrupted _ ->
+            raise_s
+              [%sexp
+                "initial subscription callback did not complete"
+              , (receipt : P.Moderator_execution.t)]);
+        current
+      | Some operation ->
+        raise_s
+          [%sexp
+            "actual subscription initial Turn ended adversely"
+          , (operation : P.Operation.t)]
+      | None ->
+        Eio.Promise.await changed;
+        await through_sequence
+    in
+    match
+      Birth.within env "actual pending mixed notices after Run.wait" (fun () ->
+        await after_sequence)
+    with
+    | current -> current
+    | exception exn ->
+      let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+      Option.iter !last ~f:(fun (current, run, callbacks) ->
+        let callbacks =
+          List.map callbacks ~f:(fun receipt ->
+            receipt.P.Moderator_execution.context.phase, receipt.status)
+        in
+        let deliveries =
+          List.map current.A.Session_state.deliveries ~f:(fun delivery ->
+            delivery.P.Delivery.status)
+        in
+        print_s
+          [%sexp
+            { work : P.Run_work.t
+            ; active = (current.active_operation : P.Operation.t option)
+            ; failure = (current.failure : P.Error.t option)
+            ; run = (run.P.Run.lifecycle : P.Run.Lifecycle.t)
+            ; callbacks : (P.Moderator_execution.phase * P.Moderator_execution.status)
+                            list
+            ; deliveries : P.Delivery.status list
+            ; inference =
+                (L.summary current.inference_ledger : P.Inference_query.Summary.t)
+            }]);
+      Exn.raise_with_original_backtrace exn backtrace
+  ;;
+
   let with_waiting ~phase ~wrap_env ~at_wake_provider f =
     let initial = Gate.create () in
     let resumed = Gate.create () in
-    let cache = Gate.create () in
-    let cache_entered, cache_enter = Eio.Promise.create () in
+    let parking = Scheduler_parking.create () in
     let entered, enter = Eio.Promise.create () in
     let context = ref None in
     let real_env = ref None in
-    let cache_directory = ref None in
-    let cache_hits = ref 0 in
     let child_calls = ref 0 in
     let selected = ref None in
     let failure = ref None in
@@ -328,17 +516,6 @@ module Waiting_fixture = struct
     let policy =
       let defaults = Chat_response.Runtime_semantics.default_policy in
       { defaults with budget = { defaults.budget with max_followup_turns = 2 } }
-    in
-    let await_signal promise =
-      let rec await () =
-        raise_failure ();
-        match Eio.Promise.peek promise with
-        | Some () -> ()
-        | None ->
-          Eio.Fiber.yield ();
-          await ()
-      in
-      await ()
     in
     try
       Birth.with_child
@@ -369,26 +546,13 @@ module Waiting_fixture = struct
                completed_response "570 unexpected replay"))
         ~wrap_env:(fun env ->
           real_env := Some env;
-          let env = wrap_env env in
-          Crash_fault_io.wrap
-            env
-            ~boundary:Before_rename
-            ~matches:(fun path ->
-              Option.exists !cache_directory ~f:(fun directory ->
-                String.equal directory (Filename.dirname path)
-                && String.is_prefix (Filename.basename path) ~prefix:".cache.bin."
-                && String.is_suffix path ~suffix:".tmp"))
-            ~reached:(fun _ ->
-              cache_directory := None;
-              Int.incr cache_hits;
-              Eio.Promise.resolve cache_enter ();
-              Eio.Promise.await cache.waiting))
+          Scheduler_parking.wrap parking (wrap_env env))
         (fun env sw daemon parent child scope reference counters ->
            protect_cleanup
              ~finally:(fun () ->
                Gate.release initial;
                Gate.release resumed;
-               Gate.release cache)
+               Scheduler_parking.resume parking)
              (fun () ->
                 selected := Some child;
                 phase := "actual authored child bootstrap joined";
@@ -399,22 +563,35 @@ module Waiting_fixture = struct
                   |> protocol_ok
                 in
                 let session, before = Goal.create_goal daemon child in
-                cache_directory
-                := Some
-                     (Agent_store.Session_store.Handle.responses_directory
-                        (Option.value_exn child.store_handle));
+                let real_env = Option.value_exn !real_env in
+                phase := "park schedulers before the actual subscription Turn";
+                Birth.within real_env !phase (fun () ->
+                  Scheduler_parking.park parking daemon ~check:raise_failure);
                 phase := "local Goal start";
                 let admission =
                   Resume.start_episode daemon child original session before
                 in
                 let run = Resume.run (state child) admission in
+                let operation =
+                  Resume.one_actual
+                    "initial subscription Turn"
+                    (Resume.operation_work run)
+                in
                 write_context env child run ();
                 Gate.release initial;
                 phase := "actual pending mixed notices after Run.wait";
-                Birth.within env !phase (fun () -> await_signal cache_entered);
-                [%test_eq: int] 1 !cache_hits;
+                (* Only this Turn can publish the two notices. Join its retained
+                   terminal while scheduler consumers are parked. *)
+                let passive =
+                  await_initial_turn
+                    real_env
+                    child
+                    admission
+                    operation
+                    ~after_sequence:before.counters.event_sequence
+                    ~check:raise_failure
+                in
                 [%test_eq: int] 2 !child_calls;
-                let passive = Resume.checkpoint child in
                 let wake = Subscription.waiting passive admission in
                 (match wake.occurrence with
                  | Subscription_delivery { subscription_id; epoch; delivery_id; _ } ->
@@ -443,7 +620,7 @@ module Waiting_fixture = struct
                 |> protocol_ok
                 |> ignore;
                 let held = Resume.checkpoint child in
-                Gate.release cache;
+                Scheduler_parking.resume parking;
                 phase := "ordinary notice remains outside local Run";
                 let ordinary =
                   Resume.await_turns
@@ -486,7 +663,8 @@ module Waiting_fixture = struct
                 [%test_eq: int] 3 !child_calls;
                 let fixture =
                   { env
-                  ; real_env = Option.value_exn !real_env
+                  ; real_env
+                  ; parking
                   ; sw
                   ; daemon
                   ; parent
@@ -708,84 +886,6 @@ let%expect_test "cold associated Goal subscription runs at local and inherited c
     {| genuine cold subscription owns SAME Run and native/inherited ACKs at both caps; ordinary notice stays separate; duplicate/quiet stays unchanged |}]
 ;;
 
-module Scheduler_parking = struct
-  type t =
-    { pause : (unit -> unit) ref
-    ; resume : (unit -> unit) ref
-    ; wall_now : (unit -> float) ref
-    ; mono_now : (unit -> Mtime.t) ref
-    }
-
-  let create () =
-    { pause = ref ignore
-    ; resume = ref ignore
-    ; wall_now = ref (fun () -> failwith "actual scheduler wall clock absent")
-    ; mono_now = ref (fun () -> failwith "actual scheduler Mono clock absent")
-    }
-  ;;
-
-  let wrap t env =
-    let env =
-      Goal_background_runtime_tests.with_controlled_polling
-        env
-        ~pause:t.pause
-        ~resume:t.resume
-        ~clock_now:t.wall_now
-    in
-    let mono_clock, pause_mono, resume_mono, _ =
-      controlled_monotonic_clock env#mono_clock
-    in
-    let pause_wall = !(t.pause) in
-    let resume_wall = !(t.resume) in
-    (t.pause
-     := fun () ->
-          pause_wall ();
-          pause_mono ());
-    (t.resume
-     := fun () ->
-          resume_mono ();
-          resume_wall ());
-    (t.mono_now := fun () -> Eio.Time.Mono.now mono_clock);
-    (object
-       method clock = env#clock
-       method mono_clock = mono_clock
-       method domain_mgr = env#domain_mgr
-       method stdin = env#stdin
-       method stdout = env#stdout
-       method stderr = env#stderr
-       method net = env#net
-       method process_mgr = env#process_mgr
-       method fs = env#fs
-       method cwd = env#cwd
-       method secure_random = env#secure_random
-       method debug = env#debug
-       method backend_id = env#backend_id
-     end
-     : Eio_unix.Stdenv.base)
-  ;;
-
-  let resume t = !(t.resume) ()
-
-  let park t (fixture : Waiting_fixture.t) =
-    !(t.pause) ();
-    let rec future_waits () =
-      Waiting_fixture.raise_failure fixture;
-      match
-        ( Daemon.For_testing.job_scheduler_wait_deadline fixture.daemon
-        , Daemon.For_testing.schedule_scheduler_wait_deadline fixture.daemon )
-      with
-      | Some wall, Some mono
-        when Float.(wall > !(t.wall_now) ()) && Mtime.compare mono (!(t.mono_now) ()) > 0
-        -> ()
-      | Some _, Some _ | Some _, None | None, Some _ | None, None ->
-        Eio.Fiber.yield ();
-        future_waits ()
-    in
-    future_waits ();
-    Daemon.For_testing.await_schedule_scheduler_idle fixture.daemon
-  ;;
-end
-
 let boundary_within (fixture : Waiting_fixture.t) = Birth.within fixture.real_env
 
 let assert_no_job_producer (current : A.Session_state.t) =
@@ -837,7 +937,6 @@ let%expect_test
   let module Barrier = Descendant_history_adapter_tests.Root_barrier in
   let reserve = Barrier.create () in
   let imported = Barrier.create () in
-  let parking = Scheduler_parking.create () in
   let cache_directory = ref None in
   let cache_closes = ref 0 in
   let phase = ref "birth for actual subscription boundaries" in
@@ -846,7 +945,6 @@ let%expect_test
     ~at_wake_provider:(fun _ ->
       failwith "cancelled or Held subscription reached a fourth provider")
     ~wrap_env:(fun env ->
-      let env = Scheduler_parking.wrap parking env in
       let env = Barrier.wrap reserve env |> Barrier.wrap imported in
       Crash_fault_io.wrap
         env
@@ -859,6 +957,7 @@ let%expect_test
         ~reached:(fun _ -> Int.incr cache_closes))
     (fun fixture ->
        let { Waiting_fixture.daemon; child; parent; scope; reference; sw; _ } = fixture in
+       let parking = fixture.parking in
        let within phase f = boundary_within fixture phase f in
        let first = ref None in
        let second = ref None in
@@ -916,7 +1015,7 @@ let%expect_test
            (fun () ->
               phase := "park actual subscription schedulers after Held ordinary Turn";
               within "actual future scheduler sleeps and dispatch join" (fun () ->
-                Scheduler_parking.park parking fixture);
+                Scheduler_parking.park parking daemon ~check:raise_failure);
               assert_no_job_producer fixture.ordinary;
               assert_no_job_producer (state child);
               (* Parking stops background progress after the terminal Turn. Settle
