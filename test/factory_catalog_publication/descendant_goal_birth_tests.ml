@@ -142,9 +142,23 @@ let with_native_goal_child
         create_response ~tools:(List.map inherited_tools ~f:fst) child_sources)
       else post_creation_stream inputs)
     (fun env sw _root daemon _policy parent _runtime _revision counters ->
+       let last = ref None in
        let within phase f =
          try Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. f with
-         | Eio.Time.Timeout -> failwith ("native descendant test timed out: " ^ phase)
+         | Eio.Time.Timeout ->
+           let observed =
+             Option.map !last ~f:(fun (revision, operation, invocation) ->
+               [%sexp
+                 { revision : int64
+                 ; operation : P.Operation.t option
+                 ; invocation : P.Invocation.status option
+                 }])
+           in
+           let providers = !(counters.providers) in
+           raise_s
+             [%sexp
+               "native descendant test timed out"
+             , { phase : string; providers : int; observed : Sexp.t option }]
        in
        let session, before = Goal.create_goal daemon parent in
        let before =
@@ -200,12 +214,23 @@ let with_native_goal_child
          |> protocol_ok
          |> Goal.activated
        in
+       let events = parent.Registry.durable_events in
        let rec await_created ~require_idle () =
+         (* Subscribe before reading State to cover a commit between the read
+            and the wait. The fresh tool output commits History_appended with
+            the invocation receipt, and clearing the Turn emits a terminal event. *)
+         let changed = A.Durable_event_log.changed events in
          let current = state parent in
          let invocation =
            List.find current.invocations ~f:(fun invocation ->
              String.equal invocation.P.Invocation.context.tool_name "agent_create")
          in
+         last
+         := Some
+              ( current.counters.revision
+              , current.active_operation
+              , Option.map invocation ~f:(fun invocation ->
+                  invocation.P.Invocation.status) );
          match invocation with
          | Some { status = Published (Complete value); _ }
            when (not require_idle) || Option.is_none current.active_operation ->
@@ -214,7 +239,7 @@ let with_native_goal_child
            raise_s
              [%sexp "native child creation failed", (failure : P.Invocation.tool_error)]
          | Some _ | None ->
-           Eio.Fiber.yield ();
+           Eio.Promise.await changed;
            await_created ~require_idle ()
        in
        (* Publishing the child and completing the parent's next model response
