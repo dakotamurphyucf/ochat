@@ -42,6 +42,21 @@ module Artifact : sig
     -> created_at:Agent_protocol.Timestamp.t
     -> (t, Store_error.t) result
 
+  (** Pure exact-publication restoration, without reauthoring known or unknown
+      manifest metadata. Optional private pools must match manifest presence and
+      exact payload inventories. The root, authored sources and both pools share
+      the existing 256-item/8 MiB inventory, checked before hashing root/source
+      bytes or restoring bundles. [publication], [sources] and [Payload.t] values
+      must already come from their validating constructors. This grants no file,
+      compiler, native or execution authority and performs no I/O. *)
+  val restore
+    :  publication:Prompt_manifest_document.Publication.t
+    -> root_chatmd:string
+    -> sources:Source.t list
+    -> program_payloads:Prompt_program_bundle.Payload.t list option
+    -> content_payloads:Prompt_program_bundle.Payload.t list option
+    -> (t, Store_error.t) result
+
   (** Authors one exact named manifest publication. Its complete inventory is
       limited to 262144 bytes, including metadata and envelope, before IO.
       Authored and private program and content payloads share the 256-file/8 MiB inventory
@@ -94,9 +109,15 @@ val discard_interrupted_installs
     flushes files and staging directories, then renames it to the revision ID and
     flushes the artifact parent before acknowledgment. Uncertain final publication
     never deletes an installed destination. Directories remain owner-managed
-    for pruning. File permissions are not a sandbox against the owning account. *)
+    for pruning. File permissions are not a sandbox against the owning account.
+    Optional [before_publish] runs after staging is flushed, immediately before
+    the final rename in the protected ownership transfer. It must be synchronous
+    and non-yielding. Its exceptions propagate unchanged after owned-staging
+    cleanup; it grants no authority after a subsequent yield. The default adds
+    no authorization policy. *)
 val install
-  :  t
+  :  ?before_publish:(unit -> unit)
+  -> t
   -> transaction_id:Agent_protocol.Id.Transaction.t
   -> Artifact.t
   -> (unit, Store_error.t) result
@@ -113,7 +134,9 @@ val install
     conflicting content fails closed. The caller owns normal artifact-root
     publication/pruning lifetime; this operation creates no new authority.
     [checkpoint] is called around the bounded admission and verification
-    phases, and its exception/cancellation propagates unchanged. Raw [install]
+    phases and immediately before a new artifact's final rename. The final
+    publication checkpoint must be synchronous and non-yielding; its original
+    exception/cancellation propagates unchanged. Raw [install]
     retains its exclusive, reject-existing contract. *)
 val install_or_reuse
   :  t

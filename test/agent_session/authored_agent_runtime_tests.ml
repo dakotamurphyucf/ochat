@@ -210,6 +210,8 @@ let on_event ctx state event = match event with
                   { name = "researcher"
                   ; source_sha256 = Source.fingerprint prepared.source
                   }
+            ; goal_origin = Some Agent_store.Delegation_goal_origin.unrelated
+            ; captured_recurrence = None
             ; authority_sha256 = Authority.fingerprint parent |> protocol_ok
             ; capability_pins =
                 Chat_response.Background_request.capability_pins private_caps
@@ -315,6 +317,7 @@ let on_event ctx state event = match event with
             ; standalone_execution_limits =
                 Agent_session.Standalone_tool_dispatch.declared_execution_limits
             ; one_off_policy = Chat_response.One_off_request.default_policy
+            ; initial_agent_guidance = None
             ; native_service_revision = None
             ; authoring_validation_host = None
             ; claim_lifecycle =
@@ -390,12 +393,13 @@ let on_event ctx state event = match event with
                 ()
             in
             B.build_authored_child
+              ~construction_checkpoint:None
               ~services
               ~revision
               ~prepared
               ~code:None
               ~authority
-              ~history:[]
+              ~existing_history:(Some [])
               ~sw
               ~env
               ~paths
@@ -411,6 +415,7 @@ let on_event ctx state event = match event with
               ~permission_profile:profile
               ~inference_context:inference.context
               ~inference_identity:inference.identity
+              ~bind_inference_identity:(fun _ -> inference.identity)
               ~on_inference_attempt:ignore
               ~on_inference_observation:ignore
               ~on_inference_completion:ignore
@@ -420,12 +425,16 @@ let on_event ctx state event = match event with
                 ; cancel = (fun ~id:_ -> failwith "unexpected timer")
                 }
               ~job_services:
-                { spawn_model =
-                    (fun ~recipe:_ ~payload:_ -> failwith "unexpected model recipe")
-                ; call_model =
-                    (fun ~recipe:_ ~payload:_ ~execute:_ ->
-                      failwith "unexpected model recipe")
-                }
+                (let initialization : Agent_session.Runtime_model_services.t =
+                   { spawn_model =
+                       (fun ~recipe:_ ~payload:_ -> failwith "unexpected model recipe")
+                   ; call_model =
+                       (fun ~recipe:_ ~payload:_ ~execute:_ ->
+                         failwith "unexpected model recipe")
+                   }
+                 in
+                 Agent_session.Runtime_model_services.
+                   { initialization; for_execution = (fun _ -> initialization) })
           in
           let runtime = build () |> protocol_ok in
           assert (Int.equal 0 !requests && Int.equal 0 !admitted);
@@ -469,6 +478,9 @@ let on_event ctx state event = match event with
                 ; reserved_history_through = Int64.of_int runtime.reserved_history_through
                 }
             }
+          in
+          let initial =
+            initialize_new_unrelated_child initial ~server_id:(Store.server_id store)
           in
           let handle =
             Store.create_session
@@ -514,6 +526,7 @@ let on_event ctx state event = match event with
                 ; schedule_limits = Agent_session.Staged_schedules.default_limits
                 ; notification_limits = Agent_session.Staged_notifications.default_limits
                 ; ingress_limits = Agent_session.Staged_ingress.default_limits
+                ; goal_descendant_profile
                 ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
                 ; state_committed = (fun _ _ -> ())
                 }
@@ -610,11 +623,13 @@ let on_event ctx state event = match event with
                   String.is_substring (rendered second) ~substring:"specialist-count-12");
                 let saved = runtime.start_moderator () |> protocol_ok in
                 let fresh = build () |> protocol_ok in
-                Exn.protect ~finally:fresh.close ~f:(fun () ->
-                  [%test_eq: int] 0 (count fresh));
+                Exn.protect
+                  ~finally:(fun () -> B.close fresh)
+                  ~f:(fun () -> [%test_eq: int] 0 (count fresh));
                 let restored = build ~snapshot:saved () |> protocol_ok in
-                Exn.protect ~finally:restored.close ~f:(fun () ->
-                  [%test_eq: int] 12 (count restored));
+                Exn.protect
+                  ~finally:(fun () -> B.close restored)
+                  ~f:(fun () -> [%test_eq: int] 12 (count restored));
                 [%test_eq: int] 4 !requests;
                 save "data/value.txt" "must-not-be-disclosed-after-revocation";
                 revoke_during_read := true;

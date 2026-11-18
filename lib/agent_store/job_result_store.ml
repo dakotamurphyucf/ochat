@@ -19,6 +19,14 @@ let protocol result =
   Result.map_error result ~f:(fun error -> Store_error.Corrupt error.P.Error.message)
 ;;
 
+(* This fixed nonnegative duration can fail only at the upper timestamp bound.
+   Expiry permits an ownership check; it never releases a private preparation. *)
+let temporary_expiry now =
+  match P.Timestamp.add_ms now 86_400_000 with
+  | Ok expires_at -> expires_at
+  | Error _ -> P.Timestamp.of_time_ns (Time_ns.of_int63_ns_since_epoch Int63.max_value)
+;;
+
 let allocate store ~env ~session ~job ~creating_principal ~now ~max_bytes completion =
   let open Result.Let_syntax in
   let%bind () = P.Completion.validate completion |> protocol in
@@ -60,11 +68,7 @@ let allocate store ~env ~session ~job ~creating_principal ~now ~max_bytes comple
       ~blob
     |> protocol
   in
-  let expires_at =
-    Some
-      (P.Timestamp.to_time_ns now
-       |> fun at -> Time_ns.add at (Time_ns.Span.of_day 1.) |> P.Timestamp.of_time_ns)
-  in
+  let expires_at = Some (temporary_expiry now) in
   let metadata : Blob_store.Metadata.t =
     { blob
     ; creating_principal

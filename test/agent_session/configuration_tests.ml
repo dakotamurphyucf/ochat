@@ -497,7 +497,7 @@ let%expect_test
            ~root_binding:(Chat_response.Root_binding.create (Runtime.Session.create ~sw))
            { config with
              inference_context = initial_context
-           ; inference_identity = Inference_fixture.identity fixture
+           ; inference_identity = (fun _ -> Inference_fixture.identity fixture)
            ; tool_tbl
            ; on_inference_attempt =
                (fun attempt -> root_scope := Some (Runtime.Attempt.scope attempt))

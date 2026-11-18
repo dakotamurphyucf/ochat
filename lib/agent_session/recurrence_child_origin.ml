@@ -1,0 +1,287 @@
+open! Core
+module P = Agent_protocol
+module D = Document_schema
+module R = Recurrence_child_reservation
+module Store = Agent_store.Delegation_store
+module Raw = Agent_store.Delegation_captured_origin
+module Source = Agent_store.Captured_source_kind
+
+type t =
+  { record : Store.record
+  ; raw : Raw.t
+  ; reservation : R.t
+  ; definition : Prompt_definition.t
+  }
+
+let root_invocation_for_source ~source_kind (definition : Prompt_definition.t) =
+  match source_kind with
+  | Source.Artifact -> definition.root_invocation
+  | Source.Authored_tool _ -> Ui
+;;
+
+let source_kind t = Raw.source_kind t.raw
+
+let root_invocation t =
+  root_invocation_for_source ~source_kind:(source_kind t) t.definition
+;;
+
+let matches_reference t reference =
+  Store.Reference.equal (Store.reference t.record) reference
+;;
+
+let matches_record t record = matches_reference t (Store.reference record)
+let reservation t = t.reservation
+let definition t = t.definition
+let invalid message = Error (P.Error.invalid_request message)
+
+let document_result result =
+  Result.map_error result ~f:(fun e ->
+    P.Error.invalid_request (Sexp.to_string_hum (D.Error.sexp_of_t e)))
+;;
+
+let spec_digest spec =
+  let open Result.Let_syntax in
+  let json =
+    Session_state_document.project_spec
+      { spec with Session_state.Spec.delegation = None }
+      ~workspace:Workspace_instance.to_jsonaf
+  in
+  let%bind () = D.Json.validate ~limits:Raw.limits json |> document_result in
+  let%map canonical = P.Json_codec.canonical_string json in
+  Digestif.SHA256.(digest_string canonical |> to_hex)
+;;
+
+let create definition ~reservation ~initial_spec =
+  let open Result.Let_syntax in
+  let%bind () = R.validate reservation ~definition in
+  let target = Recurrence_definition.target definition in
+  let%bind source_kind =
+    match Recurrence_target.view target with
+    | Existing_session _ -> invalid "captured origin requires a fresh-child target"
+    | Fresh_child { source_kind; _ } -> Ok source_kind
+  in
+  let%bind definition = Recurrence_target.fresh_definition_json target in
+  let%bind defining = Prompt_definition.of_jsonaf definition in
+  let%bind () =
+    if
+      Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.equal
+        initial_spec.Session_state.Spec.root_invocation
+        (root_invocation_for_source ~source_kind defining)
+    then Ok ()
+    else invalid "captured child root differs from its selected source contract"
+  in
+  let%bind initial_spec_sha256 = spec_digest initial_spec in
+  let create =
+    match source_kind with
+    | Artifact -> Raw.create
+    | Authored_tool authored_tool -> Raw.create_authored ~authored_tool
+  in
+  create ~reservation:(R.to_json reservation) ~definition ~initial_spec_sha256
+  |> document_result
+;;
+
+let of_record (record : Store.record) =
+  let open Result.Let_syntax in
+  let%bind raw =
+    match record.admission.captured_recurrence, record.admission.authored_tool with
+    | Some raw, None -> Ok raw
+    | None, (Some _ | None) | Some _, Some _ ->
+      invalid "delegation does not have the captured recurrence source kind"
+  in
+  let%bind reservation = R.of_json (Raw.reservation raw) in
+  let%bind definition = Prompt_definition.of_jsonaf (Raw.definition raw) in
+  let%bind key = R.delegation_key reservation in
+  if
+    Store.Key.equal record.key key
+    && String.equal record.request_sha256 (R.request_sha256 reservation)
+    && P.Id.Session.equal
+         record.admission.child_session_id
+         (R.child_session_id reservation)
+    && P.Id.Transaction.equal
+         record.admission.transaction_id
+         (R.transaction_id reservation)
+    && P.Id.Prompt_revision.equal
+         record.admission.revision_id
+         (R.artifact_revision_id reservation)
+    && String.equal record.admission.manifest_sha256 (R.manifest_sha256 reservation)
+  then Ok { record; raw; reservation; definition }
+  else invalid "captured origin differs from delegation admission"
+;;
+
+let expected_goal_scope definition ~reservation =
+  let module Origin = Agent_store.Delegation_goal_origin in
+  let module Binding = Recurrence_definition.Goal_binding in
+  let open Result.Let_syntax in
+  let%bind () = R.validate reservation ~definition in
+  match Recurrence_definition.goal_binding definition with
+  | Unbound -> Ok None
+  | Controller_goal capture ->
+    let%bind key = R.delegation_key reservation in
+    let%bind branch =
+      Origin.Anchor.create
+        ~parent_session_id:key.parent_session_id
+        ~parent_generation:key.parent_generation
+        ~principal_id:key.principal_id
+        ~key:key.idempotency_key
+        ~child_session_id:(R.child_session_id reservation)
+        ~transaction_id:(R.transaction_id reservation)
+    in
+    let%map scope =
+      Origin.Scope.create
+        ~owner:(Binding.Capture.owner capture)
+        ~goal_id:(Binding.Capture.goal_id capture)
+        ~source:(Recurrence_definition.source definition)
+        ~creator_episode:(Binding.Capture.creator_episode capture)
+        ~branch
+    in
+    Some scope
+;;
+
+let validate_goal_binding t definition =
+  let module Origin = Agent_store.Delegation_goal_origin in
+  let open Result.Let_syntax in
+  let%bind scope = expected_goal_scope definition ~reservation:t.reservation in
+  match scope, t.record.admission.goal_origin with
+  | None, _ -> Ok ()
+  | Some _, None -> invalid "Goal-bound captured recurrence lacks its frozen lower origin"
+  | Some expected, Some origin ->
+    if List.mem (Origin.scopes origin) expected ~equal:Origin.Scope.equal
+    then Ok ()
+    else
+      invalid "captured recurrence Goal origin differs from its actual frozen definition"
+;;
+
+let validate_definition t definition =
+  let open Result.Let_syntax in
+  let%bind () = R.validate t.reservation ~definition in
+  let%bind () = validate_goal_binding t definition in
+  let target = Recurrence_definition.target definition in
+  let%bind target_definition = Recurrence_target.fresh_definition_json target in
+  match Recurrence_target.view target with
+  | Existing_session _ -> invalid "captured origin requires a fresh-child target"
+  | Fresh_child { source_kind = selected; _ } ->
+    if
+      Source.equal (source_kind t) selected
+      && D.Json.equal (Raw.definition t.raw) target_definition
+    then Ok ()
+    else invalid "captured origin differs from the actual target definition/source"
+;;
+
+let validate_source t (state : Session_state.t) =
+  let expected = Store.reference t.record in
+  let source_matches =
+    match state.spec.protocol.prompt with
+    | Generated id -> P.Id.Prompt_revision.equal id (R.artifact_revision_id t.reservation)
+    | Catalog _ | Local_path _ -> false
+  in
+  let parent_epoch_matches =
+    match t.record.admission.parent_stop_epoch, state.parent_stop_epoch with
+    | Some admitted, Some acknowledged -> Int64.(acknowledged >= admitted)
+    | None, (None | Some _) | Some _, None -> false
+  in
+  let inference_matches =
+    match
+      ( t.record.admission.inference_target
+      , Inference.Selection.view state.spec.inference_target )
+    with
+    | Some expected, Captured actual -> Inference.Request.Target.equal expected actual
+    | None, (Captured _ | Unresolved) | Some _, Unresolved -> false
+  in
+  if
+    source_matches
+    && parent_epoch_matches
+    && inference_matches
+    && P.Id.Session.equal state.identity.session_id expected.child_session_id
+    && P.Id.Prompt_revision.equal state.spec.prompt_revision_id expected.revision_id
+    && Option.exists state.spec.delegation ~f:(Store.Reference.equal expected)
+    && Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.equal
+         state.spec.root_invocation
+         (root_invocation t)
+    && String.equal state.spec.permission_profile t.definition.permission_profile
+    && Option.equal String.equal state.spec.runtime_policy t.definition.runtime_policy
+  then Ok ()
+  else invalid "captured child source differs from immutable origin"
+;;
+
+let validate_initial_state t (state : Session_state.t) =
+  let open Result.Let_syntax in
+  let%bind () = validate_source t state in
+  let%bind digest = spec_digest state.spec in
+  (* This new source kind is created before any Run owner is installed. Empty
+     retained lists cannot erase evidence in the index's other owned fields. *)
+  let no_runs = Option.is_none state.run_state in
+  let stopped_pending =
+    match
+      state.lifecycle.desired, state.lifecycle.observed, state.runtime_initialization
+    with
+    | Stopped, Stopped, Pending { fresh_history = true } -> true
+    | (Stopped | Running), _, (Ready | Pending _) -> false
+  in
+  let summary = Inference_ledger.summary state.inference_ledger in
+  let turns = P.Inference_query.Summary.turns summary in
+  let coverage = P.Inference_query.Summary.coverage summary in
+  let no_inference =
+    Int64.equal (Inference_ledger.revision state.inference_ledger) 0L
+    && Int64.equal (P.Inference_query.Summary.retained_attempts summary) 0L
+    && List.for_all
+         [ turns.pending
+         ; turns.completed
+         ; turns.failed
+         ; turns.cancelled
+         ; turns.interrupted
+         ; coverage.retired_attempts
+         ; coverage.untracked_attempts
+         ; coverage.retired_turns
+         ; coverage.untracked_turns
+         ]
+         ~f:(fun count -> Int64.equal count 0L)
+    && (not coverage.before_tracking_unknown)
+    &&
+    match coverage.tracking_status with
+    | Available -> true
+    | Limited _ -> false
+  in
+  let conversation = state.conversation in
+  let no_history =
+    List.is_empty conversation.canonical_history
+    && List.is_empty conversation.deferred_user_entries
+    && List.is_empty conversation.pending_dispositions
+    && P.Pending_input.Revision.equal
+         conversation.pending_revision
+         P.Pending_input.Revision.zero
+    && Int.equal conversation.initial_prompt_entry_count 0
+    && Int64.equal conversation.next_history_sequence 0L
+    && Int64.equal conversation.reserved_history_through 0L
+    && List.is_empty conversation.tasks
+    && List.is_empty conversation.kv_store
+    && Int.equal conversation.compaction_generation 0
+    && List.is_empty conversation.compaction_archives
+    && Option.is_none conversation.authoring_reference_index
+    && Option.is_none conversation.authoring_publication
+  in
+  if
+    String.equal digest (Raw.initial_spec_sha256 t.raw)
+    && stopped_pending
+    && (not state.pending_initial_start)
+    && (not state.spec.protocol.start_immediately)
+    && Option.is_none state.active_operation
+    && Option.is_none state.failure
+    && Option.is_none state.moderator
+    && List.is_empty state.permissions
+    && List.is_empty state.grants
+    && List.is_empty state.jobs
+    && List.is_empty state.model_job_targets
+    && List.is_empty state.schedules
+    && List.is_empty state.invocations
+    && List.is_empty state.moderator_executions
+    && no_runs
+    && no_inference
+    && no_history
+    && Int.equal state.identity.generation 0
+    && P.Timestamp.equal state.identity.created_at t.record.admission.created_at
+    && Option.exists
+         state.identity.creating_principal
+         ~f:(P.Id.Principal.equal (R.principal_id t.reservation))
+  then Ok ()
+  else invalid "captured child is not the original never-initialized stopped state"
+;;

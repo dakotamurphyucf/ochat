@@ -42,7 +42,10 @@ val installed_ids
   -> checkpoint:(unit -> unit)
   -> (Id.t list, Enumeration_error.t) Result.t
 
-(** The initial catalog contains [chatml]. Other identifiers, including [skills],
-    reject until their actual instruction contents are reviewed and embedded.
-    Captured document replay uses retained output and never repeats lookup. *)
+(** Reviewed assets: [chatml], [goals], [recurrence], [skills],
+    [project-instructions], [context-recovery], [packages] and [lifecycle].
+    These are guidance, not capability activation. Context recovery supplies policy
+    only, with no context-management functionality. Unknown IDs reject without
+    fallback. Captured replay retains its selected edition and never repeats lookup;
+    only a fresh explicit capture selects the currently installed bytes. *)
 val find : Id.t -> (Asset.t, Error.t) Result.t

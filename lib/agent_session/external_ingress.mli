@@ -40,10 +40,37 @@ type receipt = private
   }
 [@@deriving equal, sexp]
 
+(** Immutable creator attribution DATA, separate from a live admission. Historical
+    missing provenance and an explicitly captured unavailable origin differ. *)
+module Provenance : sig
+  type t [@@deriving equal, sexp]
+
+  val create
+    :  source:Agent_protocol.Run_source.t
+    -> origin:Agent_protocol.Inference_origin.t option
+    -> (t, Agent_protocol.Error.t) result
+
+  val source : t -> Agent_protocol.Run_source.t
+  val origin : t -> Agent_protocol.Inference_origin.t option
+  val validate : t -> (unit, Agent_protocol.Error.t) result
+  val to_jsonaf : t -> Jsonaf.t
+
+  (** Complete input is bounded before decoding, including unfamiliar fields. *)
+  val of_jsonaf : Jsonaf.t -> (t, Agent_protocol.Error.t) result
+
+  val shape : Document_schema.Shape.t
+end
+
+(** Bound the complete optional provenance child in a retained raw registration,
+    including unfamiliar children, before admitting the document. This checks
+    the retained raw child rather than only its projected known fields. *)
+val validate_encoded_provenance : Jsonaf.t -> (unit, Agent_protocol.Error.t) result
+
 type t = private
   { context : context
   ; receipts : receipt list
   ; revoked : string option
+  ; inference_provenance : Provenance.t option
   }
 [@@deriving equal, sexp]
 
@@ -59,9 +86,12 @@ val validate : t -> (unit, Agent_protocol.Error.t) result
 
 (** Bind an active, source-owned subscription epoch. The host supplies the
     permitted producer and limits; caller JSON does not establish this authority.
-    Event namespaces must begin with [external.] and carry no internal variant. *)
+    Event namespaces must begin with [external.] and carry no internal variant.
+    Optional provenance must agree with this exact observer/generation. It is
+    immutable DATA and creates neither authorization nor retained work. *)
 val create
-  :  context
+  :  ?inference_provenance:Provenance.t
+  -> context
   -> subscription:Agent_protocol.Subscription.t
   -> (t, Agent_protocol.Error.t) result
 
@@ -109,7 +139,8 @@ val validate_owner
 (** Store transition guard: immutable binding, append-only receipts, one new
     event per admission, no unrevocation or receipt eviction. The actor must
     additionally authorize admission, check current session/source, and commit
-    the new receipt with queue insertion atomically. *)
+    the new receipt with queue insertion atomically. Retained optional provenance
+    is immutable, including historical None; no later capture may retrofit it. *)
 val validate_transition
   :  subscription:Agent_protocol.Subscription.t
   -> previous:t option

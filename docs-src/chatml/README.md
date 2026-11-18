@@ -143,6 +143,11 @@ an external effect happens exactly once. The
 [server orchestration guide](../agent-server/chatml-orchestration.md) explains
 the persistence boundary, jobs, timers, and restart behavior.
 
+To see independent Goals and recurring work in one application, follow the
+[recurring release-note review](../tutorials/goal-recurrence.md). The companion
+[composition guide](../guide/chatml-lifecycle-composition.md) shows how to keep
+component state and combine compatible decisions.
+
 ## Develop ChatML interactively
 
 Use the [ChatML development guide](../guide/chatml-development-workflow.md) to

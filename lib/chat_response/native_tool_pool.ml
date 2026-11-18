@@ -359,6 +359,7 @@ let create_with
 ;;
 
 let create
+      ?mcp_checks
       ~sw
       ~ctx
       ~host
@@ -377,12 +378,19 @@ let create
     ~construct:(fun declaration ->
       try
         Ok
-          (Tool.of_declaration ?agent_source_runner ~host ~sw ~ctx ~run_agent declaration)
+          (Tool.of_declaration
+             ?mcp_checks
+             ?agent_source_runner
+             ~host
+             ~sw
+             ~ctx
+             ~run_agent
+             declaration)
       with
       | exn ->
         let backtrace = Stdlib.Printexc.get_raw_backtrace () in
         (match exn with
-         | Eio.Cancel.Cancelled _ | Eio.Time.Timeout ->
+         | Eio.Cancel.Cancelled _ | Eio.Time.Timeout | Ctx.Effect_rejected _ ->
            Stdlib.Printexc.raise_with_backtrace exn backtrace
          | _ -> Error (error "agent.tool_construction_failed" (Exn.to_string exn))))
     ~host

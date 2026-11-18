@@ -2,6 +2,8 @@ open Core
 module Event = Chat_response.Tool_execution_event
 module Executor = Chat_response.Tool_executor
 module Output = Openai.Responses.Tool_output.Output
+module Tool_call = Chat_response.Tool_call
+module Native = Tool_call.Native
 
 let runner ~invocation payload =
   Ochat_function.Invocation.emit
@@ -42,20 +44,43 @@ let print_output = function
 ;;
 
 let%expect_test "driver fork interception preserves an explicitly selected replacement" =
-  List.iter [ Functions.fork.run_with_progress; runner ] ~f:(fun selected ->
+  let replacement = { Functions.fork with run_with_progress = runner } in
+  List.iter [ Functions.fork; replacement ] ~f:(fun selected ->
     let events = Queue.create () in
-    Chat_response.Tool_call.run_tool
+    let checks = ref 0 in
+    let native =
+      Native.create selected ~prepare_invocation:(fun invocation ->
+        Int.incr checks;
+        invocation)
+    in
+    Tool_call.run_tool
       ~kind:Function
       ~call_id:"fork-call"
       ~name:"fork"
       ~payload:"selected result"
       ~tool_tbl:(Hashtbl.create (module String))
-      ~runner:selected
+      ~native
       ~on_fork:(Some (fun ~invocation:_ ~call_id:_ ~arguments:_ -> Text "driver fork"))
       ~on_tool_execution:(Queue.enqueue events)
       ()
     |> print_output;
+    [%test_eq: int] !checks 1;
     Queue.iter events ~f:(fun event -> print_endline (show_event event)));
+  let call ?runner kind selected =
+    let _, tool_tbl = Ochat_function.functions [ selected ] in
+    Tool_call.run_tool
+      ~kind
+      ~call_id:"fork-legacy"
+      ~name:"fork"
+      ~payload:"legacy result"
+      ~tool_tbl
+      ?runner
+      ~on_fork:(Some (fun ~invocation:_ ~call_id:_ ~arguments:_ -> Text "driver fork"))
+      ()
+  in
+  call ~runner Function Functions.fork |> print_output;
+  call Custom replacement |> print_output;
+  call Custom Functions.fork |> print_output;
   [%expect
     {|
     driver fork
@@ -65,6 +90,9 @@ let%expect_test "driver fork interception preserves an explicitly selected repla
     started fork-call fork function selected result
     progress fork-call append working
     finished fork-call returned
+    legacy result
+    legacy result
+    Error: [fork] cannot be invoked as a custom tool call.
     |}]
 ;;
 
@@ -167,5 +195,84 @@ let%expect_test "cancellation emits one cancelled terminal event and re-raises" 
     cancelled
     started call-4 cancelled function
     finished call-4 cancelled
+    |}]
+;;
+
+let%expect_test "selected effect checkpoint follows Started and retains terminal failures"
+  =
+  Eio_main.run (fun _env ->
+    List.iter [ `Raised; `Cancelled ] ~f:(fun mode ->
+      let legacy = Queue.create () in
+      let strict = Queue.create () in
+      let selected_live = ref true in
+      let checkpoints = ref 0 in
+      let checks = ref 0 in
+      let executions = ref 0 in
+      let sentinel =
+        match mode with
+        | `Raised -> Failure "selected effect rejected"
+        | `Cancelled -> Eio.Cancel.Cancelled (Failure "selected effect cancelled")
+      in
+      let native =
+        Native.create Functions.fork ~prepare_invocation:(fun _ ->
+          Int.incr checks;
+          assert (Int.equal !checkpoints 1);
+          raise sentinel)
+      in
+      let observed =
+        try
+          ignore
+            (Tool_call.run_tool
+               ~kind:Function
+               ~call_id:"selected"
+               ~name:"fork"
+               ~payload:"input"
+               ~tool_tbl:(Hashtbl.create (module String))
+               ~native
+               ~on_fork:
+                 (Some
+                    (fun ~invocation:_ ~call_id:_ ~arguments:_ ->
+                      Int.incr executions;
+                      Output.Text "must not execute"))
+               ~before_effect:(fun () ->
+                 assert (not !selected_live);
+                 Int.incr checkpoints)
+               ~on_tool_execution:(Queue.enqueue legacy)
+               ~on_execution_event:(fun event ->
+                 Queue.enqueue strict event;
+                 match event with
+                 | Started _ -> selected_live := false
+                 | Progress _ | Finished _ | Trace _ -> ())
+               ()
+             : Output.t);
+          None
+        with
+        | exn -> Some exn
+      in
+      (* All decisive oracles are outside the checked runner/observers. This is
+         a component callback contract, not an Actor authority issuer. *)
+      assert (Option.exists observed ~f:(phys_equal sentinel));
+      [%test_eq: int] !checkpoints 1;
+      [%test_eq: int] !checks 1;
+      [%test_eq: int] !executions 0;
+      let started = "started selected fork function input" in
+      let terminal =
+        match mode with
+        | `Raised -> "finished selected raised"
+        | `Cancelled -> "finished selected cancelled"
+      in
+      [%test_eq: string list]
+        (List.map (Queue.to_list legacy) ~f:show_event)
+        [ started; terminal ];
+      [%test_eq: string list]
+        (List.map (Queue.to_list strict) ~f:show_event)
+        (match mode with
+         | `Raised -> [ started; terminal ]
+         | `Cancelled -> [ started ]);
+      print_endline terminal));
+  [%expect
+    {|
+    finished selected raised
+    finished selected cancelled
     |}]
 ;;

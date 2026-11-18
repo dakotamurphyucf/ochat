@@ -136,10 +136,10 @@ let spawn ~sw ~env ~cwd ~environment ~columns ~rows argv =
 let output t = Buffer.contents t.capture
 let send t text = Eio.Flow.copy_string text t.master
 
-let await_text t ~clock text =
+let await_text t ?(after = 0) ~clock text =
   let rec wait () =
     if !(t.overflow) then failwith "PTY transcript exceeded capture bound";
-    if String.is_substring (output t) ~substring:text
+    if String.is_substring (String.drop_prefix (output t) after) ~substring:text
     then ()
     else (
       Eio.Time.sleep clock 0.01;

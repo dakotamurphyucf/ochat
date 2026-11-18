@@ -64,6 +64,15 @@ module Json : sig
     | Null
     | Value of t
 
+  (** Parse one complete input with invocation-owned scratch and the pinned
+      Jsonaf grammar. Preserves number spellings and object field order. Use
+      only when the caller owns admission and bounds for this encoded value.
+      Use [decode] for bounded document admission. *)
+  val parse_syntax : string -> (t, string) Result.t
+
+  (** Bounded complete-input admission. Every call owns its parser's mutable
+      scratch state, so independent native domains can decode concurrently.
+      Numeric lexemes, JSON/error ordering and all supplied limits are retained. *)
   val decode : limits:Limits.t -> string -> (t, Error.t) Result.t
 
   (** Counts the exact compact JSON byte size, including escaping, without

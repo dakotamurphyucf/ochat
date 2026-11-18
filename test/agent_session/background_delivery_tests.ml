@@ -49,11 +49,12 @@ let%expect_test
     ; delivery = Pending
     ; launch =
         Some
-          { owner = Invocation root.context.id
+          { owner = P.Job.Birth_parent.callback (Invocation root.context.id)
           ; parent_job = None
           ; nested_depth = 0
           ; moderator_source = Some observer
           }
+    ; inference_origin = None
     ; progress = None
     }
   in
@@ -203,7 +204,14 @@ let%expect_test
        A.with_current_idle_queued_moderator_event_tools
          actor
          ~snapshot:(fun () -> Ok append)
-         (fun ~executing:_ ~retirement_reason ~event:_ ~execute:_ ~commit ->
+         (fun ~executing:_
+           ~policy_caller:_
+           ~model_jobs:_
+           ~allocate_inference:_
+           ~retirement_reason
+           ~event:_
+           ~execute:_
+           ~commit ->
             [%test_eq: string option] None retirement_reason;
             commit
               ~snapshot:before

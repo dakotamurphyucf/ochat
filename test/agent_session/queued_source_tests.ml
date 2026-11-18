@@ -79,7 +79,7 @@ let dispatch env sw actor backend job request tools =
     ; store_handle = None
     ; expire_permissions = (fun ~now:_ -> ())
     ; collect_results = (fun () -> Ok None)
-    ; close = ignore
+    ; close = Agent_server.Session_registry.Entry_close.legacy ignore
     }
   in
   Registry.add registry ~session_id entry |> protocol_ok;
@@ -100,7 +100,7 @@ let dispatch env sw actor backend job request tools =
              ; per_kind = 1
              ; max_nested_depth = 1
              })
-      ~model_job_inference:(fun _ _ -> failwith "unexpected model job")
+      ~conversation_host:Background_only
   in
   Exn.protect
     ~finally:(fun () ->
@@ -184,8 +184,9 @@ let%expect_test
              |> protocol_ok
            in
            let execute = N.execute_borrowed borrowed in
-           execute ~invocation:child (fun ~dispatched ->
+           execute ~invocation:child (fun ~dispatched ~capabilities ->
              N.with_dispatched_scope
+               ~capabilities
                ~execute
                ~selected:ceiling
                ~invocation:dispatched
@@ -295,7 +296,7 @@ let%expect_test
     let issuing = add_claimed_job actor in
     let invocation = root issuing in
     with_job actor issuing (fun ~job:_ ~execute ->
-      execute ~invocation (fun ~dispatched ->
+      execute ~invocation (fun ~dispatched ~capabilities:_ ->
         Jobs.with_scope
           service
           ~owner:(Invocation dispatched.context.id)

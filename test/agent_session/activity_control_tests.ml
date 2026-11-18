@@ -19,7 +19,9 @@ let with_actor ?(prepare = Fn.id) f =
                   ~liveness:Process_bound
                   ~start_immediately:false))
           ~persistence:
-            { archive_reference; commit = (fun ~command_audit:_ ~previous:_ _ -> Ok ()) }
+            { archive_reference
+            ; commit = (fun ?observation:_ ~command_audit:_ ~previous:_ _ -> Ok ())
+            }
           ~operation_worker:None
           ~services:
             { now = (fun () -> timestamp)
@@ -30,6 +32,7 @@ let with_actor ?(prepare = Fn.id) f =
             ; schedule_limits = Agent_session.Staged_schedules.default_limits
             ; notification_limits = Agent_session.Staged_notifications.default_limits
             ; ingress_limits = Agent_session.Staged_ingress.default_limits
+            ; goal_descendant_profile
             ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
             ; state_committed = (fun _ _ -> ())
             }
@@ -64,6 +67,7 @@ let%expect_test "job occurrence controls deny stale attempts before any transiti
         ; result = None
         ; delivery = Not_required
         ; launch = None
+        ; inference_origin = None
         ; progress = None
         }
     in
@@ -135,6 +139,7 @@ let%expect_test
         ; delivery_count = 0
         ; last_delivery_at = None
         ; ownership = None
+        ; inference_provenance = None
         ; delivery_cancellation = None
         }
     in
@@ -193,6 +198,7 @@ let%expect_test
       ; result = None
       ; delivery = Not_required
       ; launch = None
+      ; inference_origin = None
       ; progress = None
       }
   in
@@ -209,6 +215,7 @@ let%expect_test
       ; delivery_count = 0
       ; last_delivery_at = None
       ; ownership = None
+      ; inference_provenance = None
       ; delivery_cancellation = None
       }
   in

@@ -49,8 +49,11 @@ val protocol
 
 val store : ('a, Document_schema.Error.t) Result.t -> ('a, Store_error.t) Result.t
 
+(** Required semantics default to none. A nested-family owner may explicitly
+    name features it understands; unfamiliar markers always reject. *)
 val expect
-  :  Document_schema.Document.t
+  :  ?supported_semantics:string list
+  -> Document_schema.Document.t
   -> kind:string
   -> version:int
   -> (unit, Document_schema.Error.t) Result.t
@@ -58,7 +61,8 @@ val expect
 (** Explicit supported family versions, checked on the stored original document
     before any conversion or current typed reader. *)
 val expect_versions
-  :  Document_schema.Document.t
+  :  ?supported_semantics:string list
+  -> Document_schema.Document.t
   -> kind:string
   -> versions:int list
   -> (unit, Document_schema.Error.t) Result.t

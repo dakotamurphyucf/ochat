@@ -40,6 +40,24 @@ val agent_page_classification
   :  Prompt.Chat_markdown.tool
   -> (string * Tool_execution_event.agent_page_kind) option
 
+module Native_error : sig
+  type t =
+    { code : string
+    ; message : string
+    }
+  [@@deriving sexp, compare, equal]
+end
+
+(** Explicit canonical-native setup/use split. The retained projection never
+    contains the lexical setup checker. Direct callers keep their old guard. *)
+module Mcp_checks : sig
+  type check = unit -> (unit, Native_error.t) result
+  type t
+
+  val direct : check -> t
+  val canonical_native : prepare:check -> original_context:check -> resource:check -> t
+end
+
 module Agent_source_runner : sig
   (** Host-owned child source selection before any legacy Fetch operation.
       [revision] identifies the host's source-selection implementation and policy;
@@ -155,7 +173,8 @@ val validate_read_roots
     @raise Failure if the declaration references an unknown built-in
            tool name. *)
 val of_declaration
-  :  ?shell_registry:Shell_runtime.Registry.t
+  :  ?mcp_checks:Mcp_checks.t
+  -> ?shell_registry:Shell_runtime.Registry.t
   -> ?host:Shell_runtime.Host.t
   -> ?agent_source_runner:Agent_source_runner.t
   -> sw:Eio.Switch.t
@@ -171,14 +190,6 @@ val of_declaration
         -> string (* assistant answer *))
   -> Prompt.Chat_markdown.tool
   -> Ochat_function.t list
-
-module Native_error : sig
-  type t =
-    { code : string
-    ; message : string
-    }
-  [@@deriving sexp, compare, equal]
-end
 
 (** Construct a provider-independent declaration from the ordinary Eio and
     filesystem resources of this exact shell host. This path has no Ctx,

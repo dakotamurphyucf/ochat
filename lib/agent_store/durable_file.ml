@@ -94,14 +94,14 @@ let replace_paths
           | Eio.Io _ | Core_unix.Unix_error _ -> ()))
 ;;
 
-let replace_eio ~env ~durability ~path contents =
+let replace_eio ~before_rename ~env ~durability ~path contents =
   replace_paths
     ~durability
     ~path
     ~temporary_eio:(eio_path env (temporary_path path))
     ~destination:(eio_path env path)
     ~directory:(eio_path env (Filename.dirname path))
-    ~before_rename:(fun () -> ())
+    ~before_rename
     contents
 ;;
 
@@ -132,9 +132,9 @@ let validate_path path =
       (Store_error.Io { operation = "validate"; path; message = "path must be absolute" })
 ;;
 
-let replace ~env ~durability ~path contents =
+let replace ?(before_rename = fun () -> ()) ~env ~durability ~path contents =
   Result.bind (validate_path path) ~f:(fun () ->
-    replace_eio ~env ~durability ~path contents)
+    replace_eio ~before_rename ~env ~durability ~path contents)
 ;;
 
 let load ~env ~path =

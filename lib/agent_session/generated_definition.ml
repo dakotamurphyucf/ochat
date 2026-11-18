@@ -171,8 +171,9 @@ let install_reserved ~delegations ~reservation ~artifact_store t =
     | Some _ ->
       error "delegation.revoked" "generated artifact reservation has been revoked"
   in
+  let%bind source = D.Admission.authored_source current.admission |> store_result in
   let%bind () =
-    match current.admission.authored_tool with
+    match source with
     | None -> Ok ()
     | Some _ ->
       error
@@ -294,3 +295,169 @@ let restore
   in
   Ok { artifact; admission; capability_pins }
 ;;
+
+module Source_data = struct
+  type t =
+    { artifact : Store.Artifact.t
+    ; reference : Agent_store.Delegation_store.Reference.t
+    ; capability_pins : (string * string) list
+    ; moderator : Agent_protocol.Invocation.observer option
+    }
+
+  let artifact (t : t) = t.artifact
+  let reference (t : t) = t.reference
+  let capability_pins (t : t) = t.capability_pins
+  let moderator (t : t) = t.moderator
+
+  let load
+        ?(limits = Chatml_compilation.default_limits)
+        ?source_limits
+        ~artifact_store
+        ~(record : Agent_store.Delegation_store.record)
+        ()
+    =
+    let open Result.Let_syntax in
+    let%bind artifact =
+      load_artifact
+        ~artifact_store
+        ~revision_id:record.admission.revision_id
+        ~manifest_sha256:record.admission.manifest_sha256
+    in
+    let%bind bundle =
+      Chatmd_source_bundle.create
+        ?limits:source_limits
+        ~root_file:artifact.root_relative_path
+        ~sources:
+          ((artifact.root_relative_path, artifact.root_chatmd)
+           :: List.map artifact.sources ~f:(fun source ->
+             source.Store.Source.relative_path, source.contents))
+        ()
+      |> Result.map_error ~f:(fun message ->
+        [ D.error ~code:"delegation.source_bounds" message ])
+    in
+    let%bind parsed =
+      G.Source.parse
+        ~dir:(Store.materialized_tree artifact_store artifact.revision_id)
+        bundle
+    in
+    let script = G.Source.moderator parsed in
+    let%map () =
+      Chat_response.Extension_compiler.validate_delegated_source
+        ~limits
+        (Option.to_list script)
+    in
+    { artifact
+    ; reference = Agent_store.Delegation_store.reference record
+    ; capability_pins = record.admission.capability_pins
+    ; moderator =
+        Option.map script ~f:(fun script ->
+          Agent_protocol.Invocation.
+            { script_id = script.id; source_sha256 = script.source_sha256 })
+    }
+  ;;
+end
+
+module Metadata_source = struct
+  type t = Source_data.t
+
+  let artifact = Source_data.artifact
+  let reference = Source_data.reference
+  let capability_pins = Source_data.capability_pins
+  let moderator = Source_data.moderator
+
+  let load
+        ?limits
+        ?source_limits
+        ~artifact_store
+        ~(record : Agent_store.Delegation_store.record)
+        ()
+    =
+    let open Result.Let_syntax in
+    let%bind () =
+      match
+        ( record.stage
+        , record.revocation
+        , record.admission.lifetime
+        , record.admission.authored_tool
+        , record.admission.captured_recurrence )
+      with
+      | Linked, None, (Owned | Independent _), None, None -> Ok ()
+      | _ ->
+        error
+          "delegation.metadata_source_record"
+          "generated metadata requires a linked unrevoked plain-generated record"
+    in
+    Source_data.load ?limits ?source_limits ~artifact_store ~record ()
+  ;;
+end
+
+module Source = struct
+  type definition = t
+  type t = Source_data.t
+
+  let artifact = Source_data.artifact
+  let reference = Source_data.reference
+  let capability_pins = Source_data.capability_pins
+  let moderator = Source_data.moderator
+
+  let load
+        ?(limits = Chatml_compilation.default_limits)
+        ?source_limits
+        ~artifact_store
+        ~(record : Agent_store.Delegation_store.record)
+        ()
+    =
+    let open Result.Let_syntax in
+    let%bind () =
+      match
+        ( record.stage
+        , record.revocation
+        , record.admission.lifetime
+        , record.admission.authored_tool
+        , record.admission.captured_recurrence )
+      with
+      | Linked, None, Independent _, None, None -> Ok ()
+      | _ ->
+        error
+          "delegation.source_record"
+          "inert generated source requires its linked unrevoked Independent record"
+    in
+    Source_data.load ~limits ?source_limits ~artifact_store ~record ()
+  ;;
+
+  let check_definition (t : t) ~(definition : definition) =
+    let module Manager = Chat_response.Moderator_manager in
+    let failure message =
+      Agent_protocol.Error.create Invalid_state ~message ~retryable:false ()
+    in
+    let open Result.Let_syntax in
+    let%bind _, selected =
+      Manager.Registry.of_definition
+        Manager.Registry.empty
+        (G.definition definition.admission)
+      |> Result.map_error ~f:failure
+    in
+    let observed =
+      Option.map selected ~f:(fun selected ->
+        Agent_protocol.Invocation.
+          { script_id = Manager.Registry.script_id selected
+          ; source_sha256 = Manager.Registry.source_hash selected
+          })
+    in
+    let sorted pins = List.sort pins ~compare:(fun (a, _) (b, _) -> String.compare a b) in
+    if
+      Agent_protocol.Id.Prompt_revision.equal
+        t.artifact.revision_id
+        definition.artifact.revision_id
+      && String.equal t.artifact.manifest_sha256 definition.artifact.manifest_sha256
+      && Store.Artifact.same_content t.artifact definition.artifact
+      && List.equal
+           (fun (name, pin) (other_name, other_pin) ->
+              String.equal name other_name && String.equal pin other_pin)
+           (sorted t.capability_pins)
+           (sorted definition.capability_pins)
+      && Option.equal Agent_protocol.Invocation.equal_observer t.moderator observed
+    then Ok ()
+    else Error (failure "generated executable differs from its selected artifact source")
+  ;;
+end

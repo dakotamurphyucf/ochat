@@ -81,6 +81,14 @@ module Run = Make (struct
     let prefix = "run"
   end)
 
+module Goal = Make (struct
+    let prefix = "goal"
+  end)
+
+module Recurrence = Make (struct
+    let prefix = "rec"
+  end)
+
 module Developer_run = Make (struct
     let prefix = "dvr"
   end)

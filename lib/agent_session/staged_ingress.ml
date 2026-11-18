@@ -54,6 +54,7 @@ let create = Base.create
 let is_empty = Base.is_empty
 let find = Base.find
 let values = Base.values
+let selected_receipts = Base.selected_receipts
 let abort = Base.abort
 let release_owner = Base.release_owner
 let abort_all = Base.abort_all

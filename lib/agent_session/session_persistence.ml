@@ -145,8 +145,16 @@ let admit_state_document state_document ~limits =
   payload, state_document
 ;;
 
-let commit t ~command_audit ~(previous : Session_state.t) transition =
+let commit t ?observation ~command_audit ~(previous : Session_state.t) transition =
   let open Result.Let_syntax in
+  let%bind observation =
+    Option.value_map observation ~default:(Ok None) ~f:(fun observation ->
+      Session_commit_observation.Host.observe_entry
+        observation
+        ~previous
+        ~candidate:transition
+      |> Result.map ~f:Option.some)
+  in
   let%bind admitted =
     Session_document_transition.admit_encoded
       t.restored.state_document
@@ -167,6 +175,28 @@ let commit t ~command_audit ~(previous : Session_state.t) transition =
     |> Result.map_error ~f:(fun e -> protocol_error (document_error e))
   in
   let next = { t.restored with state_document } in
+  let%bind terminal =
+    Session_state_document.terminal_capacity
+      state_document
+      ~document:(Session_state_document.Admitted.document admitted)
+      ~limits:t.archive_limits
+    |> Result.map_error ~f:(fun error -> protocol_error (document_error error))
+  in
+  let%bind recurrence =
+    Session_state_document.recurrence_capacity
+      state_document
+      ~document:(Session_state_document.Admitted.document admitted)
+      ~limits:t.archive_limits
+    |> Result.map_error ~f:(fun error -> protocol_error (document_error error))
+  in
+  let%bind () =
+    Session_terminal_journal.validate
+      transition.state
+      ~terminal
+      ~recurrence:(Some recurrence)
+      ~limits:t.limits
+      ~max_payload_length:(Store.Commit_writer.max_payload_length t.writer)
+  in
   let%bind transaction, events =
     transaction t ~state_document ~command_audit previous transition
     |> Result.map_error ~f:protocol_error
@@ -215,25 +245,54 @@ let commit t ~command_audit ~(previous : Session_state.t) transition =
       | None -> assert false
       | Some document -> t.archive reference document)
   in
-  let%map committed =
+  let commit () =
     Store.Commit_writer.commit t.writer ~durability:t.durability transaction
     |> Result.map_error ~f:protocol_error
+    |> Result.map ~f:(fun committed ->
+      Session_commit_observation.Returned.
+        { sequence = committed.transaction_sequence; hash = committed.transaction_hash })
   in
-  t.previous_transaction_hash <- Some committed.transaction_hash;
+  let%map committed =
+    match observation with
+    | None -> commit ()
+    | Some observation ->
+      Session_commit_observation.Host.with_writer
+        observation
+        ~transaction:
+          { session_id = transaction.session_id
+          ; generation = transaction.generation
+          ; sequence = transaction.transaction_sequence
+          ; revision = transaction.session_revision
+          ; previous_hash = transaction.previous_transaction_hash
+          ; payload = Store.Transaction.encode transaction
+          ; hash = Store.Transaction.hash transaction
+          ; max_payload_length = Store.Commit_writer.max_payload_length t.writer
+          }
+        ~commit
+  in
+  t.previous_transaction_hash <- Some committed.hash;
   t.restored <- next;
   t.replay_documents <- t.replay_documents @ events;
   Option.iter command_audit ~f:(fun encoded ->
-    t.command_accepted encoded committed.transaction_sequence)
+    t.command_accepted encoded committed.sequence)
 ;;
 
 let actor_persistence t =
   Session_actor.
     { commit =
-        (fun ~command_audit ~previous transition ->
-          commit t ~command_audit ~previous transition)
+        (fun ?observation ~command_audit ~previous transition ->
+          commit t ?observation ~command_audit ~previous transition)
     ; archive_reference =
         (fun ~previous ~kind id -> archive_reference t ~previous ~kind id)
     }
+;;
+
+let actor_persistence_with_startup_disposal t =
+  let persistence = actor_persistence t in
+  let binding =
+    Canonical_backend_binding_data.create ~writer:t.writer ~commit:persistence.commit
+  in
+  persistence, binding
 ;;
 
 let transaction_hash t = t.previous_transaction_hash

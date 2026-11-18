@@ -19,6 +19,13 @@ val close : t -> unit
     retained by this service can remove its staging or invalidate its selection. *)
 val prepared : t -> (Agent_protocol.Run_action.t option, string) result
 
+(** Goal intent sealed by that exact same preparation and rollback owner. The
+    actor resolves its target through the permanent Run association, then checks
+    current authority and goal revision at the joint checkpoint commit. *)
+val prepared_goal_finish
+  :  t
+  -> (Agent_protocol.Goal_achievement.Intent.t option, string) result
+
 val verify : t -> Agent_protocol.Run_action.t option -> (unit, string) result
 
 (** Verify the one-shot prepared selection and compose its scheduling request with

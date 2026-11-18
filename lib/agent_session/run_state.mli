@@ -2,6 +2,10 @@
     historical absence and every unknown field. No runtime/callback is retained. *)
 type t [@@deriving sexp]
 
+(** Compare the complete native index, including private job-delivery disposition
+    and optional-child wire presence. Unknown JSON remains with its document owner. *)
+val equal : t -> t -> bool
+
 (** Compare public run evidence and pending action state with typed equality.
     Private delivery-frame retention/disposition and wire-presence bookkeeping
     do not change the client observation. No IO or validation is performed. *)
@@ -9,9 +13,60 @@ val equal_observation : t -> t -> bool
 
 val empty : t
 val installation : t -> Run_source_installation.t
+
+(** Optional current-installation lifecycle DATA. Historical absence and explicit
+    null remain distinct in the wire carrier. No execution permission is issued. *)
+val moderator_lifecycle : t -> Moderator_lifecycle.t option
+
+val clear_moderator_lifecycle : t -> t
+
+(** Only paired actual lifecycle claim application selects a new pointer. The
+    enclosing State validates receipt/new-admission custody independently. *)
+val capture_moderator_lifecycle
+  :  t
+  -> Moderator_lifecycle.t
+  -> (t, Agent_protocol.Error.t) result
+
 val runs : t -> Agent_protocol.Run.t list
 val intents : t -> Run_intent.t list
 val receipts : t -> Agent_protocol.Run_receipt.t list
+
+(** Derived known terminal obligations. Capacity-only JSON projections never
+    become index entries, runtime proof or admission authority. *)
+val terminal_capacity : t -> (Run_terminal_capacity.t, Agent_protocol.Error.t) result
+
+(** Existing exact job-frame and disposition byte credits, additive to shared
+    terminal proof/receipt capacity. *)
+val reserved_delivery_bytes : t -> int
+
+val goal_links : t -> Run_goal_link.t list
+val goal_link : t -> Agent_protocol.Id.Run.t -> Run_goal_link.t option
+
+(** Pure association candidate, never authority. Exact actual retained Workflow
+    admission is required; final transition validation additionally requires that
+    the Run itself is newly admitted in that same transition. Immutable links
+    survive terminal/source/reset/recovery and cannot be reassigned or removed. *)
+val bind_goal : t -> Run_goal_link.t -> (t, Agent_protocol.Error.t) result
+
+(** Immutable reciprocal origins follow the existing bounded Run/receipt
+    retention policy. Complete nested carriers and wrapper unknowns are retained.
+    These values are data, never current execution authority. *)
+val recurrence_origins : t -> Recurrence_run_origin.t list
+
+val recurrence_origin : t -> Agent_protocol.Id.Run.t -> Recurrence_run_origin.t option
+
+(** One pure admission candidate: a new revision-zero Admitted Run, its exact new
+    Admission receipt and origin. No independent late-attach writer is exposed.
+    Exact retained origins retry as no-ops; conflicting or reassigned evidence
+    rejects. Final transition and complete index/terminal capacity are validated
+    before return. The actor still authenticates the real prepared owner. *)
+val commit_recurrence_admission
+  :  t
+  -> run:Agent_protocol.Run.t
+  -> receipt:Agent_protocol.Run_receipt.t
+  -> origin:Recurrence_run_origin.t
+  -> (t, Agent_protocol.Error.t) result
+
 val job_deliveries : t -> Run_job_delivery.t list
 val find_job_delivery : t -> Run_job_delivery.Key.t -> Run_job_delivery.t option
 

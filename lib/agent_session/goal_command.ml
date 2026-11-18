@@ -1,0 +1,1 @@
+include Agent_protocol.Goal_command

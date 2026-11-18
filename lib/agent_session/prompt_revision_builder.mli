@@ -117,6 +117,21 @@ val reparse
   -> unit
   -> (Prompt_revision.t, Diagnostic.t list) result
 
+(** Preview only the parsed Config through the existing full captured replay
+    owner, before installation. Retained authored/parser/program/content bytes
+    and their per-script project selections are validated under the same limits.
+    [logical_tree] supplies artifact-relative source coordinates only; no file,
+    source lease, initializer, provider or native resource is acquired. This
+    grants neither installed-tree assurance nor execution authorization. The
+    caller must later verify the exact installed publication and use [reparse].
+    Checkpoint exceptions and cancellation retain their original identity. *)
+val captured_config
+  :  ?checkpoint:(unit -> unit)
+  -> ?content_limits:Chatmd_prompt_content.Limits.t
+  -> logical_tree:Eio.Fs.dir_ty Eio.Path.t
+  -> Agent_store.Prompt_artifact_store.Artifact.t
+  -> (Chat_response.Config.t, Diagnostic.t list) result
+
 (** Same bounded parser/capture walker as [capture], supplied with an actual
     original-root loader. Optional [max_total_source_bytes] only narrows the
     existing 8 MiB aggregate bound: root and distinct dependency reads use its

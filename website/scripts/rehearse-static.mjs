@@ -38,14 +38,13 @@ try {
     const temporary = await fs.mkdtemp(
       path.join(os.tmpdir(), 'ochat-static-rehearsal-'),
     );
-    const config = JSON.parse(
-      await fs.readFile(path.join(directory, 'wrangler.jsonc'), 'utf8'),
-    );
-    delete config.$schema;
-    config.assets.directory = path.join(directory, 'dist');
-    await fs.writeFile(
-      path.join(temporary, 'wrangler.json'),
-      JSON.stringify(config),
+    // Preserve the retained JSONC; Wrangler resolves its assets beside the config.
+    const config = path.join(temporary, 'wrangler.jsonc');
+    await fs.copyFile(path.join(directory, 'wrangler.jsonc'), config);
+    await fs.symlink(
+      path.join(directory, 'dist'),
+      path.join(temporary, 'dist'),
+      'dir',
     );
     const port = await freePort();
     const base = `http://127.0.0.1:${port}`;
@@ -56,7 +55,7 @@ try {
         'dev',
         '--local',
         '--config',
-        path.join(temporary, 'wrangler.json'),
+        config,
         '--ip',
         '127.0.0.1',
         '--port',

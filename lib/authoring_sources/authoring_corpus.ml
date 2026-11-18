@@ -2337,7 +2337,7 @@ module Coverage = struct
   let run_mappings =
     List.concat_map
       [ ( "moderator_v1"
-        , "5d32951cdfe26278e78887fc19d07be4f4024fb6b11b0b4ee16e7947caf78c5f"
+        , "d32db362b3c4d8d77aad5ca4196e6c306438a7f0850244372796bc29da6b5e79"
         , [ ( "module/Run"
             , "6eb6e335f86f30019f0bf3f7ff05141fbe26e7c95312a31501ab52bc016ef0e0" )
           ; ( "module_export/Run.continue"
@@ -2348,7 +2348,7 @@ module Coverage = struct
             , "79322e34f129f854d870a6f52dd729f64afabd8255eb83e9642ccd2ee8b1dc23" )
           ] )
       ; ( "delegated_moderator_v1"
-        , "9b026f950a26a85042b0c022ecf2010656999b3d7134613b227ebc123775f58e"
+        , "e5bd3958d939e04386bb1effd19b1e9a1c1266fbe9d2a9ab6ebc890019f4a93c"
         , [ ( "module/Run"
             , "845fbe661e06d288d0974a92ecb3b14cde3918f2d126dfb0f4b8cc7c49de919b" )
           ; ( "module_export/Run.continue"
@@ -2370,6 +2370,39 @@ module Coverage = struct
               ; "test/run_lifecycle_protocol_test.ml"
               ; "lib/chat_response/run_operations.ml"
               ; "lib/agent_session/run_action_service.ml"
+              ]
+          }))
+  ;;
+
+  let goal_mappings =
+    List.concat_map
+      [ ( "moderator_v1"
+        , "6209c4733211906d58e70ffdc4db718f2648689b5aeac23e02c909acabd73aa6"
+        , [ ( "module/Goal"
+            , "ae3986a7e62a9ab0300c1ce8382da73f6cd455fe920fdf0b159d5355780041bf" )
+          ; ( "module_export/Goal.finish"
+            , "4ac7320a107a1a30e184c8cf78d2e8f424ca6f1c0e909d66c8d28860154ee194" )
+          ] )
+      ; ( "delegated_moderator_v1"
+        , "89f9e99fd633eb683e1c9257991f652dbf5fdfc0c535b59201aecb8f5da31ecb"
+        , [ ( "module/Goal"
+            , "8803a36e3d21a566bf06c43e8f8bbd17db9611457ee0b015eeaf755a76928ce9" )
+          ; ( "module_export/Goal.finish"
+            , "2fd98518fbe3a506896cfd2fd769236e54731cb5e69f4a9e306a64d72db5defc" )
+          ] )
+      ]
+      ~f:(fun (surface_id, topic_closure_sha256, contracts) ->
+        List.map contracts ~f:(fun (name, contract_sha256) ->
+          { target_id = surface_id ^ "/" ^ name
+          ; contract_sha256
+          ; topic_id = "runtime.goals"
+          ; topic_closure_sha256
+          ; evidence =
+              [ "test/lifecycle_helpers/staging_tests.ml"
+              ; "test/agent_session/run_action_scope_tests.ml"
+              ; "test/agent_session/goal_run_tests.ml"
+              ; "lib/chat_response/run_operations.ml"
+              ; "lib/agent_session/goal_run_transition.ml"
               ]
           }))
   ;;
@@ -2761,6 +2794,7 @@ module Coverage = struct
     @ host_effect_mappings
     @ runtime_control_mappings
     @ run_mappings
+    @ goal_mappings
     @ background_mappings
     @ invocation_context_mappings
   ;;
@@ -2960,7 +2994,7 @@ let runtime_foundation ~sources =
       ; review =
           Audited
             { excerpt_sha256 =
-                [ "467099991d41d1e93499aa3bdde4928cbd8c644b36af1f5fc2cec87f9926923d" ]
+                [ "ad4f87bcab01491f8d8a08ca820ac7438223644db56c175a7ce368f1c810f41a" ]
             ; evidence =
                 [ "lib/chatmd/prompt.ml"
                 ; "lib/chat_response/generated_admission.ml"
@@ -3112,7 +3146,7 @@ let runtime_foundation ~sources =
         "Creation retries, lifetimes and inherited authority"
         [ "runtime.delegation.generated" ]
         [ ( "## Create, retry and retain authority"
-          , "5dfd52233e75cf9adb876f47917c5c663d40770e3796287ee261cdd41774698c" )
+          , "48012f5d35cbaad5b5e9c3fad4dc873f483879a5d1bc60cfc370e5983e209c3f" )
         ]
     ; make_child
         "runtime.delegation.submissions"
@@ -3438,12 +3472,18 @@ let runtime_foundation ~sources =
          ; review =
              Audited
                { excerpt_sha256 =
-                   [ "bfeead5e6f60c7ed6d3a6a548e68d741d852532d9aca896f3f4bc9e42dda114e" ]
+                   [ "8ed504ad77a86c0042b0b4e6a99892fd2732e6517c34ed2c94946f7f285c6417" ]
                ; evidence =
                    [ "lib/agent_session/administration.ml"
                    ; "lib/agent_session/session_actor.ml"
                    ; "lib/agent_server/command_handler.ml"
                    ; "lib/agent_server/runtime_owner.ml"
+                   ; "lib/agent_session/preparation_tracking.ml"
+                   ; "lib/agent_session/turn_admission_staging.ml"
+                   ; "lib/agent_session/delegated_runtime_load.ml"
+                   ; "lib/agent_session/runtime_builder.ml"
+                   ; "lib/agent_session/legacy_callback_runtime.ml"
+                   ; "test/factory_catalog_publication/legacy_resume_recovery_tests.ml"
                    ; "lib/agent_session/managed_submission_tracking.ml"
                    ; "lib/agent_server/managed_output_cursor.ml"
                    ; "test/chatml_composition/notification_administration_tests.ml"
@@ -3468,7 +3508,7 @@ let runtime_foundation ~sources =
          ; review =
              Audited
                { excerpt_sha256 =
-                   [ "61c51102584b197b97d02e32379eeb626f686cc8cff6c128604c5f8ca90509f5" ]
+                   [ "237ac9dc3d9b25634f5d15e25ad8bbba5a49cb622d8f6ebd5accb694a820ad54" ]
                ; evidence =
                    [ "lib/chatml/chatml_compilation.ml"
                    ; "lib/chatml/chatml_execution.ml"
@@ -3590,7 +3630,7 @@ let runtime_foundation ~sources =
          ; review =
              Audited
                { excerpt_sha256 =
-                   [ "854c730bd39b61ed4339ea9c625d1259583f32fcd9168c6798f66c00d00fe3ef"
+                   [ "63936636765cf67fa4c3116a2ea184e8004ac7e8c19c3fb434adde038f2ed56a"
                    ; "8bbaa8b6aa72f9ed301d17ac5ce4ddb94f35e07b49ee679a8e9b0cfdf2465d6b"
                    ; "94d2d6461640995f15b97e69675fa0133b46f79bdfc7216f321751a73a5a149c"
                    ]
@@ -3647,6 +3687,152 @@ let runtime_foundation ~sources =
        ]
      @ runtime
      @ children
+     @ [ { id = "instructions.builtin"
+         ; title = "Builtin instruction assets and exact captured editions"
+         ; prerequisites = []
+         ; surfaces = shared
+         ; excerpts =
+             [ { path = "guide/builtin-instructions.md"
+               ; heading = "# Builtin instruction assets"
+               ; include_children = true
+               }
+             ]
+         ; review =
+             Audited
+               { excerpt_sha256 =
+                   [ "6e6ec03ec819715129d26b68a3dcd196f358845e110aa754acd893157fac5abf" ]
+               ; evidence =
+                   [ "test/builtin_instructions/builtin_instructions_tests.ml"
+                   ; "test/chatmd_prompt_content/content_tests.ml"
+                   ; "test/prompt_content_custody/owner_tests.ml"
+                   ; "test/chatmd_authoring_assistance/assistance_tests.ml"
+                   ]
+               }
+         }
+       ]
+     @ [ { id = "runtime.goal_metadata"
+         ; title = "Selected Goal metadata, staged controls and canonical accounting"
+         ; prerequisites = []
+         ; surfaces = shared
+         ; excerpts =
+             [ { path = "guide/native-goal-metadata.md"
+               ; heading = "# Selected native Goal tools"
+               ; include_children = true
+               }
+             ]
+         ; review =
+             Audited
+               { excerpt_sha256 =
+                   [ "53e1e7f0bab84cc5abc76d3779ab88c51060a7e98f7d30da667fa714aa37e201" ]
+               ; evidence =
+                   [ "test/factory_catalog_publication/goal_native_metadata_tests.ml"
+                   ; "test/factory_catalog_publication/goal_native_resume_tests.ml"
+                   ; "test/goal_domain/goal_resume_request_tests.ml"
+                   ]
+               }
+         }
+       ]
+     @ [ { id = "runtime.recurrence"
+         ; title = "Recurring automation metadata, exact requests and retained outcomes"
+         ; prerequisites = []
+         ; surfaces = shared
+         ; excerpts =
+             [ { path = "agent-server/recurring-automation.md"
+               ; heading = "# Recurring automation from an agent"
+               ; include_children = true
+               }
+             ]
+         ; review =
+             Audited
+               { excerpt_sha256 =
+                   [ "33060b79e99187de189202b5b1c1582fa00929ca289fbfb9fca4227473629127" ]
+               ; evidence =
+                   [ "test/recurrence_creation/recurrence_native_request_tests.ml"
+                   ; "test/chatml_composition/recurrence_runtime_tests.ml"
+                   ; "test/chatml_composition/recurrence_execution_tests.ml"
+                   ; "test/factory_catalog_publication/recurrence_policy_tests.ml"
+                   ; "test/lifecycle_helpers/recurrence_helper_tests.ml"
+                   ]
+               }
+         }
+       ]
+     @ [ { id = "instructions.sources"
+         ; title = "Admitted instruction discovery and exact retained content"
+         ; prerequisites = []
+         ; surfaces = shared
+         ; excerpts =
+             [ { path = "guide/admitted-instructions.md"
+               ; heading = "# Admitted instruction sources"
+               ; include_children = true
+               }
+             ]
+         ; review =
+             Audited
+               { excerpt_sha256 =
+                   [ "100b4e20581498636be8063fd67560960dc1e52b99321135a2d4746f48ec4b41" ]
+               ; evidence =
+                   [ "test/instruction_sources/metadata_tests.ml"
+                   ; "test/instruction_sources/snapshot_tests.ml"
+                   ; "test/instruction_sources/source_tests.ml"
+                   ; "test/instruction_sources/runtime_tests.ml"
+                   ; "test/agent_session/agent_authority_tests.ml"
+                   ; "test/agent_session/instruction_selection_tests.ml"
+                   ; "test/agent_session/instruction_selection_persistence_tests.ml"
+                   ; "test/chatml_composition/instruction_control_codec_tests.ml"
+                   ; "test/chatml_composition/instruction_control_tests.ml"
+                   ]
+               }
+         }
+       ]
+     @ [ { id = "libraries.installed"
+         ; title = "Installed ordinary capability sources and explicit export"
+         ; prerequisites = []
+         ; surfaces = shared
+         ; excerpts =
+             [ { path = "guide/chatml-installed-libraries.md"
+               ; heading = "# Installed ChatML libraries"
+               ; include_children = true
+               }
+             ]
+         ; review =
+             Audited
+               { excerpt_sha256 =
+                   [ "ec62b6e31cc33115038a141bdc89a67f2a45823c4ed41fad1ba29ee8841f9335" ]
+               ; evidence =
+                   [ "test/capability_sources/inventory_tests.ml"
+                   ; "test/capability_sources/export_tests.ml"
+                   ; "test/capability_sources/closure_tests.ml"
+                   ; "test/capability_sources_cli/main.ml"
+                   ; "test/lifecycle_helpers/goal_request_tests.ml"
+                   ; "lib/capability_sources/capability_source_inventory_tests.ml"
+                   ]
+               }
+         }
+       ]
+     @ [ { id = "runtime.goals"
+         ; title = "Scoped goal completion and exact Run terminal evidence"
+         ; prerequisites = []
+         ; surfaces = moderators
+         ; excerpts =
+             [ { path = "guide/chatml-authoring-goals.md"
+               ; heading = "# Scoped goal completion"
+               ; include_children = true
+               }
+             ]
+         ; review =
+             Audited
+               { excerpt_sha256 =
+                   [ "2b5ee324aa8f8057b37615e6249941ef98536d72c7fd1ea40f4ef64d2b7cd246" ]
+               ; evidence =
+                   [ "test/lifecycle_helpers/staging_tests.ml"
+                   ; "test/agent_session/run_action_scope_tests.ml"
+                   ; "test/agent_session/goal_run_tests.ml"
+                   ; "lib/chat_response/run_operations.ml"
+                   ; "lib/agent_session/goal_run_transition.ml"
+                   ]
+               }
+         }
+       ]
      @ [ { id = "runtime.runs"
          ; title = "Scoped run decisions and transactional receipt custody"
          ; prerequisites = []
@@ -3660,7 +3846,7 @@ let runtime_foundation ~sources =
          ; review =
              Audited
                { excerpt_sha256 =
-                   [ "b609f6eee543b5a8288e5100eef55658f7271a12aada185377042464a52a9228" ]
+                   [ "fae1bb6e30213297ae46479384763486aad53b340ae1c7a8e6f970c080021859" ]
                ; evidence =
                    [ "test/agent_session/run_action_scope_tests.ml"
                    ; "test/run_lifecycle_protocol_test.ml"

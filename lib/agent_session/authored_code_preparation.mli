@@ -90,6 +90,13 @@ val prepare
   -> (t, Agent_protocol.Error.t) Result.t
 
 val revision : t -> Prompt_revision.t
+
+(** Immutable Source classification from this SAME actual selected-code
+    Delegated_ui preparation. No startup/checkpoint, new resource owner or grant
+    is retained. Bind only with the genuine selected target/record; this metadata
+    does not authorize source access or replace current private checks. *)
+val prepared_revision : t -> Runtime_source_preparation.Prepared_revision.t
+
 val native : t -> Chat_response.Agent_runtime.t
 val definition : t -> Chat_response.Extension_compiler.definition option
 val managed : t -> Chat_response.Managed_tool_registry.t option

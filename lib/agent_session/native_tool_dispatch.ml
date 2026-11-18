@@ -20,7 +20,8 @@ let invalid_input =
     }
 ;;
 
-let create
+let create_current
+      ~execution_check
       ~input
       ~(capabilities : Operation_worker.Capabilities.t)
       ~declared
@@ -118,13 +119,14 @@ let create
         Chat_response.Runtime_request_scope.collect (fun () ->
           if Result.is_error value && Option.is_none request.rejection
           then
-            capabilities.with_invocation ~invocation (fun ~dispatched:_ ->
+            capabilities.with_invocation ~invocation (fun ~dispatched:_ ~capabilities:_ ->
               Ok invalid_input)
             |> require
           else
             (match run_native with
-             | None -> Native_tool_invocation.run
-             | Some run_native -> Native_tool_invocation.run_in_driver ~run_native)
+             | None -> Native_tool_invocation.run_current
+             | Some run_native -> Native_tool_invocation.run_in_driver_current ~run_native)
+              ~execution_check
               ~capabilities
               ~registry
               ~reference
@@ -156,4 +158,8 @@ let create
           }
   in
   D.{ for_fork = None; commit_call; prepare_call = None; validate_original; run }
+;;
+
+let create =
+  create_current ~execution_check:Native_tool_invocation.Execution_check.unavailable
 ;;

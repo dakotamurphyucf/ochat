@@ -22,6 +22,7 @@ those links are not a claim of website publication or runnable examples.
 | Add retrieval | [Search setup](../guide/search-and-indexing.md) | Embedding-backed agent retrieval is separate from website search. |
 | Refine prompts | [mp-refine-run](../bin/mp_refine_run.doc.md) | Local and paid strategies differ; the broad older library overview needs API reconciliation. |
 | Reuse additional components | [Embedding and caching](embedding.md) | Keep identity-bearing histories and host-owned resources. |
+| Plan recurrence timing | [Pure recurrence rules](recurrence_rules.doc.md) | Validated rules, bounded cursors and explicit zone coverage; hosts own loading and execution. |
 | Own host credential lifecycle | [Shared registry](credential_registry.doc.md), [metadata model](credential_registry_model.doc.md) | Epoch/revision fences, explicit ports, uncertainty and local disable; no provider endpoint is inferred. |
 | Integrate direct provider OAuth | [OAuth foundation](provider_oauth.doc.md) | Host-owned browser/device flow, verified candidate and registry adapter; live provider qualification remains separate. |
 | Store provider secret revisions | [Private-file secret store](provider_secret_store.doc.md) | Immutable revisions and private filesystem primitives; lifecycle authority remains with the host. |

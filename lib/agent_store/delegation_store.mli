@@ -45,7 +45,7 @@ type record = Delegation_record.t = private
   ; artifact_collection : artifact_collection option
   ; preservation :
       (unit Document_schema.Extension_carrier.t option[@sexp.opaque] [@equal.ignore])
-    (** Private complete v6 document preservation context. Stage and revocation
+    (** Private complete v7 document preservation context. Stage and revocation
         updates retain unknown fields and immutable original admission JSON. *)
   }
 [@@deriving equal, sexp_of]
@@ -88,16 +88,36 @@ val resolve : t -> Reference.t -> (record, Store_error.t) result
 (** The request digest must cover all user-selected creation inputs. Admission
     comes from trusted validation and may contain fresh candidate IDs on retry;
     only a New result accepts those candidates. A changed authored-tool identity
-    conflicts even if the request digest is unchanged; a generated reservation
-    cannot be relabeled as authored. Replay reestablishes durability
+    or exact captured recurrence/Goal origin conflicts even if the request digest is
+    unchanged; generated, authored-tool and captured recurrence source kinds
+    cannot be relabeled on retry. Replay reestablishes durability
     after a potentially ambiguous prior write acknowledgement.
     A new key can share an admitted revision under the ownership/digest invariant
     above; child and transaction IDs remain fresh. This does not load or authorize
     the artifact. A revoked replay remains revoked and cannot authorize a new
     side effect. Scan budgets include every existing intent and atomic temporary
-    entry, including released historical records. *)
+    entry, including released historical records.
+
+    For a new key, under this same mutex, [max_bytes] also admits the complete
+    framed candidate plus positive known remaining disposition growth of every
+    retained record beyond its actual bytes read. Each future payload must fit
+    the existing per-record profile. This preserves a future scan allowance for
+    those known dispositions under this same or a larger byte policy, exclusive
+    owner and supported schema. It is not a filesystem quota: temporary names
+    consume entry budget, and unrelated external bytes are not reserved.
+    A matching replay reflushes its original record without charging a new
+    candidate or allocating replacement identities; historical replay does not
+    retroactively promise unavailable disposition headroom.
+
+    [before_write] is a trusted, nonyielding check under ledger exclusion, after
+    the temporary frame is synced and immediately before the authoritative
+    rename. New reservations and matching reflushes invoke it. Conflicting keys
+    return their original record without invoking it. A raised exception leaves
+    the prior ledger intact and propagates to the caller. The check must not
+    enter the ledger or call an Actor. *)
 val reserve
-  :  t
+  :  ?before_write:(unit -> unit)
+  -> t
   -> key:Key.t
   -> request_sha256:string
   -> admission:Admission.t
@@ -115,6 +135,12 @@ val advance : t -> record -> stage -> (record, Store_error.t) result
 (** Revocation is terminal and first-writer-wins. It preserves every identity and
     attained stage, including records whose child installation is ambiguous. *)
 val revoke : t -> record -> revocation -> (record, Store_error.t) result
+
+(** A failed creation can revoke only an unfinished reservation. Read the current
+    stage under the ledger lock. If publication already reached [Linked], return
+    its retained record unchanged, including when the caller observed an older
+    stage. This does not authorize execution or retry. *)
+val revoke_unfinished : t -> record -> revocation -> (record, Store_error.t) result
 
 (** Startup only, with exclusive root ownership and no active creation calls.
     Revalidate the private reservation and remove only its exact transaction's
@@ -145,7 +171,7 @@ val with_records
     the complete artifact matches its admitted digest under bounded validation.
     Persist a collection intent before invoking [f]; future passes may finish
     partially deleted artifacts under that same irrevocable intent. This preserves
-    the current named v6 carrier and original admission reference hash.
+    the current named v7 carrier and original admission reference hash.
     Installed/linked children, unrevoked attempts and every parent revision remain
     protected. Protection is the union across all records: releasing one record
     never permits deletion of an artifact retained by another record. The

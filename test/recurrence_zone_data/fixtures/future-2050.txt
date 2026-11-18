@@ -1,0 +1,16 @@
+America/New_York     Sun Mar 13 06:59:59 2050 UT = Sun Mar 13 01:59:59 2050 EST isdst=0 gmtoff=-18000
+America/New_York     Sun Mar 13 07:00:00 2050 UT = Sun Mar 13 03:00:00 2050 EDT isdst=1 gmtoff=-14400
+America/New_York     Sun Nov  6 05:59:59 2050 UT = Sun Nov  6 01:59:59 2050 EDT isdst=1 gmtoff=-14400
+America/New_York     Sun Nov  6 06:00:00 2050 UT = Sun Nov  6 01:00:00 2050 EST isdst=0 gmtoff=-18000
+Australia/Lord_Howe  Sat Apr  2 14:59:59 2050 UT = Sun Apr  3 01:59:59 2050 +11 isdst=1 gmtoff=39600
+Australia/Lord_Howe  Sat Apr  2 15:00:00 2050 UT = Sun Apr  3 01:30:00 2050 +1030 isdst=0 gmtoff=37800
+Australia/Lord_Howe  Sat Oct  1 15:29:59 2050 UT = Sun Oct  2 01:59:59 2050 +1030 isdst=0 gmtoff=37800
+Australia/Lord_Howe  Sat Oct  1 15:30:00 2050 UT = Sun Oct  2 02:30:00 2050 +11 isdst=1 gmtoff=39600
+America/Santiago     Sun Apr  3 02:59:59 2050 UT = Sat Apr  2 23:59:59 2050 -03 isdst=1 gmtoff=-10800
+America/Santiago     Sun Apr  3 03:00:00 2050 UT = Sat Apr  2 23:00:00 2050 -04 isdst=0 gmtoff=-14400
+America/Santiago     Sun Sep  4 03:59:59 2050 UT = Sat Sep  3 23:59:59 2050 -04 isdst=0 gmtoff=-14400
+America/Santiago     Sun Sep  4 04:00:00 2050 UT = Sun Sep  4 01:00:00 2050 -03 isdst=1 gmtoff=-10800
+Europe/Dublin        Sun Mar 27 00:59:59 2050 UT = Sun Mar 27 00:59:59 2050 GMT isdst=1 gmtoff=0
+Europe/Dublin        Sun Mar 27 01:00:00 2050 UT = Sun Mar 27 02:00:00 2050 IST isdst=0 gmtoff=3600
+Europe/Dublin        Sun Oct 30 00:59:59 2050 UT = Sun Oct 30 01:59:59 2050 IST isdst=0 gmtoff=3600
+Europe/Dublin        Sun Oct 30 01:00:00 2050 UT = Sun Oct 30 01:00:00 2050 GMT isdst=1 gmtoff=0

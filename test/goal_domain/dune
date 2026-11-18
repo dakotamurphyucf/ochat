@@ -1,0 +1,5 @@
+(library
+ (name goal_domain_tests)
+ (libraries core digestif expect_test_helpers_core ochat.agent_protocol ochat.agent_session ochat.document_schema)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

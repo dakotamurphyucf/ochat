@@ -9,6 +9,8 @@ type t =
   ; invocations : P.Invocation.t E.Sequence.t option
   ; moderator_executions : P.Moderator_execution.t E.Sequence.t option
   ; inference_ledger : Inference_ledger.t E.Field.t option
+  ; policy_canonical_usage : Policy_canonical_usage.t E.Field.t option
+  ; goal_policy_contributions : Goal_policy_contributions.t E.Field.t option
   }
 
 let ledger_of_jsonaf ~limits json =
@@ -23,9 +25,34 @@ let ledger_of_jsonaf ~limits json =
     P.Error.invalid_request (Sexp.to_string_hum (Inference_ledger.Error.sexp_of_t error)))
 ;;
 
+let policy_canonical_usage_of_jsonaf json =
+  let open Result.Let_syntax in
+  let%bind document =
+    D.Document.inspect json ~limits:Policy_canonical_usage.limits
+    |> Result.map_error ~f:(fun error ->
+      P.Error.invalid_request (Sexp.to_string_hum (D.Error.sexp_of_t error)))
+  in
+  Policy_canonical_usage.of_document document
+;;
+
+let goal_policy_contributions_of_jsonaf json =
+  let open Result.Let_syntax in
+  let%bind document =
+    D.Document.inspect json ~limits:Goal_policy_contributions.limits
+    |> Result.map_error ~f:(fun error ->
+      P.Error.invalid_request (Sexp.to_string_hum (D.Error.sexp_of_t error)))
+  in
+  Goal_policy_contributions.of_document document
+;;
+
 module Capture = struct
   type evidence = t
-  type t = { mutable evidence : evidence }
+
+  type t =
+    { mutable evidence : evidence
+    ; previous_policy : Policy_canonical_usage.t E.Field.t option
+    ; previous_book : Goal_policy_contributions.t E.Field.t option
+    }
 
   let create ?previous ~limits () =
     let evidence =
@@ -37,9 +64,18 @@ module Capture = struct
         ; invocations = None
         ; moderator_executions = None
         ; inference_ledger = None
+        ; policy_canonical_usage = None
+        ; goal_policy_contributions = None
         }
     in
-    { evidence }
+    (* Optional fields absent from this invocation must not keep a prior
+       component alive in its finished generation. Prior tokens are read-only
+       candidates until the actual field decoder visits their complete JSON. *)
+    { evidence =
+        { evidence with policy_canonical_usage = None; goal_policy_contributions = None }
+    ; previous_policy = evidence.policy_canonical_usage
+    ; previous_book = evidence.goal_policy_contributions
+    }
   ;;
 
   let sequence t json ~get ~set ~decode =
@@ -90,6 +126,37 @@ module Capture = struct
     Result.map result ~f:(fun admitted ->
       t.evidence <- { t.evidence with inference_ledger = Some admitted };
       E.Field.value admitted)
+  ;;
+
+  let component t json ~previous ~decode ~set =
+    let result =
+      match previous with
+      | None -> E.Field.admit ~decode json
+      | Some previous -> E.Field.readmit previous ~json
+    in
+    Result.map result ~f:(fun admitted ->
+      t.evidence <- set t.evidence admitted;
+      E.Field.value admitted)
+  ;;
+
+  let policy_canonical_usage t json =
+    component
+      t
+      json
+      ~previous:(Option.first_some t.evidence.policy_canonical_usage t.previous_policy)
+      ~decode:policy_canonical_usage_of_jsonaf
+      ~set:(fun evidence admitted ->
+        { evidence with policy_canonical_usage = Some admitted })
+  ;;
+
+  let goal_policy_contributions t json =
+    component
+      t
+      json
+      ~previous:(Option.first_some t.evidence.goal_policy_contributions t.previous_book)
+      ~decode:goal_policy_contributions_of_jsonaf
+      ~set:(fun evidence admitted ->
+        { evidence with goal_policy_contributions = Some admitted })
   ;;
 
   let finish t = t.evidence

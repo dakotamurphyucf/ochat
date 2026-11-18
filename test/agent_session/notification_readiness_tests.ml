@@ -34,7 +34,7 @@ let%expect_test
       { parent with
         launch =
           Some
-            { owner = Invocation root.context.id
+            { owner = P.Job.Birth_parent.callback (Invocation root.context.id)
             ; parent_job = None
             ; nested_depth = 0
             ; moderator_source = None
@@ -92,7 +92,7 @@ let%expect_test
       { parent with
         launch =
           Some
-            { owner = Invocation completed.context.id
+            { owner = P.Job.Birth_parent.callback (Invocation completed.context.id)
             ; parent_job = None
             ; nested_depth = 0
             ; moderator_source = None

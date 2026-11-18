@@ -1,0 +1,3 @@
+type state = {remaining:int}
+val initial : state
+val step : fun(state) -> {state:state; decision:json Lifecycle.component}

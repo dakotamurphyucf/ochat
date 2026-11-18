@@ -282,6 +282,26 @@ let%expect_test
   let content = field orientation "content" in
   require_json (`Array []) (field content "selected_tools");
   let guides = field content "guides" |> Jsonaf.list_exn in
+  assert (
+    List.exists guides ~f:(fun guide ->
+      List.exists
+        (field guide "topic_ids" |> Jsonaf.list_exn)
+        ~f:(fun id -> String.equal (Jsonaf.string_exn id) "runtime.recurrence")));
+  let recurrence =
+    query
+      (request
+         ~task:"one_off_script"
+         ~features:[ "recurrences" ]
+         ~max_tokens:1_000_000
+         "prepare")
+  in
+  assert (not (has_error recurrence));
+  require_json `True (field recurrence "complete");
+  assert (
+    List.exists (items recurrence) ~f:(fun item ->
+      match Jsonaf.member "topic_id" item with
+      | Some (`String "runtime.recurrence") -> true
+      | _ -> false));
   (* Follow every advertised direct route through real surface/dependency checks. *)
   List.iter guides ~f:(fun guide ->
     let task = field guide "suggested_task" |> Jsonaf.string_exn in
@@ -537,13 +557,36 @@ let%expect_test
        assert (
          List.length (Chat_response.Authoring_reference_index.receipts index)
          = List.length state.invocations);
-       assert (
-         Result.is_error (State.upgrade_schema { restored with schema_version = 19 }));
-       assert (List.equal I.equal state.invocations restored.invocations);
-       assert (
-         Result.is_error (State.upgrade_schema { restored with schema_version = 18 }));
-       let legacy =
+       (* Isolate authoring-reference migration from the later child-accounting
+          fields, so rejection still exercises the intended reference guard. *)
+       let legacy_state =
          { restored with
+           delegated_usage = None
+         ; child_contributions = None
+         ; goal_descendants = None
+         ; policy_canonical_usage = None
+         ; goal_policy_contributions = None
+         }
+       in
+       let require_migration state ~message =
+         match State.upgrade_schema state with
+         | Error error ->
+           [%test_eq: Agent_protocol.Error.code] Migration_required error.code;
+           [%test_eq: string] message error.message
+         | Ok _ -> failwith "historical authoring evidence bypassed migration"
+       in
+       require_migration
+         { legacy_state with schema_version = 19 }
+         ~message:"authoring publication context requires session schema 20";
+       assert (List.equal I.equal state.invocations restored.invocations);
+       require_migration
+         { legacy_state with
+           schema_version = 18
+         ; conversation = { restored.conversation with authoring_publication = None }
+         }
+         ~message:"invocation authoring references require session schema 19";
+       let legacy =
+         { legacy_state with
            schema_version = 18
          ; invocations = List.map restored.invocations ~f:without_reference
          ; conversation = { restored.conversation with authoring_publication = None }

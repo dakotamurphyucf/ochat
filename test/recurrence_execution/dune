@@ -1,0 +1,7 @@
+(copy_files ../recurrence_due/due_support.ml)
+
+(library
+ (name recurrence_execution_tests)
+ (libraries core expect_test_helpers_core ochat.agent_session ochat.agent_protocol ochat.document_schema ochat.recurrence_rules)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

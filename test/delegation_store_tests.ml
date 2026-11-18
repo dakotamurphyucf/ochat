@@ -63,6 +63,8 @@ let admission () =
     ; parent_revision_id = P.Id.Prompt_revision.create ()
     ; parent_stop_epoch = None
     ; authored_tool = None
+    ; goal_origin = None
+    ; captured_recurrence = None
     ; authority_sha256 = digest "parent policy and effective resource allowance"
     ; capability_pins = [ "read_file", digest "registered parent root" ]
     ; lifetime = Owned
@@ -71,8 +73,9 @@ let admission () =
     }
 ;;
 
-let reserve ledger key admission =
+let reserve ?before_write ledger key admission =
   D.reserve
+    ?before_write
     ledger
     ~key
     ~request_sha256:(digest "complete creation request")
@@ -129,7 +132,24 @@ let%expect_test "authored delegation identity survives restart and cannot change
       let store = create env sw root in
       let ledger = S.delegations store in
       let generated_key = key "generated" in
-      let generated = reserve ledger generated_key (admission ()) |> record in
+      let generated_candidate = admission () in
+      let exception Authority_changed in
+      let deny_write () = raise Authority_changed in
+      let denied () =
+        match
+          reserve ~before_write:deny_write ledger generated_key generated_candidate
+        with
+        | exception Authority_changed -> ()
+        | _ -> failwith "revoked authority published a delegation frame"
+      in
+      denied ();
+      assert (Option.is_none (D.find ledger generated_key |> store_ok));
+      let generated = reserve ledger generated_key generated_candidate |> record in
+      denied ();
+      assert (
+        Option.exists
+          (D.find ledger generated_key |> store_ok)
+          ~f:(D.equal_record generated));
       let generated_reference = D.reference generated in
       let authored_key = key "authored" in
       let origin : D.Admission.authored_tool =
@@ -141,7 +161,7 @@ let%expect_test "authored delegation identity survives restart and cannot change
       let authored = reserve ledger authored_key candidate |> record in
       let reference = D.reference authored in
       let conflict key candidate =
-        match reserve ledger key candidate with
+        match reserve ~before_write:deny_write ledger key candidate with
         | Conflict _ -> ()
         | New _ | Replay _ -> failwith "origin substitution did not conflict"
       in
@@ -188,8 +208,8 @@ let%expect_test "authored delegation identity survives restart and cannot change
         in
         let original = Eio.Path.load path in
         let document = read_document path in
-        assert (Int.equal (Schema.Document.version document) 6);
-        List.iter [ 5; 7 ] ~f:(fun version ->
+        assert (Int.equal (Schema.Document.version document) 7);
+        List.iter [ 5; 8 ] ~f:(fun version ->
           rewrite_document
             path
             (replace_member
@@ -212,7 +232,19 @@ let%expect_test "authored delegation identity survives restart and cannot change
         D.equal_record
           scoped
           (reserve ledger scoped_key { retry with lifetime = scope } |> record));
-      let revoked = D.revoke ledger authored Parent_stopped |> store_ok in
+      let linked =
+        List.fold
+          [ D.Artifact_installed; Child_installed; Linked ]
+          ~init:generated
+          ~f:(fun current stage -> D.advance ledger current stage |> store_ok)
+      in
+      assert (
+        D.equal_record
+          linked
+          (D.revoke_unfinished ledger generated Admission_failed |> store_ok));
+      assert (D.equal_record linked (D.resolve ledger generated_reference |> store_ok));
+      let revoked = D.revoke_unfinished ledger authored Parent_stopped |> store_ok in
+      assert (Option.equal D.equal_revocation revoked.revocation (Some Parent_stopped));
       assert (
         Option.equal
           D.Admission.equal_authored_tool
@@ -243,14 +275,14 @@ let%expect_test "authored delegation identity survives restart and cannot change
   print_endline
     "downgraded frames and malformed origins reject; generated reference unchanged";
   print_endline
-    "v6 retains one-off invocation ownership; scope changes and version substitution \
+    "v7 retains one-off invocation ownership; scope changes and version substitution \
      reject";
   [%expect
     {|
     v4 retains authored name/source and original instance across retry/restart/revocation
     changed name/source, generated/authored substitution and forged references reject
     downgraded frames and malformed origins reject; generated reference unchanged
-    v6 retains one-off invocation ownership; scope changes and version substitution reject
+    v7 retains one-off invocation ownership; scope changes and version substitution reject
     |}]
 ;;
 
@@ -915,7 +947,7 @@ let%expect_test
     |}]
 ;;
 
-let%expect_test "v6 captures independent target and binds complete original admission" =
+let%expect_test "v7 captures independent target and binds complete original admission" =
   let module Schema = Document_schema in
   let module Target = Inference.Request.Target in
   let schema_ok result =
@@ -967,7 +999,7 @@ let%expect_test "v6 captures independent target and binds complete original admi
         |> Agent_store.Document_record.document
       in
       let document = read_document () in
-      [%test_eq: int] 6 (Schema.Document.version document);
+      [%test_eq: int] 7 (Schema.Document.version document);
       let replace_member json name update =
         match json with
         | `Object fields ->
@@ -1029,10 +1061,10 @@ let%expect_test "v6 captures independent target and binds complete original admi
       assert (String.equal admission_bytes (exact_admission (read_document ())));
       S.close store |> store_ok));
   print_endline
-    "v6 target survives parent changes; complete future admission identity and bytes \
+    "v7 target survives parent changes; complete future admission identity and bytes \
      retained";
   [%expect
-    {| v6 target survives parent changes; complete future admission identity and bytes retained |}]
+    {| v7 target survives parent changes; complete future admission identity and bytes retained |}]
 ;;
 
 let%expect_test "delegation frame and original scoped owner precede current admission" =

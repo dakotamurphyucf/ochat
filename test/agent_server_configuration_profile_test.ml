@@ -284,7 +284,7 @@ let%expect_test "configuration RPC selects a declared same-owner profile at next
                        (Chat_response.Root_binding.create (RT.Session.create ~sw))
                      { worker_config with
                        inference_context = initial
-                     ; inference_identity = Inference_host.identity host
+                     ; inference_identity = (fun _ -> Inference_host.identity host)
                      ; tool_tbl
                      ; tools =
                          [ Openai.Responses.Request.Tool.Function

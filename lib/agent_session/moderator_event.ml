@@ -5,6 +5,9 @@ module M = Chat_response.Moderator_manager
 type claim =
   snapshot:(unit -> (Session.Moderator_state.Identity_snapshot.t, P.Error.t) result)
   -> (executing:P.Moderator_execution.t
+      -> policy_caller:Delegated_policy_caller.t option
+      -> model_jobs:Model_job_admission.t
+      -> allocate_inference:Inference_allocation.Port.t
       -> retirement_reason:string option
       -> event:Session.Snapshot.t
       -> execute:Native_tool_invocation.executor
@@ -25,6 +28,7 @@ let run
       ~prepare_decision
       ~event
       ~claim
+      ?model_recipes
       ?script_tools
       ?run_actions
       ~manager
@@ -49,6 +53,9 @@ let run
       claim
         ~snapshot:(fun () -> M.identity_snapshot manager |> Result.map_error ~f:failed)
         (fun ~(executing : P.Moderator_execution.t)
+          ~policy_caller
+          ~model_jobs
+          ~allocate_inference:_
           ~retirement_reason
           ~event:selected
           ~execute
@@ -73,6 +80,9 @@ let run
                fun () -> outcome := Some Chat_response.Moderation.Outcome.empty)
              |> Result.map_error ~f:failed
            | None ->
+             let selected_model_recipes =
+               Option.map model_recipes ~f:(fun provide -> provide model_jobs)
+             in
              let%bind run_actions =
                match run_actions with
                | None -> Ok None
@@ -133,6 +143,7 @@ let run
                     match script_tools with
                     | Some script_tools ->
                       Script_tool_calls.with_event
+                        ?policy_caller
                         script_tools
                         ~definition
                         ~execute
@@ -212,6 +223,7 @@ let run
                     (match event with
                      | Queued ->
                        M.handle_next_event_entries_transactional
+                         ?model_recipes:selected_model_recipes
                          ?jobs
                          ?subscriptions
                          ?schedules
@@ -236,6 +248,7 @@ let run
                          |> Session.Snapshot.of_value
                        in
                        M.handle_event_entries_transactional
+                         ?model_recipes:selected_model_recipes
                          ?jobs
                          ?subscriptions
                          ?schedules
@@ -271,6 +284,9 @@ type delegated_claim =
   notifications:(unit -> string list)
   -> snapshot:(unit -> (Session.Moderator_state.Identity_snapshot.t, P.Error.t) result)
   -> (executing:P.Moderator_execution.t
+      -> policy_caller:Delegated_policy_caller.t option
+      -> model_jobs:Model_job_admission.t
+      -> allocate_inference:Inference_allocation.Port.t
       -> event:Session.Snapshot.t
       -> execute:Native_tool_invocation.executor
       -> commit:
@@ -289,6 +305,7 @@ type delegated_result =
 let run_delegated
       ~event
       ~(claim : delegated_claim)
+      ?model_recipes
       ?script_tools
       ?run_actions
       ~manager
@@ -324,10 +341,19 @@ let run_delegated
       claim
         ~notifications:(fun () -> !notifications)
         ~snapshot
-        (fun ~executing ~event ~execute ~commit ->
+        (fun ~executing
+          ~policy_caller
+          ~model_jobs
+          ~allocate_inference
+          ~event
+          ~execute
+          ~commit ->
            ran := true;
            f
              ~executing
+             ~policy_caller
+             ~model_jobs
+             ~allocate_inference
              ~retirement_reason:None
              ~event
              ~execute
@@ -344,6 +370,7 @@ let run_delegated
       ~prepare_decision
       ~event:(Ordinary event)
       ~claim:ordinary_claim
+      ?model_recipes
       ?script_tools
       ?run_actions
       ~manager
@@ -369,6 +396,13 @@ module Lifecycle = struct
     | Completed
     | Failed of P.Error.t
 
+  module Status = struct
+    type t = state =
+      | Ready
+      | Completed
+      | Failed of P.Error.t
+  end
+
   type t =
     { manager : M.t
     ; event : Chat_response.Moderation.Event.t
@@ -392,6 +426,8 @@ module Lifecycle = struct
     }
   ;;
 
+  let status t = Atomic.get t.state
+
   let pending t =
     match Atomic.get t.state with
     | Ready -> true
@@ -412,9 +448,24 @@ module Lifecycle = struct
     | Internal_event _ -> false
   ;;
 
+  let resume_pending t =
+    pending t
+    &&
+    match t.event with
+    | Session_resume -> true
+    | Session_start
+    | Turn_start
+    | Item_appended _
+    | Pre_tool_call _
+    | Post_tool_response _
+    | Turn_end
+    | Internal_event _ -> false
+  ;;
+
   let run
         t
         ~claim
+        ?model_recipes
         ?script_tools
         ?run_actions
         ~history
@@ -438,6 +489,7 @@ module Lifecycle = struct
                run_ordinary
                  ~event:t.event
                  ~claim:(claim ~event:t.event)
+                 ?model_recipes
                  ?script_tools
                  ?run_actions
                  ~manager:t.manager
@@ -480,7 +532,15 @@ let foreground_outcome (outcome : Chat_response.Moderation.Outcome.t) =
   }
 ;;
 
-let foreground_handlers ?script_tools ~capabilities ~manager ~session_meta ~now () =
+let foreground_handlers
+      ?model_recipes
+      ?script_tools
+      ~capabilities
+      ~manager
+      ~session_meta
+      ~now
+      ()
+  =
   let open Result.Let_syntax in
   let%bind definition =
     M.extension_definition manager
@@ -516,6 +576,7 @@ let foreground_handlers ?script_tools ~capabilities ~manager ~session_meta ~now 
          run_ordinary
            ~event
            ~claim:(capabilities.with_moderator_event ~event)
+           ?model_recipes
            ?script_tools
            ~run_actions:capabilities.run_actions
            ~manager
@@ -552,6 +613,7 @@ let foreground_handlers ?script_tools ~capabilities ~manager ~session_meta ~now 
              match script_tools with
              | Some script_tools ->
                Moderator_observation.drain_foreground_with_tools
+                 ?model_recipes
                  ~max_observations:1
                  ~script_tools
                  ~definition
@@ -559,6 +621,7 @@ let foreground_handlers ?script_tools ~capabilities ~manager ~session_meta ~now 
                  ~observer
              | None ->
                Moderator_observation.drain_idle
+                 ?model_recipes
                  ~max_observations:1
                  ~claim:(capabilities.with_next_moderator_observation ~observer)
                  ~on_tool_call:(fun ~name:_ ~args:_ ->
@@ -583,6 +646,7 @@ let foreground_handlers ?script_tools ~capabilities ~manager ~session_meta ~now 
                  ~prepare_decision:ignore
                  ~event:Queued
                  ~claim:capabilities.with_queued_moderator_event
+                 ?model_recipes
                  ?script_tools
                  ~run_actions:capabilities.run_actions
                  ~manager

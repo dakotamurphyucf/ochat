@@ -10,6 +10,9 @@ type claim =
   snapshot:
     (unit -> (Session.Moderator_state.Identity_snapshot.t, Agent_protocol.Error.t) result)
   -> (executing:Agent_protocol.Moderator_execution.t
+      -> policy_caller:Delegated_policy_caller.t option
+      -> model_jobs:Model_job_admission.t
+      -> allocate_inference:Inference_allocation.Port.t
       -> retirement_reason:string option
       -> event:Session.Snapshot.t
       -> execute:Native_tool_invocation.executor
@@ -44,6 +47,9 @@ type claim =
     wakeup polling, deadlines, interactive permission ownership or public tools. *)
 val run_queued_idle
   :  claim:claim
+  -> ?model_recipes:
+       (Model_job_admission.t
+        -> Chat_response.Moderation.Capabilities.model_recipe Core.String.Map.t)
   -> ?script_tools:Script_tool_calls.t
   -> ?run_actions:
        (Agent_protocol.Moderator_execution.t
@@ -65,6 +71,9 @@ val run_queued_idle
 val run_ordinary
   :  event:Chat_response.Moderation.Event.t
   -> claim:claim
+  -> ?model_recipes:
+       (Model_job_admission.t
+        -> Chat_response.Moderation.Capabilities.model_recipe Core.String.Map.t)
   -> ?script_tools:Script_tool_calls.t
   -> ?run_actions:
        (Agent_protocol.Moderator_execution.t
@@ -83,6 +92,9 @@ type delegated_claim =
        (unit
         -> (Session.Moderator_state.Identity_snapshot.t, Agent_protocol.Error.t) result)
   -> (executing:Agent_protocol.Moderator_execution.t
+      -> policy_caller:Delegated_policy_caller.t option
+      -> model_jobs:Model_job_admission.t
+      -> allocate_inference:Inference_allocation.Port.t
       -> event:Session.Snapshot.t
       -> execute:Native_tool_invocation.executor
       -> commit:
@@ -109,6 +121,9 @@ type delegated_result =
 val run_delegated
   :  event:Chat_response.Moderation.Event.t
   -> claim:delegated_claim
+  -> ?model_recipes:
+       (Model_job_admission.t
+        -> Chat_response.Moderation.Capabilities.model_recipe Core.String.Map.t)
   -> ?script_tools:Script_tool_calls.t
   -> ?run_actions:
        (Agent_protocol.Moderator_execution.t
@@ -127,6 +142,18 @@ val run_delegated
 module Lifecycle : sig
   type t
 
+  module Status : sig
+    type t =
+      | Ready
+      | Completed
+      | Failed of Agent_protocol.Error.t
+  end
+
+  (** Nonblocking factual snapshot of this SAME coordinator. It grants no
+      callback, source/checkpoint installation or execution authority. Current
+      Manager and Actor checks remain required after this snapshot. *)
+  val status : t -> Status.t
+
   type outcome =
     | Unavailable
     | Activated of Chat_response.Moderation.Outcome.t
@@ -142,6 +169,10 @@ module Lifecycle : sig
       is never an authored no-input start. *)
   val startup_pending : t -> bool
 
+  (** Genuine unconsumed Session_resume lifecycle. Fresh Session_start and
+      completed, failed or interrupted activation are unavailable. *)
+  val resume_pending : t -> bool
+
   (** Concurrent callers serialize outside the actor through the shared execution
       coordinator. Recursive/cyclic activation fails before waiting. Unavailable
       actors leave activation ready for a later runnable boundary; successful
@@ -156,6 +187,9 @@ module Lifecycle : sig
   val run
     :  t
     -> claim:(event:Chat_response.Moderation.Event.t -> claim)
+    -> ?model_recipes:
+         (Model_job_admission.t
+          -> Chat_response.Moderation.Capabilities.model_recipe Core.String.Map.t)
     -> ?script_tools:Script_tool_calls.t
     -> ?run_actions:
          (Agent_protocol.Moderator_execution.t
@@ -167,6 +201,13 @@ module Lifecycle : sig
     -> unit
     -> (outcome, Agent_protocol.Error.t) result
 end
+
+(** Remove requests already owned by the durable compaction scheduler, including
+    a dependent turn. Leaves notifications and all other outcome DATA unchanged.
+    Both legacy and v1 foreground adapters use this same consumption policy. *)
+val foreground_outcome
+  :  Chat_response.Moderation.Outcome.t
+  -> Chat_response.Moderation.Outcome.t
 
 (** Bind ordinary events, queued events and deferred observations to an actual
     foreground worker. The installed checkpoint/source must already match the
@@ -180,7 +221,10 @@ end
     transaction retires unadmitted turns and settles an actual end-session action.
     Install these handlers before emitting the submitted-item event. *)
 val foreground_handlers
-  :  ?script_tools:Script_tool_calls.t
+  :  ?model_recipes:
+       (Model_job_admission.t
+        -> Chat_response.Moderation.Capabilities.model_recipe Core.String.Map.t)
+  -> ?script_tools:Script_tool_calls.t
   -> capabilities:Operation_worker.Capabilities.t
   -> manager:Chat_response.Moderator_manager.t
   -> session_meta:Jsonaf.t

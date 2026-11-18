@@ -13,7 +13,7 @@ let schema =
 |}
 ;;
 
-let fixture () =
+let fixture ?inference_provenance () =
   let subscription =
     Subscription_transaction_tests.make_subscription (invocation_fixture ())
   in
@@ -38,7 +38,7 @@ let fixture () =
         }
     }
   in
-  subscription, I.create context ~subscription |> protocol_ok
+  subscription, I.create ?inference_provenance context ~subscription |> protocol_ok
 ;;
 
 let report value = `Object [ "value", `String value; "count", `Number "1" ]
@@ -241,7 +241,15 @@ let%expect_test
   let module State = Agent_session.Session_state in
   let module Delta = Agent_session.Session_delta in
   with_actor_workspace (fun _ workspace_instance ->
-    let subscription, initial = fixture () in
+    let source =
+      P.Run_source.create
+        ~observer:Subscription_transaction_tests.source
+        ~generation:0
+        ~installation_epoch:1L
+      |> protocol_ok
+    in
+    let provenance = I.Provenance.create ~source ~origin:(Some Unbound) |> protocol_ok in
+    let subscription, initial = fixture ~inference_provenance:provenance () in
     let state =
       actor_state ~workspace_instance ~liveness:Detached ~start_immediately:false
     in
@@ -387,4 +395,93 @@ let%expect_test "administrative candidates cannot discard ingress retry receipts
        assert_same_session_snapshot before (A.state actor |> protocol_ok);
        assert_same_session_snapshot before (Agent_session.Memory_backend.state backend));
   [%expect {| ("administrative receipt removal" Conflict false) |}]
+;;
+
+let%expect_test
+    "ingress provenance distinguishes absent, unavailable and explicit originals"
+  =
+  Mirage_crypto_rng_unix.use_default ();
+  let source =
+    P.Run_source.create
+      ~observer:Subscription_transaction_tests.source
+      ~generation:0
+      ~installation_epoch:1L
+    |> protocol_ok
+  in
+  let missing_subscription, missing = fixture () in
+  assert (Option.is_none missing.inference_provenance);
+  assert (
+    not
+      (List.Assoc.mem
+         (match I.to_jsonaf missing with
+          | `Object fields -> fields
+          | _ -> assert false)
+         ~equal:String.equal
+         "inference_provenance"));
+  let unavailable = I.Provenance.create ~source ~origin:None |> protocol_ok in
+  let unbound = I.Provenance.create ~source ~origin:(Some Unbound) |> protocol_ok in
+  List.iter [ unavailable; unbound ] ~f:(fun provenance ->
+    let subscription, initial = fixture ~inference_provenance:provenance () in
+    assert (
+      I.Provenance.equal
+        provenance
+        (I.Provenance.of_jsonaf (I.Provenance.to_jsonaf provenance) |> protocol_ok));
+    assert (I.equal initial (restored initial));
+    let raw = I.to_jsonaf initial in
+    let set = Goal_catalog_tests.set in
+    let changed =
+      I.of_jsonaf
+        (set
+           raw
+           "inference_provenance"
+           (I.Provenance.to_jsonaf
+              (if I.Provenance.equal provenance unavailable then unbound else unavailable)))
+      |> protocol_ok
+    in
+    assert (
+      Result.is_error
+        (I.validate_transition ~subscription ~previous:(Some initial) changed));
+    let removed = I.of_jsonaf (set raw "inference_provenance" `Null) |> protocol_ok in
+    assert (
+      Result.is_error
+        (I.validate_transition ~subscription ~previous:(Some initial) removed));
+    let revoked = I.revoke initial ~reason:"closed" |> protocol_ok in
+    I.validate_transition ~subscription ~previous:(Some initial) revoked |> protocol_ok;
+    assert (
+      Option.equal
+        I.Provenance.equal
+        initial.inference_provenance
+        revoked.inference_provenance));
+  let retrofit =
+    I.of_jsonaf
+      (Goal_catalog_tests.set
+         (I.to_jsonaf missing)
+         "inference_provenance"
+         (I.Provenance.to_jsonaf unbound))
+    |> protocol_ok
+  in
+  assert (
+    Result.is_error
+      (I.validate_transition
+         ~subscription:missing_subscription
+         ~previous:(Some missing)
+         retrofit));
+  let raw = I.Provenance.to_jsonaf unavailable in
+  let fields =
+    match raw with
+    | `Object fields -> fields
+    | _ -> assert false
+  in
+  let without_origin =
+    `Object (List.filter fields ~f:(fun (name, _) -> not (String.equal name "origin")))
+  in
+  assert (Result.is_error (I.Provenance.of_jsonaf without_origin));
+  assert (
+    Result.is_error
+      (I.Provenance.of_jsonaf
+         (Goal_catalog_tests.set raw "future" (`String (String.make 4096 'x')))));
+  print_endline
+    "historical absence is not captured null; immutable originals and complete bounds";
+  [%expect
+    {| historical absence is not captured null; immutable originals and complete bounds |}]
 ;;

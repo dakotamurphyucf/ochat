@@ -360,6 +360,7 @@ let create
          ~close:(fun () -> D.Websocket_session.close session))
   in
   Inference_runtime.Adapter.create
+    ~supports_request_guidance:true
     ~id:"openai.responses"
     ~limits
     ~bind

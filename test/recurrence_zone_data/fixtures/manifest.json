@@ -1,0 +1,44 @@
+[
+  {
+    "zone": "America/New_York",
+    "file": "America_New_York.tzif",
+    "bytes": 1744,
+    "sha256": "d7f2206b3a45989fc9ad63d558922532fa7352280d5f87176bf1db79cb1d1fa9"
+  },
+  {
+    "zone": "Australia/Lord_Howe",
+    "file": "Australia_Lord_Howe.tzif",
+    "bytes": 692,
+    "sha256": "f368bd25659c0293d02bb79ec7dac7d5b73a92dffafce14b4dd2ffb8ba11aada"
+  },
+  {
+    "zone": "Pacific/Apia",
+    "file": "Pacific_Apia.tzif",
+    "bytes": 407,
+    "sha256": "dc70c47c80ab2c87a1ab754bab8febfc38508059e249dfe55e73a3759808ea14"
+  },
+  {
+    "zone": "America/Santiago",
+    "file": "America_Santiago.tzif",
+    "bytes": 1354,
+    "sha256": "fd006953c2b442a2e1e66db2a967dd932a4824390f01cddd9c801ce63450c715"
+  },
+  {
+    "zone": "Asia/Gaza",
+    "file": "Asia_Gaza.tzif",
+    "bytes": 2950,
+    "sha256": "f8f0bffe018e0da0c682fe4b2f31fba6d34b6cd752b4f931198e0b99e6ef70d5"
+  },
+  {
+    "zone": "Europe/Dublin",
+    "file": "Europe_Dublin.tzif",
+    "bytes": 1496,
+    "sha256": "11c00336e02f1318fe764ab29467c5f2afefbfffa644fa8dd24f5b083b495b71"
+  },
+  {
+    "zone": "Etc/UTC",
+    "file": "Etc_UTC.tzif",
+    "bytes": 111,
+    "sha256": "fddce1e648a1732ac29afd9a16151b2973cdf082e7ec0c690f7e42be6b598b93"
+  }
+]

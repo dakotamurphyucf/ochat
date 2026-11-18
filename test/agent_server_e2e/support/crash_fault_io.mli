@@ -8,6 +8,8 @@ type boundary =
   | Before_rename
   | After_rename
   | Before_directory_sync
+  | Before_stat
+  | Before_open_in
 
 (** [wrap env ~matches ~boundary ~reached] delegates IO to [env], invoking
     [reached] at the selected operation on matching paths. [After_bytes n]
@@ -18,7 +20,11 @@ type boundary =
     [Before_directory_sync] invokes the callback after opening a matching
     directory as a read-only file, verifying its kind and native descriptor,
     and before the caller can obtain its descriptor for sync.
-    That callback may return to observe a subsequent successful replacement. *)
+    That callback may return to observe a subsequent successful replacement.
+    [Before_stat] pauses before querying a matching path, including a missing
+    archive marker; the callback may return to resume the real read.
+    [Before_open_in] pauses before opening a matching real file; it can select
+    one read independently of any preceding internal stat checks. *)
 val wrap
   :  Eio_unix.Stdenv.base
   -> matches:(string -> bool)

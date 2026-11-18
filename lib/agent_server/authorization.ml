@@ -17,6 +17,12 @@ let required_scope = function
   | Protocol_ping _
   | Server_info
   | Server_health _ -> None
+  | Instructions request ->
+    Some
+      (match request with
+       | Agent_protocol.Instruction_control.Request.Inspect _ | Refresh _ | Capture _ ->
+         Agent_protocol.Scope.View_session_transcript
+       | Activate _ | Remove _ -> Send_messages)
   | Session_configuration_get _ -> Some Agent_protocol.Scope.View_session_transcript
   | Session_configuration_update _ -> Some Agent_protocol.Scope.Send_messages
   | Session_inference_summary _ -> None
@@ -31,6 +37,8 @@ let required_scope = function
   | Session_search_navigate _
   | Session_runs _
   | Session_run _
+  | Recurrence_query _
+  | Goal_query _
   | Session_pending_inputs _
   | Session_pending_input _
   | Session_list _
@@ -52,6 +60,8 @@ let required_scope = function
   | Session_start _
   | Session_resume _
   | Session_run_start _
+  | Recurrence_control _
+  | Goal_control _
   | Session_send_message _
   | Session_cancel_pending_input _
   | Session_replace_pending_input _
@@ -154,6 +164,14 @@ let authorize ?(installed_authoring = false) principal command =
       (Agent_protocol.Error.create
          Permission_denied
          ~message:"pending controls require transcript visibility"
+         ~retryable:false
+         ())
+  | (Agent_protocol.Command.Recurrence_control _ | Agent_protocol.Command.Goal_control _)
+    when not (Agent_protocol.Principal.has_scope principal View_session_transcript) ->
+    Error
+      (Agent_protocol.Error.create
+         Permission_denied
+         ~message:"Operator controls require transcript visibility"
          ~retryable:false
          ())
   | Agent_protocol.Command.Activity_list _

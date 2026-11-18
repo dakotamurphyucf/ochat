@@ -57,10 +57,25 @@ let bind ~source ~public ~reference ~capabilities =
   { source; reference; capabilities }
 ;;
 
-let resolve t ~(record : Agent_store.Delegation_store.record) ~public ~current =
+let check_current t ~public ~current =
   let open Result.Let_syntax in
   let%bind () =
-    match record.admission.authored_tool with
+    wrapper ~source:t.source ~public ~reference:t.reference ~capabilities:current
+  in
+  match String.equal (C.fingerprint current) (C.fingerprint t.capabilities) with
+  | true -> Ok ()
+  | false ->
+    denied "delegation.authored_resources_changed: private resources need fresh admission"
+;;
+
+let resolve t ~(record : Agent_store.Delegation_store.record) ~public ~current =
+  let open Result.Let_syntax in
+  let%bind source =
+    Agent_store.Delegation_store.Admission.authored_source record.admission
+    |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
+  in
+  let%bind () =
+    match source with
     | Some origin
       when String.equal origin.name (Source.identity t.source).tool_name
            && String.equal origin.source_sha256 (Source.fingerprint t.source) -> Ok ()
@@ -68,11 +83,6 @@ let resolve t ~(record : Agent_store.Delegation_store.record) ~public ~current =
       denied
         "delegation.authored_source_changed: record differs from authored declaration"
   in
-  let%bind () =
-    wrapper ~source:t.source ~public ~reference:t.reference ~capabilities:current
-  in
-  match String.equal (C.fingerprint current) (C.fingerprint t.capabilities) with
-  | true -> Ok current
-  | false ->
-    denied "delegation.authored_resources_changed: private resources need fresh admission"
+  let%map () = check_current t ~public ~current in
+  current
 ;;

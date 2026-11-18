@@ -2,6 +2,13 @@ open! Core
 module P = Agent_protocol
 module Developer = Job_scheduler_developer
 
+module Conversation_host = struct
+  type t =
+    | Factory of Session_factory.t
+    | Background_only
+    | Developer_only
+end
+
 module Fairness = struct
   type 'candidate group =
     { owner : P.Execution_owner.t
@@ -100,10 +107,7 @@ type t =
   ; mutable delivering : Session_registry.entry list
   ; mutable delivery_cancels : Eio.Cancel.t list
   ; deliveries_idle : Eio.Condition.t
-  ; model_job_inference :
-      Session_registry.entry
-      -> Agent_protocol.Job.t
-      -> (Session_factory.model_job_inference, Agent_protocol.Error.t) Result.t
+  ; conversation_host : Conversation_host.t
   ; sleep : float -> unit
   }
 
@@ -181,38 +185,7 @@ end
 
 exception Job_cancelled
 
-let interrupted_reason = "daemon restarted while the job was running"
-
-let reconcile_job entry (job : Agent_protocol.Job.t) =
-  match job.status with
-  | Agent_protocol.Job.Running ->
-    Agent_session.Session_actor.interrupt_job
-      entry.Session_registry.actor
-      ~job_id:job.id
-      ~generation:job.generation
-      ~attempt:job.attempt
-      ~reason:interrupted_reason
-    |> Result.map ~f:(fun (_ : Agent_protocol.Job.t) -> ())
-  | Queued
-  | Waiting_permission _
-  | Waiting_completion _
-  | Succeeded
-  | Failed _
-  | Cancelled
-  | Interrupted _ -> Ok ()
-;;
-
-let reconcile_entry entry ~max_count ~max_total_bytes =
-  let open Result.Let_syntax in
-  let%bind () =
-    Agent_session.Session_actor.recover_background_results
-      entry.Session_registry.actor
-      ~max_count
-      ~max_total_bytes
-  in
-  let%bind state = Agent_session.Session_actor.state entry.actor in
-  List.fold_result state.jobs ~init:() ~f:(fun () job -> reconcile_job entry job)
-;;
+let reconcile_entry = Recovery_work.jobs
 
 let reconcile_recovered ~registry ~max_count ~max_total_bytes =
   Session_registry.entries registry
@@ -260,20 +233,98 @@ let run_model_job t entry job =
     complete entry job (Agent_session.Runtime_builder.Model_failed error.message)
   | Ok (recipe, payload) ->
     let outcome =
-      match
-        let open Result.Let_syntax in
-        let%bind inference = t.model_job_inference entry job in
-        Runtime_owner.execute_model_job
-          entry.Session_registry.runtime
-          ~inference_context:inference.context
-          ~capture_recipe_target:inference.capture_recipe_target
-          ~recipe
-          ~payload
-      with
-      | Ok outcome -> outcome
+      let open Result.Let_syntax in
+      let%bind factory =
+        match t.conversation_host with
+        | Factory factory -> Ok factory
+        | Background_only | Developer_only ->
+          Error (P.Error.invalid_request "conversation host has no Model resolver")
+      in
+      Agent_session.Session_actor.with_job_execution
+        entry.Session_registry.actor
+        ~job_id:job.id
+        ~generation:job.generation
+        ~attempt:job.attempt
+        ~deadline:None
+        (fun services ->
+           (* Resolve the actual captured recipe inside the acknowledged Job
+              scope, before resource borrowing. This may yield to current host
+              policy; the resource and inference gates independently recheck. *)
+           let%bind inference = Session_factory.model_job_inference factory entry job in
+           let run (runtime : Agent_session.Runtime_builder.t) =
+             runtime.execute_model_job
+               ~allocate_inference:services.allocate_inference
+               ~inference_context:inference.context
+               ~capture_recipe_target:inference.capture_recipe_target
+               ~recipe
+               ~payload
+           in
+           match
+             Agent_session.Session_actor.Job_runtime_owner.attribution
+               services.runtime_owner
+           with
+           | Goal ->
+             Session_factory.with_goal_job_runtime
+               factory
+               entry
+               ~owner:services.runtime_owner
+               run
+           | Ordinary ->
+             Result.map
+               (Runtime_owner.with_background_runtime entry.runtime run)
+               ~f:(fun result -> Runtime_owner.Construction_result.Built result))
+    in
+    let outcome =
+      match outcome with
+      | Ok (Runtime_owner.Construction_result.Built outcome) -> outcome
+      | Ok (Callback_completed _) ->
+        Agent_session.Runtime_builder.Model_failed
+          "Goal callback completed construction before Model execution"
       | Error error -> Agent_session.Runtime_builder.Model_failed error.message
     in
     complete entry job outcome
+;;
+
+(* Capability rejection is a typed negative selection, not an admitted failure
+   or a retry. In particular, a source-less host cannot claim a Goal Job and then
+   abandon it. The canonical Actor claim and live execution guards remain final. *)
+let check_conversation_candidate t state (job : P.Job.t) =
+  let open Result.Let_syntax in
+  let%bind () =
+    match t.conversation_host with
+    | Factory _ -> Ok ()
+    | Developer_only ->
+      Error (P.Error.invalid_request "developer host has no conversation executor")
+    | Background_only ->
+      let open Result.Let_syntax in
+      let%bind attribution =
+        Agent_session.Session_actor.Job_runtime_owner.classify state job
+      in
+      (match attribution, job.kind with
+       | Ordinary, Async_tool -> Ok ()
+       | ( (Goal | Ordinary)
+         , (Model_call | Nested_agent | Scheduled_event | Shell_process | Compaction) )
+       | Goal, Async_tool ->
+         Error
+           (P.Error.invalid_request
+              "conversation host supports ordinary background tools only"))
+  in
+  Agent_session.Session_actor.Job_runtime_owner.selection state job
+;;
+
+let current_conversation_candidate t entry job =
+  let open Result.Let_syntax in
+  let%bind state = Agent_session.Session_actor.state entry.Session_registry.actor in
+  let%bind current =
+    List.find state.jobs ~f:(fun current -> P.Id.Job.equal current.id job.P.Job.id)
+    |> Result.of_option ~error:(P.Error.invalid_request "conversation Job is absent")
+  in
+  let%bind () =
+    if Jsonaf.exactly_equal (P.Job.to_json current) (P.Job.to_json job)
+    then Ok ()
+    else Error (P.Error.invalid_request "conversation Job changed before selection")
+  in
+  check_conversation_candidate t state current
 ;;
 
 let failure_completion (failure : Agent_protocol.Error.t) =
@@ -340,7 +391,14 @@ let complete_background t entry (job : Agent_protocol.Job.t) outcome =
 
 let run_background_job t entry job =
   let outcome =
-    match Runtime_owner.execute_background_job entry.Session_registry.runtime job with
+    match
+      match t.conversation_host with
+      | Factory factory -> Session_factory.execute_background_job factory entry job
+      | Background_only ->
+        Runtime_owner.execute_background_job entry.Session_registry.runtime job
+      | Developer_only ->
+        Error (P.Error.invalid_request "developer host has no conversation executor")
+    with
     | Ok outcome -> outcome
     | Error error -> Runtime_owner.Completed (failure_completion error)
   in
@@ -513,27 +571,30 @@ let claim_with_lease t sw entry (job : Agent_protocol.Job.t) lease =
 ;;
 
 let claim t sw entry (job : Agent_protocol.Job.t) =
-  let key = Worker_key.of_conversation job in
-  let already_running =
-    Eio.Mutex.use_ro t.mutex (fun () ->
-      match key with
-      | Error _ -> false
-      | Ok key ->
-        Map.exists t.running ~f:(fun running ->
-          P.Host_job.Identity.equal running.key.identity key.identity
-          || (running.rejected && P.Id.Session.equal running.session_id job.session_id)))
-  in
-  match key, already_running with
-  | Error error, _ -> reject_job t sw entry job error
-  | Ok _, true -> false
-  | Ok _, false ->
-    (match capacity_key entry job with
-     | Error error -> reject_job t sw entry job error
-     | Ok key ->
-       (match Job_capacity.try_acquire_job t.capacity key ~job with
+  match current_conversation_candidate t entry job with
+  | Error _ | Ok (Agent_session.Goal_execution_selection.Suspended_goal _) -> false
+  | Ok Eligible ->
+    let key = Worker_key.of_conversation job in
+    let already_running =
+      Eio.Mutex.use_ro t.mutex (fun () ->
+        match key with
+        | Error _ -> false
+        | Ok key ->
+          Map.exists t.running ~f:(fun running ->
+            P.Host_job.Identity.equal running.key.identity key.identity
+            || (running.rejected && P.Id.Session.equal running.session_id job.session_id)))
+    in
+    (match key, already_running with
+     | Error error, _ -> reject_job t sw entry job error
+     | Ok _, true -> false
+     | Ok _, false ->
+       (match capacity_key entry job with
         | Error error -> reject_job t sw entry job error
-        | Ok None -> false
-        | Ok (Some lease) -> claim_with_lease t sw entry job lease))
+        | Ok key ->
+          (match Job_capacity.try_acquire_job t.capacity key ~job with
+           | Error error -> reject_job t sw entry job error
+           | Ok None -> false
+           | Ok (Some lease) -> claim_with_lease t sw entry job lease)))
 ;;
 
 let delivery_pending (job : Agent_protocol.Job.t) =
@@ -549,52 +610,116 @@ let delivery_pending (job : Agent_protocol.Job.t) =
   | _ -> false
 ;;
 
-let deliver entry (job : Agent_protocol.Job.t) =
-  let delivery =
-    match job.kind with
-    | Async_tool ->
-      Runtime_owner.deliver_background_job_completion entry.Session_registry.runtime job
-    | _ -> Runtime_owner.deliver_model_job_completion entry.Session_registry.runtime job
-  in
-  match delivery with
-  | Error _ -> ()
-  | Ok () ->
-    ignore
-      (Runtime_owner.drain_idle_moderator entry.runtime
-       : (bool, Agent_protocol.Error.t) result)
+let drain_delivery_idle t entry =
+  let module Actor = Agent_session.Session_actor in
+  let open Result.Let_syntax in
+  match t.conversation_host with
+  | Factory factory -> Session_factory.drain_idle_moderator factory entry
+  | Developer_only -> Ok false
+  | Background_only ->
+    let%bind () =
+      Actor.reconcile_goal_wake_authority entry.Session_registry.actor ~request:Idle
+    in
+    let%bind selection =
+      Actor.select_goal_runtime_wake entry.Session_registry.actor ~request:Idle
+    in
+    (match selection with
+     | Ordinary -> Runtime_owner.drain_idle_moderator entry.runtime
+     | No_work | Suspended_goal _ | Wake _ -> Ok false)
 ;;
 
-let pending_run_deliveries entry =
+let deliver_selected_wake t entry ~request ordinary =
+  let module Actor = Agent_session.Session_actor in
+  let open Result.Let_syntax in
+  let%bind () =
+    Actor.reconcile_goal_wake_authority entry.Session_registry.actor ~request
+  in
+  let%bind selection =
+    Actor.select_goal_runtime_wake entry.Session_registry.actor ~request
+  in
+  match selection with
+  | No_work | Suspended_goal _ -> Ok ()
+  | Wake wake ->
+    (match t.conversation_host with
+     | Factory factory ->
+       Session_factory.deliver_goal_wake factory entry ~wake |> Result.map ~f:ignore
+     | Background_only | Developer_only ->
+       Error
+         (P.Error.create
+            Invalid_state
+            ~message:"Goal wake requires its Factory source owner"
+            ~retryable:false
+            ()))
+  | Ordinary ->
+    let%bind () = ordinary () in
+    drain_delivery_idle t entry |> Result.map ~f:ignore
+;;
+
+let deliver t entry (job : Agent_protocol.Job.t) =
+  match current_conversation_candidate t entry job with
+  | Error _ | Ok (Agent_session.Goal_execution_selection.Suspended_goal _) -> ()
+  | Ok Eligible ->
+    ignore
+      (deliver_selected_wake t entry ~request:(Job_completion job) (fun () ->
+         match job.kind with
+         | Async_tool ->
+           Runtime_owner.deliver_background_job_completion
+             entry.Session_registry.runtime
+             job
+         | Model_call | Nested_agent | Scheduled_event | Shell_process | Compaction ->
+           Runtime_owner.deliver_model_job_completion entry.runtime job)
+       : (unit, Agent_protocol.Error.t) result)
+;;
+
+let pending_run_deliveries t entry =
   match Agent_session.Session_actor.state entry.Session_registry.actor with
   | Error _ -> []
   | Ok state ->
     Option.value_map state.run_state ~default:[] ~f:(fun index ->
       List.filter (Agent_session.Run_state.job_deliveries index) ~f:(fun delivery ->
+        let available =
+          match t.conversation_host with
+          | Factory _ -> true
+          | Developer_only -> false
+          | Background_only ->
+            (match
+               Agent_session.Run_state.find
+                 index
+                 (Agent_session.Run_job_delivery.run_id delivery)
+             with
+             | None -> false
+             | Some run ->
+               (match Agent_session.Goal_work_attribution.of_run state run with
+                | Ok None -> true
+                | Ok (Some _) | Error _ -> false))
+        in
+        available
+        &&
         match Agent_session.Run_job_delivery.disposition delivery with
         | Pending -> true
         | Enqueued _ | Claimed _ | Retired _ -> false))
 ;;
 
-let deliver_pending entry =
-  List.iter (pending_run_deliveries entry) ~f:(fun delivery ->
-    match
-      Runtime_owner.deliver_run_job_completion entry.Session_registry.runtime delivery
-    with
-    | Error _ -> ()
-    | Ok () ->
-      ignore
-        (Runtime_owner.drain_idle_moderator entry.runtime
-         : (bool, Agent_protocol.Error.t) result));
+let deliver_pending t entry =
+  List.iter (pending_run_deliveries t entry) ~f:(fun delivery ->
+    ignore
+      (deliver_selected_wake t entry ~request:(Job_delivery delivery) (fun () ->
+         Runtime_owner.deliver_run_job_completion entry.Session_registry.runtime delivery)
+       : (unit, Agent_protocol.Error.t) result));
   match Agent_session.Session_actor.state entry.actor with
   | Error _ -> ()
-  | Ok state -> List.filter state.jobs ~f:delivery_pending |> List.iter ~f:(deliver entry)
+  | Ok state ->
+    List.filter state.jobs ~f:delivery_pending |> List.iter ~f:(deliver t entry)
 ;;
 
 let dispatch_delivery t sw entry jobs =
   if
     (not (Atomic.get t.closed))
+    && (match t.conversation_host with
+        | Factory _ | Background_only -> true
+        | Developer_only -> false)
     && (List.exists jobs ~f:delivery_pending
-        || not (List.is_empty (pending_run_deliveries entry)))
+        || not (List.is_empty (pending_run_deliveries t entry)))
     && not (List.mem t.delivering entry ~equal:phys_equal)
   then (
     t.delivering <- entry :: t.delivering;
@@ -612,7 +737,8 @@ let dispatch_delivery t sw entry jobs =
                Eio.Cancel.sub (fun cancel ->
                  t.delivery_cancels <- cancel :: t.delivery_cancels;
                  Exn.protect
-                   ~f:(fun () -> if not (Atomic.get t.closed) then deliver_pending entry)
+                   ~f:(fun () ->
+                     if not (Atomic.get t.closed) then deliver_pending t entry)
                    ~finally:(fun () ->
                      t.delivery_cancels
                      <- List.filter t.delivery_cancels ~f:(fun current ->
@@ -709,6 +835,7 @@ let state_jobs t entry =
     List.iter state.jobs ~f:(cancel_terminal_worker t ~actor:entry.actor);
     if
       Agent_protocol.Session.equal_desired_state state.lifecycle.desired Stopped
+      || Agent_session.Session_state.execution_migration_required state
       || (match state.runtime_initialization with
           | Pending _ -> true
           | Ready -> false)
@@ -752,6 +879,46 @@ let process t sw registry =
              ~attempt:job.attempt
            : (Agent_protocol.Job.t, Agent_protocol.Error.t) result)
       | _ -> ()));
+  (* Authority loss is factual retirement, not a fresh execution selection.
+     Run it before Held/capability filtering so suspension cannot hide expiry.
+     The Actor's negative-only request cannot race a Resume into claiming work. *)
+  List.iter states ~f:(fun (entry, _, jobs) ->
+    List.iter jobs ~f:(fun job ->
+      match job.P.Job.status with
+      | Queued ->
+        ignore
+          (Agent_session.Session_actor.reconcile_job_authority
+             entry.Session_registry.actor
+             ~job_id:job.id
+             ~generation:job.generation
+           : (unit, P.Error.t) result)
+      | Running
+      | Waiting_permission _
+      | Waiting_completion _
+      | Succeeded
+      | Failed _
+      | Cancelled
+      | Interrupted _ -> ()));
+  let states =
+    List.filter states ~f:(fun (entry, _, _) ->
+      Session_registry.execution_selected registry entry)
+  in
+  let states =
+    List.map states ~f:(fun (entry, owner, jobs) ->
+      let jobs =
+        match Agent_session.Session_actor.state entry.Session_registry.actor with
+        | Error _ -> []
+        | Ok state ->
+          List.filter_map jobs ~f:(fun previous ->
+            List.find state.jobs ~f:(fun current ->
+              P.Id.Job.equal previous.P.Job.id current.P.Job.id))
+          |> List.filter ~f:(fun job ->
+            match check_conversation_candidate t state job with
+            | Ok Agent_session.Goal_execution_selection.Eligible -> true
+            | Ok (Suspended_goal _) | Error _ -> false)
+      in
+      entry, owner, jobs)
+  in
   List.iter states ~f:(fun (entry, _, jobs) -> dispatch_delivery t sw entry jobs);
   let conversation_groups =
     List.filter_map states ~f:(fun (entry, owner, jobs) ->
@@ -834,7 +1001,7 @@ let start_controlled
       ~registry
       ~developer_registry
       ~capacity
-      ~model_job_inference
+      ~conversation_host
   =
   let developer =
     Option.map developer_registry ~f:(fun registry ->
@@ -851,7 +1018,7 @@ let start_controlled
     ; capacity
     ; developer
     ; developer_registry
-    ; model_job_inference
+    ; conversation_host
     ; mutex = Eio.Mutex.create ()
     ; running = Map.empty (module Worker_key)
     ; after = None
@@ -880,7 +1047,7 @@ let uses_developer_registry t registry =
     phys_equal installed registry)
 ;;
 
-let start ~sw ~clock ~registry ~developer_registry ~capacity ~model_job_inference =
+let start ~sw ~clock ~registry ~developer_registry ~capacity ~conversation_host =
   start_controlled
     ~enabled:true
     ~sw
@@ -888,7 +1055,7 @@ let start ~sw ~clock ~registry ~developer_registry ~capacity ~model_job_inferenc
     ~registry
     ~developer_registry
     ~capacity
-    ~model_job_inference
+    ~conversation_host
 ;;
 
 let cancel_conversation t ~actor ~job =

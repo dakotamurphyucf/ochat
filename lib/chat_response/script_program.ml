@@ -4,13 +4,19 @@ type t =
   | Single of Chatml_host_runtime.compiled_script
   | Prepared of Chatml_linked_program.t
 
+let source_revision_of_prepared prepared ~single_file_revision =
+  match prepared with
+  | None -> single_file_revision
+  | Some prepared ->
+    Chatml_prepared_program.fingerprint prepared |> Chatml_source.Digest.to_hex
+;;
+
 let source_revision t ~single_file_revision =
-  match t with
-  | Single _ -> single_file_revision
-  | Prepared program ->
-    Chatml_linked_program.prepared program
-    |> Chatml_prepared_program.fingerprint
-    |> Chatml_source.Digest.to_hex
+  source_revision_of_prepared
+    (match t with
+     | Single _ -> None
+     | Prepared program -> Some (Chatml_linked_program.prepared program))
+    ~single_file_revision
 ;;
 
 let run_in_scope

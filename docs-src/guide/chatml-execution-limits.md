@@ -179,10 +179,18 @@ service and current authorization checks are separate delivery work.
 
 ## Persist data, not live execution
 
-Retained moderator state supports finite primitive values, arrays, records and
-variants containing other serializable values. It rejects refs, functions,
+Retained moderator state supports finite primitive values, arrays, records, tuples
+and variants containing other serializable values. It rejects refs, functions,
 modules, builtins and task objects. The snapshot codec retains ChatML structure;
 it is not the same representation as an agent-facing JSON result.
+
+Host observations, including appended items, proposed calls, returned results and
+`Tool_observed`, use the moderator's live execution control and inherited budgets.
+A trusted host can choose a larger observer execution budget so a handler can
+inspect an oversized call; this does not enlarge that call's declared input or
+output limits. Ordinary raw and transactional delivery use the same observer
+budget. Internal events and queued-event copies retain their separate JSON and
+declaration bounds.
 
 The manager checks and copies the old state before a versioned handler runs,
 then validates the new state and its encoded size before committing it. Returned

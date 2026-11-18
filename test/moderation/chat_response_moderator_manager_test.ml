@@ -193,10 +193,14 @@ let%expect_test "manager snapshots, restores, and drains internal events" =
     ((append_item))
     moderation-overlay-1 developer "policy"
     synthetic-1 assistant "queued"
-    ((script_id main) (script_source_hash 720bb598084b1f2609fb3ce5ac5d8787)
+    ((script_id main)
+     (script_source_hash
+      96c382dc7455c37f455bc282132255f5292420f1a0bbee1960d14342950b98e9)
      (queued_internal_events 0) (prepended_items 1) (appended_items 1)
      (replacements 0) (deleted_items 0))
-    ((script_id main) (script_source_hash 720bb598084b1f2609fb3ce5ac5d8787)
+    ((script_id main)
+     (script_source_hash
+      96c382dc7455c37f455bc282132255f5292420f1a0bbee1960d14342950b98e9)
      (queued_internal_events 0) (prepended_items 1) (appended_items 1)
      (replacements 0) (deleted_items 0))
     |}]
@@ -297,7 +301,7 @@ let%expect_test "manager rejects mismatched persisted script metadata" =
    | Ok _ -> print_endline "unexpected success"
    | Error msg -> print_endline msg);
   [%expect
-    {| Moderator snapshot source hash "other-hash" does not match prompt source hash "720bb598084b1f2609fb3ce5ac5d8787". |}]
+    {| Moderator snapshot source hash "other-hash" does not match prompt source hash "96c382dc7455c37f455bc282132255f5292420f1a0bbee1960d14342950b98e9". |}]
 ;;
 
 let%expect_test "manager restores queued internal events from persisted snapshots" =
@@ -1128,4 +1132,122 @@ let%expect_test "manager serializes events while a process handler is suspended"
     false
     (Record ((count (Int 11))))
     |}]
+;;
+
+(* Engine/service binding qualification only. Actual actor continuation authority
+   and provider admission are qualified by their owning integration fixtures. *)
+let%expect_test
+    "legacy callback scope binds services and commits one head only after save"
+  =
+  let source =
+    {|type state = { count : int }
+      type event = [ `Session_start | `Queued ]
+      let initial_state = { count = 0 }
+      let on_event : context -> state -> event -> state task =
+        fun ctx st ev ->
+          Task.bind(Model.call("owner", `String("input")), fun ignored_model ->
+          match ev with
+          | `Session_start ->
+            Task.bind(Runtime.emit(`Queued), fun ignored_emit ->
+            Task.pure({ count = st.count + 1 }))
+          | `Queued -> Task.pure({ count = st.count + 1 }))|}
+  in
+  let artifact =
+    Manager.Registry.compile_script
+      Manager.Registry.empty
+      { script with id = "callback"; source = Inline source }
+    |> ok_or_fail
+    |> snd
+  in
+  let static_calls = ref 0 in
+  let scoped_calls = ref 0 in
+  let recipes calls =
+    let recipe : Moderation.Capabilities.model_recipe =
+      { call =
+          (fun ~payload:_ ->
+            incr calls;
+            Ok (Model_ok `Null))
+      ; spawn = (fun ~payload:_ -> Error "not used")
+      }
+    in
+    Map.singleton (module String) "owner" recipe
+  in
+  let manager =
+    Manager.create_entries
+      ~artifact
+      ~capabilities:{ capabilities with model_recipes = recipes static_calls }
+      ~allocator:
+        (History_entry.Allocator.create ~namespace:"callback" ~next_sequence:0
+         |> ok_or_fail)
+      ()
+    |> ok_or_fail
+  in
+  let other = Manager.create ~artifact ~capabilities () |> ok_or_fail in
+  let last_callback = ref None in
+  let escaped = ref None in
+  let installs = ref 0 in
+  let invoke ~reject selection =
+    Manager.handle_legacy_callback_entries
+      manager
+      ~selection
+      ~session_id:"callback"
+      ~now_ms:1
+      ~history:[]
+      ~available_tools:[]
+      ~session_meta:`Null
+      ~with_admission:(fun callback ~snapshot:_ run ->
+        assert (Manager.callback_is_current manager callback);
+        assert (not (Manager.callback_is_current other callback));
+        last_callback := Some callback;
+        let binding : Manager.callback_binding =
+          { services =
+              { model_recipes = recipes scoped_calls
+              ; tool_call = (fun ~name:_ ~args:_ -> Error "unused callback Tool service")
+              ; after_ms = (fun ~delay_ms:_ ~payload:_ -> Error "not used")
+              ; cancel = (fun ~id:_ -> Error "not used")
+              }
+          ; authorize = (fun () -> Ok ())
+          ; prepare =
+              (fun ~outcome:_ ~snapshot:_ ->
+                Ok
+                  { persist = (fun () -> if reject then Error "save rejected" else Ok ())
+                  ; install = (fun () -> incr installs)
+                  })
+          }
+        in
+        escaped := Some (fun () -> run binding);
+        run binding)
+  in
+  invoke ~reject:false (Boundary Session_start) |> ok_or_fail |> ignore;
+  let before = Manager.identity_snapshot manager |> ok_or_fail in
+  assert (List.length before.queued_internal_events = 1);
+  assert (Result.is_error (invoke ~reject:true Queue_head));
+  let rejected = Manager.identity_snapshot manager |> ok_or_fail in
+  assert (
+    Sexp.equal
+      (Session.Moderator_state.Identity_snapshot.sexp_of_t before)
+      (Session.Moderator_state.Identity_snapshot.sexp_of_t rejected));
+  assert (not (Manager.callback_is_current manager (Option.value_exn !last_callback)));
+  assert (Result.is_error ((Option.value_exn !escaped) ()));
+  invoke ~reject:false Queue_head |> ok_or_fail |> ignore;
+  let after = Manager.identity_snapshot manager |> ok_or_fail in
+  assert (List.is_empty after.queued_internal_events);
+  [%test_eq: int] !scoped_calls 3;
+  [%test_eq: int] !static_calls 0;
+  [%test_eq: int] !installs 2;
+  Manager.handle_event_entries
+    manager
+    ~session_id:"callback"
+    ~now_ms:1
+    ~history:[]
+    ~available_tools:[]
+    ~session_meta:`Null
+    ~event:Session_start
+  |> ok_or_fail
+  |> ignore;
+  [%test_eq: int] !static_calls 1;
+  print_endline
+    "scoped services expire; failed save retains head; standalone services restore";
+  [%expect
+    {| scoped services expire; failed save retains head; standalone services restore |}]
 ;;

@@ -43,6 +43,10 @@ let collect state ~delta ~limits =
       | Parent_stop_epoch_changed _
       | Workspace_changed _
       | Canonical_entries_appended _
+      | Instruction_selection_changed _
+      | Goal_accounts_changed _
+      | Goal_catalog_changed _
+      | Recurrence_catalog_changed _
       | Run_state_changed _
       | Canonical_history_replaced _
       | Authoring_references_forgotten _
@@ -63,6 +67,12 @@ let collect state ~delta ~limits =
       | Model_job_target_captured _
       | Model_job_recipe_target_captured _
       | Model_job_target_restored _
+      | Goal_policy_contributions_changed _
+      | Policy_cause_changed _
+      | Policy_inference_ledger_changed _
+      | Delegated_inference_ledger_changed _
+      | Child_contributions_changed _
+      | Goal_descendants_changed _
       | Inference_ledger_changed _
       | Job_changed _
       | Schedule_changed _
@@ -72,6 +82,7 @@ let collect state ~delta ~limits =
       | Managed_stop_admitted _
       | Invocation_reconciled _
       | Moderator_execution_changed _
+      | Moderator_lifecycle_claimed _
       | Moderator_execution_reconciled _
       | Subscription_changed _
       | Subscription_expired _

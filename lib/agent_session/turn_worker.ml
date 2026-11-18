@@ -4,7 +4,8 @@ module Config = struct
   type t =
     { env : Eio_unix.Stdenv.base
     ; inference_context : Inference_runtime.Context.t
-    ; inference_identity : Chat_response.Neutral_turn.Identity.t
+    ; inference_identity :
+        Inference_allocation.Port.t -> Chat_response.Neutral_turn.Identity.t
     ; on_inference_attempt : Inference_runtime.Attempt.t -> unit
     ; on_inference_completion : Inference_client.Completion.t -> unit
     ; on_inference_observation : Inference.Observation.t -> unit
@@ -310,6 +311,7 @@ let run
       ?root_binding
       ?runtime_policy
       ?authoring_context
+      ?agent_guidance
       ?dispatch_tool
       ?moderator_events
       ?notification_input
@@ -382,12 +384,14 @@ let run
     else
       Chat_response.In_memory_stream.run_completion_stream_in_memory_entries
         ~env:config.Config.env
+        ?agent_guidance:
+          (Option.map agent_guidance ~f:(fun make -> make ~input ~capabilities))
         ~inference_context:config.inference_context
         ?root_context:
           (Option.map capabilities.root_context ~f:(fun source ->
              Option.value_map root_binding ~default:source ~f:(fun binding ->
                Chat_response.Root_binding.wrap binding source)))
-        ~inference_identity:config.inference_identity
+        ~inference_identity:(config.inference_identity capabilities.allocate_inference)
         ~on_inference_attempt:config.on_inference_attempt
         ~on_inference_completion:config.on_inference_completion
         ~on_inference_observation:config.on_inference_observation
@@ -439,6 +443,7 @@ let create
       ?root_binding
       ?runtime_policy
       ?authoring_context
+      ?agent_guidance
       ?dispatch_tool
       ?moderator_events
       ?notification_input
@@ -451,6 +456,7 @@ let create
         ?root_binding
         ?runtime_policy
         ?authoring_context
+        ?agent_guidance
         ?dispatch_tool
         ?moderator_events
         ?notification_input
@@ -465,8 +471,9 @@ let create
     | exception
         ( Moderator_tool_dispatch.Dispatch_error failure
         | Native_tool_dispatch.Dispatch_error failure
-        | Standalone_tool_dispatch.Dispatch_error failure ) ->
-      Operation_worker.Failed failure
+        | Standalone_tool_dispatch.Dispatch_error failure
+        | Inference_allocation.Rejected failure
+        | Chat_response.Ctx.Effect_rejected failure ) -> Operation_worker.Failed failure
     | exception Chat_response.In_memory_stream.Post_tool_moderation_failed (entry, _) ->
       Operation_worker.Failed
         (Agent_protocol.Error.create

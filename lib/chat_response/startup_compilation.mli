@@ -120,7 +120,10 @@ val remaining_limits : t -> (Chatml_compilation.limits, Chatml_compilation.error
 
 (** Time one actual host preparation/preflight phase using the original remaining
     allowance. Do not include activation. Compiler calls inside remain joined by
-    their existing worker on cancellation; original failures propagate unchanged. *)
+    their existing worker on cancellation; original failures propagate unchanged.
+    Expiry while a supplied checkpoint is suspended still returns the mapped
+    compilation-timeout error. Caller cancellation remains cancellation; it is
+    never reclassified as deadline expiry or a compiler diagnostic. *)
 val within
   :  t
   -> map_error:(Chatml_compilation.error -> 'error)

@@ -13,7 +13,9 @@ let%expect_test "schedule delivery is generation-checked and actor-committed" =
           ~initial_state:
             (actor_state ~workspace_instance ~liveness:Detached ~start_immediately:false)
           ~persistence:
-            { archive_reference; commit = (fun ~command_audit:_ ~previous:_ _ -> Ok ()) }
+            { archive_reference
+            ; commit = (fun ?observation:_ ~command_audit:_ ~previous:_ _ -> Ok ())
+            }
           ~operation_worker:None
           ~services:
             { now = (fun () -> timestamp)
@@ -27,6 +29,7 @@ let%expect_test "schedule delivery is generation-checked and actor-committed" =
             ; schedule_limits = Agent_session.Staged_schedules.default_limits
             ; notification_limits = Agent_session.Staged_notifications.default_limits
             ; ingress_limits = Agent_session.Staged_ingress.default_limits
+            ; goal_descendant_profile
             ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
             ; state_committed = (fun _ _ -> ())
             }
@@ -47,6 +50,7 @@ let%expect_test "schedule delivery is generation-checked and actor-committed" =
           ; status = Scheduled
           ; delivery_count = 0
           ; last_delivery_at = None
+          ; inference_provenance = None
           ; delivery_cancellation = None
           ; ownership = None
           }
@@ -131,7 +135,9 @@ let%expect_test "model jobs are claimed, completed, and delivered atomically" =
           ~initial_state:
             (actor_state ~workspace_instance ~liveness:Detached ~start_immediately:false)
           ~persistence:
-            { archive_reference; commit = (fun ~command_audit:_ ~previous:_ _ -> Ok ()) }
+            { archive_reference
+            ; commit = (fun ?observation:_ ~command_audit:_ ~previous:_ _ -> Ok ())
+            }
           ~operation_worker:None
           ~services:
             { now = (fun () -> timestamp)
@@ -144,6 +150,7 @@ let%expect_test "model jobs are claimed, completed, and delivered atomically" =
             ; schedule_limits = Agent_session.Staged_schedules.default_limits
             ; notification_limits = Agent_session.Staged_notifications.default_limits
             ; ingress_limits = Agent_session.Staged_ingress.default_limits
+            ; goal_descendant_profile
             ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
             ; state_committed = (fun _ _ -> ())
             }
@@ -169,6 +176,7 @@ let%expect_test "model jobs are claimed, completed, and delivered atomically" =
           ; result = None
           ; delivery = Pending
           ; launch = None
+          ; inference_origin = None
           ; progress = None
           }
       in
@@ -242,7 +250,9 @@ let%expect_test "durable job retry policy persists backoff before terminal deliv
           ~initial_state:
             (actor_state ~workspace_instance ~liveness:Detached ~start_immediately:false)
           ~persistence:
-            { archive_reference; commit = (fun ~command_audit:_ ~previous:_ _ -> Ok ()) }
+            { archive_reference
+            ; commit = (fun ?observation:_ ~command_audit:_ ~previous:_ _ -> Ok ())
+            }
           ~operation_worker:None
           ~services:
             { now = (fun () -> !now)
@@ -255,6 +265,7 @@ let%expect_test "durable job retry policy persists backoff before terminal deliv
             ; schedule_limits = Agent_session.Staged_schedules.default_limits
             ; notification_limits = Agent_session.Staged_notifications.default_limits
             ; ingress_limits = Agent_session.Staged_ingress.default_limits
+            ; goal_descendant_profile
             ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
             ; state_committed = (fun _ _ -> ())
             }
@@ -276,6 +287,7 @@ let%expect_test "durable job retry policy persists backoff before terminal deliv
           ; result = None
           ; delivery = Pending
           ; launch = None
+          ; inference_origin = None
           ; progress = None
           }
       in

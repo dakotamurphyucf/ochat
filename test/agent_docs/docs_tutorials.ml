@@ -40,9 +40,18 @@ let parse_bundle env scratch sources entry =
     |> SL.with_observer ~f:(fun source _ -> Hash_set.add read (SL.relative_path source))
     |> SL.with_agent_observer ~f:(fun source -> Queue.enqueue agents source)
   in
+  let limits = Agent_session.Prompt_revision_builder.capture_limits () in
   let parse source =
     let raw = SL.read loader source |> Result.ok_or_failwith in
-    CM.parse_chat_inputs ~source:(SL.relative_path source) ~source_loader:loader ~dir raw
+    CM.prepare_chat_inputs
+      ~source:(SL.relative_path source)
+      ~source_loader:loader
+      ~dir
+      ~preprocess:Fn.id
+      ~limits
+      ~checkpoint:Eio.Fiber.check
+      raw
+    |> CM.Parsed.elements
   in
   let root = SL.root loader ~file:entry |> Result.ok_or_failwith in
   let root_nodes = parse root in
@@ -135,6 +144,27 @@ let workflow source =
   done
 ;;
 
+let check_project example ~env ~home_parent ~bundle ~entry ~required =
+  match example with
+  | "goal-recurrence" ->
+    (* Mirrors the tutorial's external grant for sibling ordinary libraries. *)
+    let project_sources =
+      Agent_server.Project_source_configuration.
+        { external_roots =
+            [ Eio.Path.native_exn Eio.Path.(bundle / "examples/libraries") ]
+        ; git = None
+        }
+    in
+    Docs_project_bundle.check_with_project_sources
+      ~project_sources
+      ~env
+      ~home_parent
+      ~bundle
+      ~entry
+      ~required
+  | _ -> Docs_project_bundle.check ~env ~home_parent ~bundle ~entry ~required
+;;
+
 let run env root scratch =
   let load source = Eio.Path.load Eio.Path.(Eio.Stdenv.fs env / root / source) in
   let examples =
@@ -209,7 +239,8 @@ let run env root scratch =
             |> List.dedup_and_sort ~compare:String.compare))
         ("unreachable project companion: " ^ string example "id");
       List.iter project_readers ~f:(fun (entry, required) ->
-        Docs_project_bundle.check
+        check_project
+          (string example "id")
           ~env
           ~home_parent:Eio.Path.(Eio.Stdenv.fs env / scratch)
           ~bundle:directory

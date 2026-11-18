@@ -31,12 +31,31 @@ effects; failure does not undo external work. After recovery, a `Pending` runtim
 requires explicit activation. Loading it neither proves initialization succeeded
 nor automatically repeats its initializer.
 
+A `Ready` legacy moderator restored without a live initializer first installs its
+retained identity checkpoint and actual runtime. Its `Session_resume` callback
+then runs under the installed lifecycle borrow, once for that runtime; a
+foreground operation joins it before its own callbacks or provider request.
+The checkpoint alone is not a resume acknowledgement. Recovery does not restore
+the old original caller or its native-tool authority: a callback may inspect and
+update its retained state, but permission-bearing effects still need an actual
+current caller. A later authenticated foreground operation uses its own admitted
+caller. A failed or interrupted resume is retained and is not replayed merely by
+polling that same runtime.
+
 ## Stop, start and restart
 
 A stop acknowledgement means the stop was admitted. Cleanup may still be in
 progress: use the stop result/status instead of treating the acknowledgement as
 a join of every child and process. Replaying an old stop key cannot stop a newly
 started lifetime. See `runtime.delegation.stop-helper` for modes and receipts.
+
+A runtime whose cleanup fails stays retired until an explicit unload or close
+retry succeeds; it cannot be reused as a loaded runtime. Concurrent cleanup
+callers share the same attempt and failure rather than silently retrying it.
+While cleanup is pending, source replacement and new runtime construction remain
+blocked. Read-only status checks do not initiate cleanup. A stop or permanent
+close accepted during administrative cleanup prevents that administration from
+continuing with a commit or rebuilding the runtime.
 
 Graceful stop preserves source-owned subscriptions and timers. Their deadlines
 do not pause or renew just because the conversation stopped; retained timers can
@@ -46,11 +65,14 @@ retires unclaimed callbacks together with the applicable job/lifecycle changes.
 An already claimed handler may instead retain an explicit interruption record.
 Neither mode rewrites an already committed terminal result as a new cancellation.
 
-Stopping a parent is also subject to its children's admitted lifetime policy.
-Do not assume every independent child stops with its parent, or that a linked
-subscription automatically controls the child it watches. Independent children
-still retain their delegated authority/resource relationship. See
-`runtime.delegation.creation` before choosing attached or independent lifetime.
+Stopping a parent propagates to its owned children. An authorized independent
+child can remain running under the original delegated authority, including
+eligible parent policy while the parent stays stopped. If Stop places a governing
+Goal on Hold, new work under that Goal is blocked even when the child remains
+running. The child can be stopped separately through its own lifecycle admission.
+A linked subscription observes its target within the separately admitted
+subscription scope. See `runtime.delegation.creation` for lifetime and authority
+checks.
 
 After host restart, inspect retained work before launching replacements. A job
 waiting on an owned pending dependency can retain that dependency and its original
@@ -117,6 +139,29 @@ Replacing existing moderator state requires the host's explicit migration approv
 that approval does not implement an application-specific state migration. The
 replacement initializes its own state, and the upgrade archive retains the old
 checkpoint and queue.
+
+New single-file legacy moderators use SHA-256 of their exact retained source
+bytes as checkpoint identity. Prepared project moderators retain their complete
+linked-program fingerprint. Neither identity grants runtime or tool permission.
+
+An older captured single-file checkpoint may retain its original MD5 identity.
+The host recognizes that historical form only against the exact captured script
+ID and code. It keeps the session administratively reachable and unloaded with
+`Migration_required`; it does not relabel the checkpoint or run its initializer,
+provider requests or tools. For a single-file moderator without authored child
+tools, stop the session and explicitly rebuild with the pinned revision to
+initialize a new generation from the captured source. Original source files are
+unnecessary. A historical definition that declares child Agent tools still needs
+their captured parser and program custody. Pinned rebuild cannot supply missing
+custody: it may commit the archival generation change before runtime preparation
+rejects. Use an explicitly captured current definition for those tools.
+
+Archives retain admitted historical data, but unknown fields in a moderator
+checkpoint can block rebuild if they cannot safely be preserved after replacement.
+The host rejects the rebuild and preserves the old state instead of stripping
+unknown fields or inventing a migration.
+Rebuild retires the old generation's work and authority under the ordinary
+administration rules. It does not revive a historical callback or authorization.
 
 A terminal job whose publisher or selected dependencies are no longer valid can
 retain its result while delivery is discarded for authority change. The result

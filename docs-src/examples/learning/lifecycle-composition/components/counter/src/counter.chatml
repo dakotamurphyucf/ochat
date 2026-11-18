@@ -1,0 +1,9 @@
+type state = {remaining:int}
+let initial = {remaining = 1}
+let step = fun state ->
+  if state.remaining > 0 then
+    {state = {remaining = state.remaining - 1};
+     decision = {id = "counter"; obligation = `Active; action = `Continue}}
+  else
+    {state = state;
+     decision = {id = "counter"; obligation = `Finished; action = `No_action}}

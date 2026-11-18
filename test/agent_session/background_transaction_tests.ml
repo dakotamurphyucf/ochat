@@ -13,7 +13,7 @@ let%expect_test "ending the owner between preparation and staging releases capac
        let owner = J.Invocation invocation.context.id in
        let prepared = ref None in
        with_job actor parent (fun ~job:_ ~execute ->
-         execute ~invocation (fun ~dispatched:_ ->
+         execute ~invocation (fun ~dispatched:_ ~capabilities:_ ->
            let job =
              A.prepare_background_job_launch actor ~owner request |> protocol_ok
            in
@@ -50,6 +50,7 @@ let%expect_test "ending the owner between preparation and staging releases capac
 
 let stage actor backend capacity request owner =
   let job = A.prepare_background_job_launch actor ~owner request |> protocol_ok in
+  assert (Option.equal J.Inference_origin.equal job.inference_origin (Some Unbound));
   let quota = Background_admission_tests.key actor job in
   let reservation = Background_admission_tests.reserve capacity quota job in
   A.stage_background_job
@@ -86,7 +87,7 @@ let%expect_test
            let selected = ref None in
            let result =
              with_job actor parent (fun ~job:_ ~execute ->
-               execute ~invocation (fun ~dispatched:_ ->
+               execute ~invocation (fun ~dispatched:_ ~capabilities:_ ->
                  let discarded = stage actor backend capacity request owner in
                  assert (
                    A.has_staged_background_job actor ~owner ~id:discarded.id
@@ -163,6 +164,16 @@ let%expect_test
               let decoded = J.of_json (J.to_json stored) |> protocol_ok in
               assert (Option.equal J.equal_launch stored.launch decoded.launch);
               assert (
+                Option.equal
+                  J.Inference_origin.equal
+                  stored.inference_origin
+                  (Some Unbound));
+              assert (
+                Option.equal
+                  J.Inference_origin.equal
+                  stored.inference_origin
+                  decoded.inference_origin);
+              assert (
                 Result.is_error
                   (Agent_session.Session_delta.apply
                      state
@@ -238,41 +249,44 @@ let%expect_test "job starts commit atomically with managed handler and event che
                   let result =
                     match mode with
                     | `Handler | `Handler_cancelled ->
-                      services.execute ~invocation:(root parent) (fun ~dispatched:root ->
-                        let observer : I.observer =
-                          { script_id = before.script_id
-                          ; source_sha256 = before.script_source_hash
-                          }
-                        in
-                        let invocation =
-                          I.create
-                            ~observer
-                            { root.context with
-                              id = Agent_protocol.Id.Invocation.create ()
-                            ; parent_job = None
-                            ; parent_invocation = Some root.context.id
-                            ; tool_name = "counter"
-                            }
-                          |> protocol_ok
-                        in
-                        let result =
-                          services.moderator_execute
-                            ~invocation
-                            (fun ~dispatched ~commit ->
-                               let job = start (J.Invocation dispatched.context.id) in
-                               let outcome =
-                                 match mode with
-                                 | `Handler_cancelled -> I.Cancelled "handler cancelled"
-                                 | `Handler | `Event -> I.Pending (Job job.id, `Null)
-                               in
-                               let resolved =
-                                 I.resolve dispatched ~session_id ~generation:0 outcome
-                                 |> protocol_ok
-                               in
-                               commit ~resolved ~snapshot:after)
-                        in
-                        reject := false;
-                        Result.map result ~f:(fun () -> I.Complete `Null))
+                      services.execute
+                        ~invocation:(root parent)
+                        (fun ~dispatched:root ~capabilities:_ ->
+                           let observer : I.observer =
+                             { script_id = before.script_id
+                             ; source_sha256 = before.script_source_hash
+                             }
+                           in
+                           let invocation =
+                             I.create
+                               ~observer
+                               { root.context with
+                                 id = Agent_protocol.Id.Invocation.create ()
+                               ; parent_job = None
+                               ; parent_invocation = Some root.context.id
+                               ; tool_name = "counter"
+                               }
+                             |> protocol_ok
+                           in
+                           let result =
+                             services.moderator_execute
+                               ~invocation
+                               (fun ~dispatched ~capabilities:_ ~commit ->
+                                  let job = start (J.Invocation dispatched.context.id) in
+                                  let outcome =
+                                    match mode with
+                                    | `Handler_cancelled ->
+                                      I.Cancelled "handler cancelled"
+                                    | `Handler | `Event -> I.Pending (Job job.id, `Null)
+                                  in
+                                  let resolved =
+                                    I.resolve dispatched ~session_id ~generation:0 outcome
+                                    |> protocol_ok
+                                  in
+                                  commit ~resolved ~snapshot:after)
+                           in
+                           reject := false;
+                           Result.map result ~f:(fun () -> I.Complete `Null))
                       |> Result.map ~f:ignore
                     | `Event ->
                       let event =
@@ -289,6 +303,9 @@ let%expect_test "job starts commit atomically with managed handler and event che
                         ~event
                         ~snapshot:(fun () -> Ok before)
                         (fun ~executing
+                          ~policy_caller:_
+                          ~model_jobs:_
+                          ~allocate_inference:_
                           ~retirement_reason:_
                           ~event:_
                           ~execute:_
@@ -329,11 +346,13 @@ let%expect_test "job starts commit atomically with managed handler and event che
              | true -> before
              | false -> after
            in
-           assert (
-             Option.equal
-               Jsonaf.exactly_equal
-               state.moderator
-               (Some (Agent_session.Runtime_builder.encode_moderator_snapshot expected)));
+           let metadata = assert_moderator_checkpoint state ~snapshot:expected in
+           let completed =
+             match fail_commit, mode with
+             | false, (`Handler | `Event) -> true
+             | true, _ | false, `Handler_cancelled -> false
+           in
+           assert_moderator_queue_frontier metadata ~required:completed ~head:0L ~next:0L;
            let lease =
              Capacity.try_acquire capacity (Background_admission_tests.key actor job)
              |> protocol_ok
@@ -353,4 +372,706 @@ let%expect_test "job starts commit atomically with managed handler and event che
     +queued moderator cleanup failed: injected job transition failure
     (Event true)
     |}]
+;;
+
+let%expect_test
+    "selected Job loans survive an intervening claim and defer only actual owned work"
+  =
+  let module P = Agent_protocol in
+  let module Auth = Agent_authority_tests in
+  List.iter [ `Legacy; `Original; `Rejected_save; `Changed_source ] ~f:(fun mode ->
+    let authenticated =
+      match mode with
+      | `Legacy -> false
+      | `Original | `Rejected_save | `Changed_source -> true
+    in
+    let original =
+      if authenticated then Some (Auth.authentication (Atomic.make true)) else None
+    in
+    let reject = ref false in
+    let completed = ref [] in
+    let terminal_operations = ref [] in
+    with_actor
+      ~start:false
+      ~prepare_state:(fun state ->
+        { state with runtime_initialization = Pending { fresh_history = true } })
+      ~reject_save:(fun _ -> !reject)
+      ~state_committed:(fun _ events ->
+        List.iter events ~f:(fun (event : P.Event.Durable.t) ->
+          match
+            P.Event.Durable.Payload.of_json ~kind:event.kind event.payload |> protocol_ok
+          with
+          | Operation_completed operation ->
+            completed := operation.id :: !completed;
+            terminal_operations := operation :: !terminal_operations
+          | Operation_failed operation
+          | Operation_cancelled operation
+          | Operation_interrupted operation ->
+            terminal_operations := operation :: !terminal_operations
+          | _ -> ()))
+      (fun env sw actor writer backend ->
+         let expected = A.state actor |> protocol_ok in
+         let initialization =
+           (match original with
+            | None -> A.begin_initialization actor ~expected
+            | Some original ->
+              A.begin_initialization_authenticated actor ~actor:original ~expected)
+           |> protocol_ok
+         in
+         let independent : J.t =
+           { id = P.Id.Job.create ()
+           ; session_id
+           ; generation = expected.identity.generation
+           ; kind = Model_call
+           ; payload = `Object []
+           ; status = Queued
+           ; retry_policy = Never
+           ; attempt = 0
+           ; created_at = timestamp
+           ; started_at = None
+           ; next_run_at = None
+           ; completed_at = None
+           ; result = None
+           ; delivery = Not_required
+           ; launch = None
+           ; inference_origin = None
+           ; progress = None
+           }
+         in
+         let independent =
+           A.add_initialization_model_job actor ~scope:initialization independent
+           |> protocol_ok
+         in
+         A.complete_initialization actor ~scope:initialization ~candidate:expected
+         |> protocol_ok
+         |> ignore;
+         A.end_initialization actor ~scope:initialization |> protocol_ok;
+         let registry = native_registry (ref 0) ~raises:false in
+         let request =
+           Background_execution_tests.capture_tool
+             registry
+             Chat_response.One_off_request.default_policy
+         in
+         let replacement, _, _ = handoff_definition env in
+         let replacement =
+           Chat_response.Moderator_manager.identity_snapshot replacement
+           |> Result.ok_or_failwith
+         in
+         let selected = ref [] in
+         let claimed_independent = ref None in
+         let published = ref []
+         and aborted = ref [] in
+         let duplicate_aborts = ref 0 in
+         let duplicate_released = ref false in
+         let callback_result = ref None in
+         let worker_finished = ref false in
+         let stage owner =
+           let job =
+             A.prepare_background_job_launch actor ~owner request |> protocol_ok
+           in
+           A.stage_background_job
+             actor
+             ~job
+             ~capacity:
+               { publish =
+                   (fun () ->
+                     assert (
+                       List.for_all !selected ~f:(fun selected ->
+                         List.exists
+                           (Agent_session.Memory_backend.state backend).jobs
+                           ~f:(fun saved -> P.Id.Job.equal saved.id selected.J.id)));
+                     published := job.id :: !published)
+               ; abort = (fun () -> aborted := job.id :: !aborted)
+               }
+           |> protocol_ok;
+           job
+         in
+         let worker =
+           Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input caps ->
+             let call, invocation = publication_call caps () in
+             let _, invocation = native_context registry invocation in
+             caps.commit_invocation_call ~invocation call |> protocol_ok;
+             let result =
+               caps.with_invocation ~invocation (fun ~dispatched ~capabilities:_ ->
+                 let owner = J.Invocation dispatched.context.id in
+                 let first = stage owner in
+                 let duplicate =
+                   A.stage_background_job
+                     actor
+                     ~job:first
+                     ~capacity:
+                       { publish = (fun () -> failwith "duplicate staged Job published")
+                       ; abort =
+                           (fun () ->
+                             if not !duplicate_released
+                             then (
+                               duplicate_released := true;
+                               Int.incr duplicate_aborts))
+                       }
+                 in
+                 (match duplicate with
+                  | Error _ -> ()
+                  | Ok () -> failwith "duplicate staged ID was accepted");
+                 claimed_independent
+                 := A.claim_job
+                      actor
+                      ~job_id:independent.id
+                      ~generation:independent.generation
+                    |> protocol_ok;
+                 let second = stage owner in
+                 selected := [ first; second ];
+                 A.select_background_jobs actor ~owner ~ids:[ first.id; second.id ]
+                 |> protocol_ok;
+                 (match mode with
+                  | `Changed_source ->
+                    A.change_moderator
+                      actor
+                      (Some (Agent_session.Moderator_checkpoint.encode replacement))
+                    |> protocol_ok
+                    |> ignore
+                  | `Rejected_save -> reject := true
+                  | `Legacy | `Original -> ());
+                 Ok (I.Complete `Null))
+             in
+             reject := false;
+             callback_result := Some result;
+             (match result with
+              | Ok resolved ->
+                let outcome =
+                  match resolved.I.status with
+                  | Resolved outcome -> outcome
+                  | _ -> failwith "native callback returned no truthful outcome"
+                in
+                caps.publish_invocation_output
+                  ~invocation_id:resolved.context.id
+                  (publication_output
+                     caps
+                     ~text:(Jsonaf.to_string (I.outcome_to_json outcome))
+                     ())
+                |> protocol_ok
+              | Error _ -> ());
+             let state = A.state actor |> protocol_ok in
+             worker_finished := true;
+             Agent_session.Operation_worker.Completed
+               { final_history =
+                   Agent_session.History_codec.all_of_protocol
+                     state.conversation.canonical_history
+                   |> protocol_ok
+               ; moderator_snapshot = state.moderator
+               ; runtime_requests = []
+               })
+         in
+         A.set_operation_worker actor (Some worker) |> protocol_ok;
+         A.start ?actor:original actor ~attachment_id:writer.id |> protocol_ok |> ignore;
+         let submitted =
+           (match original with
+            | None ->
+              A.submit_message
+                actor
+                ~submitting_principal:principal_id
+                ~attachment_id:writer.id
+                actor_entry
+            | Some original ->
+              A.submit_message_authenticated
+                actor
+                ~actor:original
+                ~attachment_id:writer.id
+                actor_entry)
+           |> protocol_ok
+         in
+         let state = await_idle actor in
+         assert !worker_finished;
+         assert (Option.is_none state.failure);
+         let operation_id = Option.value_exn submitted.operation_id in
+         let terminal =
+           List.find_exn !terminal_operations ~f:(fun operation ->
+             P.Id.Operation.equal operation.id operation_id)
+         in
+         (match mode, terminal.state with
+          | (`Rejected_save | `Changed_source), Failed failure ->
+            [%test_eq: P.Error.code] Internal_error failure.code;
+            [%test_eq: string]
+              "worker completed with an active invocation"
+              failure.message
+          | (`Legacy | `Original), Completed ->
+            assert (List.exists !completed ~f:(P.Id.Operation.equal operation_id))
+          | _ ->
+            raise_s
+              [%sexp
+                "unexpected staged worker terminal"
+              , (mode : [ `Legacy | `Original | `Rejected_save | `Changed_source ])
+              , (terminal : P.Operation.t)
+              , (!callback_result : (I.t, P.Error.t) Result.t option)]);
+         [%test_eq: int] 1 !duplicate_aborts;
+         let ids = List.map !selected ~f:(fun job -> job.J.id) in
+         [%test_eq: int] 2 (List.length ids);
+         let present id =
+           List.exists state.jobs ~f:(fun job -> P.Id.Job.equal job.id id)
+         in
+         match mode, Option.value_exn !callback_result with
+         | (`Rejected_save | `Changed_source), Error failure ->
+           (match mode with
+            | `Rejected_save ->
+              [%test_eq: P.Error.code] Internal_error failure.code;
+              [%test_eq: string] "injected job transition failure" failure.message
+            | `Changed_source ->
+              [%test_eq: P.Error.code] Conflict failure.code;
+              [%test_eq: string]
+                "Job admission acquired a different source"
+                failure.message
+            | `Legacy | `Original -> assert false);
+           assert (List.for_all ids ~f:(fun id -> not (present id)));
+           assert (List.is_empty !published);
+           assert (List.equal P.Id.Job.equal ids (List.rev !aborted))
+         | (`Legacy | `Original), Ok { status = Resolved (Complete `Null); _ } ->
+           assert (List.for_all ids ~f:present);
+           assert (List.equal P.Id.Job.equal ids (List.rev !published));
+           assert (List.is_empty !aborted);
+           let check_loan job =
+             let observed = ref None in
+             let resolved =
+               with_job actor job (fun ~job:_ ~execute ->
+                 execute ~invocation:(root job) (fun ~dispatched ~capabilities ->
+                   let borrow_agent_actor =
+                     capabilities.Agent_session.Invocation_capabilities.borrow_agent_actor
+                   in
+                   let borrowed = borrow_agent_actor ~invocation:dispatched in
+                   observed
+                   := Some
+                        ( borrowed
+                        , match borrowed with
+                          | Ok (Some proof) -> Operator_authorization.is_current proof
+                          | Ok None -> not authenticated
+                          | Error _ -> false );
+                   Ok (I.Complete `Null)))
+               |> protocol_ok
+             in
+             (match resolved.I.status with
+              | Resolved (Complete `Null) -> ()
+              | _ -> failwith "Job oracle callback did not complete");
+             match authenticated, Option.value_exn !observed with
+             | false, (Ok None, true) -> ()
+             | true, (Ok (Some proof), true) -> Auth.expired proof
+             | _, (Error failure, _) -> raise_s [%sexp (failure : P.Error.t)]
+             | _ -> failwith "selected commit lost independent or selected loan"
+           in
+           let independent = Option.value_exn !claimed_independent in
+           check_loan independent;
+           let claim (job : J.t) =
+             A.claim_job actor ~job_id:job.id ~generation:job.generation
+             |> protocol_ok
+             |> Option.value_exn
+           in
+           let first = claim (List.nth_exn !selected 0) in
+           let second = claim (List.nth_exn !selected 1) in
+           check_loan first;
+           check_loan second;
+           (match mode with
+            | `Original ->
+              (* The public Job service also owns direct inference for this
+                 genuinely selected Async attempt, without a Model or Invocation
+                 standing in for its physical execution. *)
+              let module Tracking = Inference_tracking_tests in
+              let module Graph = Agent_server.Graph_tracking in
+              let module Ledger = Agent_session.Inference_ledger in
+              let before = A.state actor |> protocol_ok in
+              let previous = Ledger.rows before.inference_ledger in
+              let new_rows current =
+                Ledger.rows current.Agent_session.Session_state.inference_ledger
+                |> List.filter ~f:(fun row ->
+                  not
+                    (List.exists previous ~f:(fun old ->
+                       Ledger.Handle.equal (Ledger.Row.handle old) (Ledger.Row.handle row))))
+              in
+              let providers = ref 0 in
+              let observed = ref None in
+              let context, inference_request, _ =
+                Tracking.prepared
+                  ~post_stream:(fun ~sw:_ ~inputs:_ ->
+                    Int.incr providers;
+                    let current = A.state actor |> protocol_ok in
+                    let job =
+                      List.find_exn current.jobs ~f:(fun job ->
+                        P.Id.Job.equal first.id job.id)
+                    in
+                    [%test_eq: J.kind] Async_tool job.kind;
+                    (match job.status with
+                     | Running -> ()
+                     | Queued
+                     | Waiting_permission _
+                     | Waiting_completion _
+                     | Succeeded
+                     | Failed _
+                     | Cancelled
+                     | Interrupted _ ->
+                       raise_s
+                         [%sexp
+                           "direct Async provider lost its running Job"
+                         , (job.status : J.status)]);
+                    [%test_eq: int] first.attempt job.attempt;
+                    let row = List.hd_exn (new_rows current) in
+                    [%test_eq: int] 1 (List.length (new_rows current));
+                    let handle = Ledger.Row.handle row in
+                    assert (Option.is_none (Ledger.Handle.operation_id handle));
+                    assert (Option.is_none (Ledger.Handle.invocation_id handle));
+                    observed := Some handle;
+                    Seq.empty)
+                  ()
+              in
+              let graph =
+                Graph.create
+                  actor
+                  ~source:(Tracking.source "actual-direct-async")
+                  ~upstream:(Tracking.upstream (fun ~scope:_ ~accounting_id:_ -> ()))
+                |> protocol_ok
+              in
+              let dispatch identity =
+                Inference_client.run
+                  context
+                  ~sw
+                  ~identity
+                  ~relation:Root
+                  ~request:inference_request
+                  ~before_dispatch:ignore
+                  ~on_attempt:(Graph.on_attempt graph)
+                  ~on_observation:(Graph.on_observation graph)
+                  ~on_completion:(Graph.on_completion graph)
+                  ~on_event:ignore
+                |> Result.map_error ~f:(fun error ->
+                  Sexp.to_string_hum (Inference_client.Error.sexp_of_t error))
+                |> Result.ok_or_failwith
+                |> ignore
+              in
+              let capture f =
+                try Ok (f ()) with
+                | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())
+              in
+              let result =
+                capture (fun () ->
+                  let escaped =
+                    A.with_job_execution
+                      actor
+                      ~job_id:first.id
+                      ~generation:first.generation
+                      ~attempt:first.attempt
+                      ~deadline:(Some deadline)
+                      (fun execution ->
+                         let identity =
+                           Graph.bind_identity
+                             graph
+                             ~allocate:execution.allocate_inference
+                         in
+                         dispatch identity;
+                         Ok identity)
+                    |> protocol_ok
+                  in
+                  [%test_eq: int] 1 !providers;
+                  let handle = Option.value_exn !observed in
+                  let current = A.state actor |> protocol_ok in
+                  let row = List.hd_exn (new_rows current) in
+                  assert (Ledger.Handle.equal handle (Ledger.Row.handle row));
+                  (match dispatch escaped with
+                   | () -> failwith "expired Async allocator admitted another H"
+                   | exception Graph.Rejected error ->
+                     [%test_eq: P.Error.code] Conflict error.code);
+                  [%test_eq: int] 1 !providers;
+                  [%test_eq: int]
+                    1
+                    (List.length (new_rows (A.state actor |> protocol_ok))))
+              in
+              let closed =
+                Eio.Cancel.protect (fun () ->
+                  capture (fun () ->
+                    Graph.seal graph |> protocol_ok;
+                    Graph.finish graph |> protocol_ok))
+              in
+              (match result, closed with
+               | Error (exn, backtrace), _ | Ok (), Error (exn, backtrace) ->
+                 Exn.raise_with_original_backtrace exn backtrace
+               | Ok (), Ok () -> ());
+              let module Model = Agent_session.Model_job_admission in
+              let retained_port = ref None in
+              let model =
+                A.with_job_execution
+                  actor
+                  ~job_id:first.id
+                  ~generation:first.generation
+                  ~attempt:first.attempt
+                  ~deadline:(Some deadline)
+                  (fun execution ->
+                     retained_port := Some execution.model_jobs;
+                     let before = A.state actor |> protocol_ok in
+                     let rejected = Inference_target_tests.job before in
+                     reject := true;
+                     let result = Model.admit execution.model_jobs rejected in
+                     reject := false;
+                     (match result with
+                      | Error failure ->
+                        [%test_eq: P.Error.code] Internal_error failure.code;
+                        [%test_eq: string]
+                          "injected job transition failure"
+                          failure.message
+                      | Ok _ -> failwith "rejected direct Model save was accepted");
+                     let after = A.state actor |> protocol_ok in
+                     assert_same_session_snapshot before after;
+                     let candidate = Inference_target_tests.job after in
+                     Model.admit execution.model_jobs candidate)
+                |> protocol_ok
+              in
+              let launch =
+                match model.launch with
+                | Some launch -> launch
+                | None ->
+                  failwith "real Job-owned Model admission lost its immediate parent"
+              in
+              (match J.Birth_parent.view launch.owner with
+               | Job_attempt { id; attempt } ->
+                 assert (P.Id.Job.equal id first.id);
+                 [%test_eq: int] first.attempt attempt
+               | Callback _ ->
+                 failwith "direct Job Model birth copied a callback ancestor");
+              let parent_launch = Option.value_exn first.launch in
+              [%test_eq: int] (parent_launch.nested_depth + 1) launch.nested_depth;
+              assert (
+                Option.equal
+                  I.equal_observer
+                  parent_launch.moderator_source
+                  launch.moderator_source);
+              let before = A.state actor |> protocol_ok in
+              assert (
+                Result.is_error
+                  (Model.admit
+                     (Option.value_exn !retained_port)
+                     (Inference_target_tests.job before)));
+              let after = A.state actor |> protocol_ok in
+              assert_same_session_snapshot before after;
+              let model = claim model in
+              check_loan model;
+              complete actor model |> protocol_ok |> ignore
+            | `Legacy | `Rejected_save | `Changed_source -> ());
+           let child = ref None in
+           let dependency_call = root first in
+           let pending =
+             with_job actor first (fun ~job:_ ~execute ->
+               execute ~invocation:dependency_call (fun ~dispatched ~capabilities:_ ->
+                 let owner = J.Invocation dispatched.context.id in
+                 let job = stage owner in
+                 child := Some job;
+                 A.select_background_jobs actor ~owner ~ids:[ job.id ] |> protocol_ok;
+                 Ok (I.Pending (Job job.id, `Null))))
+             |> protocol_ok
+           in
+           let child = Option.value_exn !child in
+           (match pending.status with
+            | Resolved (Pending (Job id, `Null)) -> assert (P.Id.Job.equal id child.id)
+            | _ -> failwith "defer target did not acknowledge actual owned child");
+           let dependency : J.dependency =
+             { invocation_id = dependency_call.context.id
+             ; work = Job child.id
+             ; deadline
+             ; completion_schema = None
+             ; max_output_bytes = 1_000_000
+             ; max_output_depth = 128
+             }
+           in
+           let defer () =
+             A.defer_background_job
+               actor
+               ~job_id:first.id
+               ~generation:first.generation
+               ~attempt:first.attempt
+               dependency
+           in
+           reject := true;
+           assert (Result.is_error (defer ()));
+           reject := false;
+           (match (current backend first).status with
+            | Running -> ()
+            | _ -> failwith "rejected defer changed current Job");
+           let waiting = defer () |> protocol_ok in
+           (match waiting.status with
+            | Waiting_completion saved -> assert (J.equal_dependency dependency saved)
+            | _ -> failwith "real defer failed to retain the actual dependency");
+           let child = claim child in
+           check_loan child;
+           A.complete_background_job
+             actor
+             ~job_id:child.id
+             ~generation:child.generation
+             ~attempt:child.attempt
+             (Succeeded `Null)
+           |> protocol_ok
+           |> ignore;
+           let settled =
+             A.refresh_background_job
+               actor
+               ~job_id:first.id
+               ~generation:first.generation
+               ~attempt:first.attempt
+             |> protocol_ok
+           in
+           (match settled.status with
+            | Succeeded -> ()
+            | _ -> failwith "saved child completion did not settle deferred parent");
+           complete actor independent |> protocol_ok |> ignore;
+           A.complete_background_job
+             actor
+             ~job_id:second.id
+             ~generation:second.generation
+             ~attempt:second.attempt
+             (Succeeded `Null)
+           |> protocol_ok
+           |> ignore
+         | _, Error failure -> raise_s [%sexp (failure : P.Error.t)]
+         | _, Ok _ -> failwith "staged callback outcome disagrees with its ACK cut"));
+  print_endline
+    "one current inventory across A/C/B; original and legacy admissions survive parent; \
+     failed ACK/source change publish no child; real dependency defers and settles";
+  [%expect
+    {| one current inventory across A/C/B; original and legacy admissions survive parent; failed ACK/source change publish no child; real dependency defers and settles |}]
+;;
+
+(* Pure native provenance. None of these records is used as runtime custody. *)
+let%expect_test
+    "direct Job birth keeps exact parent attempt and source without widening callbacks"
+  =
+  let module P = Agent_protocol in
+  let module Launch = Agent_session.Job_launch in
+  let invocation = I.create (invocation_fixture ()).context |> protocol_ok in
+  let callback =
+    Launch.derive
+      ~session_id
+      ~generation:0
+      ~invocations:[ invocation ]
+      ~events:[]
+      ~jobs:[]
+      ~owner:(Invocation invocation.context.id)
+    |> protocol_ok
+  in
+  let source : I.observer =
+    { script_id = "birth-source"; source_sha256 = String.make 64 'b' }
+  in
+  let parent : J.t =
+    { id = P.Id.Job.create ()
+    ; session_id
+    ; generation = 0
+    ; kind = Async_tool
+    ; payload = `Null
+    ; status = Running
+    ; retry_policy = Never
+    ; attempt = 1
+    ; created_at = timestamp
+    ; started_at = Some timestamp
+    ; next_run_at = None
+    ; completed_at = None
+    ; result = None
+    ; delivery = Not_required
+    ; launch = Some { callback with moderator_source = Some source }
+    ; inference_origin = Some Unbound
+    ; progress = None
+    }
+  in
+  let launch job =
+    Launch.derive_from_job
+      ~session_id
+      ~generation:0
+      ~jobs:[ job ]
+      ~job_id:job.J.id
+      ~attempt:job.attempt
+    |> protocol_ok
+  in
+  let child =
+    { parent with
+      id = P.Id.Job.create ()
+    ; kind = Model_call
+    ; status = Queued
+    ; attempt = 0
+    ; started_at = None
+    ; launch = Some (launch parent)
+    }
+  in
+  let check parent child =
+    Launch.validate ~invocations:[ invocation ] ~events:[] ~jobs:[ parent; child ] child
+  in
+  let decoded = J.of_json (J.to_json child) |> protocol_ok in
+  assert (J.equal_launch (Option.value_exn child.launch) (Option.value_exn decoded.launch));
+  check parent decoded |> protocol_ok;
+  assert (
+    Option.is_none (J.Birth_parent.callback_owner (Option.value_exn child.launch).owner));
+  let launch_raw job =
+    match Document_schema.Json.field (J.to_json job) ~name:"launch" with
+    | Value raw -> raw
+    | Absent | Null -> assert false
+  in
+  let expected_callback version source =
+    `Object
+      ([ "schema_version", `Number version
+       ; "owner_type", `String "invocation"
+       ; "owner_id", P.Id.Invocation.to_json invocation.context.id
+       ; "nested_depth", `Number "0"
+       ]
+       @ Option.to_list
+           (Option.map source ~f:(fun source ->
+              ( "moderator_source"
+              , `Object
+                  [ "script_id", `String source.I.script_id
+                  ; "source_sha256", `String source.source_sha256
+                  ] ))))
+  in
+  [%test_eq: string]
+    (Jsonaf.to_string (expected_callback "1" None))
+    (Jsonaf.to_string (launch_raw { parent with launch = Some callback }));
+  [%test_eq: string]
+    (Jsonaf.to_string (expected_callback "2" (Some source)))
+    (Jsonaf.to_string (launch_raw parent));
+  assert (J.equal_launch callback (J.launch_of_sexp (J.sexp_of_launch callback)));
+  let advanced = { parent with attempt = 2 } in
+  check advanced child |> protocol_ok;
+  assert (
+    Result.is_error
+      (Launch.derive_from_job
+         ~session_id
+         ~generation:0
+         ~jobs:[ advanced ]
+         ~job_id:advanced.id
+         ~attempt:1));
+  let without_source job =
+    { job with
+      J.launch =
+        Option.map job.J.launch ~f:(fun launch -> { launch with moderator_source = None })
+    }
+  in
+  assert (Result.is_error (check parent (without_source child)));
+  assert (Result.is_error (check (without_source parent) child));
+  let no_source_parent = without_source parent in
+  check no_source_parent { child with launch = Some (launch no_source_parent) }
+  |> protocol_ok;
+  assert (Result.is_error (J.of_json (J.to_json { child with kind = Async_tool })));
+  let raw = J.to_json child in
+  let changed =
+    match raw with
+    | `Object fields ->
+      `Object
+        (List.map fields ~f:(fun (key, value) ->
+           if String.equal key "launch"
+           then
+             ( key
+             , match value with
+               | `Object fields ->
+                 `Object
+                   (List.map fields ~f:(fun (key, value) ->
+                      ( key
+                      , if String.equal key "owner_id"
+                        then P.Id.Job.to_json child.id
+                        else value )))
+               | _ -> assert false )
+           else key, value))
+    | _ -> assert false
+  in
+  assert (Result.is_error (J.of_json changed));
+  print_endline
+    "callback wires unchanged; direct parent frozen; new stale attempt, source mismatch \
+     and owner mismatch reject";
+  [%expect
+    {| callback wires unchanged; direct parent frozen; new stale attempt, source mismatch and owner mismatch reject |}]
 ;;

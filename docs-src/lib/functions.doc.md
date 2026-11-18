@@ -38,6 +38,13 @@ capabilities. The returned dispatch runners require an invocation and return
 for a compiled example. Registering a directory does not universally sandbox
 every tool: use each tool's documented path and authorization contract.
 
+The file-tool error handlers and optional index/search fallback handlers in this
+module preserve Eio cancellation and timeout exceptions with their original
+backtrace. These handlers do not turn control exceptions into tool text or
+fallback results. Ordinary errors retain their existing reports or fallbacks.
+This does not cover exception handling inside lower-level libraries, and
+cancellation does not roll back effects already performed.
+
 ---
 
 ## Available tools

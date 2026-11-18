@@ -105,7 +105,7 @@ type routing =
 [@@deriving equal, sexp]
 
 (** Stable source identity, independent of process-local tool capability IDs. *)
-type observer =
+type observer = Moderator_observer.t =
   { script_id : string
   ; source_sha256 : string
   }
@@ -174,6 +174,11 @@ type t = private
   ; authoring_reference : Authoring_reference.t option [@sexp.option]
     (** Host-produced receipt bound to the successful disclosed output. Its
         existence alone does not mean documentation reached provider history. *)
+  ; inference_origin : Inference_origin.t option [@sexp.option]
+  ; native_goal_action : Goal_native_action_intent.t option [@sexp.option]
+    (** Immutable original attribution, outside the authored context ABI. Missing
+        historical evidence is unavailable; terminal Runs stay named. This field
+        grants no live ownership or execution permission. *)
   }
 [@@deriving equal, sexp]
 
@@ -197,6 +202,13 @@ val record_handler_intent : t -> requests:follow_up -> (t, Error.t) result
 val apply_handler_intent : t -> (t, Error.t) result
 val accept_handler_compaction : t -> operation_id:Id.Operation.t -> (t, Error.t) result
 val discard_handler_intent : t -> reason:string -> (t, Error.t) result
+
+(** Capture evidence on a fresh, unclassified admitted DTO. The actor must
+    authenticate its actual admitting owner and reject caller-supplied claims;
+    this validated transformation alone grants no authority. Existing records,
+    including historical absence, cannot be retrospectively reclassified. *)
+val capture_inference_origin : t -> Inference_origin.t -> (t, Error.t) result
+
 val dispatch : t -> (t, Error.t) result
 
 (** Records one outcome for a dispatched invocation after checking its owner
@@ -288,6 +300,14 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 (** Complete current durable record projection. Required-null option fields;
     independent of the public protocol's historical envelope variants. *)
 module Storage : sig
+  (** Current canonical native_goal_action field only. Older saved records must
+      pass their state/delta schema conversion first; a residual old alias fails. *)
   val to_json : t -> Jsonaf.t
+
   val of_json : Jsonaf.t -> (t, Error.t) result
 end
+
+(** Native action DATA follows the actual successful resolution transition.
+    Updating its phase validates immutable request/principal and monotone status;
+    the Actor must independently authenticate owner, writer and physical custody. *)
+val record_native_goal_action : t -> Goal_native_action_intent.t -> (t, Error.t) result

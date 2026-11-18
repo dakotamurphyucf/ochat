@@ -4,7 +4,9 @@ open! Core
     Output is explicitly Reconstructed, never an original provider capture.
     EOF is the fixture's declared completion and usage is explicitly unknown.
     Only finalized DTO items become candidates; announcement is not admission.
-    Observers, cancellation and unexpected mock exceptions propagate unchanged. *)
+    The selected backend checks the actual composed submission guard immediately
+    before invoking [post_stream]. Observers, cancellation and unexpected mock
+    exceptions propagate unchanged. *)
 type post_stream =
   sw:Eio.Switch.t
   -> inputs:Openai.Responses.Item.t list
@@ -19,6 +21,16 @@ val create : namespace:string -> default_model:string -> post_stream:post_stream
 
 (** Observe the exact synthetic adapter request at real preparation. *)
 val create_with_observer
+  :  on_prepare:(Inference.Request.t -> unit)
+  -> namespace:string
+  -> default_model:string
+  -> post_stream:post_stream
+  -> t
+
+(** Explicitly opts into the actual pure OpenAI input translator and final
+    submission guard. Default fixtures preserve history-only DTO input and reject
+    request guidance. Synthetic outputs remain reconstructed. *)
+val create_with_request_guidance
   :  on_prepare:(Inference.Request.t -> unit)
   -> namespace:string
   -> default_model:string

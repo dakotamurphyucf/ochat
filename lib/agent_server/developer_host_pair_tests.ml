@@ -389,6 +389,8 @@ let%test_module "retained Developer Host policy" =
         ; source_file = Filename.concat root "server.sexp"
         ; server =
             { data_dir = Option.value data_dir ~default:(Filename.concat root "data")
+            ; recurrence_automation = None
+            ; recurrence_execution = None
             ; session_helpers = []
             ; authoring_packages = []
             ; authoring_budget = None
@@ -821,6 +823,7 @@ let%test_module "retained Developer Host policy" =
           ~script_preparation:options.script_preparation
           ~content_limits:options.content_limits
           ~child_sources
+          ~recurrence_planning_host:None
           ~durability:Flush
           ~limits:options.factory_limits
       in
@@ -1224,7 +1227,7 @@ let%test_module "retained Developer Host policy" =
           ~registry:shared.registry
           ~developer_registry:(Some (Developer_host.registry host))
           ~capacity:shared.capacity
-          ~model_job_inference:(Session_factory.model_job_inference shared.factory)
+          ~conversation_host:(Factory shared.factory)
       in
       Developer_host.install_scheduler host scheduler |> required "scheduler install";
       let route =

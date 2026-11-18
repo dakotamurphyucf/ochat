@@ -100,9 +100,23 @@
   {
     "query": "install",
     "expected": [
-      "/docs/start/installation/",
-      "/docs/start/build-troubleshooting/"
-    ]
+      "/docs/start/installation/"
+    ],
+    "maxRank": 1
+  },
+  {
+    "query": "installed ChatML libraries",
+    "expected": [
+      "/docs/reference/chatml/installed-libraries/"
+    ],
+    "maxRank": 1
+  },
+  {
+    "query": "recurring release notes",
+    "expected": [
+      "/docs/tutorials/goal-recurrence/"
+    ],
+    "maxRank": 3
   },
   {
     "query": "first agent",

@@ -83,6 +83,42 @@ module Decision : sig
   val of_json : Jsonaf.t -> (t, Error.t) result
 end
 
+(** Immutable facts about the consumed queue position. [origin = None] means
+    explicitly unavailable original attribution; it is distinct from a receipt
+    without a capture. These data grant no execution permission or Run work.
+    Source identity and nonnegative ordinal are validated, including on decode. *)
+module Queue_occurrence : sig
+  (** [Unknown] retains absent historical evidence. [Captured None] records an
+      exact head whose producer was unavailable; neither proves unrelatedness. *)
+  module Producer : sig
+    type t =
+      | Unknown
+      | Captured of Queue_producer.t option
+    [@@deriving equal, sexp]
+  end
+
+  type t [@@deriving equal, sexp]
+
+  val create
+    :  source:Run_source.t
+    -> ordinal:int64
+    -> origin:Inference_origin.t option
+    -> producer:Producer.t
+    -> (t, Error.t) result
+
+  val source : t -> Run_source.t
+  val ordinal : t -> int64
+  val origin : t -> Inference_origin.t option
+  val producer : t -> Producer.t
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+
+  (** Bound the complete retained child to the decoder's 4 KiB/depth8 profile
+      and validate its raw producer, including unfamiliar fields, before
+      universal projection. *)
+  val validate_encoded_capacity : Jsonaf.t -> (unit, Error.t) result
+end
+
 type t = private
   { context : context
   ; status : status
@@ -93,10 +129,20 @@ type t = private
   ; retirement : retirement option [@sexp.option]
   ; delegation : delegation option [@sexp.option]
   ; decision : Decision.t option [@sexp.option]
+  ; queue_occurrence : Queue_occurrence.t option [@sexp.option]
   }
 [@@deriving equal, sexp]
 
 val create : context -> (t, Error.t) result
+
+(** Create a Running Internal_event receipt with compatible source/generation,
+    no Job or delegation, and an honest optional physical operation drainer.
+    The actor must separately prove the exact previous queue head. Codec5
+    retains an absent producer; codec6 requires its explicit null/value. New
+    claims capture the exact known head producer, without transferring opaque
+    Entry extensions. Older codecs remain absent. Existing receipts cannot
+    adopt, remove or change the capture, including after terminalization. *)
+val create_queued : queue_occurrence:Queue_occurrence.t -> context -> (t, Error.t) result
 
 (** Only pre-tool checks without parent operation/job ownership may carry this
     provenance. Completed checks require a decision in the same receipt as the

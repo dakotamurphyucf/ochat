@@ -111,6 +111,37 @@ let inspect elements =
     else Ok (List.rev names, List.rev scripts, context))
 ;;
 
+module Source = struct
+  type t =
+    { elements : CM.top_level_elements list
+    ; inherited_names : string list
+    ; scripts : Spec.script list
+    ; context : Spec.authoring_context option
+    }
+
+  let moderator t = List.hd t.scripts
+
+  let parse ~dir bundle =
+    let open Result.Let_syntax in
+    let%bind parsed =
+      try Ok (CM.parse_source_bundle ~dir bundle) with
+      | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
+      | exn ->
+        error "delegation.invalid_source" (String.prefix (Exn.to_string exn) (16 * 1024))
+    in
+    let%bind names, scripts, context = inspect parsed.root in
+    let%bind () =
+      if List.is_empty parsed.agents
+      then Ok ()
+      else
+        error
+          "delegation.implicit_agent"
+          "invoke an inherited agent/session tool instead of an implicit agent definition"
+    in
+    Ok { elements = parsed.root; inherited_names = names; scripts; context }
+  ;;
+end
+
 let prepare
       ?(limits = Chatml_compilation.default_limits)
       ?catalog
@@ -125,21 +156,8 @@ let prepare
     C.select ceiling ~names:requested_names
     |> Result.map_error ~f:(fun e -> [ D.error ~code:e.code e.message ])
   in
-  let%bind parsed =
-    try Ok (CM.parse_source_bundle ~dir bundle) with
-    | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
-    | exn ->
-      error "delegation.invalid_source" (String.prefix (Exn.to_string exn) (16 * 1024))
-  in
-  let%bind names, scripts, context = inspect parsed.root in
-  let%bind () =
-    if List.is_empty parsed.agents
-    then Ok ()
-    else
-      error
-        "delegation.implicit_agent"
-        "invoke an inherited agent/session tool instead of an implicit agent definition"
-  in
+  let%bind source = Source.parse ~dir bundle in
+  let { Source.elements; inherited_names = names; scripts; context } = source in
   let%bind authoring =
     Authoring_policy.resolve_context
       ?context
@@ -176,12 +194,5 @@ let prepare
     |> Sexp.to_string
     |> Chatmd_shell_spec.Source_ref.digest
   in
-  Ok
-    { elements = parsed.root
-    ; capabilities
-    ; authoring
-    ; definition
-    ; source_fingerprint
-    ; fingerprint
-    }
+  Ok { elements; capabilities; authoring; definition; source_fingerprint; fingerprint }
 ;;

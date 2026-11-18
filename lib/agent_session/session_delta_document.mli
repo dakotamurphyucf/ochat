@@ -1,8 +1,24 @@
 open! Core
 
+(** Capacity-only instruction delta using the actual encoder shape. The supplied
+    conservative selection is never decoded/applied as a command or receipt. *)
+val project_instruction_clear
+  :  Jsonaf.t
+  -> limits:Document_schema.Limits.t
+  -> (Document_schema.Document.t, Document_schema.Error.t) result
+
 (** Immutable journal change document. The admitted complete child documents and
     unknown fields remain attached to the value and are never rebuilt for hashing. *)
 type t
+
+(** Private capacity projection of this owner's real retirement delta encoding.
+    Inputs are JSON witnesses only, never decoded/applied as Session_delta. *)
+val project_run_retirement
+  :  run:Jsonaf.t option
+  -> goal:Jsonaf.t option
+  -> recurrence:Jsonaf.t option
+  -> limits:Document_schema.Limits.t
+  -> (Document_schema.Document.t, Document_schema.Error.t) result
 
 val value : t -> Session_delta.t
 val document : t -> Document_schema.Document.t
@@ -48,7 +64,9 @@ end
     context into the mutable state owner. Conflicts fail before any write. Optional
     transaction metadata changes only its four owned scalar fields; original
     native validation and complete bounds admission precede those changes, and
-    the complete stamped document passes bounds and current domain validation. *)
+    the complete stamped document passes bounds and current domain validation.
+    Newly Included local occurrences must match the actual final publication
+    revision after optional stamping; other unstamped replay remains supported. *)
 val apply
   :  t
   -> ?transaction_metadata:Transaction_metadata.t

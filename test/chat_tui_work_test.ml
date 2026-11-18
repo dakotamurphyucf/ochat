@@ -20,6 +20,7 @@ let job id : P.Job.t =
   ; result = None
   ; delivery = Pending
   ; launch = None
+  ; inference_origin = None
   ; progress =
       Some
         { sequence = 3
@@ -66,6 +67,7 @@ let public_event payload ~sequence =
     event
     ~body:(Full (Shared value))
     ~extension_status:None
+    ~instruction_status:None
     ~replacement_snapshot:None
   |> protocol_ok
 ;;
@@ -111,6 +113,7 @@ let%expect_test
     { running with
       status = Succeeded
     ; completed_at = Some timestamp
+    ; inference_origin = None
     ; progress = None
     ; result = Some (P.Completion.to_json (Succeeded (`String "PRIVATE-RESULT")))
     }

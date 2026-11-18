@@ -132,10 +132,32 @@ own loaded record lifecycle.
 
 Each abstract `Document.t` carries an immutable certificate of the limits that
 validated its exact JSON. `Document.validate document ~limits` reuses that proof
-for equal or componentwise looser limits. Any stricter component runs the complete
-validator, preserving its ordinary error ordering. New or replaced payloads receive
-a fresh certificate only after validation; there is no shared cache. Domain
-projection and preservation checks still run on every codec operation.
+for equal or componentwise looser limits. Private exact whole-document measurements
+also prove a positive fit under stricter limits. Missing or insufficient
+measurements run the complete validator, preserving its ordinary error ordering.
+New or replaced payloads receive a fresh certificate only after validation;
+there is no shared cache. Domain projection and preservation checks still run
+on every codec operation.
+
+Successful document admission also retains private exact measurements of its
+payload and the unchanged envelope outside that value. During codec encoding,
+the existing known-payload validation captures its measurements in the same
+walk. Preservation merge can prove that its output has the same compact byte count,
+fields, nodes and depth, including when object members are reordered or owned
+fields are added or removed. Replacement uses the actual merged JSON and its
+preserved member order; it never substitutes the differently ordered known
+payload. Domain validation, roundtrip checks, preservation merge and envelope
+validation still run.
+
+Composition requires the same schema version, an unchanged admitted envelope,
+the actual known-payload scan under the requested limits and a complete composed
+fit under all four bounds. Retained payload extensions, unproved descendant
+merges, unavailable measurements or insufficient arithmetic proof use ordinary
+full inspection with its existing errors. Original-template validation still
+precedes encoding, even when a smaller replacement could fit. Scalar edits
+that establish admission without rescanning discard these exact measurements.
+No caller-supplied proof or shared cache is introduced; public JSON validation
+keeps its original checkpoints and interruption behavior.
 
 `Document.replace_payload_scalars` validates the original under the requested
 bounds, then replaces only existing scalar object fields within its payload.
@@ -168,4 +190,12 @@ extension conflicts, domain failures, wrong kinds/targets, required semantics,
 duplicate/malformed input, limits and original-byte integrity. A stored-byte
 SHA-256 expectation was independently computed with Python `hashlib`, and a
 Quickcheck property exercises 100 arbitrary Unicode extension-preserving edits.
+The measured-payload differential compares complete inspected output and typed
+errors with codec encoding across escaping, numeric lexemes, nested field order,
+owned field additions/removals, envelope and payload extensions, all four bounds,
+stricter profiles and the unmeasured scalar-edit fallback. Original-template
+errors still precede a smaller candidate, and retained extensions cannot leave
+underestimated measurements for later validation. It also compares public scanner
+checkpoints
+with document admission and preserves the exact interruption value.
 No frozen historical binary fixture or runtime reader is introduced.

@@ -10,6 +10,10 @@ let check_count count =
   else Ok ()
 ;;
 
+let validate_document json =
+  Extension_codec.validate_json ~max_bytes:max_document_bytes ~max_depth json
+;;
+
 let list decode = function
   | `Array values ->
     let open Result.Let_syntax in

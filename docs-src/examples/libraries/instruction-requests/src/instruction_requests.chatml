@@ -1,0 +1,57 @@
+type selection = [ `Project({root:string; scope:string}) | `Skills(string array) ]
+type member = {root:string; member:string; sha256:string}
+type descriptor = {selection:selection; members:member array}
+type error = [ `Too_many_roots | `Too_many_members ]
+type 'a checked = [ `Ok('a) | `Error(error) ]
+let failure : fun(error) -> error = fun error -> error
+
+let selection_json = fun selection ->
+  match selection with
+  | `Project(project) -> `Ok(`Object([
+      {key = "kind"; value = `String("project")},
+      {key = "roots"; value = `Array([`String(project.root)])},
+      {key = "scope"; value = `String(project.scope)}]))
+  | `Skills(roots) ->
+      if Array.length(roots) > 64 then `Error(failure(`Too_many_roots))
+      else `Ok(`Object([
+        {key = "kind"; value = `String("skills")},
+        {key = "roots"; value = `Array(Array.map(roots, fun root -> `String(root)))},
+        {key = "scope"; value = `Null}]))
+
+let roots = fun () -> `Object([{key = "selection"; value = `Null}])
+let refresh = fun selection ->
+  match selection_json(selection) with
+  | `Error(error) -> `Error(error)
+  | `Ok(value) -> `Ok(`Object([{key = "selection"; value = value}]))
+
+let descriptor_fields = fun descriptor ->
+  if Array.length(descriptor.members) > 64 then `Error(failure(`Too_many_members))
+  else match selection_json(descriptor.selection) with
+    | `Error(error) -> `Error(error)
+    | `Ok(selection) -> `Ok([
+        {key = "selection"; value = selection},
+        {key = "members"; value = `Array(Array.map(descriptor.members, fun member ->
+          `Object([{key = "root"; value = `String(member.root)},
+                   {key = "member"; value = `String(member.member)},
+                   {key = "sha256"; value = `String(member.sha256)}])))}])
+
+let read = fun descriptor ->
+  match descriptor_fields(descriptor) with
+  | `Error(error) -> `Error(error)
+  | `Ok(fields) -> `Ok(`Object(fields))
+
+let activate = fun descriptor capture_id revision key ->
+  match descriptor_fields(descriptor) with
+  | `Error(error) -> `Error(error)
+  | `Ok(fields) -> `Ok(`Object(Array.append(fields, [
+      {key = "capture_id"; value = `String(capture_id)},
+      {key = "expected_revision"; value = `String(revision)},
+      {key = "key"; value = `String(key)}])))
+
+let clear = fun revision key -> `Object([
+  {key = "kind"; value = `String("all")},
+  {key = "members"; value = `Null},
+  {key = "expected_revision"; value = `String(revision)},
+  {key = "key"; value = `String(key)}])
+
+let status = fun () -> `Object([])

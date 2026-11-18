@@ -6,6 +6,12 @@ module Execution_id = struct
   include Comparator.Make (P.Id.Moderator_execution)
 end
 
+module Lifecycle_selection = struct
+  type t =
+    | Authored_start of P.Run.t
+    | Goal_resume of P.Run.t
+end
+
 type t =
   { run : P.Run.t
   ; delta : Session_delta.t
@@ -64,25 +70,81 @@ let digest json =
   Jsonaf.to_string json |> Digestif.SHA256.digest_string |> Digestif.SHA256.to_hex
 ;;
 
-let prepare
+type preparation =
+  | Checkpoint of P.Run_action.t option
+  | Running_work
+
+let select_lifecycle
+      (state : Session_state.t)
+      index
+      (previous : P.Run.t)
+      (executing : P.Moderator_execution.t)
+      selection
+  =
+  let open Result.Let_syntax in
+  let selected, phase, failure =
+    match selection with
+    | Lifecycle_selection.Authored_start selected ->
+      ( selected
+      , P.Moderator_execution.Session_start
+      , "held authored selection differs from its actual callback" )
+    | Goal_resume selected ->
+      selected, Session_resume, "Goal resume selection differs from its actual callback"
+  in
+  let%bind () =
+    if
+      P.Run.equal selected previous
+      && P.Moderator_execution.equal_phase executing.context.phase phase
+      && Option.is_none executing.context.operation_id
+      && Option.is_none executing.context.job
+      && Option.is_none executing.delegation
+      && Int.equal executing.context.generation previous.source.generation
+      && P.Invocation.equal_observer executing.context.source previous.source.observer
+      && List.exists state.moderator_executions ~f:(fun retained ->
+        P.Moderator_execution.equal_context retained.context executing.context)
+    then Ok ()
+    else Error (conflict failure)
+  in
+  let%map () =
+    match selection with
+    | Authored_start _ -> Ok ()
+    | Goal_resume _ ->
+      let%bind installed =
+        Run_source_installation.captured
+          (Run_state.installation index)
+          ~generation:state.identity.generation
+      in
+      if
+        P.Run.Mode.equal previous.mode Workflow
+        && P.Run_source.equal previous.source installed
+        && (match previous.lifecycle with
+            | Admitted | Active | Waiting _ -> true
+            | Terminal _ -> false)
+        && Option.exists (Run_state.goal_link index previous.id) ~f:(fun link ->
+          P.Id.Run.equal (Run_goal_link.run_id link) previous.id
+          && P.Goal_episode.matches_run (Run_goal_link.episode link) previous)
+      then Ok ()
+      else Error (conflict failure)
+  in
+  Some selected
+;;
+
+let prepare_internal
+      ?lifecycle_selection
+      ?startup_run
+      mode
       (state : Session_state.t)
       ~scope
       ~(executing : P.Moderator_execution.t)
-      ~work_state
+      ~work_delta
       ~owned_work
-      ~action
       ~now
   =
   let open Result.Let_syntax in
-  let%bind () = Session_state.validate work_state in
-  let%bind () =
-    if
-      P.Id.Session.equal
-        state.identity.session_id
-        work_state.Session_state.identity.session_id
-      && Int.equal state.identity.generation work_state.identity.generation
-    then Ok ()
-    else Error (conflict "staged work belongs to another session or generation")
+  let action =
+    match mode with
+    | Checkpoint action -> action
+    | Running_work -> None
   in
   let%bind index =
     Result.of_option state.run_state ~error:(conflict "run index absent")
@@ -91,6 +153,21 @@ let prepare
     Result.of_option
       (Run_state.find index (Run_scope.run_id scope))
       ~error:(conflict "run absent")
+  in
+  let%bind work_state, producer_proofs =
+    Run_producer_settlement.capture state ~delta:work_delta ~run:previous ~owned_work
+  in
+  (* The work projection may introduce a Job whose immutable Run origin is
+     captured in this same transaction. Its occurrence is added below, so the
+     complete cross-carrier validation belongs after that index is constructed. *)
+  let%bind () =
+    if
+      P.Id.Session.equal
+        state.identity.session_id
+        work_state.Session_state.identity.session_id
+      && Int.equal state.identity.generation work_state.identity.generation
+    then Ok ()
+    else Error (conflict "staged work belongs to another session or generation")
   in
   let%bind () =
     if
@@ -105,7 +182,14 @@ let prepare
     then Ok ()
     else Error (conflict "run callback scope changed before commit")
   in
-  let%bind selected = Run_event_scope.select state ~executing in
+  let%bind selected =
+    match lifecycle_selection with
+    | None -> Run_event_scope.select state ~executing
+    | Some selection ->
+      (* Exact selection DATA from the actor's physically owned held lifecycle
+         borrow. This does not authenticate a caller or widen generic selection. *)
+      select_lifecycle state index previous executing selection
+  in
   let%bind () =
     if Option.exists selected ~f:(fun run -> P.Id.Run.equal run.id previous.id)
     then Ok ()
@@ -125,12 +209,46 @@ let prepare
       P.Id.Moderator_execution.equal completed.context.id executing.context.id)
   in
   let initial_single_turn =
-    Run_event_scope.is_initial_single_turn previous executing.context
+    match mode with
+    | Checkpoint _ -> Run_event_scope.is_initial_single_turn previous executing.context
+    | Running_work -> false
   in
   let%bind terminal_work =
-    match completed with
-    | None -> Ok previous.terminal_work
-    | Some completed -> Run_callback_evidence.capture previous ~executing ~completed
+    match mode with
+    | Checkpoint _ ->
+      (match completed with
+       | None -> Ok previous.terminal_work
+       | Some completed -> Run_callback_evidence.capture previous ~executing ~completed)
+    | Running_work ->
+      let%bind () =
+        if
+          (not (List.is_empty owned_work))
+          && (not
+                (List.exists owned_work ~f:(fun work ->
+                   List.mem previous.owned_work work ~equal:P.Run_work.equal)))
+          && Option.exists completed ~f:(fun current ->
+            P.Moderator_execution.equal_context executing.context current.context
+            &&
+            match executing.status, current.status with
+            | Running, Running -> true
+            | _, _ -> false)
+          &&
+          match previous.lifecycle with
+          | Admitted | Active | Waiting _ -> true
+          | Terminal _ -> false
+        then Ok ()
+        else
+          Error (conflict "immediate work requires new occurrences and its live callback")
+      in
+      Ok previous.terminal_work
+  in
+  let%bind terminal_work =
+    match mode with
+    | Checkpoint _ -> Ok (terminal_work @ producer_proofs)
+    | Running_work ->
+      if List.is_empty producer_proofs
+      then Ok terminal_work
+      else Error (conflict "immediate work admission cannot complete a producer")
   in
   let evidence =
     Set.of_list
@@ -141,7 +259,10 @@ let prepare
     match action with
     | None ->
       let%bind lifecycle =
-        if initial_single_turn && Set.is_empty owned
+        if
+          initial_single_turn
+          && Set.is_empty owned
+          && not (Option.exists startup_run ~f:(P.Run.equal previous))
         then (
           match completed with
           | Some completed
@@ -226,12 +347,16 @@ let prepare
       let remaining = Set.diff owned (Set.of_list (module P.Run_work) relinquish) in
       let unsettled = Set.diff remaining evidence in
       let%bind lifecycle =
-        if Set.is_empty unsettled
+        if
+          Set.is_empty unsettled
+          && not (Option.exists startup_run ~f:(P.Run.equal previous))
         then Ok (P.Run.Lifecycle.Terminal terminal)
         else (
           match
             executing.context.phase, executing.context.operation_id, Set.to_list unsettled
           with
+          | _, _, [] when Option.exists startup_run ~f:(P.Run.equal previous) ->
+            Ok P.Run.Lifecycle.Active
           | Turn_end, Some operation_id, [ work ] ->
             (match work.P.Run_work.key with
              | Operation id when P.Id.Operation.equal id operation_id ->
@@ -285,7 +410,7 @@ let prepare
       in
       Run_state.commit index ~run ~receipt ~intent:(Some intent)
   in
-  let%map index =
+  let%bind index =
     match run.lifecycle with
     | Admitted | Active | Waiting _ -> Ok index
     | Terminal terminal ->
@@ -304,10 +429,54 @@ let prepare
       in
       Run_state.commit index ~run ~receipt:terminal_receipt ~intent:None
   in
+  let%map () = Session_state.validate { work_state with run_state = Some index } in
   { run; delta = Session_delta.Run_state_changed index }
 ;;
 
-let settle_operation (state : Session_state.t) ~operation_id ~outcome ~now =
+let prepare
+      ?lifecycle_selection
+      ?startup_run
+      state
+      ~scope
+      ~executing
+      ~work_delta
+      ~owned_work
+      ~action
+      ~now
+  =
+  prepare_internal
+    ?lifecycle_selection
+    ?startup_run
+    (Checkpoint action)
+    state
+    ~scope
+    ~executing
+    ~work_delta
+    ~owned_work
+    ~now
+;;
+
+let add_owned_work
+      ?lifecycle_selection
+      state
+      ~scope
+      ~executing
+      ~work_delta
+      ~owned_work
+      ~now
+  =
+  prepare_internal
+    ?lifecycle_selection
+    Running_work
+    state
+    ~scope
+    ~executing
+    ~work_delta
+    ~owned_work
+    ~now
+;;
+
+let settle_operation ?startup_run (state : Session_state.t) ~operation_id ~outcome ~now =
   let open Result.Let_syntax in
   match state.run_state with
   | None -> Ok []
@@ -334,88 +503,15 @@ let settle_operation (state : Session_state.t) ~operation_id ~outcome ~now =
                 ~outcome
                 ~revision:(Int64.succ previous.revision)
             in
-            let terminal_work = proof :: previous.terminal_work in
-            let pending =
-              List.filter (Run_state.intents index) ~f:(fun intent ->
-                P.Id.Run.equal intent.Run_intent.receipt.run_id previous.id
-                && Run_intent.Disposition.equal intent.disposition Pending)
-            in
-            let requested =
-              List.find_map pending ~f:(fun intent ->
-                match intent.action with
-                | Finish { terminal; _ } -> Some terminal
-                | Continue | Wait _ -> None)
-            in
-            let settled = List.length terminal_work = List.length previous.owned_work in
-            let terminal_outcome =
-              List.fold terminal_work ~init:outcome ~f:(fun accumulated proof ->
-                match proof.P.Run_work.Terminal.outcome, accumulated with
-                | Failed, _ | _, Failed -> P.Run_work.Terminal.Failed
-                | Cancelled, _ | _, Cancelled -> Cancelled
-                | Limited, _ | _, Limited -> Limited
-                | Interrupted, _ | _, Interrupted -> Interrupted
-                | Unconfirmed, _ | _, Unconfirmed -> Unconfirmed
-                | Succeeded, Succeeded -> Succeeded)
-            in
-            let awaiting_callback =
-              match previous.lifecycle with
-              | Waiting _ -> true
-              | Admitted | Active | Terminal _ -> false
-            in
-            let terminal =
-              if (not settled) || awaiting_callback
-              then None
-              else (
-                match terminal_outcome with
-                | Failed -> Some (P.Run.Terminal.Failed None)
-                | Cancelled -> Some P.Run.Terminal.Cancelled
-                | Limited -> Some P.Run.Terminal.Limited
-                | Interrupted | Unconfirmed -> Some P.Run.Terminal.Interrupted
-                | Succeeded ->
-                  (match requested, previous.mode with
-                   | Some terminal, _ -> Some terminal
-                   | None, Single_turn -> Some (P.Run.Terminal.Completed None)
-                   | None, Workflow -> None))
-            in
-            let lifecycle =
-              Option.value_map terminal ~default:previous.lifecycle ~f:(fun terminal ->
-                P.Run.Lifecycle.Terminal terminal)
-            in
-            let%bind run =
-              rebuild
-                previous
-                ~lifecycle
-                ~owned_work:previous.owned_work
-                ~relinquished_work:previous.relinquished_work
-                ~terminal_work
-                ~now
-            in
-            let%bind intents =
-              match terminal with
-              | None -> Ok []
-              | Some _ ->
-                List.map pending ~f:(fun intent ->
-                  Run_intent.consume intent ~operation_id:(Some operation_id))
-                |> Result.all
-            in
-            let%bind index = Run_state.advance index ~run ~intents in
-            match terminal with
-            | None -> Ok index
-            | Some terminal ->
-              let%bind receipt =
-                make_receipt
-                  state
-                  run
-                  ~kind:Terminal
-                  ~key:
-                    ("run-terminal:"
-                     ^ P.Id.Run.to_string run.id
-                     ^ ":"
-                     ^ Int64.to_string run.revision)
-                  ~digest:(digest (P.Run.Terminal.to_json terminal))
-                  ~now
-              in
-              Run_state.commit index ~run ~receipt ~intent:None))
+            Run_work_settlement.prepare
+              ?startup_run
+              index
+              ~state
+              ~previous
+              ~owned_work:previous.owned_work
+              ~terminal_work:(proof :: previous.terminal_work)
+              ~operation_id:(Some operation_id)
+              ~now))
     in
     [ Session_delta.Run_state_changed index ]
 ;;
@@ -535,6 +631,7 @@ let fail_callback
 ;;
 
 let admit_turn
+      ?(work_delta = Session_delta.Batch [])
       (state : Session_state.t)
       ~(operation : P.Operation.t)
       ~events
@@ -596,13 +693,21 @@ let admit_turn
                 Set.add (Set.of_list (module P.Run_work) run.owned_work) work
                 |> Set.to_list
               in
+              let%bind producer_state, proofs =
+                Run_producer_settlement.capture state ~delta:work_delta ~run ~owned_work
+              in
+              let%bind () =
+                if Option.equal Run_state.equal state.run_state producer_state.run_state
+                then Ok ()
+                else Error (conflict "turn companion work must not advance the Run index")
+              in
               let%bind next =
                 rebuild
                   run
                   ~lifecycle:Active
                   ~owned_work
                   ~relinquished_work:run.relinquished_work
-                  ~terminal_work:run.terminal_work
+                  ~terminal_work:(run.terminal_work @ proofs)
                   ~now
               in
               let%bind intent =

@@ -179,7 +179,7 @@ These tags are recognised by the parser, but they are primarily meaningful **ins
 
 | Inline tag | What it does |
 |---|---|
-| `<doc src="..." [local] [strip] [markdown] />` | Inline document text (local file or remote URL). |
+| `<doc src="..." [local] [strip] [markdown] />` | Inline document text from a file, URL or `builtin:` asset. |
 | `<img src="..." [local] />` | Inline an image (remote URL or local file encoded as a data URI). |
 | `<agent src="..." [local]> ... </agent>` | Run another ChatMD prompt as a sub-agent and insert its final answer. |
 | `<import src="..."/>` | Parse-time include (only expands in certain places; see below). |
@@ -349,12 +349,25 @@ that inventory rejects the request before fetching the prompt. A missing,
 revoked or unavailable source never silently switches modes. Omitting
 `source_mode` selects the default; setting it to `null` is an error.
 
-Spawned model jobs deliver completion back to the moderator as internal events, using stable v1 tags:
+Spawned model jobs deliver completion back to the moderator as internal events.
+Legacy moderators retain these tags:
 
 - `Model_job_succeeded(job_id, recipe_name, result_json)`
 - `Model_job_failed(job_id, recipe_name, message)`
 
-Note: the initial implementation may track spawned jobs in memory only; in-flight jobs are not durably persisted across process restarts.
+Extensibility-v1 moderators instead receive `Internal_event(payload)` JSON with
+`kind: "model_job_completed"`, `job_id`, `attempt` (a decimal string), `recipe`,
+and `result` in the protocol stored-completion format. This retains the actual
+terminal attempt and its success, failure, cancellation or interruption. The
+existing 1MiB internal-event JSON limit applies; oversized content rejects without
+truncation. Delivery remains an exact host-owned Job/checkpoint transaction, and
+the payload grants no effect authority. See [ChatML orchestration](../agent-server/chatml-orchestration.md).
+
+The daemon persists Job records and delivery state with the session. Recovery
+reconciles unfinished work; it does not promise that active execution continues
+across a process restart. Standalone embedders provide their own job storage and
+recovery, so an in-memory host does not gain the daemon persistence contract. See
+[recovery and durability](../agent-server/operations.md#durable-state).
 
 Moderator scripts receive `ctx.items`, where each item has the structural
 shape:
@@ -417,8 +430,8 @@ when the moderator requests one.
 An end-to-end idle async completion currently looks like this:
 
 1. a moderator script calls `Model.spawn(...)`
-2. the background job finishes and is converted into `Model_job_succeeded(...)`
-   or `Model_job_failed(...)`
+2. the background job finishes and is converted into the completion envelope
+   for the actual moderator API: legacy Model tags or v1 `model_job_completed` JSON
 3. the host enqueues that internal event into `Moderator_manager`
 4. the idle `chat_tui` reducer receives a moderator wakeup
 5. `chat_tui` drains queued internal events, refreshes visible transcript state
@@ -728,6 +741,11 @@ Summarise this:
 <doc src="README.md" local/>
 </user>
 ```
+
+Use `<doc src="builtin:goals"/>` to include an exact
+[builtin instruction asset](../guide/builtin-instructions.md). The installed
+catalog resolves this namespace and captures the selected edition during prompt
+preparation.
 
 Attributes:
 

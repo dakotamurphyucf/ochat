@@ -74,6 +74,10 @@ module Registry : sig
     -> (t * artifact option, string) result
 
   val script_id : artifact -> string
+
+  (** Canonical SHA-256 identity. Single programs hash exact retained source
+      bytes; Prepared programs retain their complete linked-program fingerprint.
+      Historical MD5 checkpoints require explicit host rebuild, never relabeling. *)
   val source_hash : artifact -> string
 end
 
@@ -91,6 +95,88 @@ type prepared_commit =
   { persist : unit -> (unit, string) result
   ; install : unit -> unit
   }
+
+(** Services selected for one actual callback. Tool, Model and immediate legacy
+    Schedule operations share the callback owner; constructing this record grants
+    no host authority. Standalone embeddings keep their explicitly supplied
+    constructor services when they do not use the callback boundary. *)
+module Callback_services : sig
+  type t =
+    { model_recipes : Moderation.Capabilities.model_recipe String.Map.t
+    ; tool_call :
+        name:string
+        -> args:Jsonaf.t
+        -> (Moderation.Capabilities.tool_call_result, string) result
+    ; after_ms :
+        delay_ms:int -> payload:Chatml.Chatml_lang.value -> (string, string) result
+    ; cancel : id:string -> (unit, string) result
+    }
+end
+
+module Callback : sig
+  (** Issued under the actual Manager gate for one selected callback. No codec or
+      public constructor exists. Saved values expire before that callback returns. *)
+  type t
+
+  module Selection : sig
+    type t =
+      | Boundary of Moderation.Event.t
+      | Queue_head
+  end
+
+  val source : t -> Agent_protocol.Invocation.observer
+  val snapshot : t -> Session.Moderator_state.Identity_snapshot.t
+  val event : t -> Session.Snapshot.t
+
+  (** The actual selection made while this Manager holds its gate. Reading it
+      grants no host admission or authority; the callback epoch must still be
+      current on that exact installed Manager. *)
+  val selection : t -> Selection.t
+
+  val consumes_head : t -> bool
+end
+
+(** Exact installed resource identity and callback epoch, not source-string
+    equality. This check does not acquire the Manager gate or yield. *)
+val callback_is_current : t -> Callback.t -> bool
+
+type callback_binding =
+  { services : Callback_services.t
+  ; authorize : unit -> (unit, string) result
+  ; prepare :
+      outcome:Moderation.Outcome.t
+      -> snapshot:Session.Moderator_state.Identity_snapshot.t
+      -> (prepared_commit, string) result
+  }
+
+(** Execute one legacy boundary or exact queue head through the existing Runtime
+    transaction engine. Mode is taken from this compiled Manager, never a caller
+    relaxation of v1 envelopes. The CPS admission owns its actor borrow through
+    handler execution, checkpoint persistence and cleanup. The supplied snapshot
+    precedes execution; prepare receives the full prospective queue. Queue removal
+    and local installation follow successful persistence. Empty queues do not
+    call admission. Failure leaves the live checkpoint unchanged; the host must
+    retain failed/interrupted claims so external effects cannot automatically replay.
+    Services are restored on error, exception or cancellation. The supplied CPS
+    executor rejects reuse and execution after its admission callback ends. This
+    boundary retains the compiled runtime's existing execution controls; deferred
+    Task values are interpreted under the callback that executes them. UI
+    suspension rejects this boundary.
+    Existing standalone drains and strict v1 entry points are unchanged. *)
+val handle_legacy_callback_entries
+  :  t
+  -> selection:Callback.Selection.t
+  -> session_id:string
+  -> now_ms:int
+  -> history:History_entry.t list
+  -> available_tools:Res.Request.Tool.t list
+  -> session_meta:Jsonaf.t
+  -> with_admission:
+       (Callback.t
+        -> snapshot:Session.Moderator_state.Identity_snapshot.t
+        -> (callback_binding -> (Moderation.Outcome.t, string) result)
+        -> (Moderation.Outcome.t, string) result)
+  -> (Moderation.Outcome.t option, string) result
 
 (** In-memory embeddings/tests with no durable owner. Does not grant job services. *)
 val memory_commit : (unit -> unit) -> prepared_commit
@@ -216,6 +302,13 @@ val handle_event_entries
     is required and scoped to this execution, with no legacy callback fallback.
     It must enforce current capabilities, policy and durable child ownership.
 
+    Ordinary host observations are projected under this manager's live execution
+    control, including inherited budgets. A trusted host [execution_policy] may
+    admit a larger observation than the source declaration permits as retained
+    state or callee input/output. Those declaration limits still apply at their
+    respective boundaries. Internal events and queued-event copies retain their
+    existing JSON and declaration bounds.
+
     Local outcome validation precedes [prepare_event], which receives the complete
     prospective state, queued events, halt and identity overlay. The host validates
     its handoff and returns a [prepared_commit] without saving yet. The manager
@@ -239,7 +332,8 @@ val handle_event_entries
     continuations are rejected. This engine boundary does not acquire an actor
     borrow, impose a host deadline or provide interactive permission ownership. *)
 val handle_event_entries_transactional
-  :  ?run_actions:Run_operations.transaction
+  :  ?model_recipes:Moderation.Capabilities.model_recipe String.Map.t
+  -> ?run_actions:Run_operations.transaction
   -> ?jobs:Background_job_operations.transaction
   -> ?subscriptions:Subscription_operations.transaction
   -> ?schedules:Schedule_operations.transaction
@@ -277,7 +371,8 @@ val handle_event_entries_transactional
     effects; this method does not retry, claim or retire failures itself.
     Returns [Ok None] for an empty queue without calling either callback. *)
 val handle_next_event_entries_transactional
-  :  ?run_actions:Run_operations.transaction
+  :  ?model_recipes:Moderation.Capabilities.model_recipe String.Map.t
+  -> ?run_actions:Run_operations.transaction
   -> ?jobs:Background_job_operations.transaction
   -> ?subscriptions:Subscription_operations.transaction
   -> ?schedules:Schedule_operations.transaction
@@ -326,7 +421,8 @@ val handle_next_event_entries_transactional
     private dependencies. [execution_context] retains inherited budgets across
     domain handoffs; it cannot reset the caller's limits. *)
 val handle_invocation_entries
-  :  ?run_actions:Run_operations.transaction
+  :  ?model_recipes:Moderation.Capabilities.model_recipe String.Map.t
+  -> ?run_actions:Run_operations.transaction
   -> ?jobs:Background_job_operations.transaction
   -> ?subscriptions:Subscription_operations.transaction
   -> ?schedules:Schedule_operations.transaction
@@ -356,6 +452,9 @@ val handle_invocation_entries
 
 (** Deliver a source-bound, already claimed nested outcome through Tool_observed.
     It has no provider call ID and cannot resolve the original invocation again.
+    The complete observation envelope uses the live observer execution control,
+    including inherited budgets; the source's retained-state and callee limits
+    remain separate and unchanged.
     The host must hold the exclusive actor borrow and persist [observed] with the
     prospective snapshot using the deferred commit returned by
     [prepare_observation]. Job/subscription selection and the final budget check precede its
@@ -370,7 +469,8 @@ val handle_invocation_entries
     Optional Tool.call routing has the same scoped authority requirements as
     [handle_invocation_entries]. *)
 val handle_observation_entries
-  :  ?run_actions:Run_operations.transaction
+  :  ?model_recipes:Moderation.Capabilities.model_recipe String.Map.t
+  -> ?run_actions:Run_operations.transaction
   -> ?jobs:Background_job_operations.transaction
   -> ?subscriptions:Subscription_operations.transaction
   -> ?schedules:Schedule_operations.transaction

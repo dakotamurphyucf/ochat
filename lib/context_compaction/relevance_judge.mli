@@ -10,6 +10,13 @@ val score_relevance
   -> prompt:string
   -> float
 
+val score_relevance_with_guidance
+  :  guidance:Inference.Request.Guidance.t option
+  -> inference:Inference_client.Execution.t
+  -> Config.t
+  -> prompt:string
+  -> float
+
 val is_relevant
   :  inference:Inference_client.Execution.t
   -> Config.t

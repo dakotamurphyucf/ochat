@@ -124,7 +124,8 @@ let create
       let invocation = prepare prepared request in
       let resolved, runtime_requests =
         Chat_response.Runtime_request_scope.collect (fun () ->
-          capabilities.with_invocation ~invocation (fun ~dispatched ->
+          let invoke = capabilities.with_invocation ~invocation in
+          invoke (fun ~dispatched ~capabilities:invocation_capabilities ->
             let execute control =
               Script_tool_calls.with_job_scope
                 script_tools
@@ -227,6 +228,7 @@ let create
                        script_tools
                        ~prepared
                        ~capabilities
+                       ~invocation_capabilities
                        ~parent:dispatched
                        ~moderate:(fun call ->
                          let%map outcome = moderate_tool dispatched call in

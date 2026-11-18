@@ -751,7 +751,12 @@ module Prepared_inputs = struct
         ?agent_prompt_v1_recipe:ctx.agent_prompt_v1_recipe
         ~inference_relation:ctx.inference_relation
         ()
-      |> fun child -> Ctx.with_submission_guard child ctx.submission_guard
+      |> fun child ->
+      Option.value_map ctx.effect_checkpoint ~default:child ~f:(fun check ->
+        Ctx.with_effect_checkpoint child ~check)
+      |> fun child ->
+      Ctx.with_submission_guard child ctx.submission_guard
+      |> fun child -> Ctx.inherit_agent_guidance child ~from:ctx
     in
     let config = Config.of_elements elements in
     { ctx; elements; config; input }
@@ -938,7 +943,9 @@ let run_stream_entries
     ~on_inference_completion:ctx.on_inference_completion
     ~on_inference_observation:ctx.on_inference_observation
     ~on_admitted_call:ctx.on_admitted_call
+    ?agent_guidance:(Ctx.agent_guidance ctx)
     ~submission_guard:ctx.submission_guard
+    ?before_tool_effect:ctx.effect_checkpoint
     ~before_inference_dispatch:ctx.before_inference_dispatch
     ~inference_relation:ctx.inference_relation
     ~env:(Ctx.env ctx)
@@ -989,6 +996,12 @@ let rec run_agent_input
           (items : CM.content_item list)
   : string
   =
+  let checkpoint () =
+    Eio.Fiber.check ();
+    Option.iter checkpoint ~f:(fun check -> check ());
+    Ctx.check_effect ctx
+  in
+  checkpoint ();
   Eio.Switch.run
   @@ fun sw ->
   (* 1.  Extract individual components from the shared context *)
@@ -998,7 +1011,13 @@ let rec run_agent_input
     match input with
     | Authored prompt_xml ->
       let source = Option.value session_id ~default:"<nested-agent>" in
-      CM.parse_chat_inputs ~source ~dir prompt_xml, None
+      let source_loader =
+        Option.map ctx.effect_checkpoint ~f:(fun check ->
+          Source_loader.with_checkpoint
+            (Source_loader.filesystem ~root:dir)
+            ~checkpoint:check)
+      in
+      CM.parse_chat_inputs ~source ?source_loader ~dir prompt_xml, None
     | Prepared { parsed; programs; document_projection } ->
       let elements =
         match document_projection with
@@ -1041,7 +1060,7 @@ let rec run_agent_input
       ?agent_source_runner
       ?startup
       ?compilation_limits
-      ?checkpoint
+      ~checkpoint
       ?programs
       ~moderator_surface:Chatml.Chatml_builtin_surface.moderator_surface
       ~sw
@@ -1054,6 +1073,7 @@ let rec run_agent_input
       ~approval_store:(Shell_access.Approval.create_store ())
       ~run_agent:(fun ?prompt_dir ?session_id ?observer ~source ~ctx prompt items ->
         run_agent
+          ~checkpoint
           ~history_compaction
           ?prompt_dir
           ?session_id
@@ -1083,6 +1103,7 @@ let rec run_agent_input
       ?input_agent_source_runner
       ~run_agent:(fun ?prompt_dir ?session_id ~ctx prompt items ->
         run_agent
+          ~checkpoint
           ~history_compaction
           ?prompt_dir
           ?session_id
@@ -1107,6 +1128,7 @@ let rec run_agent_input
         ; run_agent =
             (fun ?history_compaction ?prompt_dir ?session_id ~ctx prompt items ->
               run_agent
+                ~checkpoint
                 ?history_compaction
                 ?prompt_dir
                 ?session_id
@@ -1127,6 +1149,7 @@ let rec run_agent_input
       in
       let moderator =
         let on_process_run = Agent_runtime.moderator_process_handler agent_runtime in
+        checkpoint ();
         create_moderator_entries
           ~env:(Ctx.env ctx)
           ~session_id
@@ -1179,6 +1202,7 @@ let rec run_agent_input
   all_items
 
 and run_agent
+      ?checkpoint
       ?history_compaction
       ?prompt_dir
       ?session_id
@@ -1193,6 +1217,7 @@ and run_agent
       items
   =
   run_agent_input
+    ?checkpoint
     ?history_compaction
     ?prompt_dir
     ?session_id
@@ -1516,7 +1541,9 @@ and run_completion_stream
       ~on_inference_completion:ctx.on_inference_completion
       ~on_inference_observation:ctx.on_inference_observation
       ~on_admitted_call:ctx.on_admitted_call
+      ?agent_guidance:(Ctx.agent_guidance ctx)
       ~submission_guard:ctx.submission_guard
+      ?before_tool_effect:ctx.effect_checkpoint
       ~before_inference_dispatch:ctx.before_inference_dispatch
       ~inference_relation:ctx.inference_relation
       ~datadir

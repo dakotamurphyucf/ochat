@@ -73,6 +73,17 @@ let create_child ?(start_immediately = false) ?lifetime env root daemon parent_i
   |> F.protocol_ok
 ;;
 
+let await_parent_moderator env daemon parent_id =
+  let entry =
+    Agent_server.Session_registry.find (Daemon.registry daemon) parent_id
+    |> Option.value_exn
+  in
+  Support.Load_fixture.wait
+    env
+    "parent Session_start completion before child creation"
+    (fun () -> A.state entry.actor |> F.protocol_ok |> session_start_completed_exn)
+;;
+
 let run_child env ~root ~boundary ~recover =
   let under_independent = String.is_prefix boundary ~prefix:"under-independent-" in
   let boundary = if under_independent then String.drop_prefix boundary 18 else boundary in
@@ -81,11 +92,8 @@ let run_child env ~root ~boundary ~recover =
     if independent then Agent_server.Session_factory.Independent else Owned
   in
   let boundary = if independent then String.drop_prefix boundary 12 else boundary in
-  let boundary =
-    if String.is_prefix boundary ~prefix:"moderated-"
-    then String.drop_prefix boundary 10
-    else boundary
-  in
+  let moderated = String.is_prefix boundary ~prefix:"moderated-" in
+  let boundary = if moderated then String.drop_prefix boundary 10 else boundary in
   let start_immediately = String.is_prefix boundary ~prefix:"auto-" in
   let boundary = if start_immediately then String.drop_prefix boundary 5 else boundary in
   let armed = ref false in
@@ -206,6 +214,7 @@ let run_child env ~root ~boundary ~recover =
                   let root_parent, attachment =
                     create_session ~start_immediately:true client
                   in
+                  if moderated then await_parent_moderator env daemon root_parent.id;
                   let parent =
                     match under_independent with
                     | false -> root_parent
@@ -372,7 +381,7 @@ let run_child env ~root ~boundary ~recover =
                                parent.id
                              |> Option.value_exn
                            in
-                           parent_entry.close ();
+                           Agent_server.Session_registry.close_entry parent_entry;
                            ignore
                              (Agent_server.Session_registry.remove
                                 (Daemon.registry daemon)

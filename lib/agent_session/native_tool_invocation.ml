@@ -6,9 +6,18 @@ module C = Chat_response.Tool_capability
 module S = Chatmd_shell_spec.Tool_schema
 module Managed = Chat_response.Managed_tool_registry
 
+(** Explicit executor-issued borrow, qualified by the exact dispatched invocation.
+    Returned proofs must remain bound to the original authentication and physical
+    execution lifetime. This is not a source grant. *)
+type agent_actor_borrow =
+  invocation:Agent_protocol.Invocation.t
+  -> (Operator_authorization.t option, Agent_protocol.Error.t) result
+
 type executor =
   invocation:I.t
-  -> (dispatched:I.t -> (I.outcome, Agent_protocol.Error.t) result)
+  -> (dispatched:I.t
+      -> capabilities:Invocation_capabilities.t
+      -> (I.outcome, Agent_protocol.Error.t) result)
   -> (I.t, Agent_protocol.Error.t) result
 
 type owned_executor =
@@ -17,8 +26,11 @@ type owned_executor =
   -> (H.t, Agent_protocol.Error.t) result
 
 type moderator_executor =
-  invocation:I.t
+  ?snapshot:
+    (unit -> (Session.Moderator_state.Identity_snapshot.t, Agent_protocol.Error.t) result)
+  -> invocation:I.t
   -> (dispatched:I.t
+      -> capabilities:Invocation_capabilities.t
       -> commit:
            (resolved:I.t
             -> snapshot:Session.Moderator_state.Identity_snapshot.t
@@ -40,9 +52,11 @@ type borrowed =
   ; child_origin : I.origin
   ; coordination_context : Chat_response.Execution_gate.context
   ; execution_context : Chatml_execution.context
+  ; goal_context : Chat_response.Goal_native_scope.collection option
   ; runtime_context : Chat_response.Runtime_request_scope.t option
   ; moderation_context : Native_tool_moderation.t option
   ; authoring_reference_context : Authoring_reference_scope.t option
+  ; capabilities : Invocation_capabilities.t
   }
 
 type owned_borrowed =
@@ -55,6 +69,7 @@ type owned_borrowed =
   ; child_origin : I.origin
   ; coordination_context : Chat_response.Execution_gate.context
   ; execution_context : Chatml_execution.context
+  ; goal_context : Chat_response.Goal_native_scope.collection option
   ; runtime_context : Chat_response.Runtime_request_scope.t option
   }
 
@@ -67,6 +82,7 @@ type selected_borrowed =
   ; ceiling : C.t option
   ; effect_entry : (C.binding -> (unit, Agent_protocol.Error.t) result) option
   ; execution_context : Chatml_execution.context
+  ; goal_context : Chat_response.Goal_native_scope.collection option
   ; runtime_context : Chat_response.Runtime_request_scope.t option
   ; selected_ancestor : selected_borrowed option
   }
@@ -174,6 +190,57 @@ let borrow () =
 let borrowed_invocation (scope : borrowed) = scope.invocation
 let borrowed_execution_context (scope : borrowed) = scope.execution_context
 
+let borrowed_agent_actor (scope : borrowed) =
+  let open Result.Let_syntax in
+  if not (Atomic.get scope.active)
+  then
+    Error (Agent_protocol.Error.invalid_request "native invocation scope is not active")
+  else (
+    let%bind actor = scope.capabilities.borrow_agent_actor ~invocation:scope.invocation in
+    let%map () =
+      if Atomic.get scope.active
+      then Ok ()
+      else
+        Error
+          (Agent_protocol.Error.invalid_request "native invocation scope is not active")
+    in
+    Option.map actor ~f:(fun actor ->
+      Operator_authorization.guarded
+        ~principal:(Operator_authorization.principal actor)
+        ~is_current:(fun () ->
+          Atomic.get scope.active && Operator_authorization.is_current actor)))
+;;
+
+let borrowed_policy_caller (scope : borrowed) =
+  let open Result.Let_syntax in
+  let%bind () =
+    if Atomic.get scope.active
+    then Ok ()
+    else
+      Error (Agent_protocol.Error.invalid_request "native invocation scope is not active")
+  in
+  let%bind caller = scope.capabilities.policy_caller ~invocation:scope.invocation in
+  let%bind caller =
+    match
+      Delegated_policy_caller_custody.Host.restrict caller ~check_current:(fun () ->
+        if Atomic.get scope.active
+        then Ok ()
+        else
+          Error
+            (Agent_protocol.Error.invalid_request "native invocation scope is not active"))
+    with
+    | Ok caller -> Ok caller
+    | Error _ as failure ->
+      Delegated_policy_caller.close caller;
+      failure
+  in
+  if Atomic.get scope.active
+  then Ok caller
+  else (
+    Delegated_policy_caller.close caller;
+    Error (Agent_protocol.Error.invalid_request "native invocation scope is not active"))
+;;
+
 let borrowed_capabilities (scope : borrowed) =
   match Atomic.get scope.active, scope.ceiling with
   | true, Some selected -> Ok selected
@@ -181,6 +248,19 @@ let borrowed_capabilities (scope : borrowed) =
     Error
       (Agent_protocol.Error.invalid_request
          "borrowed scope has no active verified tool capabilities")
+;;
+
+let check_borrowed_effect_current (scope : borrowed) =
+  let open Result.Let_syntax in
+  let%bind _ = borrowed_capabilities scope in
+  scope.capabilities.check_effect_current ~invocation:scope.invocation
+;;
+
+let refresh_borrowed_effect_current (scope : borrowed) =
+  let open Result.Let_syntax in
+  let%bind _ = borrowed_capabilities scope in
+  let%bind () = scope.capabilities.refresh_effect_current ~invocation:scope.invocation in
+  check_borrowed_effect_current scope
 ;;
 
 let require_native_admission (scope : borrowed) ~binding =
@@ -214,6 +294,93 @@ let require_native_admission (scope : borrowed) ~binding =
      | Some _, _, _ | None, _, _ -> denied ())
   | Some _, _ | None, _ -> denied ()
 ;;
+
+let borrowed_inference_allocator (scope : borrowed) =
+  let open Result.Let_syntax in
+  let%bind admission =
+    Eio.Fiber.get native_admission_key
+    |> Result.of_option
+         ~error:
+           (Agent_protocol.Error.invalid_request
+              "native inference requires the actual handler admission")
+  in
+  let%bind () = require_native_admission scope ~binding:admission.admitted_binding in
+  let check () =
+    if Atomic.get scope.active && Atomic.get admission.admission_active
+    then Ok ()
+    else Error (Agent_protocol.Error.invalid_request "native inference scope expired")
+  in
+  let require () =
+    match check () with
+    | Ok () -> ()
+    | Error error -> raise (Inference_allocation.Rejected error)
+  in
+  let guard =
+    Inference_runtime.Submission_guard.create ~refresh:(fun () ->
+      require ();
+      require)
+  in
+  Ok
+    (fun ~graph ~relation ~configuration ->
+      let%bind () = check () in
+      let%map allocation =
+        scope.capabilities.allocate_inference ~graph ~relation ~configuration
+      in
+      (* Preserve the actual ACK before any fallible lifetime recheck. *)
+      Inference_allocation.Host.create
+        ~handle:(Inference_allocation.handle allocation)
+        ~submission_guard:
+          (Inference_runtime.Submission_guard.compose
+             guard
+             (Inference_allocation.submission_guard allocation)))
+;;
+
+module Admission = struct
+  type t =
+    { borrowed : borrowed
+    ; admission : native_admission
+    ; binding : C.binding
+    ; actor : Operator_authorization.t option
+    }
+
+  let capture borrowed ~binding =
+    let open Result.Let_syntax in
+    let%bind () = require_native_admission borrowed ~binding in
+    let%bind actor = borrowed_agent_actor borrowed in
+    let%bind () = require_native_admission borrowed ~binding in
+    match Eio.Fiber.get native_admission_key with
+    | None ->
+      Error (Agent_protocol.Error.invalid_request "native admission is unavailable")
+    | Some admission -> Ok { borrowed; admission; binding; actor }
+  ;;
+
+  let check_now t ~binding =
+    let reference = C.reference binding in
+    let issued = C.reference t.binding in
+    if
+      Atomic.get t.borrowed.active
+      && Atomic.get t.admission.admission_active
+      && I.equal_context t.admission.invocation_context t.borrowed.invocation.context
+      && Agent_protocol.Id.Capability.equal reference.id issued.id
+      && String.equal reference.fingerprint issued.fingerprint
+      && Option.equal
+           phys_equal
+           (C.native_implementation binding)
+           (C.native_implementation t.binding)
+    then Ok ()
+    else
+      Error
+        (Agent_protocol.Error.invalid_request
+           "native admission expired or effect differs")
+  ;;
+
+  let callback_scope t =
+    Option.map t.borrowed.goal_context ~f:Chat_response.Goal_native_scope.owner
+  ;;
+
+  let invocation t = t.borrowed.invocation
+  let actor t = t.actor
+end
 
 let with_native_admission invocation binding f =
   let admission : native_admission =
@@ -464,6 +631,7 @@ let with_owned_scope
       ?ceiling
       ?(child_origin = I.Script)
       ?execution_context
+      ?goal_context
       ?runtime_context
       ~issuer
       ~parent_claim
@@ -477,6 +645,9 @@ let with_owned_scope
     Option.value_or_thunk
       runtime_context
       ~default:Chat_response.Runtime_request_scope.capture
+  in
+  let goal_context =
+    Option.value_or_thunk goal_context ~default:Chat_response.Goal_native_scope.capture
   in
   let scope =
     { invocation
@@ -488,20 +659,23 @@ let with_owned_scope
     ; child_origin
     ; coordination_context = Chat_response.Execution_gate.capture_context ()
     ; execution_context
+    ; goal_context
     ; runtime_context
     }
   in
   Exn.protect
     ~finally:(fun () -> Atomic.set scope.active false)
     ~f:(fun () ->
-      Chat_response.Runtime_request_scope.with_context runtime_context (fun () ->
-        Eio.Fiber.with_binding owned_scope_key scope f))
+      Chat_response.Goal_native_scope.with_context goal_context (fun () ->
+        Chat_response.Runtime_request_scope.with_context runtime_context (fun () ->
+          Eio.Fiber.with_binding owned_scope_key scope f)))
 ;;
 
 let with_selected_scope
       ?ceiling
       ?effect_entry
       ?execution_context
+      ?goal_context
       ?runtime_context
       ~issuer
       ~parent_claim
@@ -516,6 +690,9 @@ let with_selected_scope
       runtime_context
       ~default:Chat_response.Runtime_request_scope.capture
   in
+  let goal_context =
+    Option.value_or_thunk goal_context ~default:Chat_response.Goal_native_scope.capture
+  in
   let selected_ancestor = Eio.Fiber.get selected_scope_key in
   let scope =
     { invocation
@@ -526,6 +703,7 @@ let with_selected_scope
     ; ceiling
     ; effect_entry
     ; execution_context
+    ; goal_context
     ; runtime_context
     ; selected_ancestor
     }
@@ -533,8 +711,9 @@ let with_selected_scope
   Exn.protect
     ~finally:(fun () -> Atomic.set scope.active false)
     ~f:(fun () ->
-      Chat_response.Runtime_request_scope.with_context runtime_context (fun () ->
-        Eio.Fiber.with_binding selected_scope_key scope f))
+      Chat_response.Goal_native_scope.with_context goal_context (fun () ->
+        Chat_response.Runtime_request_scope.with_context runtime_context (fun () ->
+          Eio.Fiber.with_binding selected_scope_key scope f)))
 ;;
 
 let select_tools (scope : borrowed) ~names =
@@ -558,8 +737,7 @@ let borrow_for_fork () =
       Agent_protocol.Error.invalid_request error.C.message)
   in
   match C.implementation binding with
-  | Native implementation
-    when phys_equal implementation.run_with_progress Functions.fork.run_with_progress ->
+  | Native implementation when Chat_response.Tool_call.is_builtin_fork implementation ->
     Ok { scope with child_origin = I.Delegated_agent }
   | Native _ | Managed _ ->
     Error
@@ -583,15 +761,23 @@ let record_authoring_reference (scope : borrowed) response =
 let with_scope
       ?ceiling
       ?moderator_execute
+      ?(capabilities = Invocation_capabilities.unavailable)
       ?(child_origin = I.Script)
       ?execution_context
+      ?goal_context
       ?runtime_context
       ?moderation_context
       ~execute
       invocation
       f
   =
-  let execute, moderator_execute, ceiling, execution_context, authoring_reference_context =
+  let ( execute
+      , moderator_execute
+      , ceiling
+      , execution_context
+      , authoring_reference_context
+      , capabilities )
+    =
     match Eio.Fiber.get scope_key with
     | Some scope when Atomic.get scope.active && I.equal scope.invocation invocation ->
       (* Preserve the real actor executor rather than inheriting a direct-child
@@ -600,14 +786,16 @@ let with_scope
       , Option.first_some scope.moderator_execute moderator_execute
       , Option.first_some ceiling scope.ceiling
       , Option.value execution_context ~default:scope.execution_context
-      , scope.authoring_reference_context )
+      , scope.authoring_reference_context
+      , scope.capabilities )
     | None | Some _ ->
       ( execute
       , moderator_execute
       , ceiling
       , Option.value_or_thunk execution_context ~default:(fun () ->
           Chatml_execution.capture_context ())
-      , Authoring_reference_scope.capture ~invocation_id:invocation.context.id )
+      , Authoring_reference_scope.capture ~invocation_id:invocation.context.id
+      , capabilities )
   in
   let execution_context =
     Chatml_execution.capture_context ~inherited:execution_context ()
@@ -618,29 +806,35 @@ let with_scope
       runtime_context
       ~default:Chat_response.Runtime_request_scope.capture
   in
+  let goal_context =
+    Option.value_or_thunk goal_context ~default:Chat_response.Goal_native_scope.capture
+  in
   let moderation_context =
     Option.value_or_thunk moderation_context ~default:Native_tool_moderation.capture
   in
   Exn.protect
     ~finally:(fun () -> Atomic.set active false)
     ~f:(fun () ->
-      Chat_response.Runtime_request_scope.with_context runtime_context (fun () ->
-        Native_tool_moderation.with_context moderation_context (fun () ->
-          Eio.Fiber.with_binding
-            scope_key
-            { invocation
-            ; active
-            ; execute
-            ; moderator_execute
-            ; ceiling
-            ; child_origin
-            ; coordination_context = Chat_response.Execution_gate.capture_context ()
-            ; execution_context
-            ; runtime_context
-            ; moderation_context
-            ; authoring_reference_context
-            }
-            f)))
+      Chat_response.Goal_native_scope.with_context goal_context (fun () ->
+        Chat_response.Runtime_request_scope.with_context runtime_context (fun () ->
+          Native_tool_moderation.with_context moderation_context (fun () ->
+            Eio.Fiber.with_binding
+              scope_key
+              { invocation
+              ; active
+              ; execute
+              ; moderator_execute
+              ; ceiling
+              ; child_origin
+              ; coordination_context = Chat_response.Execution_gate.capture_context ()
+              ; execution_context
+              ; goal_context
+              ; runtime_context
+              ; moderation_context
+              ; authoring_reference_context
+              ; capabilities
+              }
+              f))))
 ;;
 
 let check_active (scope : borrowed) =
@@ -687,19 +881,21 @@ let execute_borrowed (scope : borrowed) ~invocation f =
   let open Result.Let_syntax in
   let%bind ceiling = check_child scope invocation in
   Chat_response.Execution_gate.with_context scope.coordination_context (fun () ->
-    scope.execute ~invocation (fun ~dispatched ->
+    scope.execute ~invocation (fun ~dispatched ~capabilities ->
       (* Actor admission can yield while the native callback returns. A retained
        executor must not start effects after its lending scope has expired. *)
       let%bind () = check_active scope in
       with_scope
         ~ceiling
+        ~capabilities
         ?moderator_execute:scope.moderator_execute
         ~execution_context:scope.execution_context
+        ~goal_context:scope.goal_context
         ~runtime_context:scope.runtime_context
         ~moderation_context:scope.moderation_context
         ~execute:scope.execute
         dispatched
-        (fun () -> f ~dispatched)))
+        (fun () -> f ~dispatched ~capabilities)))
 ;;
 
 let execute_owned_borrowed (scope : owned_borrowed) ~invocation f =
@@ -735,6 +931,7 @@ let execute_owned_borrowed (scope : owned_borrowed) ~invocation f =
            ~ceiling:selected
            ~child_origin:scope.child_origin
            ~execution_context:scope.execution_context
+           ~goal_context:scope.goal_context
            ~runtime_context:scope.runtime_context
            ~issuer:scope.issuer
            ~parent_claim:active
@@ -742,7 +939,7 @@ let execute_owned_borrowed (scope : owned_borrowed) ~invocation f =
            (fun () -> f ~active ~dispatched)))
 ;;
 
-let execute_moderator_borrowed (scope : borrowed) ~invocation f =
+let execute_moderator_borrowed (scope : borrowed) ?snapshot ~invocation f =
   let open Result.Let_syntax in
   let%bind () =
     match invocation.I.context.origin with
@@ -760,17 +957,19 @@ let execute_moderator_borrowed (scope : borrowed) ~invocation f =
            "borrowed moderator executor is unavailable")
   in
   Chat_response.Execution_gate.with_context scope.coordination_context (fun () ->
-    execute ~invocation (fun ~dispatched ~commit ->
+    execute ?snapshot ~invocation (fun ~dispatched ~capabilities ~commit ->
       let%bind () = check_active scope in
       with_scope
         ~ceiling
+        ~capabilities
         ?moderator_execute:scope.moderator_execute
         ~execution_context:scope.execution_context
+        ~goal_context:scope.goal_context
         ~runtime_context:scope.runtime_context
         ~moderation_context:scope.moderation_context
         ~execute:scope.execute
         dispatched
-        (fun () -> f ~dispatched ~commit)))
+        (fun () -> f ~dispatched ~capabilities ~commit)))
 ;;
 
 let moderator_executor (scope : borrowed) =
@@ -805,6 +1004,7 @@ let with_managed_scope execution f =
     ~child_origin
     ?moderator_execute:scope.moderator_execute
     ~execution_context:scope.execution_context
+    ~goal_context:scope.goal_context
     ~runtime_context:scope.runtime_context
     ~moderation_context:scope.moderation_context
     ~execute:scope.execute
@@ -850,6 +1050,7 @@ let with_owned_managed_scope execution f =
     ~parent_claim:scope.parent_claim
     ~child_origin:I.Script
     ~execution_context:scope.execution_context
+    ~goal_context:scope.goal_context
     ~runtime_context:scope.runtime_context
     scope.invocation
     (fun () -> Result.bind (borrow_owned ()) ~f)
@@ -893,18 +1094,26 @@ let with_selected_managed_scope execution f =
     ~issuer:scope.issuer
     ~parent_claim:scope.parent_claim
     ~execution_context:scope.execution_context
+    ~goal_context:scope.goal_context
     ~runtime_context:scope.runtime_context
     scope.invocation
     (fun () -> Result.bind (borrow_selected ()) ~f)
 ;;
 
-let with_dispatched_scope ~execute ?moderator_execute ~selected ~invocation f =
+let with_dispatched_scope
+      ~execute
+      ?moderator_execute
+      ?capabilities
+      ~selected
+      ~invocation
+      f
+  =
   let open Result.Let_syntax in
   let%bind () = I.validate invocation in
   match invocation.status with
   | Dispatching
     when String.equal invocation.context.capability_fingerprint (C.fingerprint selected)
-    -> with_scope ~execute ?moderator_execute ~ceiling:selected invocation f
+    -> with_scope ~execute ?moderator_execute ?capabilities ~ceiling:selected invocation f
   | _ ->
     Error
       (Agent_protocol.Error.invalid_request
@@ -970,6 +1179,7 @@ let with_owned_selected_capabilities selected f =
       ~parent_claim:scope.parent_claim
       ~child_origin:scope.child_origin
       ~execution_context:scope.execution_context
+      ~goal_context:scope.goal_context
       ~runtime_context:scope.runtime_context
       scope.invocation
       f
@@ -1001,6 +1211,7 @@ let with_developer_selected_capabilities selected f =
       ~issuer:scope.issuer
       ~parent_claim:scope.parent_claim
       ~execution_context:scope.execution_context
+      ~goal_context:scope.goal_context
       ~runtime_context:scope.runtime_context
       scope.invocation
       f
@@ -1125,7 +1336,232 @@ let selected_managed_target
     })
 ;;
 
+module Execution_check = struct
+  type t =
+    | Unavailable
+    | Local
+    | Guarded of (unit -> (unit, Agent_protocol.Error.t) result)
+
+  let unavailable = Unavailable
+
+  let with_local_default = function
+    | Unavailable -> Local
+    | (Local | Guarded _) as t -> t
+  ;;
+
+  let with_guard t ~check =
+    let current () =
+      let open Result.Let_syntax in
+      let%bind () = check () in
+      let%bind () =
+        match t with
+        | Unavailable | Local -> Ok ()
+        | Guarded previous -> previous ()
+      in
+      check ()
+    in
+    Guarded current
+  ;;
+
+  let available = function
+    | Unavailable -> false
+    | Local | Guarded _ -> true
+  ;;
+
+  let check = function
+    | Unavailable ->
+      Error
+        (Agent_protocol.Error.invalid_request
+           "native execution currentness is unavailable")
+    | Local -> Ok ()
+    | Guarded check -> check ()
+  ;;
+end
+
+(* These representations never leave this module. The scopes/admissions are the
+   actual records captured INSIDE the existing authorized callback, not copies
+   reconstructed from an invocation header or later ambient fiber lookup. *)
+module Current_call = struct
+  type issuer =
+    | Conversation of
+        { scope : borrowed
+        ; admission : native_admission
+        ; execution_check : Execution_check.t
+        }
+    | Owned of
+        { scope : owned_borrowed
+        ; admission : owned_native_admission
+        ; check_owner : unit -> (unit, Agent_protocol.Error.t) result
+        }
+    | Selected of
+        { scope : selected_borrowed
+        ; admission : owned_native_admission
+        ; check_owner : unit -> (unit, Agent_protocol.Error.t) result
+        }
+
+  type t =
+    { domain_id : int
+    ; issuer : issuer
+    ; binding : C.binding
+    ; registry : unit -> (C.t, C.error) result
+    }
+
+  let denied () =
+    Error (Agent_protocol.Error.invalid_request "native effect call expired or changed")
+  ;;
+
+  let create ~issuer ~binding ~registry =
+    { domain_id = (Stdlib.Domain.self () :> int); issuer; binding; registry }
+  ;;
+
+  let check t =
+    let open Result.Let_syntax in
+    if not (Int.equal t.domain_id (Stdlib.Domain.self () :> int))
+    then denied ()
+    else (
+      let%bind ceiling, admitted, fingerprint, revision =
+        match t.issuer with
+        | Conversation { scope; admission; execution_check } ->
+          if
+            not
+              (Atomic.get scope.active
+               && Atomic.get admission.admission_active
+               && I.equal_context admission.invocation_context scope.invocation.context
+               && Execution_check.available execution_check)
+          then denied ()
+          else (
+            let%map ceiling = borrowed_capabilities scope in
+            ( ceiling
+            , admission.admitted_binding
+            , scope.invocation.context.capability_fingerprint
+            , scope.invocation.context.implementation_revision ))
+        | Owned { scope; admission; check_owner = _ } ->
+          if
+            not
+              (owned_active scope
+               && Atomic.get admission.admission_active
+               && H.equal_context
+                    admission.invocation_context
+                    (H.context scope.invocation))
+          then denied ()
+          else (
+            let%map ceiling = owned_borrowed_capabilities scope in
+            let context = H.context scope.invocation in
+            ( ceiling
+            , admission.admitted_binding
+            , context.capability_fingerprint
+            , context.implementation_revision ))
+        | Selected { scope; admission; check_owner = _ } ->
+          if
+            not
+              (selected_active scope
+               && Atomic.get admission.admission_active
+               && H.equal_context
+                    admission.invocation_context
+                    (H.context scope.invocation))
+          then denied ()
+          else (
+            let%map ceiling = selected_borrowed_capabilities scope in
+            let context = H.context scope.invocation in
+            ( ceiling
+            , admission.admitted_binding
+            , context.capability_fingerprint
+            , context.implementation_revision ))
+      in
+      let reference = C.reference t.binding in
+      let admitted_reference = C.reference admitted in
+      let resolve capabilities =
+        C.resolve capabilities ~id:reference.id ~fingerprint:reference.fingerprint
+        |> Result.map_error ~f:(fun error ->
+          Agent_protocol.Error.invalid_request error.C.message)
+      in
+      let%bind retained = resolve ceiling in
+      match
+        ( C.native_implementation t.binding
+        , C.native_implementation admitted
+        , C.native_implementation retained )
+      with
+      | Some implementation, Some admitted, Some retained
+        when Agent_protocol.Id.Capability.equal reference.id admitted_reference.id
+             && String.equal reference.fingerprint admitted_reference.fingerprint
+             && String.equal reference.implementation_revision revision
+             && String.equal fingerprint (C.fingerprint ceiling)
+             && phys_equal implementation admitted
+             && phys_equal implementation retained -> Ok ()
+      | _ -> denied ())
+  ;;
+
+  let resolve_current t =
+    let open Result.Let_syntax in
+    let%bind selected =
+      t.registry ()
+      |> Result.map_error ~f:(fun error ->
+        Agent_protocol.Error.invalid_request error.C.message)
+    in
+    let reference = C.reference t.binding in
+    let%bind current =
+      C.resolve selected ~id:reference.id ~fingerprint:reference.fingerprint
+      |> Result.map_error ~f:(fun error ->
+        Agent_protocol.Error.invalid_request error.C.message)
+    in
+    let fingerprint =
+      match t.issuer with
+      | Conversation { scope; _ } -> scope.invocation.context.capability_fingerprint
+      | Owned { scope; _ } -> (H.context scope.invocation).capability_fingerprint
+      | Selected { scope; _ } -> (H.context scope.invocation).capability_fingerprint
+    in
+    match C.native_implementation t.binding, C.native_implementation current with
+    | Some implementation, Some current
+      when phys_equal implementation current
+           && String.equal fingerprint (C.fingerprint selected) -> Ok ()
+    | _ -> denied ()
+  ;;
+
+  let refresh_owner t =
+    let open Result.Let_syntax in
+    match t.issuer with
+    | Conversation { scope; admission = _; execution_check } ->
+      let%bind () =
+        scope.capabilities.refresh_effect_current ~invocation:scope.invocation
+      in
+      let%bind () = check t in
+      let%bind () = Execution_check.check execution_check in
+      let%bind () = check t in
+      scope.capabilities.check_effect_current ~invocation:scope.invocation
+    | Owned { check_owner; _ } -> check_owner ()
+    | Selected { scope; check_owner; admission = _ } ->
+      let%bind () = check_owner () in
+      (match scope.effect_entry with
+       | Some effect_entry -> effect_entry t.binding
+       | None -> denied ())
+  ;;
+
+  let refresh t =
+    let open Result.Let_syntax in
+    let%bind () = check t in
+    let%bind () = refresh_owner t in
+    let%bind () = check t in
+    (* Registry resolution can invoke actual custody/profile checks and YIELD.
+       It never executes in check or while discovery holds its cache mutex. *)
+    let%bind () = resolve_current t in
+    let%bind () = check t in
+    let%bind () = refresh_owner t in
+    check t
+  ;;
+
+  let transport t =
+    let require = function
+      | Ok () -> ()
+      | Error error -> raise (Chat_response.Ctx.Effect_rejected error)
+    in
+    Ochat_function.Invocation.Effect_check.create
+      ~refresh:(fun () -> require (refresh t))
+      ~check:(fun () -> require (check t))
+  ;;
+end
+
 let run_with_native
+      ~execution_check
       ~run_native
       ~on_progress
       ~(managed : managed_dispatch option)
@@ -1138,9 +1574,21 @@ let run_with_native
       ~authorize
       ~prepare_output
   =
+  let actual_scope : borrowed option ref = ref None in
   let scoped_execute ~invocation f =
-    execute ~invocation (fun ~dispatched ->
-      with_scope ?moderator_execute ~execute dispatched (fun () -> f ~dispatched))
+    execute ~invocation (fun ~dispatched ~capabilities ->
+      with_scope ?moderator_execute ~capabilities ~execute dispatched (fun () ->
+        (* Retain the real executor-installed scope rather than rediscovering
+           ambient owned/selected contexts or comparing with an admission DTO. *)
+        match Eio.Fiber.get scope_key with
+        | Some scope when Atomic.get scope.active && I.equal scope.invocation dispatched
+          ->
+          actual_scope := Some scope;
+          Exn.protect
+            ~finally:(fun () -> actual_scope := None)
+            ~f:(fun () -> f ~dispatched)
+        | None | Some _ ->
+          Error (Agent_protocol.Error.invalid_request "dispatched native scope is absent")))
   in
   let managed_revision binding =
     match C.implementation binding, managed with
@@ -1153,9 +1601,30 @@ let run_with_native
   in
   let check_halted () =
     let failure = fail "invocation.session_ended" "The session has ended." in
-    match checked failure (fun () -> Ok (is_halted ())) with
-    | Ok false -> Ok ()
-    | Ok true | Error _ -> Error failure
+    checked failure (fun () ->
+      let open Result.Let_syntax in
+      let%bind scope =
+        Result.of_option
+          !actual_scope
+          ~error:(Agent_protocol.Error.invalid_request "native effect scope is absent")
+      in
+      let check_current () =
+        let%bind () =
+          if Atomic.get scope.active && Option.exists !actual_scope ~f:(phys_equal scope)
+          then Ok ()
+          else Error (Agent_protocol.Error.invalid_request "native effect scope expired")
+        in
+        scope.capabilities.check_effect_current ~invocation:scope.invocation
+      in
+      let%bind () = check_current () in
+      let halted = is_halted () in
+      (* Existing halted callbacks may await. Recheck this SAME actual dispatched
+         lifetime and admitted operation view immediately before the prefix.
+         Generic effects do not borrow stronger agent-creation authentication. *)
+      let%bind () = check_current () in
+      if halted
+      then Error (Agent_protocol.Error.invalid_request "native effect authority ended")
+      else Ok ())
   in
   Native_tool_policy.run_policy
     ~run_native
@@ -1173,7 +1642,19 @@ let run_with_native
     ~preparation:(fun invocation ->
       Option.map invocation.I.routing ~f:(fun routing -> routing.preparation))
     ~with_selected:with_selected_capabilities
-    ~with_native_admission
+    ~with_native_admission:(fun dispatched binding f ->
+      with_native_admission dispatched binding (fun () ->
+        match Eio.Fiber.get scope_key, Eio.Fiber.get native_admission_key with
+        | Some scope, Some admission ->
+          let current =
+            Current_call.create
+              ~issuer:(Conversation { scope; admission; execution_check })
+              ~binding
+              ~registry:(fun () -> Ok (registry ()))
+          in
+          f ~current:(Current_call.transport current)
+        | None, _ | _, None ->
+          Error (fail "invocation.run_ended" "Native admission is absent.")))
     ~authorize
     ~prepare_output
     ~complete:(fun outcome ~selected_jobs:_ -> Ok outcome)
@@ -1222,7 +1703,20 @@ let run_owned
       | _ -> false)
     ~preparation:(fun _ -> None)
     ~with_selected:with_owned_selected_capabilities
-    ~with_native_admission:with_owned_native_admission
+    ~with_native_admission:(fun dispatched binding f ->
+      with_owned_native_admission dispatched binding (fun () ->
+        match Eio.Fiber.get owned_scope_key, Eio.Fiber.get owned_native_admission_key with
+        | Some scope, Some admission ->
+          let check_owner () = D.check_invocation owner ~parent:parent_claim dispatched in
+          let current =
+            Current_call.create
+              ~issuer:(Owned { scope; admission; check_owner })
+              ~binding
+              ~registry
+          in
+          f ~current:(Current_call.transport current)
+        | None, _ | _, None ->
+          Error (fail "invocation.run_ended" "Owned admission is absent.")))
     ~authorize
     ~prepare_output
     ~complete:(fun outcome ~selected_jobs:_ -> Ok outcome)
@@ -1403,7 +1897,27 @@ let run_owned_selected
     ~with_native_admission:(fun dispatched binding f ->
       with_owned_native_admission dispatched binding (fun () ->
         match effect_entry binding with
-        | Ok () -> f ()
+        | Ok () ->
+          (match
+             Eio.Fiber.get selected_scope_key, Eio.Fiber.get owned_native_admission_key
+           with
+           | Some scope, Some admission ->
+             let check_owner () = D.Selected.check_invocation owner ~parent dispatched in
+             let current =
+               Current_call.create
+                 ~issuer:(Selected { scope; admission; check_owner })
+                 ~binding
+                 ~registry:(fun () ->
+                   registry ()
+                   |> Result.map_error ~f:(fun _ ->
+                     C.
+                       { code = "capability.invalid_selection"
+                       ; message = "developer selection changed"
+                       }))
+             in
+             f ~current:(Current_call.transport current)
+           | None, _ | _, None ->
+             Error (fail "invocation.run_ended" "Selected admission is absent."))
         | Error _ ->
           Error (fail "invocation.run_ended" "The developer run is unavailable.")))
     ~authorize
@@ -1411,18 +1925,28 @@ let run_owned_selected
     ~complete
 ;;
 
-let run_scoped_with_managed = run_with_native ~run_native:None
+let run_scoped_current_with_managed ~execution_check =
+  run_with_native ~execution_check ~run_native:None
+;;
+
+let run_scoped_with_managed =
+  run_scoped_current_with_managed ~execution_check:Execution_check.unavailable
+;;
 
 let run_scoped_in_driver ~run_native =
-  run_with_native ~run_native:(Some run_native) ~on_progress:None
+  run_with_native
+    ~execution_check:Execution_check.unavailable
+    ~run_native:(Some run_native)
+    ~on_progress:None
 ;;
 
 let run_scoped =
   run_scoped_with_managed ~on_progress:None ~managed:None ~moderator_execute:None
 ;;
 
-let run ~capabilities =
-  run_scoped_with_managed
+let run_current ~execution_check ~capabilities =
+  run_scoped_current_with_managed
+    ~execution_check
     ~on_progress:None
     ~managed:None
     ~moderator_execute:
@@ -1430,8 +1954,9 @@ let run ~capabilities =
     ~execute:capabilities.Operation_worker.Capabilities.with_invocation
 ;;
 
-let run_in_driver ~run_native ~capabilities =
+let run_in_driver_current ~execution_check ~run_native ~capabilities =
   run_with_native
+    ~execution_check
     ~run_native:(Some run_native)
     ~on_progress:None
     ~managed:None
@@ -1439,3 +1964,6 @@ let run_in_driver ~run_native ~capabilities =
       (Some capabilities.Operation_worker.Capabilities.with_moderator_invocation)
     ~execute:capabilities.Operation_worker.Capabilities.with_invocation
 ;;
+
+let run = run_current ~execution_check:Execution_check.unavailable
+let run_in_driver = run_in_driver_current ~execution_check:Execution_check.unavailable

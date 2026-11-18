@@ -173,3 +173,26 @@ let%test_unit "host domain handoffs preserve nested owner ancestry explicitly" =
              assert (is G.Reentrant (G.with_access gate ignore)))))
       |> ok))
 ;;
+
+let%test_unit "standalone moderator routing has no ambient Goal transaction" =
+  let module Scope = Chat_response.Goal_native_scope in
+  assert (Option.is_none (Scope.current ()));
+  assert (Option.is_none (Scope.capture ()));
+  let value, tickets = Scope.collect None (fun () -> 7) in
+  [%test_eq: int] 7 value;
+  [%test_eq: int list] [] tickets;
+  (match Scope.with_context None (fun () -> Scope.emit 0) with
+   | Error message ->
+     [%test_eq: string] "Goal native transaction route is not installed" message
+   | Ok () -> assert false);
+  let calls = ref 0 in
+  (match
+     Scope.with_context None (fun () ->
+       incr calls;
+       raise Exit)
+   with
+   | _ -> assert false
+   | exception Exit -> ());
+  [%test_eq: int] 1 !calls;
+  assert (Option.is_none (Scope.capture ()))
+;;

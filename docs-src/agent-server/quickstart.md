@@ -11,7 +11,7 @@ API key and access to the model you select. Model requests incur provider
 charges. These instructions use a Unix-style shell such as bash or zsh.
 
 Install OCaml and opam using the [OCaml installation guide](https://ocaml.org/install#linux_mac_bsd)
-if they are not already available. Ochat requires OCaml 5.1+ and Dune 3.21+;
+if they are not already available. Source setup uses OCaml 5.3.0, opam 2.5.2, Node.js 18+ and Dune 3.21+;
 see [package requirements](../../dune-project) and
 [build troubleshooting](../guide/build-troubleshooting.md) for native libraries
 and Apple Silicon/OpenBLAS setup.
@@ -25,23 +25,31 @@ git clone https://github.com/dakotamurphyucf/ochat.git
 cd ochat
 ```
 
-Run the following setup **inside the Ochat checkout**, not the project you
-will eventually ask your agent to work on. If there is no suitable opam switch
-for this checkout, create one once:
+Run setup **inside the Ochat checkout**, not the project you will ask your agent
+to work on. Create a new isolated compiler environment:
 
 ```sh
-opam switch create .
+node scripts/bootstrap-opam.mjs scratch/ochat-toolchain
 ```
 
-Use that switch's environment, install the declared dependencies, and build
-and install the command-line tools:
+The destination must not already exist. Bootstrap installs the compiler and
+selects this checkout's [Eio overlay](https://github.com/dakotamurphyucf/ochat/tree/main/tooling/opam-overlay) without
+changing other roots or switches. It accepts an optional second argument naming
+an opam 2.5.2 binary. Run the explicit environment command it prints in this
+terminal. Then install dependencies and build the command-line tools:
 
 ```sh
-eval "$(opam env)"
 opam install . --deps-only
 dune build @install
 dune install
 ```
+
+The committed Linux lock starts from the [recorded upstream dependency baseline](https://github.com/dakotamurphyucf/ochat/actions/runs/34188359989)
+and now selects the patched Eio family. This changed candidate awaits final Linux
+qualification; `opam install . --deps-only --with-test --locked` reproduces it.
+On other POSIX platforms, use the declared dependencies as above. The custom Eio
+package is supplied by the checkout overlay; it is not an upstream package-registry
+release.
 
 Check that the tools are available:
 
@@ -50,8 +58,8 @@ chat-tui -help
 ```
 
 The help command does not contact a model. Keep this terminal open so its
-opam environment remains available. In a new terminal, select the same switch
-and load its environment before running Ochat. If `chat-tui` is not found,
+opam environment remains available. In a new terminal, reuse the same explicit environment command printed by
+bootstrap before running Ochat. If `chat-tui` is not found,
 check that environment and the installation steps above.
 
 The installed commands include `chat-tui`, `chatml-repl`,

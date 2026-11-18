@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "namespace": "ochat.capabilities.lifecycle-run",
+  "dependencies": {
+    "lifecycle": {
+      "source": {
+        "kind": "local",
+        "path": "../lifecycle"
+      },
+      "project": "chatml.project.json",
+      "environment": "pure"
+    }
+  },
+  "modules": {
+    "Lifecycle_run": {
+      "implementation": "src/lifecycle_run.chatml",
+      "interface": "src/lifecycle_run.chatmli"
+    }
+  },
+  "environments": {
+    "moderator": {
+      "modules": {
+        "Lifecycle": "lifecycle.Lifecycle",
+        "Lifecycle_run": "self.Lifecycle_run"
+      },
+      "requires": {
+        "targets": [
+          "moderator_v1",
+          "delegated_moderator_v1"
+        ]
+      }
+    }
+  },
+  "default_environment": "moderator"
+}

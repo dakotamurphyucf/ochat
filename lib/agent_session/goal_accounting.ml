@@ -1,0 +1,319 @@
+open! Core
+include Goal_accounting_state
+
+module Admission = struct
+  type t =
+    | Attempt of
+        { episode : G.Episode.t
+        ; handle : L.Handle.t
+        ; tracking : L.tracking
+        }
+    | Turn of
+        { episode : G.Episode.t
+        ; operation : P.Operation.t
+        ; handle : L.Turn_handle.t
+        ; tracking : L.tracking
+        }
+end
+
+let create ?(max_bindings = 256) goal ~ledger:current =
+  let open Result.Let_syntax in
+  if max_bindings <= 0 || max_bindings > 256
+  then
+    Error
+      (Error.Invalid_field
+         { field = "max_bindings"; reason = "required positive bound at most256" })
+  else (
+    let scope = { Scope.goal_id = G.id goal; session = G.session goal } in
+    let%bind () =
+      ledger
+        (L.validate
+           current
+           ~limits:L.Limits.default
+           ~session_id:(P.Session_ref.session_id scope.session)
+           ~generation:(L.generation current))
+    in
+    let%map fences = marks current in
+    { scope
+    ; revision = 0L
+    ; admitted_turns = 0L
+    ; admitted_attempts = 0L
+    ; untracked_turns = 0L
+    ; settled = Usage.empty
+    ; bindings = Int64.Map.empty
+    ; max_bindings
+    ; last_attempt_ordinal = fences.attempt
+    ; last_turn_ordinal = fences.turn
+    ; last_ledger_revision = L.revision current
+    })
+;;
+
+let bound_row current binding =
+  match L.find current ~ordinal:(L.Handle.ordinal binding.Binding.handle) with
+  | Some row when L.Handle.equal (L.Row.handle row) binding.handle -> Ok row
+  | Some _ -> Error Error.Conflicting_binding
+  | None -> Error Error.Missing_bound_row
+;;
+
+let usage t ~ledger:current =
+  let open Result.Let_syntax in
+  let%bind () = check_session t current in
+  let%bind () =
+    if Int64.(L.revision current < t.last_ledger_revision)
+    then Error Error.Stale_plan
+    else Ok ()
+  in
+  List.fold_result (bindings t) ~init:t.settled ~f:(fun totals binding ->
+    let%bind row = bound_row current binding in
+    counter (Usage.add_record totals (L.Row.record row)))
+;;
+
+let reconcile t ~before ~after =
+  let open Result.Let_syntax in
+  let%map plan =
+    Canonical_usage_fold.prepare
+      t.settled
+      ~before
+      ~after
+      ~handles:(List.map (bindings t) ~f:Binding.handle)
+    |> Result.map_error ~f:fold_error
+  in
+  let retired =
+    List.fold
+      (Canonical_usage_fold.Plan.retired plan)
+      ~init:Int64.Set.empty
+      ~f:(fun retired handle -> Set.add retired (L.Handle.ordinal handle))
+  in
+  ( { t with
+      settled = Canonical_usage_fold.Plan.settled plan
+    ; bindings =
+        Map.filter_keys t.bindings ~f:(fun ordinal -> not (Set.mem retired ordinal))
+    }
+  , List.filter (bindings t) ~f:(fun binding ->
+      Set.mem retired (L.Handle.ordinal binding.handle))
+    |> List.rev )
+;;
+
+let check_episode t goal episode ~after =
+  let source = (G.Episode.admission episode).source in
+  if
+    P.Session_ref.equal (G.Episode.session episode) t.scope.session
+    && Option.exists (G.episode goal) ~f:(G.Episode.equal episode)
+    && P.Run_source.equal source (G.source goal)
+    && Int.equal source.generation (L.generation after)
+  then Ok ()
+  else Error Error.Scope_mismatch
+;;
+
+let check_new before after =
+  Result.bind (increment before) ~f:(fun expected ->
+    if Int64.equal expected after then Ok () else Error Error.Invalid_admission)
+;;
+
+let admit_attempt t ~before:_ ~after ~before_marks ~after_marks ~episode ~handle ~tracking
+  =
+  let open Result.Let_syntax in
+  let%bind () = check_new before_marks.attempt after_marks.attempt in
+  let%bind () =
+    if
+      Int64.equal (L.Handle.ordinal handle) after_marks.attempt
+      && P.Id.Session.equal (L.Handle.session_id handle) (L.session_id after)
+      && Int.equal (L.Handle.generation handle) (L.generation after)
+    then Ok ()
+    else Error Error.Invalid_admission
+  in
+  let%bind admitted_attempts = increment t.admitted_attempts in
+  match tracking, L.find after ~ordinal:(L.Handle.ordinal handle) with
+  | L.Tracked, Some row when L.Handle.equal handle (L.Row.handle row) ->
+    if Map.mem t.bindings (L.Handle.ordinal handle)
+    then Error Error.Conflicting_binding
+    else if Map.length t.bindings >= t.max_bindings
+    then Error Error.Binding_capacity
+    else (
+      let admission = G.Episode.admission episode in
+      let binding =
+        { Binding.handle; run_id = admission.run_id; source = admission.source }
+      in
+      Ok
+        { t with
+          admitted_attempts
+        ; bindings = Map.set t.bindings ~key:(L.Handle.ordinal handle) ~data:binding
+        })
+  | Untracked _, None ->
+    let%bind () =
+      check_new before_marks.untracked_attempts after_marks.untracked_attempts
+    in
+    let%map settled = counter (Usage.add_untracked t.settled) in
+    { t with admitted_attempts; settled }
+  | Tracked, None | Tracked, Some _ | Untracked _, Some _ -> Error Error.Invalid_admission
+;;
+
+let matching_turn current handle =
+  L.find_turn_handle
+    current
+    ~operation_id:(L.Turn_handle.operation_id handle)
+    ~generation:(L.Turn_handle.generation handle)
+  |> Option.exists ~f:(fun found ->
+    P.Id.Operation.equal
+      (L.Turn_handle.operation_id found)
+      (L.Turn_handle.operation_id handle)
+    && Int.equal (L.Turn_handle.generation found) (L.Turn_handle.generation handle))
+;;
+
+let admit_turn t ~before ~after ~before_marks ~after_marks ~operation ~handle ~tracking =
+  let open Result.Let_syntax in
+  let%bind () =
+    match P.Operation.of_json (P.Operation.to_json operation) with
+    | Error _ -> Error Error.Invalid_admission
+    | Ok operation ->
+      if
+        P.Id.Operation.equal operation.id (L.Turn_handle.operation_id handle)
+        && Int.equal operation.generation (L.Turn_handle.generation handle)
+        && Int.equal operation.generation (L.generation after)
+        &&
+        match operation.kind, operation.state with
+        | Turn _, (Starting | Running) -> true
+        | Turn _, (Cancelling | Completed | Failed _ | Cancelled | Interrupted _)
+        | Compaction, _ -> false
+      then Ok ()
+      else Error Error.Invalid_admission
+  in
+  if
+    Int64.equal before_marks.turn after_marks.turn
+    && matching_turn before handle
+    && matching_turn after handle
+    && L.equal_tracking tracking Tracked
+  then Ok (t, false)
+  else (
+    let%bind () = check_new before_marks.turn after_marks.turn in
+    let%bind () =
+      if matching_turn before handle then Error Error.Invalid_admission else Ok ()
+    in
+    let%bind () =
+      match tracking with
+      | L.Tracked ->
+        if matching_turn after handle then Ok () else Error Error.Invalid_admission
+      | Untracked _ ->
+        if matching_turn after handle
+        then Error Error.Invalid_admission
+        else check_new before_marks.untracked_turns after_marks.untracked_turns
+    in
+    let%bind admitted_turns = increment t.admitted_turns in
+    let%map untracked_turns =
+      match tracking with
+      | L.Tracked -> Ok t.untracked_turns
+      | Untracked _ -> increment t.untracked_turns
+    in
+    { t with admitted_turns; untracked_turns }, true)
+;;
+
+module Plan = struct
+  type accounting = t
+
+  type admission_disposition =
+    | Not_requested
+    | Counted
+    | Already_retained
+  [@@deriving equal, sexp_of]
+
+  type t =
+    { expected_accounting_revision : int64
+    ; before_accounting : accounting
+    ; before_ledger : L.t
+    ; after_ledger : L.t
+    ; candidate : accounting
+    ; retired_bindings : Binding.t list
+    ; admission_disposition : admission_disposition
+    }
+
+  let expected_accounting_revision t = t.expected_accounting_revision
+  let before_ledger_revision t = L.revision t.before_ledger
+  let after_ledger_revision t = L.revision t.after_ledger
+  let before_accounting t = t.before_accounting
+  let before_ledger t = t.before_ledger
+  let after_ledger t = t.after_ledger
+  let candidate t = t.candidate
+  let retired_bindings t = t.retired_bindings
+  let admission_disposition t = t.admission_disposition
+end
+
+let plan t ~goal ~before ~after ~admission =
+  let open Result.Let_syntax in
+  let%bind () =
+    if
+      P.Id.Goal.equal t.scope.goal_id (G.id goal)
+      && P.Session_ref.equal t.scope.session (G.session goal)
+    then Ok ()
+    else Error Error.Scope_mismatch
+  in
+  let%bind () = check_session t before in
+  let%bind () = check_session t after in
+  let%bind () = ledger (L.validate_update before ~incoming:after) in
+  let%bind before_marks = marks before in
+  let%bind after_marks = marks after in
+  let%bind () =
+    if
+      Int64.(
+        before_marks.attempt < t.last_attempt_ordinal
+        || before_marks.turn < t.last_turn_ordinal
+        || L.revision before < t.last_ledger_revision)
+    then Error Error.Stale_plan
+    else Ok ()
+  in
+  let%bind candidate, retired_bindings = reconcile t ~before ~after in
+  let%bind candidate, admission_disposition =
+    match admission with
+    | None -> Ok (candidate, Plan.Not_requested)
+    | Some (Admission.Attempt { episode; handle; tracking }) ->
+      let%bind () = check_episode t goal episode ~after in
+      let%map candidate =
+        admit_attempt
+          candidate
+          ~before
+          ~after
+          ~before_marks
+          ~after_marks
+          ~episode
+          ~handle
+          ~tracking
+      in
+      candidate, Plan.Counted
+    | Some (Turn { episode; operation; handle; tracking }) ->
+      let%bind () = check_episode t goal episode ~after in
+      let%map candidate, counted =
+        admit_turn
+          candidate
+          ~before
+          ~after
+          ~before_marks
+          ~after_marks
+          ~operation
+          ~handle
+          ~tracking
+      in
+      candidate, if counted then Plan.Counted else Already_retained
+  in
+  let%bind candidate =
+    if equal t candidate
+    then Ok t
+    else (
+      let%map revision = increment t.revision in
+      { candidate with
+        revision
+      ; last_attempt_ordinal = after_marks.attempt
+      ; last_turn_ordinal = after_marks.turn
+      ; last_ledger_revision = L.revision after
+      })
+  in
+  Ok
+    { Plan.expected_accounting_revision = t.revision
+    ; before_accounting = t
+    ; before_ledger = before
+    ; after_ledger = after
+    ; candidate
+    ; retired_bindings = List.rev retired_bindings
+    ; admission_disposition
+    }
+;;
+
+module Stored = Goal_accounting_stored

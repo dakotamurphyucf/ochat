@@ -1,0 +1,7 @@
+(library
+ (name recurrence_zone_data_test)
+ (modules fixtures synthetic calendar_model decoder_tests)
+ (libraries core ochat.recurrence_rules ochat.recurrence_zone_data)
+ (inline_tests)
+ (preprocessor_deps (glob_files fixtures/*))
+ (preprocess (pps ppx_jane ppx_expect ppx_blob)))

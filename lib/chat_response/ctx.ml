@@ -1,3 +1,5 @@
+open! Core
+
 (** Shared execution context used by the {!Chat_response} sub-modules.
 
     The module provides a thin, immutable record bundling together:
@@ -53,13 +55,16 @@ type 'env t =
   { inference_relation : Transcript.Scope.relation
   ; inference_context : Inference_runtime.Context.t
   ; inference_identity : Neutral_turn.Identity.t
+  ; before_inference_attempt : Inference_runtime.Attempt.t -> unit
   ; on_inference_attempt : Inference_runtime.Attempt.t -> unit
   ; on_inference_completion : Inference_client.Completion.t -> unit
   ; on_inference_observation : Inference.Observation.t -> unit
   ; on_admitted_call : In_memory_stream.Admitted_call.t -> unit
   ; submission_guard : Inference_runtime.Submission_guard.t
   ; before_inference_dispatch : Inference_runtime.Prepared.t -> unit
+  ; effect_checkpoint : (unit -> unit) option
   ; agent_prompt_v1_recipe : Moderation.Capabilities.model_recipe option
+  ; agent_guidance_scope : Agent_guidance.Scope.t
   ; env : 'env
   ; dir : Eio.Fs.dir_ty Eio.Path.t
     (** Root directory used by {!Fetch} helpers for reading local files. *)
@@ -91,13 +96,16 @@ let create
   { inference_relation
   ; inference_context
   ; inference_identity
+  ; before_inference_attempt = ignore
   ; on_inference_attempt
   ; on_inference_completion
   ; on_inference_observation
   ; on_admitted_call
   ; submission_guard = Inference_runtime.Submission_guard.empty
   ; before_inference_dispatch
+  ; effect_checkpoint = None
   ; agent_prompt_v1_recipe
+  ; agent_guidance_scope = Eligible None
   ; env
   ; dir
   ; tool_dir
@@ -137,8 +145,55 @@ let of_env
 ;;
 
 exception Inference_admission_rejected
+exception Effect_rejected = Effect_rejection.Rejected
+
+let check_effect t = Option.iter t.effect_checkpoint ~f:(fun check -> check ())
+
+let with_effect_checkpoint t ~check =
+  { t with
+    effect_checkpoint =
+      Some
+        (fun () ->
+          check_effect t;
+          check ())
+  }
+;;
+
+let after_guard guard callback attempt =
+  guard attempt;
+  callback attempt
+;;
+
+let with_inference_tracking t ~identity ~on_attempt ~on_observation ~on_completion =
+  { t with
+    inference_identity = identity
+  ; on_inference_attempt = after_guard t.before_inference_attempt on_attempt
+  ; on_inference_observation = on_observation
+  ; on_inference_completion = on_completion
+  }
+;;
 
 let with_inference t ~inference_context = { t with inference_context }
+
+let with_agent_guidance t guidance =
+  match t.agent_guidance_scope with
+  | Excluded -> t
+  | Eligible _ -> { t with agent_guidance_scope = Eligible (Some guidance) }
+;;
+
+let without_agent_guidance t = { t with agent_guidance_scope = Excluded }
+
+let inherit_agent_guidance t ~from =
+  { t with agent_guidance_scope = from.agent_guidance_scope }
+;;
+
+let agent_guidance t =
+  match t.agent_guidance_scope with
+  | Eligible guidance -> guidance
+  | Excluded -> None
+;;
+
+let with_inference_identity t ~inference_identity = { t with inference_identity }
 let with_agent_prompt_v1_recipe t recipe = { t with agent_prompt_v1_recipe = Some recipe }
 
 let with_submission_guard t guard =
@@ -149,10 +204,8 @@ let with_submission_guard t guard =
 
 let with_inference_attempt_guard t ~before_attempt =
   { t with
-    on_inference_attempt =
-      (fun attempt ->
-        before_attempt attempt;
-        t.on_inference_attempt attempt)
+    before_inference_attempt = after_guard before_attempt t.before_inference_attempt
+  ; on_inference_attempt = after_guard before_attempt t.on_inference_attempt
   }
 ;;
 

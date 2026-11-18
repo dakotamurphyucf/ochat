@@ -57,6 +57,88 @@ let%expect_test "one deadline covers successive compiler preparation phases" =
     |}]
 ;;
 
+let%test_unit "nested parser checkpoint distinguishes deadline from caller cancellation" =
+  let module Cause = struct
+    type t =
+      | Deadline
+      | Caller
+  end
+  in
+  let exception Caller_cancelled of int ref in
+  let reason = Caller_cancelled (ref 575) in
+  Eio_main.run (fun actual_env ->
+    (* Only the fake clock drives expiry; the real-clock bound detects broken
+       test setup instead of retaining a blocked timer/checkpoint indefinitely. *)
+    Eio.Time.with_timeout_exn (Eio.Stdenv.clock actual_env) 5. (fun () ->
+      let run cause =
+        Eio.Cancel.sub (fun cancellation ->
+          Eio.Switch.run (fun sw ->
+            let clock = Clock.create () in
+            let env =
+              Startup_budget_support.environment
+                clock
+                actual_env
+                ~on_domain_start:ignore
+                ~completed:(Atomic.make 0)
+            in
+            let source =
+              Chatml_source.create
+                (Chatml_source.Id.create
+                   ~package_namespace:"startup-cancellation"
+                   ~relative_path:"nested.chatml"
+                 |> Or_error.ok_exn)
+                ~contents:"let result = 1"
+                ~expected_digest:None
+                ~max_bytes:None
+                ~checkpoint:ignore
+              |> Or_error.ok_exn
+            in
+            let entered, entered_u = Eio.Promise.create () in
+            let blocked, _ = Eio.Promise.create () in
+            let armed = ref false in
+            let checkpoint () =
+              if !armed
+              then (
+                armed := false;
+                Eio.Promise.resolve entered_u ();
+                Eio.Promise.await blocked)
+            in
+            let driver =
+              Eio.Fiber.fork_promise ~sw (fun () ->
+                Clock.await_sleeping clock;
+                Eio.Promise.await entered;
+                match cause with
+                | Cause.Deadline -> Clock.advance clock ~seconds:3.
+                | Caller -> Eio.Cancel.cancel cancellation reason)
+            in
+            let result =
+              context env ~checkpoint (fun budget ->
+                Budget.within budget ~map_error:Fn.id ~f:(fun () ->
+                  armed := true;
+                  (* The real parser adds its own generative protect boundary around
+                     this callback; a naked checkpoint would miss that nesting. *)
+                  Chatml.Chatml_parse.parse_captured source ~checkpoint:(fun () ->
+                    Budget.checkpoint budget)
+                  |> ok
+                  |> ignore;
+                  Ok ()))
+            in
+            Eio.Promise.await_exn driver;
+            result))
+      in
+      List.iter
+        Cause.[ Deadline; Caller ]
+        ~f:(fun cause ->
+          match cause with
+          | Deadline -> run cause |> error_code "chatml.compile_timeout"
+          | Caller ->
+            (* Cancellation is requested only after the callback is suspended.
+             This branch never advances time or accepts a timeout result. *)
+            (match run cause with
+             | _ -> failwith "suspended caller cancellation became a compiler result"
+             | exception Eio.Cancel.Cancelled actual -> assert (phys_equal reason actual)))))
+;;
+
 let%test_unit "exact-text and canonical graph ledgers stay independent" =
   Eio_main.run (fun env ->
     context ~max_distinct_text_bytes:4 env ~checkpoint:ignore (fun budget ->

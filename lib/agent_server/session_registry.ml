@@ -11,6 +11,52 @@ module Session_key = struct
   include Comparator.Make (T)
 end
 
+module Entry_close = struct
+  type t =
+    { close : unit -> Session_disposal_report.t
+    ; mutex : Eio.Mutex.t
+    ; domain : int
+    ; mutable disposed : Session_disposal_report.t option
+    }
+
+  let reported close =
+    { close
+    ; mutex = Eio.Mutex.create ()
+    ; domain = (Stdlib.Domain.self () :> int)
+    ; disposed = None
+    }
+  ;;
+
+  let legacy close =
+    reported (fun () ->
+      close ();
+      Disposal_report_data.create ~disposition:Disposed [])
+  ;;
+
+  let run_reported t =
+    if not (Int.equal t.domain (Stdlib.Domain.self () :> int))
+    then invalid_arg "entry disposal belongs to another creating domain";
+    Eio.Cancel.protect (fun () ->
+      Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
+        match t.disposed with
+        | Some report -> report
+        | None ->
+          let report =
+            match t.close () with
+            | report -> report
+            | exception exn ->
+              let trace = Stdlib.Printexc.get_raw_backtrace () in
+              let primary =
+                Disposal_report_data.Diagnostic.create
+                  [ Agent_session.Callback_cleanup.Failure.Raised (exn, trace) ]
+              in
+              Disposal_report_data.create ~primary ~disposition:Retained [ primary ]
+          in
+          if Session_disposal_report.disposed report then t.disposed <- Some report;
+          report))
+  ;;
+end
+
 type entry =
   { actor : Agent_session.Session_actor.t
   ; history_ids : Agent_session.History_id_source.t
@@ -24,8 +70,33 @@ type entry =
       -> ( Agent_store.Job_result_store.Publisher.collection_stats option
            , Agent_protocol.Error.t )
            result
-  ; close : unit -> unit
+  ; close : Entry_close.t
   }
+
+module Binding = struct
+  type selection =
+    | Ordinary
+    | Metadata_acquired
+
+  type t =
+    { entry : entry
+    ; selection : selection
+    }
+
+  let selected t =
+    match t.selection with
+    | Ordinary -> true
+    | Metadata_acquired -> Runtime_owner.has_activation_handoff t.entry.runtime
+  ;;
+end
+
+module Recovered = struct
+  type t = Binding.t
+
+  let ordinary entry = { Binding.entry; selection = Ordinary }
+  let metadata entry = { Binding.entry; selection = Metadata_acquired }
+  let entry t = t.Binding.entry
+end
 
 module Lifecycle_reservation = struct
   type target =
@@ -33,12 +104,28 @@ module Lifecycle_reservation = struct
     | Indexed of Agent_store.Session_index.Entry.t
     | Absent
 
+  module Loaded_purpose = struct
+    type t =
+      | Read
+      | Retention
+  end
+
+  module Phase = struct
+    type t =
+      | Exclusive
+      | Loaded of
+          { entry : entry
+          ; purpose : Loaded_purpose.t
+          }
+  end
+
   type t =
     { owner : unit ref
     ; session_id : Agent_protocol.Id.Session.t
     ; target : target
     ; finished : unit Eio.Promise.t
     ; finish : unit Eio.Promise.u
+    ; mutable phase : Phase.t
     }
 
   let target t = t.target
@@ -82,6 +169,26 @@ end
 
 exception Cleanup_failed of Cleanup_failure.t
 
+let resume_report report =
+  match Disposal_report_data.take_legacy_failure_exn report with
+  | Some (Raised (exn, trace)) -> Exn.raise_with_original_backtrace exn trace
+  | Some (Protocol error) -> raise (Cleanup_failed (Rejected error))
+  | None ->
+    if not (Session_disposal_report.disposed report)
+    then
+      raise
+        (Cleanup_failed
+           (Rejected
+              (Agent_protocol.Error.create
+                 Conflict
+                 ~message:"session resources remain retained"
+                 ~retryable:true
+                 ())))
+;;
+
+let close_entry_reported (entry : entry) = Entry_close.run_reported entry.close
+let close_entry (entry : entry) = resume_report (close_entry_reported entry)
+
 module Cleanup_owner = struct
   type t =
     | Entry of entry
@@ -94,17 +201,44 @@ module Cleanup_owner = struct
   let fence entry fence = Fence (entry, fence)
 end
 
-let cleanup_owner = function
+let cleanup_owner_with_report ?capture_report = function
   | Cleanup_owner.Entry entry ->
-    Runtime_owner.close_and_wait entry.runtime;
-    entry.close ();
+    let prefix = ref None in
+    (* This is the existing Strict prefix. Its actual invocation report is
+       captured before raw legacy resume; Reported would permit another suffix. *)
+    (match
+       Runtime_owner.close_and_wait
+         ~capture_report:(fun report -> prefix := Some report)
+         entry.runtime
+     with
+     | () -> ()
+     | exception exn ->
+       let trace = Stdlib.Printexc.get_raw_backtrace () in
+       Option.iter !prefix ~f:(fun report ->
+         Option.iter capture_report ~f:(fun capture -> capture report));
+       Exn.raise_with_original_backtrace exn trace);
+    let entry_report = close_entry_reported entry in
+    let report =
+      Option.value_map !prefix ~default:entry_report ~f:(fun prefix ->
+        (* A successful prefix can retain historical diagnostics. Only the
+           actual Entry exit selects this stage's primary. *)
+        Disposal_report_data.create
+          ?primary:(Disposal_report_data.primary entry_report)
+          ~disposition:(Disposal_report_data.disposition entry_report)
+          (Disposal_report_data.diagnostics prefix
+           @ Disposal_report_data.diagnostics entry_report))
+    in
+    Option.iter capture_report ~f:(fun capture -> capture report);
+    resume_report report;
     Ok ()
   | Handle (store, handle) ->
     Agent_store.Session_store.close_session store handle
     |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
   | Fence (entry, fence) -> Agent_session.Session_actor.abort_lifecycle entry.actor fence
-  | Recovery owner -> Session_recovery_owner.close owner
+  | Recovery owner -> Session_recovery_owner.close ?capture_report owner
 ;;
+
+let cleanup_owner owner = cleanup_owner_with_report owner
 
 module Failed_cleanup = struct
   type t =
@@ -112,12 +246,16 @@ module Failed_cleanup = struct
     ; session_id : Agent_protocol.Id.Session.t
     ; primary : Cleanup_failure.t
     ; failure : Cleanup_failure.t
+    ; report : Session_disposal_report.t option
     }
 end
 
 type t =
-  { mutex : Eio.Mutex.t
+  { domain : int
+  ; mutex : Eio.Mutex.t
   ; shutdown_mutex : Eio.Mutex.t
+  ; mutable disposal_report : Session_disposal_report.t option
+  ; mutable disposal_diagnostics : Disposal_report_data.Diagnostic.t list
   ; lifecycle_owner : unit ref
   ; mutable reservations :
       ( Agent_protocol.Id.Session.t
@@ -128,7 +266,8 @@ type t =
   ; mutable failed_cleanups : Failed_cleanup.t list
   ; closing : bool Atomic.t
   ; sessions :
-      (Agent_protocol.Id.Session.t, entry, Session_key.comparator_witness) Map.t Atomic.t
+      (Agent_protocol.Id.Session.t, Binding.t, Session_key.comparator_witness) Map.t
+        Atomic.t
   ; mutable indexed :
       ( Agent_protocol.Id.Session.t
         , Agent_store.Session_index.Entry.t
@@ -139,7 +278,8 @@ type t =
        -> (Agent_session.Session_state.t, Agent_protocol.Error.t) result)
         option
   ; mutable loader :
-      (Agent_store.Session_index.Entry.t -> (entry, Agent_protocol.Error.t) result) option
+      (Agent_store.Session_index.Entry.t -> (Recovered.t, Agent_protocol.Error.t) result)
+        option
   }
 
 type stats =
@@ -149,8 +289,11 @@ type stats =
 [@@deriving sexp]
 
 let create () =
-  { mutex = Eio.Mutex.create ()
+  { domain = (Stdlib.Domain.self () :> int)
+  ; mutex = Eio.Mutex.create ()
   ; shutdown_mutex = Eio.Mutex.create ()
+  ; disposal_report = None
+  ; disposal_diagnostics = []
   ; lifecycle_owner = ref ()
   ; reservations = Map.empty (module Session_key)
   ; read_leases = []
@@ -163,16 +306,26 @@ let create () =
   }
 ;;
 
+let check_disposal_domain_exn t =
+  if not (Int.equal t.domain (Stdlib.Domain.self () :> int))
+  then invalid_arg "registry disposal belongs to another creating domain"
+;;
+
 let cleanup_pending t session_id =
   List.exists t.failed_cleanups ~f:(fun cleanup ->
     Agent_protocol.Id.Session.equal cleanup.Failed_cleanup.session_id session_id)
 ;;
 
-let install_loader t loader =
+let install_recovery_loader t loader =
   Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
     match Atomic.get t.closing with
     | true -> ()
     | false -> t.loader <- Some loader)
+;;
+
+let install_loader t loader =
+  install_recovery_loader t (fun indexed ->
+    Result.map (loader indexed) ~f:Recovered.ordinary)
 ;;
 
 let install_reader t reader =
@@ -201,7 +354,7 @@ let shutting_down () =
     ()
 ;;
 
-let add t ~session_id entry =
+let add_recovered t ~session_id (recovered : Recovered.t) =
   Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
     if Atomic.get t.closing
     then Error (shutting_down ())
@@ -222,12 +375,40 @@ let add t ~session_id entry =
            ~retryable:false
            ())
     else (
-      Atomic.set t.sessions (Map.set (Atomic.get t.sessions) ~key:session_id ~data:entry);
+      Atomic.set
+        t.sessions
+        (Map.set (Atomic.get t.sessions) ~key:session_id ~data:recovered);
       t.indexed <- Map.remove t.indexed session_id;
       Ok ()))
 ;;
 
-let find t session_id = Map.find (Atomic.get t.sessions) session_id
+let add t ~session_id entry = add_recovered t ~session_id (Recovered.ordinary entry)
+
+let find t session_id =
+  Map.find (Atomic.get t.sessions) session_id
+  |> Option.map ~f:(fun binding -> binding.Binding.entry)
+;;
+
+let execution_selected t (entry : entry) =
+  match entry.store_handle with
+  | None ->
+    Map.exists (Atomic.get t.sessions) ~f:(fun binding ->
+      phys_equal binding.Binding.entry entry && Binding.selected binding)
+  | Some handle ->
+    Option.exists
+      (Map.find
+         (Atomic.get t.sessions)
+         (Agent_store.Session_store.Handle.session_id handle))
+      ~f:(fun binding ->
+        phys_equal binding.Binding.entry entry && Binding.selected binding)
+;;
+
+let execution_entries t =
+  Map.data (Atomic.get t.sessions)
+  |> List.filter_map ~f:(fun binding ->
+    if Binding.selected binding then Some binding.entry else None)
+;;
+
 let is_closing t = Atomic.get t.closing
 
 let lifecycle_conflict message =
@@ -266,7 +447,13 @@ let rec reserve_lifecycle t session_id ~wait =
           in
           let finished, finish = Eio.Promise.create () in
           let reservation =
-            ({ owner = t.lifecycle_owner; session_id; target; finished; finish }
+            ({ owner = t.lifecycle_owner
+             ; session_id
+             ; target
+             ; finished
+             ; finish
+             ; phase = Exclusive
+             }
              : Lifecycle_reservation.t)
           in
           t.reservations <- Map.set t.reservations ~key:session_id ~data:reservation;
@@ -315,15 +502,61 @@ let check_retained_owner entry =
 (* Actor identity is the retained ownership capability, not value equality. *)
 let same_owner first second = phys_equal first.actor second.actor
 
+let check_retained_factual_owner t (entry : entry) =
+  let open Result.Let_syntax in
+  let%bind () = check_retained_owner entry in
+  let%bind handle =
+    Result.of_option
+      entry.store_handle
+      ~error:(lifecycle_conflict "factual owner has no retained Store Handle")
+  in
+  let session_id = Agent_store.Session_store.Handle.session_id handle in
+  let same_tuple actual =
+    same_owner actual entry
+    && phys_equal actual.runtime entry.runtime
+    && Option.exists actual.store_handle ~f:(phys_equal handle)
+  in
+  (* Like has_pending_cleanup, this negative check runs on the creating Eio
+     domain. Each list/binding update is nonyielding; no registry lock or callback
+     is entered while comparing actual retained ownership. *)
+  let%bind () =
+    match find t session_id with
+    | Some actual when same_tuple actual -> Ok ()
+    | Some _ | None -> Error (lifecycle_conflict "factual owner is no longer registered")
+  in
+  if
+    List.for_all t.failed_cleanups ~f:(fun cleanup ->
+      if Agent_protocol.Id.Session.equal cleanup.Failed_cleanup.session_id session_id
+      then (
+        match cleanup.owner with
+        | Cleanup_owner.Entry actual -> same_tuple actual
+        | Handle _ | Fence _ | Recovery _ -> false)
+      else true)
+  then Ok ()
+  else Error (lifecycle_conflict "factual owner has foreign pending cleanup")
+;;
+
+(* Disposal owns the complete actual tuple. Lifecycle's Actor capability above
+   intentionally has a different comparison contract. *)
+let same_disposal_entry (first : entry) (second : entry) =
+  phys_equal first.actor second.actor
+  && phys_equal first.runtime second.runtime
+  && Option.equal phys_equal first.store_handle second.store_handle
+;;
+
 let same_cleanup_owner (first : Cleanup_owner.t) (second : Cleanup_owner.t) =
   match first, second with
-  | Entry first, Entry second -> same_owner first second
+  | Entry first, Entry second -> same_disposal_entry first second
   | Handle (_, first), Handle (_, second) -> phys_equal first second
   | Fence (first, first_fence), Fence (second, second_fence) ->
     same_owner first second && phys_equal first_fence second_fence
   | Recovery first, Recovery second -> phys_equal first second
   | Recovery owner, Entry entry | Entry entry, Recovery owner ->
     Session_recovery_owner.owns_actor owner entry.actor
+    && Session_recovery_owner.owns_runtime owner entry.runtime
+    && Option.exists
+         entry.store_handle
+         ~f:(phys_equal (Session_recovery_owner.handle owner))
   | Recovery owner, Handle (_, handle) | Handle (_, handle), Recovery owner ->
     phys_equal (Session_recovery_owner.handle owner) handle
   | Entry _, (Handle _ | Fence _)
@@ -332,28 +565,119 @@ let same_cleanup_owner (first : Cleanup_owner.t) (second : Cleanup_owner.t) =
   | Recovery _, Fence _ -> false
 ;;
 
-let retain_failure t ~session_id ~owner ~primary ~failure =
+let entry_aliases_recovery (entry : entry) owner =
+  Session_recovery_owner.owns_actor owner entry.actor
+  && Session_recovery_owner.owns_runtime owner entry.runtime
+  && Runtime_owner.belongs_to_actor entry.runtime entry.actor
+  && Option.exists
+       entry.store_handle
+       ~f:(phys_equal (Session_recovery_owner.handle owner))
+;;
+
+(* No actual child report exists on these legacy boundaries. Preserve their
+   observed original outcome once, including the already-applied legacy primary /
+   secondary projection. Reported data remains immutable and available. *)
+let original_legacy_report failure =
+  let failure =
+    match failure with
+    | Cleanup_failure.Rejected error ->
+      Agent_session.Callback_cleanup.Failure.Protocol error
+    | Raised (exn, trace) -> Raised (exn, trace)
+  in
+  let diagnostic = Disposal_report_data.Diagnostic.create [ failure ] in
+  let report =
+    Disposal_report_data.create ~primary:diagnostic ~disposition:Retained [ diagnostic ]
+  in
+  ignore
+    (Disposal_report_data.take_legacy_failure_exn report
+     : Agent_session.Callback_cleanup.Failure.t option);
+  report
+;;
+
+(* A genuine later Entry retains its exact factual tuple instead of being hidden
+   by the earlier provisional Recovery alias. No Entry is manufactured here. *)
+let retain_actual_owner_locked t ~session_id ~owner ~primary ~failure ~report =
+  match
+    List.find t.failed_cleanups ~f:(fun cleanup ->
+      same_cleanup_owner cleanup.Failed_cleanup.owner owner)
+  with
+  | None ->
+    let report =
+      Some
+        (Option.value_or_thunk report ~default:(fun () -> original_legacy_report failure))
+    in
+    t.failed_cleanups
+    <- { Failed_cleanup.owner; session_id; primary; failure; report } :: t.failed_cleanups
+  | Some actual ->
+    let owner =
+      match actual.owner, owner with
+      | Recovery recovery, Cleanup_owner.Entry entry
+        when entry_aliases_recovery entry recovery -> owner
+      | (Entry _ | Handle _ | Fence _ | Recovery _), _ -> actual.owner
+    in
+    let report = Option.first_some actual.report report in
+    t.failed_cleanups
+    <- List.map t.failed_cleanups ~f:(fun current ->
+         if phys_equal current actual then { actual with owner; report } else current)
+;;
+
+let retain_failure ?report t ~session_id ~owner ~primary ~failure =
   Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
-    if
-      not
-        (List.exists t.failed_cleanups ~f:(fun cleanup ->
-           same_cleanup_owner cleanup.Failed_cleanup.owner owner))
-    then (
-      let cleanup : Failed_cleanup.t = { owner; session_id; primary; failure } in
-      t.failed_cleanups <- cleanup :: t.failed_cleanups))
+    retain_actual_owner_locked t ~session_id ~owner ~primary ~failure ~report)
+;;
+
+(* Factory has already attempted this SAME owner's actual reported close.
+   Retain custody before its Entry can be dropped; no close or callback runs
+   under the Registry mutex. An actual registered Entry keeps its factual tuple. *)
+let retain_recovery_owner_reported t owner report =
+  check_disposal_domain_exn t;
+  if Session_disposal_report.disposed report
+  then invalid_arg "disposed recovery owner cannot be retained";
+  let session_id = Session_recovery_owner.session_id owner in
+  let failure =
+    match Session_disposal_report.failures report with
+    | Raised (exn, trace) :: _ -> Cleanup_failure.Raised (exn, trace)
+    | Protocol error :: _ -> Rejected error
+    | [] ->
+      Rejected
+        (Agent_protocol.Error.create
+           Conflict
+           ~message:"recovery owner resources remain retained"
+           ~retryable:true
+           ())
+  in
+  Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
+    let actual_owner =
+      match Map.find (Atomic.get t.sessions) session_id with
+      | Some binding when entry_aliases_recovery binding.entry owner ->
+        Cleanup_owner.Entry binding.entry
+      | Some _ | None -> Recovery owner
+    in
+    retain_actual_owner_locked
+      t
+      ~session_id
+      ~owner:actual_owner
+      ~primary:failure
+      ~failure
+      ~report:(Some report))
 ;;
 
 let cleanup_after_failure t ~session_id ~owner ~primary =
   Eio.Cancel.protect (fun () ->
+    let report = ref None in
     let failure =
-      match cleanup_owner owner with
+      match
+        cleanup_owner_with_report
+          ~capture_report:(fun actual -> report := Some actual)
+          owner
+      with
       | Ok () -> None
       | Error error -> Some (Cleanup_failure.rejected error)
       | exception exn ->
         Some (Cleanup_failure.raised exn (Stdlib.Printexc.get_raw_backtrace ()))
     in
     Option.iter failure ~f:(fun failure ->
-      retain_failure t ~session_id ~owner ~primary ~failure))
+      retain_failure ?report:!report t ~session_id ~owner ~primary ~failure))
 ;;
 
 let with_read_snapshot t ~capture ~check_current f =
@@ -402,20 +726,21 @@ let close_provisional t ~session_id entry result =
     Exn.raise_with_original_backtrace exn backtrace
 ;;
 
-let with_recovery_owner t owner f =
+let with_recovered_owner t owner f =
   let session_id = Session_recovery_owner.session_id owner in
   let close primary =
     cleanup_after_failure t ~session_id ~owner:(Cleanup_owner.Recovery owner) ~primary
   in
   let run () =
     let open Result.Let_syntax in
-    let%bind entry = f () in
+    let%bind recovered = f () in
+    let entry = Recovered.entry recovered in
     if
       Session_recovery_owner.owns_actor owner entry.actor
       && Option.exists
            entry.store_handle
            ~f:(phys_equal (Session_recovery_owner.handle owner))
-    then Ok entry
+    then Ok recovered
     else Error (lifecycle_conflict "recovery returned a different resource owner")
   in
   match run () with
@@ -427,6 +752,11 @@ let with_recovery_owner t owner f =
     let backtrace = Stdlib.Printexc.get_raw_backtrace () in
     close (Cleanup_failure.Raised (exn, backtrace));
     Exn.raise_with_original_backtrace exn backtrace
+;;
+
+let with_recovery_owner t owner f =
+  with_recovered_owner t owner (fun () -> Result.map (f ()) ~f:Recovered.ordinary)
+  |> Result.map ~f:Recovered.entry
 ;;
 
 let with_recovery_handle t ~store handle f =
@@ -493,7 +823,8 @@ let load_reserved t reservation =
       Eio.Mutex.use_ro t.mutex (fun () ->
         Result.of_option t.loader ~error:(shutting_down ()))
     in
-    let%bind entry = loader indexed in
+    let%bind recovered = loader indexed in
+    let entry = Recovered.entry recovered in
     close_provisional t ~session_id entry (fun () ->
       let%bind () = check_retained_owner entry in
       let%bind state = Agent_session.Session_actor.state entry.actor in
@@ -525,21 +856,70 @@ let load_reserved t reservation =
           let%bind () = check_retained_owner entry in
           Atomic.set
             t.sessions
-            (Map.set (Atomic.get t.sessions) ~key:session_id ~data:entry);
+            (Map.set (Atomic.get t.sessions) ~key:session_id ~data:recovered);
           t.indexed <- Map.remove t.indexed session_id;
           Ok entry)))
 ;;
 
 let load t session_id = with_lifecycle t session_id (load_reserved t)
 
-let with_loaded_read t session_id f =
-  with_lifecycle_admission t session_id ~wait:true (fun reservation ->
-    Result.bind (load_reserved t reservation) ~f)
+let qualify_loaded_reservation t reservation entry ~purpose =
+  Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
+    let open Result.Let_syntax in
+    let%bind () = check_reservation t reservation in
+    let session_id = reservation.Lifecycle_reservation.session_id in
+    if Atomic.get t.closing
+    then Error (shutting_down ())
+    else if cleanup_pending t session_id
+    then Error (lifecycle_conflict "session cleanup is pending")
+    else (
+      match reservation.phase, find t session_id with
+      | Exclusive, Some actual when same_disposal_entry actual entry ->
+        let%map () =
+          match purpose with
+          | Lifecycle_reservation.Loaded_purpose.Read -> check_retained_owner actual
+          | Retention -> Ok ()
+        in
+        reservation.phase <- Loaded { entry = actual; purpose }
+      | (Exclusive | Loaded _), (Some _ | None) ->
+        Error (lifecycle_conflict "loaded reservation owner changed")))
 ;;
+
+let with_loaded_read t session_id f =
+  let open Result.Let_syntax in
+  with_lifecycle_admission t session_id ~wait:true (fun reservation ->
+    let%bind entry = load_reserved t reservation in
+    let%bind () = qualify_loaded_reservation t reservation entry ~purpose:Read in
+    f entry)
+;;
+
+let with_loaded_retention t ~actor ~runtime ~handle f =
+  let open Result.Let_syntax in
+  let session_id = Agent_store.Session_store.Handle.session_id handle in
+  with_lifecycle t session_id (fun reservation ->
+    match Lifecycle_reservation.target reservation with
+    | Loaded entry
+      when phys_equal entry.actor actor
+           && phys_equal entry.runtime runtime
+           && Option.exists entry.store_handle ~f:(phys_equal handle) ->
+      let%map () = qualify_loaded_reservation t reservation entry ~purpose:Retention in
+      Some (f ())
+    | Loaded _ | Indexed _ | Absent -> Ok None)
+;;
+
+module Read_origin = struct
+  type t =
+    | Selected
+    | Loaded_unselected
+    | Indexed
+end
 
 module Read_binding = struct
   type t =
-    | Loaded of entry
+    | Loaded of
+        { entry : entry
+        ; execution_selected : bool option
+        }
     | Indexed of
         { entry : Agent_store.Session_index.Entry.t
         ; read :
@@ -548,9 +928,13 @@ module Read_binding = struct
         }
 end
 
-let capture_read_binding t session_id =
+let capture_read_binding t ~capture_execution session_id =
   match find t session_id with
-  | Some entry -> Ok (Read_binding.Loaded entry)
+  | Some entry ->
+    let execution_selected =
+      if capture_execution then Some (execution_selected t entry) else None
+    in
+    Ok (Read_binding.Loaded { entry; execution_selected })
   | None ->
     (match Map.find t.indexed session_id, t.reader with
      | None, _ ->
@@ -565,8 +949,11 @@ let capture_read_binding t session_id =
 ;;
 
 let read_binding_is_current t session_id = function
-  | Read_binding.Loaded original ->
-    Option.exists (find t session_id) ~f:(same_owner original)
+  | Read_binding.Loaded { entry; execution_selected = selected } ->
+    Option.exists (find t session_id) ~f:(fun actual ->
+      same_owner entry actual
+      && Option.value_map selected ~default:true ~f:(fun selected ->
+        Bool.equal selected (execution_selected t actual)))
   | Indexed { entry; read = _ } ->
     Option.is_none (find t session_id)
     && Option.equal
@@ -575,7 +962,14 @@ let read_binding_is_current t session_id = function
          (Some entry)
 ;;
 
-let read_retained t ~authorize ~read_loaded ~read_stored session_id =
+let read_retained
+      t
+      ?(capture_execution = false)
+      ~authorize
+      ~read_loaded
+      ~read_indexed
+      session_id
+  =
   let open Result.Let_syntax in
   let check (state, observation) =
     let summary = Agent_session.Session_state.summary state in
@@ -593,35 +987,135 @@ let read_retained t ~authorize ~read_loaded ~read_stored session_id =
   in
   with_read_snapshot
     t
-    ~capture:(fun () -> capture_read_binding t session_id)
+    ~capture:(fun () -> capture_read_binding t ~capture_execution session_id)
     ~check_current:(fun binding ->
       if not (read_binding_is_current t session_id binding)
       then Error (lifecycle_conflict "session observation binding changed")
       else (
         match binding with
-        | Read_binding.Loaded entry -> check_retained_owner entry
+        | Read_binding.Loaded { entry; _ } -> check_retained_owner entry
         | Indexed _ -> Ok ()))
-    (function
-      | Read_binding.Loaded entry ->
-        let%bind () = check_retained_owner entry in
-        let%bind observation = read_loaded entry.actor in
-        let%bind () = check_retained_owner entry in
-        check observation
-      | Indexed { entry; read } ->
-        let%bind () = authorize entry.session in
-        let%bind state = read entry in
-        check (state, read_stored state))
+    (fun binding ->
+       match binding with
+       | Read_binding.Loaded { entry; execution_selected } ->
+         let%bind () = check_retained_owner entry in
+         let%bind observation = read_loaded entry.actor in
+         let%bind () = check_retained_owner entry in
+         let%map state, observation = check observation in
+         let origin =
+           if Option.value execution_selected ~default:false
+           then Read_origin.Selected
+           else Loaded_unselected
+         in
+         state, observation, origin, binding
+       | Indexed { entry; read } ->
+         let%bind () = authorize entry.session in
+         let%bind observation = read_indexed read entry in
+         let%map state, observation = check observation in
+         state, observation, Read_origin.Indexed, binding)
 ;;
 
-let read_state t ~authorize session_id =
+let read_indexed_state read entry ~observation =
+  Result.map (read entry) ~f:(fun state -> state, observation)
+;;
+
+let read_state_snapshot t ~capture_execution ~authorize session_id =
   read_retained
     t
+    ~capture_execution
     ~authorize
     session_id
     ~read_loaded:(fun actor ->
       Agent_session.Session_actor.state actor |> Result.map ~f:(fun state -> state, ()))
-    ~read_stored:(fun _ -> ())
+    ~read_indexed:(read_indexed_state ~observation:())
+  |> Result.map ~f:(fun (state, (), origin, _) -> state, origin)
+;;
+
+let read_state t ~authorize session_id =
+  read_state_snapshot t ~capture_execution:false ~authorize session_id
   |> Result.map ~f:fst
+;;
+
+let read_state_with_execution t ~authorize session_id =
+  read_state_snapshot t ~capture_execution:true ~authorize session_id
+;;
+
+module Recurrence_read = struct
+  module Query = Agent_session.Recurrence_query
+
+  type observation =
+    | Live of Query.t
+    | Stored of Query.snapshot
+
+  type t =
+    { session_id : Agent_protocol.Id.Session.t
+    ; state : Agent_session.Session_state.t
+    ; origin : Read_origin.t
+    ; binding : Read_binding.t
+    ; observation : observation
+    }
+
+  let state t = t.state
+  let origin t = t.origin
+
+  let snapshot t =
+    match t.observation with
+    | Live query -> Query.snapshot query
+    | Stored snapshot -> snapshot
+  ;;
+
+  let same_basis t other =
+    Query.same_basis (snapshot t) (snapshot other)
+    &&
+    match t.binding, other.binding with
+    | Loaded left, Loaded right ->
+      same_disposal_entry left.entry right.entry
+      && Option.equal Bool.equal left.execution_selected right.execution_selected
+    | Indexed left, Indexed right ->
+      Agent_store.Session_index.Entry.equal left.entry right.entry
+    | Loaded _, Indexed _ | Indexed _, Loaded _ -> false
+  ;;
+end
+
+let read_recurrences t ~actor ~authorize ~read_indexed ~request session_id =
+  let open Result.Let_syntax in
+  let%map state, observation, origin, binding =
+    read_retained
+      t
+      ~capture_execution:true
+      ~authorize
+      ~read_loaded:(fun owner ->
+        Agent_session.Session_actor.query_recurrences_with_state
+          owner
+          ~actor
+          ~authorize:(fun state -> authorize (Agent_session.Session_state.summary state))
+          ~request
+        |> Result.map ~f:(fun (state, query) -> state, Recurrence_read.Live query))
+      ~read_indexed:(fun _ entry ->
+        read_indexed entry
+        |> Result.map ~f:(fun (state, snapshot) -> state, Recurrence_read.Stored snapshot))
+      session_id
+  in
+  { Recurrence_read.session_id; state; origin; binding; observation }
+;;
+
+let check_recurrence_read t (read : Recurrence_read.t) =
+  let open Result.Let_syntax in
+  if Atomic.get t.closing
+  then Error (shutting_down ())
+  else if not (read_binding_is_current t read.session_id read.binding)
+  then Error (lifecycle_conflict "recurrence read binding changed")
+  else (
+    match read.binding, read.observation with
+    | Loaded { entry; _ }, Live query ->
+      let%bind () = check_retained_factual_owner t entry in
+      Agent_session.Recurrence_query.check_current query
+    | Indexed _, Stored _ ->
+      if cleanup_pending t read.session_id
+      then Error (lifecycle_conflict "recurrence read has pending indexed cleanup")
+      else Ok ()
+    | Loaded _, Stored _ | Indexed _, Live _ ->
+      Error (lifecycle_conflict "recurrence read observation has another owner"))
 ;;
 
 let with_indexed_retention_read t indexed ~f =
@@ -648,7 +1142,7 @@ let with_indexed_retention_read t indexed ~f =
 
 let read_observation t ~authorize ~now session_id =
   let open Result.Let_syntax in
-  let%map state, snapshot =
+  let%map state, snapshot, _, _ =
     read_retained
       t
       ~authorize
@@ -656,7 +1150,7 @@ let read_observation t ~authorize ~now session_id =
       ~read_loaded:(fun actor ->
         Agent_session.Session_actor.observe actor
         |> Result.map ~f:(fun (state, snapshot) -> state, Some snapshot))
-      ~read_stored:(fun _ -> None)
+      ~read_indexed:(read_indexed_state ~observation:None)
   in
   let snapshot, transient =
     match snapshot with
@@ -675,7 +1169,10 @@ let read_observation t ~authorize ~now session_id =
     }
 ;;
 
-let entries t = Eio.Mutex.use_ro t.mutex (fun () -> Map.data (Atomic.get t.sessions))
+let entries t =
+  Eio.Mutex.use_ro t.mutex (fun () ->
+    Map.data (Atomic.get t.sessions) |> List.map ~f:(fun binding -> binding.Binding.entry))
+;;
 
 let stats t =
   Eio.Mutex.use_ro t.mutex (fun () ->
@@ -704,7 +1201,7 @@ let remove t session_id =
     if Map.mem t.reservations session_id || cleanup_pending t session_id
     then None
     else (
-      let entry = Map.find (Atomic.get t.sessions) session_id in
+      let entry = find t session_id in
       Atomic.set t.sessions (Map.remove (Atomic.get t.sessions) session_id);
       t.indexed <- Map.remove t.indexed session_id;
       entry))
@@ -717,16 +1214,20 @@ let catalog t ~now ~indexed_entries =
     ~check_current:(fun (loaded, indexed) ->
       if
         not
-          (Map.equal same_owner loaded (Atomic.get t.sessions)
+          (Map.equal
+             (fun first second -> same_owner first.Binding.entry second.Binding.entry)
+             loaded
+             (Atomic.get t.sessions)
            && Map.equal Agent_store.Session_index.Entry.equal indexed t.indexed)
       then Error (lifecycle_conflict "session catalog binding changed")
       else
         Map.fold loaded ~init:(Ok ()) ~f:(fun ~key:_ ~data checked ->
-          Result.bind checked ~f:(fun () -> check_retained_owner data)))
+          Result.bind checked ~f:(fun () -> check_retained_owner data.Binding.entry)))
     (fun (loaded_entries, _) ->
        let open Result.Let_syntax in
        let%map loaded =
          Map.fold loaded_entries ~init:(Ok []) ~f:(fun ~key ~data entries ->
+           let data = data.Binding.entry in
            let%bind entries = entries in
            let%bind () = check_retained_owner data in
            let%bind state = Agent_session.Session_actor.state data.actor in
@@ -866,51 +1367,61 @@ let unload_inactive t ~index_entries =
         if not (matches state)
         then Ok false
         else (
-          let%bind fence =
-            Agent_session.Session_actor.begin_lifecycle
-              entry.actor
-              ~attachment_id:None
-              ~expected_generation:state.identity.generation
-              ~expected_revision:state.counters.revision
+          (* Cleanup may advance the canonical projection. Resample before the
+             reversible eviction fence and decline this old index candidate. *)
+          let%bind () =
+            Agent_session.Session_actor.drain_descendant_cleanup entry.actor
           in
-          let retired = ref false in
-          Exn.protect
-            ~f:(fun () ->
-              let%bind current =
-                Agent_session.Session_actor.lifecycle_state entry.actor fence
-              in
-              let%bind () = check_retained_owner entry in
-              if not (matches current)
-              then Ok false
-              else
-                Eio.Cancel.protect (fun () ->
-                  if not (Runtime_owner.reserve_inactive_close entry.runtime)
-                  then Ok false
-                  else (
-                    retired := true;
-                    let%bind () =
-                      Agent_session.Session_actor.retire_lifecycle entry.actor fence
-                    in
-                    (* Keep failed cleanup discoverable; detach only after its owner closed. *)
-                    entry.close ();
-                    Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
-                      let%bind () = check_reservation t reservation in
-                      match find t session_id with
-                      | Some current when same_owner current entry ->
-                        Atomic.set
-                          t.sessions
-                          (Map.remove (Atomic.get t.sessions) session_id);
-                        t.indexed <- Map.set t.indexed ~key:session_id ~data:indexed;
-                        Ok true
-                      | Some _ | None ->
-                        Error (lifecycle_conflict "eviction owner changed")))))
-            ~finally:(fun () ->
-              if not !retired
-              then
-                Eio.Cancel.protect (fun () ->
-                  ignore
-                    (Agent_session.Session_actor.abort_lifecycle entry.actor fence
-                     : (unit, Agent_protocol.Error.t) Result.t)))))
+          let%bind state = Agent_session.Session_actor.state entry.actor in
+          let%bind () = check_retained_owner entry in
+          if not (matches state)
+          then Ok false
+          else (
+            let%bind fence =
+              Agent_session.Session_actor.begin_lifecycle
+                entry.actor
+                ~attachment_id:None
+                ~expected_generation:state.identity.generation
+                ~expected_revision:state.counters.revision
+            in
+            let retired = ref false in
+            Exn.protect
+              ~f:(fun () ->
+                let%bind current =
+                  Agent_session.Session_actor.lifecycle_state entry.actor fence
+                in
+                let%bind () = check_retained_owner entry in
+                if not (matches current)
+                then Ok false
+                else
+                  Eio.Cancel.protect (fun () ->
+                    if not (Runtime_owner.reserve_inactive_close entry.runtime)
+                    then Ok false
+                    else (
+                      retired := true;
+                      let%bind () =
+                        Agent_session.Session_actor.retire_lifecycle entry.actor fence
+                      in
+                      (* Keep failed cleanup discoverable; detach only after its owner closed. *)
+                      close_entry entry;
+                      Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
+                        let%bind () = check_reservation t reservation in
+                        match find t session_id with
+                        | Some current when same_owner current entry ->
+                          Atomic.set
+                            t.sessions
+                            (Map.remove (Atomic.get t.sessions) session_id);
+                          t.indexed <- Map.set t.indexed ~key:session_id ~data:indexed;
+                          Ok true
+                        | Some _ | None ->
+                          Error (lifecycle_conflict "eviction owner changed")))))
+              ~finally:(fun () ->
+                if not !retired
+                then
+                  Eio.Cancel.protect (fun () ->
+                    ignore
+                      (Agent_session.Session_actor.abort_lifecycle entry.actor fence
+                       : (unit, Agent_protocol.Error.t) Result.t))))))
   in
   let observe session_id =
     with_read_snapshot
@@ -945,67 +1456,225 @@ let unload_inactive t ~index_entries =
     | Ok false | Error _ -> count)
 ;;
 
-let shutdown t =
-  Eio.Cancel.protect (fun () ->
-    (* Only shutdown uses this coordinator. Registry admissions and callbacks
-       never acquire it; concurrent retries cannot close the same owner twice. *)
-    Eio.Mutex.use_ro t.shutdown_mutex (fun () ->
-      let reservations, readers =
-        Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
-          Atomic.set t.closing true;
-          ( Map.data t.reservations
-            |> List.map ~f:(fun reservation -> reservation.Lifecycle_reservation.finished)
-          , List.map t.read_leases ~f:(fun lease -> lease.Read_lease.finished) ))
-      in
-      List.iter reservations ~f:Eio.Promise.await;
-      List.iter readers ~f:Eio.Promise.await;
-      let failed_cleanups = Eio.Mutex.use_ro t.mutex (fun () -> t.failed_cleanups) in
-      List.iter failed_cleanups ~f:(fun cleanup ->
-        match cleanup_owner cleanup.Failed_cleanup.owner with
-        | Ok () ->
-          Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
-            (match cleanup.owner with
-             | Cleanup_owner.Entry entry ->
-               Atomic.set
-                 t.sessions
-                 (Map.filter (Atomic.get t.sessions) ~f:(fun current ->
-                    not (same_owner current entry)))
-             | Recovery owner ->
-               Atomic.set
-                 t.sessions
-                 (Map.filter (Atomic.get t.sessions) ~f:(fun current ->
-                    not (Session_recovery_owner.owns_actor owner current.actor)))
-             | Handle _ | Fence _ -> ());
-            t.failed_cleanups
-            <- List.filter t.failed_cleanups ~f:(fun current ->
-                 not (phys_equal current cleanup)))
-        | Error _ | (exception _) ->
-          (* Preserve the original diagnostic and exact owner for another retry. *)
-          (match Cleanup_failure.exception_and_backtrace cleanup.failure with
-           | Some (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
-           | None -> raise (Cleanup_failed cleanup.failure)));
-      let entries =
-        Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
-          let entries = Map.data (Atomic.get t.sessions) in
-          t.indexed <- Map.empty (module Session_key);
-          t.loader <- None;
-          t.reader <- None;
-          entries)
-      in
-      (* Dependency cleanup can still need another actor's durable stop acknowledgement.
-     Keep the complete loaded graph and all actors alive until every runtime has
-     joined cleanup. No registry mutex is held while entering a runtime owner. *)
-      List.map entries ~f:(fun entry () -> Runtime_owner.close_and_wait entry.runtime)
-      |> Eio.Fiber.all;
-      List.map entries ~f:(fun entry () ->
-        entry.close ();
-        Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
-          Atomic.set
-            t.sessions
-            (Map.filter (Atomic.get t.sessions) ~f:(fun current ->
-               not (same_owner current entry)))))
-      |> Eio.Fiber.all))
+let outcome_report f =
+  let failure =
+    match f () with
+    | Ok () -> None
+    | Error error -> Some (Agent_session.Callback_cleanup.Failure.Protocol error)
+    | exception exn -> Some (Raised (exn, Stdlib.Printexc.get_raw_backtrace ()))
+  in
+  match failure with
+  | None -> Disposal_report_data.create ~disposition:Disposed []
+  | Some failure ->
+    let primary = Disposal_report_data.Diagnostic.create [ failure ] in
+    Disposal_report_data.create ~primary ~disposition:Retained [ primary ]
 ;;
+
+let shutdown_reported t =
+  check_disposal_domain_exn t;
+  Eio.Cancel.protect (fun () ->
+    Eio.Mutex.use_rw ~protect:true t.shutdown_mutex (fun () ->
+      match t.disposal_report with
+      | Some report -> report
+      | None ->
+        let reservations, readers =
+          Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
+            Atomic.set t.closing true;
+            ( List.map (Map.data t.reservations) ~f:(fun reservation ->
+                reservation.Lifecycle_reservation.finished)
+            , List.map t.read_leases ~f:(fun lease -> lease.Read_lease.finished) ))
+        in
+        List.iter reservations ~f:Eio.Promise.await;
+        List.iter readers ~f:Eio.Promise.await;
+        let failed, loaded =
+          Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
+            t.indexed <- Map.empty (module Session_key);
+            t.loader <- None;
+            t.reader <- None;
+            ( t.failed_cleanups
+            , List.map
+                (Map.data (Atomic.get t.sessions))
+                ~f:(fun binding -> binding.Binding.entry) ))
+        in
+        let recoveries =
+          List.filter_map failed ~f:(fun cleanup ->
+            match cleanup.Failed_cleanup.owner with
+            | Recovery owner -> Some owner
+            | Entry _ | Handle _ | Fence _ -> None)
+        in
+        let entries =
+          List.fold
+            (List.filter_map failed ~f:(fun cleanup ->
+               match cleanup.Failed_cleanup.owner with
+               | Entry entry -> Some entry
+               | Recovery _ | Handle _ | Fence _ -> None)
+             @ loaded)
+            ~init:[]
+            ~f:(fun entries entry ->
+              if
+                List.exists entries ~f:(fun current -> same_disposal_entry current entry)
+                || List.exists recoveries ~f:(fun owner ->
+                  entry_aliases_recovery entry owner)
+              then entries
+              else entry :: entries)
+          |> List.rev
+        in
+        (* ALL runtime producers join before ANY graph Actor/writer/Handle is
+           released, including provisional recovered owners adopted off-map. *)
+        let original_reports =
+          List.filter_map failed ~f:(fun cleanup -> cleanup.Failed_cleanup.report)
+        in
+        let settled_fences = ref [] in
+        let fences =
+          List.filter_map failed ~f:(fun cleanup ->
+            match cleanup.Failed_cleanup.owner with
+            | Fence (entry, fence) ->
+              let report =
+                outcome_report (fun () ->
+                  Agent_session.Session_actor.abort_lifecycle entry.actor fence)
+              in
+              if Session_disposal_report.disposed report
+              then (
+                settled_fences := cleanup.owner :: !settled_fences;
+                Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
+                  t.failed_cleanups
+                  <- List.filter t.failed_cleanups ~f:(fun actual ->
+                       not (phys_equal actual cleanup))));
+              Some report
+            | Entry _ | Recovery _ | Handle _ -> None)
+        in
+        let prepared =
+          Eio.Fiber.List.map
+            (function
+              | Cleanup_owner.Recovery owner ->
+                Session_recovery_owner.prepare_close_reported owner
+              | Entry entry -> Runtime_owner.close_and_wait_reported entry.runtime
+              | Handle _ | Fence _ ->
+                invalid_arg "resource-only owner entered runtime preparation")
+            (List.map recoveries ~f:(fun owner -> Cleanup_owner.Recovery owner)
+             @ List.map entries ~f:(fun entry -> Cleanup_owner.Entry entry))
+        in
+        let publish ~disposed ~current ~settled_originals reports =
+          let diagnostics =
+            t.disposal_diagnostics
+            @ List.concat_map reports ~f:Disposal_report_data.diagnostics
+          in
+          let report =
+            Disposal_report_data.create
+              ?primary:(List.find_map current ~f:Disposal_report_data.primary)
+              ~disposition:(if disposed then Disposed else Retained)
+              diagnostics
+          in
+          (* Retain only settled-stage groups across partial shutdown. Failed
+             retry reports belong to their callers; no accumulating history. *)
+          let settled =
+            Disposal_report_data.combine
+              ~disposition:Disposed
+              (Disposal_report_data.create ~disposition:Disposed t.disposal_diagnostics
+               :: List.filter reports ~f:Session_disposal_report.disposed)
+          in
+          (* Original Retained diagnostics belong to the exact owner which just
+             disposed, even when its direct Recovery close does not repeat a
+             Factory checkpoint. Preserve payload, never its old disposition. *)
+          t.disposal_diagnostics
+          <- Disposal_report_data.diagnostics
+               (Disposal_report_data.create
+                  ~disposition:Disposed
+                  (Disposal_report_data.diagnostics settled
+                   @ List.concat_map settled_originals ~f:Disposal_report_data.diagnostics
+                  ));
+          if disposed then t.disposal_report <- Some report;
+          report
+        in
+        if not (List.for_all (prepared @ fences) ~f:Session_disposal_report.disposed)
+        then
+          publish
+            ~disposed:false
+            ~current:(fences @ prepared)
+            ~settled_originals:
+              (List.filter_map failed ~f:(fun cleanup ->
+                 if
+                   List.exists
+                     !settled_fences
+                     ~f:(same_cleanup_owner cleanup.Failed_cleanup.owner)
+                 then cleanup.report
+                 else None))
+            (original_reports @ fences @ prepared)
+        else (
+          let settled_owners = ref !settled_fences in
+          let remove owner =
+            settled_owners := owner :: !settled_owners;
+            Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
+              t.failed_cleanups
+              <- List.filter t.failed_cleanups ~f:(fun cleanup ->
+                   not (same_cleanup_owner cleanup.Failed_cleanup.owner owner));
+              Atomic.set
+                t.sessions
+                (Map.filter (Atomic.get t.sessions) ~f:(fun binding ->
+                   match owner with
+                   | Cleanup_owner.Entry entry ->
+                     not (same_disposal_entry binding.entry entry)
+                   | Recovery owner -> not (entry_aliases_recovery binding.entry owner)
+                   | Handle _ | Fence _ -> true)))
+          in
+          let recovered =
+            Eio.Fiber.List.map
+              (fun owner ->
+                 let report = Session_recovery_owner.close_reported owner in
+                 if Session_disposal_report.disposed report then remove (Recovery owner);
+                 report)
+              recoveries
+          in
+          let closed =
+            Eio.Fiber.List.map
+              (fun entry ->
+                 let report = close_entry_reported entry in
+                 if Session_disposal_report.disposed report then remove (Entry entry);
+                 report)
+              entries
+          in
+          let other =
+            List.filter_map failed ~f:(fun cleanup ->
+              let report =
+                match cleanup.Failed_cleanup.owner with
+                | Handle (store, handle) ->
+                  Some
+                    (outcome_report (fun () ->
+                       Agent_store.Session_store.close_session store handle
+                       |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error))
+                | Fence _ | Entry _ | Recovery _ -> None
+              in
+              Option.map report ~f:(fun report ->
+                if Session_disposal_report.disposed report then remove cleanup.owner;
+                report))
+          in
+          let reports =
+            original_reports @ fences @ prepared @ recovered @ closed @ other
+          in
+          let disposed =
+            List.for_all
+              (fences @ prepared @ recovered @ closed @ other)
+              ~f:Session_disposal_report.disposed
+            && Eio.Mutex.use_ro t.mutex (fun () ->
+              Map.is_empty (Atomic.get t.sessions) && List.is_empty t.failed_cleanups)
+          in
+          let settled_originals =
+            List.filter_map failed ~f:(fun cleanup ->
+              if
+                List.exists
+                  !settled_owners
+                  ~f:(same_cleanup_owner cleanup.Failed_cleanup.owner)
+              then cleanup.report
+              else None)
+          in
+          publish
+            ~disposed
+            ~current:(recovered @ closed @ other @ prepared @ fences)
+            ~settled_originals
+            reports)))
+;;
+
+let shutdown t = resume_report (shutdown_reported t)
 
 let install_lifecycle_projection t reservation indexed =
   let open Result.Let_syntax in
@@ -1076,9 +1745,86 @@ let commit_retired t reservation ~store =
     install_lifecycle_projection t reservation indexed)
 ;;
 
+(* This existing negative sampler is confined to the creating Eio domain.
+   Failed-cleanup list updates are nonyielding, so a same-domain read observes
+   the complete old or new list without entering the registry mutex. In
+   particular retained-policy callbacks must not wait on that mutex. *)
+let has_pending_cleanup t session_id = cleanup_pending t session_id
+
 let lifecycle_reserved t session_id =
   Eio.Mutex.use_ro t.mutex (fun () ->
     Map.mem t.reservations session_id || cleanup_pending t session_id)
+;;
+
+module Reservation_consumer = struct
+  type t =
+    | Owned_execution
+    | Native_metadata_read
+end
+
+let blocks_loaded_owner_locked t ~session_id entry ~(consumer : Reservation_consumer.t) =
+  Atomic.get t.closing
+  || cleanup_pending t session_id
+  || (not (Option.exists (find t session_id) ~f:(same_disposal_entry entry)))
+  ||
+  match Map.find t.reservations session_id with
+  | None -> false
+  | Some reservation ->
+    (match reservation.phase, consumer with
+     | Exclusive, (Owned_execution | Native_metadata_read)
+     | Loaded { purpose = Retention; _ }, Owned_execution -> true
+     | ( Loaded { purpose = Read; entry = retained }
+       , (Owned_execution | Native_metadata_read) )
+     | Loaded { purpose = Retention; entry = retained }, Native_metadata_read ->
+       not (same_disposal_entry retained entry))
+;;
+
+let blocks_loaded_owner t entry ~consumer =
+  match entry.store_handle with
+  | None -> true
+  | Some handle ->
+    let session_id = Agent_store.Session_store.Handle.session_id handle in
+    Eio.Mutex.use_ro t.mutex (fun () ->
+      blocks_loaded_owner_locked t ~session_id entry ~consumer
+      || Result.is_error (check_retained_owner entry))
+;;
+
+let blocks_owned_execution t entry = blocks_loaded_owner t entry ~consumer:Owned_execution
+
+let blocks_native_metadata_read t entry =
+  blocks_loaded_owner t entry ~consumer:Native_metadata_read
+;;
+
+let try_publication_lock t f =
+  if Eio.Mutex.try_lock t.mutex
+  then Exn.protect ~f ~finally:(fun () -> Eio.Mutex.unlock t.mutex)
+  else Error (lifecycle_conflict "session publication is concurrently busy")
+;;
+
+let check_native_metadata_publication t entry =
+  if not (Int.equal t.domain (Stdlib.Domain.self () :> int))
+  then
+    Error
+      (Agent_protocol.Error.create
+         Conflict
+         ~message:"native metadata publication belongs to another Eio domain"
+         ~retryable:false
+         ())
+  else (
+    match entry.store_handle with
+    | None ->
+      Error (lifecycle_conflict "native metadata publication has no durable owner")
+    | Some handle ->
+      let open Result.Let_syntax in
+      let session_id = Agent_store.Session_store.Handle.session_id handle in
+      let%bind () =
+        try_publication_lock t (fun () ->
+          if blocks_loaded_owner_locked t ~session_id entry ~consumer:Native_metadata_read
+          then
+            Error (lifecycle_conflict "native metadata publication owner is unavailable")
+          else Ok ())
+      in
+      check_retained_owner entry)
 ;;
 
 let cleanup_belongs_to_reservation reservation (owner : Cleanup_owner.t) =
@@ -1111,15 +1857,13 @@ let retain_cleanup t reservation ~owner ~primary ~failure =
       when phys_equal current reservation
            && phys_equal reservation.owner t.lifecycle_owner
            && cleanup_belongs_to_reservation reservation owner ->
-      if
-        not
-          (List.exists t.failed_cleanups ~f:(fun cleanup ->
-             same_cleanup_owner cleanup.Failed_cleanup.owner owner))
-      then (
-        let cleanup : Failed_cleanup.t =
-          { owner; session_id = reservation.session_id; primary; failure }
-        in
-        t.failed_cleanups <- cleanup :: t.failed_cleanups)
+      retain_actual_owner_locked
+        t
+        ~session_id:reservation.session_id
+        ~owner
+        ~primary
+        ~failure
+        ~report:None
     | Some _ | None -> failwith "cleanup capability differs from its issuing reservation")
 ;;
 
@@ -1132,15 +1876,21 @@ let rollback_recovered t ~primary entries =
         | Some handle -> Agent_store.Session_store.Handle.session_id handle
         | None -> failwith "recovered entry has no retained handle"
       in
-      match cleanup_owner owner with
+      let report = ref None in
+      match
+        cleanup_owner_with_report
+          ~capture_report:(fun actual -> report := Some actual)
+          owner
+      with
       | Ok () ->
         Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
           Atomic.set
             t.sessions
             (Map.filter (Atomic.get t.sessions) ~f:(fun current ->
-               not (same_owner current entry))))
+               not (same_disposal_entry current.Binding.entry entry))))
       | Error error ->
         retain_failure
+          ?report:!report
           t
           ~session_id
           ~owner
@@ -1148,7 +1898,7 @@ let rollback_recovered t ~primary entries =
           ~failure:(Cleanup_failure.rejected error)
       | exception exn ->
         let failure = Cleanup_failure.raised exn (Stdlib.Printexc.get_raw_backtrace ()) in
-        retain_failure t ~session_id ~owner ~primary ~failure))
+        retain_failure ?report:!report t ~session_id ~owner ~primary ~failure))
 ;;
 
 let retains_cleanup_handle t handle =
@@ -1163,7 +1913,24 @@ let retains_cleanup_handle t handle =
       Option.exists actual ~f:(phys_equal handle)))
 ;;
 
-let select_indexed t reservation ~store ~handle ~current ~authorize ~recover =
+let with_authorized_publication t ~authorize f =
+  let open Result.Let_syntax in
+  let%bind () = authorize () in
+  (* The final original/host check stays outside the mutex. Do not yield waiting
+     for it afterward: contention is a genuine changed publication opportunity. *)
+  try_publication_lock t f
+;;
+
+let select_indexed_with_selection
+      t
+      reservation
+      ~(selection : Binding.selection)
+      ~store
+      ~handle
+      ~current
+      ~authorize
+      ~recover
+  =
   let module S = Agent_store.Session_store in
   let module C = S.Lifecycle.Current in
   let module Entry = Agent_store.Session_index.Entry in
@@ -1171,7 +1938,6 @@ let select_indexed t reservation ~store ~handle ~current ~authorize ~recover =
   let session_id = reservation.Lifecycle_reservation.session_id in
   let check_current current =
     let entry = C.entry current in
-    let%bind () = authorize entry.session in
     if
       S.owns_handle store handle
       && C.is_current current handle
@@ -1189,40 +1955,191 @@ let select_indexed t reservation ~store ~handle ~current ~authorize ~recover =
     then Error (lifecycle_conflict "session selection already has a loaded owner")
     else Ok ()
   in
+  let%bind () = authorize (C.entry current).session in
   let%bind () =
     Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
       let%bind () = check_reservation_open () in
       let%bind () = check_current current in
       match reservation.target with
       | Indexed expected
-        when Entry.equal expected (C.entry current)
-             && Option.exists (Map.find t.indexed session_id) ~f:(Entry.equal expected) ->
-        Ok ()
+        when Option.exists (Map.find t.indexed session_id) ~f:(Entry.equal expected) ->
+        (match selection with
+         | Ordinary ->
+           if Entry.equal expected (C.entry current)
+           then Ok ()
+           else Error (lifecycle_conflict "session indexed selection basis changed")
+         | Metadata_acquired ->
+           (* The exact owned Handle/Current supplies canonical DATA. A former
+              failed recovery may have advanced it before disposing its owner. *)
+           t.indexed <- Map.set t.indexed ~key:session_id ~data:(C.entry current);
+           Ok ())
       | Indexed _ | Loaded _ | Absent ->
         Error (lifecycle_conflict "session indexed selection basis changed"))
   in
   Eio.Cancel.protect (fun () ->
     let%bind entry, fresh = recover () in
     close_provisional t ~session_id entry (fun () ->
-      Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
-        let%bind () = check_reservation_open () in
-        let%bind () = check_retained_owner entry in
-        let%bind () = check_current fresh in
-        let%bind () =
-          if
-            Option.exists entry.store_handle ~f:(phys_equal handle)
-            && Int.equal
-                 (C.entry fresh).session.generation
-                 (C.entry current).session.generation
-            && Agent_protocol.Session_lifecycle.Revision.equal
-                 (C.entry fresh).lifecycle_revision
-                 (C.entry current).lifecycle_revision
-          then Ok ()
-          else Error (lifecycle_conflict "session recovery returned a different owner")
-        in
-        Atomic.set
-          t.sessions
-          (Map.set (Atomic.get t.sessions) ~key:session_id ~data:entry);
-        t.indexed <- Map.remove t.indexed session_id;
-        Ok entry)))
+      with_authorized_publication
+        t
+        ~authorize:(fun () -> authorize (C.entry fresh).session)
+        (fun () ->
+           let%bind () = check_reservation_open () in
+           let%bind () = check_retained_owner entry in
+           let%bind () = check_current fresh in
+           let%bind () =
+             if
+               Option.exists entry.store_handle ~f:(phys_equal handle)
+               && Int.equal
+                    (C.entry fresh).session.generation
+                    (C.entry current).session.generation
+               && Agent_protocol.Session_lifecycle.Revision.equal
+                    (C.entry fresh).lifecycle_revision
+                    (C.entry current).lifecycle_revision
+             then Ok ()
+             else Error (lifecycle_conflict "session recovery returned a different owner")
+           in
+           Atomic.set
+             t.sessions
+             (Map.set
+                (Atomic.get t.sessions)
+                ~key:session_id
+                ~data:{ Binding.entry; selection });
+           t.indexed <- Map.remove t.indexed session_id;
+           Ok entry)))
+;;
+
+let select_indexed t reservation ~store ~handle ~current ~authorize ~recover =
+  select_indexed_with_selection
+    t
+    reservation
+    ~selection:Ordinary
+    ~store
+    ~handle
+    ~current
+    ~authorize
+    ~recover
+;;
+
+let acquire_indexed_target t reservation ~store ~handle ~authorize ~recover =
+  let module S = Agent_store.Session_store in
+  let open Result.Let_syntax in
+  let transferred = ref false in
+  let run () =
+    let%bind () =
+      match reservation.Lifecycle_reservation.target with
+      | Indexed _ -> Ok ()
+      | Loaded _ | Absent ->
+        Error (lifecycle_conflict "metadata acquisition requires its indexed reservation")
+    in
+    let%bind indexed =
+      Agent_store.Session_index.find_checked
+        (S.session_index store)
+        reservation.session_id
+      |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
+      |> Result.bind ~f:(fun value ->
+        Result.of_option
+          value
+          ~error:(lifecycle_conflict "metadata target canonical index disappeared"))
+    in
+    let%bind current =
+      S.current_lifecycle store handle ~current_entry:indexed
+      |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
+    in
+    select_indexed_with_selection
+      t
+      reservation
+      ~selection:Metadata_acquired
+      ~store
+      ~handle
+      ~current
+      ~authorize
+      ~recover:(fun () ->
+        (* From invocation onward Factory's concrete recovery owner consumes this
+           exact Handle, including failure. Capture transfer before any yield. *)
+        transferred := true;
+        recover ())
+  in
+  let close primary =
+    if not !transferred
+    then
+      cleanup_after_failure
+        t
+        ~session_id:reservation.session_id
+        ~owner:(Cleanup_owner.handle ~store handle)
+        ~primary
+  in
+  let refresh_failed_projection () =
+    Eio.Cancel.protect (fun () ->
+      (* A read failure is secondary to the actual primary error. It is neither
+         joined-resource evidence nor permission to reuse the old projection.
+         Every later acquisition independently reads canonical DATA again. *)
+      try
+        match
+          Agent_store.Session_index.find_checked
+            (S.session_index store)
+            reservation.session_id
+        with
+        | Error _ -> ()
+        | Ok indexed ->
+          Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
+            match check_reservation t reservation, find t reservation.session_id with
+            | Ok (), None ->
+              t.indexed
+              <- (match indexed with
+                  | Some actual ->
+                    Map.set t.indexed ~key:reservation.session_id ~data:actual
+                  | None -> Map.remove t.indexed reservation.session_id)
+            | Error _, _ | Ok (), Some _ -> ())
+      with
+      | _ -> ())
+  in
+  match run () with
+  | Ok _ as success -> success
+  | Error failure as result ->
+    close (Cleanup_failure.rejected failure);
+    refresh_failed_projection ();
+    result
+  | exception exn ->
+    let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+    close (Cleanup_failure.raised exn backtrace);
+    refresh_failed_projection ();
+    Exn.raise_with_original_backtrace exn backtrace
+;;
+
+let select_loaded t reservation ~store ~handle ~current (entry : entry) ~authorize =
+  let module S = Agent_store.Session_store in
+  let module C = S.Lifecycle.Current in
+  let open Result.Let_syntax in
+  with_authorized_publication
+    t
+    ~authorize:(fun () -> authorize (C.entry current).session)
+    (fun () ->
+       let%bind () = check_reservation t reservation in
+       let session_id = reservation.Lifecycle_reservation.session_id in
+       let exact =
+         match reservation.target, Map.find (Atomic.get t.sessions) session_id with
+         | Loaded expected, Some binding ->
+           phys_equal expected entry
+           && phys_equal binding.Binding.entry entry
+           && Option.exists entry.store_handle ~f:(phys_equal handle)
+         | (Loaded _ | Indexed _ | Absent), _ -> false
+       in
+       let indexed = C.entry current in
+       if
+         exact
+         && (not (Atomic.get t.closing))
+         && S.owns_handle store handle
+         && C.is_current current handle
+         && Agent_protocol.Id.Session.equal indexed.session.id session_id
+         && (not indexed.archived)
+         && Agent_store.Session_archive_record.Admission.equal indexed.admission Automatic
+       then (
+         Atomic.set
+           t.sessions
+           (Map.set
+              (Atomic.get t.sessions)
+              ~key:session_id
+              ~data:{ Binding.entry; selection = Ordinary });
+         Ok ())
+       else Error (lifecycle_conflict "loaded selection owner changed"))
 ;;

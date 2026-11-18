@@ -87,6 +87,28 @@ val data_root : t -> Data_root.t
 val server_id : t -> Agent_protocol.Id.Server.t
 val session_index : t -> Session_index.t
 
+module Command_receipts : sig
+  type store = t
+
+  (** The existing daemon command receipt cache opened under this owned Store's
+      canonical root. Open once at daemon composition and share [cache].
+      An unrelated cache cannot be attached to this owner. *)
+  type t
+
+  val open_or_create : store -> (t, Store_error.t) result
+  val cache : t -> Idempotency_store.t
+
+  module Removal : sig
+    (** Verified protected receipt from one exact open Store owner. *)
+    type t
+
+    val fact : t -> Idempotency_store.Removal.t
+    val belongs_to : t -> store -> bool
+  end
+
+  val removal : t -> session_id:Agent_protocol.Id.Session.t -> Removal.t option
+end
+
 (** Open one durable authoring-upload child using THIS Store's live exclusive
     daemon lock and Data_root. The lock remains privately owned here; no caller
     may reacquire it or supply an unrelated root. Reject a closed Store and a
@@ -207,9 +229,15 @@ val create_session
     acquisition never removes a pre-existing staging directory. Returned errors,
     cancellation and exceptions clean only this call's acquired staging; after
     rename, final evidence survives later failures. Original exceptions propagate
-    after protected best-effort cleanup. *)
+    after protected best-effort cleanup. Optional [before_publish] runs after
+    yielding preparation and projection intent, immediately before final rename
+    in the protected ownership transfer. It must be synchronous and non-yielding,
+    including any authorization checks. Its exceptions propagate unchanged;
+    existing projection/index failure fences remain conservative when intent
+    already exists. The default adds no authorization policy. *)
 val create_session_initialized
-  :  t
+  :  ?before_publish:(unit -> unit)
+  -> t
   -> sw:Eio.Switch.t
   -> transaction_id:Agent_protocol.Id.Transaction.t
   -> actor_lock_nonce:string
@@ -309,6 +337,21 @@ module Lifecycle : sig
     val is_current : t -> Handle.t -> bool
   end
 
+  module Retained_owner : sig
+    (** Actual lifecycle ownership retained from one successful exact Current.
+        Ordinary metadata/projection progress does not invalidate it. Actual
+        lifecycle mutation, uncertainty, close or loss of locks does. This is
+        not a full-projection CAS, execution grant or scalar revision witness. *)
+    type t
+
+    (** Pure domain-owned check: same physical Handle and lifecycle-authority
+        epoch, actual daemon/session locks, live store owner, no metadata/
+        lifecycle uncertainty and no sticky projection publication failure.
+        Pending canonical projection alone is not failure; a concrete canonical
+        writer availability check remains separately mandatory for execution. *)
+    val is_current : t -> Handle.t -> bool
+  end
+
   module Installed : sig
     (** Acknowledged authority AND checked exact full index projection. Replays
         whose outcome is older than current state do not construct this witness.
@@ -336,7 +379,30 @@ end
     availability or grant IO permission; retained cleanup uses it to bind owner. *)
 val owns_handle : t -> Handle.t -> bool
 
+(** Pure negative availability only, no permission or witness. Checks actual
+    Store/Handle ownership, locks, existing uncertainty and publication health. *)
+val retained_lifecycle_available : t -> Handle.t -> bool
+
+(** Pure checked conversion from a still-current exact observation. Never
+    reconstruct from metadata, a revision, JSON or an arbitrary availability
+    predicate. Caller must separately bind the SAME actual canonical writer. *)
+val retain_lifecycle_owner
+  :  t
+  -> Handle.t
+  -> Lifecycle.Current.t
+  -> (Lifecycle.Retained_owner.t, Store_error.t) result
+
 val read_lifecycle : t -> Handle.t -> (Lifecycle.Observation.t, Store_error.t) Result.t
+
+(** Re-read and compare a previously issued opaque observation under its exact
+    owned Handle and current lifecycle epoch. This can validate recovery-only
+    safety retirement while canonical metadata/index repair is pending. It does
+    not establish a full current scheduling projection or authorize execution. *)
+val check_lifecycle_observation
+  :  t
+  -> Handle.t
+  -> Lifecycle.Observation.t
+  -> (unit, Store_error.t) result
 
 (** Read-only current projection issuance from owned authority, exact full index
     and fenced canonical state. Does not publish, acknowledge receipts, repair or
@@ -399,6 +465,8 @@ val finish_removal
 val pending_removal_ids : t -> (Agent_protocol.Id.Session.t list, Store_error.t) Result.t
 
 (** Acquire terminal source ownership, or admit a retired cleanup container.
+    An exact terminal source may lack its nested workspace. A present workspace
+    must be a non-symlink directory.
     Never manufacture a Handle from a partially removed payload. *)
 val open_removal
   :  t

@@ -24,6 +24,39 @@ let%expect_test
       |> Option.value_exn
     in
     let next = S.Session_delta.apply state delta |> protocol_ok in
+    let module R = S.Session_state.Spec.Resource_identity in
+    let basis = R.capture state.spec in
+    assert (R.equal basis (R.capture next.spec));
+    [%test_eq: (string * string) list] [ "tag", "release" ] next.identity.labels;
+    [%test_eq: (string * string) list] next.identity.labels next.spec.protocol.labels;
+    [%test_eq: string option] (Some "actor") state.spec.protocol.display_name;
+    [%test_eq: (string * string) list] [] state.spec.protocol.labels;
+    assert (
+      not
+        (Sexp.equal
+           (S.Session_state.Spec.sexp_of_t state.spec)
+           (S.Session_state.Spec.sexp_of_t next.spec)));
+    (* These are pure comparison inputs, not installed configuration or authority.
+       Display metadata is excluded; executable configuration remains exact. *)
+    let configured =
+      { next.spec with
+        configuration_revision = Int64.succ next.spec.configuration_revision
+      }
+    in
+    assert (not (R.equal basis (R.capture configured)));
+    let inference_target =
+      Inference.Selection.unresolved ~limits:document_limits
+      |> Result.map_error ~f:(fun error ->
+        Sexp.to_string_hum (Inference.Request.Error.sexp_of_t error))
+      |> Result.ok_or_failwith
+    in
+    let different_inference = { next.spec with inference_target } in
+    (* A raw Spec sexp cannot see this difference. The shared identity must. *)
+    assert (
+      Sexp.equal
+        (S.Session_state.Spec.sexp_of_t next.spec)
+        (S.Session_state.Spec.sexp_of_t different_inference));
+    assert (not (R.equal (R.capture next.spec) (R.capture different_inference)));
     let stale =
       S.Session_metadata_transition.apply next ~expected_metadata_revision:0L ~patch
     in
@@ -133,7 +166,7 @@ let%expect_test
           ~persistence:
             { archive_reference
             ; commit =
-                (fun ~command_audit:_ ~previous:_ _ ->
+                (fun ?observation:_ ~command_audit:_ ~previous:_ _ ->
                   if !fail_commit
                   then
                     Error
@@ -157,6 +190,7 @@ let%expect_test
             ; schedule_limits = S.Staged_schedules.default_limits
             ; notification_limits = S.Staged_notifications.default_limits
             ; ingress_limits = S.Staged_ingress.default_limits
+            ; goal_descendant_profile
             ; subscription_limits = S.Staged_subscriptions.default_limits
             ; state_committed = (fun _ _ -> ())
             }

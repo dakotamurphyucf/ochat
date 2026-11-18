@@ -398,7 +398,7 @@ let execute_loaded
     let retire _ =
       if not !closed
       then (
-        entry.close ();
+        Session_registry.close_entry entry;
         closed := true);
       Ok ()
     in

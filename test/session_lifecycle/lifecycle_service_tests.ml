@@ -733,82 +733,163 @@ let%expect_test
   =
   Eio_main.run (fun raw_env ->
     Mirage_crypto_rng_unix.use_default ();
-    List.iter [ Lifecycle_faults.Payload_deletion; Final_cleanup ] ~f:(fun phase ->
-      let fault = Lifecycle_faults.create () in
-      let env = Lifecycle_faults.wrap_env fault raw_env in
-      with_lifecycle_root raw_env (fun ~root ~content ~configuration ->
-        let calls = ref 0 in
-        let command =
+    List.iter
+      [ Lifecycle_faults.Payload_deletion, true, false
+      ; Final_cleanup, true, false
+        (* The existing metadata completion fault skips the Pending write and
+         fails the next write before its rename, here the applied Remove. *)
+      ; Rejection_completion, false, false
+      ; Rejection_completion, false, true
+      ]
+      ~f:(fun (phase, initially_committed, keep_workspace) ->
+        let fault = Lifecycle_faults.create () in
+        let env = Lifecycle_faults.wrap_env fault raw_env in
+        with_lifecycle_root raw_env (fun ~root ~content ~configuration ->
+          let calls = ref 0 in
+          let command, removed, session_directory =
+            Eio.Switch.run (fun sw ->
+              let daemon = start_daemon sw env ~root ~configuration calls in
+              let client = connection daemon (principal ()) in
+              initialize client;
+              let session, attachment =
+                create_session ~key:"remove-fault-create" client
+              in
+              let session_directory =
+                Agent_store.Data_root.session_path
+                  (Agent_store.Session_store.data_root (Agent_server.Daemon.store daemon))
+                  session.id
+              in
+              let workspace =
+                Eio.Path.(
+                  Eio.Stdenv.fs raw_env / Filename.concat session_directory "workspace")
+              in
+              if keep_workspace
+              then
+                Eio.Path.save
+                  ~create:(`Exclusive 0o600)
+                  Eio.Path.(workspace / "retained.txt")
+                  "nested workspace content"
+              else Eio.Path.rmdir workspace;
+              let command =
+                delete_command
+                  client
+                  session
+                  attachment
+                  ~policy:Remove
+                  ~key_text:"remove-fault-original"
+                  ~revision_offset:0L
+              in
+              Lifecycle_faults.arm fault phase;
+              let result = C.Connection.request_without_history client command in
+              let pending_cleanup =
+                Agent_store.Session_store.pending_removal_ids
+                  (Agent_server.Daemon.store daemon)
+                |> store_ok
+              in
+              assert (Lifecycle_faults.was_triggered fault);
+              assert (String.equal (status result) "persistence_error");
+              assert (List.mem pending_cleanup session.id ~equal:P.Id.Session.equal);
+              assert (
+                List.is_empty
+                  (C.Admin.list_sessions_page client query |> protocol_ok).items);
+              if initially_committed
+              then assert (String.equal (receipt_state client command) "committed")
+              else
+                assert (
+                  match
+                    Eio.Path.kind
+                      ~follow:false
+                      Eio.Path.(Eio.Stdenv.fs raw_env / session_directory)
+                  with
+                  | `Directory -> true
+                  | _ -> false);
+              C.Connection.close client;
+              Agent_server.Daemon.shutdown daemon |> protocol_ok;
+              command, session, session_directory)
+          in
+          let data_root =
+            Agent_store.Data_root.open_existing ~env ~path:configuration.server.data_dir
+            |> store_ok
+          in
+          let indexes = Agent_store.Data_root.indexes_path data_root in
+          let retained_removal () =
+            let module I = Agent_store.Idempotency_store in
+            let store =
+              I.open_or_create ~env ~path:(Filename.concat indexes "idempotency.sexp")
+              |> store_ok
+            in
+            I.removal store ~session_id:removed.id
+          in
+          assert (Bool.equal (Option.is_some (retained_removal ())) initially_committed);
+          if not (initially_committed || keep_workspace)
+          then
+            Eio.Path.unlink
+              Eio.Path.(Eio.Stdenv.fs raw_env / indexes / "sessions.snapshot");
           Eio.Switch.run (fun sw ->
             let daemon = start_daemon sw env ~root ~configuration calls in
             let client = connection daemon (principal ()) in
             initialize client;
-            let session, attachment = create_session ~key:"remove-fault-create" client in
-            (* External workspace content is asserted below. Remove the unused
-               empty session-layout workspace to exercise terminal retirement. *)
-            let session_directory =
-              Agent_store.Data_root.session_path
-                (Agent_store.Session_store.data_root (Agent_server.Daemon.store daemon))
-                session.id
-            in
-            Eio.Path.rmdir
-              Eio.Path.(
-                Eio.Stdenv.fs raw_env / Filename.concat session_directory "workspace");
-            let command =
-              delete_command
-                client
-                session
-                attachment
-                ~policy:Remove
-                ~key_text:"remove-fault-original"
-                ~revision_offset:0L
-            in
-            Lifecycle_faults.arm fault phase;
-            let result = C.Connection.request_without_history client command in
-            let pending_cleanup =
+            let replayed = C.Connection.request_without_history client command in
+            let pending =
               Agent_store.Session_store.pending_removal_ids
                 (Agent_server.Daemon.store daemon)
               |> store_ok
             in
+            assert (
+              match
+                Eio.Path.kind
+                  ~follow:false
+                  Eio.Path.(Eio.Stdenv.fs raw_env / session_directory)
+              with
+              | `Not_found -> true
+              | _ -> false);
+            assert (
+              List.is_empty (C.Admin.list_sessions_page client query |> protocol_ok).items);
+            let workspace_disposition =
+              if keep_workspace
+              then (
+                let directory =
+                  Eio.Path.(
+                    Eio.Stdenv.fs raw_env
+                    / Agent_store.Data_root.lost_and_found_path data_root)
+                in
+                let prefix = "deleted-" ^ P.Id.Session.to_string removed.id ^ "-" in
+                let container =
+                  Eio.Path.read_dir directory
+                  |> List.find_exn ~f:(String.is_prefix ~prefix)
+                in
+                assert (List.equal P.Id.Session.equal pending [ removed.id ]);
+                assert (
+                  String.equal
+                    (Eio.Path.load
+                       Eio.Path.(directory / container / "workspace" / "retained.txt"))
+                    "nested workspace content");
+                "retained")
+              else (
+                assert (List.is_empty pending);
+                "absent")
+            in
             print_s
               [%sexp
-                (( Lifecycle_faults.was_triggered fault
-                 , status result
+                (( status replayed
                  , receipt_state client command
-                 , not (List.is_empty pending_cleanup)
-                 , List.is_empty
-                     (C.Admin.list_sessions_page client query |> protocol_ok).items )
-                 : bool * string * string * bool * bool)];
+                 , workspace_disposition
+                 , String.equal
+                     (Eio.Path.load Eio.Path.(Eio.Stdenv.fs raw_env / content))
+                     "fault fixture workspace"
+                 , !calls )
+                 : string * string * string * bool * int)];
             C.Connection.close client;
-            Agent_server.Daemon.shutdown daemon |> protocol_ok;
-            command)
-        in
-        Eio.Switch.run (fun sw ->
-          let daemon = start_daemon sw env ~root ~configuration calls in
-          let client = connection daemon (principal ()) in
-          initialize client;
-          let replayed = C.Connection.request_without_history client command in
-          print_s
-            [%sexp
-              (( status replayed
-               , receipt_state client command
-               , List.is_empty
-                   (Agent_store.Session_store.pending_removal_ids
-                      (Agent_server.Daemon.store daemon)
-                    |> store_ok)
-               , String.equal
-                   (Eio.Path.load Eio.Path.(Eio.Stdenv.fs raw_env / content))
-                   "fault fixture workspace"
-               , !calls )
-               : string * string * bool * bool * int)];
-          C.Connection.close client;
-          Agent_server.Daemon.shutdown daemon |> protocol_ok))));
+            Agent_server.Daemon.shutdown daemon |> protocol_ok);
+          let proof = retained_removal () |> Option.value_exn in
+          assert (P.Id.Session.equal proof.session_id removed.id);
+          [%test_eq: int] removed.generation proof.generation)));
   [%expect
     {|
-    (true persistence_error committed true true)
-    (ok committed true true 0)
-    (true persistence_error committed true true)
-    (ok committed true true 0)
+    (ok committed absent true 0)
+    (ok committed absent true 0)
+    (ok committed absent true 0)
+    (ok committed retained true 0)
     |}]
 ;;
 
@@ -1038,9 +1119,9 @@ let%expect_test
                 Ok
                   { provisional with
                     close =
-                      (fun () ->
+                      Agent_server.Session_registry.Entry_close.legacy (fun () ->
                         Int.incr provisional_closed;
-                        provisional.close ())
+                        Agent_server.Session_registry.close_entry provisional)
                   });
               Eio.Fiber.fork ~sw (fun () ->
                 Eio.Promise.resolve finish_load (Registry.load loading second.id));
@@ -1085,14 +1166,14 @@ let%expect_test
                 ~session_id:third.id
                 { shutdown_entry with
                   close =
-                    (fun () ->
+                    Agent_server.Session_registry.Entry_close.legacy (fun () ->
                       Int.incr shutdown_attempts;
                       if !shutdown_attempts = 1
                       then failwith "owned entry close failed"
                       else (
                         Eio.Promise.resolve close_enter ();
                         Eio.Promise.await close_release;
-                        shutdown_entry.close ()))
+                        Agent_server.Session_registry.close_entry shutdown_entry))
                 }
               |> protocol_ok;
               let close_failed =
@@ -1153,11 +1234,11 @@ let%expect_test
                      Ok
                        { cancel_entry with
                          close =
-                           (fun () ->
+                           Agent_server.Session_registry.Entry_close.legacy (fun () ->
                              Int.incr cancel_attempts;
                              if !cancel_attempts = 1
                              then failwith "cancelled provisional cleanup failure"
-                             else cancel_entry.close ())
+                             else Agent_server.Session_registry.close_entry cancel_entry)
                        });
                    try
                      ignore
@@ -1187,7 +1268,7 @@ let%expect_test
               let post_authorization_unavailable =
                 match
                   Registry.read_state final_read fifth.id ~authorize:(fun _ ->
-                    read_entry.close ();
+                    Agent_server.Session_registry.close_entry read_entry;
                     Ok ())
                 with
                 | Error failure -> P.Error.equal_code failure.code Persistence_error
@@ -1200,11 +1281,11 @@ let%expect_test
               let entry =
                 { entry with
                   close =
-                    (fun () ->
+                    Agent_server.Session_registry.Entry_close.legacy (fun () ->
                       Int.incr attempts;
                       if !attempts <= 2
                       then failwith "original provisional cleanup failure"
-                      else entry.close ())
+                      else Agent_server.Session_registry.close_entry entry)
                 }
               in
               let registry = Registry.create () in
@@ -1294,11 +1375,11 @@ let%expect_test
               let entry =
                 { original with
                   close =
-                    (fun () ->
+                    Agent_server.Session_registry.Entry_close.legacy (fun () ->
                       Int.incr closes;
                       if !closes <= 2
                       then failwith "retired lifecycle close failed"
-                      else original.close ())
+                      else Agent_server.Session_registry.close_entry original)
                 }
               in
               Registry.add registry ~session_id:session.id entry |> protocol_ok;
@@ -1472,18 +1553,51 @@ let%expect_test "startup rollback retains actual failed owner and its storage un
               let registry = Agent_server.Daemon.registry daemon in
               let original = R.remove registry session.id |> Option.value_exn in
               let handle = original.store_handle |> Option.value_exn in
+              let foreign_session, _ =
+                create_session ~key:"startup-foreign-tuple" client
+              in
+              let foreign = R.find registry foreign_session.id |> Option.value_exn in
+              let mixed_tuples =
+                [ { original with actor = foreign.actor }
+                ; { original with runtime = foreign.runtime }
+                ; { original with store_handle = foreign.store_handle }
+                ]
+              in
               let attempts = ref 0 in
+              let factual_during_shutdown = ref false in
+              let cleanup_started, signal_cleanup_started = Eio.Promise.create () in
+              let cleanup_released, signal_cleanup_released = Eio.Promise.create () in
+              let cleanup_finished, signal_cleanup_finished = Eio.Promise.create () in
+              let close_before_graph_join = ref false in
               let retained =
                 { original with
                   close =
-                    (fun () ->
+                    Agent_server.Session_registry.Entry_close.legacy (fun () ->
                       Int.incr attempts;
                       if Int.equal !attempts 1
                       then failwith "original startup close failure";
-                      original.close ())
+                      (* Retry still owns the SAME genuine Entry and open Handle.
+                         Check while its failed cleanup is retained and global
+                         closing is true, before actual Actor/writer destruction. *)
+                      assert (R.is_closing registry);
+                      close_before_graph_join
+                      := Option.is_none (Eio.Promise.peek cleanup_finished);
+                      let current = R.find registry session.id |> Option.value_exn in
+                      R.check_retained_factual_owner registry current |> protocol_ok;
+                      factual_during_shutdown := true;
+                      Agent_server.Session_registry.close_entry original)
                 }
               in
               R.add registry ~session_id:session.id retained |> protocol_ok;
+              R.check_retained_factual_owner registry retained |> protocol_ok;
+              List.iter mixed_tuples ~f:(fun entry ->
+                match R.check_retained_factual_owner registry entry with
+                | Error failure ->
+                  [%test_eq: P.Error.code] Conflict failure.code;
+                  [%test_eq: string]
+                    "factual owner is no longer registered"
+                    failure.message
+                | Ok () -> failwith "factual check accepted a mixed actual resource tuple");
               let primary =
                 P.Error.create
                   Persistence_error
@@ -1505,12 +1619,82 @@ let%expect_test "startup rollback retains actual failed owner and its storage un
                 Option.exists (R.find registry session.id) ~f:(fun entry ->
                   phys_equal entry.actor original.actor)
               in
+              (* The injected callback failed before original.close. Its Actor,
+                 writer and lower Store head remain genuine and available; no
+                 uncertain/closed Handle is promoted to writable custody. *)
+              Agent_store.Session_store.Handle.metadata_checked handle
+              |> store_ok
+              |> ignore;
+              Agent_session.Session_actor.state original.actor |> protocol_ok |> ignore;
+              R.check_retained_factual_owner registry retained |> protocol_ok;
               let fresh_load_refused =
                 match R.load registry session.id with
                 | Error error -> P.Error.equal_code error.code Conflict
                 | Ok _ -> false
               in
-              R.shutdown registry;
+              let borrowed, signal_borrowed = Eio.Promise.create () in
+              let never, _ = Eio.Promise.create () in
+              let foreign_borrow =
+                Eio.Fiber.fork_promise ~sw (fun () ->
+                  try
+                    Agent_server.Runtime_owner.with_resource_lifetime
+                      foreign.runtime
+                      (fun () ->
+                         Eio.Promise.resolve signal_borrowed ();
+                         Exn.protect
+                           ~f:(fun () ->
+                             Eio.Promise.await never;
+                             Ok ())
+                           ~finally:(fun () ->
+                             (* Actual Owner close cancels this genuine resource
+                               borrow. Its resource cleanup must join before ANY
+                               failed Entry resource-close callback is retried. *)
+                             Eio.Cancel.protect (fun () ->
+                               Eio.Promise.resolve signal_cleanup_started ();
+                               Eio.Promise.await cleanup_released;
+                               Eio.Promise.resolve signal_cleanup_finished ())))
+                    |> protocol_ok;
+                    failwith "foreign resource borrow ended without Owner cancellation"
+                  with
+                  | Eio.Cancel.Cancelled _ -> ())
+              in
+              let closing =
+                Exn.protect
+                  ~finally:(fun () ->
+                    if Option.is_none (Eio.Promise.peek cleanup_released)
+                    then Eio.Promise.resolve signal_cleanup_released ())
+                  ~f:(fun () ->
+                    Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
+                      Eio.Fiber.first
+                        (fun () -> Eio.Promise.await borrowed)
+                        (fun () ->
+                           Eio.Promise.await_exn foreign_borrow;
+                           failwith "foreign resource borrow ended before shutdown"));
+                    let closing =
+                      Eio.Fiber.fork_promise ~sw (fun () -> R.shutdown registry)
+                    in
+                    Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
+                      Eio.Promise.await cleanup_started);
+                    assert (R.is_closing registry);
+                    assert (Option.is_none (Eio.Promise.peek closing));
+                    (* The failed Entry's runtime is already joined. Only the
+                     graph-wide barrier prevents its second close callback from
+                     running while this OTHER actual Owner is still cleaning up.
+                     Observe callback entry, not a checkpoint blocked behind IO. *)
+                    [%test_eq: int] 1 !attempts;
+                    assert (not !close_before_graph_join);
+                    R.check_retained_factual_owner registry retained |> protocol_ok;
+                    Agent_store.Session_store.Handle.metadata_checked handle
+                    |> store_ok
+                    |> ignore;
+                    closing)
+              in
+              Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
+                Eio.Promise.await_exn closing;
+                Eio.Promise.await_exn foreign_borrow);
+              assert (Option.is_some (Eio.Promise.peek cleanup_finished));
+              assert (not !close_before_graph_join);
+              assert !factual_during_shutdown;
               let owner_released = not (R.retains_cleanup_handle registry handle) in
               print_s
                 [%sexp
@@ -1773,7 +1957,7 @@ let%expect_test
               let registry = Agent_server.Daemon.registry daemon in
               let original = R.remove registry session.id |> Option.value_exn in
               Agent_server.Runtime_owner.close_and_wait original.runtime;
-              original.close ();
+              Agent_server.Session_registry.close_entry original;
               let store = Agent_server.Daemon.store daemon in
               let indexed =
                 Agent_store.Session_index.find_checked (S.session_index store) session.id
@@ -1796,7 +1980,7 @@ let%expect_test
                           (Inference_runtime.Preparation_error.sexp_of_t
                              Target_unavailable))
                 | Ok unexpected ->
-                  unexpected.close ();
+                  Agent_server.Session_registry.close_entry unexpected;
                   false
               in
               let actor_was_owned = Option.is_some !failed_actor in
@@ -2110,14 +2294,14 @@ let%expect_test
               ~persistence:
                 { persistence with
                   commit =
-                    (fun ~command_audit ~previous next ->
+                    (fun ?observation ~command_audit ~previous next ->
                       if !blocked
                       then (
                         blocked := false;
                         next_state := next.Agent_session.Session_transition.state;
                         Eio.Promise.resolve enter ();
                         Eio.Promise.await release);
-                      persistence.commit ~command_audit ~previous next)
+                      persistence.commit ?observation ~command_audit ~previous next)
                 }
               ~services:
                 { now = P.Timestamp.now
@@ -2127,6 +2311,7 @@ let%expect_test
                 ; create_reclaim_token = (fun () -> "maintenance-test")
                 ; state_committed = (fun _ _ -> ())
                 ; job_results = None
+                ; goal_descendant_profile
                 ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
                 ; schedule_limits = Agent_session.Staged_schedules.default_limits
                 ; notification_limits = Agent_session.Staged_notifications.default_limits
@@ -2154,7 +2339,7 @@ let%expect_test
             ; expire_permissions = (fun ~now:_ -> ())
             ; collect_results = (fun () -> Ok None)
             ; close =
-                (fun () ->
+                Agent_server.Session_registry.Entry_close.legacy (fun () ->
                   Int.incr closes;
                   A.shutdown actor)
             }

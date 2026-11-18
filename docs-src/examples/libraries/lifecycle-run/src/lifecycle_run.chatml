@@ -1,0 +1,114 @@
+type compose_error = [ `Composition(Lifecycle.error) | `Wake_limit_exceeded ]
+type 'a composed = [ `Ok('a) | `Error(compose_error) ]
+type budget = {nodes:int; bytes:int}
+type measured = [ `Within(budget) | `Over_limit ]
+
+let charge_text : fun(string, budget) -> measured = fun text budget ->
+  let bytes = String.length(text) in
+  if bytes > budget.bytes then `Over_limit
+  else `Within({nodes = budget.nodes; bytes = budget.bytes - bytes})
+
+(* Every recursive edge consumes depth and every value consumes one node.
+   Subtract remaining allowances; never add untrusted sizes or retain a walk. *)
+let rec measure : fun(json, int, budget) -> measured = fun value depth budget ->
+  if depth > 32 then `Over_limit
+  else if budget.nodes == 0 then `Over_limit
+  else
+    let budget = {nodes = budget.nodes - 1; bytes = budget.bytes} in
+    match value with
+    | `Null -> `Within(budget)
+    | `Bool(value) -> `Within(budget)
+    | `Number(value) -> `Within(budget)
+    | `String(text) -> charge_text(text, budget)
+    | `Array(values) ->
+        let count = Array.length(values) in
+        if count > budget.nodes then `Over_limit
+        else
+          let rec visit index remaining =
+            if index == count then `Within(remaining)
+            else match measure(values[index], depth + 1, remaining) with
+              | `Over_limit -> `Over_limit
+              | `Within(next) -> visit(index + 1, next)
+          in visit(0, budget)
+    | `Object(fields) ->
+        let count = Array.length(fields) in
+        if count > budget.nodes then `Over_limit
+        else
+          let rec visit index remaining =
+            if index == count then `Within(remaining)
+            else match charge_text(fields[index].key, remaining) with
+              | `Over_limit -> `Over_limit
+              | `Within(charged) ->
+                  match measure(fields[index].value, depth + 1, charged) with
+                  | `Over_limit -> `Over_limit
+                  | `Within(next) -> visit(index + 1, next)
+          in visit(0, budget)
+
+(* Private and called only after the complete finite preflight. A cyclic wake
+   cannot reach this traversal. No caller comparison function is invoked here. *)
+let rec equal_json : fun(json, json) -> bool = fun left right ->
+  match left with
+  | `Null -> String.equal(Json.tag(right), "Null")
+  | `Bool(a) -> (match Json.as_bool(right) with
+      | `None -> false
+      | `Some(b) -> a == b)
+  | `Number(a) -> (match Json.as_number(right) with
+      | `None -> false
+      | `Some(b) -> a == b)
+  | `String(a) -> (match Json.as_string(right) with
+      | `None -> false
+      | `Some(b) -> String.equal(a, b))
+  | `Array(a) -> (match Json.as_array(right) with
+      | `None -> false
+      | `Some(b) ->
+          let count = Array.length(a) in
+          if count != Array.length(b) then false
+          else
+            let rec visit index =
+              if index == count then true
+              else if equal_json(a[index], b[index]) then visit(index + 1)
+              else false
+            in visit(0))
+  | `Object(a) -> (match Json.as_object(right) with
+      | `None -> false
+      | `Some(b) ->
+          let count = Array.length(a) in
+          if count != Array.length(b) then false
+          else
+            let rec visit index =
+              if index == count then true
+              else if String.equal(a[index].key, b[index].key) == false then false
+              else if equal_json(a[index].value, b[index].value) then visit(index + 1)
+              else false
+            in visit(0))
+
+let compose : fun((json Lifecycle.component) array) -> (json Lifecycle.plan) composed =
+  fun components ->
+    let count = Array.length(components) in
+    if count > 64 then `Error(`Composition(`Too_many_components))
+    else
+      let rec preflight index budget =
+        if index == count then
+          match Lifecycle.compose(components, equal_json) with
+          | `Ok(plan) -> `Ok(plan)
+          | `Error(error) -> `Error(`Composition(error))
+        else match components[index].action with
+          | `No_action -> preflight(index + 1, budget)
+          | `Continue -> preflight(index + 1, budget)
+          | `Wait(wake) ->
+              match measure(wake, 0, budget) with
+              | `Over_limit -> `Error(`Wake_limit_exceeded)
+              | `Within(next) -> preflight(index + 1, next)
+      in preflight(0, {nodes = 4096; bytes = 65536})
+
+let stage : fun(json Lifecycle.action) -> unit task = fun action ->
+  match action with
+  | `No_action -> Task.pure(())
+  | `Continue -> Run.continue()
+  | `Wait(wake) -> Run.wait(wake)
+
+let finish : fun(json Lifecycle.plan, json) -> (unit Lifecycle.checked) task =
+  fun plan decision ->
+    match Lifecycle.root_finish(plan, decision) with
+    | `Error(error) -> Task.pure(`Error(error))
+    | `Ok(admitted) -> Task.map(Run.finish(admitted), fun ignored -> `Ok(()))

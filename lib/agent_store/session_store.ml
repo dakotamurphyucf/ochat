@@ -107,6 +107,8 @@ module Handle = struct
     ; mutable canonical_projection : Session_projection_update.Pending.t option
     ; mutable lifecycle_unavailable : Store_error.t option
     ; mutable lifecycle_epoch : unit ref
+    ; mutable retained_lifecycle_epoch : unit ref
+    ; projection_updates : Session_projection_update.t
     ; mutable closed : bool
     ; owner_available : unit -> bool
     ; daemon_lock_live : unit -> bool
@@ -137,6 +139,16 @@ module Handle = struct
       match t.metadata_unavailable, t.lifecycle_unavailable with
       | None, None -> Ok t.metadata
       | Some error, _ | _, Some error -> Error error)
+  ;;
+
+  let retained_available t =
+    (not t.closed)
+    && t.owner_available ()
+    && t.daemon_lock_live ()
+    && Lock.is_live t.actor_lock
+    && Option.is_none t.lifecycle_unavailable
+    && Option.is_none t.metadata_unavailable
+    && Session_projection_update.is_available t.projection_updates
   ;;
 
   let session_id t = t.metadata.session.id
@@ -200,6 +212,11 @@ module Handle = struct
   let idempotency_directory t = t.idempotency_directory
 end
 
+let invalidate_lifecycle_authority (handle : Handle.t) =
+  handle.lifecycle_epoch <- ref ();
+  handle.retained_lifecycle_epoch <- ref ()
+;;
+
 module Lifecycle = struct
   module R = Session_archive_record
 
@@ -240,6 +257,19 @@ module Lifecycle = struct
       && handle.owner_available ()
       && Option.is_none handle.lifecycle_unavailable
       && Option.is_none handle.metadata_unavailable
+    ;;
+  end
+
+  module Retained_owner = struct
+    type t =
+      { owner : Handle.t
+      ; epoch : unit ref
+      }
+
+    let is_current t handle =
+      phys_equal t.owner handle
+      && phys_equal t.epoch handle.Handle.retained_lifecycle_epoch
+      && Handle.retained_available handle
     ;;
   end
 
@@ -296,12 +326,71 @@ type t =
   ; mutable closed : bool
   }
 
+module Command_receipts = struct
+  type store = t
+
+  type t =
+    { owner : store
+    ; cache : Idempotency_store.t
+    }
+
+  let open_or_create owner =
+    let open Result.Let_syntax in
+    if owner.closed
+    then Error (Store_error.Corrupt "command receipt Store owner is closed")
+    else (
+      let%map cache =
+        Idempotency_store.open_or_create
+          ~env:owner.env
+          ~path:(Filename.concat (Data_root.indexes_path owner.root) "idempotency.sexp")
+      in
+      { owner; cache })
+  ;;
+
+  let cache t = t.cache
+
+  module Removal = struct
+    type t =
+      { owner : store
+      ; fact : Idempotency_store.Removal.t
+      }
+
+    let fact t = t.fact
+    let belongs_to t owner = phys_equal t.owner owner && not owner.closed
+  end
+
+  let removal t ~session_id =
+    if t.owner.closed
+    then None
+    else
+      Option.map (Idempotency_store.removal t.cache ~session_id) ~f:(fun fact ->
+        { Removal.owner = t.owner; fact })
+  ;;
+end
+
 let owns_handle t handle = phys_equal t.owner_token handle.Handle.store_owner
 
 let check_handle t handle =
   if (not (owns_handle t handle)) || t.closed
   then Error (Store_error.Corrupt "session handle belongs to a different or closed store")
   else Handle.metadata_checked handle |> Result.map ~f:(fun _ -> ())
+;;
+
+let retained_lifecycle_available t handle =
+  owns_handle t handle && (not t.closed) && Handle.retained_available handle
+;;
+
+let retain_lifecycle_owner t handle current =
+  if retained_lifecycle_available t handle && Lifecycle.Current.is_current current handle
+  then
+    Ok
+      { Lifecycle.Retained_owner.owner = handle
+      ; epoch = handle.Handle.retained_lifecycle_epoch
+      }
+  else
+    Error
+      (Store_error.Corrupt
+         "retained lifecycle requires the actual current Store/Handle owner")
 ;;
 
 let current_schema_version = 2
@@ -561,15 +650,20 @@ let require_kind ~env path expected =
   let actual = Eio.Path.kind ~follow:false Eio.Path.(Eio.Stdenv.fs env / path) in
   match actual, expected with
   | `Directory, `Directory | `Regular_file, `Regular_file -> Ok ()
+  | (`Directory | `Not_found), `Optional_directory -> Ok ()
   | _ -> Error (Store_error.Corrupt ("invalid session layout path: " ^ path))
 ;;
 
-let validate_layout ~env directory =
+let validate_layout ?(workspace_kind = `Directory) ~env directory =
   let open Result.Let_syntax in
+  let workspace = Filename.concat directory "workspace" in
   let%bind () =
     Result.all_unit
       (List.map (directory :: session_directories directory) ~f:(fun path ->
-         require_kind ~env path `Directory))
+         let expected =
+           if String.equal path workspace then workspace_kind else `Directory
+         in
+         require_kind ~env path expected))
   in
   require_kind ~env (metadata_path directory) `Regular_file
 ;;
@@ -680,13 +774,24 @@ let project_lifecycle entry document =
     Session_index.Entry.with_lifecycle entry lifecycle |> Result.map ~f:Option.some
 ;;
 
+let is_terminal_removal document =
+  let module R = Session_archive_record in
+  R.Status.equal (R.status (Session_archive_document.value document)) Removed
+;;
+
 let recover_index_entry ~env sessions_directory name =
   let open Result.Let_syntax in
   let directory = Filename.concat sessions_directory name in
-  let%bind () = validate_layout ~env directory in
+  let%bind () = require_kind ~env directory `Directory in
   let%bind metadata = load_metadata_at ~env (metadata_path directory) in
   let%bind () = validate_metadata ~require_durable:true name metadata in
   let%bind document = archive_carrier ~env directory metadata.session.id in
+  let workspace_kind =
+    if Option.exists document ~f:is_terminal_removal
+    then `Optional_directory
+    else `Directory
+  in
+  let%bind () = validate_layout ~workspace_kind ~env directory in
   match document with
   | None -> Ok (Some (index_entry metadata))
   | Some document -> project_lifecycle (index_entry metadata) document
@@ -909,6 +1014,7 @@ let make_handle
       ~metadata:session_metadata
       ~actor_lock
       ~owner_available
+      ~projection_updates
       ~daemon_lock_live
       ~developer_root_state
       ~store_owner
@@ -922,6 +1028,8 @@ let make_handle
   ; canonical_projection = None
   ; lifecycle_unavailable = None
   ; lifecycle_epoch = ref ()
+  ; retained_lifecycle_epoch = ref ()
+  ; projection_updates
   ; closed = false
   ; owner_available
   ; daemon_lock_live
@@ -965,6 +1073,7 @@ let acquire_handle t ~sw ~directory ~actor_lock_nonce _metadata =
       ~metadata
       ~actor_lock
       ~owner_available:(fun () -> not t.closed)
+      ~projection_updates:t.projection_updates
       ~daemon_lock_live:(fun () -> Lock.is_live t.daemon_lock)
       ~developer_root_state:t.developer_root_state
       ~store_owner:t.owner_token
@@ -973,12 +1082,19 @@ let acquire_handle t ~sw ~directory ~actor_lock_nonce _metadata =
   in
   Eio.Switch.on_release sw (fun () ->
     handle.Handle.closed <- true;
-    handle.lifecycle_epoch <- ref ());
+    invalidate_lifecycle_authority handle);
   handle.Handle.metadata_carrier <- metadata_carrier;
   handle
 ;;
 
-let create_session_initialized t ~sw ~transaction_id ~actor_lock_nonce ~initialize =
+let create_session_initialized
+      ?(before_publish = fun () -> ())
+      t
+      ~sw
+      ~transaction_id
+      ~actor_lock_nonce
+      ~initialize
+  =
   let open Result.Let_syntax in
   let temporary_directory =
     Filename.concat
@@ -1024,22 +1140,28 @@ let create_session_initialized t ~sw ~transaction_id ~actor_lock_nonce ~initiali
     Session_projection_update.publish t.projection_updates ~f:(fun ~require_intent ->
       Session_index.with_prepared_upsert t.index entry ~publish_authority:(fun () ->
         let%bind () = require_intent () in
+        Eio.Fiber.check ();
         let%bind () =
-          try
-            (* Final evidence survives every later failure. Protect only transfer
-               of the staging ownership, not directory sync or handle acquisition. *)
-            Eio.Cancel.protect (fun () ->
+          (* Final evidence survives every later failure. Protect only transfer
+             of the staging ownership, not directory sync or handle acquisition. *)
+          Eio.Cancel.protect (fun () ->
+            (* A caller's synchronous exception is not a filesystem failure. *)
+            before_publish ();
+            try
               Eio.Path.rename temporary destination;
               owns_staging := false;
-              Initial_projection.publish initial);
-            Durable_file.sync_directory ~env:t.env ~path:(Data_root.sessions_path t.root)
-          with
-          | (Eio.Io _ | Core_unix.Unix_error _) as exn ->
-            Error
-              (Store_error.of_exn
-                 ~operation:"install session layout"
-                 ~path:final_directory
-                 exn)
+              Initial_projection.publish initial;
+              Ok ()
+            with
+            | (Eio.Io _ | Core_unix.Unix_error _) as exn ->
+              Error
+                (Store_error.of_exn
+                   ~operation:"install session layout"
+                   ~path:final_directory
+                   exn))
+        in
+        let%bind () =
+          Durable_file.sync_directory ~env:t.env ~path:(Data_root.sessions_path t.root)
         in
         acquire_handle t ~sw ~directory:final_directory ~actor_lock_nonce metadata)))
 ;;
@@ -1078,13 +1200,13 @@ let open_session t ~sw ~actor_lock_nonce session_id =
              (Session_archive_record.status (Session_archive_document.value document))
              Removed ->
       handle.Handle.closed <- true;
-      handle.lifecycle_epoch <- ref ();
+      invalidate_lifecycle_authority handle;
       let%bind () = Lock.release ~env:t.env handle.actor_lock in
       Error (Store_error.Missing directory)
     | Ok None | Ok (Some _) -> Ok handle
     | Error error ->
       handle.Handle.closed <- true;
-      handle.lifecycle_epoch <- ref ();
+      invalidate_lifecycle_authority handle;
       Eio.Cancel.protect (fun () ->
         try
           ignore
@@ -1095,7 +1217,7 @@ let open_session t ~sw ~actor_lock_nonce session_id =
     | exception exn ->
       let backtrace = Stdlib.Printexc.get_raw_backtrace () in
       handle.Handle.closed <- true;
-      handle.lifecycle_epoch <- ref ();
+      invalidate_lifecycle_authority handle;
       Eio.Cancel.protect (fun () ->
         try
           ignore
@@ -1263,7 +1385,7 @@ let close_session t handle =
   then Error (Store_error.Corrupt "session handle belongs to a different store")
   else (
     handle.closed <- true;
-    handle.lifecycle_epoch <- ref ();
+    invalidate_lifecycle_authority handle;
     Lock.release ~env:t.env handle.actor_lock)
 ;;
 
@@ -1521,7 +1643,7 @@ let publish_prepared_lifecycle t handle prepared =
       in
       publish_projection ~publish_authority:(fun () ->
         let%bind () = require_intent () in
-        handle.lifecycle_epoch <- ref ();
+        invalidate_lifecycle_authority handle;
         handle.lifecycle_unavailable
         <- Some (Store_error.Corrupt "lifecycle publication is in progress");
         match
@@ -1624,7 +1746,7 @@ let complete_lifecycle_outcome t handle ~key ~request_digest ~complete =
       Session_projection_update.publish t.projection_updates ~f:(fun ~require_intent ->
         let%bind () = check_lifecycle_observation t handle observation in
         let%bind () = require_intent () in
-        handle.Handle.lifecycle_epoch <- ref ();
+        invalidate_lifecycle_authority handle;
         handle.lifecycle_unavailable
         <- Some (Store_error.Corrupt "lifecycle acknowledgement is in progress");
         match
@@ -1705,7 +1827,7 @@ let finish_removal t removal ~complete ~retire =
       let%bind directory =
         Session_removal_directory.create ~env:t.env ~data_root:t.root removal.session_id
       in
-      handle.lifecycle_epoch <- ref ();
+      invalidate_lifecycle_authority handle;
       let%bind () =
         match
           Session_removal_directory.complete_receipts directory ~complete:complete_owned
@@ -1813,7 +1935,16 @@ let open_removal t ~sw ~actor_lock_nonce session_id =
         }
     | None ->
       let directory = Data_root.session_path t.root session_id in
-      let%bind () = validate_layout ~env:t.env directory in
+      let%bind () = require_kind ~env:t.env directory `Directory in
+      let%bind document = archive_carrier ~env:t.env directory session_id in
+      let%bind () =
+        if Option.exists document ~f:is_terminal_removal
+        then Ok ()
+        else Error (Store_error.Corrupt "removal namespace lacks terminal authority")
+      in
+      let%bind () =
+        validate_layout ~workspace_kind:`Optional_directory ~env:t.env directory
+      in
       let%bind metadata = load_metadata_at ~env:t.env (metadata_path directory) in
       let%bind () =
         validate_metadata (Agent_protocol.Id.Session.to_string session_id) metadata

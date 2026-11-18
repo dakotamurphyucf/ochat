@@ -106,5 +106,11 @@
     "outcome": "Start the real documentation checker, inspect or cancel its job, and deliver terminal evidence as a separate notification.",
     "requires": "Stateful moderator tools, shell guardrails, the complete Lantern bundle and explicit shell-manifest authorization.",
     "nextBenefit": "Combine checks with continuing specialists and a durable host."
+  },
+  {
+    "page": "tutorials/goal-recurrence",
+    "outcome": "Review two captured workers\u2019 outcomes and complete a Goal with retained evidence.",
+    "requires": "The extracted source tree, daemon planning and captured-child execution, and a configured model.",
+    "nextBenefit": "Use authorized Goal and recurrence reads to examine the retained outcome after reconnecting."
   }
 ]

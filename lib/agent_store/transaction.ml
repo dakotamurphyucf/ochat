@@ -85,7 +85,11 @@ module Stored = struct
     let%bind () = validate_event_range metadata in
     let%bind delta = F.required payload "delta" (F.document ~limits) in
     let%bind () =
-      F.expect_versions delta ~kind:"session.delta" ~versions:[ 1; 2; 3; 4; 5; 6 ]
+      F.expect_versions
+        ~supported_semantics:Agent_protocol.Session_storage_semantics.supported_children
+        delta
+        ~kind:"session.delta"
+        ~versions:[ 1; 2; 3; 4; 5; 6; 7; 8; 9; 10 ]
     in
     let%bind audit = F.optional payload "command_audit" (F.document ~limits) in
     let%bind () =
@@ -279,6 +283,32 @@ let codec ~limits =
     ~decode:(decode_value ~limits)
     ~encode:encode_value
 ;;
+
+module Capacity = struct
+  let document ~limits ~session_id ~generation ~delta ~durable_events =
+    let count = List.length durable_events in
+    let value =
+      Value.
+        { schema_version = current_schema_version
+        ; session_id
+        ; generation
+        ; transaction_sequence = Int64.max_value
+        ; previous_transaction_hash = Some (String.make 64 'f')
+        ; session_revision = Int64.max_value
+        ; first_event_sequence =
+            (if count = 0 then None else Some Int64.(max_value - of_int count + 1L))
+        ; last_event_sequence = (if count = 0 then None else Some Int64.max_value)
+        ; accepted_at_ns = Int64.max_value
+        ; command_audit = None
+        ; delta
+        ; durable_events
+        }
+    in
+    let open Result.Let_syntax in
+    let%bind payload = encode_value value in
+    D.Document.create ~limits ~kind ~version:current_schema_version ~payload
+  ;;
+end
 
 let restore stored ~limits =
   let open Result.Let_syntax in

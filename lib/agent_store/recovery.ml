@@ -1,5 +1,6 @@
 open! Core
 module F = Document_fields
+module Restoration_cache = Recovery_restoration_cache
 
 type 'state t =
   { state : 'state
@@ -258,12 +259,18 @@ type 'state replay_proof =
   ; snapshots : 'state proven_snapshot list
   }
 
+type 'state successful_check =
+  { proof : 'state replay_proof
+  ; restorations : 'state Restoration_cache.t
+  }
+
 type 'state replay_mode =
   | Sequential
   | Shared of ('state -> 'state -> (bool, Store_error.t) Result.t)
   | Certified of
       { equivalent : 'state -> 'state -> (bool, Store_error.t) Result.t
-      ; previous : 'state replay_proof option
+      ; previous : 'state successful_check option
+      ; restoration_budget : Restoration_cache.Budget.t
       }
 
 let same_original_record left right =
@@ -369,16 +376,36 @@ let prepare
     validate_stored_retained ~session_id ~snapshots ~transactions:stored_transactions
   in
   let%bind snapshot_limits = F.limits ~max_bytes:max_snapshot_payload_length |> F.store in
-  (* All original-byte anchors are checked before any current-domain constructor. *)
+  (* Fresh original-byte and anchor validation precedes any restoration reuse.
+     The cache belongs to this fixed retention owner, not to a replay route. *)
+  let restorations =
+    match replay_mode with
+    | Certified { previous = Some previous; _ } -> Some previous.restorations
+    | Sequential | Shared _ | Certified { previous = None; _ } -> None
+  in
   let%bind restored_snapshots =
     Result.all
       (List.map snapshots ~f:(fun installed ->
-         let%bind snapshot =
-           Snapshot.restore installed.Snapshot.stored ~limits:snapshot_limits
+         let cached =
+           Option.bind restorations ~f:(fun cache ->
+             Restoration_cache.find_snapshot
+               cache
+               ~filename:installed.Snapshot.filename
+               ~covered:(Snapshot.Stored.metadata installed.stored).transaction_sequence
+               ~original:(Snapshot.Stored.record installed.stored))
          in
-         let%bind state = restore_snapshot snapshot in
+         let%bind restored, state =
+           match cached with
+           | Some restored -> Ok restored
+           | None ->
+             let%bind snapshot =
+               Snapshot.restore installed.stored ~limits:snapshot_limits
+             in
+             let%map state = restore_snapshot snapshot in
+             { Snapshot.filename = installed.filename; snapshot }, state
+         in
          let%map () = validate state in
-         installed.filename, { Snapshot.filename = installed.filename; snapshot }, state))
+         installed.filename, restored, state))
   in
   let%bind snapshot, state =
     match selected with
@@ -394,7 +421,16 @@ let prepare
   let%bind transactions =
     Result.all
       (List.map stored_transactions ~f:(fun stored ->
-         let%bind transaction = Transaction.restore stored ~limits:transaction_limits in
+         let%bind transaction =
+           match
+             Option.bind restorations ~f:(fun cache ->
+               Restoration_cache.find_transaction
+                 cache
+                 ~original:(Transaction.Stored.record stored))
+           with
+           | Some transaction -> Ok transaction
+           | None -> Transaction.restore stored ~limits:transaction_limits
+         in
          let%map () = validate_transaction_domain transaction in
          transaction))
   in
@@ -419,17 +455,19 @@ let prepare
              replay ~covered:installed.Snapshot.snapshot.transaction_sequence state
            in
            filename, state))
-    | Shared equivalent | Certified { equivalent; previous = None } ->
+    | Shared equivalent | Certified { equivalent; previous = None; _ } ->
       let routes =
         List.map restored_snapshots ~f:(fun (filename, installed, state) ->
           filename, installed.Snapshot.snapshot.transaction_sequence, state)
       in
       replay_shared ~equivalent ~transactions ~apply ~validate routes
-    | Certified { equivalent; previous = Some proof } ->
-      (* Fresh framing, stored metadata, every anchor, current-domain restoration
-         and transaction validation above are prerequisites for consulting a
-         prior proof. A matching head record plus the freshly verified original
-         hash chain binds every byte of the already replayed prefix. *)
+    | Certified { equivalent; previous = Some previous; _ } ->
+      let proof = previous.proof in
+      (* Fresh framing, stored metadata, every anchor and current-domain
+         transaction validation above precede consulting the separate replay
+         proof. Immutable conversion reuse alone supplies no replay permission.
+         A matching head record plus the freshly verified original hash chain
+         binds every byte of the already replayed prefix. *)
       let reachable = proof_head_reachable proof stored_transactions in
       let routes =
         List.map restored_snapshots ~f:(fun (filename, installed, state) ->
@@ -462,7 +500,7 @@ let prepare
   let%bind proof =
     match replay_mode with
     | Sequential | Shared _ -> Ok None
-    | Certified _ ->
+    | Certified { restoration_budget; _ } ->
       let%bind head_record =
         if Int64.equal counters.transaction_sequence 0L
         then Ok None
@@ -493,7 +531,16 @@ let prepare
           })
         |> Result.all
       in
-      Some { head = counters; head_record; snapshots }
+      let proof = { head = counters; head_record; snapshots } in
+      let previous =
+        Option.value
+          restorations
+          ~default:(Restoration_cache.empty ~budget:restoration_budget)
+      in
+      let restorations =
+        Restoration_cache.replace previous ~snapshots:restored_snapshots ~transactions
+      in
+      Some { proof; restorations }
   in
   Ok
     ( ( { state
@@ -565,6 +612,8 @@ let preflight_shared
 ;;
 
 module Retention_preflight = struct
+  module Budget = Restoration_cache.Budget
+
   type 'state owner =
     { env : Eio_unix.Stdenv.base
     ; journal : Journal.t
@@ -577,13 +626,15 @@ module Retention_preflight = struct
     ; equivalent : 'state -> 'state -> (bool, Store_error.t) Result.t
     ; validate_transaction : Transaction.t -> (unit, Store_error.t) Result.t
     ; validate : 'state -> (unit, Store_error.t) Result.t
+    ; restoration_budget : Budget.t
     ; mutex : Eio.Mutex.t
-    ; mutable proof : 'state replay_proof option
+    ; mutable successful_check : 'state successful_check option
     }
 
   type t = Owner : 'state owner -> t
 
   let create
+        ~restoration_budget
         ~env
         ~journal
         ~snapshot_directory
@@ -608,30 +659,49 @@ module Retention_preflight = struct
       ; equivalent
       ; validate_transaction
       ; validate
+      ; restoration_budget
       ; mutex = Eio.Mutex.create ()
-      ; proof = None
+      ; successful_check = None
       }
   ;;
 
   let check (Owner owner) =
-    Eio.Mutex.use_rw ~protect:false owner.mutex (fun () ->
-      let open Result.Let_syntax in
-      let%map _, proof =
-        prepare
-          ~env:owner.env
-          ~journal:owner.journal
-          ~snapshot_directory:owner.snapshot_directory
-          ~max_snapshot_payload_length:owner.max_snapshot_payload_length
-          ~session_id:owner.session_id
-          ~initial:owner.initial
-          ~restore_snapshot:owner.restore_snapshot
-          ~apply:owner.apply
-          ~validate_transaction:owner.validate_transaction
-          ~validate:owner.validate
-          ~replay_mode:
-            (Certified { equivalent = owner.equivalent; previous = owner.proof })
-      in
-      owner.proof <- proof)
+    (* The owner changes only by publishing one complete immutable record. Even
+       when a callback raises, the previous record remains valid; release the
+       mutex without poisoning it before propagating the original exception. *)
+    let outcome =
+      Eio.Mutex.use_rw ~protect:false owner.mutex (fun () ->
+        match
+          Eio.Fiber.check ();
+          let open Result.Let_syntax in
+          let%map _, successful_check =
+            prepare
+              ~env:owner.env
+              ~journal:owner.journal
+              ~snapshot_directory:owner.snapshot_directory
+              ~max_snapshot_payload_length:owner.max_snapshot_payload_length
+              ~session_id:owner.session_id
+              ~initial:owner.initial
+              ~restore_snapshot:owner.restore_snapshot
+              ~apply:owner.apply
+              ~validate_transaction:owner.validate_transaction
+              ~validate:owner.validate
+              ~replay_mode:
+                (Certified
+                   { equivalent = owner.equivalent
+                   ; previous = owner.successful_check
+                   ; restoration_budget = owner.restoration_budget
+                   })
+          in
+          Eio.Fiber.check ();
+          owner.successful_check <- successful_check
+        with
+        | result -> `Returned result
+        | exception exn -> `Raised (exn, Stdlib.Printexc.get_raw_backtrace ()))
+    in
+    match outcome with
+    | `Returned result -> result
+    | `Raised (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
   ;;
 end
 

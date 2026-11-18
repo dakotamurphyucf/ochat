@@ -4,49 +4,35 @@ module E = P.Moderator_execution
 module S = Session.Moderator_state.Identity_snapshot
 
 let conflict message = Error (P.Error.create Conflict ~message ~retryable:false ())
-
-let checkpoint snapshot =
-  S.to_jsonaf snapshot
-  |> Jsonaf.to_string
-  |> Digestif.SHA256.digest_string
-  |> Digestif.SHA256.to_hex
-;;
+let checkpoint = Moderator_checkpoint.digest
 
 let same_value a b =
   Sexp.equal (Session.Snapshot.sexp_of_t a) (Session.Snapshot.sexp_of_t b)
 ;;
 
 let installed ~state ~(snapshot : S.t) =
-  match state.Session_state.moderator with
-  | Some saved
-    when Document_schema.Json.equal
-           saved
-           (Runtime_builder.encode_moderator_snapshot snapshot) -> Ok ()
+  let open Result.Let_syntax in
+  let%bind saved = Moderator_checkpoint.decode state.Session_state.moderator in
+  let%bind metadata = Moderator_checkpoint.queue state.moderator in
+  let%bind () =
+    match metadata with
+    | None -> Ok ()
+    | Some metadata ->
+      Moderator_queue.validate_queue metadata snapshot.queued_internal_events
+  in
+  match saved with
+  | Some saved when Sexp.equal (S.sexp_of_t saved) (S.sexp_of_t snapshot) -> Ok ()
   | _ -> conflict "queued event requires the exact installed moderator checkpoint"
 ;;
 
-let encoded_event event = `Object [ "snapshot", Session.Snapshot.to_jsonaf event ]
+let encoded_event = Queue_payload.encoded_event
 
 let captured_timer event =
   Result.bind (Session.Snapshot.to_value event) ~f:Chat_response.Schedule_delivery.decode
   |> Result.map_error ~f:P.Error.invalid_request
 ;;
 
-let receipt_snapshot (receipt : E.t) =
-  let open Result.Let_syntax in
-  match receipt.context.phase, receipt.context.event with
-  | Internal_event, `Object fields ->
-    (match List.Assoc.find fields ~equal:String.equal "snapshot" with
-     | Some json ->
-       let%bind event =
-         Session.Snapshot.of_jsonaf json
-         |> Result.map_error ~f:(fun error ->
-           P.Error.invalid_request ("invalid captured queued event snapshot: " ^ error))
-       in
-       Ok (Some event)
-     | _ -> Ok None)
-  | _ -> Ok None
-;;
+let receipt_snapshot = Queue_payload.receipt_snapshot
 
 let receipt_timer receipt =
   let open Result.Let_syntax in
@@ -346,7 +332,15 @@ let has_unsettled_claim ~state ~(observer : P.Invocation.observer) =
     | Completed _ -> false)
 ;;
 
-let claim_in_context ~operation_id ~state ~id ~(snapshot : S.t) ~now =
+let claim_in_context
+      ~queue_occurrence
+      ~check_event
+      ~operation_id
+      ~state
+      ~id
+      ~(snapshot : S.t)
+      ~now
+  =
   let open Result.Let_syntax in
   let%bind () = installed ~state ~snapshot in
   let%bind event =
@@ -354,19 +348,7 @@ let claim_in_context ~operation_id ~state ~id ~(snapshot : S.t) ~now =
     | false, event :: _ -> Ok event
     | _ -> conflict "moderator has no runnable queued event"
   in
-  let%bind () =
-    let checked =
-      let%bind value = Session.Snapshot.to_value event in
-      let%bind value = Chat_response.Schedule_delivery.script_event value in
-      let%bind value = Chat_response.Ingress_delivery.script_event value in
-      let%bind value = Chat_response.Background_delivery.script_event value in
-      match value with
-      | Chatml.Chatml_lang.VVariant ("Internal_event", [ payload ]) ->
-        Chat_response.Moderator_invocation.internal_event payload |> Result.map ~f:ignore
-      | _ -> Error "queued event requires an extensibility-v1 Internal_event envelope"
-    in
-    Result.map_error checked ~f:P.Error.invalid_request
-  in
+  let%bind () = check_event event in
   let checkpoint_sha256 = checkpoint snapshot in
   let%bind () =
     match
@@ -380,7 +362,9 @@ let claim_in_context ~operation_id ~state ~id ~(snapshot : S.t) ~now =
         "moderator has an unsettled queued event claim; automatic replay is forbidden"
     | false -> Ok ()
   in
-  E.create
+  (match queue_occurrence with
+   | None -> E.create
+   | Some occurrence -> E.create_queued ~queue_occurrence:occurrence)
     { id
     ; session_id = state.identity.session_id
     ; generation = state.identity.generation
@@ -396,8 +380,93 @@ let claim_in_context ~operation_id ~state ~id ~(snapshot : S.t) ~now =
   |> Result.map ~f:(fun receipt -> receipt, event)
 ;;
 
-let claim = claim_in_context ~operation_id:None
-let claim_foreground ~operation_id = claim_in_context ~operation_id:(Some operation_id)
+let check_versioned_event event =
+  let open Result.Let_syntax in
+  let checked =
+    let%bind value = Session.Snapshot.to_value event in
+    let%bind value = Chat_response.Schedule_delivery.script_event value in
+    let%bind value = Chat_response.Ingress_delivery.script_event value in
+    let%bind value = Chat_response.Background_delivery.script_event value in
+    match value with
+    | Chatml.Chatml_lang.VVariant ("Internal_event", [ payload ]) ->
+      Chat_response.Moderator_invocation.internal_event payload |> Result.map ~f:ignore
+    | _ -> Error "queued event requires an extensibility-v1 Internal_event envelope"
+  in
+  Result.map_error checked ~f:P.Error.invalid_request
+;;
+
+let installed_queue_occurrence ~state =
+  let open Result.Let_syntax in
+  let%bind metadata = Moderator_checkpoint.queue state.Session_state.moderator in
+  match metadata with
+  | None -> Ok None
+  | Some metadata ->
+    (match Moderator_queue.entries metadata with
+     | [] -> Ok None
+     | entry :: _ ->
+       E.Queue_occurrence.create
+         ~source:(Moderator_queue.source metadata)
+         ~ordinal:(Moderator_queue.Entry.ordinal entry)
+         ~origin:(Moderator_queue.Entry.origin entry)
+         ~producer:(Captured (Moderator_queue.Entry.producer entry))
+       |> Result.map ~f:Option.some)
+;;
+
+let claim_versioned ~operation_id ~state ~id ~snapshot ~now =
+  let open Result.Let_syntax in
+  let%bind queue_occurrence = installed_queue_occurrence ~state in
+  claim_in_context
+    ~queue_occurrence
+    ~check_event:check_versioned_event
+    ~operation_id
+    ~state
+    ~id
+    ~snapshot
+    ~now
+;;
+
+let claim = claim_versioned ~operation_id:None
+let claim_foreground ~operation_id = claim_versioned ~operation_id:(Some operation_id)
+
+let claim_legacy ~callback ~operation_id ~state ~id ~now =
+  let open Result.Let_syntax in
+  let%bind () =
+    if Chat_response.Moderator_manager.Callback.consumes_head callback
+    then Ok ()
+    else conflict "legacy queued claim requires the selected exact queue head"
+  in
+  let snapshot = Chat_response.Moderator_manager.Callback.snapshot callback in
+  let%bind _, source = Moderator_source_installation.capture state in
+  let%bind metadata = Moderator_checkpoint.queue state.Session_state.moderator in
+  let%bind metadata =
+    match metadata with
+    | Some metadata -> Ok metadata
+    | None -> Moderator_queue.bootstrap ~source ~queue:snapshot.queued_internal_events
+  in
+  let%bind entry =
+    match Moderator_queue.entries metadata with
+    | entry :: _ -> Ok entry
+    | [] -> conflict "legacy queued claim requires its exact occurrence"
+  in
+  let%bind queue_occurrence =
+    E.Queue_occurrence.create
+      ~source:(Moderator_queue.source metadata)
+      ~ordinal:(Moderator_queue.Entry.ordinal entry)
+      ~origin:(Moderator_queue.Entry.origin entry)
+      ~producer:(Captured (Moderator_queue.Entry.producer entry))
+  in
+  claim_in_context
+    ~queue_occurrence:(Some queue_occurrence)
+    ~check_event:(fun event ->
+      if same_value event (Chat_response.Moderator_manager.Callback.event callback)
+      then Ok ()
+      else conflict "legacy callback no longer selects the installed queue head")
+    ~operation_id
+    ~state
+    ~id
+    ~snapshot
+    ~now
+;;
 
 let complete ~claimed ~before ~(snapshot : S.t) ~requests =
   let open Result.Let_syntax in
@@ -626,6 +695,16 @@ let claim_retirement ~state ~id ~(snapshot : S.t) =
                 receipt.context.source.source_sha256
                 snapshot.script_source_hash -> Ok ()
     | _ -> conflict "retirement requires an unsettled failure at its original checkpoint"
+  in
+  let%bind () =
+    match receipt.queue_occurrence with
+    | None -> Ok ()
+    | Some captured ->
+      let%bind current = installed_queue_occurrence ~state in
+      (match current with
+       | Some current when E.Queue_occurrence.equal captured current -> Ok ()
+       | Some _ | None ->
+         conflict "failed receipt no longer names the exact queue occurrence")
   in
   match snapshot.queued_internal_events with
   | event :: _ when Jsonaf.exactly_equal receipt.context.event (encoded_event event) ->

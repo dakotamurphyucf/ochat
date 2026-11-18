@@ -1,0 +1,411 @@
+open! Core
+module A = Agent_session
+module P = Agent_protocol
+module Actor = A.Session_actor
+module Factory = Session_factory
+
+module Activation_result = struct
+  type t =
+    | Activated of P.Run_receipt.t
+    | Controlled of
+        { admission : P.Run_receipt.t
+        ; control : Actor.Goal_callback_control.t
+        }
+    | Settled of
+        { admission : P.Run_receipt.t
+        ; settlement : P.Goal_episode.Settlement.t
+        }
+    | Retained of P.Run_receipt.t
+    | Admission_uncertain of P.Error.t
+    | Activation_failed of
+        { admission : P.Run_receipt.t
+        ; error : P.Error.t
+        }
+end
+
+module Callback_success = struct
+  type t =
+    | Activated of P.Run_receipt.t
+    | Controlled of
+        { admission : P.Run_receipt.t
+        ; control : Actor.Goal_callback_control.t
+        }
+    | Settled of
+        { admission : P.Run_receipt.t
+        ; settlement : P.Goal_episode.Settlement.t
+        }
+    | Retained of P.Run_receipt.t
+end
+
+module Admission_fact = struct
+  type t =
+    | Before_admission
+    | Uncertain
+    | Known of P.Run_receipt.t
+end
+
+module Attempt = struct
+  type t =
+    { actual : Callback_success.t Factory.Deferred_run_attempt.t
+    ; fact : Admission_fact.t
+    }
+
+  let result t =
+    match Factory.Deferred_run_attempt.result t.actual with
+    | Ok (Callback_success.Activated admission) ->
+      Ok (Activation_result.Activated admission)
+    | Ok (Controlled { admission; control }) ->
+      Ok (Activation_result.Controlled { admission; control })
+    | Ok (Settled { admission; settlement }) ->
+      Ok (Activation_result.Settled { admission; settlement })
+    | Ok (Retained admission) -> Ok (Activation_result.Retained admission)
+    | Error error ->
+      (match t.fact with
+       | Before_admission -> Error error
+       | Uncertain -> Ok (Activation_result.Admission_uncertain error)
+       | Known admission -> Ok (Activation_result.Activation_failed { admission; error }))
+  ;;
+
+  let no_effects t = Factory.Deferred_run_attempt.no_effects t.actual
+end
+
+module Outcome = struct
+  type t =
+    | Retained of P.Run_receipt.t
+    | Attempted of Attempt.t
+end
+
+type t =
+  { factory : Factory.t
+  ; authorize : Operator_authorization.t -> A.Session_state.t -> (unit, P.Error.t) result
+  }
+
+let create ~factory ~authorize = { factory; authorize }
+
+let authorize_registered_owner t (entry : Session_registry.entry) ~actor ~session state =
+  let open Result.Let_syntax in
+  let check_owner () = Factory.check_registered_owner t.factory entry ~session in
+  let%bind () = check_owner () in
+  let%bind () = t.authorize actor state in
+  check_owner ()
+;;
+
+module Context = struct
+  type service = t
+
+  type t =
+    { service : service
+    ; entry : Session_registry.entry
+    ; actor : Operator_authorization.t
+    ; session : P.Session_ref.t
+    ; request : A.Goal_activation_request.t
+    }
+
+  let check_entry t =
+    Factory.check_registered_entry t.service.factory t.entry ~session:t.session
+  ;;
+
+  let authorize t state =
+    authorize_registered_owner t.service t.entry ~actor:t.actor ~session:t.session state
+  ;;
+
+  let receipt ?writer t =
+    let open Result.Let_syntax in
+    let%bind () = check_entry t in
+    Actor.goal_run_receipt
+      ?writer
+      t.entry.actor
+      ~actor:t.actor
+      ~authorize:(authorize t)
+      ~request:t.request
+      ~session:t.session
+  ;;
+
+  let validate_retained ?writer t admission =
+    let%bind.Result actual = receipt ?writer t in
+    if Option.exists actual ~f:(P.Run_receipt.equal admission)
+    then Ok admission
+    else
+      Error
+        (P.Error.create
+           Conflict
+           ~message:"retained Run does not match the requested Goal association"
+           ~retryable:false
+           ())
+  ;;
+end
+
+let activate
+      factory
+      (entry : Session_registry.entry)
+      ~(input : P.Run_start.Input.t)
+      prepared
+      activation
+  =
+  let held = Actor.Goal_activation.held activation in
+  let checked = Actor.Goal_activation.checked activation in
+  match input with
+  | Authored_start ->
+    Runtime_owner.start_held_authored_runtime_result
+      entry.runtime
+      ~prepared
+      ~held
+      ~checked
+  | User_submission _ ->
+    Runtime_owner.with_held_input_runtime_result
+      entry.runtime
+      ~prepared
+      ~held
+      ~checked
+      (fun runtime ->
+         Runtime_owner.Held_input_runtime.submit runtime ~prepare:(fun ~runtime ~scope ->
+           Factory.prepare_held_input factory ~entry ~runtime ~scope))
+;;
+
+let admit_selected
+      ?writer
+      factory
+      entry
+      ~check_entry
+      ~session
+      ~intent
+      ~input
+      fact
+      prepared
+  =
+  let open Result.Let_syntax in
+  let%bind () = check_entry () in
+  let%bind decision =
+    Actor.admit_held_goal_run
+      ?writer
+      entry.Session_registry.actor
+      ~binding:(Runtime_owner.Prepared.binding prepared)
+      ~intent
+      ~session
+  in
+  match decision with
+  | Rejected error -> Error error
+  | Uncertain error ->
+    fact := Admission_fact.Uncertain;
+    Error error
+  | Retained admission ->
+    fact := Admission_fact.Known admission;
+    Ok (Callback_success.Retained admission)
+  | Activation_unavailable { admission; error } ->
+    fact := Admission_fact.Known admission;
+    Error error
+  | Admitted activation ->
+    fact
+    := Admission_fact.Known
+         (Actor.Held_run.admission (Actor.Goal_activation.held activation));
+    let admission = Actor.Held_run.admission (Actor.Goal_activation.held activation) in
+    let%map result = activate factory entry ~input prepared activation in
+    (match result with
+     | Runtime_owner.Construction_result.Built admission ->
+       Callback_success.Activated admission
+     | Callback_completed (Actor.Goal_callback_completion.Controlled control) ->
+       Callback_success.Controlled { admission; control }
+     | Callback_completed (Settled settlement) ->
+       Callback_success.Settled { admission; settlement })
+;;
+
+let start_episode ?writer service ~entry ~actor ~session ~request =
+  let open Result.Let_syntax in
+  let context = { Context.service; entry; actor; session; request } in
+  let%bind receipt = Context.receipt ?writer context in
+  match receipt with
+  | Some admission -> Ok (Outcome.Retained admission)
+  | None ->
+    let fact = ref Admission_fact.Before_admission in
+    let%bind outcome =
+      Factory.with_effect_deferred_run_source
+        service.factory
+        entry
+        ~actor
+        ~authorize:(Context.authorize context)
+        ~request:(A.Goal_activation_request.request request)
+        (fun _deferred prepared ->
+           admit_selected
+             ?writer
+             service.factory
+             entry
+             ~check_entry:(fun () -> Context.check_entry context)
+             ~session
+             ~intent:(A.Goal_activation_request.intent request)
+             ~input:(A.Goal_activation_request.request request).input
+             fact
+             prepared)
+    in
+    (match outcome with
+     | Retained admission ->
+       let%map admission = Context.validate_retained ?writer context admission in
+       Outcome.Retained admission
+     | Attempted actual -> Ok (Outcome.Attempted { Attempt.actual; fact = !fact }))
+;;
+
+module Resume_result = Actor.Goal_resume_result
+
+let resume_from_source ?writer (entry : Session_registry.entry) ~check_entry ~with_source =
+  let module Source = Factory.Goal_resume_source in
+  let open Result.Let_syntax in
+  let uncertain = ref false in
+  let%bind report =
+    with_source (fun prepared ->
+      let%bind () = check_entry () in
+      let%bind decision =
+        Actor.admit_goal_resume
+          ?writer
+          entry.actor
+          ~binding:(Runtime_owner.Prepared_goal_continuation.binding prepared)
+      in
+      let finish = function
+        | (Resume_result.Resumed _ | Retained _) as result -> Ok result
+        | Resume_failed { receipt = _; error } | Rejected error -> Error error
+        | Uncertain error ->
+          uncertain := true;
+          Error error
+      in
+      match decision with
+      | Retained receipt -> Ok (Resume_result.Retained receipt)
+      | Waiting { receipt; wake } ->
+        Ok (Resume_result.Resumed { receipt; continuation = Waiting wake })
+      | Rejected error -> Error error
+      | Uncertain error ->
+        uncertain := true;
+        Error error
+      | Resume_failed { receipt = _; error } -> Error error
+      | Ready continuation ->
+        Runtime_owner.resume_goal_episode entry.runtime ~prepared ~continuation
+        |> Result.bind ~f:finish)
+  in
+  match Source.result report with
+  | Ok (Retained receipt) -> Ok (Resume_result.Retained receipt)
+  | Ok (Fresh result) -> Ok result
+  | Error error ->
+    (match Source.receipt report with
+     | Some receipt -> Ok (Resume_result.Resume_failed { receipt; error })
+     | None ->
+       Ok
+         (if !uncertain
+          then Resume_result.Uncertain error
+          else Resume_result.Rejected error))
+;;
+
+let resume_episode ?writer service ~entry ~actor ~session ~request =
+  let open Result.Let_syntax in
+  let check_entry () = Factory.check_registered_entry service.factory entry ~session in
+  let authorize state = authorize_registered_owner service entry ~actor ~session state in
+  let%bind () = check_entry () in
+  let lookup () =
+    Actor.goal_resume_receipt
+      ?writer
+      entry.Session_registry.actor
+      ~actor
+      ~authorize
+      ~session
+      ~request
+  in
+  let%bind retained = lookup () in
+  match retained with
+  | Some receipt -> Ok (Resume_result.Retained receipt)
+  | None ->
+    let%bind result =
+      resume_from_source
+        ?writer
+        entry
+        ~check_entry
+        ~with_source:
+          (Factory.with_goal_resume_source_reported
+             service.factory
+             entry
+             ~actor
+             ~authorize
+             ~session
+             ~request)
+    in
+    (match writer, result with
+     | Some _, Resume_result.Retained receipt ->
+       let%bind observed = lookup () in
+       if Option.exists observed ~f:(A.Goal_command_receipt.equal receipt)
+       then Ok result
+       else
+         Error
+           (P.Error.create
+              Conflict
+              ~message:"retained Goal Resume receipt changed"
+              ~retryable:false
+              ())
+     | _ -> Ok result)
+;;
+
+let resume_native_episode factory ~entry ~selection =
+  let open Result.Let_syntax in
+  let session = Actor.Goal_native_resume.Selection.session selection in
+  let check_entry () = Factory.check_registered_entry factory entry ~session in
+  let%bind () = check_entry () in
+  (* Retained command facts do not acquire a runtime/source lease, including
+     while an already started continuation still owns the loaded runtime. *)
+  let%bind receipt =
+    Actor.native_goal_resume_receipt entry.Session_registry.actor ~selection
+  in
+  match receipt with
+  | Some receipt -> Ok (Resume_result.Retained receipt)
+  | None ->
+    resume_from_source
+      entry
+      ~check_entry
+      ~with_source:
+        (Factory.with_native_goal_resume_source_reported factory entry ~selection)
+;;
+
+let start_native_episode factory ~entry ~selection =
+  let module Selection = Actor.Goal_native_start.Selection in
+  let module Request = P.Goal_native_start_request in
+  let open Result.Let_syntax in
+  let session = Selection.session selection in
+  let request = Selection.request selection in
+  let check_entry () = Factory.check_registered_entry factory entry ~session in
+  let receipt () =
+    let%bind () = check_entry () in
+    Actor.native_goal_start_receipt entry.Session_registry.actor ~selection
+  in
+  let validate_retained admission =
+    let%bind actual = receipt () in
+    if Option.exists actual ~f:(P.Run_receipt.equal admission)
+    then Ok admission
+    else
+      Error
+        (P.Error.create
+           Conflict
+           ~message:"retained Run does not match the selected native Goal admission"
+           ~retryable:false
+           ())
+  in
+  let%bind retained = receipt () in
+  match retained with
+  | Some admission -> Ok (Outcome.Retained admission)
+  | None ->
+    let%bind intent = A.Goal_native_start_association.intent request in
+    let fact = ref Admission_fact.Before_admission in
+    let%bind outcome =
+      Factory.with_native_goal_start_source
+        factory
+        ~entry
+        ~selection
+        (fun _deferred prepared ->
+           admit_selected
+             factory
+             entry
+             ~check_entry
+             ~session
+             ~intent
+             ~input:(Request.input request)
+             fact
+             prepared)
+    in
+    (match outcome with
+     | Retained admission ->
+       let%map admission = validate_retained admission in
+       Outcome.Retained admission
+     | Attempted actual -> Ok (Outcome.Attempted { Attempt.actual; fact = !fact }))
+;;

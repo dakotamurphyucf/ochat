@@ -6,6 +6,43 @@ type create_session =
   -> Agent_protocol.Session.Create_request.t
   -> (Session_registry.entry, Agent_protocol.Error.t) result
 
+type create_session_authenticated =
+  command_audit:Document_schema.Document.t option
+  -> actor:Operator_authorization.t
+  -> Agent_protocol.Session.Create_request.t
+  -> (Session_registry.entry, Agent_protocol.Error.t) result
+
+type goal_read =
+  actor:Operator_authorization.t
+  -> context:Connection_context.t
+  -> Agent_protocol.Goal_query.Request.t
+  -> (Agent_protocol.Goal_query.Result.t, Agent_protocol.Error.t) result
+
+type goal_operator =
+  actor:Operator_authorization.t
+  -> context:Connection_context.t
+  -> Agent_protocol.Goal_control.Request.t
+  -> (Agent_protocol.Goal_control.Result.t, Agent_protocol.Error.t) result
+
+type recurrence_read =
+  actor:Operator_authorization.t
+  -> context:Connection_context.t
+  -> Agent_protocol.Recurrence_query.Request.t
+  -> (Agent_protocol.Recurrence_query.Result.t, Agent_protocol.Error.t) result
+
+type recurrence_operator =
+  { execute :
+      actor:Operator_authorization.t
+      -> context:Connection_context.t
+      -> Agent_protocol.Recurrence_control.Request.t
+      -> (Agent_protocol.Recurrence_control.Result.t, Agent_protocol.Error.t) result
+  ; check_disclosure :
+      actor:Operator_authorization.t
+      -> context:Connection_context.t
+      -> Agent_protocol.Recurrence_control.Request.t
+      -> (unit, Agent_protocol.Error.t) result
+  }
+
 type t =
   { sw : Eio.Switch.t
   ; env : Eio_unix.Stdenv.base
@@ -28,6 +65,10 @@ type t =
   ; blob_store : Agent_store.Blob_store.t
   ; session_store : Agent_store.Session_store.t
   ; authoring : Authoring_installation.t option
+  ; goal_read : goal_read option
+  ; recurrence_read : recurrence_read option
+  ; goal_operator : goal_operator option
+  ; recurrence_operator : recurrence_operator option
   ; lifecycle_service : Session_lifecycle_service.t
   ; retained : Retained_session.t
   ; archive_payload_limit : int
@@ -40,6 +81,7 @@ type t =
   ; server_health : Agent_protocol.Health.Request.t -> Agent_protocol.Health.Response.t
   ; cancel_job : actor:Agent_session.Session_actor.t -> job:Agent_protocol.Job.t -> unit
   ; create_session : create_session
+  ; create_session_authenticated : create_session_authenticated option
   ; prepare_session_start :
       Session_registry.entry -> (unit, Agent_protocol.Error.t) result
   ; workspace_retained :
@@ -64,6 +106,10 @@ let create
       ~blob_store
       ~session_store
       ~authoring
+      ~goal_read
+      ~recurrence_read
+      ~goal_operator
+      ~recurrence_operator
       ~lifecycle_service
       ~retained
       ~archive_payload_limit
@@ -73,6 +119,7 @@ let create
       ~server_health
       ~cancel_job
       ~create_session
+      ~create_session_authenticated
       ~seed_factory
       ~seed_recovery_limits
       ~prepare_session_start
@@ -116,9 +163,22 @@ let create
   let installed_authoring =
     Option.value_map authoring ~default:[] ~f:Authoring_installation.available_features
   in
+  let operator_features =
+    [ Agent_protocol.Goal_query.Features.inspect, Option.is_some goal_read
+    ; Agent_protocol.Goal_control.Features.control, Option.is_some goal_operator
+    ; Agent_protocol.Recurrence_query.Features.inspect, Option.is_some recurrence_read
+    ; ( Agent_protocol.Recurrence_control.Features.control
+      , Option.is_some recurrence_operator )
+    ]
+  in
+  let installed_operator_features =
+    List.filter_map operator_features ~f:(fun (feature, installed) ->
+      Option.some_if installed feature)
+  in
   let base_features features =
     List.filter features ~f:(fun feature ->
       (not (List.mem authoring_features feature ~equal:String.equal))
+      && (not (List.Assoc.mem operator_features feature ~equal:String.equal))
       && (Option.is_some seed_factory || not (String.equal feature "sessions.seed")))
   in
   let initialize ~principal request =
@@ -138,12 +198,17 @@ let create
           List.filter requested ~f:(fun feature ->
             String.equal feature Agent_protocol.Authoring.Features.bundle)
       in
+      let operator_features =
+        List.filter installed_operator_features ~f:(fun feature ->
+          List.mem request.features feature ~equal:String.equal)
+      in
       Agent_protocol.Initialize.Response.create
         ~protocol_name:response.protocol_name
         ~selected_version:response.selected_version
         ~implementation:response.implementation
         ~server_id:response.server_id
-        ~enabled_features:(base_features response.enabled_features @ requested)
+        ~enabled_features:
+          (base_features response.enabled_features @ requested @ operator_features)
         ~extensions:response.extensions
         ~principal:response.principal
         ~limits:response.limits
@@ -153,7 +218,10 @@ let create
   in
   let server_info () =
     let (info : Agent_protocol.Method_result.Server_info.t) = server_info () in
-    { info with features = base_features info.features @ installed_authoring }
+    { info with
+      features =
+        base_features info.features @ installed_authoring @ installed_operator_features
+    }
   in
   { sw
   ; env
@@ -179,6 +247,10 @@ let create
   ; blob_store
   ; session_store
   ; authoring
+  ; goal_read
+  ; recurrence_read
+  ; goal_operator
+  ; recurrence_operator
   ; lifecycle_service
   ; retained
   ; archive_payload_limit
@@ -188,6 +260,7 @@ let create
   ; server_health
   ; cancel_job
   ; create_session
+  ; create_session_authenticated
   ; prepare_session_start
   ; workspace_retained
   ; prepare_administration
@@ -430,7 +503,16 @@ let idempotency = function
   | Provider_select _
   | Provider_configure_environment _ -> None
   | Agent_protocol.Command.Ingress_submit _ -> None
-  | Agent_protocol.Command.Authoring _ -> None
+  (* Instruction receipts live in the sole selection transaction. Re-enter its
+     current operator/source checks on every retry; do not cache this response. *)
+  | Agent_protocol.Command.Instructions _ -> None
+  (* Goal writers reconcile their exact receipts at the canonical owner. The
+     general command journal cannot authorize their replay or fabricate absence. *)
+  | Agent_protocol.Command.Goal_query _
+  | Goal_control _
+  | Recurrence_query _
+  | Recurrence_control _
+  | Authoring _ -> None
   | Agent_protocol.Command.Session_seed request ->
     protected None (Agent_protocol.Session_seed.Request.idempotency_key request)
   | Agent_protocol.Command.Session_create request ->
@@ -574,9 +656,11 @@ let audit_read_error = function
   | failure -> persistence_error failure
 ;;
 
-let pending_record t key digest retention =
+let pending_record ?(remove = false) t key digest retention =
+  let module I = Agent_store.Idempotency_store in
   let now = now t in
-  Agent_store.Idempotency_store.record
+  let record = if remove then I.record_remove else I.record in
+  record
     t.idempotency_store
     { key
     ; request_digest = digest
@@ -607,7 +691,10 @@ let store_outcome t key digest result =
 ;;
 
 let with_idempotency_owner t context command identity ~prepare ~complete =
-  Eio.Mutex.use_rw ~protect:true t.idempotency_mutex (fun () ->
+  (* A locally cancelled post-commit source suffix is an expected command
+     outcome. Release the shared receipt mutex before preserving that exception,
+     keeping its actual acknowledgement and later mutation admission usable. *)
+  let run () =
     let open Result.Let_syntax in
     let principal = Connection_context.principal context in
     let key = idempotency_key principal command identity in
@@ -633,7 +720,17 @@ let with_idempotency_owner t context command identity ~prepare ~complete =
         |> Agent_store.Idempotency_store.Command_audit.encode
         |> Result.map_error ~f:persistence_error
       in
-      complete ~key ~digest (execute (Some command_audit)))
+      complete ~key ~digest (execute (Some command_audit))
+  in
+  match
+    Eio.Mutex.use_rw ~protect:true t.idempotency_mutex (fun () ->
+      match run () with
+      | result -> Ok result
+      | exception (Eio.Cancel.Cancelled _ as exn) ->
+        Error (exn, Stdlib.Printexc.get_raw_backtrace ()))
+  with
+  | Ok result -> result
+  | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
 ;;
 
 let handle_idempotent t context command identity ~prepare =
@@ -945,8 +1042,17 @@ let attach_entry
         }
 ;;
 
-let handle_session_create t context command_audit request =
+let check_original_agent_actor = function
+  | None -> Ok ()
+  | Some actor ->
+    if Operator_authorization.is_current actor
+    then Ok ()
+    else Error (error Permission_denied "agent execution authentication expired")
+;;
+
+let handle_session_create t ~agent_actor context command_audit request =
   let open Result.Let_syntax in
+  let%bind () = check_original_agent_actor agent_actor in
   let%bind () =
     match
       request.Agent_protocol.Session.Create_request.requested_mode, request.subscribe
@@ -957,10 +1063,15 @@ let handle_session_create t context command_audit request =
     | Some _, _ -> Ok ()
   in
   let%bind entry =
-    t.create_session
-      ~command_audit
-      ~principal:(Connection_context.principal context)
-      request
+    match agent_actor, t.create_session_authenticated with
+    | Some actor, Some create -> create ~command_audit ~actor request
+    | None, _ ->
+      t.create_session
+        ~command_audit
+        ~principal:(Connection_context.principal context)
+        request
+    | Some _, None ->
+      Error (error Invalid_state "authenticated session initialization is unavailable")
   in
   let%bind state = Agent_session.Session_actor.state entry.actor in
   let%bind () =
@@ -1513,7 +1624,8 @@ let with_writer t ?prepared_writer context ~session_id ~attachment_id f =
   f entry
 ;;
 
-let rec handle_session_start t ?prepared_writer context command_audit request =
+let rec handle_session_start t ~agent_actor ?prepared_writer context command_audit request
+  =
   with_writer
     t
     ?prepared_writer
@@ -1522,6 +1634,7 @@ let rec handle_session_start t ?prepared_writer context command_audit request =
     ~attachment_id:request.attachment_id
     (fun entry ->
        let open Result.Let_syntax in
+       let%bind () = check_original_agent_actor agent_actor in
        let%bind () = t.prepare_session_start entry in
        let%bind state = Agent_session.Session_actor.state entry.actor in
        let%bind () =
@@ -1536,23 +1649,30 @@ let rec handle_session_start t ?prepared_writer context command_audit request =
            (Agent_protocol.Method_result.Session_start
               (session_mutation (Agent_session.Session_state.summary state)))
        | _, None ->
-         let%bind () = Runtime_owner.ensure_loaded entry.runtime in
+         let%bind () =
+           match agent_actor with
+           | None -> Runtime_owner.ensure_loaded entry.runtime
+           | Some actor -> Runtime_owner.ensure_loaded_authenticated entry.runtime ~actor
+         in
          actor_command
            command_audit
            ~plain:(fun () ->
              Agent_session.Session_actor.start
+               ?actor:agent_actor
                ?expected_parent_stop_epoch:state.parent_stop_epoch
                entry.actor
                ~attachment_id:request.attachment_id)
            ~audited:(fun command_audit ->
              Agent_session.Session_actor.start_with_command_audit
+               ?actor:agent_actor
                ?expected_parent_stop_epoch:state.parent_stop_epoch
                entry.actor
                ~command_audit
                ~attachment_id:request.attachment_id)
          |> Result.map ~f:(fun session ->
            Agent_protocol.Method_result.Session_start (session_mutation session))
-       | _, Some capacity -> handle_capacity_start t entry capacity command_audit request)
+       | _, Some capacity ->
+         handle_capacity_start t ~agent_actor entry capacity command_audit request)
 
 and enqueue_start t (state : Agent_session.Session_state.t) =
   let open Result.Let_syntax in
@@ -1587,18 +1707,32 @@ and queue_capacity_start t entry command_audit request =
   let%map () = enqueue_start t state in
   Agent_protocol.Method_result.Session_start (session_mutation session)
 
-and acquired_capacity_start entry capacity command_audit request ~newly_acquired =
+and acquired_capacity_start
+      ~agent_actor
+      entry
+      capacity
+      command_audit
+      request
+      ~newly_acquired
+  =
   let started =
     let open Result.Let_syntax in
-    let%bind () = Runtime_owner.ensure_loaded entry.Session_registry.runtime in
+    let%bind () =
+      match agent_actor with
+      | None -> Runtime_owner.ensure_loaded entry.Session_registry.runtime
+      | Some actor ->
+        Runtime_owner.ensure_loaded_authenticated entry.Session_registry.runtime ~actor
+    in
     actor_command
       command_audit
       ~plain:(fun () ->
         Agent_session.Session_actor.start
+          ?actor:agent_actor
           entry.actor
           ~attachment_id:request.Agent_protocol.Session.Start_request.attachment_id)
       ~audited:(fun command_audit ->
         Agent_session.Session_actor.start_with_command_audit
+          ?actor:agent_actor
           entry.actor
           ~command_audit
           ~attachment_id:request.attachment_id)
@@ -1611,16 +1745,28 @@ and acquired_capacity_start entry capacity command_audit request ~newly_acquired
     Session_capacity.runtime_ready capacity;
     Ok (Agent_protocol.Method_result.Session_start (session_mutation session))
 
-and handle_capacity_start t entry capacity command_audit request =
+and handle_capacity_start t ~agent_actor entry capacity command_audit request =
   match
     Session_capacity.try_acquire
       capacity
       ~queue_if_limited:request.Agent_protocol.Session.Start_request.queue_if_limited
   with
   | Acquired ->
-    acquired_capacity_start entry capacity command_audit request ~newly_acquired:true
+    acquired_capacity_start
+      ~agent_actor
+      entry
+      capacity
+      command_audit
+      request
+      ~newly_acquired:true
   | Already_acquired ->
-    acquired_capacity_start entry capacity command_audit request ~newly_acquired:false
+    acquired_capacity_start
+      ~agent_actor
+      entry
+      capacity
+      command_audit
+      request
+      ~newly_acquired:false
   | Queue_required _ -> queue_capacity_start t entry command_audit request
   | Rejected error -> Error error
 ;;
@@ -1815,7 +1961,7 @@ let handle_delete_history t ?prepared_writer context command_audit request =
          Agent_protocol.Method_result.Session_delete_history (session_mutation session)))
 ;;
 
-let handle_session_compact t ?prepared_writer context command_audit request =
+let handle_session_compact t ~agent_actor ?prepared_writer context command_audit request =
   with_writer
     t
     ?prepared_writer
@@ -1826,13 +1972,19 @@ let handle_session_compact t ?prepared_writer context command_audit request =
        actor_command
          command_audit
          ~plain:(fun () ->
-           Agent_session.Session_actor.compact
-             entry.actor
+           (match agent_actor with
+            | None -> Agent_session.Session_actor.compact entry.actor
+            | Some actor ->
+              Agent_session.Session_actor.compact_authenticated entry.actor ~actor)
              ~attachment_id:request.attachment_id
              ~expected_revision:request.expected_revision)
          ~audited:(fun command_audit ->
-           Agent_session.Session_actor.compact_with_command_audit
-             entry.actor
+           (match agent_actor with
+            | None -> Agent_session.Session_actor.compact_with_command_audit entry.actor
+            | Some actor ->
+              Agent_session.Session_actor.compact_authenticated_with_command_audit
+                entry.actor
+                ~actor)
              ~command_audit
              ~attachment_id:request.attachment_id
              ~expected_revision:request.expected_revision)
@@ -1938,8 +2090,9 @@ let run_start_result = function
   | Rejected failure | Uncertain failure -> Error failure
 ;;
 
-let handle_send_message t ?prepared_writer context command_audit request =
+let handle_send_message t ~agent_actor ?prepared_writer context command_audit request =
   let open Result.Let_syntax in
+  let%bind () = check_original_agent_actor agent_actor in
   let content = request.Agent_protocol.Session.Send_message_request.content in
   let%bind () =
     if String.is_empty (String.strip content.text)
@@ -1954,29 +2107,51 @@ let handle_send_message t ?prepared_writer context command_audit request =
     ~attachment_id:request.attachment_id
     (fun entry ->
        let%bind () = require_connection_writer context request.attachment_id in
-       let%bind history_id = Agent_session.History_id_source.allocate entry.history_ids in
        let%bind history_entry =
-         Runtime_owner.parse_user_content entry.runtime ~id:history_id content
+         Runtime_owner.with_loaded_runtime entry.runtime (fun runtime ->
+           let%bind history_id =
+             Agent_session.History_id_source.allocate entry.history_ids
+           in
+           runtime.parse_user_content ~id:history_id content)
        in
        let history_entry = Agent_session.History_codec.to_protocol history_entry in
        let%bind submission =
          actor_command
            command_audit
            ~plain:(fun () ->
-             Agent_session.Session_actor.submit_message
-               entry.actor
-               ~timing:request.timing
-               ~submitting_principal:(Connection_context.principal context).id
-               ~attachment_id:request.attachment_id
-               history_entry)
+             match agent_actor with
+             | Some actor ->
+               Agent_session.Session_actor.submit_message_authenticated
+                 entry.actor
+                 ~actor
+                 ~timing:request.timing
+                 ~attachment_id:request.attachment_id
+                 history_entry
+             | None ->
+               Agent_session.Session_actor.submit_message
+                 entry.actor
+                 ~submitting_principal:(Connection_context.principal context).id
+                 ~timing:request.timing
+                 ~attachment_id:request.attachment_id
+                 history_entry)
            ~audited:(fun command_audit ->
-             Agent_session.Session_actor.submit_message_with_command_audit
-               entry.actor
-               ~command_audit
-               ~timing:request.timing
-               ~submitting_principal:(Connection_context.principal context).id
-               ~attachment_id:request.attachment_id
-               history_entry)
+             match agent_actor with
+             | Some actor ->
+               Agent_session.Session_actor.submit_message_authenticated_with_command_audit
+                 entry.actor
+                 ~actor
+                 ~command_audit
+                 ~timing:request.timing
+                 ~attachment_id:request.attachment_id
+                 history_entry
+             | None ->
+               Agent_session.Session_actor.submit_message_with_command_audit
+                 entry.actor
+                 ~submitting_principal:(Connection_context.principal context).id
+                 ~command_audit
+                 ~timing:request.timing
+                 ~attachment_id:request.attachment_id
+                 history_entry)
        in
        Ok
          (Agent_protocol.Method_result.Session_send_message
@@ -2651,6 +2826,7 @@ let handle_schedule_create t ?prepared_writer context command_audit request =
            ; status = Scheduled
            ; delivery_count = 0
            ; last_delivery_at = None
+           ; inference_provenance = None
            ; delivery_cancellation = None
            ; ownership = None
            }
@@ -2829,6 +3005,10 @@ let prepared_writer_attachment command =
   | Session_runs _
   | Session_run _
   | Session_run_start _
+  | Goal_query _
+  | Goal_control _
+  | Recurrence_query _
+  | Recurrence_control _
   | Session_pending_inputs _
   | Session_pending_input _
   | Session_cancel_pending_input _
@@ -2847,6 +3027,7 @@ let prepared_writer_attachment command =
   | Schedule_list _
   | Schedule_get _
   | Ingress_submit _
+  | Instructions _
   | Authoring _ -> None
 ;;
 
@@ -2897,6 +3078,7 @@ let dispatch_authorized
       t
       ?prepared_writer
       ~actor
+      ~agent_actor
       ~context
       ~command_audit
       ~inference_budget
@@ -2962,7 +3144,8 @@ let dispatch_authorized
       ~now:(now t)
       command
   | Blob_read request -> handle_blob_read t context request
-  | Session_create request -> handle_session_create t context command_audit request
+  | Session_create request ->
+    handle_session_create t ~agent_actor context command_audit request
   | Session_list request -> handle_session_list t context request
   | Session_search request -> handle_session_search t context request
   | Session_search_navigate request ->
@@ -2980,7 +3163,7 @@ let dispatch_authorized
   | Session_renew_owner request ->
     handle_session_renew_owner t context command_audit request
   | Session_start request ->
-    handle_session_start t ?prepared_writer context command_audit request
+    handle_session_start t ~agent_actor ?prepared_writer context command_audit request
   | Session_update_organization request ->
     handle_session_update_organization t ?prepared_writer context command_audit request
   | Session_update_metadata request ->
@@ -2989,13 +3172,55 @@ let dispatch_authorized
     handle_session_stop t ?prepared_writer context command_audit request
   | Session_cancel_operation request ->
     handle_session_cancel_operation t ?prepared_writer context command_audit request
+  | Goal_query request ->
+    let open Result.Let_syntax in
+    let%bind read =
+      Result.of_option
+        t.goal_read
+        ~error:(error Method_not_found "Goal inspection is not installed")
+    in
+    let%map result = read ~actor ~context request in
+    Agent_protocol.Method_result.Goal_query result
+  | Goal_control request ->
+    let open Result.Let_syntax in
+    let%bind execute =
+      Result.of_option
+        t.goal_operator
+        ~error:(error Method_not_found "Goal control is not installed")
+    in
+    let%map result = execute ~actor ~context request in
+    Agent_protocol.Method_result.Goal_control result
+  | Recurrence_query request ->
+    let open Result.Let_syntax in
+    let%bind read =
+      Result.of_option
+        t.recurrence_read
+        ~error:(error Method_not_found "Recurrence inspection is not installed")
+    in
+    let%map result = read ~actor ~context request in
+    Agent_protocol.Method_result.Recurrence_query result
+  | Recurrence_control request ->
+    let open Result.Let_syntax in
+    let%bind operator =
+      Result.of_option
+        t.recurrence_operator
+        ~error:(error Method_not_found "Recurrence control is not installed")
+    in
+    let%map result = operator.execute ~actor ~context request in
+    Agent_protocol.Method_result.Recurrence_control result
+  | Instructions request ->
+    let service =
+      Instruction_operator_service.create ~registry:t.registry ~authoring:t.authoring
+    in
+    Instruction_operator_service.execute service ~actor ~context request
+    |> Result.map ~f:(fun result -> Agent_protocol.Method_result.Instructions result)
   | Session_configuration_get request -> handle_configuration_get t context request
   | Session_configuration_update request ->
     handle_configuration_update t ?prepared_writer context command_audit request
   | Session_run_start request ->
     handle_run_start t ~actor context command_audit request |> run_start_result
   | Session_send_message request ->
-    handle_send_message t ?prepared_writer context command_audit request
+    handle_send_message t ~agent_actor ?prepared_writer context command_audit request
   | Session_runs request -> handle_runs t ~actor context request
   | Session_run request -> handle_run t ~actor context request
   | Session_pending_inputs request -> handle_pending_inputs t context request
@@ -3005,7 +3230,7 @@ let dispatch_authorized
   | Session_replace_pending_input request ->
     handle_replace_pending t context command_audit request
   | Session_compact request ->
-    handle_session_compact t ?prepared_writer context command_audit request
+    handle_session_compact t ~agent_actor ?prepared_writer context command_audit request
   | Session_edit_history request -> handle_edit_history t context command_audit request
   | Session_continue_history request ->
     handle_continue_history t context command_audit request
@@ -3053,6 +3278,7 @@ let handle_authorized
       t
       ?prepared_writer
       ~actor
+      ~agent_actor
       ~context
       ~command_audit
       ~inference_budget
@@ -3065,6 +3291,7 @@ let handle_authorized
       t
       ?prepared_writer
       ~actor
+      ~agent_actor
       ~context
       ~command_audit
       ~inference_budget
@@ -3113,6 +3340,8 @@ let command_session_id = function
   | Blob_read request -> Some request.session_id
   | Audit_read request -> request.session_id
   | Session_get request -> Some request.Agent_protocol.Session.Get_request.session_id
+  | Instructions request ->
+    Some (Agent_protocol.Instruction_control.Request.session_id request)
   | Session_configuration_get request -> Some request.session_id
   | Session_configuration_update request -> Some request.session_id
   | Session_inference_summary request -> Some request.session_id
@@ -3129,6 +3358,15 @@ let command_session_id = function
   | Session_send_message request -> Some request.session_id
   | Session_runs request -> Some (Agent_protocol.Session_ref.session_id request.session)
   | Session_run request -> Some (Agent_protocol.Session_ref.session_id request.session)
+  | Recurrence_query request ->
+    Some (Agent_protocol.Session_ref.session_id request.session)
+  | Recurrence_control request ->
+    Some (Agent_protocol.Session_ref.session_id request.session)
+  | Goal_query request -> Some (Agent_protocol.Session_ref.session_id request.session)
+  | Goal_control request ->
+    Some
+      (Agent_protocol.Goal_control.Request.session request
+       |> Agent_protocol.Session_ref.session_id)
   | Session_pending_inputs request -> Some request.session_id
   | Session_pending_input request -> Some request.session_id
   | Session_cancel_pending_input request -> Some request.session_id
@@ -3323,6 +3561,11 @@ let receipt_summary ~session_id result =
   | Schedule_list _
   | Schedule_get _
   | Ingress_submit _
+  | Goal_query _
+  | Goal_control _
+  | Recurrence_query _
+  | Recurrence_control _
+  | Instructions _
   | Authoring _ -> Error (error Invalid_request "method has no generic command receipt")
 ;;
 
@@ -3602,7 +3845,13 @@ let handle_lifecycle t context command request =
       | Replay { outcome = Pending; _ } -> Ok None
       | Replay { outcome = Success _; retention = Standard; _ } ->
         Error (error Persistence_error "lifecycle receipt lacks protected retention")
-      | Missing -> pending_record t key digest Protected |> Result.map ~f:(fun _ -> None))
+      | Missing ->
+        let remove =
+          match request with
+          | Session_lifecycle_service.Request.Delete { policy = Remove; _ } -> true
+          | Delete { policy = Archive; _ } | Restore _ | Resume _ -> false
+        in
+        pending_record ~remove t key digest Protected |> Result.map ~f:(fun _ -> None))
   in
   match cached with
   | Some cached_outcome ->
@@ -3753,7 +4002,7 @@ let handle_seed t ~actor context request =
          "seed authority changed after receipt admission; outcome is unknown")
 ;;
 
-let execute t ~actor context ~inference_budget command =
+let execute t ~actor ~agent_actor context ~inference_budget command =
   match command with
   | Agent_protocol.Command.Session_seed request -> handle_seed t ~actor context request
   | Agent_protocol.Command.Prompt_dependencies_status -> dependency_status t
@@ -3788,7 +4037,14 @@ let execute t ~actor context ~inference_budget command =
   | _ ->
     (match idempotency command with
      | None ->
-       handle_authorized t ~actor ~context ~command_audit:None ~inference_budget command
+       handle_authorized
+         t
+         ~actor
+         ~agent_actor
+         ~context
+         ~command_audit:None
+         ~inference_budget
+         command
      | Some identity ->
        handle_idempotent t context command identity ~prepare:(fun () ->
          let open Result.Let_syntax in
@@ -3804,6 +4060,7 @@ let execute t ~actor context ~inference_budget command =
              t
              ?prepared_writer
              ~actor
+             ~agent_actor
              ~context
              ~command_audit
              ~inference_budget
@@ -3812,6 +4069,7 @@ let execute t ~actor context ~inference_budget command =
 
 let handle t ?actor ~context ~inference_budget command =
   let open Result.Let_syntax in
+  let agent_actor = Option.first_some actor (Connection_context.original_actor context) in
   let%bind actor = Connection_context.request_actor context actor in
   let%bind () =
     Authorization.authorize
@@ -3861,7 +4119,7 @@ let handle t ?actor ~context ~inference_budget command =
     in
     let outcome =
       Result.bind
-        (execute t ~actor context ~inference_budget command)
+        (execute t ~actor ~agent_actor context ~inference_budget command)
         ~f:(Principal_projection.result (Connection_context.principal context))
     in
     let outcome =
@@ -3873,12 +4131,31 @@ let handle t ?actor ~context ~inference_budget command =
           |> Result.map ~f:(fun () -> result))
       | _ -> outcome
     in
-    match audit_outcome t context command outcome with
-    | Ok _ -> outcome
-    | Error audit_failure ->
-      (match outcome with
-       | Error _ -> outcome
-       | Ok _ -> Error audit_failure))
+    let operator =
+      match command with
+      | Goal_query _ | Goal_control _ -> Some "Goal"
+      | Recurrence_query _ | Recurrence_control _ -> Some "Recurrence"
+      | _ -> None
+    in
+    match audit_outcome t context command outcome, outcome, operator with
+    | Ok _, Ok _, Some name when not (Operator_authorization.is_current actor) ->
+      (* Audit publication can yield after the original snapshot/receipt check. *)
+      Error (error Permission_denied (name ^ " authority expired or was revoked"))
+    | Ok _, Ok _, Some _ ->
+      (match command, t.recurrence_operator with
+       | Recurrence_control request, Some operator ->
+         Result.bind (operator.check_disclosure ~actor ~context request) ~f:(fun () ->
+           outcome)
+       | _ -> outcome)
+    | Ok _, _, _ | Error _, Error _, _ -> outcome
+    | Error failure, Ok _, Some name ->
+      Error
+        (Agent_protocol.Error.create
+           failure.code
+           ~message:(name ^ " response audit could not be published")
+           ~retryable:failure.retryable
+           ())
+    | Error failure, Ok _, None -> Error failure)
 ;;
 
 let close_connection t context =

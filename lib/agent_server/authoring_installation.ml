@@ -445,6 +445,15 @@ let check_historical_origin_now t ~actor origin =
 
 let issued_by_source_host (t : t) source_host = phys_equal t.source_host source_host
 
+let instruction_source_port (t : t) =
+  match t.source, t.policy.configured_projects with
+  | Some source, Some configured ->
+    Some
+      (Authoring_instruction_sources.create source ~configured ~is_current:(fun () ->
+         not t.closed))
+  | None, _ | Some _, None -> None
+;;
+
 let developer_roots (t : t) ~actor ~checkpoint =
   if t.closed
   then Error (error Server_shutting_down "authoring is closed" ~retryable:true)

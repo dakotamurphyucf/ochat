@@ -44,7 +44,7 @@ let%expect_test "session actor publishes committed events to multiple subscriber
           ~persistence:
             { archive_reference
             ; commit =
-                (fun ~command_audit ~previous:_ _transition ->
+                (fun ?observation:_ ~command_audit ~previous:_ _transition ->
                   Int.incr commits;
                   command_audits := command_audit :: !command_audits;
                   Ok ())
@@ -64,6 +64,7 @@ let%expect_test "session actor publishes committed events to multiple subscriber
             ; schedule_limits = Agent_session.Staged_schedules.default_limits
             ; notification_limits = Agent_session.Staged_notifications.default_limits
             ; ingress_limits = Agent_session.Staged_ingress.default_limits
+            ; goal_descendant_profile
             ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
             ; state_committed = (fun _ _ -> ())
             }
@@ -184,7 +185,9 @@ let%expect_test "session actor enforces its configured attachment limit" =
                ~liveness:Process_bound
                ~start_immediately:false)
           ~persistence:
-            { archive_reference; commit = (fun ~command_audit:_ ~previous:_ _ -> Ok ()) }
+            { archive_reference
+            ; commit = (fun ?observation:_ ~command_audit:_ ~previous:_ _ -> Ok ())
+            }
           ~operation_worker:None
           ~services:
             { now = (fun () -> timestamp)
@@ -200,6 +203,7 @@ let%expect_test "session actor enforces its configured attachment limit" =
             ; schedule_limits = Agent_session.Staged_schedules.default_limits
             ; notification_limits = Agent_session.Staged_notifications.default_limits
             ; ingress_limits = Agent_session.Staged_ingress.default_limits
+            ; goal_descendant_profile
             ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
             ; state_committed = (fun _ _ -> ())
             }
@@ -235,7 +239,9 @@ let%expect_test "owner-bound actor stops after its owner disconnect grace" =
                ~liveness:(Owner_bound { disconnect_grace_ms = 5; stop_mode = Graceful })
                ~start_immediately:false)
           ~persistence:
-            { archive_reference; commit = (fun ~command_audit:_ ~previous:_ _ -> Ok ()) }
+            { archive_reference
+            ; commit = (fun ?observation:_ ~command_audit:_ ~previous:_ _ -> Ok ())
+            }
           ~operation_worker:None
           ~services:
             { now = (fun () -> Agent_protocol.Timestamp.now ())
@@ -248,6 +254,7 @@ let%expect_test "owner-bound actor stops after its owner disconnect grace" =
             ; schedule_limits = Agent_session.Staged_schedules.default_limits
             ; notification_limits = Agent_session.Staged_notifications.default_limits
             ; ingress_limits = Agent_session.Staged_ingress.default_limits
+            ; goal_descendant_profile
             ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
             ; state_committed = (fun _ _ -> ())
             }
@@ -287,7 +294,9 @@ let%expect_test "owner-bound actor permits one owner and supports grace reclaim"
                ~liveness:(Owner_bound { disconnect_grace_ms = 20; stop_mode = Graceful })
                ~start_immediately:false)
           ~persistence:
-            { archive_reference; commit = (fun ~command_audit:_ ~previous:_ _ -> Ok ()) }
+            { archive_reference
+            ; commit = (fun ?observation:_ ~command_audit:_ ~previous:_ _ -> Ok ())
+            }
           ~operation_worker:None
           ~services:
             { now = (fun () -> Agent_protocol.Timestamp.now ())
@@ -303,6 +312,7 @@ let%expect_test "owner-bound actor permits one owner and supports grace reclaim"
             ; schedule_limits = Agent_session.Staged_schedules.default_limits
             ; notification_limits = Agent_session.Staged_notifications.default_limits
             ; ingress_limits = Agent_session.Staged_ingress.default_limits
+            ; goal_descendant_profile
             ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
             ; state_committed = (fun _ _ -> ())
             }
@@ -373,7 +383,9 @@ let%expect_test "read-only attachments cannot mutate actor state" =
                ~liveness:Process_bound
                ~start_immediately:false)
           ~persistence:
-            { archive_reference; commit = (fun ~command_audit:_ ~previous:_ _ -> Ok ()) }
+            { archive_reference
+            ; commit = (fun ?observation:_ ~command_audit:_ ~previous:_ _ -> Ok ())
+            }
           ~operation_worker:None
           ~services:
             { now = (fun () -> timestamp)
@@ -387,6 +399,7 @@ let%expect_test "read-only attachments cannot mutate actor state" =
             ; schedule_limits = Agent_session.Staged_schedules.default_limits
             ; notification_limits = Agent_session.Staged_notifications.default_limits
             ; ingress_limits = Agent_session.Staged_ingress.default_limits
+            ; goal_descendant_profile
             ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
             ; state_committed = (fun _ _ -> ())
             }
@@ -423,7 +436,7 @@ let%expect_test "history IDs are allocated only from actor-committed blocks" =
           ~persistence:
             { archive_reference
             ; commit =
-                (fun ~command_audit:_ ~previous:_ _ ->
+                (fun ?observation:_ ~command_audit:_ ~previous:_ _ ->
                   Int.incr commits;
                   Ok ())
             }
@@ -439,6 +452,7 @@ let%expect_test "history IDs are allocated only from actor-committed blocks" =
             ; schedule_limits = Agent_session.Staged_schedules.default_limits
             ; notification_limits = Agent_session.Staged_notifications.default_limits
             ; ingress_limits = Agent_session.Staged_ingress.default_limits
+            ; goal_descendant_profile
             ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
             ; state_committed = (fun _ _ -> ())
             }
@@ -488,7 +502,9 @@ let%expect_test "durable history source adapts the response engine contract" =
                ~liveness:Process_bound
                ~start_immediately:false)
           ~persistence:
-            { archive_reference; commit = (fun ~command_audit:_ ~previous:_ _ -> Ok ()) }
+            { archive_reference
+            ; commit = (fun ?observation:_ ~command_audit:_ ~previous:_ _ -> Ok ())
+            }
           ~operation_worker:None
           ~services:
             { now = (fun () -> timestamp)
@@ -502,6 +518,7 @@ let%expect_test "durable history source adapts the response engine contract" =
             ; schedule_limits = Agent_session.Staged_schedules.default_limits
             ; notification_limits = Agent_session.Staged_notifications.default_limits
             ; ingress_limits = Agent_session.Staged_ingress.default_limits
+            ; goal_descendant_profile
             ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
             ; state_committed = (fun _ _ -> ())
             }
@@ -598,7 +615,9 @@ let%expect_test "foreground worker commits history before terminal operation" =
                ~liveness:Process_bound
                ~start_immediately:false)
           ~persistence:
-            { archive_reference; commit = (fun ~command_audit:_ ~previous:_ _ -> Ok ()) }
+            { archive_reference
+            ; commit = (fun ?observation:_ ~command_audit:_ ~previous:_ _ -> Ok ())
+            }
           ~operation_worker:(Some (completed_worker ~started ~release:release_worker))
           ~services:
             { now = (fun () -> Agent_protocol.Timestamp.now ())
@@ -609,6 +628,7 @@ let%expect_test "foreground worker commits history before terminal operation" =
             ; schedule_limits = Agent_session.Staged_schedules.default_limits
             ; notification_limits = Agent_session.Staged_notifications.default_limits
             ; ingress_limits = Agent_session.Staged_ingress.default_limits
+            ; goal_descendant_profile
             ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
             ; state_committed = (fun _ _ -> ())
             }
@@ -742,7 +762,9 @@ let%expect_test
                ~liveness:Process_bound
                ~start_immediately:false)
           ~persistence:
-            { archive_reference; commit = (fun ~command_audit:_ ~previous:_ _ -> Ok ()) }
+            { archive_reference
+            ; commit = (fun ?observation:_ ~command_audit:_ ~previous:_ _ -> Ok ())
+            }
           ~operation_worker:(Some worker)
           ~services:
             { now = (fun () -> timestamp)
@@ -753,6 +775,7 @@ let%expect_test
             ; schedule_limits = Agent_session.Staged_schedules.default_limits
             ; notification_limits = Agent_session.Staged_notifications.default_limits
             ; ingress_limits = Agent_session.Staged_ingress.default_limits
+            ; goal_descendant_profile
             ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
             ; state_committed = (fun _ _ -> ())
             }
@@ -819,7 +842,9 @@ let%expect_test
                ~liveness:(Owner_bound { disconnect_grace_ms = 1000; stop_mode = Cancel })
                ~start_immediately:false)
           ~persistence:
-            { archive_reference; commit = (fun ~command_audit:_ ~previous:_ _ -> Ok ()) }
+            { archive_reference
+            ; commit = (fun ?observation:_ ~command_audit:_ ~previous:_ _ -> Ok ())
+            }
           ~operation_worker:None
           ~services:
             { now = (fun () -> !now)
@@ -830,6 +855,7 @@ let%expect_test
             ; schedule_limits = Agent_session.Staged_schedules.default_limits
             ; notification_limits = Agent_session.Staged_notifications.default_limits
             ; ingress_limits = Agent_session.Staged_ingress.default_limits
+            ; goal_descendant_profile
             ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
             ; state_committed = (fun _ _ -> ())
             }
@@ -857,6 +883,7 @@ let%expect_test
           ; result = None
           ; delivery = Pending
           ; launch = None
+          ; inference_origin = None
           ; progress = None
           }
       in
@@ -934,6 +961,7 @@ let%expect_test "unchanged moderator checkpoints publish the actual returned pos
             ; schedule_limits = Agent_session.Staged_schedules.default_limits
             ; notification_limits = Agent_session.Staged_notifications.default_limits
             ; ingress_limits = Agent_session.Staged_ingress.default_limits
+            ; goal_descendant_profile
             ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
             ; state_committed = (fun _ _ -> ())
             }

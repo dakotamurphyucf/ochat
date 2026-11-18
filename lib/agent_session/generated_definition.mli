@@ -91,3 +91,69 @@ val restore
   -> pins:(string * string) list
   -> unit
   -> (t, Chatmd_shell_spec.Diagnostic.t list) result
+
+(** Immutable publication metadata for lawful Linked plain-generated lifetimes.
+    This is separate from the Independent-only Source selection below. *)
+module Metadata_source : sig
+  (** Inert plain-generated publication DATA, independently abstract from Source.t
+      and Generated_definition.t. No manifest alias/conversion to either type.
+      No Program, admission, capabilities, native scope or physical Source view. *)
+  type t
+
+  (** The caller resolves its actual private record and rechecks it around waits.
+      Accept only Linked/unrevoked plain-generated records: authored_tool=None,
+      captured_recurrence=None, with Owned or Independent lifetime. Invocation_owned
+      requires an authored-tool origin in the durable store and is rejected here.
+      Publication DATA supply no lifetime or Invocation execution authority.
+      Uses the SAME full artifact/tree/schema, bounded bundle, generated parser
+      and extension validation as Source.load. No compilation or initialization.
+      Existing IO and cancellation exceptions propagate. *)
+  val load
+    :  ?limits:Chatml_compilation.limits
+    -> ?source_limits:Chatmd_source_bundle.limits
+    -> artifact_store:Agent_store.Prompt_artifact_store.t
+    -> record:Agent_store.Delegation_store.record
+    -> unit
+    -> (t, Chatmd_shell_spec.Diagnostic.t list) result
+
+  val artifact : t -> Agent_store.Prompt_artifact_store.Artifact.t
+  val reference : t -> Agent_store.Delegation_store.Reference.t
+  val capability_pins : t -> (string * string) list
+  val moderator : t -> Agent_protocol.Invocation.observer option
+end
+
+(** Inert immutable generated source DATA for Independent children whose actual
+    parent execution runtime need not be loaded. This is distinct from [t]: no
+    capability registry, executable admission, compiled Program or resource loan
+    can be obtained here. Full [restore] remains mandatory after actual execution
+    admission against the genuine constructed parent registry. *)
+module Source : sig
+  type definition = t
+  type t
+
+  (** Requires a Linked, unrevoked plain-generated Independent record. Checks
+      exact artifact/manifest/full tree, bounded bundle, shared generated syntax
+      and delegated single-file/source-limit contract. Durable pins are retained
+      as DATA only; current private record/parent authority remains the host's
+      duty. Does not compile or initialize code or construct resources. *)
+  val load
+    :  ?limits:Chatml_compilation.limits
+    -> ?source_limits:Chatmd_source_bundle.limits
+    -> artifact_store:Agent_store.Prompt_artifact_store.t
+    -> record:Agent_store.Delegation_store.record
+    -> unit
+    -> (t, Chatmd_shell_spec.Diagnostic.t list) result
+
+  val artifact : t -> Agent_store.Prompt_artifact_store.Artifact.t
+  val reference : t -> Agent_store.Delegation_store.Reference.t
+  val capability_pins : t -> (string * string) list
+  val moderator : t -> Agent_protocol.Invocation.observer option
+
+  (** Before exposing the actual restored executable, compare full artifact
+      identity/content, effective durable pins and the authentic live Registry
+      observer. This checks metadata correspondence, never current permission. *)
+  val check_definition
+    :  t
+    -> definition:definition
+    -> (unit, Agent_protocol.Error.t) result
+end

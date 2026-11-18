@@ -232,6 +232,8 @@ let%expect_test
               ; parent_revision_id = !parent_state.spec.prompt_revision_id
               ; parent_stop_epoch = Some !parent_state.stop_epoch
               ; authored_tool = None
+              ; goal_origin = Some Agent_store.Delegation_goal_origin.unrelated
+              ; captured_recurrence = None
               ; authority_sha256 = Authority.fingerprint !parent_state |> protocol_ok
               ; capability_pins = G.capability_pins definition
               ; lifetime =
@@ -395,6 +397,7 @@ let%expect_test
             ; standalone_execution_limits =
                 Agent_session.Standalone_tool_dispatch.declared_execution_limits
             ; one_off_policy = Chat_response.One_off_request.default_policy
+            ; initial_agent_guidance = None
             ; native_service_revision = None
             ; authoring_validation_host = None
             ; claim_lifecycle =
@@ -489,6 +492,7 @@ let%expect_test
                 ()
             in
             B.build_generated
+              ~construction_checkpoint:None
               ~services
               ~definition
               ~artifact_store
@@ -511,6 +515,7 @@ let%expect_test
               ~permission_profile:profile
               ~inference_context:inference.context
               ~inference_identity:inference.identity
+              ~bind_inference_identity:(fun _ -> inference.identity)
               ~on_inference_attempt:ignore
               ~on_inference_observation:ignore
               ~on_inference_completion:ignore
@@ -520,12 +525,16 @@ let%expect_test
                 ; cancel = (fun ~id:_ -> failwith "unexpected timer")
                 }
               ~job_services:
-                { spawn_model =
-                    (fun ~recipe:_ ~payload:_ -> failwith "unexpected model recipe")
-                ; call_model =
-                    (fun ~recipe:_ ~payload:_ ~execute:_ ->
-                      failwith "unexpected model recipe")
-                }
+                (let initialization : Agent_session.Runtime_model_services.t =
+                   { spawn_model =
+                       (fun ~recipe:_ ~payload:_ -> failwith "unexpected model recipe")
+                   ; call_model =
+                       (fun ~recipe:_ ~payload:_ ~execute:_ ->
+                         failwith "unexpected model recipe")
+                   }
+                 in
+                 Agent_session.Runtime_model_services.
+                   { initialization; for_execution = (fun _ -> initialization) })
           in
           let runtime = build definition |> protocol_ok in
           assert (Int.equal 0 !requests && Int.equal 0 !admitted);
@@ -559,6 +568,11 @@ let%expect_test
                 ; reserved_history_through = Int64.of_int runtime.reserved_history_through
                 }
             }
+          in
+          let initial =
+            initialize_new_unrelated_child
+              initial
+              ~server_id:(Session_store.server_id session_store)
           in
           let child_handle =
             Session_store.create_session
@@ -607,6 +621,7 @@ let%expect_test
                 ; schedule_limits = Agent_session.Staged_schedules.default_limits
                 ; notification_limits = Agent_session.Staged_notifications.default_limits
                 ; ingress_limits = Agent_session.Staged_ingress.default_limits
+                ; goal_descendant_profile
                 ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
                 ; state_committed = (fun _ _ -> ())
                 }
@@ -643,6 +658,9 @@ let%expect_test
                 assert (
                   Result.is_error
                     (runtime.execute_model_job
+                       ~allocate_inference:
+                         Agent_session.Invocation_capabilities.unavailable
+                           .allocate_inference
                        ~inference_context:
                          (B.inference_execution runtime
                           |> Inference_client.Execution.context)
@@ -801,17 +819,19 @@ let%expect_test
                        restored
                      |> protocol_ok
                    in
-                   Exn.protect ~finally:rebuilt.close ~f:(fun () ->
-                     let restored_snapshot =
-                       Chat_response.Moderator_manager.identity_snapshot
-                         (Option.value_exn rebuilt.moderator_manager)
-                       |> Result.ok_or_failwith
-                     in
-                     [%test_eq: Sexp.t]
-                       (Session.Snapshot.sexp_of_t
-                          (Option.value_exn snapshot).current_state)
-                       (Session.Snapshot.sexp_of_t restored_snapshot.current_state);
-                     [%test_eq: int] 2 !requests)
+                   Exn.protect
+                     ~finally:(fun () -> B.close rebuilt)
+                     ~f:(fun () ->
+                       let restored_snapshot =
+                         Chat_response.Moderator_manager.identity_snapshot
+                           (Option.value_exn rebuilt.moderator_manager)
+                         |> Result.ok_or_failwith
+                       in
+                       [%test_eq: Sexp.t]
+                         (Session.Snapshot.sexp_of_t
+                            (Option.value_exn snapshot).current_state)
+                         (Session.Snapshot.sexp_of_t restored_snapshot.current_state);
+                       [%test_eq: int] 2 !requests)
                  | `Plain
                  | `Denied
                  | `Revoked

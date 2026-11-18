@@ -91,48 +91,37 @@ let%expect_test
   let module A = Agent_session.Session_actor in
   let module I = Agent_protocol.Invocation in
   let module E = Agent_protocol.Moderator_execution in
+  let module B = Agent_session.Runtime_builder in
+  let module M = Chat_response.Moderator_manager in
   List.iter
     [ `Continue; `Reload; `Stop; `End; `Obsolete; `Cancel; `Failure; `Interrupted ]
     ~f:(fun mode ->
       with_actor_workspace (fun env workspace_instance ->
         Eio.Switch.run (fun sw ->
           Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 15. (fun () ->
-            let source = String.make 64 'a' in
-            let observer : I.observer =
-              { script_id = "handoff"; source_sha256 = source }
+            let original = Agent_authority_tests.authentication (Atomic.make true) in
+            let native_calls = ref 0 in
+            let registry = native_registry native_calls ~raises:false in
+            let manager, _, _ =
+              handoff_definition env ~capability_registry:registry ~declare_tool:false
             in
-            let parent = invocation_fixture () |> I.dispatch |> protocol_ok in
-            let parent =
-              I.resolve parent ~session_id ~generation:0 (Complete `Null) |> protocol_ok
+            let snapshot = M.identity_snapshot manager |> Result.ok_or_failwith in
+            let observer = M.invocation_observer manager |> Option.value_exn in
+            let encoded = Some (B.encode_moderator_snapshot snapshot) in
+            let requests ?(compact = false) ?end_session () : I.follow_up =
+              { request_turn = Option.is_none end_session
+              ; request_compaction = compact
+              ; end_session
+              }
             in
-            let child id follow_up =
-              I.create
-                ~observer
-                { parent.context with
-                  id = Agent_protocol.Id.Invocation.of_string id |> protocol_ok
-                ; origin = Moderator
-                ; parent_invocation = Some parent.context.id
-                }
-              |> protocol_ok
-              |> I.dispatch
-              |> protocol_ok
-              |> fun child ->
-              I.resolve child ~session_id ~generation:0 (Complete (`String "native"))
-              |> protocol_ok
-              |> I.claim_observation
-              |> protocol_ok
-              |> I.complete_observation ~follow_up
-              |> protocol_ok
-            in
-            let initial =
-              actor_state ~workspace_instance ~liveness:Detached ~start_immediately:false
-            in
-            let event ?(source = observer) id requests =
+            let stale =
               E.create
-                { id = Agent_protocol.Id.Moderator_execution.of_string id |> protocol_ok
+                { id =
+                    Agent_protocol.Id.Moderator_execution.of_string "mex_follow_obsolete"
+                    |> protocol_ok
                 ; session_id
                 ; generation = 0
-                ; source
+                ; source = { observer with source_sha256 = String.make 64 'd' }
                 ; operation_id = None
                 ; job = None
                 ; phase = Internal_event
@@ -141,147 +130,29 @@ let%expect_test
                 ; created_at = timestamp
                 }
               |> protocol_ok
-              |> E.complete ~checkpoint_sha256:(String.make 64 'c') ~requests
+              |> E.complete
+                   ~checkpoint_sha256:(String.make 64 'c')
+                   ~requests:
+                     { request_turn = false
+                     ; request_compaction = false
+                     ; end_session = Some "obsolete stop"
+                     }
               |> protocol_ok
             in
-            let snapshot =
-              { (handoff_snapshot 1) with
-                script_source_hash = source
-              ; halted =
-                  (match mode with
-                   | `End -> true
-                   | _ -> false)
-              ; halted_reason =
-                  (match mode with
-                   | `End -> Some "done"
-                   | _ -> None)
-              }
+            let event_labels = ref [ stale.context.id, "obsolete" ] in
+            let event_label (event : E.t) =
+              List.Assoc.find_exn
+                !event_labels
+                event.context.id
+                ~equal:Agent_protocol.Id.Moderator_execution.equal
             in
-            let initial =
-              { initial with
-                lifecycle = { desired = Running; observed = Idle }
-              ; moderator =
-                  Some (Agent_session.Runtime_builder.encode_moderator_snapshot snapshot)
-              ; moderator_executions =
-                  ([ event
-                       "mex_follow_both"
-                       { request_turn = true
-                       ; request_compaction = true
-                       ; end_session = None
-                       }
-                   ; event
-                       "mex_follow_turn"
-                       { request_turn = true
-                       ; request_compaction = false
-                       ; end_session = None
-                       }
-                   ; event
-                       ~source:{ observer with source_sha256 = String.make 64 'd' }
-                       "mex_follow_obsolete"
-                       { request_turn = false
-                       ; request_compaction = false
-                       ; end_session = Some "obsolete stop"
-                       }
-                   ]
-                   @
-                   match mode with
-                   | `End ->
-                     [ event
-                         "mex_follow_end"
-                         { request_turn = false
-                         ; request_compaction = false
-                         ; end_session = Some "done"
-                         }
-                     ]
-                   | _ -> [])
-              ; invocations =
-                  ((parent
-                    :: [ child
-                           "inv_follow_both"
-                           { request_turn = true
-                           ; request_compaction = true
-                           ; end_session = None
-                           }
-                       ; child
-                           "inv_follow_turn"
-                           { request_turn = true
-                           ; request_compaction = false
-                           ; end_session = None
-                           }
-                       ])
-                   @
-                   match mode with
-                   | `End ->
-                     [ child
-                         "inv_follow_end"
-                         { request_turn = false
-                         ; request_compaction = false
-                         ; end_session = Some "done"
-                         }
-                     ]
-                   | _ -> [])
-              }
-            in
-            let initial =
-              match mode with
-              | `Obsolete ->
-                { initial with
-                  identity = { initial.identity with generation = 1 }
-                ; inference_ledger =
-                    Agent_session.Inference_ledger.with_generation
-                      initial.inference_ledger
-                      ~generation:1
-                    |> Result.map_error ~f:(fun error ->
-                      Sexp.to_string_hum
-                        (Agent_session.Inference_ledger.Error.sexp_of_t error))
-                    |> Result.ok_or_failwith
-                }
-              | `Cancel | `Failure | `Interrupted ->
-                let other =
-                  child
-                    "inv_follow_other"
-                    { request_turn = true; request_compaction = true; end_session = None }
-                  |> I.accept_observation_compaction
-                       ~operation_id:
-                         (Agent_protocol.Id.Operation.of_string "op_previous_compaction"
-                          |> protocol_ok)
-                  |> protocol_ok
-                in
-                let other_event =
-                  event
-                    "mex_follow_other"
-                    { request_turn = true; request_compaction = true; end_session = None }
-                  |> E.accept_compaction
-                       ~operation_id:
-                         (Agent_protocol.Id.Operation.of_string "op_previous_compaction"
-                          |> protocol_ok)
-                  |> protocol_ok
-                in
-                { initial with
-                  invocations = other :: initial.invocations
-                ; moderator_executions = other_event :: initial.moderator_executions
-                }
-              | _ -> initial
-            in
-            let restore (state : Agent_session.Session_state.t) =
-              let state =
-                { state with
-                  Agent_session.Session_state.invocations =
-                    List.map state.invocations ~f:(fun invocation ->
-                      I.of_json (I.to_json invocation) |> protocol_ok)
-                }
-              in
-              restore_state state |> store_ok
-            in
+            let seeds = ref [] in
+            let producer_completed = ref false in
             let starts = ref []
             and model_runs = ref 0
-            and reject = ref true in
-            let reject_completion =
-              ref
-                (match mode with
-                 | `Failure -> true
-                 | _ -> false)
-            in
+            and reject = ref false in
+            let armed = ref false in
+            let reject_completion = ref false in
             let captured_compaction = ref None in
             let cancel_ready, cancel_ready_u = Eio.Promise.create () in
             let create (initial : Agent_session.Session_state.t) =
@@ -292,11 +163,84 @@ let%expect_test
               in
               let persistence = Agent_session.Memory_backend.persistence backend in
               let worker =
-                Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input _ ->
-                  Int.incr model_runs;
+                Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input caps ->
+                  (match !seeds with
+                   | [] -> Int.incr model_runs
+                   | selected ->
+                     seeds := [];
+                     let proof =
+                       caps.original_agent_actor () |> Agent_authority_tests.require_actor
+                     in
+                     Agent_authority_tests.current proof;
+                     let parent =
+                       I.create
+                         { (invocation_fixture ()).context with
+                           id = Agent_protocol.Id.Invocation.create ()
+                         ; tool_name = "follow-up producer"
+                         }
+                       |> protocol_ok
+                     in
+                     caps.with_invocation
+                       ~invocation:parent
+                       (fun ~dispatched:_ ~capabilities:_ ->
+                          List.iter selected ~f:(fun (label, _) ->
+                            let reference =
+                              List.hd_exn
+                                (Chat_response.Tool_capability.references registry)
+                            in
+                            let child =
+                              I.create
+                                ~observer
+                                { parent.context with
+                                  id =
+                                    Agent_protocol.Id.Invocation.of_string
+                                      ("inv_follow_" ^ label)
+                                    |> protocol_ok
+                                ; origin = Moderator
+                                ; parent_invocation = Some parent.context.id
+                                ; tool_name = "read_file"
+                                ; input = `Object []
+                                ; implementation_revision =
+                                    reference.implementation_revision
+                                ; capability_fingerprint =
+                                    Chat_response.Tool_capability.fingerprint registry
+                                }
+                              |> protocol_ok
+                            in
+                            Agent_session.Native_tool_invocation.run_scoped
+                              ~execute:caps.with_invocation
+                              ~registry:(fun () -> registry)
+                              ~reference
+                              ~invocation:child
+                              ~is_halted:(fun () -> false)
+                              ~authorize:(fun _ _ -> Ok ())
+                              ~prepare_output:(fun _ -> Ok (`String "native"))
+                            |> protocol_ok
+                            |> ignore);
+                          Ok (Complete `Null))
+                     |> protocol_ok
+                     |> ignore;
+                     List.iter selected ~f:(fun (label, requests) ->
+                       assert (
+                         caps.with_moderator_event
+                           ~snapshot:(fun () -> Ok snapshot)
+                           ~event:Chat_response.Moderation.Event.Turn_end
+                           (fun ~executing
+                             ~policy_caller:_
+                             ~model_jobs:_
+                             ~allocate_inference:_
+                             ~retirement_reason:_
+                             ~event:_
+                             ~execute:_
+                             ~commit ->
+                              event_labels
+                              := (executing.context.id, label) :: !event_labels;
+                              commit ~snapshot ~requests)
+                         |> protocol_ok));
+                     producer_completed := true);
                   Completed
                     { final_history = input.history
-                    ; moderator_snapshot = initial.moderator
+                    ; moderator_snapshot = encoded
                     ; runtime_requests = []
                     })
               in
@@ -310,7 +254,7 @@ let%expect_test
                   ~persistence:
                     { archive_reference
                     ; commit =
-                        (fun ~command_audit ~previous next ->
+                        (fun ?observation ~command_audit ~previous next ->
                           if !reject
                           then (
                             reject := false;
@@ -327,7 +271,8 @@ let%expect_test
                           then (
                             reject_completion := false;
                             Error (handoff_error "injected compaction checkpoint failure"))
-                          else persistence.commit ~command_audit ~previous next)
+                          else
+                            persistence.commit ?observation ~command_audit ~previous next)
                     }
                   ~operation_worker:(Some worker)
                   ~services:
@@ -340,58 +285,58 @@ let%expect_test
                     ; notification_limits =
                         Agent_session.Staged_notifications.default_limits
                     ; ingress_limits = Agent_session.Staged_ingress.default_limits
+                    ; goal_descendant_profile
                     ; subscription_limits =
                         Agent_session.Staged_subscriptions.default_limits
                     ; state_committed =
                         (fun committed events ->
-                          List.iter events ~f:(fun event ->
-                            match
-                              Agent_protocol.Event.Durable.Payload.of_json
-                                ~kind:event.kind
-                                event.payload
-                              |> protocol_ok
-                            with
-                            | Operation_started operation ->
-                              starts := !starts @ [ operation.kind ];
-                              (match operation.kind with
-                               | Compaction ->
-                                 captured_compaction := Some committed;
-                                 let bound =
-                                   List.find_exn
-                                     committed.invocations
-                                     ~f:(fun invocation ->
-                                       String.equal
-                                         (Agent_protocol.Id.Invocation.to_string
-                                            invocation.context.id)
-                                         "inv_follow_both")
-                                 in
-                                 assert (
-                                   Option.equal
-                                     Agent_protocol.Id.Operation.equal
-                                     (Option.value_exn bound.observation)
-                                       .compaction_operation_id
-                                     (Some operation.id));
-                                 let bound_event =
-                                   List.find_exn
-                                     committed.moderator_executions
-                                     ~f:(fun event ->
-                                       String.equal
-                                         (Agent_protocol.Id.Moderator_execution.to_string
-                                            event.context.id)
-                                         "mex_follow_both")
-                                 in
-                                 assert (
-                                   Option.equal
-                                     Agent_protocol.Id.Operation.equal
-                                     bound_event.compaction_operation_id
-                                     (Some operation.id));
-                                 (match mode with
-                                  | `Cancel ->
-                                    Eio.Promise.resolve cancel_ready_u operation.id;
-                                    Eio.Fiber.yield ()
-                                  | _ -> ())
-                               | _ -> ())
-                            | _ -> ()))
+                          if !armed
+                          then
+                            List.iter events ~f:(fun event ->
+                              match
+                                Agent_protocol.Event.Durable.Payload.of_json
+                                  ~kind:event.kind
+                                  event.payload
+                                |> protocol_ok
+                              with
+                              | Operation_started operation ->
+                                starts := !starts @ [ operation.kind ];
+                                (match operation.kind with
+                                 | Compaction ->
+                                   captured_compaction := Some committed;
+                                   let bound =
+                                     List.find_exn
+                                       committed.invocations
+                                       ~f:(fun invocation ->
+                                         String.equal
+                                           (Agent_protocol.Id.Invocation.to_string
+                                              invocation.context.id)
+                                           "inv_follow_both")
+                                   in
+                                   assert (
+                                     Option.equal
+                                       Agent_protocol.Id.Operation.equal
+                                       (Option.value_exn bound.observation)
+                                         .compaction_operation_id
+                                       (Some operation.id));
+                                   let bound_event =
+                                     List.find_exn
+                                       committed.moderator_executions
+                                       ~f:(fun event ->
+                                         String.equal (event_label event) "both")
+                                   in
+                                   assert (
+                                     Option.equal
+                                       Agent_protocol.Id.Operation.equal
+                                       bound_event.compaction_operation_id
+                                       (Some operation.id));
+                                   (match mode with
+                                    | `Cancel ->
+                                      Eio.Promise.resolve cancel_ready_u operation.id;
+                                      Eio.Fiber.yield ()
+                                    | _ -> ())
+                                 | _ -> ())
+                              | _ -> ()))
                     }
               in
               A.set_runtime_worker
@@ -401,14 +346,176 @@ let%expect_test
               |> protocol_ok;
               actor, backend
             in
-            let actor, backend = create (restore initial) in
+            let initial =
+              { (actor_state
+                   ~workspace_instance
+                   ~liveness:Detached
+                   ~start_immediately:false)
+                with
+                lifecycle = { desired = Running; observed = Idle }
+              ; moderator = encoded
+              ; moderator_executions = [ stale ]
+              }
+            in
+            let actor, backend = create initial in
+            let writer, _ =
+              A.attach actor ~mode:Read_write ~subscribe:false |> protocol_ok
+            in
+            let produce selected =
+              seeds := selected;
+              producer_completed := false;
+              let reservation = A.reserve_history_block actor ~count:1 |> protocol_ok in
+              let entry =
+                Pending_input_tests.occurrence
+                  (Int64.to_int_exn reservation.first_sequence)
+                  "follow-up producer"
+              in
+              let cursor = (A.state actor |> protocol_ok).counters.event_sequence in
+              let submitted =
+                A.submit_message_authenticated
+                  actor
+                  ~actor:original
+                  ~attachment_id:writer.id
+                  entry
+                |> protocol_ok
+              in
+              let operation_id = Option.value_exn submitted.operation_id in
+              await_idle actor |> ignore;
+              assert !producer_completed;
+              assert (
+                List.exists
+                  (Agent_session.Memory_backend.events_after backend cursor |> protocol_ok)
+                  ~f:(fun event ->
+                    match
+                      Agent_protocol.Event.Durable.Payload.of_json
+                        ~kind:event.kind
+                        event.payload
+                      |> protocol_ok
+                    with
+                    | Operation_completed { id; state = Completed; _ } ->
+                      Agent_protocol.Id.Operation.equal id operation_id
+                    | _ -> false));
+              List.iter selected ~f:(fun _ ->
+                assert (
+                  A.with_idle_moderator_observation
+                    actor
+                    ~observer
+                    (fun ~observing ~capabilities ~commit ->
+                       let label, requests =
+                         List.find_exn selected ~f:(fun (label, _) ->
+                           String.equal
+                             ("inv_follow_" ^ label)
+                             (Agent_protocol.Id.Invocation.to_string observing.context.id))
+                       in
+                       ignore label;
+                       let proof =
+                         capabilities.borrow_agent_actor ~invocation:observing
+                         |> Agent_authority_tests.require_actor
+                       in
+                       Agent_authority_tests.current proof;
+                       let resolved =
+                         I.complete_observation observing ~follow_up:requests
+                         |> protocol_ok
+                       in
+                       commit ~resolved ~snapshot)
+                  |> protocol_ok))
+            in
+            (* These are real older accepted requests, not a fabricated operation ID.
+               They remain independent when the next compaction fails/cancels. *)
+            (match mode with
+             | `Cancel | `Failure | `Interrupted ->
+               produce [ "other", requests ~compact:true () ];
+               assert (A.apply_observation_follow_up actor |> protocol_ok);
+               await_idle actor |> ignore
+             | _ -> ());
+            let selected =
+              [ "both", requests ~compact:true (); "turn", requests () ]
+              @
+              match mode with
+              | `End -> [ "end", requests ~end_session:"done" () ]
+              | _ -> []
+            in
+            produce selected;
+            [%test_eq: int]
+              (List.length selected
+               +
+               match mode with
+               | `Cancel | `Failure | `Interrupted -> 1
+               | _ -> 0)
+              !native_calls;
+            (* A stale-source terminal receipt is historical DATA only. It can
+               exercise discard/precedence but cannot authorize a new effect. *)
+            (match mode with
+             | `End ->
+               let state = A.state actor |> protocol_ok in
+               let checkpoint =
+                 Agent_session.Moderator_checkpoint.of_jsonaf
+                   (Option.value_exn state.moderator)
+                 |> protocol_ok
+               in
+               let current = Agent_session.Moderator_checkpoint.snapshot checkpoint in
+               let halted = { current with halted = true; halted_reason = Some "done" } in
+               let checkpoint =
+                 Agent_session.Moderator_checkpoint.update
+                   checkpoint
+                   ~snapshot:halted
+                   ~queue:Keep
+                 |> protocol_ok
+                 |> Agent_session.Moderator_checkpoint.to_jsonaf
+               in
+               A.change_moderator actor (Some checkpoint) |> protocol_ok |> ignore
+             | _ -> ());
+            let restore state = restore_state state |> store_ok in
+            let actor, backend =
+              match mode with
+              | `Obsolete ->
+                let state = A.state actor |> protocol_ok in
+                A.shutdown actor;
+                (* Keep the original receipt DATA for the old-generation rejection
+                   oracle, but retire its source exactly as a generation reset does.
+                   This fixture is not an administrative reset command test. *)
+                let revision = Int64.succ state.counters.revision in
+                let run_state =
+                  Option.map state.run_state ~f:(fun index ->
+                    Agent_session.Run_retirement.replace
+                      index
+                      ~change:(Reset None)
+                      ~session_revision:revision
+                      ~now:state.identity.updated_at
+                    |> protocol_ok)
+                in
+                let state =
+                  { state with
+                    identity = { state.identity with generation = 1 }
+                  ; counters = { state.counters with revision }
+                  ; run_state
+                  ; moderator = None
+                  ; inference_ledger =
+                      Agent_session.Inference_ledger.with_generation
+                        state.inference_ledger
+                        ~generation:1
+                      |> Result.map_error ~f:(fun error ->
+                        Sexp.to_string_hum
+                          (Agent_session.Inference_ledger.Error.sexp_of_t error))
+                      |> Result.ok_or_failwith
+                  }
+                in
+                create (restore state)
+              | _ -> actor, backend
+            in
+            starts := [];
+            model_runs := 0;
+            let compaction_before =
+              (A.state actor |> protocol_ok).conversation.compaction_generation
+            in
+            armed := true;
+            reject := true;
+            (reject_completion
+             := match mode with
+                | `Failure -> true
+                | _ -> false);
             (match mode with
              | `Cancel ->
-               reject := false;
-               let writer, _ =
-                 A.attach actor ~mode:Read_write ~subscribe:false |> protocol_ok
-               in
-               reject := true;
                Eio.Fiber.fork ~sw (fun () ->
                  let operation_id = Eio.Promise.await cancel_ready in
                  A.cancel_operation actor ~attachment_id:writer.id ~operation_id
@@ -418,6 +525,9 @@ let%expect_test
             let before = A.state actor |> protocol_ok in
             assert (Result.is_error (A.apply_moderator_follow_up actor));
             assert_same_session_snapshot before (A.state actor |> protocol_ok);
+            assert_same_session_snapshot
+              before
+              (Agent_session.Memory_backend.state backend);
             assert (List.is_empty !starts && !model_runs = 0);
             assert (A.apply_observation_follow_up actor |> protocol_ok);
             let actor, backend =
@@ -474,28 +584,60 @@ let%expect_test
                    create (restore recovered)
                  | _ -> actor, backend)
             in
-            (match mode with
-             | `Stop ->
-               let writer, _ =
-                 A.attach actor ~mode:Read_write ~subscribe:false |> protocol_ok
-               in
-               A.stop actor ~attachment_id:writer.id ~mode:Cancel |> protocol_ok |> ignore;
-               A.start actor ~attachment_id:writer.id |> protocol_ok |> ignore
-             | `Continue | `Reload | `Cancel | `Failure | `Interrupted ->
-               (* Compaction acceptance retains and coalesces the two requested turns. *)
-               assert (A.apply_observation_follow_up actor |> protocol_ok);
-               ignore (await_idle actor : Agent_session.Session_state.t)
-             | `End | `Obsolete -> ());
-            assert (not (A.apply_observation_follow_up actor |> protocol_ok));
+            let historical_denial =
+              match mode with
+              | `Reload | `Interrupted ->
+                let before = A.state actor |> protocol_ok in
+                (match A.apply_observation_follow_up actor with
+                 | Error failure ->
+                   [%test_eq: Agent_protocol.Error.code] Permission_denied failure.code;
+                   [%test_eq: string]
+                     "observation follow-up admission is unavailable"
+                     failure.message
+                 | Ok _ -> failwith "restored follow-up admitted new work");
+                assert_same_session_snapshot before (A.state actor |> protocol_ok);
+                assert_same_session_snapshot
+                  before
+                  (Agent_session.Memory_backend.state backend);
+                [%test_eq: int] 0 !model_runs;
+                true
+              | `Stop ->
+                A.stop actor ~attachment_id:writer.id ~mode:Cancel
+                |> protocol_ok
+                |> ignore;
+                A.start actor ~attachment_id:writer.id |> protocol_ok |> ignore;
+                false
+              | `Continue | `Cancel | `Failure ->
+                assert (A.apply_observation_follow_up actor |> protocol_ok);
+                await_idle actor |> ignore;
+                false
+              | `End | `Obsolete -> false
+            in
+            if not historical_denial
+            then assert (not (A.apply_observation_follow_up actor |> protocol_ok));
             let state = A.state actor |> protocol_ok in
             [%test_eq: int]
               (match mode with
                | `Continue | `Reload | `Stop -> 1
                | _ -> 0)
-              state.conversation.compaction_generation;
+              (state.conversation.compaction_generation - compaction_before);
             assert_same_session_snapshot
               state
               (Agent_session.Memory_backend.state backend);
+            Agent_authority_tests.current original;
+            let expected_starts =
+              match mode with
+              | `Continue | `Cancel | `Failure ->
+                [ Agent_protocol.Operation.Compaction; Turn Moderator_request ]
+              | `Reload | `Stop | `Interrupted -> [ Compaction ]
+              | `End | `Obsolete -> []
+            in
+            [%test_eq: Agent_protocol.Operation.kind list] expected_starts !starts;
+            [%test_eq: int]
+              (match mode with
+               | `Continue | `Cancel | `Failure -> 1
+               | _ -> 0)
+              !model_runs;
             let receipts =
               List.filter_map state.invocations ~f:(fun invocation ->
                 Option.bind invocation.observation ~f:(fun observation ->
@@ -509,8 +651,10 @@ let%expect_test
             in
             let events =
               List.map state.moderator_executions ~f:(fun event ->
-                assert (E.equal_status event.status (Completed (String.make 64 'c')));
-                ( Agent_protocol.Id.Moderator_execution.to_string event.context.id
+                (match event.E.status with
+                 | Completed _ -> ()
+                 | Running | Failed _ | Interrupted _ -> failwith "event did not complete");
+                ( "mex_follow_" ^ event_label event
                 , (Agent_protocol.Extension_status.moderator_execution event).state ))
               |> List.sort ~compare:(fun (a, _) (b, _) -> String.compare a b)
             in
@@ -529,6 +673,7 @@ let%expect_test
                      : string)
                 ; starts = (!starts : Agent_protocol.Operation.kind list)
                 ; model_runs = (!model_runs : int)
+                ; historical_denial : bool
                 ; receipts : (string * I.follow_up_status) list
                 ; events : (string * string) list
                 }];
@@ -536,7 +681,7 @@ let%expect_test
   [%expect
     {|
     ((mode continue) (starts (Compaction (Turn Moderator_request)))
-     (model_runs 1)
+     (model_runs 1) (historical_denial false)
      (receipts
       ((inv_follow_both
         (Applied_follow_up
@@ -548,19 +693,20 @@ let%expect_test
       ((mex_follow_both completed.applied)
        (mex_follow_obsolete completed.discarded)
        (mex_follow_turn completed.applied))))
-    ((mode reload) (starts (Compaction (Turn Moderator_request))) (model_runs 1)
+    ((mode reload) (starts (Compaction)) (model_runs 0) (historical_denial true)
      (receipts
       ((inv_follow_both
-        (Applied_follow_up
+        (Compaction_accepted_follow_up
          ((request_turn true) (request_compaction true) (end_session ()))))
        (inv_follow_turn
-        (Applied_follow_up
+        (Pending_follow_up
          ((request_turn true) (request_compaction false) (end_session ()))))))
      (events
-      ((mex_follow_both completed.applied)
+      ((mex_follow_both completed.waiting_compaction)
        (mex_follow_obsolete completed.discarded)
-       (mex_follow_turn completed.applied))))
+       (mex_follow_turn completed.pending))))
     ((mode "stop then restart") (starts (Compaction)) (model_runs 0)
+     (historical_denial false)
      (receipts
       ((inv_follow_both
         (Discarded_follow_up
@@ -575,6 +721,7 @@ let%expect_test
        (mex_follow_obsolete completed.discarded)
        (mex_follow_turn completed.discarded))))
     ((mode "end overrides work") (starts ()) (model_runs 0)
+     (historical_denial false)
      (receipts
       ((inv_follow_both
         (Discarded_follow_up
@@ -591,7 +738,7 @@ let%expect_test
       ((mex_follow_both completed.discarded) (mex_follow_end completed.applied)
        (mex_follow_obsolete completed.discarded)
        (mex_follow_turn completed.discarded))))
-    ((mode "old generation") (starts ()) (model_runs 0)
+    ((mode "old generation") (starts ()) (model_runs 0) (historical_denial false)
      (receipts
       ((inv_follow_both
         (Discarded_follow_up
@@ -606,7 +753,7 @@ let%expect_test
        (mex_follow_obsolete completed.discarded)
        (mex_follow_turn completed.discarded))))
     ((mode "compaction cancelled") (starts (Compaction (Turn Moderator_request)))
-     (model_runs 1)
+     (model_runs 1) (historical_denial false)
      (receipts
       ((inv_follow_both
         (Discarded_follow_up
@@ -624,6 +771,7 @@ let%expect_test
        (mex_follow_other completed.applied) (mex_follow_turn completed.applied))))
     ((mode "compaction checkpoint failed")
      (starts (Compaction (Turn Moderator_request))) (model_runs 1)
+     (historical_denial false)
      (receipts
       ((inv_follow_both
         (Discarded_follow_up
@@ -639,23 +787,24 @@ let%expect_test
       ((mex_follow_both completed.discarded)
        (mex_follow_obsolete completed.discarded)
        (mex_follow_other completed.applied) (mex_follow_turn completed.applied))))
-    ((mode "compaction interrupted")
-     (starts (Compaction (Turn Moderator_request))) (model_runs 1)
+    ((mode "compaction interrupted") (starts (Compaction)) (model_runs 0)
+     (historical_denial true)
      (receipts
       ((inv_follow_both
         (Discarded_follow_up
          ((request_turn true) (request_compaction true) (end_session ()))
          "compaction interrupted before durable completion"))
        (inv_follow_other
-        (Applied_follow_up
+        (Compaction_accepted_follow_up
          ((request_turn true) (request_compaction true) (end_session ()))))
        (inv_follow_turn
-        (Applied_follow_up
+        (Pending_follow_up
          ((request_turn true) (request_compaction false) (end_session ()))))))
      (events
       ((mex_follow_both completed.discarded)
        (mex_follow_obsolete completed.discarded)
-       (mex_follow_other completed.applied) (mex_follow_turn completed.applied))))
+       (mex_follow_other completed.waiting_compaction)
+       (mex_follow_turn completed.pending))))
     |}]
 ;;
 
@@ -667,10 +816,12 @@ let%expect_test "runtime owner drains observation batches and applies durable te
   let module B = Agent_session.Runtime_builder in
   List.iter [ false; true ] ~f:(fun tool_calls ->
     let prepared = ref None in
+    let seed_ids = ref [] in
     let native_calls = ref 0
     and nested_calls = ref 0 in
     let registry = native_registry nested_calls ~raises:false in
     with_handoff_actor
+      ~timeout_scope:Per_step
       ~make_worker:(fun env _ ->
         let call =
           {|match p.tool_name with
@@ -719,7 +870,7 @@ let%expect_test "runtime owner drains observation batches and applies durable te
         Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input caps ->
           caps.commit_moderator snapshot |> protocol_ok;
           let parent = invocation_fixture () in
-          caps.with_invocation ~invocation:parent (fun ~dispatched:_ ->
+          caps.with_invocation ~invocation:parent (fun ~dispatched:_ ~capabilities:_ ->
             List.iter (List.range 0 36) ~f:(fun n ->
               let observer =
                 match n with
@@ -737,7 +888,8 @@ let%expect_test "runtime owner drains observation batches and applies durable te
                   }
                 |> protocol_ok
               in
-              caps.with_invocation ~invocation:child (fun ~dispatched:_ ->
+              caps.with_invocation ~invocation:child (fun ~dispatched ~capabilities:_ ->
+                seed_ids := dispatched.I.context.id :: !seed_ids;
                 Int.incr native_calls;
                 Ok (Complete (`String "native result")))
               |> protocol_ok
@@ -751,8 +903,19 @@ let%expect_test "runtime owner drains observation batches and applies durable te
             ; moderator_snapshot = snapshot
             ; runtime_requests = []
             }))
-      (fun _env actor _writer backend ->
-         let initial = await_idle actor in
+      (fun env actor _writer backend ->
+         (* Each poll does durable work and has a separate checkpoint below. Scope
+            the watchdog to each step so their total cost does not decide liveness. *)
+         let with_step_timeout ~step f =
+           match with_handoff_timeout env f with
+           | result -> result
+           | exception Eio.Time.Timeout ->
+             raise_s
+               [%sexp "handoff step timed out", (tool_calls : bool), (step : string)]
+         in
+         let initial =
+           with_step_timeout ~step:"seed invocations" (fun () -> await_idle actor)
+         in
          let manager = Option.value_exn !prepared in
          let snapshot () =
            Some
@@ -789,12 +952,21 @@ let%expect_test "runtime owner drains observation batches and applies durable te
                  failwith "unexpected model turn")
            ; inference_execution = Inference_ports.execution inference
            ; now = Agent_protocol.Timestamp.now
+           ; parse_prepared_input =
+               (fun ~execution:_ ~tracking:_ ->
+                 Error
+                   (Agent_protocol.Error.create
+                      Invalid_state
+                      ~message:"fixture has no held input parser"
+                      ~retryable:false
+                      ()))
            ; parse_user_content = (fun ~id:_ _ -> failwith "unexpected input")
            ; initial_history = []
            ; initial_prompt_entry_count = 0
            ; reserved_history_through = 0
            ; moderator_snapshot = snapshot
            ; moderator_manager = Some manager
+           ; model_recipes = (fun _ -> Core.String.Map.empty)
            ; moderator_tools = []
            ; moderator_script_tools = script_tools
            ; standalone_completion = None
@@ -802,24 +974,48 @@ let%expect_test "runtime owner drains observation batches and applies durable te
            ; idle_notifications = None
            ; automatic_turn_policy = None
            ; check_execution = None
+           ; check_ancestry = None
            ; ancestor_capabilities = None
+           ; retained_ancestor_sources = None
            ; source_lease = Agent_session.Prompt_source_lease.legacy
            ; activity = None
+           ; product_callbacks = None
+           ; unmoderated_source = None
            ; native_runtime = None
            ; moderator_activation = None
+           ; authored_start =
+               (fun () ->
+                 Error
+                   (Agent_protocol.Error.create
+                      Invalid_state
+                      ~message:"fixture has no authored startup"
+                      ~retryable:false
+                      ()))
+           ; runtime_resume =
+               (fun () ->
+                 Error
+                   (Agent_protocol.Error.create
+                      Invalid_state
+                      ~message:"fixture has no runtime resume"
+                      ~retryable:false
+                      ()))
            ; start_moderator = (fun () -> failwith "unexpected startup")
            ; enqueue_internal_event =
                (fun ?prepare:_ _ -> failwith "unexpected external event")
+           ; legacy_events = None
            ; drain_internal_events =
                (fun _ ->
                  Int.incr internal_batches;
                  failwith "v1 owner used legacy event drain")
            ; execute_model_job =
-               (fun ~inference_context:_ ~capture_recipe_target:_ ~recipe:_ ~payload:_ ->
-                 failwith "unexpected model job")
+               (fun ~allocate_inference:_
+                 ~inference_context:_
+                 ~capture_recipe_target:_
+                 ~recipe:_
+                 ~payload:_ -> failwith "unexpected model job")
            ; enqueue_model_job_completion =
                (fun ?prepare:_ _ -> failwith "unexpected completion")
-           ; close = (fun () -> ())
+           ; close = B.Close.legacy (fun () -> ())
            }
          in
          let owner =
@@ -834,18 +1030,21 @@ let%expect_test "runtime owner drains observation batches and applies durable te
            ; queued_internal_events = [ Session.Snapshot.String "wake" ]
            }
          in
-         A.change_moderator actor (Some (B.encode_moderator_snapshot changed_source))
-         |> protocol_ok
-         |> ignore;
-         let changed = A.state actor |> protocol_ok in
-         let stale_source_rejected =
-           Agent_server.Runtime_owner.drain_idle_moderator owner |> Result.is_error
-         in
-         [%test_eq: bool] true stale_source_rejected;
-         assert_same_session_snapshot changed (A.state actor |> protocol_ok);
-         assert_same_session_snapshot changed (Agent_session.Memory_backend.state backend);
-         [%test_eq: int] 0 !nested_calls;
-         A.change_moderator actor initial.moderator |> protocol_ok |> ignore;
+         with_step_timeout ~step:"reject stale moderator" (fun () ->
+           A.change_moderator actor (Some (B.encode_moderator_snapshot changed_source))
+           |> protocol_ok
+           |> ignore;
+           let changed = A.state actor |> protocol_ok in
+           let stale_source_rejected =
+             Agent_server.Runtime_owner.drain_idle_moderator owner |> Result.is_error
+           in
+           [%test_eq: bool] true stale_source_rejected;
+           assert_same_session_snapshot changed (A.state actor |> protocol_ok);
+           assert_same_session_snapshot
+             changed
+             (Agent_session.Memory_backend.state backend);
+           [%test_eq: int] 0 !nested_calls;
+           A.change_moderator actor initial.moderator |> protocol_ok |> ignore);
          let poll () =
            Agent_server.Runtime_owner.drain_idle_moderator owner |> protocol_ok
          in
@@ -857,6 +1056,29 @@ let%expect_test "runtime owner drains observation batches and applies durable te
                  I.equal_observation_status observation.status status))
            in
            assert (Option.is_none state.active_operation);
+           let is_seed id =
+             List.mem !seed_ids id ~equal:Agent_protocol.Id.Invocation.equal
+           in
+           let seeds, generated =
+             List.partition_tf state.invocations ~f:(fun invocation ->
+               is_seed invocation.I.context.id)
+           in
+           let generated =
+             List.filter generated ~f:(fun invocation ->
+               String.equal invocation.I.context.tool_name "read_file"
+               && Option.exists invocation.context.parent_invocation ~f:is_seed)
+           in
+           [%test_eq: int] 36 (List.length seeds);
+           [%test_eq: int] !nested_calls (List.length generated);
+           (* Count actual dispatched seeds and their actual native children,
+              including completions beyond the former private128-slot limit.
+              No successful drain may strand one of these effects Dispatching. *)
+           List.iter (seeds @ generated) ~f:(fun invocation ->
+             match invocation.I.status with
+             | Resolved (Complete _) | Published (Complete _) -> ()
+             | Admitted | Dispatching | Resolved _ | Published _ ->
+               raise_s
+                 [%sexp "native effect lost its completed outcome", (invocation : I.t)]);
            [%test_eq: int] 1 (List.length state.conversation.canonical_history);
            assert_same_session_snapshot state (Agent_session.Memory_backend.state backend);
            print_s
@@ -873,8 +1095,11 @@ let%expect_test "runtime owner drains observation batches and applies durable te
                }]
          in
          List.iter
-           (List.range 0 (if tool_calls then 7 else 3))
-           ~f:(fun _ -> summarize (poll ()))));
+           (List.range 1 (if tool_calls then 8 else 4))
+           ~f:(fun batch ->
+             with_step_timeout
+               ~step:(sprintf "drain observation batch %d" batch)
+               (fun () -> summarize (poll ())))));
   [%expect
     {|
     ((tool_calls false) (more true) (observed 32) (awaiting 4) (desired Running)
@@ -947,8 +1172,8 @@ let%expect_test
           match mode, !rejected with
           | `Save_failure, false
             when List.exists next.state.moderator_executions ~f:(fun event ->
-                   match event.status with
-                   | Completed _ -> true
+                   match event.context.phase, event.status with
+                   | Internal_event, Completed _ -> true
                    | _ -> false) ->
             rejected := true;
             true
@@ -1004,27 +1229,32 @@ let%expect_test
                  | _ -> Task.pure(state) |}
                 )
           in
-          M.handle_event_entries_transactional
-            manager
-            ~session_id:"fixture"
-            ~now_ms:0
-            ~history:[]
-            ~available_tools:[]
-            ~session_meta:`Null
-            ~event:Session_start
-            ~authorize:(fun () -> Ok ())
-            ~on_tool_call:(fun ~name:_ ~args:_ -> assert false)
-            ~prepare_event:(fun ~outcome:_ ~snapshot:_ -> Ok (M.memory_commit ignore))
-          |> Result.ok_or_failwith
-          |> ignore;
+          let empty = M.identity_snapshot manager |> Result.ok_or_failwith in
+          assert (List.is_empty empty.queued_internal_events);
           let snapshot =
-            Some
-              (B.encode_moderator_snapshot
-                 (M.identity_snapshot manager |> Result.ok_or_failwith))
+            Some (Agent_session.Runtime_builder.encode_moderator_snapshot empty)
           in
           prepared := Some manager;
           Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input caps ->
             caps.commit_moderator snapshot |> protocol_ok;
+            let startup =
+              Agent_session.Moderator_event.run_ordinary
+                ~event:Session_start
+                ~claim:(caps.with_moderator_event ~event:Session_start)
+                ~manager
+                ~history:(fun () -> input.history)
+                ~available_tools:[]
+                ~session_meta:`Null
+                ~now:Agent_protocol.Timestamp.now
+                ()
+              |> protocol_ok
+            in
+            assert (Option.is_some startup);
+            let snapshot =
+              Some
+                (Agent_session.Runtime_builder.encode_moderator_snapshot
+                   (M.identity_snapshot manager |> Result.ok_or_failwith))
+            in
             Completed
               { final_history = input.history
               ; moderator_snapshot = snapshot
@@ -1034,6 +1264,34 @@ let%expect_test
            Eio.Switch.run (fun probe_sw ->
              let initial = await_idle actor in
              let manager = Option.value_exn !prepared in
+             let startup =
+               match
+                 List.filter initial.moderator_executions ~f:(fun event ->
+                   Agent_protocol.Moderator_execution.equal_phase
+                     event.context.phase
+                     Session_start)
+               with
+               | [ startup ] -> startup
+               | _ -> failwith "fixture requires one actual Session_start receipt"
+             in
+             (match startup.status with
+              | Completed _ -> ()
+              | Running | Failed _ | Interrupted _ ->
+                failwith "actual fixture Session_start failed");
+             let metadata =
+               assert_moderator_checkpoint
+                 initial
+                 ~snapshot:(M.identity_snapshot manager |> Result.ok_or_failwith)
+               |> Option.value_exn
+             in
+             let entries = Agent_session.Moderator_queue.entries metadata in
+             [%test_eq: int] (if interactive then 1 else 35) (List.length entries);
+             List.iter entries ~f:(fun entry ->
+               match Agent_session.Moderator_queue.Entry.producer entry with
+               | Some (Event actual) ->
+                 assert (
+                   Agent_protocol.Id.Moderator_execution.equal actual startup.context.id)
+               | _ -> failwith "fixture emit lost its actual Session_start producer");
              let release_probe, release_probe_u = Eio.Promise.create () in
              let probed, probed_u = Eio.Promise.create () in
              (on_native
@@ -1166,12 +1424,21 @@ let%expect_test
                      failwith "unexpected model turn")
                ; inference_execution = Inference_ports.execution inference
                ; now = Agent_protocol.Timestamp.now
+               ; parse_prepared_input =
+                   (fun ~execution:_ ~tracking:_ ->
+                     Error
+                       (Agent_protocol.Error.create
+                          Invalid_state
+                          ~message:"fixture has no held input parser"
+                          ~retryable:false
+                          ()))
                ; parse_user_content = (fun ~id:_ _ -> failwith "unexpected input")
                ; initial_history = []
                ; initial_prompt_entry_count = 0
                ; reserved_history_through = 0
                ; moderator_snapshot = (fun () -> initial.moderator)
                ; moderator_manager = Some manager
+               ; model_recipes = (fun _ -> Core.String.Map.empty)
                ; moderator_tools = []
                ; moderator_script_tools = script_tools
                ; standalone_completion = None
@@ -1179,23 +1446,45 @@ let%expect_test
                ; idle_notifications = None
                ; automatic_turn_policy = None
                ; check_execution = None
+               ; check_ancestry = None
                ; ancestor_capabilities = None
+               ; retained_ancestor_sources = None
                ; source_lease = Agent_session.Prompt_source_lease.legacy
                ; activity = None
+               ; product_callbacks = None
+               ; unmoderated_source = None
                ; native_runtime = None
                ; moderator_activation = None
+               ; authored_start =
+                   (fun () ->
+                     Error
+                       (Agent_protocol.Error.create
+                          Invalid_state
+                          ~message:"fixture has no authored startup"
+                          ~retryable:false
+                          ()))
+               ; runtime_resume =
+                   (fun () ->
+                     Error
+                       (Agent_protocol.Error.create
+                          Invalid_state
+                          ~message:"fixture has no runtime resume"
+                          ~retryable:false
+                          ()))
                ; start_moderator = (fun () -> failwith "unexpected startup")
                ; enqueue_internal_event =
                    (fun ?prepare:_ _ -> failwith "unexpected external event")
+               ; legacy_events = None
                ; drain_internal_events = (fun _ -> failwith "legacy event drain used")
                ; execute_model_job =
-                   (fun ~inference_context:_
+                   (fun ~allocate_inference:_
+                     ~inference_context:_
                      ~capture_recipe_target:_
                      ~recipe:_
                      ~payload:_ -> failwith "unexpected model job")
                ; enqueue_model_job_completion =
                    (fun ?prepare:_ _ -> failwith "unexpected completion")
-               ; close = (fun () -> ())
+               ; close = B.Close.legacy (fun () -> ())
                }
              in
              let owner =
@@ -1215,11 +1504,20 @@ let%expect_test
              let summarize result =
                let state = A.state actor |> protocol_ok in
                let snapshot = M.identity_snapshot manager |> Result.ok_or_failwith in
-               assert (
-                 Option.equal
-                   Jsonaf.exactly_equal
-                   state.moderator
-                   (Some (B.encode_moderator_snapshot snapshot)));
+               let metadata = assert_moderator_checkpoint state ~snapshot in
+               let emitted = if interactive then 1 else 35 in
+               let committed =
+                 List.exists state.moderator_executions ~f:(fun event ->
+                   match event.context.phase, event.status with
+                   | Internal_event, Completed _ -> true
+                   | _ -> false)
+               in
+               assert_moderator_queue_frontier
+                 metadata
+                 ~required:committed
+                 ~head:
+                   (Int64.of_int (emitted - List.length snapshot.queued_internal_events))
+                 ~next:(Int64.of_int emitted);
                assert_same_session_snapshot
                  state
                  (Agent_session.Memory_backend.state backend);
@@ -1231,14 +1529,14 @@ let%expect_test
                assert (Option.is_none state.active_operation);
                let completed =
                  List.count state.moderator_executions ~f:(fun event ->
-                   match event.status, event.intent with
-                   | Completed _, (None | Some Applied) -> true
+                   match event.context.phase, event.status, event.intent with
+                   | Internal_event, Completed _, (None | Some Applied) -> true
                    | _ -> false)
                in
                let failed =
                  List.count state.moderator_executions ~f:(fun event ->
-                   match event.status with
-                   | Failed _ | Interrupted _ -> true
+                   match event.context.phase, event.status with
+                   | Internal_event, (Failed _ | Interrupted _) -> true
                    | _ -> false)
                in
                let observed =
@@ -1507,6 +1805,7 @@ let%expect_test
     ((mode Permission_cancel) (result (Ok false)) (calls 0) (authorized 1)
      (completed 0) (failed 1) (observed 1) (queued 1) (state 100)
      (desired Running) (permissions (Cancelled)))
+    +native Invocation cleanup failed: injected invocation save failure
     ((mode Permission_cancel_save) (result (Error failed)) (calls 0)
      (authorized 1) (completed 0) (failed 1) (observed 0) (queued 1) (state 0)
      (desired Running) (permissions (Cancelled)))

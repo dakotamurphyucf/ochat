@@ -14,7 +14,7 @@ module Key = struct
 end
 
 module Admission = struct
-  type authored_tool =
+  type authored_tool = Captured_source_kind.Authored_tool.t =
     { name : string
     ; source_sha256 : string
     }
@@ -35,12 +35,36 @@ module Admission = struct
     ; parent_stop_epoch : int64 option [@sexp.option]
     ; authority_sha256 : string
     ; authored_tool : authored_tool option [@sexp.option]
+    ; goal_origin : Delegation_goal_origin.t option [@sexp.option]
+    ; captured_recurrence : Delegation_captured_origin.t option [@sexp.option]
     ; capability_pins : (string * string) list
     ; lifetime : lifetime
     ; created_at : P.Timestamp.t
     ; inference_target : (Inference.Request.Target.t[@sexp.opaque]) option [@sexp.option]
     }
   [@@deriving equal, sexp]
+
+  let authored_source t =
+    let open Result.Let_syntax in
+    let%bind selected =
+      match t.authored_tool, t.captured_recurrence with
+      | Some _, Some _ ->
+        Error (Store_error.Corrupt "delegation has conflicting source kinds")
+      | Some selector, None -> Ok (Some selector)
+      | None, None -> Ok None
+      | None, Some captured ->
+        (match Delegation_captured_origin.source_kind captured with
+         | Artifact -> Ok None
+         | Authored_tool selector -> Ok (Some selector))
+    in
+    let%map () =
+      Option.value_map selected ~default:(Ok ()) ~f:(fun selector ->
+        Captured_source_kind.Authored_tool.validate selector
+        |> Result.map_error ~f:(fun error ->
+          Store_error.Corrupt (Sexp.to_string_hum (D.Error.sexp_of_t error))))
+    in
+    selected
+  ;;
 end
 
 type stage =
@@ -153,22 +177,19 @@ let validate (record : t) ~limits =
   in
   let authored_valid =
     Option.for_all a.authored_tool ~f:(fun authored ->
-      (not (String.is_empty authored.name))
-      && String.length authored.name <= 1024
-      && (not
-            (String.exists authored.name ~f:(fun c ->
-               Char.to_int c < 32 || Char.equal c '\127')))
-      && sha256 authored.source_sha256)
+      Result.is_ok (Captured_source_kind.Authored_tool.validate authored))
   in
   match
     (not (P.Id.Session.equal record.key.parent_session_id a.child_session_id))
-    && (not (P.Id.Prompt_revision.equal a.parent_revision_id a.revision_id))
+    && ((not (P.Id.Prompt_revision.equal a.parent_revision_id a.revision_id))
+        || Option.is_some a.captured_recurrence)
     && sha256 record.request_sha256
     && sha256 a.manifest_sha256
     && sha256 a.authority_sha256
     && Option.for_all a.parent_stop_epoch ~f:(fun epoch -> Int64.(epoch >= 0L))
     && lifetime_valid
     && authored_valid
+    && (not (Option.is_some a.authored_tool && Option.is_some a.captured_recurrence))
     && (match record.artifact_collection, record.stage, record.revocation with
         | None, _, _ -> true
         | Some Prepared, (Reserved | Artifact_installed), Some _ -> true

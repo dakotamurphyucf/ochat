@@ -34,6 +34,7 @@ type t =
   ; retained_generated : retained_generated option
   ; captured : string String.Map.t option
   ; read_limit : (source -> int) option
+  ; read_checkpoint : (unit -> unit) option
   ; observer : (source -> string -> unit) option
   ; agent_observer : (source -> unit) option
   }
@@ -49,6 +50,7 @@ let filesystem ~root =
   ; retained_generated = None
   ; captured = None
   ; read_limit = None
+  ; read_checkpoint = None
   ; observer = None
   ; agent_observer = None
   }
@@ -97,6 +99,18 @@ let portable_reference reference =
        (String.exists reference ~f:(function
           | '\\' | ':' | '\000' | '\r' | '\n' -> true
           | _ -> false))
+;;
+
+let check_read t = Option.iter t.read_checkpoint ~f:(fun check -> check ())
+
+let with_checkpoint t ~checkpoint =
+  { t with
+    read_checkpoint =
+      Some
+        (fun () ->
+          check_read t;
+          checkpoint ())
+  }
 ;;
 
 let with_read_limit t ~max_bytes =
@@ -217,6 +231,7 @@ let resolve t ~base ~reference =
 ;;
 
 let read_legacy_unbounded t source =
+  check_read t;
   try
     let contents =
       match t.captured with
@@ -247,6 +262,7 @@ let read_legacy_bounded ~max_bytes t source =
     if max_bytes < 0
     then Error "invalid source read bound"
     else (
+      check_read t;
       try
         let contents =
           match t.captured with
@@ -278,7 +294,11 @@ let read_legacy_bounded ~max_bytes t source =
 ;;
 
 let read_generated_retained ~max_bytes t capture source =
-  capture.checkpoint ();
+  let checkpoint () =
+    capture.checkpoint ();
+    check_read t
+  in
+  checkpoint ();
   match Source.Portable_path.create source.relative_path with
   | Error _ -> raise (Generated_error.Raised Generated_error.Invalid_reference)
   | Ok member ->
@@ -299,9 +319,7 @@ let read_generated_retained ~max_bytes t capture source =
         then raise (Generated_error.Raised Limit_exceeded);
         if
           Option.is_some
-            (Source.Portable_path.first_collision
-               (member :: capture.paths)
-               ~checkpoint:capture.checkpoint)
+            (Source.Portable_path.first_collision (member :: capture.paths) ~checkpoint)
         then raise (Generated_error.Raised Generated_error.Invalid_reference);
         let remaining = capture.limits.max_bundle_bytes - capture.bytes in
         let host_maximum = capture.before_import_read ~member in
@@ -313,11 +331,7 @@ let read_generated_retained ~max_bytes t capture source =
             (Int.min capture.limits.max_source_bytes (Int.min remaining host_maximum))
         in
         (match
-           Chatml_local_source.read
-             capture.owner
-             ~member
-             ~max_bytes:maximum
-             ~checkpoint:capture.checkpoint
+           Chatml_local_source.read capture.owner ~member ~max_bytes:maximum ~checkpoint
          with
          | Error error ->
            (match Chatml_local_source.Error.code error with
@@ -326,7 +340,7 @@ let read_generated_retained ~max_bytes t capture source =
               raise (Generated_error.Raised Generated_error.Limit_exceeded)
             | _ -> raise (Generated_error.Raised Generated_error.Source_unavailable))
          | Ok contents ->
-           capture.checkpoint ();
+           checkpoint ();
            capture.on_import_read ~member ~contents;
            capture.sources
            <- Map.set capture.sources ~key:source.relative_path ~data:contents;
@@ -344,7 +358,11 @@ let read_bounded ~max_bytes t source =
    | None ->
      (match t.retained with
       | None -> read_legacy_bounded ~max_bytes t source
-      | Some (owner, checkpoint) ->
+      | Some (owner, parent_checkpoint) ->
+        let checkpoint () =
+          parent_checkpoint ();
+          check_read t
+        in
         let max_bytes =
           Option.value_map t.read_limit ~default:max_bytes ~f:(fun bound ->
             Int.min max_bytes (bound source))

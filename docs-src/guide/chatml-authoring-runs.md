@@ -35,6 +35,12 @@ subscription delivery ID with epoch and creator. A bare schedule or subscription
 ID does not identify a wake. Replacing a source, advancing an attempt or epoch, or
 using another callback's source cannot make an old wake current authority.
 
+Job waits require an owned generic Async Job with an admitted bounded-result
+producer. Model Jobs are outside this wait producer contract: `Run.wait` rejects
+that selection early with nonretryable `Resource_limit`, before admitting the
+wait or retaining delivery. Model completion notifications do not add a Model Wait or
+Model result-artifact publication path.
+
 `Run.finish` takes a JSON run action with `kind` equal to `finish`, a `terminal`
 decision, and `relinquish`, a bounded array of exact owned work occurrences. The
 terminal kinds are `completed`, `failed`, `cancelled`, `limited` and `interrupted`.

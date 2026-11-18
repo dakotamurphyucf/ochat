@@ -20,6 +20,13 @@
     capability-style design makes the functions easy to reason about in a
     concurrent [`Eio`] application.
 
+    The file-tool error handlers and optional index/search fallback handlers in
+    this module preserve [Eio.Cancel.Cancelled] and [Eio.Time.Timeout] with their
+    original backtrace. These handlers do not convert control exceptions into
+    tool text or fallback results. Ordinary errors retain their existing reports
+    or fallbacks. Cancellation does not undo effects already performed. This
+    contract does not extend to exception handling inside lower-level libraries.
+
     {1 Categories}
 
     • Filesystem – {{!val:get_contents}get_contents},

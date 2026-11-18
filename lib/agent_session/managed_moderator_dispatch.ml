@@ -14,6 +14,7 @@ let message result =
 ;;
 
 let create
+      ?model_recipes
       ~definition
       ~manager
       ~history
@@ -21,7 +22,7 @@ let create
       ~session_meta
       ~now
       tools
-      ~execute
+      ~(execute : N.moderator_executor)
       ~native_execute
       ~selected
       ~reference
@@ -44,12 +45,21 @@ let create
       failure := outcome;
       Error "moderator dispatch check failed"
   in
+  let invoke =
+    execute
+      ~snapshot:(fun () ->
+        M.identity_snapshot manager
+        |> Result.map_error ~f:(fun message ->
+          Agent_protocol.Error.create Conflict ~message ~retryable:false ()))
+      ~invocation
+  in
   let result =
-    execute ~invocation (fun ~dispatched ~commit ->
+    invoke (fun ~dispatched ~capabilities ~commit ->
       let authoring_scope =
         Authoring_reference_scope.capture ~invocation_id:dispatched.I.context.id
       in
       N.with_dispatched_scope
+        ~capabilities
         ~execute:native_execute
         ~moderator_execute:execute
         ~selected
@@ -155,6 +165,9 @@ let create
                       ~borrowed
                       (fun on_tool_call ->
                          M.handle_invocation_entries
+                           ?model_recipes:
+                             (Option.map model_recipes ~f:(fun provide ->
+                                provide capabilities.Invocation_capabilities.model_jobs))
                            ?jobs
                            ?subscriptions
                            ?schedules

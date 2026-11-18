@@ -10,14 +10,43 @@ end
 
 type t =
   { run_state_absent : bool
+  ; goal_catalog_absent : bool
+  ; goal_accounts_absent : bool
+  ; delegated_usage_absent : bool
+  ; child_contributions_absent : bool
+  ; goal_descendants_absent : bool
+  ; policy_canonical_usage_absent : bool
+  ; goal_policy_contributions_absent : bool
+  ; instruction_selection_absent : bool
+  ; recurrence_catalog_absent : bool
   ; delivery_bindings : bool Map.M(Delivery_id).t
   }
 
 let authored =
-  { run_state_absent = false; delivery_bindings = Map.empty (module Delivery_id) }
+  { run_state_absent = false
+  ; goal_catalog_absent = false
+  ; goal_accounts_absent = false
+  ; delegated_usage_absent = false
+  ; child_contributions_absent = false
+  ; goal_descendants_absent = false
+  ; policy_canonical_usage_absent = true
+  ; goal_policy_contributions_absent = true
+  ; instruction_selection_absent = false
+  ; recurrence_catalog_absent = false
+  ; delivery_bindings = Map.empty (module Delivery_id)
+  }
 ;;
 
 let run_state_is_absent t = t.run_state_absent
+let goal_catalog_is_absent t = t.goal_catalog_absent
+let goal_accounts_is_absent t = t.goal_accounts_absent
+let delegated_usage_is_absent t = t.delegated_usage_absent
+let child_contributions_is_absent t = t.child_contributions_absent
+let goal_descendants_is_absent t = t.goal_descendants_absent
+let policy_canonical_usage_is_absent t = t.policy_canonical_usage_absent
+let goal_policy_contributions_is_absent t = t.goal_policy_contributions_absent
+let instruction_selection_is_absent t = t.instruction_selection_absent
+let recurrence_catalog_is_absent t = t.recurrence_catalog_absent
 
 let delivery_binding_is_absent t id =
   Option.value (Map.find t.delivery_bindings id) ~default:false
@@ -37,6 +66,51 @@ let of_document document ~limits =
   let payload = D.Document.payload document in
   let run_state_absent =
     match D.Json.field payload ~name:"run_state" with
+    | Absent -> true
+    | Null | Value _ -> false
+  in
+  let goal_catalog_absent =
+    match D.Json.field payload ~name:"goal_catalog" with
+    | Absent -> true
+    | Null | Value _ -> false
+  in
+  let goal_accounts_absent =
+    match D.Json.field payload ~name:"goal_accounts" with
+    | Absent -> true
+    | Null | Value _ -> false
+  in
+  let delegated_usage_absent =
+    match D.Json.field payload ~name:"delegated_usage" with
+    | Absent -> true
+    | Null | Value _ -> false
+  in
+  let child_contributions_absent =
+    match D.Json.field payload ~name:"child_contributions" with
+    | Absent -> true
+    | Null | Value _ -> false
+  in
+  let instruction_selection_absent =
+    match D.Json.field payload ~name:"instruction_selection" with
+    | Absent -> true
+    | Null | Value _ -> false
+  in
+  let goal_descendants_absent =
+    match D.Json.field payload ~name:"goal_descendants" with
+    | Absent -> true
+    | Null | Value _ -> false
+  in
+  let policy_canonical_usage_absent =
+    match D.Json.field payload ~name:"policy_canonical_usage" with
+    | Absent -> true
+    | Null | Value _ -> false
+  in
+  let goal_policy_contributions_absent =
+    match D.Json.field payload ~name:"goal_policy_contributions" with
+    | Absent -> true
+    | Null | Value _ -> false
+  in
+  let recurrence_catalog_absent =
+    match D.Json.field payload ~name:"recurrence_catalog" with
     | Absent -> true
     | Null | Value _ -> false
   in
@@ -74,5 +148,16 @@ let of_document document ~limits =
                ; reason = "duplicate delivery identity in original state"
                }))
   in
-  { run_state_absent; delivery_bindings }
+  { run_state_absent
+  ; goal_catalog_absent
+  ; goal_accounts_absent
+  ; delegated_usage_absent
+  ; child_contributions_absent
+  ; goal_descendants_absent
+  ; policy_canonical_usage_absent
+  ; goal_policy_contributions_absent
+  ; instruction_selection_absent
+  ; recurrence_catalog_absent
+  ; delivery_bindings
+  }
 ;;

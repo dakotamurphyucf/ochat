@@ -17,9 +17,13 @@ let source ~state (job : P.Job.t) =
       ~jobs:state.jobs
       job
   in
-  match job.kind, job.launch with
-  | Async_tool, Some { moderator_source = Some source; _ } -> Ok (Some source)
-  | Async_tool, Some { owner = Invocation id; _ } ->
+  let owner =
+    Option.bind job.launch ~f:(fun launch ->
+      P.Job.Birth_parent.callback_owner launch.owner)
+  in
+  match job.kind, job.launch, owner with
+  | Async_tool, Some { moderator_source = Some source; _ }, _ -> Ok (Some source)
+  | Async_tool, Some _, Some (Invocation id) ->
     let%map invocation =
       List.find state.invocations ~f:(fun invocation ->
         P.Id.Invocation.equal invocation.context.id id)
@@ -28,7 +32,7 @@ let source ~state (job : P.Job.t) =
     in
     Option.map invocation.observation ~f:(fun observation ->
       observation.P.Invocation.observer)
-  | Async_tool, Some { owner = Moderator_event id; _ } ->
+  | Async_tool, Some _, Some (Moderator_event id) ->
     let%map event =
       List.find state.moderator_executions ~f:(fun event ->
         P.Id.Moderator_execution.equal event.context.id id)

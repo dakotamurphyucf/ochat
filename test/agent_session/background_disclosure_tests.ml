@@ -54,10 +54,11 @@ let%expect_test
                  (P.Completion.to_json
                     (Succeeded (`String "PRIVATE-COMPLETION-SENTINEL")))
            ; delivery = Pending
+           ; inference_origin = None
            ; progress = None
            ; launch =
                Some
-                 { owner = Invocation root.context.id
+                 { owner = P.Job.Birth_parent.callback (Invocation root.context.id)
                  ; parent_job = None
                  ; nested_depth = 0
                  ; moderator_source = Some source

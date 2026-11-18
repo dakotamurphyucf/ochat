@@ -15,7 +15,8 @@ type agent_observer = Agent_response_loop.observer =
     Omitted fields inherit account/profile/endpoint/model/settings and actual
     parent relation; no backend or credential resolution occurs here. *)
 val run_agent
-  :  ?history_compaction:bool
+  :  ?checkpoint:(unit -> unit)
+  -> ?history_compaction:bool
   -> ?prompt_dir:Eio.Fs.dir_ty Eio.Path.t
   -> ?session_id:string
   -> ?response_dir:Eio.Fs.dir_ty Eio.Path.t

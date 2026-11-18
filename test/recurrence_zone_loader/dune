@@ -1,0 +1,10 @@
+(library
+ (name recurrence_zone_loader_test)
+ (modules loader_tests)
+ (libraries core cstruct eio eio_main agent_session ochat.recurrence_rules
+  ochat.recurrence_zone_data ochat.chatml_local_source)
+ (inline_tests)
+ (preprocessor_deps
+  ../recurrence_zone_data/fixtures/Australia_Lord_Howe.tzif
+  ../recurrence_zone_data/fixtures/Etc_UTC.tzif)
+ (preprocess (pps ppx_jane ppx_expect ppx_blob)))

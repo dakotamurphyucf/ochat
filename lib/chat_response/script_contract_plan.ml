@@ -172,9 +172,9 @@ let create
         || (!allocation / 32 = allowance && !allocation mod 32 > 0)
       then fail "chatml.program_plan_limit" "Script metadata allocation debit limit"
     in
-    let bytes = Contract.input_bytes contract ~checkpoint:poll ~allocate in
-    debit bytes;
-    let compiler_contract = Contract.fingerprint contract ~checkpoint:poll in
+    let summary = Contract.summarize_identity contract ~checkpoint:poll ~allocate in
+    debit (Contract.Identity_summary.encoded_bytes summary);
+    let compiler_contract = Contract.Identity_summary.fingerprint summary in
     List.iter !rows ~f:(fun previous ->
       poll ();
       if

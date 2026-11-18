@@ -2,6 +2,26 @@
 
 type t
 
+(** Fixed payload profile of this writer's actual Journal, captured at creation.
+    Reading it performs no IO and grants no writer/lifecycle authority. *)
+val max_payload_length : t -> int
+
+(** Negative affinity check only; matching IDs do not prove physical writer
+    ownership. The trusted host must bind its SAME actual canonical writer. *)
+val session_id : t -> Agent_protocol.Id.Session.t
+
+(** Pure domain-owned status. A normal in-flight commit remains Available;
+    uncertain journal/closed writer or joined worker shutdown returns false.
+    Does not authorize another commit or recover uncertain journal counters. *)
+val is_available : t -> bool
+
+(** Pure domain-owned status of an unavailable writer whose worker has not
+    stopped. Available, closed and joined workers return false. This is not a
+    write-outcome or disposal proof: unavailability can also follow validation
+    failure or an acknowledged final transaction sequence. It grants no retry,
+    acknowledgement or resource-release authority. *)
+val requires_recovery : t -> bool
+
 type committed =
   { transaction_sequence : int64
   ; transaction_hash : string

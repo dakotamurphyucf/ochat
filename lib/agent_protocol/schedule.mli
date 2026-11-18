@@ -42,6 +42,10 @@ type t =
   ; ownership : ownership option [@sexp.option]
     (** Owned schedules use a version-2 JSON envelope. Legacy records retain
         their original flat encoding; old readers reject the owned envelope. *)
+  ; inference_provenance : Schedule_provenance.t option [@sexp.option]
+    (** Immutable original source and optional inference origin. Historical
+        absence remains unavailable. Positive evidence uses JSON envelope v4;
+        it grants no execution, cancellation or callback authority. *)
   ; delivery_cancellation : string option [@sexp.option]
     (** Immutable cancellation of an enqueued callback, separate from the retained
         Delivered status/count/time. Present only on owned Delivered records with

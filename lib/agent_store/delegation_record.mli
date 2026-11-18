@@ -12,7 +12,7 @@ module Key : sig
 end
 
 module Admission : sig
-  type authored_tool =
+  type authored_tool = Captured_source_kind.Authored_tool.t =
     { name : string
     ; source_sha256 : string
     }
@@ -33,12 +33,26 @@ module Admission : sig
     ; parent_stop_epoch : int64 option [@sexp.option]
     ; authority_sha256 : string
     ; authored_tool : authored_tool option [@sexp.option]
+    ; goal_origin : Delegation_goal_origin.t option [@sexp.option]
+      (** Immutable inherited Goal DATA. Absence is historical Unknown; positive
+          Unrelated and Associated are explicit runtime birth decisions. *)
+    ; captured_recurrence : Delegation_captured_origin.t option [@sexp.option]
+      (** Immutable lower custody, never permission. Mutually exclusive with
+            [authored_tool]; the upper owner validates its actual domain types.
+            Captured recurrence children may reuse the parent's exact artifact
+            revision. They remain distinct sessions; the factory verifies the
+            captured manifest and reciprocal origin before any creation effect. *)
     ; capability_pins : (string * string) list
     ; lifetime : lifetime
     ; created_at : Agent_protocol.Timestamp.t
     ; inference_target : (Inference.Request.Target.t[@sexp.opaque]) option [@sexp.option]
     }
   [@@deriving equal, sexp]
+
+  (** Immutable metadata only; validates the shared selector and rejects both
+      top-level source fields being present. This does not authenticate a record
+      or resolve its actual live source/resources. *)
+  val authored_source : t -> (authored_tool option, Store_error.t) result
 end
 
 type stage =

@@ -1,0 +1,4 @@
+<system><doc src="builtin:goals"/><doc src="builtin:recurrence"/></system>
+<developer><doc src="builtin:lifecycle"/></developer>
+<user>Explain the next bounded step for my current work and the evidence needed to
+finish it. Use only controls actually supplied in this session.</user>

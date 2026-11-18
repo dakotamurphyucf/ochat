@@ -1,7 +1,7 @@
 (** Pure actor-side run/action composition. No I/O, authorization lookup, provider
     calls or callback execution. The actor establishes live scope/authority and
-    passes a validated prospective state from its actual staged-work delta. New
-    custody is captured even without an authored action. It persists the returned
+    passes its exact actual staged-work delta, projected and validated once by the
+    producer evidence capture helper. New custody is captured even without an authored action. It persists the returned
     delta with its prospective moderator checkpoint and actual event receipt.
 
     An exact completed initial Single_turn callback with no action, owned work
@@ -11,13 +11,51 @@
     explicit session-end disposition remains effective. Workflow is unchanged. *)
 type t
 
+module Lifecycle_selection : sig
+  (** Exact retained Run selection DATA supplied by the Actor's live lifecycle
+      owner. Neither case authenticates a caller or grants execution authority.
+      The Actor must validate the same physical borrow and writer at commit. *)
+  type t =
+    | Authored_start of Agent_protocol.Run.t
+    | Goal_resume of Agent_protocol.Run.t
+end
+
+(** [startup_run], when supplied by the actual actor, is the exact retained Run
+    selected by its live held startup/Init owner. It defers quiescent terminal
+    completion while real input/startup handoff remains pending. This optional
+    pure DATA is not execution authority and must never be decoded as a live
+    hold. Ordinary settlement without that owner remains unchanged. *)
+
+(** [lifecycle_selection] identifies the exact retained Run from the Actor's
+    actual lifecycle borrow. Authored_start retains the held Session_start law.
+    Goal_resume requires a nonterminal Workflow with its immutable Goal episode
+    link, unchanged source installation and actual Session_resume execution.
+    Both exclude operation, Job and delegated contexts. Default generic callback
+    selection remains unchanged. *)
 val prepare
-  :  Session_state.t
+  :  ?lifecycle_selection:Lifecycle_selection.t
+  -> ?startup_run:Agent_protocol.Run.t
+  -> Session_state.t
   -> scope:Run_scope.t
   -> executing:Agent_protocol.Moderator_execution.t
-  -> work_state:Session_state.t
+  -> work_delta:Session_delta.t
   -> owned_work:Agent_protocol.Run_work.t list
   -> action:Agent_protocol.Run_action.t option
+  -> now:Agent_protocol.Timestamp.t
+  -> (t, Agent_protocol.Error.t) result
+
+(** Immediate work admission while the same retained callback is still Running.
+    The actor supplies its exact sequential staged-work delta, containing the
+    actual new occurrences, and commits both children together. Requires nonempty newly owned
+    work; preserves prior terminal evidence and emits no action/terminal receipt.
+    It does not complete the parent callback or change its staged action. *)
+val add_owned_work
+  :  ?lifecycle_selection:Lifecycle_selection.t
+  -> Session_state.t
+  -> scope:Run_scope.t
+  -> executing:Agent_protocol.Moderator_execution.t
+  -> work_delta:Session_delta.t
+  -> owned_work:Agent_protocol.Run_work.t list
   -> now:Agent_protocol.Timestamp.t
   -> (t, Agent_protocol.Error.t) result
 
@@ -27,9 +65,13 @@ val payloads : t -> Agent_protocol.Event.Durable.Payload.t list
 
 (** Join the actual root terminal transaction. Captures immutable owner evidence
     and resolves a pending Finish only after all retained owned work has settled.
-    This never starts another worker or stops the session. *)
+    The same aggregate law is used when an actual Job is the final owned work,
+    so child-before-root and child-after-root orderings agree. Waiting is never
+    bypassed; successful Workflow still requires a pending Finish. This never
+    starts another worker or stops the session. *)
 val settle_operation
-  :  Session_state.t
+  :  ?startup_run:Agent_protocol.Run.t
+  -> Session_state.t
   -> operation_id:Agent_protocol.Id.Operation.t
   -> outcome:Agent_protocol.Run_work.Terminal.outcome
   -> now:Agent_protocol.Timestamp.t
@@ -52,9 +94,14 @@ val fail_callback
 
 (** Pair existing turn admission with only its exact applied handler request or
     bound subscription-delivery wake. Consumes the retained action once and binds
-    the actual operation; unrelated input never resumes a waiting run. *)
+    the actual operation; unrelated input never resumes a waiting run.
+    [work_delta] is the exact companion publication/turn delta committed by the
+    caller, with no Run-index change. Its actual producer evidence joins this
+    same Run revision before wake consumption and Operation ownership. Commit
+    those companion leaves exactly once alongside the returned Run delta. *)
 val admit_turn
-  :  Session_state.t
+  :  ?work_delta:Session_delta.t
+  -> Session_state.t
   -> operation:Agent_protocol.Operation.t
   -> events:Agent_protocol.Moderator_execution.t list
   -> deliveries:Agent_protocol.Delivery.t list

@@ -1,0 +1,20 @@
+<developer>
+Review the release-note handoff for a missing owner or follow-up. Report the
+single most important observation.
+</developer>
+<script id="review_worker" language="chatml" kind="moderator" api="extensibility-v1">
+type state = [ `Ready | `Reviewing | `Finish_staged ]
+let initial_state : state = `Ready
+
+let completed = `Object([
+  {key = "kind"; value = `String("finish")},
+  {key = "terminal"; value = `Object([{key = "kind"; value = `String("completed")}])},
+  {key = "relinquish"; value = `Array([])}])
+
+let on_event ctx state event = match (|state, event|) with
+  | (|`Ready, `Session_start|) ->
+      Task.map(Run.continue(), fun ignored -> `Reviewing)
+  | (|`Reviewing, `Turn_end|) ->
+      Task.map(Run.finish(completed), fun ignored -> `Finish_staged)
+  | _ -> Task.pure(state)
+</script>

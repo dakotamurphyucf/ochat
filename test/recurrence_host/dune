@@ -1,0 +1,6 @@
+(library
+ (name recurrence_host_tests)
+ (libraries core eio eio_main cstruct expect_test_helpers_core ochat.agent_session ochat.agent_server ochat.agent_protocol ochat.chatml_local_source ochat.recurrence_rules)
+ (inline_tests)
+ (preprocessor_deps ../recurrence_zone_data/fixtures/Etc_UTC.tzif)
+ (preprocess (pps ppx_jane ppx_expect ppx_blob)))

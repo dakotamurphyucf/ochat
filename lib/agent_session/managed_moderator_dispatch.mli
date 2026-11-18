@@ -7,7 +7,10 @@ open Core
     only after the moderator commits. All tools belonging to the active manager
     are rejected by the handler's scoped Tool.call bridge before reentrant waits. *)
 val create
-  :  definition:Chat_response.Managed_tool_registry.t
+  :  ?model_recipes:
+       (Model_job_admission.t
+        -> Chat_response.Moderation.Capabilities.model_recipe Core.String.Map.t)
+  -> definition:Chat_response.Managed_tool_registry.t
   -> manager:Chat_response.Moderator_manager.t
   -> history:(unit -> History_entry.t list)
   -> available_tools:Openai.Responses.Request.Tool.t list

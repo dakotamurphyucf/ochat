@@ -96,6 +96,13 @@ module Durable : sig
   (** [to_json t] encodes the parameters of a [session.event] notification. *)
   val to_json : t -> Jsonaf.t
 
+  (** Counts-only selection state on a visible [Session_updated]. Admission checks
+      session identity and exact revision/sequence anchors. No source authority is
+      conveyed. An absent extra preserves a client's prior summary; null is invalid. *)
+  val with_instruction_status : t -> Instruction_status.t -> (t, Error.t) result
+
+  val instruction_status : t -> (Instruction_status.t option, Error.t) result
+
   (** Optional complete status projection on [Session_updated]. Older clients
       ignore this field; an empty list explicitly clears previously held state. *)
   val with_extension_status : t -> Extension_status.t list -> t

@@ -83,6 +83,23 @@ val restore_revision
   -> revision_id:Agent_protocol.Id.Prompt_revision.t
   -> (Prompt_revision.t, Prompt_revision_builder.Diagnostic.t list) result
 
+(** Restore under the same catalog admission, then verify the current retained
+    publication, complete private payloads and materialized files through this
+    catalog's artifact store, including cache hits. The publication digest must
+    equal the original retained revision's digest. Also verify the actual tree
+    held by that revision; return its original parser/program/content custody,
+    without reparsing cached code or reading original authoring files.
+
+    This is source verification, not permission to execute or a filesystem lock.
+    The caller must retain its runtime/source owners and recheck execution
+    authority at admission. Verification failure does not evict or replace the
+    retained revision. Cancellation propagates through the existing store. *)
+val restore_verified_revision
+  :  t
+  -> definition_id:Agent_protocol.Id.Prompt_definition.t
+  -> revision_id:Agent_protocol.Id.Prompt_revision.t
+  -> (Prompt_revision.t, Prompt_revision_builder.Diagnostic.t list) result
+
 module Source_selection : sig
   type t
 

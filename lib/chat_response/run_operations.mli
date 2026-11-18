@@ -6,6 +6,7 @@ open! Core
     decisions before the host checkpoint is persisted. *)
 type handlers =
   { stage : Agent_protocol.Run_action.t -> (int, string) result
+  ; stage_goal_finish : Agent_protocol.Goal_achievement.Intent.t -> (int, string) result
   ; rollback : int -> unit
   }
 

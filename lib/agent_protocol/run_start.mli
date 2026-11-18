@@ -1,14 +1,6 @@
 (** Explicit host-authorized run start; no caller-supplied source/run identity.
     The actor captures current compiled source and current authorization. *)
-module Input : sig
-  type t =
-    | User_submission of Session.Message_content.t
-    | Authored_start
-  [@@deriving sexp]
-
-  val to_json : t -> Jsonaf.t
-  val of_json : Jsonaf.t -> (t, Error.t) result
-end
+module Input = Run_input
 
 type t = private
   { session_id : Id.Session.t
@@ -36,3 +28,14 @@ val create
 
 val to_json : t -> Jsonaf.t
 val of_json : Jsonaf.t -> (t, Error.t) result
+
+(** Durable headless Run admission identity. Transport attachments are separate
+    from this identity, including when a public Goal Start requires a writer. *)
+val headless_request_sha256
+  :  session_id:Id.Session.t
+  -> generation:int
+  -> expected_revision:int64
+  -> mode:Run.Mode.t
+  -> input:Input.t
+  -> key:Idempotency_key.t
+  -> (string, Error.t) result

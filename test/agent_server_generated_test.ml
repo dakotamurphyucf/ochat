@@ -94,6 +94,8 @@ let install_child
     ; parent_revision_id = parent.spec.prompt_revision_id
     ; parent_stop_epoch = Some parent.stop_epoch
     ; authored_tool = None
+    ; goal_origin = None
+    ; captured_recurrence = None
     ; inference_target
     ; authority_sha256 =
         (let moderator =
@@ -556,53 +558,27 @@ let%expect_test
                           parent.id
                         |> Option.value_exn
                       in
-                      let pins =
+                      let prepare_definition ~filename ~inherited source =
                         Owner.with_background_runtime parent_entry.runtime (fun runtime ->
+                          let module C = Chat_response.Tool_capability in
                           let native =
                             Option.value_exn
                               runtime.Agent_session.Runtime_builder.native_runtime
                           in
                           let capabilities =
                             Lazy.force native.capabilities
-                            |> Result.map_error ~f:(fun error ->
-                              error.Chat_response.Tool_capability.message)
+                            |> Result.map_error ~f:(fun error -> error.C.message)
                             |> Result.ok_or_failwith
                           in
                           let selected =
-                            Chat_response.Tool_capability.select
-                              capabilities
-                              ~names:[ "read_file" ]
-                            |> Result.map_error ~f:(fun error ->
-                              error.Chat_response.Tool_capability.message)
-                            |> Result.ok_or_failwith
-                          in
-                          Chat_response.Background_request.capability_pins selected)
-                        |> protocol_ok
-                      in
-                      let parent_state = A.state parent_entry.actor |> protocol_ok in
-                      let bad_definition =
-                        Owner.with_background_runtime parent_entry.runtime (fun runtime ->
-                          let native =
-                            Option.value_exn
-                              runtime.Agent_session.Runtime_builder.native_runtime
-                          in
-                          let capabilities =
-                            Lazy.force native.capabilities
-                            |> Result.map_error ~f:(fun error ->
-                              error.Chat_response.Tool_capability.message)
+                            C.select capabilities ~names:inherited
+                            |> Result.map_error ~f:(fun error -> error.C.message)
                             |> Result.ok_or_failwith
                           in
                           let bundle =
                             Chatmd_source_bundle.create
-                              ~root_file:"bad.chatmd"
-                              ~sources:
-                                [ ( "bad.chatmd"
-                                  , {|<developer>Bad initializer.</developer><script id="bad" language="chatml" kind="moderator" api="extensibility-v1">
-let initial_state = if true then fail("fixture initialization failure") else 0
-let on_event ctx state event = Task.pure(state)
-</script>|}
-                                  )
-                                ]
+                              ~root_file:filename
+                              ~sources:[ filename, source ]
                               ()
                             |> Result.ok_or_failwith
                           in
@@ -612,7 +588,7 @@ let on_event ctx state event = Task.pure(state)
                             ~revision_id:(P.Id.Prompt_revision.create ())
                             ~created_at:(P.Timestamp.now ())
                             ~current_capabilities:(fun () -> capabilities)
-                            ~references:[]
+                            ~references:(C.references selected)
                             bundle
                           |> Result.map_error ~f:(fun errors ->
                             P.Error.invalid_request
@@ -620,17 +596,30 @@ let on_event ctx state event = Task.pure(state)
                                |> String.concat ~sep:"\n")))
                         |> protocol_ok
                       in
-                      let create_bad () =
+                      let create ~start_immediately ~key definition =
                         Agent_server.Session_factory.create_generated_session
-                          ~start_immediately:true
+                          ~start_immediately
                           (Daemon.factory daemon)
                           ~parent_session_id:parent.id
-                          ~idempotency_key:
-                            (P.Idempotency_key.of_string "bad-initial-start"
-                             |> protocol_ok)
+                          ~idempotency_key:(P.Idempotency_key.of_string key |> protocol_ok)
                           ~display_name:None
-                          bad_definition
+                          definition
                         |> protocol_ok
+                      in
+                      let bad_definition =
+                        prepare_definition
+                          ~filename:"bad.chatmd"
+                          ~inherited:[]
+                          {|<developer>Bad initializer.</developer><script id="bad" language="chatml" kind="moderator" api="extensibility-v1">
+let initial_state = if true then fail("fixture initialization failure") else 0
+let on_event ctx state event = Task.pure(state)
+</script>|}
+                      in
+                      let create_bad () =
+                        create
+                          ~start_immediately:true
+                          ~key:"bad-initial-start"
+                          bad_definition
                       in
                       let failed = create_bad () in
                       let failed_state = A.state failed.actor |> protocol_ok in
@@ -667,19 +656,30 @@ let on_event ctx state event = Task.pure(state)
                       H.detach bad |> protocol_ok;
                       [%test_eq: int] 0 !requests;
                       assert (Owner.is_loaded parent_entry.runtime);
-                      let child_id, _ =
-                        install_child
-                          ~env
-                          ~sw
-                          ~daemon
-                          ~parent:parent_state
-                          ~mode:`Valid
-                          ~source:
-                            {|<config model="child-test" reasoning_effort="high"/><developer>Child.</developer><tool type="inherited" name="read_file"/>|}
-                          ~capability_pins:pins
-                          ~pending_initial_start:false
-                          ~revoke:false
+                      let child_definition =
+                        prepare_definition
+                          ~filename:"child.chatmd"
+                          ~inherited:[ "read_file" ]
+                          {|<config model="child-test" reasoning_effort="high"/><developer>Child.</developer><tool type="inherited" name="read_file"/>|}
                       in
+                      let created =
+                        create
+                          ~start_immediately:false
+                          ~key:"inherited-read"
+                          child_definition
+                      in
+                      let state = A.state created.actor |> protocol_ok in
+                      let child_id = state.identity.session_id in
+                      let reference = Option.value_exn state.spec.delegation in
+                      let record =
+                        D.resolve (S.delegations (Daemon.store daemon)) reference
+                        |> store_ok
+                      in
+                      assert (
+                        Option.equal
+                          Agent_store.Delegation_goal_origin.equal
+                          record.admission.goal_origin
+                          (Some Agent_store.Delegation_goal_origin.unrelated));
                       let child =
                         H.attach
                           ~sw
@@ -973,13 +973,119 @@ let%expect_test
           in
           create, prepare
         in
-        let create_child daemon parent_id =
+        let create_child daemon parent_id ~fresh =
           let create, prepare = child_creation daemon parent_id in
           let created = create ~display_name:None (prepare ()) |> protocol_ok in
           let state = A.state created.actor |> protocol_ok in
           assert (P.Session.equal_desired_state state.lifecycle.desired Running);
           assert (not state.pending_initial_start);
+          (* Host management never inherits ambient native Goal attribution. Its
+             real lower admission, parent slot and unpublished child agree. *)
+          let origin = Agent_store.Delegation_goal_origin.unrelated in
+          let reference = Option.value_exn state.spec.delegation in
+          let record =
+            D.resolve (S.delegations (Daemon.store daemon)) reference |> store_ok
+          in
+          assert (
+            Option.equal
+              Agent_store.Delegation_goal_origin.equal
+              record.admission.goal_origin
+              (Some origin));
+          let accounting = Option.value_exn state.goal_descendants in
+          assert (
+            Option.equal
+              Agent_store.Delegation_goal_origin.equal
+              (Agent_session.Goal_descendants.origin accounting)
+              (Some origin));
+          let parent =
+            Agent_server.Session_registry.find (Daemon.registry daemon) parent_id
+            |> Option.value_exn
+          in
+          let parent_before_replay = A.state parent.actor |> protocol_ok in
+          let children = Option.value_exn parent_before_replay.child_contributions in
+          assert (
+            Option.equal
+              Agent_store.Delegation_goal_origin.equal
+              (Agent_session.Child_contributions.origin children ~reference |> protocol_ok)
+              (Some origin));
+          let initial_snapshot =
+            Agent_session.Child_contributions.snapshot children ~reference
+            |> protocol_ok
+            |> Option.value_exn
+          in
+          if fresh
+          then
+            assert (
+              Agent_session.Child_usage_snapshot.Partition.equal
+                (Agent_session.Child_usage_snapshot.own initial_snapshot)
+                Agent_session.Child_usage_snapshot.Partition.empty)
+          else (
+            let retained_snapshot =
+              Agent_session.Child_accounting.snapshot state
+              |> protocol_ok
+              |> Option.value_exn
+            in
+            assert (
+              String.equal
+                (Agent_session.Child_usage_snapshot.digest initial_snapshot)
+                (Agent_session.Child_usage_snapshot.digest retained_snapshot)));
+          assert (
+            Option.value_map
+              (Agent_session.Child_usage_snapshot.goal_scopes initial_snapshot)
+              ~default:false
+              ~f:List.is_empty);
+          (* Fresh activation advances past the pre-Init snapshot; recovery may
+             have already imported the current one. Derive the exact expected
+             disposition and carrier from these actual acknowledged projections. *)
+          let replay_basis = A.state created.actor |> protocol_ok in
+          let replay_snapshot =
+            Agent_session.Child_accounting.snapshot replay_basis
+            |> protocol_ok
+            |> Option.value_exn
+          in
+          let expected_children, disposition =
+            Agent_session.Child_contributions.replace children ~snapshot:replay_snapshot
+            |> protocol_ok
+          in
+          let expected_disposition =
+            let previous_revision =
+              Agent_session.Child_usage_snapshot.revision initial_snapshot
+            in
+            let replay_revision =
+              Agent_session.Child_usage_snapshot.revision replay_snapshot
+            in
+            if Int64.equal replay_revision previous_revision
+            then Agent_session.Child_contributions.Duplicate
+            else (
+              assert (Int64.(replay_revision > previous_revision));
+              Replaced)
+          in
+          assert (
+            Agent_session.Child_contributions.equal_disposition
+              disposition
+              expected_disposition);
           let repeated = create ~display_name:None (prepare ()) |> protocol_ok in
+          let parent_after_replay = A.state parent.actor |> protocol_ok in
+          let replay_children =
+            Option.value_exn parent_after_replay.child_contributions
+          in
+          assert (
+            List.equal
+              D.Reference.equal
+              (Agent_session.Child_contributions.references children)
+              (Agent_session.Child_contributions.references replay_children));
+          assert (
+            Option.equal
+              Agent_store.Delegation_goal_origin.equal
+              (Agent_session.Child_contributions.origin replay_children ~reference
+               |> protocol_ok)
+              (Some origin));
+          assert (
+            Document_schema.Json.equal
+              (Agent_session.Child_contributions.to_jsonaf expected_children
+               |> protocol_ok)
+              (Agent_session.Child_contributions.to_jsonaf replay_children |> protocol_ok));
+          assert (phys_equal created.actor repeated.actor);
           assert (
             P.Id.Session.equal
               state.identity.session_id
@@ -1003,6 +1109,27 @@ let%expect_test
                    ~substring:"Root.")));
           state.identity.session_id
         in
+        (* Disabling delegation must still allow an ordinary root actor to be
+           materialized under the actual zero-depth Factory host profile. *)
+        Eio.Switch.run (fun sw ->
+          let daemon = start sw 0 |> protocol_ok in
+          Exn.protect
+            ~finally:(fun () -> Daemon.shutdown daemon |> protocol_ok)
+            ~f:(fun () ->
+              let client = connection daemon (principal ()) in
+              Exn.protect
+                ~finally:(fun () -> Agent_client.Connection.close client)
+                ~f:(fun () ->
+                  initialize client;
+                  let parent, _ = create_session ~key:"zero-depth-root" client in
+                  let entry =
+                    Agent_server.Session_registry.find (Daemon.registry daemon) parent.id
+                    |> Option.value_exn
+                  in
+                  let state = A.state entry.actor |> protocol_ok in
+                  assert (P.Id.Session.equal parent.id state.identity.session_id);
+                  assert (Option.is_none state.spec.delegation);
+                  [%test_eq: int] 0 !requests)));
         let root_id, child_id, leaf_id =
           Eio.Switch.run (fun sw ->
             let daemon = start sw 2 |> protocol_ok in
@@ -1016,7 +1143,7 @@ let%expect_test
                     initialize client;
                     let parent, _ = create_session ~start_immediately:true client in
                     let make_child parent_id =
-                      let id = create_child daemon parent_id in
+                      let id = create_child daemon parent_id ~fresh:true in
                       let handle =
                         H.attach
                           ~sw
@@ -1068,8 +1195,10 @@ let%expect_test
             Exn.protect
               ~finally:(fun () -> Daemon.shutdown daemon |> protocol_ok)
               ~f:(fun () ->
-                assert (P.Id.Session.equal child_id (create_child daemon root_id));
-                assert (P.Id.Session.equal leaf_id (create_child daemon child_id));
+                assert (
+                  P.Id.Session.equal child_id (create_child daemon root_id ~fresh:false));
+                assert (
+                  P.Id.Session.equal leaf_id (create_child daemon child_id ~fresh:false));
                 List.iter [ root_id; child_id; leaf_id ] ~f:(fun id ->
                   let entry =
                     Agent_server.Session_registry.find (Daemon.registry daemon) id
@@ -1084,7 +1213,7 @@ let%expect_test
                 let previous =
                   Agent_server.Session_registry.find registry leaf_id |> Option.value_exn
                 in
-                previous.close ();
+                Agent_server.Session_registry.close_entry previous;
                 ignore
                   (Agent_server.Session_registry.remove registry leaf_id
                    : Agent_server.Session_registry.entry option);
@@ -1169,7 +1298,7 @@ let%expect_test
                      | 2 ->
                        H.stop handle ~mode:Cancel |> protocol_ok |> ignore;
                        H.detach handle |> protocol_ok;
-                       entry.close ();
+                       Agent_server.Session_registry.close_entry entry;
                        ignore
                          (Agent_server.Session_registry.remove registry leaf_id
                           : Agent_server.Session_registry.entry option);
@@ -1183,7 +1312,7 @@ let%expect_test
                        unavailable ();
                        S.remove_session (Daemon.store daemon) leaf_id |> store_ok;
                        unavailable ();
-                       assert (List.length (S.list_sessions (Daemon.store daemon)) = 2)
+                       assert (List.length (S.list_sessions (Daemon.store daemon)) = 3)
                      | _ -> H.detach handle |> protocol_ok);
                     print_s
                       [%sexp

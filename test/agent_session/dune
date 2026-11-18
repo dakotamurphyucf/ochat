@@ -1,13 +1,57 @@
+(copy_files ../../lib/agent_session/session_commit_attempt.ml)
+(copy_files ../../lib/agent_session/session_commit_attempt.mli)
+(library
+ (name session_commit_attempt_test_support)
+ (modules session_commit_attempt)
+ (libraries core ochat.agent_session ochat.agent_protocol)
+ (flags (:standard -open Agent_session))
+ (preprocess (pps ppx_jane)))
+
+(copy_files ../../lib/agent_session/goal_root_policy.ml)
+(copy_files ../../lib/agent_session/goal_root_policy.mli)
+(library
+ (name goal_root_policy_test_support)
+ (modules goal_root_policy)
+ (libraries core ochat.agent_session ochat.agent_protocol)
+ (flags (:standard -open Agent_session))
+ (preprocess (pps ppx_jane)))
+
 (library
  (name agent_session_test)
  (modules
+  delegated_caller_test_support
+  model_job_event_tests
+  session_recovery_cpu_tests
+  session_commit_attempt_tests
+  delegated_usage_persistence_tests
   fixtures
+  native_goal_action_conversion_tests
+  native_goal_action_physical_recovery_tests
   inference_ports
   document_adoption_tests
   decode_evidence_tests
   run_state_tests
   run_replacement_tests
   run_admission_tests
+  turn_admission_staging_tests
+  run_schedule_settlement_tests
+  run_producer_settlement_tests
+  headless_run_tests
+  goal_catalog_tests
+  goal_accounting_persistence_tests
+  goal_accounting_state_tests
+  goal_accounting_bootstrap_tests
+  goal_policy_transition_tests
+  descendant_depth_state_tests
+  descendant_physical_recovery_tests
+  instruction_selection_tests
+  instruction_selection_persistence_tests
+  instruction_clear_capacity_tests
+  goal_run_tests
+  goal_root_policy_tests
+  goal_control_transition_tests
+  goal_work_attribution_tests
+  run_terminal_capacity_tests
   run_subscription_wake_tests
   run_persistence_tests
   run_job_delivery_tests
@@ -18,6 +62,8 @@
   inference_tracking_tests
   inference_transition_tests
   actor_tests
+  owner_termination_tests
+  cleanup_launch_tests
   activity_control_tests
   metadata_tests
   organization_tests
@@ -32,6 +78,7 @@
   managed_output_page_tests
   durable_event_wait_tests
   borrowed_execution_tests
+  agent_authority_tests
   background_execution_tests
   queued_source_tests
   queued_child_tests
@@ -56,11 +103,21 @@
   job_execution_tests
   job_delivery_tests
   job_fixtures
+  job_inference_provenance_tests
+  invocation_inference_provenance_tests
+  invocation_inference_persistence_tests
+  moderator_queue_tests
+  moderator_queue_persistence_tests
+  moderator_checkpoint_tests
+  queue_retirement_tests
+  job_inference_persistence_tests
   job_dependency_tests
   subscription_dependency_tests
   subscription_expiry_tests
   schedule_transaction_tests
   timer_delivery_tests
+  creator_custody_support
+  creator_custody_tests
   extension_stop_tests
   extension_clock_tests
   timer_range_tests
@@ -120,6 +177,8 @@
   subscription_transaction_tests
   moderator_descendant_tests
   moderator_lifecycle_tests
+  moderator_lifecycle_evidence_tests
+  policy_restore_basis_tests
   moderator_native_calls_tests
   moderator_routing_tests
   native_result_tests
@@ -144,7 +203,7 @@
   standalone_tests
   root_invocation_tests
   state_tests)
- (libraries agent_server_test_support developer_root_owner_test_suite developer_run_store_test_suite inference_fixture ochat.transcript core eio eio_main mirage-crypto-rng.unix ochat.agent_session ochat.agent_server ochat.agent_store)
+ (libraries session_commit_attempt_test_support goal_root_policy_test_support agent_server_test_support developer_root_owner_test_suite developer_run_store_test_suite inference_fixture ochat.transcript core eio eio_main mirage-crypto-rng.unix ochat.agent_session ochat.instruction_content ochat.agent_server ochat.agent_store)
  (inline_tests)
  (preprocess
   (pps ppx_jane ppx_expect)))

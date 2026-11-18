@@ -36,10 +36,15 @@ type t =
   { issuer : Project_source_host.Identity.t
   ; grants : grant list
   ; selections : selection list
+  ; instruction_roots : (int * Instruction_content.Root_id.t) list
   }
 
 let issued_by t host =
   Project_source_host.Identity.equal t.issuer (Project_source_host.identity host)
+;;
+
+let instruction_root t ~root =
+  List.Assoc.find t.instruction_roots (Sources.Root.index root) ~equal:Int.equal
 ;;
 
 let selection_request = function
@@ -167,7 +172,22 @@ let bind
           { index; project; request; contract })
         |> Result.all
       in
-      { issuer = Project_source_host.identity host; grants; selections }
+      let instruction_roots =
+        List.mapi roots ~f:(fun index (name, _) ->
+          let digest =
+            Digestif.SHA256.(
+              digest_string ("ochat-instruction-root-v1\000" ^ name) |> to_hex)
+          in
+          let id =
+            Instruction_content.Root_id.of_string ("root-" ^ digest) |> Or_error.ok_exn
+          in
+          index, id)
+      in
+      { issuer = Project_source_host.identity host
+      ; grants
+      ; selections
+      ; instruction_roots
+      }
     in
     let bounded () =
       match

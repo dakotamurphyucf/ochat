@@ -296,6 +296,12 @@ let apply_event t event =
   let fields =
     Option.value_map event.extension_status ~default:fields ~f:(fun extension_status ->
       { fields with extension_status })
+    |> fun (fields : Public.Snapshot.Fields.t) ->
+    Option.value_map
+      event.instruction_status
+      ~default:fields
+      ~f:(fun instruction_status ->
+        { fields with instruction_status = Some instruction_status })
     |> fun fields -> advance fields event
   in
   let%bind live =

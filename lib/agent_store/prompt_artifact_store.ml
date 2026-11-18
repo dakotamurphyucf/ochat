@@ -110,9 +110,19 @@ module Artifact = struct
     Manifest.equal (manifest a) { (manifest b) with created_at = a.created_at }
   ;;
 
-  let check_payload_budget ~root_chatmd ~sources ~program_bundle ~content_bundle =
+  let check_inventory_budget ~root_chatmd ~sources ~program_payloads ~content_payloads =
     let module B = Program_bundle in
     let open Result.Let_syntax in
+    let invalid () =
+      Error
+        (Store_error.Document
+           (Document_schema.Error.Limit_exceeded "prompt source inventory"))
+    in
+    let charge (count, bytes) length =
+      if count >= B.max_payload_count || length > B.max_payload_bytes - bytes
+      then invalid ()
+      else Ok (count + 1, bytes + length)
+    in
     let%bind () =
       if String.length root_chatmd > B.max_payload_bytes
       then
@@ -120,40 +130,51 @@ module Artifact = struct
           (Store_error.Document (Document_schema.Error.Limit_exceeded "root prompt bytes"))
       else Ok ()
     in
-    let invalid () =
-      Error
-        (Store_error.Document
-           (Document_schema.Error.Limit_exceeded "prompt source inventory"))
+    let%bind initial = charge (0, 0) (String.length root_chatmd) in
+    let%bind total =
+      List.fold_result sources ~init:initial ~f:(fun total source ->
+        charge total (String.length source.Source.contents))
     in
-    let%bind initial_count, initial_bytes =
-      List.fold_result
-        [ program_bundle; content_bundle ]
-        ~init:(1, String.length root_chatmd)
-        ~f:(fun (count, bytes) bundle ->
-          match bundle with
-          | None -> Ok (count, bytes)
-          | Some bundle ->
-            let manifest = B.manifest bundle in
-            let additional_count = List.length (B.Manifest.payloads manifest) in
-            let additional_bytes = B.Manifest.payload_bytes manifest in
-            if
-              additional_count > B.max_payload_count - count
-              || additional_bytes > B.max_payload_bytes - bytes
-            then invalid ()
-            else Ok (count + additional_count, bytes + additional_bytes))
+    List.fold_result
+      [ program_payloads; content_payloads ]
+      ~init:total
+      ~f:(fun total pool ->
+        List.fold_result pool ~init:total ~f:(fun total payload ->
+          charge total (B.Payload.byte_length payload)))
+    |> Result.map ~f:(fun _ -> ())
+  ;;
+
+  let check_payload_budget ~root_chatmd ~sources ~program_bundle ~content_bundle =
+    check_inventory_budget
+      ~root_chatmd
+      ~sources
+      ~program_payloads:
+        (Option.value_map program_bundle ~default:[] ~f:Program_bundle.payloads)
+      ~content_payloads:
+        (Option.value_map content_bundle ~default:[] ~f:Program_bundle.payloads)
+  ;;
+
+  let restore ~publication ~root_chatmd ~sources ~program_payloads ~content_payloads =
+    let open Result.Let_syntax in
+    let%bind () =
+      check_inventory_budget
+        ~root_chatmd
+        ~sources
+        ~program_payloads:(Option.value program_payloads ~default:[])
+        ~content_payloads:(Option.value content_payloads ~default:[])
     in
-    if initial_count > B.max_payload_count || initial_bytes > B.max_payload_bytes
-    then invalid ()
-    else
-      List.fold_result
-        sources
-        ~init:(initial_count, initial_bytes)
-        ~f:(fun (count, bytes) source ->
-          let length = String.length source.Source.contents in
-          if count >= B.max_payload_count || length > B.max_payload_bytes - bytes
-          then invalid ()
-          else Ok (count + 1, bytes + length))
-      |> Result.map ~f:(fun _ -> ())
+    let known = Prompt_manifest_document.value (Publication.document publication) in
+    let bundle expected actual =
+      match expected, actual with
+      | None, None -> Ok None
+      | Some manifest, Some payloads ->
+        Result.map (Program_bundle.restore manifest payloads) ~f:Option.some
+      | None, Some _ | Some _, None ->
+        Error (Store_error.Corrupt "private payload presence differs from manifest")
+    in
+    let%bind program_bundle = bundle known.program_bundle program_payloads in
+    let%bind content_bundle = bundle known.content_bundle content_payloads in
+    of_publication publication ~root_chatmd ~sources ~program_bundle ~content_bundle
   ;;
 
   let create
@@ -398,7 +419,7 @@ let rec remove_staging t path =
   | _ -> raise_s [%sexp "invalid private prompt cleanup entry", (path : string)]
 ;;
 
-let install t ~transaction_id artifact =
+let install ?(before_publish = fun () -> ()) t ~transaction_id artifact =
   let open Result.Let_syntax in
   let%bind () = validate_artifact artifact in
   let destination = revision_directory t artifact.Artifact.revision_id in
@@ -417,13 +438,33 @@ let install t ~transaction_id artifact =
           try remove_staging t staging with
           | _ -> ())
     in
+    let install_io f =
+      try f () with
+      | (Eio.Io _ | Core_unix.Unix_error _) as exn ->
+        Error
+          (Store_error.of_exn ~operation:"install prompt artifact" ~path:destination exn)
+    in
     let perform () =
-      Eio.Path.mkdir ~perm:0o700 (eio_path t staging);
-      created := true;
-      install_files t staging artifact;
-      let%bind () = sync_staging t staging in
-      Eio.Path.rename (eio_path t staging) (eio_path t destination);
-      Durable_file.sync_directory ~env:t.env ~path:t.root
+      let%bind () =
+        install_io (fun () ->
+          Eio.Cancel.protect (fun () ->
+            Eio.Path.mkdir ~perm:0o700 (eio_path t staging);
+            created := true);
+          install_files t staging artifact;
+          sync_staging t staging)
+      in
+      Eio.Fiber.check ();
+      let%bind () =
+        Eio.Cancel.protect (fun () ->
+          (* The caller's synchronous check is outside IO classification: even
+             an IO-shaped callback exception must retain its original identity. *)
+          before_publish ();
+          install_io (fun () ->
+            Eio.Path.rename (eio_path t staging) (eio_path t destination);
+            created := false;
+            Ok ()))
+      in
+      install_io (fun () -> Durable_file.sync_directory ~env:t.env ~path:t.root)
     in
     (try
        match perform () with
@@ -432,10 +473,6 @@ let install t ~transaction_id artifact =
          cleanup ();
          Error failure
      with
-     | (Eio.Io _ | Core_unix.Unix_error _) as exn ->
-       cleanup ();
-       Error
-         (Store_error.of_exn ~operation:"install prompt artifact" ~path:destination exn)
      | exn ->
        let backtrace = Stdlib.Printexc.get_raw_backtrace () in
        cleanup ();
@@ -715,7 +752,7 @@ let install_or_reuse t ~transaction_id candidate ~checkpoint =
   | `Directory -> verified_retained ()
   | `Not_found ->
     checkpoint ();
-    (match install t ~transaction_id candidate with
+    (match install ~before_publish:checkpoint t ~transaction_id candidate with
      | Ok () -> verified_retained ()
      | Error original ->
        (* A competing publisher, or uncertainty after our rename, is resolved

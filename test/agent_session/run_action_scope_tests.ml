@@ -50,6 +50,62 @@ let service () =
 
 let string_get = Result.ok_or_failwith
 
+let%expect_test "goal finish shares sealed Run staging and Catch rollback ownership" =
+  let action : P.Run_action.t = Finish { terminal = Completed None; relinquish = [] } in
+  let intent =
+    P.Goal_achievement.Intent.create
+      ~expected_goal_revision:7L
+      ~evidence:(P.Goal.Reason.of_string "Checked evidence" |> get)
+      ~action
+    |> get
+  in
+  assert (
+    P.Goal_achievement.Intent.equal
+      intent
+      (P.Goal_achievement.Intent.to_json intent
+       |> P.Goal_achievement.Intent.of_json
+       |> get));
+  let owner = service () in
+  let transaction = A.Run_action_service.transaction owner in
+  let ordinary = transaction.handlers.stage action |> string_get in
+  let goal = transaction.handlers.stage_goal_finish intent |> string_get in
+  transaction.handlers.rollback goal;
+  ignore (transaction.prepare [ ordinary ] |> string_get : P.Run_action.t option);
+  assert (Option.is_none (A.Run_action_service.prepared_goal_finish owner |> string_get));
+  let selected = service () in
+  let transaction = A.Run_action_service.transaction selected in
+  let goal = transaction.handlers.stage_goal_finish intent |> string_get in
+  ignore (transaction.prepare [ goal ] |> string_get : P.Run_action.t option);
+  assert (
+    Option.equal
+      P.Goal_achievement.Intent.equal
+      (A.Run_action_service.prepared_goal_finish selected |> string_get)
+      (Some intent));
+  transaction.handlers.rollback goal;
+  assert (Result.is_error (A.Run_action_service.prepared_goal_finish selected));
+  let duplicate = service () in
+  let transaction = A.Run_action_service.transaction duplicate in
+  let first = transaction.handlers.stage_goal_finish intent |> string_get in
+  let second = transaction.handlers.stage_goal_finish intent |> string_get in
+  assert (Result.is_error (transaction.prepare [ first; second ]));
+  let ordinary name : L.eff = { op = name; args = [] } in
+  let goal_effect : L.eff =
+    { op = "Goal.finish"; args = [ VVariant ("Run_receipt", [ VInt 7; VUnit ]); VUnit ] }
+  in
+  let receipts, effects =
+    Chat_response.Run_operations.split_actions
+      [ ordinary "before"; goal_effect; ordinary "after" ]
+    |> string_get
+  in
+  [%test_eq: int list] receipts [ 7 ];
+  [%test_eq: string list]
+    (List.map effects ~f:(fun operation -> operation.L.op))
+    [ "before"; "after" ];
+  A.Run_action_service.close owner;
+  print_endline "one goal intent; same receipt custody; rollback seals nothing durable";
+  [%expect {| one goal intent; same receipt custody; rollback seals nothing durable |}]
+;;
+
 let%expect_test "run staging rejects foreign rollback stale prepared and closed actions" =
   let first = service () in
   let other = service () in
@@ -231,4 +287,69 @@ let%expect_test "sealed run action composes with actual runtime requests" =
     ((continued ((request_turn true) (request_compaction true) (end_session ())))
      (turn_rejected true) (stop_preserved true) (continue_stop_rejected true))
     |}]
+;;
+
+let%expect_test "immediate work basis advances only once after acknowledgement" =
+  let owner = service () in
+  let scope = A.Run_action_service.scope owner in
+  let transaction = A.Run_action_service.transaction owner in
+  let receipt = transaction.handlers.stage Continue |> string_get in
+  let next =
+    P.Run.create
+      ~id:run.id
+      ~session:run.session
+      ~principal_id:run.principal_id
+      ~source:run.source
+      ~mode:run.mode
+      ~lifecycle:run.lifecycle
+      ~revision:2L
+      ~owned_work:run.owned_work
+      ~relinquished_work:run.relinquished_work
+      ~terminal_work:run.terminal_work
+      ~created_at:run.created_at
+      ~updated_at:run.updated_at
+    |> get
+  in
+  let prepare () =
+    A.Run_scope.Host.prepare_advance
+      scope
+      ~previous:run
+      ~next
+      ~execution_id:(A.Run_scope.execution_id scope)
+    |> get
+  in
+  let discarded_on_failed_save = prepare () in
+  ignore discarded_on_failed_save;
+  [%test_eq: int64] (A.Run_scope.revision scope) 1L;
+  let acknowledged = prepare () in
+  A.Run_scope.Host.acknowledge_advance acknowledged |> get;
+  [%test_eq: int64] (A.Run_scope.revision scope) 2L;
+  assert (Result.is_error (A.Run_scope.Host.acknowledge_advance acknowledged));
+  assert (Result.is_error (A.Run_scope.Host.acknowledge_advance discarded_on_failed_save));
+  assert (
+    Result.is_error
+      (A.Run_scope.Host.prepare_advance
+         scope
+         ~previous:run
+         ~next
+         ~execution_id:(A.Run_scope.execution_id scope)));
+  ignore (transaction.prepare [ receipt ] |> string_get : P.Run_action.t option);
+  A.Run_action_service.verify owner (Some Continue) |> string_get;
+  let closed = service () |> A.Run_action_service.scope in
+  let pending =
+    A.Run_scope.Host.prepare_advance
+      closed
+      ~previous:run
+      ~next
+      ~execution_id:(A.Run_scope.execution_id closed)
+    |> get
+  in
+  A.Run_scope.close closed;
+  assert (Result.is_error (A.Run_scope.Host.acknowledge_advance pending));
+  [%test_eq: int64] (A.Run_scope.revision closed) 1L;
+  print_endline
+    "no speculative advance; one acknowledged step; stale/closed reject; staged \
+     selection unchanged";
+  [%expect
+    {| no speculative advance; one acknowledged step; stale/closed reject; staged selection unchanged |}]
 ;;

@@ -1048,12 +1048,14 @@ let public_limit = function
 (* Planning recognizes exactly container-retirement extension conflicts. Other
    document/domain errors propagate. Retrying another eligible row never resets
    a carrier or discards an uninterpreted field. *)
-let retire_attempt (t : Candidate.t) =
+let retire_attempt (t : Candidate.t) ~protected_ordinals =
   let v = Candidate.value t in
   let rec choose protected = function
     | [] -> Ok (None, protected)
     | (ordinal, row) :: rest ->
-      if not (ended (O.Attempt_record.state row.Row.record))
+      if Set.mem protected_ordinals ordinal
+      then choose true rest
+      else if not (ended (O.Attempt_record.state row.Row.record))
       then choose protected rest
       else
         let* retired_attempts = increment v.coverage.retired_attempts in
@@ -1115,7 +1117,15 @@ let capacity_failure = function
   | Invalid_transition -> false
 ;;
 
-let admit t ~source ~relation ~operation_id ~invocation_id ~configuration =
+let admit
+      ?(protected_ordinals = Int64.Set.empty)
+      t
+      ~source
+      ~relation
+      ~operation_id
+      ~invocation_id
+      ~configuration
+  =
   let v = value t in
   let* () =
     observation
@@ -1187,7 +1197,7 @@ let admit t ~source ~relation ~operation_id ~invocation_id ~configuration =
     match admitted with
     | Some next -> Ok (next, handle, Tracked)
     | None ->
-      let* retired, saw_protected = retire_attempt current in
+      let* retired, saw_protected = retire_attempt current ~protected_ordinals in
       (match retired with
        | Some next -> plan next (protected || saw_protected)
        | None ->
@@ -1613,17 +1623,6 @@ let row_view (row : Row.t) ~include_configuration ~include_diagnostics =
   |> invariant
 ;;
 
-let absent_usage row =
-  match O.Attempt_record.state row.Row.record with
-  | Prepared -> O.Count.Not_submitted
-  | Running -> Not_reported
-  | Interrupted _ -> Interrupted
-  | Terminal terminal ->
-    (match Inference.Event.Terminal.delivery terminal with
-     | Definitely_not_submitted -> Not_submitted
-     | Possibly_submitted | Response_started -> Not_reported)
-;;
-
 let add_sum sum tokens =
   match sum with
   | Q.Metric.Overflow -> sum
@@ -1654,18 +1653,7 @@ let metric rows component =
       rows
       ~init:(Q.Metric.Tokens 0L, 0L, Q.Metric.Tokens 0L, 0L, None, false, zero_unknown)
       ~f:(fun (actual, na, estimated, ne, estimator, mixed, unknown) row ->
-        let count =
-          List.find_map
-            (O.Attempt_record.observations row.Row.record)
-            ~f:(fun observation ->
-              match O.payload observation with
-              | Usage usage -> Some (O.Count.view (O.Usage.count usage component))
-              | Context_estimate _
-              | Configuration _
-              | Transport_selection _
-              | Diagnostic _ -> None)
-          |> Option.value ~default:(O.Count.Unknown (absent_usage row))
-        in
+        let count = Inference_usage_count.count row.Row.record component in
         match count with
         | O.Count.Actual tokens ->
           ( add_sum actual tokens

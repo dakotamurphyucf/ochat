@@ -33,11 +33,35 @@ let flatten delta =
 let created_atom state = `Object [ "kind", `String "created"; "state", state ]
 
 let changes_document changes ~limits =
-  D.Document.create
+  let open Result.Let_syntax in
+  let%bind document =
+    D.Document.create
+      ~limits
+      ~kind:"session.delta"
+      ~version:10
+      ~payload:(`Object [ "changes", `Array changes ])
+  in
+  Session_storage_semantics.require_delta document ~limits
+;;
+
+let project_run_retirement ~run ~goal ~recurrence ~limits =
+  changes_document
+    (Option.to_list
+       (Option.map run ~f:(fun run ->
+          `Object [ "kind", `String "run_state_changed"; "value", run ]))
+     @ Option.to_list
+         (Option.map recurrence ~f:(fun recurrence ->
+            `Object [ "kind", `String "recurrence_catalog_changed"; "value", recurrence ]))
+     @ Option.to_list
+         (Option.map goal ~f:(fun goal ->
+            `Object [ "kind", `String "goal_catalog_changed"; "value", goal ])))
     ~limits
-    ~kind:"session.delta"
-    ~version:6
-    ~payload:(`Object [ "changes", `Array changes ])
+;;
+
+let project_instruction_clear selection ~limits =
+  changes_document
+    [ `Object [ "kind", `String "instruction_selection_changed"; "value", selection ] ]
+    ~limits
 ;;
 
 let project_created state ~limits =
@@ -228,6 +252,49 @@ let atom_to_jsonaf ~limits ~state_document delta =
     in
     `Object
       [ "kind", `String "inference_ledger_changed"; "value", D.Document.json document ]
+  | Delegated_inference_ledger_changed (ledger, usage) ->
+    let%bind ledger =
+      Inference_ledger.to_document ledger
+      |> Result.map_error ~f:(fun error ->
+        P.Error.invalid_request
+          (Sexp.to_string_hum (Inference_ledger.Error.sexp_of_t error)))
+    in
+    let%map usage = Delegated_usage.to_document usage in
+    `Object
+      [ "kind", `String "delegated_inference_ledger_changed"
+      ; "ledger", D.Document.json ledger
+      ; "usage", D.Document.json usage
+      ]
+  | Policy_cause_changed update ->
+    let%map value = Policy_canonical_usage.Update.to_json update in
+    `Object [ "kind", `String "policy_cause_changed"; "value", value ]
+  | Goal_policy_contributions_changed update ->
+    let%map value = Goal_policy_contributions.Update.to_json update in
+    `Object [ "kind", `String "goal_policy_contributions_changed"; "value", value ]
+  | Policy_inference_ledger_changed (ledger, usage, update) ->
+    let%bind ledger =
+      Inference_ledger.to_document ledger
+      |> Result.map_error ~f:(fun error ->
+        P.Error.invalid_request
+          (Sexp.to_string_hum (Inference_ledger.Error.sexp_of_t error)))
+    in
+    let%bind usage =
+      Option.value_map usage ~default:(Ok `Null) ~f:(fun usage ->
+        Result.map (Delegated_usage.to_document usage) ~f:D.Document.json)
+    in
+    let%map update = Policy_canonical_usage.Update.to_json update in
+    `Object
+      [ "kind", `String "policy_inference_ledger_changed"
+      ; "ledger", D.Document.json ledger
+      ; "usage", usage
+      ; "policy", update
+      ]
+  | Goal_descendants_changed update ->
+    let%map value = Goal_descendants.Update.to_json update in
+    `Object [ "kind", `String "goal_descendants_changed"; "value", value ]
+  | Child_contributions_changed children ->
+    let%map value = Child_contributions.to_jsonaf children in
+    `Object [ "kind", `String "child_contributions_changed"; "value", value ]
   | Job_changed value ->
     let%bind () =
       match value.P.Job.status with
@@ -261,9 +328,28 @@ let atom_to_jsonaf ~limits ~state_document delta =
           [ "kind", `String "invocation_reconciled"
           ; "value", P.Invocation.Storage.to_json value
           ])
+  | Instruction_selection_changed value ->
+    let%map.Result json = Instruction_selection.to_jsonaf value in
+    `Object [ "kind", `String "instruction_selection_changed"; "value", json ]
+  | Goal_accounts_changed value ->
+    let%map.Result json = Goal_accounts.to_jsonaf value in
+    `Object [ "kind", `String "goal_accounts_changed"; "value", json ]
+  | Goal_catalog_changed value ->
+    let%map.Result json = Goal_catalog.to_jsonaf value in
+    `Object [ "kind", `String "goal_catalog_changed"; "value", json ]
+  | Recurrence_catalog_changed value ->
+    let%map.Result json = Recurrence_catalog.to_jsonaf value in
+    `Object [ "kind", `String "recurrence_catalog_changed"; "value", json ]
   | Run_state_changed value ->
     Ok
       (`Object [ "kind", `String "run_state_changed"; "value", Run_state.to_jsonaf value ])
+  | Moderator_lifecycle_claimed { receipt; capture } ->
+    Ok
+      (`Object
+          [ "kind", `String "moderator_lifecycle_claimed"
+          ; "value", P.Moderator_execution.to_json receipt
+          ; "capture", Moderator_lifecycle.to_json capture
+          ])
   | Moderator_execution_changed value ->
     Ok
       (`Object
@@ -558,6 +644,66 @@ let atom_of_jsonaf ~limits json =
           (Sexp.to_string_hum (Inference_ledger.Error.sexp_of_t error)))
     in
     Delta.Inference_ledger_changed ledger
+  | "delegated_inference_ledger_changed" ->
+    let%bind ledger = X.required fields "ledger" X.raw in
+    let%bind ledger =
+      D.Document.inspect ledger ~limits
+      |> Result.map_error ~f:(fun error ->
+        P.Error.invalid_request (Sexp.to_string_hum (D.Error.sexp_of_t error)))
+    in
+    let%bind ledger =
+      Inference_ledger.of_document ledger ~limits:Inference_ledger.Limits.default
+      |> Result.map_error ~f:(fun error ->
+        P.Error.invalid_request
+          (Sexp.to_string_hum (Inference_ledger.Error.sexp_of_t error)))
+    in
+    let%bind usage = X.required fields "usage" X.raw in
+    let%bind usage =
+      D.Document.inspect usage ~limits:Delegated_usage.limits
+      |> Result.map_error ~f:(fun error ->
+        P.Error.invalid_request (Sexp.to_string_hum (D.Error.sexp_of_t error)))
+    in
+    let%map usage = Delegated_usage.of_document usage in
+    Delta.Delegated_inference_ledger_changed (ledger, usage)
+  | "policy_cause_changed" ->
+    let%map update = X.required fields "value" Policy_canonical_usage.Update.of_json in
+    Delta.Policy_cause_changed update
+  | "goal_policy_contributions_changed" ->
+    let%map update = X.required fields "value" Goal_policy_contributions.Update.of_json in
+    Delta.Goal_policy_contributions_changed update
+  | "policy_inference_ledger_changed" ->
+    let%bind ledger = X.required fields "ledger" X.raw in
+    let%bind ledger =
+      D.Document.inspect ledger ~limits
+      |> Result.map_error ~f:(fun error ->
+        P.Error.invalid_request (Sexp.to_string_hum (D.Error.sexp_of_t error)))
+    in
+    let%bind ledger =
+      Inference_ledger.of_document ledger ~limits:Inference_ledger.Limits.default
+      |> Result.map_error ~f:(fun error ->
+        P.Error.invalid_request
+          (Sexp.to_string_hum (Inference_ledger.Error.sexp_of_t error)))
+    in
+    let%bind usage =
+      X.required
+        fields
+        "usage"
+        (X.nullable (fun raw ->
+           let%bind document =
+             D.Document.inspect raw ~limits:Delegated_usage.limits
+             |> Result.map_error ~f:(fun error ->
+               P.Error.invalid_request (Sexp.to_string_hum (D.Error.sexp_of_t error)))
+           in
+           Delegated_usage.of_document document))
+    in
+    let%map update = X.required fields "policy" Policy_canonical_usage.Update.of_json in
+    Delta.Policy_inference_ledger_changed (ledger, usage, update)
+  | "goal_descendants_changed" ->
+    let%map update = X.required fields "value" Goal_descendants.Update.of_json in
+    Delta.Goal_descendants_changed update
+  | "child_contributions_changed" ->
+    let%map children = X.required fields "value" Child_contributions.of_jsonaf in
+    Delta.Child_contributions_changed children
   | "job_changed" ->
     Result.map (X.required fields "value" P.Job.of_json) ~f:(fun value ->
       Delta.Job_changed value)
@@ -570,9 +716,25 @@ let atom_of_jsonaf ~limits json =
   | "invocation_reconciled" ->
     Result.map (X.required fields "value" P.Invocation.Storage.of_json) ~f:(fun value ->
       Delta.Invocation_reconciled value)
+  | "instruction_selection_changed" ->
+    let%map.Result value = X.required fields "value" Instruction_selection.of_jsonaf in
+    Delta.Instruction_selection_changed value
+  | "goal_accounts_changed" ->
+    let%map.Result value = X.required fields "value" Goal_accounts.of_jsonaf in
+    Delta.Goal_accounts_changed value
+  | "goal_catalog_changed" ->
+    Result.map (X.required fields "value" Goal_catalog.of_jsonaf) ~f:(fun value ->
+      Delta.Goal_catalog_changed value)
+  | "recurrence_catalog_changed" ->
+    Result.map (X.required fields "value" Recurrence_catalog.of_jsonaf) ~f:(fun value ->
+      Delta.Recurrence_catalog_changed value)
   | "run_state_changed" ->
     Result.map (X.required fields "value" Run_state.of_jsonaf) ~f:(fun value ->
       Delta.Run_state_changed value)
+  | "moderator_lifecycle_claimed" ->
+    let%bind receipt = X.required fields "value" P.Moderator_execution.of_json in
+    let%map capture = X.required fields "capture" Moderator_lifecycle.of_json in
+    Delta.Moderator_lifecycle_claimed { receipt; capture }
   | "moderator_execution_changed" ->
     Result.map (X.required fields "value" P.Moderator_execution.of_json) ~f:(fun value ->
       Delta.Moderator_execution_changed value)
@@ -772,6 +934,33 @@ let shape =
                , X.shape_exn [ "kind", D.Shape.value; "value", Model_job_target.shape ] )
              ; ( "inference_ledger_changed"
                , X.shape_exn [ "kind", D.Shape.value; "value", D.Shape.value ] )
+             ; ( "delegated_inference_ledger_changed"
+               , X.shape_exn
+                   [ "kind", D.Shape.value
+                   ; "ledger", D.Shape.value
+                   ; "usage", D.Shape.value
+                   ] )
+             ; ( "policy_cause_changed"
+               , X.shape_exn
+                   [ "kind", D.Shape.value; "value", Policy_canonical_usage.Update.shape ]
+               )
+             ; ( "goal_policy_contributions_changed"
+               , X.shape_exn
+                   [ "kind", D.Shape.value
+                   ; "value", Goal_policy_contributions.Update.shape
+                   ] )
+             ; ( "policy_inference_ledger_changed"
+               , X.shape_exn
+                   [ "kind", D.Shape.value
+                   ; "ledger", D.Shape.value
+                   ; "usage", D.Shape.nullable D.Shape.value
+                   ; "policy", Policy_canonical_usage.Update.shape
+                   ] )
+             ; ( "goal_descendants_changed"
+               , X.shape_exn
+                   [ "kind", D.Shape.value; "value", Goal_descendants.Update.shape ] )
+             ; ( "child_contributions_changed"
+               , X.shape_exn [ "kind", D.Shape.value; "value", D.Shape.value ] )
              ; ( "job_changed"
                , X.shape_exn [ "kind", D.Shape.value; "value", Session_record_shapes.job ]
                )
@@ -784,8 +973,24 @@ let shape =
              ; ( "invocation_reconciled"
                , X.shape_exn
                    [ "kind", D.Shape.value; "value", Session_record_shapes.invocation ] )
+             ; ( "instruction_selection_changed"
+               , X.shape_exn
+                   [ "kind", D.Shape.value; "value", Instruction_selection.shape ] )
+             ; ( "goal_accounts_changed"
+               , X.shape_exn [ "kind", D.Shape.value; "value", D.Shape.value ] )
+             ; ( "goal_catalog_changed"
+               , X.shape_exn [ "kind", D.Shape.value; "value", Goal_catalog.shape ] )
+             ; ( "recurrence_catalog_changed"
+               , X.shape_exn [ "kind", D.Shape.value; "value", Recurrence_catalog.shape ]
+               )
              ; ( "run_state_changed"
                , X.shape_exn [ "kind", D.Shape.value; "value", Run_state.shape ] )
+             ; ( "moderator_lifecycle_claimed"
+               , X.shape_exn
+                   [ "kind", D.Shape.value
+                   ; "value", Session_record_shapes.moderator_execution
+                   ; "capture", Moderator_lifecycle.shape
+                   ] )
              ; ( "moderator_execution_changed"
                , X.shape_exn
                    [ "kind", D.Shape.value
@@ -826,9 +1031,8 @@ let shape =
                , X.shape_exn [ "kind", D.Shape.value; "value", External_ingress.shape ] )
              ; ( "moderator_changed"
                , X.shape_exn
-                   [ "kind", D.Shape.value
-                   ; "moderator", D.Shape.nullable Moderator_checkpoint.shape
-                   ] )
+                   [ "kind", D.Shape.value; "moderator", D.Shape.nullable D.Shape.value ]
+               )
              ; ( "shell_changed"
                , X.shape_exn [ "kind", D.Shape.value; "shell", Session.Shell_state.shape ]
                )
@@ -1007,13 +1211,116 @@ let upgrade document ~limits =
   let%bind pending_input_step =
     D.Conversion.Step.of_function ~kind:"session.delta" ~from_version:5 ~f:Result.return
   in
+  let%bind native_goal_action_step =
+    D.Conversion.Step.of_function ~kind:"session.delta" ~from_version:6 ~f:(fun payload ->
+      let%bind changes = F.required payload "changes" F.array in
+      let%bind changes =
+        List.map changes ~f:(fun change ->
+          let%bind kind = F.required change "kind" F.string in
+          let field, convert =
+            match kind with
+            | "invocation_changed" | "invocation_reconciled" ->
+              "value", P.Native_goal_action_conversion.invocation_record
+            | "created" ->
+              ( "state"
+              , fun raw ->
+                  let%bind state = D.Document.inspect ~limits raw in
+                  let%map state = Session_state_document.upgrade state ~limits in
+                  D.Document.json state )
+            | _ -> "", Result.return
+          in
+          if String.is_empty field
+          then Ok change
+          else (
+            let%bind value = F.required change field convert in
+            match change with
+            | `Object fields ->
+              Ok
+                (`Object
+                    (List.map fields ~f:(fun (name, old) ->
+                       name, if String.equal name field then value else old)))
+            | _ -> F.invalid "change" "must be an object"))
+        |> Result.all
+      in
+      match payload with
+      | `Object fields ->
+        Ok
+          (`Object
+              (List.map fields ~f:(fun (name, old) ->
+                 name, if String.equal name "changes" then `Array changes else old)))
+      | _ -> F.invalid "payload" "must be an object")
+  in
+  let%bind descendants_step =
+    D.Conversion.Step.of_function ~kind:"session.delta" ~from_version:7 ~f:Result.return
+  in
+  let%bind policy_step =
+    D.Conversion.Step.of_function ~kind:"session.delta" ~from_version:8 ~f:(fun payload ->
+      let%bind changes = F.required payload "changes" F.array in
+      let%map () =
+        List.fold_result changes ~init:() ~f:(fun () change ->
+          let%bind kind = F.required change "kind" F.string in
+          let%bind created_positive =
+            if String.equal kind "created"
+            then (
+              let%map state = F.required change "state" Result.return in
+              match D.Json.field state ~name:"payload" with
+              | Value payload ->
+                (match D.Json.field payload ~name:"policy_canonical_usage" with
+                 | Value _ -> true
+                 | Absent | Null -> false)
+              | Absent | Null -> false)
+            else Ok false
+          in
+          if
+            String.equal kind "policy_cause_changed"
+            || String.equal kind "policy_inference_ledger_changed"
+            || created_positive
+          then F.invalid "changes" "policy causal mutation requires delta schema9"
+          else Ok ())
+      in
+      payload)
+  in
+  let%bind goal_policy_step =
+    D.Conversion.Step.of_function ~kind:"session.delta" ~from_version:9 ~f:(fun payload ->
+      let%bind changes = F.required payload "changes" F.array in
+      let%map () =
+        List.fold_result changes ~init:() ~f:(fun () change ->
+          let%bind kind = F.required change "kind" F.string in
+          let%bind created_positive =
+            if String.equal kind "created"
+            then (
+              let%map state = F.required change "state" Result.return in
+              match D.Json.field state ~name:"payload" with
+              | Value payload ->
+                (match D.Json.field payload ~name:"goal_policy_contributions" with
+                 | Value _ -> true
+                 | Absent | Null -> false)
+              | Absent | Null -> false)
+            else Ok false
+          in
+          if String.equal kind "goal_policy_contributions_changed" || created_positive
+          then F.invalid "changes" "causal Goal book mutation requires delta schema10"
+          else Ok ())
+      in
+      payload)
+  in
   let%bind conversion =
     D.Conversion.create
       ~limits
-      ~targets:[ "session.delta", 6 ]
-      ~max_steps:5
+      ~targets:[ "session.delta", 10 ]
+      ~max_steps:9
       ~max_operations:100_000
-      ~steps:[ step; ledger_step; history_revision_step; run_step; pending_input_step ]
+      ~steps:
+        [ step
+        ; ledger_step
+        ; history_revision_step
+        ; run_step
+        ; pending_input_step
+        ; native_goal_action_step
+        ; descendants_step
+        ; policy_step
+        ; goal_policy_step
+        ]
   in
   D.Conversion.upgrade conversion document
 ;;
@@ -1022,9 +1329,9 @@ let codec ~limits =
   D.Domain_codec.create
     ~limits
     ~kind:"session.delta"
-    ~version:6
+    ~version:10
     ~shape
-    ~supported_semantics:[]
+    ~supported_semantics:Session_storage_semantics.supported
     ~decode:(fun json -> decode_payload ~limits json |> X.document_result)
     ~encode:(fun _ ->
       Error
@@ -1034,9 +1341,86 @@ let codec ~limits =
   |> Result.ok_or_failwith
 ;;
 
+let validate_raw_queues document =
+  let open Result.Let_syntax in
+  match D.Json.field (D.Document.payload document) ~name:"changes" with
+  | Value (`Array changes) ->
+    List.fold_result changes ~init:() ~f:(fun () change ->
+      let moderator =
+        match D.Json.field change ~name:"kind" with
+        | Value (`String "moderator_changed") ->
+          (match D.Json.field change ~name:"moderator" with
+           | Value raw -> Some raw
+           | Absent | Null -> None)
+        | Value (`String "created") ->
+          (match D.Json.field change ~name:"state" with
+           | Value state ->
+             (match D.Json.field state ~name:"payload" with
+              | Value payload ->
+                (match D.Json.field payload ~name:"moderator" with
+                 | Value raw -> Some raw
+                 | Absent | Null -> None)
+              | Absent | Null -> None)
+           | Absent | Null -> None)
+        | Value _ | Absent | Null -> None
+      in
+      let%bind () =
+        Moderator_checkpoint.validate_encoded_capacity moderator |> X.document_result
+      in
+      let receipts =
+        match D.Json.field change ~name:"kind" with
+        | Value
+            (`String
+               ( "moderator_execution_changed"
+               | "moderator_execution_reconciled"
+               | "moderator_lifecycle_claimed" )) ->
+          (match D.Json.field change ~name:"value" with
+           | Value raw -> [ raw ]
+           | Absent | Null -> [])
+        | Value (`String "created") ->
+          (match D.Json.field change ~name:"state" with
+           | Value state ->
+             (match D.Json.field state ~name:"payload" with
+              | Value payload ->
+                (match D.Json.field payload ~name:"moderator_executions" with
+                 | Value (`Array receipts) -> receipts
+                 | Value _ | Absent | Null -> [])
+              | Absent | Null -> [])
+           | Absent | Null -> [])
+        | Value _ | Absent | Null -> []
+      in
+      let%bind () =
+        List.fold_result receipts ~init:() ~f:(fun () receipt ->
+          Queue_provenance_validation.validate_encoded_event receipt |> X.document_result)
+      in
+      let registrations =
+        match D.Json.field change ~name:"kind" with
+        | Value (`String "ingress_changed") ->
+          (match D.Json.field change ~name:"value" with
+           | Value raw -> [ raw ]
+           | Absent | Null -> [])
+        | Value (`String "created") ->
+          (match D.Json.field change ~name:"state" with
+           | Value state ->
+             (match D.Json.field state ~name:"payload" with
+              | Value payload ->
+                (match D.Json.field payload ~name:"ingress_registrations" with
+                 | Value (`Array registrations) -> registrations
+                 | Value _ | Absent | Null -> [])
+              | Absent | Null -> [])
+           | Absent | Null -> [])
+        | Value _ | Absent | Null -> []
+      in
+      List.fold_result registrations ~init:() ~f:(fun () registration ->
+        External_ingress.validate_encoded_provenance registration |> X.document_result))
+  | Value _ | Absent | Null -> Ok ()
+;;
+
 let decode ~limits document =
   let open Result.Let_syntax in
   let%bind document = upgrade document ~limits in
+  let%bind () = Session_storage_semantics.check_delta document in
+  let%bind () = validate_raw_queues document in
   let%map carrier = D.Domain_codec.decode (codec ~limits) document in
   { value = D.Extension_carrier.value carrier; document }
 ;;
@@ -1295,7 +1679,7 @@ let apply t ?transaction_metadata ~limits previous =
     |> X.document_result
   in
   let%bind candidate =
-    Session_document_transition.admit previous ~delta:t.value ~next ~limits
+    Session_document_transition.admit_prefix_encoded previous ~delta:t.value ~next ~limits
   in
   let%bind changes = raw_changes t in
   (* Created is an immutable captured state document, carrying its full template.
@@ -1306,14 +1690,11 @@ let apply t ?transaction_metadata ~limits previous =
       | Value (`String "created") ->
         let%bind json = get_path change [ "state" ] in
         let%bind document = D.Document.inspect ~limits json in
-        let%bind incoming = Session_state_document.decode ~limits document in
-        Session_state_document.adopt
-          candidate
-          ~limits
-          (Session_state_document.with_value incoming next)
+        let%bind captured = Session_state_document.decode ~limits document in
+        Session_state_document.Prefix.merge_created candidate ~captured ~limits
       | _ -> Ok candidate)
   in
-  let%bind document = Session_state_document.encode candidate ~limits in
+  let document = Session_state_document.Prefix.document candidate in
   let%bind payload =
     List.fold_result changes ~init:(D.Document.payload document) ~f:(fun payload change ->
       let%bind kind =
@@ -1346,6 +1727,17 @@ let apply t ?transaction_metadata ~limits previous =
       | "managed_stop_admitted" -> member "managed_stops" "id" Managed_stop.shape
       | "moderator_execution_changed" | "moderator_execution_reconciled" ->
         member "moderator_executions" "id" Session_record_shapes.moderator_execution
+      | "moderator_lifecycle_claimed" ->
+        let%bind payload =
+          member "moderator_executions" "id" Session_record_shapes.moderator_execution
+        in
+        let%bind capture = field "capture" in
+        patch_scalar
+          ~limits
+          ~shape:Moderator_lifecycle.shape
+          payload
+          [ "run_state"; "moderator_lifecycle" ]
+          capture
       | "subscription_changed" | "subscription_expired" | "subscription_cancelled" ->
         member "subscriptions" "id" Session_record_shapes.subscription
       | "delivery_changed" | "delivery_wake_changed" ->
@@ -1390,6 +1782,69 @@ let apply t ?transaction_metadata ~limits previous =
         in
         let%bind entry = field "entry" in
         patch_history ~limits payload entry
+      | "instruction_selection_changed" ->
+        scalar [ "instruction_selection" ] "value" Instruction_selection.shape
+      | "goal_accounts_changed" -> scalar [ "goal_accounts" ] "value" D.Shape.value
+      | "policy_cause_changed" | "policy_inference_ledger_changed" ->
+        let field_name =
+          if String.equal kind "policy_cause_changed" then "value" else "policy"
+        in
+        let%bind raw = field field_name in
+        let%bind fields = X.object_ raw |> X.document_result in
+        let%bind accounting = X.required fields "accounting" X.raw |> X.document_result in
+        patch_scalar
+          ~limits
+          ~shape:D.Shape.value
+          payload
+          [ "policy_canonical_usage" ]
+          accounting
+      | "goal_policy_contributions_changed" ->
+        let%bind raw = field "value" in
+        let%bind fields = X.object_ raw |> X.document_result in
+        let%bind accounting = X.required fields "accounting" X.raw |> X.document_result in
+        patch_scalar
+          ~limits
+          ~shape:D.Shape.value
+          payload
+          [ "goal_policy_contributions" ]
+          accounting
+      | "goal_descendants_changed" ->
+        let%bind raw = field "value" in
+        let%bind fields = X.object_ raw |> X.document_result in
+        let%bind accounting = X.required fields "accounting" X.raw |> X.document_result in
+        let%bind payload =
+          patch_scalar
+            ~limits
+            ~shape:D.Shape.value
+            payload
+            [ "goal_descendants" ]
+            accounting
+        in
+        let%bind children = X.required fields "children" X.raw |> X.document_result in
+        let%bind children_fields = X.object_ children |> X.document_result in
+        let%bind kind = X.required children_fields "kind" J.string |> X.document_result in
+        (match kind with
+         | "preserve" -> Ok payload
+         | "replace" ->
+           let%bind children =
+             X.required children_fields "value" X.raw |> X.document_result
+           in
+           patch_scalar
+             ~limits
+             ~shape:D.Shape.value
+             payload
+             [ "child_contributions" ]
+             children
+         | _ -> Error (path_error [ "changes" ] "invalid descendant child action"))
+      | "child_contributions_changed" ->
+        scalar [ "child_contributions" ] "value" D.Shape.value
+      | "delegated_inference_ledger_changed" ->
+        let%bind payload = scalar [ "inference_ledger" ] "ledger" D.Shape.value in
+        let%bind usage = field "usage" in
+        patch_scalar ~limits ~shape:D.Shape.value payload [ "delegated_usage" ] usage
+      | "goal_catalog_changed" -> scalar [ "goal_catalog" ] "value" Goal_catalog.shape
+      | "recurrence_catalog_changed" ->
+        scalar [ "recurrence_catalog" ] "value" Recurrence_catalog.shape
       | "run_state_changed" -> scalar [ "run_state" ] "value" Run_state.shape
       | "lifecycle_changed" ->
         scalar [ "lifecycle" ] "lifecycle" Session_record_shapes.lifecycle
@@ -1407,8 +1862,7 @@ let apply t ?transaction_metadata ~limits previous =
           Automatic_turn_budget.policy_shape
       | "active_operation_changed" ->
         scalar [ "active_operation" ] "operation" Session_record_shapes.operation
-      | "moderator_changed" ->
-        scalar [ "moderator" ] "moderator" Moderator_checkpoint.shape
+      | "moderator_changed" -> scalar [ "moderator" ] "moderator" D.Shape.value
       | "shell_changed" -> scalar [ "shell" ] "shell" Session.Shell_state.shape
       | "failure_changed" -> scalar [ "failure" ] "failure" Session_record_shapes.error
       | _ -> Ok payload)
@@ -1427,10 +1881,17 @@ let apply t ?transaction_metadata ~limits previous =
   let%bind incoming_document =
     match transaction_metadata with
     | None -> Ok incoming_document
-    | Some metadata -> Transaction_metadata.apply metadata ~limits incoming_document
+    | Some metadata ->
+      let%bind () =
+        Delta.validate_descendant_publication
+          t.value
+          ~revision:metadata.Transaction_metadata.revision
+        |> X.document_result
+      in
+      Transaction_metadata.apply metadata ~limits incoming_document
   in
   (* The fold starts from the complete carried candidate. Component merges keep
      its known projection and add only compatible preservation paths, so this
      admitted document already contains the candidate and captured child fields. *)
-  Session_state_document.decode ~limits incoming_document
+  Session_state_document.Prefix.materialize candidate ~limits incoming_document
 ;;

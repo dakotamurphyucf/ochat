@@ -4,6 +4,9 @@ module A = Agent_session
 module P = Agent_protocol
 
 let with_startup_actor
+      ?original_actor
+      ?(before_authorize = fun _ -> ())
+      ?make_manager
       ?events
       ?make_worker
       ?make_job_results
@@ -17,7 +20,13 @@ let with_startup_actor
     let result =
       Eio.Switch.run (fun sw ->
         prepare env;
-        let manager, _, _ = handoff_definition ?events env in
+        let manager =
+          match make_manager with
+          | Some make -> make env
+          | None ->
+            let manager, _, _ = handoff_definition ?events env in
+            manager
+        in
         let snapshot =
           Chat_response.Moderator_manager.identity_snapshot manager
           |> Result.ok_or_failwith
@@ -43,7 +52,7 @@ let with_startup_actor
           | None ->
             { A.Session_actor.archive_reference
             ; commit =
-                (fun ~command_audit:_ ~previous:_ _ ->
+                (fun ?observation:_ ~command_audit:_ ~previous:_ _ ->
                   if !reject_commit
                   then
                     Error
@@ -72,6 +81,7 @@ let with_startup_actor
               ; create_reclaim_token = (fun () -> "run-start-reclaim")
               ; state_committed = (fun _ _ -> ())
               ; job_results
+              ; goal_descendant_profile
               ; subscription_limits = A.Staged_subscriptions.default_limits
               ; schedule_limits = A.Staged_schedules.default_limits
               ; notification_limits = A.Staged_notifications.default_limits
@@ -83,11 +93,13 @@ let with_startup_actor
         in
         let authorized = ref true in
         let scope =
-          A.Run_admission.Scope.create
-            ~principal_id
+          (match original_actor with
+           | None -> A.Run_admission.Scope.create ~principal_id
+           | Some actor -> A.Run_admission.Scope.create_authenticated ~actor)
             ~observer
             ~startup_pending:(fun () -> true)
-            ~authorize:(fun _ ->
+            ~authorize:(fun state ->
+              before_authorize state;
               if !authorized
               then Ok ()
               else
@@ -185,19 +197,19 @@ let%test_unit "single-turn startup requires exact completed prospective evidence
           Batch
             [ Moderator_execution_changed running; Moderator_execution_changed completed ]
       in
-      A.Session_delta.apply state delta |> protocol_ok
+      delta
     in
-    let prepare work_state =
+    let prepare work_delta =
       A.Run_transition.prepare
         state
         ~scope
         ~executing
-        ~work_state
+        ~work_delta
         ~owned_work:[]
         ~action:None
         ~now:timestamp
     in
-    assert (Result.is_error (prepare state));
+    assert (Result.is_error (prepare (Batch [])));
     assert (Result.is_error (prepare (projected executing)));
     let requests : P.Invocation.follow_up =
       { request_turn = false; request_compaction = false; end_session = None }
@@ -233,7 +245,9 @@ let%test_unit "single-turn startup requires exact completed prospective evidence
     assert (Option.is_none completed.requests);
     let prepared = prepare (projected completed) |> protocol_ok in
     let settled =
-      A.Session_delta.apply (projected completed) (A.Run_transition.delta prepared)
+      A.Session_delta.apply
+        state
+        (Batch [ projected completed; A.Run_transition.delta prepared ])
       |> protocol_ok
     in
     let index = Option.value_exn settled.run_state in
@@ -309,6 +323,220 @@ let%expect_test "failed admission checkpoint leaves no run and same request can 
         ; admitted_on_retry = (Option.is_some final.run_state : bool)
         }]);
   [%expect {| ((rejected true) (no_uncommitted_run true) (admitted_on_retry true)) |}]
+;;
+
+(* These are ordered Actor persistence-adapter cuts, not physical journal or
+   process-restart claims. The first acknowledged lifecycle transition already
+   owns the Run; the later Idle failure cannot turn its receipt into a retry. *)
+let%test_unit "authenticated authored startup preserves first ACK across lifecycle cuts" =
+  List.iter [ 1; 2 ] ~f:(fun failed_write ->
+    let principal =
+      P.Principal.create
+        ~id:principal_id
+        ~authentication_kind:"local"
+        ~scopes:(P.Scope.Set.of_list [ Send_messages ])
+        ~attributes:[]
+      |> protocol_ok
+    in
+    let original = Operator_authorization.nonexpiring_static principal in
+    let attempts = ref 0 in
+    let reject = ref true in
+    let acknowledged = ref None in
+    let failure =
+      P.Error.create
+        Persistence_error
+        ~message:"injected authored lifecycle checkpoint failure"
+        ~retryable:true
+        ()
+    in
+    let make_persistence _env _sw _initial =
+      { A.Session_actor.archive_reference
+      ; commit =
+          (fun ?observation:_
+            ~command_audit:_
+            ~previous:_
+            (candidate : A.Session_transition.t) ->
+            let has_run =
+              Option.exists candidate.state.run_state ~f:(fun index ->
+                not (List.is_empty (A.Run_state.runs index)))
+            in
+            if not has_run
+            then Ok ()
+            else (
+              incr attempts;
+              if !reject && Int.equal !attempts failed_write
+              then Error failure
+              else (
+                acknowledged := Some candidate.state;
+                Ok ())))
+      }
+    in
+    with_startup_actor
+      ~original_actor:original
+      ~make_persistence
+      (fun actor _ _ request start manager _ _ _ ->
+         let before = A.Session_actor.state actor |> protocol_ok in
+         let request = request "authenticated-startup-cut" in
+         (match start request with
+          | Error actual ->
+            assert (P.Error.equal_code actual.code failure.code);
+            assert (String.equal actual.message failure.message);
+            assert (Bool.equal actual.retryable failure.retryable)
+          | Ok _ -> failwith "injected lifecycle checkpoint unexpectedly acknowledged");
+         [%test_eq: int] !attempts failed_write;
+         let failed = A.Session_actor.state actor |> protocol_ok in
+         if Int.equal failed_write 1
+         then (
+           assert (
+             Sexp.equal
+               (A.Session_state.sexp_of_t before)
+               (A.Session_state.sexp_of_t failed));
+           assert (Option.is_none !acknowledged);
+           assert (Option.is_none failed.run_state);
+           reject := false;
+           ignore (start request |> protocol_ok : P.Run_receipt.t);
+           [%test_eq: int] !attempts 3)
+         else (
+           let first = Option.value_exn !acknowledged in
+           assert (
+             Sexp.equal
+               (A.Session_state.sexp_of_t first)
+               (A.Session_state.sexp_of_t failed));
+           assert (P.Session.equal_desired_state failed.lifecycle.desired Running);
+           [%test_eq: Sexp.t]
+             (P.Session.sexp_of_observed_state failed.lifecycle.observed)
+             (P.Session.sexp_of_observed_state Starting);
+           assert (Option.is_none failed.active_operation);
+           let index = Option.value_exn failed.run_state in
+           let run = List.hd_exn (A.Run_state.runs index) in
+           [%test_eq: int] (List.length (A.Run_state.runs index)) 1;
+           assert (P.Run.Lifecycle.equal run.lifecycle Admitted);
+           [%test_eq: int64] run.revision 0L;
+           let admission = List.hd_exn (A.Run_state.receipts index) in
+           [%test_eq: int] (List.length (A.Run_state.receipts index)) 1;
+           assert (P.Run_receipt.Kind.equal admission.kind Admission);
+           (* Starting is not idle-claim eligible; do not manufacture Idle or
+              claim that a preserved Pending loan automatically resumes startup. *)
+           let claimed =
+             A.Moderator_event.run_ordinary
+               ~event:Session_start
+               ~claim:
+                 (A.Session_actor.with_current_moderator_event
+                    actor
+                    ~operation_id:None
+                    ~event:Session_start)
+               ~run_actions:(A.Session_actor.run_actions actor)
+               ~manager
+               ~history:(fun () -> [])
+               ~available_tools:[]
+               ~session_meta:`Null
+               ~now:(fun () -> timestamp)
+               ()
+             |> protocol_ok
+           in
+           assert (Option.is_none claimed);
+           let reconciled = start request |> protocol_ok in
+           assert (P.Run_receipt.equal reconciled admission);
+           [%test_eq: int] !attempts 2;
+           let after = A.Session_actor.state actor |> protocol_ok in
+           assert (
+             Sexp.equal
+               (A.Session_state.sexp_of_t failed)
+               (A.Session_state.sexp_of_t after)))));
+  (* Learn the last startup callback from the first real writer entry. A fresh
+     run revokes its original exactly there, without hardcoded callback counts. *)
+  let callback_cut revoke_at =
+    let live = Atomic.make true in
+    let principal =
+      P.Principal.create
+        ~id:principal_id
+        ~authentication_kind:"local"
+        ~scopes:(P.Scope.Set.of_list [ Send_messages ])
+        ~attributes:[]
+      |> protocol_ok
+    in
+    let original =
+      Operator_authorization.guarded ~principal ~is_current:(fun () -> Atomic.get live)
+    in
+    let pending_calls = ref 0 in
+    let writers = ref 0 in
+    let first_writer_pending_call = ref None in
+    let hit = ref false in
+    let make_persistence _env _sw _initial =
+      { A.Session_actor.archive_reference
+      ; commit =
+          (fun ?observation:_
+            ~command_audit:_
+            ~previous:_
+            (candidate : A.Session_transition.t) ->
+            if
+              Option.exists candidate.state.run_state ~f:(fun index ->
+                not (List.is_empty (A.Run_state.runs index)))
+            then (
+              incr writers;
+              if Int.equal !writers 1
+              then first_writer_pending_call := Some !pending_calls);
+            Ok ())
+      }
+    in
+    with_startup_actor
+      ~original_actor:original
+      ~make_persistence
+      (fun actor _ _ request _start _manager base_scope reference _ ->
+         let before = A.Session_actor.state actor |> protocol_ok in
+         let scope =
+           A.Run_admission.Scope.create_authenticated
+             ~actor:original
+             ~observer:(A.Run_admission.Scope.observer base_scope)
+             ~startup_pending:(fun () ->
+               incr pending_calls;
+               if Option.exists revoke_at ~f:(Int.equal !pending_calls)
+               then (
+                 hit := true;
+                 Atomic.set live false);
+               true)
+             ~authorize:(fun _ -> Ok ())
+           |> protocol_ok
+         in
+         let request = request "final-startup-callback-cut" in
+         let result =
+           A.Session_actor.admit_run
+             actor
+             ~scope
+             ~request
+             ~session:reference
+             ~entry:None
+             ~request_sha256:
+               (P.Run_start.to_json request
+                |> Jsonaf.to_string
+                |> Digestif.SHA256.digest_string
+                |> Digestif.SHA256.to_hex)
+         in
+         match revoke_at, result with
+         | None, Ok _ -> [%test_eq: int] !writers 2
+         | Some _, Error failure ->
+           assert (P.Error.equal_code failure.code Permission_denied);
+           assert (String.equal failure.message "Run original authority expired");
+           assert (not failure.retryable);
+           assert !hit;
+           [%test_eq: int] !writers 0;
+           let after = A.Session_actor.state actor |> protocol_ok in
+           assert (Option.is_none after.run_state);
+           assert (
+             Sexp.equal
+               (A.Session_state.sexp_of_t before)
+               (A.Session_state.sexp_of_t after))
+         | None, Error failure ->
+           raise_s [%sexp "accepted callback trace failed", (failure : P.Error.t)]
+         | Some _, Ok _ -> failwith "expired final startup original was acknowledged");
+    !first_writer_pending_call, !hit
+  in
+  let learned, hit = callback_cut None in
+  assert (not hit);
+  let final_pending_call = Option.value_exn learned in
+  assert (final_pending_call > 0);
+  let written, hit = callback_cut (Some final_pending_call) in
+  assert (Option.is_none written && hit)
 ;;
 
 let%expect_test "host authority releases terminal and obsolete run closures" =
@@ -634,12 +862,14 @@ let%expect_test
           ~operation_id:None
           ~event:Session_start
           ~snapshot:(fun () -> Ok before)
-          (fun ~executing ~retirement_reason:_ ~event:_ ~execute:_ ~commit ->
-             let service =
-               A.Session_actor.run_actions actor executing
-               |> protocol_ok
-               |> Option.value_exn
-             in
+          (fun ~executing
+            ~policy_caller:_
+            ~model_jobs:_
+            ~allocate_inference:_
+            ~retirement_reason:_
+            ~event:_
+            ~execute:_
+            ~commit ->
              let owner = P.Job.Moderator_event executing.context.id in
              let job =
                A.Session_actor.prepare_background_job_launch actor ~owner request
@@ -653,6 +883,13 @@ let%expect_test
              |> protocol_ok;
              A.Session_actor.select_background_jobs actor ~owner ~ids:[ job.id ]
              |> protocol_ok;
+             (* Child preparation must install the exact event's existing Run
+                scope without a caller making an unrelated action lookup first. *)
+             let service =
+               A.Session_actor.run_actions actor executing
+               |> protocol_ok
+               |> Option.value_exn
+             in
              let transaction = A.Run_action_service.transaction service in
              let tickets =
                if wait
@@ -1023,6 +1260,156 @@ let%expect_test "preparation preserves original CAS through owned history reserv
   |}]
 ;;
 
+let%expect_test
+    "common custody ACK retains initial closed evidence and constructor subset"
+  =
+  (* Local-domain custody/state law only: these candidates model acknowledged
+     steps. No Actor, Store, Factory cleanup or no-effects observation is issued. *)
+  with_actor_workspace (fun _env workspace_instance ->
+    let module R = A.Run_preparation in
+    let initial =
+      actor_state ~workspace_instance ~liveness:Detached ~start_immediately:false
+    in
+    let owner = R.Owner.create () in
+    let source_owner = A.Runtime_source_owner.create () in
+    let principal =
+      P.Principal.create
+        ~id:principal_id
+        ~authentication_kind:"local"
+        ~scopes:(P.Scope.Set.of_list [ Send_messages ])
+        ~attributes:[]
+      |> protocol_ok
+    in
+    let original = Operator_authorization.trusted_local principal in
+    let request =
+      A.Run_admission_request.Headless.create
+        ~session_id:initial.identity.session_id
+        ~generation:initial.identity.generation
+        ~expected_revision:initial.counters.revision
+        ~mode:Workflow
+        ~input:Authored_start
+        ~key:(P.Idempotency_key.of_string "common-custody-state" |> protocol_ok)
+      |> protocol_ok
+      |> A.Run_admission_request.of_headless
+    in
+    let digest = A.Run_admission_request.request_sha256 request |> protocol_ok in
+    let deferred =
+      R.Deferred.create_authenticated_request
+        ~owner
+        ~source_owner:(A.Runtime_source_owner.identity source_owner)
+        ~state:initial
+        ~actor:original
+        ~request
+        ~request_sha256:digest
+        ~authorize:(fun _ -> Ok ())
+      |> protocol_ok
+    in
+    let preparation = R.Deferred.preparation deferred in
+    let custody = R.custody preparation in
+    let candidate state delta =
+      A.Session_transition.apply ~now:timestamp state ~delta ~payloads:[]
+      |> protocol_ok
+      |> fun (transition : A.Session_transition.t) -> transition.state
+    in
+    let job =
+      P.Job.
+        { id = P.Id.Job.create ()
+        ; session_id = initial.identity.session_id
+        ; generation = initial.identity.generation
+        ; kind = Async_tool
+        ; payload = `Null
+        ; status = Queued
+        ; retry_policy = Never
+        ; attempt = 0
+        ; created_at = timestamp
+        ; started_at = None
+        ; next_run_at = None
+        ; completed_at = None
+        ; result = None
+        ; delivery = Pending
+        ; launch = None
+        ; inference_origin = Some Unbound
+        ; progress = None
+        }
+    in
+    let add =
+      R.Constructor_jobs.prepare_add preparation ~owner ~state:initial ~job |> protocol_ok
+    in
+    R.Custody.Constructor_jobs.check_before_commit add ~owner ~state:initial
+    |> protocol_ok;
+    let admitted = candidate initial (Job_changed job) in
+    R.advance preparation ~owner ~previous:initial ~current:admitted |> protocol_ok;
+    R.Custody.Constructor_jobs.acknowledge add;
+    let ids, handoff =
+      R.Custody.Constructor_jobs.prepare_handoff custody ~owner ~state:admitted
+      |> protocol_ok
+    in
+    [%test_eq: P.Id.Job.t list] [ job.id ] ids;
+    R.Constructor_jobs.check_before_commit handoff ~owner ~state:admitted |> protocol_ok;
+    let joined =
+      candidate
+        admitted
+        (History_block_reserved
+           (Int64.succ admitted.conversation.reserved_history_through))
+    in
+    (* The LAST step deliberately bypasses the initial adapter: a sidecar updated
+       only by R.advance would remain stale and fail the completion check below. *)
+    R.Custody.advance custody ~owner ~previous:admitted ~current:joined |> protocol_ok;
+    R.Constructor_jobs.acknowledge handoff;
+    let remaining, _ =
+      R.Constructor_jobs.prepare_handoff preparation ~owner ~state:joined |> protocol_ok
+    in
+    [%test_eq: P.Id.Job.t list] [] remaining;
+    let original_identity_retained =
+      Int64.equal (R.request preparation).expected_revision request.expected_revision
+      && P.Idempotency_key.equal (R.request preparation).key request.key
+      && String.equal (R.request_sha256 preparation) digest
+      && Option.exists (R.original_actor preparation) ~f:(phys_equal original)
+    in
+    R.Custody.close custody;
+    assert (Result.is_error (R.check_basis preparation ~owner ~state:joined));
+    assert (Result.is_error (R.Deferred.check_basis deferred ~owner ~state:joined));
+    let closed = R.Deferred.close deferred ~owner ~state:joined |> protocol_ok in
+    let completion = R.Closed_attempt.complete closed ~source_owner |> protocol_ok in
+    let common_ack_source_completion =
+      Result.is_ok (R.Source_completion.check_basis completion ~owner ~state:joined)
+    in
+    let stale_and_foreign_rejected =
+      Result.is_error (R.Source_completion.check_basis completion ~owner ~state:admitted)
+      && Result.is_error
+           (R.Source_completion.check_basis
+              completion
+              ~owner:(R.Owner.create ())
+              ~state:joined)
+    in
+    let next =
+      candidate
+        joined
+        (History_block_reserved (Int64.succ joined.conversation.reserved_history_through))
+    in
+    let closed_advance_rejected =
+      Result.is_error (R.Custody.advance custody ~owner ~previous:joined ~current:next)
+    in
+    let closed_evidence_retained =
+      Result.is_ok (R.Source_completion.check_basis completion ~owner ~state:joined)
+    in
+    print_s
+      [%sexp
+        { constructor_subset_shared = (List.is_empty remaining : bool)
+        ; original_identity_retained : bool
+        ; common_ack_source_completion : bool
+        ; stale_and_foreign_rejected : bool
+        ; closed_advance_rejected : bool
+        ; closed_evidence_retained : bool
+        }]);
+  [%expect
+    {|
+    ((constructor_subset_shared true) (original_identity_retained true)
+     (common_ack_source_completion true) (stale_and_foreign_rejected true)
+     (closed_advance_rejected true) (closed_evidence_retained true))
+    |}]
+;;
+
 let%expect_test "unrelated reservation invalidates preparation without admitting a run" =
   with_startup_actor (fun actor _ _ request _ _ scope reference _ ->
     let original = request "displaced-preparation" in
@@ -1247,6 +1634,7 @@ let%expect_test "constructor schedule cancellation preserves admission custody" 
         ; delivery_count = 0
         ; last_delivery_at = None
         ; ownership = None
+        ; inference_provenance = None
         ; delivery_cancellation = None
         }
     in
@@ -1302,7 +1690,14 @@ let%expect_test "captured runtime installation advances only its owned accountin
     let policy = Chat_response.Runtime_semantics.default_policy in
     A.Session_actor.enable_run_constructor_turn_budget actor ~preparation policy
     |> protocol_ok;
+    let first_checkpoint = A.Session_actor.state actor |> protocol_ok in
+    A.Session_actor.checkpoint_run_moderator actor ~preparation first_checkpoint.moderator
+    |> protocol_ok
+    |> ignore;
     let installed = A.Session_actor.state actor |> protocol_ok in
+    let index = Option.value_exn installed.run_state in
+    assert (List.is_empty (A.Run_state.runs index));
+    assert (Option.is_some (A.Run_state.installation index).source);
     A.Session_actor.enable_run_constructor_turn_budget actor ~preparation policy
     |> protocol_ok;
     ignore
@@ -1332,317 +1727,742 @@ let%expect_test "captured runtime installation advances only its owned accountin
 ;;
 
 let%expect_test "actual exact job and timer wakes consume once under current authority" =
-  List.iter [ `Job; `Timer ] ~f:(fun kind ->
-    with_startup_actor (fun actor authorized _ request start manager _ _ _ ->
-      ignore (start (request "exact-owned-wake") |> protocol_ok : P.Run_receipt.t);
-      let before =
-        Chat_response.Moderator_manager.identity_snapshot manager |> Result.ok_or_failwith
+  List.iter
+    [ `Job, `Idle
+    ; `Timer, `Idle
+    ; `Job, `Unbound
+    ; `Timer, `Unbound
+    ; `Job, `Single_turn
+    ; `Timer, `Single_turn
+    ]
+    ~f:(fun (kind, drainer) ->
+      let foreground =
+        match drainer with
+        | `Idle -> false
+        | `Unbound | `Single_turn -> true
       in
-      let job = ref None in
-      let timer = ref None in
-      A.Session_actor.with_current_moderator_event
-        actor
-        ~operation_id:None
-        ~event:Session_start
-        ~snapshot:(fun () -> Ok before)
-        (fun ~executing ~retirement_reason:_ ~event:_ ~execute:_ ~commit ->
-           let service =
-             A.Session_actor.run_actions actor executing
-             |> protocol_ok
-             |> Option.value_exn
-           in
-           let owner = P.Job.Moderator_event executing.context.id in
-           let occurrence =
-             match kind with
-             | `Job ->
-               let registry = native_registry (ref 0) ~raises:false in
-               let request =
-                 Background_execution_tests.capture_tool
-                   registry
-                   { Chat_response.One_off_request.default_policy with
-                     max_output_bytes = 512
-                   }
-               in
-               let staged =
-                 A.Session_actor.prepare_background_job_launch actor ~owner request
-                 |> protocol_ok
-               in
-               job := Some staged;
-               A.Session_actor.stage_background_job
-                 actor
-                 ~job:staged
-                 ~capacity:{ publish = ignore; abort = ignore }
-               |> protocol_ok;
-               A.Session_actor.select_background_jobs actor ~owner ~ids:[ staged.id ]
-               |> protocol_ok;
-               P.Run_wake.Occurrence.Job_completion
-                 { job_id = staged.id; attempt = Int.succ staged.attempt }
-             | `Timer ->
-               let creation, staged =
-                 A.Session_actor.create_script_schedule
-                   actor
-                   ~owner
-                   ~source:executing.context.source
-                   ~delay_ms:0
-                   ~payload:(`String "owned timer")
-                   ~misfire:Deliver_once_immediately
-                 |> protocol_ok
-               in
-               timer := Some staged;
-               A.Session_actor.select_schedule_mutations
-                 actor
-                 ~owner
-                 ~source:executing.context.source
-                 ~receipts:[ creation ]
-               |> protocol_ok;
-               let ownership = Option.value_exn staged.ownership in
-               Delivered_timer
-                 { schedule_id = staged.id
-                 ; delivery_count = Int.succ staged.delivery_count
-                 ; creator = ownership.creator
-                 ; subscription = ownership.subscription
-                 }
-           in
-           let state = A.Session_actor.state actor |> protocol_ok in
-           let run =
-             Option.value_exn state.run_state |> A.Run_state.runs |> List.hd_exn
-           in
-           let wake =
-             P.Run_wake.create ~run_id:run.id ~source:run.source ~occurrence
-             |> protocol_ok
-           in
-           let transaction = A.Run_action_service.transaction service in
-           let ticket = transaction.handlers.stage (Wait wake) |> Result.ok_or_failwith in
-           ignore
-             (transaction.prepare [ ticket ] |> Result.ok_or_failwith
-              : P.Run_action.t option);
-           commit
-             ~snapshot:before
-             ~requests:
-               { request_turn = false; request_compaction = false; end_session = None })
-      |> protocol_ok
-      |> ignore;
-      let queued =
-        let frame, commit_delivery =
-          match kind with
-          | `Job ->
-            let staged = Option.value_exn !job in
-            let claimed =
-              A.Session_actor.claim_job
-                actor
-                ~job_id:staged.id
-                ~generation:staged.generation
-              |> protocol_ok
-              |> Option.value_exn
-            in
-            let completed =
-              A.Session_actor.complete_background_job
-                actor
-                ~job_id:staged.id
-                ~generation:staged.generation
-                ~attempt:claimed.attempt
-                (Succeeded (`String "done"))
-              |> protocol_ok
-            in
-            let state = A.Session_actor.state actor |> protocol_ok in
-            let observer =
-              A.Moderator_checkpoint.observer state.moderator
-              |> protocol_ok
-              |> Option.value_exn
-            in
-            let frame =
-              A.Background_job_event.frame ~state ~observer completed
-              |> protocol_ok
-              |> Chat_response.Background_delivery.capture
-            in
-            ( frame
-            , fun snapshot ->
-                A.Session_actor.deliver_job
-                  ~expected:before
-                  ~expected_job:completed
-                  actor
-                  ~job_id:completed.id
-                  ~generation:completed.generation
-                  ~moderator_snapshot:(Some (A.Moderator_checkpoint.encode snapshot))
-                |> protocol_ok
-                |> ignore )
-          | `Timer ->
-            let staged = Option.value_exn !timer in
-            let claimed =
-              A.Session_actor.claim_schedule
-                actor
-                ~schedule_id:staged.id
-                ~generation:staged.generation
-              |> protocol_ok
-              |> Option.value_exn
-            in
-            let frame =
-              Chat_response.Schedule_delivery.capture claimed |> Result.ok_or_failwith
-            in
-            ( frame
-            , fun snapshot ->
-                A.Session_actor.complete_schedule
-                  ~expected:before
-                  ~expected_schedule:claimed
-                  actor
-                  ~schedule_id:claimed.id
-                  ~generation:claimed.generation
-                  ~moderator_snapshot:(Some (A.Moderator_checkpoint.encode snapshot))
-                |> protocol_ok
-                |> ignore )
-        in
-        let frame = Session.Snapshot.of_value frame |> Result.ok_or_failwith in
-        let snapshot =
-          { before with
-            queued_internal_events = before.queued_internal_events @ [ frame ]
-          }
-        in
-        commit_delivery snapshot;
-        snapshot
-      in
-      let waiting = A.Session_actor.state actor |> protocol_ok in
-      let run = Option.value_exn waiting.run_state |> A.Run_state.runs |> List.hd_exn in
-      let wake =
-        match run.lifecycle with
-        | Waiting wake -> wake
-        | _ -> failwith "actual wait did not persist"
-      in
-      let candidate, captured =
-        A.Queued_moderator_event.claim
-          ~state:waiting
-          ~id:(P.Id.Moderator_execution.of_string "mex_wake_negative" |> protocol_ok)
-          ~snapshot:queued
-          ~now:timestamp
+      let original_live = Atomic.make true in
+      let principal =
+        P.Principal.create
+          ~id:principal_id
+          ~authentication_kind:"local"
+          ~scopes:(P.Scope.Set.of_list [ Send_messages ])
+          ~attributes:[]
         |> protocol_ok
       in
-      let matches executing wake =
-        match A.Run_wake_owner.claim_matches waiting ~run ~wake ~executing with
-        | Ok matches -> matches
-        | Error _ -> false
+      let original =
+        Operator_authorization.guarded ~principal ~is_current:(fun () ->
+          Atomic.get original_live)
       in
-      let wrong_source =
-        P.Moderator_execution.create
-          { candidate.context with
-            source = { candidate.context.source with source_sha256 = String.make 64 'f' }
-          }
-        |> protocol_ok
+      let revoke_on_policy = ref false in
+      let writes = ref 0 in
+      let reject_claim = ref false in
+      let claim_failure =
+        P.Error.create
+          Persistence_error
+          ~message:"injected wake claim failure"
+          ~retryable:true
+          ()
       in
-      let wrong_generation =
-        P.Moderator_execution.create
-          { candidate.context with generation = Int.succ candidate.context.generation }
-        |> protocol_ok
+      let foreground_body = ref (fun (_ : A.Operation_worker.Capabilities.t) -> ()) in
+      let finished, finish = Eio.Promise.create () in
+      let bounded = ref (fun f -> f ()) in
+      let make_worker manager =
+        A.Operation_worker.create ~run:(fun ~sw:_ ~input caps ->
+          Exn.protect
+            ~finally:(fun () -> Eio.Promise.resolve finish ())
+            ~f:(fun () ->
+              !foreground_body caps;
+              A.Operation_worker.Completed
+                { final_history = input.history
+                ; moderator_snapshot =
+                    Some
+                      (A.Moderator_checkpoint.encode
+                         (Chat_response.Moderator_manager.identity_snapshot manager
+                          |> Result.ok_or_failwith))
+                ; runtime_requests = []
+                }))
       in
-      let wrong_occurrence =
-        let occurrence =
-          match wake.occurrence with
-          | Job_completion { job_id; attempt } ->
-            P.Run_wake.Occurrence.Job_completion { job_id; attempt = Int.succ attempt }
-          | Delivered_timer { schedule_id; delivery_count; creator; subscription } ->
-            Delivered_timer
-              { schedule_id
-              ; delivery_count = Int.succ delivery_count
-              ; creator
-              ; subscription
-              }
-          | Subscription_delivery _ -> failwith "fixture unexpectedly used subscription"
-        in
-        P.Run_wake.create ~run_id:run.id ~source:run.source ~occurrence |> protocol_ok
-      in
-      let exact_frame_matches = matches candidate wake in
-      let foreign_source_rejected = not (matches wrong_source wake) in
-      let foreign_generation_rejected = not (matches wrong_generation wake) in
-      let wrong_occurrence_rejected = not (matches candidate wrong_occurrence) in
-      let revision = waiting.counters.revision in
-      let claimed_scope = ref false in
-      let claim () =
-        A.Session_actor.with_idle_queued_moderator_event_tools
-          actor
-          ~snapshot:queued
-          (fun ~executing ~retirement_reason ~event:_ ~execute:_ ~commit ->
-             if Option.is_some retirement_reason then failwith "valid wake retired";
-             let service =
-               A.Session_actor.run_actions actor executing
-               |> protocol_ok
-               |> Option.value_exn
+      with_startup_actor
+        ~original_actor:original
+        ~before_authorize:(fun _ ->
+          if !revoke_on_policy then Atomic.set original_live false)
+        ~make_persistence:(fun _ _ _ ->
+          { A.Session_actor.archive_reference
+          ; commit =
+              (fun ?observation:_ ~command_audit:_ ~previous:_ _ ->
+                incr writes;
+                if !reject_claim then Error claim_failure else Ok ())
+          })
+        ~prepare:(fun env ->
+          bounded := fun f -> Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. f)
+        ?make_worker:(Option.some_if foreground make_worker)
+        (fun actor authorized _ request start manager scope reference attachment ->
+           !bounded (fun () ->
+             ignore (start (request "exact-owned-wake") |> protocol_ok : P.Run_receipt.t);
+             A.Session_actor.set_runtime_worker
+               ~moderator_manager:manager
+               actor
+               ~worker:(Some (make_worker manager))
+               ~inference:
+                 (Some
+                    (Inference_ports.create ~config:Chat_response.Config.default ()
+                     |> Inference_ports.execution))
+             |> protocol_ok;
+             let before =
+               Chat_response.Moderator_manager.identity_snapshot manager
+               |> Result.ok_or_failwith
              in
-             claimed_scope := true;
-             ignore
-               ((A.Run_action_service.transaction service).prepare []
-                |> Result.ok_or_failwith
-                : P.Run_action.t option);
-             commit
-               ~snapshot:{ queued with queued_internal_events = [] }
-               ~requests:
-                 { request_turn = false; request_compaction = false; end_session = None })
-      in
-      authorized := false;
-      let revoked_rejected = Result.is_error (claim ()) in
-      let rejected_unchanged =
-        Int64.equal
-          revision
-          (A.Session_actor.state actor |> protocol_ok).counters.revision
-      in
-      authorized := true;
-      let actual_callback = claim () |> protocol_ok in
-      let duplicate_rejected = Result.is_error (claim ()) in
-      let state = A.Session_actor.state actor |> protocol_ok in
-      let index = Option.value_exn state.run_state in
-      let run = List.hd_exn (A.Run_state.runs index) in
-      let duplicate_frame_retired =
-        Option.is_some
-          (A.Queued_moderator_event.delivery_retirement_reason
-             ~state
-             ~observer:candidate.context.source
-             ~event:captured
-             ~subscription_expired:(fun _ -> Ok false)
-           |> protocol_ok)
-      in
-      let callback_proof_once =
-        Int.equal
-          1
-          (List.count run.terminal_work ~f:(fun proof ->
-             match proof.work.key, proof.outcome with
-             | Retained (Moderator_execution _), Succeeded -> true
-             | _ -> false))
-      in
-      let consumed_once =
-        Int.equal
-          1
-          (List.count (A.Run_state.intents index) ~f:(fun intent ->
-             match intent.action, intent.disposition with
-             | Wait _, Consumed None -> true
-             | _ -> false))
-      in
-      print_s
-        [%sexp
-          { exact_frame_matches : bool
-          ; foreign_source_rejected : bool
-          ; foreign_generation_rejected : bool
-          ; wrong_occurrence_rejected : bool
-          ; duplicate_frame_retired : bool
-          ; revoked_rejected : bool
-          ; rejected_unchanged : bool
-          ; actual_callback : bool
-          ; claimed_scope = (!claimed_scope : bool)
-          ; duplicate_rejected : bool
-          ; consumed_once : bool
-          ; callback_proof_once : bool
-          ; active = (P.Run.Lifecycle.equal run.lifecycle Active : bool)
-          }]));
+             let job = ref None in
+             let timer = ref None in
+             A.Session_actor.with_current_moderator_event
+               actor
+               ~operation_id:None
+               ~event:Session_start
+               ~snapshot:(fun () -> Ok before)
+               (fun ~executing
+                 ~policy_caller:_
+                 ~model_jobs:_
+                 ~allocate_inference:_
+                 ~retirement_reason:_
+                 ~event:_
+                 ~execute:_
+                 ~commit ->
+                  let service =
+                    A.Session_actor.run_actions actor executing
+                    |> protocol_ok
+                    |> Option.value_exn
+                  in
+                  let owner = P.Job.Moderator_event executing.context.id in
+                  let occurrence =
+                    match kind with
+                    | `Job ->
+                      let registry = native_registry (ref 0) ~raises:false in
+                      let request =
+                        Background_execution_tests.capture_tool
+                          registry
+                          { Chat_response.One_off_request.default_policy with
+                            max_output_bytes = 512
+                          }
+                      in
+                      let staged =
+                        A.Session_actor.prepare_background_job_launch actor ~owner request
+                        |> protocol_ok
+                      in
+                      job := Some staged;
+                      A.Session_actor.stage_background_job
+                        actor
+                        ~job:staged
+                        ~capacity:{ publish = ignore; abort = ignore }
+                      |> protocol_ok;
+                      A.Session_actor.select_background_jobs
+                        actor
+                        ~owner
+                        ~ids:[ staged.id ]
+                      |> protocol_ok;
+                      P.Run_wake.Occurrence.Job_completion
+                        { job_id = staged.id; attempt = Int.succ staged.attempt }
+                    | `Timer ->
+                      let creation, staged =
+                        A.Session_actor.create_script_schedule
+                          actor
+                          ~owner
+                          ~source:executing.context.source
+                          ~delay_ms:0
+                          ~payload:(`String "owned timer")
+                          ~misfire:Deliver_once_immediately
+                        |> protocol_ok
+                      in
+                      timer := Some staged;
+                      A.Session_actor.select_schedule_mutations
+                        actor
+                        ~owner
+                        ~source:executing.context.source
+                        ~receipts:[ creation ]
+                      |> protocol_ok;
+                      let ownership = Option.value_exn staged.ownership in
+                      Delivered_timer
+                        { schedule_id = staged.id
+                        ; delivery_count = Int.succ staged.delivery_count
+                        ; creator = ownership.creator
+                        ; subscription = ownership.subscription
+                        }
+                  in
+                  let state = A.Session_actor.state actor |> protocol_ok in
+                  let run =
+                    Option.value_exn state.run_state |> A.Run_state.runs |> List.hd_exn
+                  in
+                  let wake =
+                    P.Run_wake.create ~run_id:run.id ~source:run.source ~occurrence
+                    |> protocol_ok
+                  in
+                  let transaction = A.Run_action_service.transaction service in
+                  let ticket =
+                    transaction.handlers.stage (Wait wake) |> Result.ok_or_failwith
+                  in
+                  ignore
+                    (transaction.prepare [ ticket ] |> Result.ok_or_failwith
+                     : P.Run_action.t option);
+                  commit
+                    ~snapshot:before
+                    ~requests:
+                      { request_turn = false
+                      ; request_compaction = false
+                      ; end_session = None
+                      })
+             |> protocol_ok
+             |> ignore;
+             let queued =
+               let frame, commit_delivery =
+                 match kind with
+                 | `Job ->
+                   let staged = Option.value_exn !job in
+                   let claimed =
+                     A.Session_actor.claim_job
+                       actor
+                       ~job_id:staged.id
+                       ~generation:staged.generation
+                     |> protocol_ok
+                     |> Option.value_exn
+                   in
+                   let completed =
+                     A.Session_actor.complete_background_job
+                       actor
+                       ~job_id:staged.id
+                       ~generation:staged.generation
+                       ~attempt:claimed.attempt
+                       (Succeeded (`String "done"))
+                     |> protocol_ok
+                   in
+                   let state = A.Session_actor.state actor |> protocol_ok in
+                   let observer =
+                     A.Moderator_checkpoint.observer state.moderator
+                     |> protocol_ok
+                     |> Option.value_exn
+                   in
+                   let frame =
+                     A.Background_job_event.frame ~state ~observer completed
+                     |> protocol_ok
+                     |> Chat_response.Background_delivery.capture
+                   in
+                   ( frame
+                   , fun snapshot ->
+                       A.Session_actor.deliver_job
+                         ~moderator_manager:manager
+                         ~expected:before
+                         ~expected_job:completed
+                         actor
+                         ~job_id:completed.id
+                         ~generation:completed.generation
+                         ~moderator_snapshot:
+                           (Some (A.Moderator_checkpoint.encode snapshot))
+                       |> protocol_ok
+                       |> ignore )
+                 | `Timer ->
+                   let staged = Option.value_exn !timer in
+                   let claimed =
+                     A.Session_actor.claim_schedule
+                       actor
+                       ~schedule_id:staged.id
+                       ~generation:staged.generation
+                     |> protocol_ok
+                     |> Option.value_exn
+                   in
+                   let frame =
+                     Chat_response.Schedule_delivery.capture claimed
+                     |> Result.ok_or_failwith
+                   in
+                   ( frame
+                   , fun snapshot ->
+                       A.Session_actor.complete_schedule
+                         ~expected:before
+                         ~expected_schedule:claimed
+                         actor
+                         ~schedule_id:claimed.id
+                         ~generation:claimed.generation
+                         ~moderator_snapshot:
+                           (Some (A.Moderator_checkpoint.encode snapshot))
+                       |> protocol_ok
+                       |> ignore )
+               in
+               let frame = Session.Snapshot.of_value frame |> Result.ok_or_failwith in
+               let snapshot =
+                 { before with
+                   queued_internal_events = before.queued_internal_events @ [ frame ]
+                 }
+               in
+               commit_delivery snapshot;
+               snapshot
+             in
+             let waiting = A.Session_actor.state actor |> protocol_ok in
+             let run =
+               Option.value_exn waiting.run_state |> A.Run_state.runs |> List.hd_exn
+             in
+             let wake =
+               match run.lifecycle with
+               | Waiting wake -> wake
+               | _ -> failwith "actual wait did not persist"
+             in
+             let candidate, captured =
+               A.Queued_moderator_event.claim
+                 ~state:waiting
+                 ~id:
+                   (P.Id.Moderator_execution.of_string "mex_wake_negative" |> protocol_ok)
+                 ~snapshot:queued
+                 ~now:timestamp
+               |> protocol_ok
+             in
+             let matches executing wake =
+               match A.Run_wake_owner.claim_matches waiting ~run ~wake ~executing with
+               | Ok matches -> matches
+               | Error _ -> false
+             in
+             let wrong_source =
+               P.Moderator_execution.create
+                 { candidate.context with
+                   source =
+                     { candidate.context.source with source_sha256 = String.make 64 'f' }
+                 }
+               |> protocol_ok
+             in
+             let wrong_generation =
+               P.Moderator_execution.create
+                 { candidate.context with
+                   generation = Int.succ candidate.context.generation
+                 }
+               |> protocol_ok
+             in
+             let wrong_occurrence =
+               let occurrence =
+                 match wake.occurrence with
+                 | Job_completion { job_id; attempt } ->
+                   P.Run_wake.Occurrence.Job_completion
+                     { job_id; attempt = Int.succ attempt }
+                 | Delivered_timer { schedule_id; delivery_count; creator; subscription }
+                   ->
+                   Delivered_timer
+                     { schedule_id
+                     ; delivery_count = Int.succ delivery_count
+                     ; creator
+                     ; subscription
+                     }
+                 | Subscription_delivery _ ->
+                   failwith "fixture unexpectedly used subscription"
+               in
+               P.Run_wake.create ~run_id:run.id ~source:run.source ~occurrence
+               |> protocol_ok
+             in
+             let exact_frame_matches = matches candidate wake in
+             let foreign_source_rejected = not (matches wrong_source wake) in
+             let foreign_generation_rejected = not (matches wrong_generation wake) in
+             let wrong_occurrence_rejected = not (matches candidate wrong_occurrence) in
+             let drainer_original =
+               Operator_authorization.nonexpiring_static
+                 (P.Principal.create
+                    ~id:second_principal_id
+                    ~authentication_kind:"local"
+                    ~scopes:(P.Scope.Set.of_list [ Send_messages ])
+                    ~attributes:[]
+                  |> protocol_ok)
+             in
+             let drainer_scope =
+               A.Run_admission.Scope.create_authenticated
+                 ~actor:drainer_original
+                 ~observer:(A.Run_admission.Scope.observer scope)
+                 ~startup_pending:(fun () -> false)
+                 ~authorize:(fun _ -> Ok ())
+               |> protocol_ok
+             in
+             let exercise
+                   (claim_scope :
+                     A.Operation_worker.Capabilities.event_handler
+                     -> (bool, P.Error.t) result)
+               =
+               let revision =
+                 (A.Session_actor.state actor |> protocol_ok).counters.revision
+               in
+               let claimed_scope = ref false in
+               let expected_callback_run = ref false in
+               let expected_invocation_run = ref false in
+               let claim () =
+                 claim_scope
+                   (fun
+                       ~executing
+                        ~policy_caller:_
+                        ~model_jobs
+                        ~allocate_inference:_
+                        ~retirement_reason
+                        ~event:_
+                        ~execute
+                        ~commit
+                      ->
+                      if Option.is_some retirement_reason
+                      then failwith "valid wake retired";
+                      let service =
+                        A.Session_actor.run_actions actor executing |> protocol_ok
+                      in
+                      claimed_scope := Option.is_some service;
+                      expected_callback_run
+                      := Option.exists service ~f:(fun service ->
+                           P.Id.Run.equal
+                             run.id
+                             (A.Run_scope.run_id (A.Run_action_service.scope service)));
+                      let admit_model port =
+                        let state = A.Session_actor.state actor |> protocol_ok in
+                        let admitted =
+                          A.Model_job_admission.admit
+                            port
+                            (Inference_target_tests.job state)
+                          |> protocol_ok
+                        in
+                        assert (
+                          Option.equal
+                            P.Inference_origin.equal
+                            admitted.inference_origin
+                            (Some (Run run.id)));
+                        let state = A.Session_actor.state actor |> protocol_ok in
+                        let occurrence =
+                          A.Run_job_occurrence.work admitted |> protocol_ok
+                        in
+                        let owner =
+                          A.Goal_work_attribution.run_of_work state occurrence
+                          |> protocol_ok
+                          |> Option.value_exn
+                        in
+                        assert (P.Id.Run.equal owner.id run.id)
+                      in
+                      (* Missing/expired wake A cannot borrow foreground B.
+                         Failed admission writes nothing and does not consume A. *)
+                      let before_denial = A.Session_actor.state actor |> protocol_ok in
+                      let previous_writes = !writes in
+                      Atomic.set original_live false;
+                      assert (Operator_authorization.is_current drainer_original);
+                      (match
+                         A.Model_job_admission.admit
+                           model_jobs
+                           (Inference_target_tests.job before_denial)
+                       with
+                       | Error failure ->
+                         assert (P.Error.equal_code failure.code Permission_denied)
+                       | Ok _ -> failwith "wake borrowed unrelated drainer authority");
+                      assert (Int.equal previous_writes !writes);
+                      assert (
+                        Sexp.equal
+                          (A.Session_state.sexp_of_t before_denial)
+                          (A.Session_state.sexp_of_t
+                             (A.Session_actor.state actor |> protocol_ok)));
+                      Atomic.set original_live true;
+                      admit_model model_jobs;
+                      let invocation =
+                        P.Invocation.create
+                          ~observer:run.source.observer
+                          ~parent_event:executing.context.id
+                          { (invocation_fixture ()).context with origin = Moderator }
+                        |> protocol_ok
+                      in
+                      let resolved =
+                        execute ~invocation (fun ~dispatched ~capabilities ->
+                          admit_model capabilities.model_jobs;
+                          expected_invocation_run
+                          := Option.exists
+                               dispatched.P.Invocation.inference_origin
+                               ~f:(function
+                               | P.Inference_origin.Run id -> P.Id.Run.equal id run.id
+                               | Unbound -> false);
+                          Ok (P.Invocation.Complete `Null))
+                        |> protocol_ok
+                      in
+                      assert (
+                        Option.equal
+                          P.Inference_origin.equal
+                          resolved.P.Invocation.inference_origin
+                          (List.hd_exn
+                             (A.Session_actor.state actor |> protocol_ok).invocations)
+                            .inference_origin);
+                      (match kind, drainer with
+                       | `Job, `Single_turn ->
+                         (* Pure historical/recovery projections only: no actor
+                            mutation, execution permission or success proof. *)
+                         let basis = A.Session_actor.state actor |> protocol_ok in
+                         let index = Option.value_exn basis.run_state in
+                         let causal = A.Run_state.find index run.id |> Option.value_exn in
+                         let retired =
+                           A.Run_retirement.interrupt_run
+                             index
+                             ~run_id:run.id
+                             ~session_revision:(Int64.succ basis.counters.revision)
+                             ~now:timestamp
+                           |> protocol_ok
+                         in
+                         assert (
+                           Option.is_none
+                             (A.Run_event_scope.select
+                                { basis with run_state = Some retired }
+                                ~executing
+                              |> protocol_ok));
+                         assert (
+                           Option.equal
+                             P.Inference_origin.equal
+                             (Some (Run run.id))
+                             (A.Invocation_inference_provenance.of_event
+                                ~runs:(Some retired)
+                                ~jobs:basis.jobs
+                                executing
+                              |> protocol_ok));
+                         A.Invocation_inference_provenance.validate
+                           ~invocations:[ resolved ]
+                           ~jobs:basis.jobs
+                           ~events:[ executing ]
+                           ~runs:(Some retired)
+                         |> protocol_ok;
+                         let stale =
+                           P.Moderator_execution.create
+                             { executing.context with
+                               source =
+                                 { executing.context.source with
+                                   source_sha256 = String.make 64 'f'
+                                 }
+                             }
+                           |> protocol_ok
+                         in
+                         assert (
+                           Option.is_none
+                             (A.Run_event_scope.select basis ~executing:stale
+                              |> protocol_ok));
+                         assert (
+                           Result.is_error
+                             (A.Invocation_inference_provenance.validate
+                                ~invocations:[ resolved ]
+                                ~jobs:basis.jobs
+                                ~events:[ stale ]
+                                ~runs:basis.run_state));
+                         let contradictory =
+                           P.Run.create
+                             ~id:
+                               (P.Id.Run.of_string "run_conflicting_event" |> protocol_ok)
+                             ~session:causal.session
+                             ~principal_id:causal.principal_id
+                             ~source:causal.source
+                             ~mode:Single_turn
+                             ~lifecycle:Active
+                             ~revision:causal.revision
+                             ~owned_work:causal.owned_work
+                             ~relinquished_work:causal.relinquished_work
+                             ~terminal_work:causal.terminal_work
+                             ~created_at:causal.created_at
+                             ~updated_at:causal.updated_at
+                           |> protocol_ok
+                         in
+                         assert (
+                           Result.is_error
+                             (A.Run_event_ancestry.find
+                                [ causal; contradictory ]
+                                ~executing))
+                       | (`Job | `Timer), (`Idle | `Unbound) | `Timer, `Single_turn -> ());
+                      Option.iter service ~f:(fun service ->
+                        ignore
+                          ((A.Run_action_service.transaction service).prepare []
+                           |> Result.ok_or_failwith
+                           : P.Run_action.t option));
+                      commit
+                        ~snapshot:{ queued with queued_internal_events = [] }
+                        ~requests:
+                          { request_turn = false
+                          ; request_compaction = false
+                          ; end_session = None
+                          })
+               in
+               authorized := false;
+               let revoked_rejected = Result.is_error (claim ()) in
+               let rejected_unchanged =
+                 Int64.equal
+                   revision
+                   (A.Session_actor.state actor |> protocol_ok).counters.revision
+               in
+               authorized := true;
+               (* The real claim policy revokes A at the final prewrite seam.
+                  It must deny before the persistence adapter sees a candidate. *)
+               let before_cut = A.Session_actor.state actor |> protocol_ok in
+               let previous_writes = !writes in
+               revoke_on_policy := true;
+               (match claim () with
+                | Error failure ->
+                  assert (P.Error.equal_code failure.code Permission_denied)
+                | Ok _ -> failwith "claim accepted policy-revoked original");
+               revoke_on_policy := false;
+               assert (not (Atomic.get original_live));
+               assert (Int.equal previous_writes !writes);
+               assert (
+                 Sexp.equal
+                   (A.Session_state.sexp_of_t before_cut)
+                   (A.Session_state.sexp_of_t
+                      (A.Session_actor.state actor |> protocol_ok)));
+               Atomic.set original_live true;
+               (match kind, drainer with
+                | `Job, `Idle ->
+                  reject_claim := true;
+                  (match claim () with
+                   | Error failure ->
+                     assert (P.Error.equal_code failure.code claim_failure.code);
+                     assert (String.equal failure.message claim_failure.message)
+                   | Ok _ -> failwith "injected claim unexpectedly committed");
+                  reject_claim := false;
+                  assert (Int.equal (Int.succ previous_writes) !writes);
+                  assert (
+                    Sexp.equal
+                      (A.Session_state.sexp_of_t before_cut)
+                      (A.Session_state.sexp_of_t
+                         (A.Session_actor.state actor |> protocol_ok)))
+                | (`Job | `Timer), (`Unbound | `Single_turn) | `Timer, `Idle -> ());
+               let actual_callback = claim () |> protocol_ok in
+               let duplicate_rejected = Result.is_error (claim ()) in
+               let state = A.Session_actor.state actor |> protocol_ok in
+               let index = Option.value_exn state.run_state in
+               let run = A.Run_state.find index run.id |> Option.value_exn in
+               let duplicate_frame_retired =
+                 Option.is_some
+                   (A.Queued_moderator_event.delivery_retirement_reason
+                      ~state
+                      ~observer:candidate.context.source
+                      ~event:captured
+                      ~subscription_expired:(fun _ -> Ok false)
+                    |> protocol_ok)
+               in
+               let callback_proof_once =
+                 Int.equal
+                   1
+                   (List.count run.terminal_work ~f:(fun proof ->
+                      match proof.work.key, proof.outcome with
+                      | Retained (Moderator_execution _), Succeeded -> true
+                      | _ -> false))
+               in
+               let consumed_once =
+                 Int.equal
+                   1
+                   (List.count (A.Run_state.intents index) ~f:(fun intent ->
+                      match intent.action, intent.disposition with
+                      | Wait _, Consumed None -> true
+                      | _ -> false))
+               in
+               assert (
+                 exact_frame_matches
+                 && foreign_source_rejected
+                 && foreign_generation_rejected
+                 && wrong_occurrence_rejected
+                 && duplicate_frame_retired
+                 && revoked_rejected
+                 && rejected_unchanged
+                 && actual_callback
+                 && duplicate_rejected
+                 && consumed_once
+                 && P.Run.Lifecycle.equal run.lifecycle Active);
+               assert (Bool.equal !claimed_scope !expected_callback_run);
+               print_s
+                 [%sexp
+                   (kind : [ `Job | `Timer ])
+                 , (drainer : [ `Idle | `Unbound | `Single_turn ])
+                 , (!expected_callback_run : bool)
+                 , (!expected_invocation_run : bool)
+                 , (callback_proof_once : bool)]
+             in
+             if foreground
+             then (
+               (foreground_body
+                := fun caps ->
+                     let actual = A.Session_actor.state actor |> protocol_ok in
+                     let operation = Option.value_exn actual.active_operation in
+                     let actual_index = Option.value_exn actual.run_state in
+                     let unchanged =
+                       A.Run_state.find actual_index run.id |> Option.value_exn
+                     in
+                     assert (P.Run.Lifecycle.equal unchanged.lifecycle (Waiting wake));
+                     assert (
+                       not
+                         (List.exists unchanged.owned_work ~f:(fun work ->
+                            match work.P.Run_work.key with
+                            | Operation id -> P.Id.Operation.equal id operation.id
+                            | Retained _ -> false)));
+                     let drainer_runs =
+                       A.Run_state.runs actual_index
+                       |> List.filter ~f:(fun candidate ->
+                         List.exists candidate.P.Run.owned_work ~f:(fun work ->
+                           match work.P.Run_work.key with
+                           | Operation id -> P.Id.Operation.equal id operation.id
+                           | Retained _ -> false))
+                     in
+                     (match drainer, drainer_runs with
+                      | `Unbound, [] -> ()
+                      | `Single_turn, [ drainer_run ] ->
+                        assert (P.Run.Mode.equal drainer_run.mode Single_turn);
+                        assert (not (P.Id.Run.equal drainer_run.id run.id))
+                      | _ -> failwith "actual drainer Run classification differs");
+                     exercise
+                       (caps.with_queued_moderator_event ~snapshot:(fun () -> Ok queued)));
+               let entry =
+                 A.History_codec.user_text
+                   ~id:
+                     (History_entry.Id.create
+                        ~namespace:"unrelated_foreground"
+                        ~sequence:0
+                      |> Result.ok_or_failwith)
+                   "unrelated foreground"
+                 |> A.History_codec.to_protocol
+               in
+               (match drainer with
+                | `Idle -> assert false
+                | `Unbound ->
+                  A.Session_actor.submit_message
+                    ~submitting_principal:principal_id
+                    actor
+                    ~attachment_id:attachment.id
+                    entry
+                  |> protocol_ok
+                  |> ignore
+                | `Single_turn ->
+                  let state = A.Session_actor.state actor |> protocol_ok in
+                  let request =
+                    P.Run_start.create
+                      ~session_id
+                      ~attachment_id:attachment.id
+                      ~generation:state.identity.generation
+                      ~expected_revision:state.counters.revision
+                      ~mode:Single_turn
+                      ~input:
+                        (User_submission
+                           { kind = Plain_text
+                           ; text = "unrelated foreground"
+                           ; attachments = []
+                           })
+                      ~key:(P.Idempotency_key.of_string "single-drainer" |> protocol_ok)
+                    |> protocol_ok
+                  in
+                  A.Session_actor.admit_run
+                    actor
+                    ~scope:drainer_scope
+                    ~request
+                    ~session:reference
+                    ~request_sha256:
+                      (P.Run_start.to_json request
+                       |> Jsonaf.to_string
+                       |> Digestif.SHA256.digest_string
+                       |> Digestif.SHA256.to_hex)
+                    ~entry:(Some entry)
+                  |> protocol_ok
+                  |> ignore);
+               Eio.Promise.await finished)
+             else
+               exercise
+                 (A.Session_actor.with_idle_queued_moderator_event_tools
+                    actor
+                    ~snapshot:queued))));
   [%expect
     {|
-    ((exact_frame_matches true) (foreign_source_rejected true)
-     (foreign_generation_rejected true) (wrong_occurrence_rejected true)
-     (duplicate_frame_retired true) (revoked_rejected true)
-     (rejected_unchanged true) (actual_callback true) (claimed_scope true)
-     (duplicate_rejected true) (consumed_once true) (callback_proof_once true)
-     (active true))
-    ((exact_frame_matches true) (foreign_source_rejected true)
-     (foreign_generation_rejected true) (wrong_occurrence_rejected true)
-     (duplicate_frame_retired true) (revoked_rejected true)
-     (rejected_unchanged true) (actual_callback true) (claimed_scope true)
-     (duplicate_rejected true) (consumed_once true) (callback_proof_once true)
-     (active true))
+    (Job Idle true true true)
+    (Timer Idle true true true)
+    (Job Unbound true true true)
+    (Timer Unbound true true true)
+    (Job Single_turn true true true)
+    (Timer Single_turn true true true)
     |}]
 ;;
 
@@ -1665,7 +2485,14 @@ let%expect_test "unbounded inline job Wait rejects before staged work publicatio
         ~operation_id:None
         ~event:Session_start
         ~snapshot:(fun () -> Ok before)
-        (fun ~executing ~retirement_reason:_ ~event:_ ~execute:_ ~commit ->
+        (fun ~executing
+          ~policy_caller:_
+          ~model_jobs:_
+          ~allocate_inference:_
+          ~retirement_reason:_
+          ~event:_
+          ~execute:_
+          ~commit ->
            let service =
              A.Session_actor.run_actions actor executing
              |> protocol_ok
@@ -1745,7 +2572,14 @@ let%expect_test "actual retry retains failed attempt and wakes its callback once
          ~operation_id:None
          ~event:Session_start
          ~snapshot:(fun () -> Ok before)
-         (fun ~executing ~retirement_reason:_ ~event:_ ~execute:_ ~commit ->
+         (fun ~executing
+           ~policy_caller:_
+           ~model_jobs:_
+           ~allocate_inference:_
+           ~retirement_reason:_
+           ~event:_
+           ~execute:_
+           ~commit ->
             let service =
               A.Session_actor.run_actions actor executing
               |> protocol_ok
@@ -1960,6 +2794,27 @@ let%expect_test "actual retry retains failed attempt and wakes its callback once
          ~after:(A.Moderator_checkpoint.encode after)
        |> protocol_ok;
        let enqueued_state = A.Session_actor.state actor |> protocol_ok |> round_trip in
+       let queue =
+         A.Moderator_checkpoint.queue enqueued_state.moderator
+         |> protocol_ok
+         |> Option.value_exn
+       in
+       let occurrence = List.last_exn (A.Moderator_queue.entries queue) in
+       assert (
+         Option.equal
+           P.Inference_origin.equal
+           (A.Moderator_queue.Entry.origin occurrence)
+           (Some (Run (A.Run_job_delivery.run_id delivery))));
+       assert (
+         P.Run_source.equal
+           (A.Moderator_queue.source queue)
+           (A.Run_job_delivery.source delivery));
+       (match A.Moderator_queue.Entry.producer occurrence with
+        | Some (Job_completion { id; generation; attempt }) ->
+          assert (P.Id.Job.equal id frame.job_id);
+          assert (Int.equal generation frame.generation);
+          assert (Int.equal attempt 1)
+        | _ -> failwith "retained first attempt lost its actual queued producer");
        let recovered_enqueued =
          A.Run_retirement.recover
            (Option.value_exn enqueued_state.run_state)
@@ -1985,7 +2840,16 @@ let%expect_test "actual retry retains failed attempt and wakes its callback once
        A.Session_actor.with_idle_queued_moderator_event_tools
          actor
          ~snapshot:after
-         (fun ~executing ~retirement_reason ~event:_ ~execute:_ ~commit ->
+         (fun
+             ~executing
+              ~policy_caller:_
+              ~model_jobs:_
+              ~allocate_inference:_
+              ~retirement_reason
+              ~event:_
+              ~execute:_
+              ~commit
+            ->
             if Option.is_some retirement_reason
             then failwith "exact retained retry frame retired";
             let service =
@@ -2089,7 +2953,14 @@ let%test_unit
          ~operation_id:None
          ~event:Session_start
          ~snapshot:(fun () -> Ok before)
-         (fun ~executing ~retirement_reason:_ ~event:_ ~execute:_ ~commit:_ ->
+         (fun ~executing
+           ~policy_caller:_
+           ~model_jobs:_
+           ~allocate_inference:_
+           ~retirement_reason:_
+           ~event:_
+           ~execute:_
+           ~commit:_ ->
             let service =
               A.Session_actor.run_actions actor executing
               |> protocol_ok
@@ -2241,7 +3112,14 @@ let%test_unit "actual callback cancellation retires run with original reason" =
          ~operation_id:None
          ~event:Session_start
          ~snapshot:(fun () -> Ok before)
-         (fun ~executing ~retirement_reason:_ ~event:_ ~execute:_ ~commit:_ ->
+         (fun ~executing
+           ~policy_caller:_
+           ~model_jobs:_
+           ~allocate_inference:_
+           ~retirement_reason:_
+           ~event:_
+           ~execute:_
+           ~commit:_ ->
             A.Session_actor.run_actions actor executing
             |> protocol_ok
             |> Option.value_exn
@@ -2281,7 +3159,14 @@ let stage_bounded_owned_wait actor manager =
     ~operation_id:None
     ~event:Session_start
     ~snapshot:(fun () -> Ok before)
-    (fun ~executing ~retirement_reason:_ ~event:_ ~execute:_ ~commit ->
+    (fun ~executing
+      ~policy_caller:_
+      ~model_jobs:_
+      ~allocate_inference:_
+      ~retirement_reason:_
+      ~event:_
+      ~execute:_
+      ~commit ->
        let captured =
          Background_execution_tests.capture_tool
            (native_registry (ref 0) ~raises:false)
@@ -2326,6 +3211,242 @@ let stage_bounded_owned_wait actor manager =
   |> protocol_ok
   |> ignore;
   Option.value_exn !staged, before
+;;
+
+let%expect_test "owned nested cancellation settles both exact Job occurrences once" =
+  let principal =
+    P.Principal.create
+      ~id:principal_id
+      ~authentication_kind:"local"
+      ~scopes:(P.Scope.Set.of_list [ Send_messages ])
+      ~attributes:[]
+    |> protocol_ok
+  in
+  let bounded = ref (fun f -> f ()) in
+  with_startup_actor
+    ~original_actor:(Operator_authorization.trusted_local principal)
+    ~prepare:(fun env ->
+      bounded := fun f -> Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 15. f)
+    (fun actor _ _ request start manager _ _ _ ->
+       !bounded (fun () ->
+         ignore (start (request "owned-nested-cancel") |> protocol_ok : P.Run_receipt.t);
+         let staged_parent, before = stage_bounded_owned_wait actor manager in
+         let parent =
+           A.Session_actor.claim_job
+             actor
+             ~job_id:staged_parent.id
+             ~generation:staged_parent.generation
+           |> protocol_ok
+           |> Option.value_exn
+         in
+         let captured =
+           Background_execution_tests.capture_tool
+             (native_registry (ref 0) ~raises:false)
+             { Chat_response.One_off_request.default_policy with max_output_bytes = 512 }
+         in
+         let invocation = Job_fixtures.root parent in
+         let selected = ref None in
+         Job_fixtures.with_job actor parent (fun ~job:_ ~execute ->
+           execute ~invocation (fun ~dispatched ~capabilities:_ ->
+             let owner = P.Job.Invocation dispatched.context.id in
+             let child =
+               A.Session_actor.prepare_background_job_launch actor ~owner captured
+               |> protocol_ok
+             in
+             selected := Some child;
+             A.Session_actor.stage_background_job
+               actor
+               ~job:child
+               ~capacity:{ publish = ignore; abort = ignore }
+             |> protocol_ok;
+             A.Session_actor.select_background_jobs actor ~owner ~ids:[ child.id ]
+             |> protocol_ok;
+             Ok
+               (P.Invocation.Pending (Job child.id, `String "selected nested dependency"))))
+         |> protocol_ok
+         |> ignore;
+         let child = Option.value_exn !selected in
+         [%test_eq: int] 0 child.attempt;
+         (match child.status, child.launch with
+          | Queued, Some { owner; parent_job = Some (id, attempt); _ } ->
+            assert (
+              P.Job.Birth_parent.equal
+                owner
+                (P.Job.Birth_parent.callback (Invocation invocation.context.id)));
+            assert (P.Id.Job.equal id parent.id);
+            [%test_eq: int] parent.attempt attempt
+          | _ -> raise_s [%sexp (child : P.Job.t)]);
+         let dependency : P.Job.dependency =
+           { invocation_id = invocation.context.id
+           ; work = Job child.id
+           ; deadline = Option.value_exn invocation.context.deadline
+           ; completion_schema = None
+           ; max_output_bytes = 512
+           ; max_output_depth = 128
+           }
+         in
+         let waiting =
+           A.Session_actor.defer_background_job
+             actor
+             ~job_id:parent.id
+             ~generation:parent.generation
+             ~attempt:parent.attempt
+             dependency
+           |> protocol_ok
+         in
+         (match waiting.status with
+          | Waiting_completion actual -> assert (P.Job.equal_dependency dependency actual)
+          | _ -> raise_s [%sexp (waiting : P.Job.t)]);
+         let state () = A.Session_actor.state actor |> protocol_ok in
+         let run state =
+           Option.value_exn state.A.Session_state.run_state
+           |> A.Run_state.runs
+           |> List.hd_exn
+         in
+         let previous_state = state () in
+         let previous = run previous_state in
+         let parent_work = A.Run_job_occurrence.work parent |> protocol_ok in
+         let child_work = A.Run_job_occurrence.work child |> protocol_ok in
+         List.iter [ parent; child ] ~f:(fun job ->
+           assert (
+             Option.equal
+               P.Inference_origin.equal
+               job.inference_origin
+               (Some (Run previous.id))));
+         List.iter [ parent_work; child_work ] ~f:(fun work ->
+           assert (List.mem previous.owned_work work ~equal:P.Run_work.equal);
+           assert (
+             not
+               (List.exists previous.terminal_work ~f:(fun proof ->
+                  P.Run_work.equal proof.work work))));
+         (match child_work.key with
+          | Retained (Job { id; attempt = 1 }) -> assert (P.Id.Job.equal id child.id)
+          | _ -> failwith "queued child did not retain its planned first occurrence");
+         let terminal =
+           A.Session_actor.cancel_job_internal actor ~job_id:parent.id |> protocol_ok
+         in
+         let cancelled_state = state () in
+         let cancelled = run cancelled_state in
+         [%test_eq: int64]
+           (Int64.succ previous_state.counters.revision)
+           cancelled_state.counters.revision;
+         [%test_eq: int64] (Int64.succ previous.revision) cancelled.revision;
+         assert (P.Id.Run.equal previous.id cancelled.id);
+         assert (P.Run_source.equal previous.source cancelled.source);
+         assert (List.equal P.Run_work.equal previous.owned_work cancelled.owned_work);
+         List.iter previous.terminal_work ~f:(fun proof ->
+           assert (List.mem cancelled.terminal_work proof ~equal:P.Run_work.Terminal.equal));
+         List.iter [ parent_work; child_work ] ~f:(fun work ->
+           let proof =
+             List.find_exn cancelled.terminal_work ~f:(fun proof ->
+               P.Run_work.equal proof.work work)
+           in
+           assert (P.Run_work.Terminal.equal_outcome proof.outcome Cancelled);
+           [%test_eq: int64] cancelled.revision proof.revision);
+         [%test_eq: int]
+           (List.length previous.terminal_work + 2)
+           (List.length cancelled.terminal_work);
+         let cancelled_child =
+           List.find_exn cancelled_state.jobs ~f:(fun job ->
+             P.Id.Job.equal job.id child.id)
+         in
+         List.iter [ terminal; cancelled_child ] ~f:(fun job ->
+           (match job.status with
+            | Cancelled -> ()
+            | _ -> raise_s [%sexp (job : P.Job.t)]);
+           match P.Job.terminal_completion job |> protocol_ok with
+           | Some (Cancelled _) -> ()
+           | _ -> failwith "actual cancellation did not retain its terminal result");
+         [%test_eq: int] parent.attempt terminal.attempt;
+         [%test_eq: int] 0 cancelled_child.attempt;
+         (* Invalid DATA projections of the actual completed cancellation do
+            not establish alternate cancellation owners. *)
+         let project cancelled_dependencies =
+           A.Run_job_completion.prepare
+             ~cancelled_dependencies
+             previous_state
+             ~running:waiting
+             ~terminal
+             ~successor:terminal
+             ~outcome:Cancelled
+             ~now:(Option.value_exn terminal.completed_at)
+         in
+         ignore (project [ cancelled_child ] |> protocol_ok : A.Session_delta.t list);
+         List.iter
+           [ []
+           ; [ cancelled_child; cancelled_child ]
+           ; [ { cancelled_child with attempt = Int.succ cancelled_child.attempt } ]
+           ]
+           ~f:(fun cancelled_dependencies ->
+             match project cancelled_dependencies with
+             | Error error -> assert (P.Error.equal_code error.code Invalid_request)
+             | Ok _ -> failwith "invalid cancelled dependency set produced Run evidence");
+         let index = Option.value_exn cancelled_state.run_state in
+         let delivery = A.Run_state.job_deliveries index |> List.hd_exn in
+         let event =
+           A.Run_job_delivery.frame delivery
+           |> Chat_response.Background_delivery.capture
+           |> Session.Snapshot.of_value
+           |> Result.ok_or_failwith
+         in
+         let queued =
+           { before with
+             queued_internal_events = before.queued_internal_events @ [ event ]
+           }
+         in
+         A.Session_actor.enqueue_run_job_delivery
+           actor
+           ~delivery
+           ~before
+           ~after:(A.Moderator_checkpoint.encode queued)
+         |> protocol_ok;
+         A.Session_actor.with_idle_queued_moderator_event_tools
+           actor
+           ~snapshot:queued
+           (fun
+               ~executing
+                ~policy_caller:_
+                ~model_jobs:_
+                ~allocate_inference:_
+                ~retirement_reason
+                ~event:_
+                ~execute:_
+                ~commit
+              ->
+              assert (Option.is_none retirement_reason);
+              let service =
+                A.Session_actor.run_actions actor executing
+                |> protocol_ok
+                |> Option.value_exn
+              in
+              let transaction = A.Run_action_service.transaction service in
+              let ticket =
+                transaction.handlers.stage
+                  (Finish { terminal = Cancelled; relinquish = [] })
+                |> Result.ok_or_failwith
+              in
+              ignore
+                (transaction.prepare [ ticket ] |> Result.ok_or_failwith
+                 : P.Run_action.t option);
+              commit
+                ~snapshot:{ queued with queued_internal_events = [] }
+                ~requests:
+                  { request_turn = false; request_compaction = false; end_session = None })
+         |> protocol_ok
+         |> ignore;
+         let finished = run (state ()) in
+         assert (P.Run.Lifecycle.equal finished.lifecycle (Terminal Cancelled));
+         List.iter [ parent_work; child_work ] ~f:(fun work ->
+           let proof =
+             List.find_exn finished.terminal_work ~f:(fun proof ->
+               P.Run_work.equal proof.work work)
+           in
+           [%test_eq: int64] cancelled.revision proof.revision);
+         print_endline
+           "actual parent and queued child cancel in one Run revision; strict Finish \
+            joins both"));
+  [%expect
+    {| actual parent and queued child cancel in one Run revision; strict Finish joins both |}]
 ;;
 
 let%expect_test "owned job cancellation and interruption preserve actual custody" =
@@ -2476,7 +3597,16 @@ let%expect_test "owned job cancellation and interruption preserve actual custody
           A.Session_actor.with_idle_queued_moderator_event_tools
             actor
             ~snapshot:queued
-            (fun ~executing ~retirement_reason ~event:_ ~execute:_ ~commit ->
+            (fun
+                ~executing
+                 ~policy_caller:_
+                 ~model_jobs:_
+                 ~allocate_inference:_
+                 ~retirement_reason
+                 ~event:_
+                 ~execute:_
+                 ~commit
+               ->
                if Option.is_some retirement_reason
                then failwith "actual owned control frame retired";
                let service =
@@ -2550,4 +3680,1010 @@ let%expect_test "owned job cancellation and interruption preserve actual custody
     ((truthful_outcome true) (actual_attempt_preserved true)
      (no_fabricated_success true) (finished_truthfully true) (no_replay true))
     |}]
+;;
+
+let%expect_test "unavailable legacy lookalike cannot consume a registered timer wait" =
+  let module M = Chat_response.Moderator_manager in
+  let make_manager env =
+    prepared_legacy_callback_managers
+      env
+      ~id:"legacy-wait"
+      ~source:
+        {|let initial_state = 0
+        let on_event = fun ctx st ev -> Task.pure(st)|}
+      ()
+  in
+  with_startup_actor ~make_manager (fun actor _ _ request start manager _ _ _ ->
+    start (request "legacy-lookalike") |> protocol_ok |> ignore;
+    let before = M.identity_snapshot manager |> Result.ok_or_failwith in
+    let timer = ref None in
+    A.Session_actor.with_current_moderator_event
+      actor
+      ~operation_id:None
+      ~event:Session_start
+      ~snapshot:(fun () -> Ok before)
+      (fun ~executing
+        ~policy_caller:_
+        ~model_jobs:_
+        ~allocate_inference:_
+        ~retirement_reason:_
+        ~event:_
+        ~execute:_
+        ~commit ->
+         let service =
+           A.Session_actor.run_actions actor executing |> protocol_ok |> Option.value_exn
+         in
+         let owner = P.Job.Moderator_event executing.context.id in
+         let creation, staged =
+           A.Session_actor.create_script_schedule
+             actor
+             ~owner
+             ~source:executing.context.source
+             ~delay_ms:0
+             ~payload:(`String "timer")
+             ~misfire:Deliver_once_immediately
+           |> protocol_ok
+         in
+         timer := Some staged;
+         A.Session_actor.select_schedule_mutations
+           actor
+           ~owner
+           ~source:executing.context.source
+           ~receipts:[ creation ]
+         |> protocol_ok;
+         let run =
+           (A.Session_actor.state actor |> protocol_ok).run_state
+           |> Option.value_exn
+           |> A.Run_state.runs
+           |> List.hd_exn
+         in
+         let ownership = Option.value_exn staged.ownership in
+         let wake =
+           P.Run_wake.create
+             ~run_id:run.id
+             ~source:run.source
+             ~occurrence:
+               (Delivered_timer
+                  { schedule_id = staged.id
+                  ; delivery_count = Int.succ staged.delivery_count
+                  ; creator = ownership.creator
+                  ; subscription = ownership.subscription
+                  })
+           |> protocol_ok
+         in
+         let transaction = A.Run_action_service.transaction service in
+         let ticket = transaction.handlers.stage (Wait wake) |> Result.ok_or_failwith in
+         transaction.prepare [ ticket ] |> Result.ok_or_failwith |> ignore;
+         commit
+           ~snapshot:before
+           ~requests:
+             { request_turn = false; request_compaction = false; end_session = None })
+    |> protocol_ok
+    |> ignore;
+    let timer = Option.value_exn !timer in
+    let claimed =
+      A.Session_actor.claim_schedule
+        actor
+        ~schedule_id:timer.id
+        ~generation:timer.generation
+      |> protocol_ok
+      |> Option.value_exn
+    in
+    let frame =
+      Chat_response.Schedule_delivery.capture claimed |> Result.ok_or_failwith
+    in
+    (* Byte-identical raw content is not the actual Schedule delivery transaction:
+       the producer remains Delivering and there is no positive queue capture. *)
+    M.enqueue_internal_event_entries
+      manager
+      ~event:frame
+      ~prepare:(fun ~before ~snapshot ->
+        let state = A.Session_actor.state actor |> protocol_ok in
+        let metadata =
+          assert_moderator_checkpoint state ~snapshot:before |> Option.value_exn
+        in
+        let metadata =
+          A.Moderator_queue.advance
+            metadata
+            ~before:before.queued_internal_events
+            ~after:snapshot.queued_internal_events
+            ~consume:Keep
+            ~appended:[ A.Moderator_queue.Capture.unavailable ]
+          |> protocol_ok
+        in
+        let checkpoint =
+          A.Moderator_checkpoint.update_with_queue
+            state.moderator
+            ~snapshot
+            ~queue:metadata
+          |> protocol_ok
+        in
+        A.Session_actor.change_moderator actor (Some checkpoint)
+        |> Result.map ~f:ignore
+        |> Result.map_error ~f:(fun error -> error.P.Error.message))
+    |> Result.ok_or_failwith
+    |> ignore;
+    let waiting = A.Session_actor.state actor |> protocol_ok in
+    let index = Option.value_exn waiting.run_state in
+    let run = A.Run_state.runs index |> List.hd_exn in
+    (match run.lifecycle with
+     | Waiting _ -> ()
+     | _ -> failwith "real timer wait was not registered");
+    let worker =
+      A.Operation_worker.create ~run:(fun ~sw:_ ~input:_ _ ->
+        failwith "unexpected foreground worker")
+    in
+    A.Session_actor.set_runtime_worker
+      ~moderator_manager:manager
+      actor
+      ~worker:(Some worker)
+      ~inference:
+        (Some
+           (Inference_ports.create ~config:Chat_response.Config.default ()
+            |> Inference_ports.execution))
+    |> protocol_ok;
+    M.handle_legacy_callback_entries
+      manager
+      ~selection:Queue_head
+      ~session_id:"fixture"
+      ~now_ms:0
+      ~history:[]
+      ~available_tools:[]
+      ~session_meta:`Null
+      ~with_admission:(fun callback ~snapshot:_ execute ->
+        let outcome = ref None in
+        let result =
+          A.Session_actor.with_legacy_queued_callback
+            actor
+            ~callback
+            ~operation_id:None
+            (fun ~scope ~commit ->
+               assert (Option.is_none (A.Session_actor.Callback_scope.origin scope));
+               assert (
+                 Option.is_none
+                   (A.Session_actor.run_actions
+                      actor
+                      (A.Session_actor.Callback_scope.executing scope)
+                    |> protocol_ok));
+               let binding : M.callback_binding =
+                 { services =
+                     { model_recipes = Map.empty (module String)
+                     ; tool_call =
+                         (fun ~name:_ ~args:_ -> Error "unused callback Tool service")
+                     ; after_ms = (fun ~delay_ms:_ ~payload:_ -> Error "unused")
+                     ; cancel = (fun ~id:_ -> Error "unused")
+                     }
+                 ; authorize =
+                     (fun () ->
+                       A.Session_actor.check_callback_current actor scope
+                       |> Result.map_error ~f:(fun error -> error.P.Error.message))
+                 ; prepare =
+                     (fun ~outcome:_ ~snapshot ->
+                       Ok
+                         { M.persist =
+                             (fun () ->
+                               commit
+                                 ~notifications:[]
+                                 ~snapshot
+                                 ~requests:
+                                   { request_turn = false
+                                   ; request_compaction = false
+                                   ; end_session = None
+                                   }
+                               |> Result.map_error ~f:(fun error -> error.P.Error.message))
+                         ; install = ignore
+                         })
+                 }
+               in
+               execute binding
+               |> Result.map_error ~f:handoff_error
+               |> Result.map ~f:(fun value -> outcome := Some value))
+        in
+        match result with
+        | Ok true -> Ok (Option.value_exn !outcome)
+        | Ok false -> Error "legacy callback unavailable"
+        | Error error -> Error error.P.Error.message)
+    |> Result.ok_or_failwith
+    |> ignore;
+    let after = A.Session_actor.state actor |> protocol_ok in
+    let after_index = Option.value_exn after.run_state in
+    assert (
+      Document_schema.Json.equal
+        (A.Run_state.to_jsonaf index)
+        (A.Run_state.to_jsonaf after_index));
+    let retained =
+      List.find_exn after.schedules ~f:(fun schedule ->
+        P.Id.Schedule.equal schedule.id timer.id)
+    in
+    (match retained.status with
+     | Delivering -> ()
+     | _ -> failwith "lookalike acknowledged timer delivery");
+    print_endline "raw lookalike runs without consuming Wait or lending Run actions");
+  [%expect {|raw lookalike runs without consuming Wait or lending Run actions|}]
+;;
+
+let%expect_test "fresh host Model retry policies validate before classification" =
+  let fresh retry_policy : P.Job.t =
+    { id = P.Id.Job.create ()
+    ; session_id
+    ; generation = 0
+    ; kind = Model_call
+    ; payload = `Null
+    ; status = Queued
+    ; retry_policy
+    ; attempt = 0
+    ; created_at = timestamp
+    ; started_at = None
+    ; next_run_at = None
+    ; completed_at = None
+    ; result = None
+    ; delivery = Pending
+    ; launch = None
+    ; inference_origin = None
+    ; progress = None
+    }
+  in
+  List.iter
+    [ P.Job.Never
+    ; Safe_retry { max_attempts = 1; backoff_ms = 0 }
+    ; Safe_retry { max_attempts = Int.max_value; backoff_ms = Int.max_value }
+    ]
+    ~f:(fun retry_policy ->
+      let job = fresh retry_policy in
+      let prepared =
+        A.Model_job_admission.prepare job ~session_id ~generation:0 ~origin:Unbound
+        |> protocol_ok
+      in
+      assert (
+        Jsonaf.exactly_equal
+          (P.Job.retry_to_json retry_policy)
+          (P.Job.retry_to_json prepared.retry_policy));
+      assert (Option.is_none job.inference_origin);
+      assert (
+        Option.equal P.Inference_origin.equal prepared.inference_origin (Some Unbound)));
+  List.iter
+    [ P.Job.Safe_retry { max_attempts = 0; backoff_ms = 0 }
+    ; Safe_retry { max_attempts = -1; backoff_ms = 0 }
+    ; Safe_retry { max_attempts = 1; backoff_ms = -1 }
+    ; Idempotent
+        { key = P.Idempotency_key.of_string "not-a-new-Model-semantics" |> protocol_ok
+        ; max_attempts = 2
+        ; backoff_ms = 0
+        }
+    ]
+    ~f:(fun retry_policy ->
+      match
+        A.Model_job_admission.prepare
+          (fresh retry_policy)
+          ~session_id
+          ~generation:0
+          ~origin:Unbound
+      with
+      | Error failure -> assert (P.Error.equal_code failure.code Invalid_request)
+      | Ok _ -> failwith "unsupported or invalid retry policy was classified");
+  print_endline
+    "fresh Never and bounded Safe_retry classify; invalid bounds and Idempotent reject";
+  [%expect
+    {| fresh Never and bounded Safe_retry classify; invalid bounds and Idempotent reject |}]
+;;
+
+let%test_unit
+    "actual Model children settle Runs by completion order and acknowledged attempts"
+  =
+  List.iter
+    [ `Child_first
+    ; `Root_first_ack_retry
+    ; `Safe_retry
+    ; `Safe_retry_overflow
+    ; `Workflow_success
+    ; `Queued_cancel
+    ; `Current_cancel
+    ; `Current_interrupt
+    ]
+    ~f:(fun case ->
+      let callback, signal_callback = Eio.Promise.create () in
+      let release, signal_release = Eio.Promise.create () in
+      let released = ref false in
+      let release_root () =
+        if not !released
+        then (
+          released := true;
+          Eio.Promise.resolve signal_release ())
+      in
+      let actor_ref = ref None in
+      let backend_ref = ref None in
+      let backend_commits = ref 0 in
+      let reject_terminal = ref false in
+      let reject_birth = ref false in
+      let reject_retry = ref false in
+      let rejected = ref false in
+      let handler_completed = ref false in
+      let within = ref (fun (f : unit -> unit) -> f ()) in
+      let original =
+        Operator_authorization.nonexpiring_static
+          (P.Principal.create
+             ~id:principal_id
+             ~authentication_kind:"local"
+             ~scopes:(P.Scope.Set.of_list [ Send_messages ])
+             ~attributes:[]
+           |> protocol_ok)
+      in
+      let mode =
+        match case with
+        | `Workflow_success -> P.Run.Mode.Workflow
+        | _ -> Single_turn
+      in
+      let make_persistence _env _sw initial =
+        let backend =
+          A.Memory_backend.create ~event_capacity:512 ~initial_state:initial
+        in
+        backend_ref := Some backend;
+        let persistence = A.Memory_backend.persistence backend in
+        { persistence with
+          commit =
+            (fun ?observation
+              ~command_audit
+              ~previous
+              (candidate : A.Session_transition.t) ->
+              if
+                (!reject_birth || !reject_retry)
+                && List.exists candidate.state.jobs ~f:(fun job ->
+                  match job.P.Job.kind, job.status with
+                  | Model_call, Queued ->
+                    (!reject_birth && Int.equal job.attempt 0)
+                    || (!reject_retry && Int.equal job.attempt 1)
+                  | Model_call, Failed _ ->
+                    !reject_retry
+                    &&
+                      (match case with
+                      | `Safe_retry_overflow -> true
+                      | _ -> false)
+                  | _ -> false)
+              then
+                let open Result.Let_syntax in
+                let%bind () =
+                  Option.value_map observation ~default:(Ok ()) ~f:(fun observation ->
+                    A.Session_commit_observation.Host.observe_entry
+                      observation
+                      ~previous
+                      ~candidate
+                    |> Result.map ~f:ignore)
+                in
+                Error
+                  (P.Error.create
+                     Persistence_error
+                     ~message:"injected Model pre-writer failure"
+                     ~retryable:true
+                     ())
+              else if
+                !reject_terminal
+                && List.exists candidate.state.jobs ~f:(fun job ->
+                  match job.P.Job.kind, job.status with
+                  | Model_call, Succeeded -> true
+                  | _ -> false)
+              then (
+                rejected := true;
+                Error
+                  (P.Error.create
+                     Persistence_error
+                     ~message:"injected final Model completion ACK failure"
+                     ~retryable:true
+                     ()))
+              else (
+                Int.incr backend_commits;
+                persistence.commit ?observation ~command_audit ~previous candidate))
+        }
+      in
+      let make_worker manager =
+        A.Operation_worker.create ~run:(fun ~sw:_ ~input caps ->
+          let result =
+            try
+              let actor = Option.value_exn !actor_ref in
+              let child = ref None in
+              let ran =
+                caps.with_moderator_event
+                  ~event:Turn_start
+                  ~snapshot:(fun () ->
+                    Chat_response.Moderator_manager.identity_snapshot manager
+                    |> Result.map_error ~f:P.Error.invalid_request)
+                  (fun ~executing
+                    ~policy_caller:_
+                    ~model_jobs
+                    ~allocate_inference:_
+                    ~retirement_reason
+                    ~event:_
+                    ~execute:_
+                    ~commit ->
+                     assert (Option.is_none retirement_reason);
+                     [%test_eq: P.Id.Operation.t option]
+                       (Some input.operation.id)
+                       executing.context.operation_id;
+                     let current = A.Session_actor.state actor |> protocol_ok in
+                     let fresh = Inference_target_tests.job current in
+                     let fresh =
+                       match case with
+                       | `Safe_retry | `Safe_retry_overflow ->
+                         { fresh with
+                           retry_policy =
+                             Safe_retry
+                               { max_attempts = 2
+                               ; backoff_ms =
+                                   (match case with
+                                    | `Safe_retry_overflow -> Int.max_value
+                                    | _ -> 0)
+                               }
+                         }
+                       | `Child_first
+                       | `Root_first_ack_retry
+                       | `Workflow_success
+                       | `Queued_cancel
+                       | `Current_cancel
+                       | `Current_interrupt -> fresh
+                     in
+                     (match case with
+                      | `Safe_retry | `Safe_retry_overflow ->
+                        let before_commits = !backend_commits in
+                        reject_birth := true;
+                        (match A.Model_job_admission.admit model_jobs fresh with
+                         | Error failure ->
+                           assert (P.Error.equal_code failure.code Persistence_error);
+                           [%test_eq: string]
+                             "injected Model pre-writer failure"
+                             failure.message
+                         | Ok _ -> failwith "rejected Model birth was admitted");
+                        reject_birth := false;
+                        [%test_eq: int] before_commits !backend_commits;
+                        assert (
+                          phys_equal current (A.Session_actor.state actor |> protocol_ok));
+                        assert (
+                          phys_equal
+                            current
+                            (A.Memory_backend.state (Option.value_exn !backend_ref)))
+                      | `Child_first
+                      | `Root_first_ack_retry
+                      | `Workflow_success
+                      | `Queued_cancel
+                      | `Current_cancel
+                      | `Current_interrupt -> ());
+                     let admitted =
+                       A.Model_job_admission.admit model_jobs fresh |> protocol_ok
+                     in
+                     [%test_eq: int] 0 admitted.attempt;
+                     child := Some admitted;
+                     let actions =
+                       caps.run_actions executing |> protocol_ok |> Option.value_exn
+                     in
+                     let transaction = A.Run_action_service.transaction actions in
+                     ignore
+                       (transaction.prepare [] |> Result.ok_or_failwith
+                        : P.Run_action.t option);
+                     let snapshot =
+                       Chat_response.Moderator_manager.identity_snapshot manager
+                       |> Result.ok_or_failwith
+                     in
+                     commit
+                       ~snapshot
+                       ~requests:
+                         { request_turn = false
+                         ; request_compaction = false
+                         ; end_session = None
+                         })
+                |> protocol_ok
+              in
+              assert ran;
+              let child = Option.value_exn !child in
+              handler_completed := true;
+              Ok (child, input.operation.id)
+            with
+            | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())
+          in
+          Eio.Promise.resolve signal_callback result;
+          match result with
+          | Error _ ->
+            A.Operation_worker.Failed
+              (P.Error.create
+                 Internal_error
+                 ~message:"Model owner callback failed"
+                 ~retryable:false
+                 ())
+          | Ok _ ->
+            Eio.Promise.await release;
+            (* This worker owns no aggregate moderator borrow. Return the exact
+               acknowledged carrier instead of clearing the installed source. *)
+            let current =
+              A.Session_actor.state (Option.value_exn !actor_ref) |> protocol_ok
+            in
+            Completed
+              { final_history = input.history
+              ; moderator_snapshot = current.moderator
+              ; runtime_requests = []
+              })
+      in
+      with_startup_actor
+        ~original_actor:original
+        ~mode
+        ~make_persistence
+        ~make_worker
+        ~prepare:(fun env ->
+          within := fun f -> Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 15. f)
+        (fun actor _ _ _ _ _ scope reference attachment ->
+           actor_ref := Some actor;
+           Exn.protect ~finally:release_root ~f:(fun () ->
+             !within (fun () ->
+               let backend = Option.value_exn !backend_ref in
+               let state () = A.Session_actor.state actor |> protocol_ok in
+               let rec idle () =
+                 let current = state () in
+                 match
+                   current.active_operation, current.lifecycle.observed, current.failure
+                 with
+                 | None, Idle, None -> current
+                 | _, _, Some error -> raise_s [%sexp (error : P.Error.t)]
+                 | _ ->
+                   Eio.Fiber.yield ();
+                   idle ()
+               in
+               A.Session_actor.start ~actor:original actor ~attachment_id:attachment.id
+               |> protocol_ok
+               |> ignore;
+               let before = idle () in
+               let request =
+                 P.Run_start.create
+                   ~session_id
+                   ~attachment_id:attachment.id
+                   ~generation:before.identity.generation
+                   ~expected_revision:before.counters.revision
+                   ~mode
+                   ~input:
+                     (User_submission
+                        { kind = Plain_text; text = "hello"; attachments = [] })
+                   ~key:
+                     (P.Idempotency_key.of_string "model-completion-order" |> protocol_ok)
+                 |> protocol_ok
+               in
+               let receipt =
+                 A.Session_actor.admit_run
+                   actor
+                   ~scope
+                   ~request
+                   ~session:reference
+                   ~request_sha256:
+                     (P.Run_start.to_json request
+                      |> Jsonaf.to_string
+                      |> Digestif.SHA256.digest_string
+                      |> Digestif.SHA256.to_hex)
+                   ~entry:(Some actor_entry)
+                 |> protocol_ok
+               in
+               let admitted, operation_id =
+                 match Eio.Promise.await callback with
+                 | Ok result -> result
+                 | Error (exn, backtrace) ->
+                   Exn.raise_with_original_backtrace exn backtrace
+               in
+               assert !handler_completed;
+               (* Retry policy was selected once through the actual Event port.
+                  Changing an admitted Job would retire its exact original. *)
+               let queued =
+                 List.find_exn (state ()).jobs ~f:(fun job ->
+                   P.Id.Job.equal job.id admitted.id)
+               in
+               [%test_eq: int] 0 queued.attempt;
+               assert (
+                 Option.equal
+                   P.Inference_origin.equal
+                   admitted.inference_origin
+                   queued.inference_origin);
+               assert (Option.equal P.Job.equal_launch admitted.launch queued.launch);
+               let child =
+                 match case with
+                 | `Queued_cancel -> queued
+                 | `Child_first
+                 | `Root_first_ack_retry
+                 | `Safe_retry
+                 | `Safe_retry_overflow
+                 | `Workflow_success
+                 | `Current_cancel
+                 | `Current_interrupt ->
+                   A.Session_actor.claim_job
+                     actor
+                     ~job_id:queued.id
+                     ~generation:queued.generation
+                   |> protocol_ok
+                   |> Option.value_exn
+               in
+               [%test_eq: int]
+                 (match case with
+                  | `Queued_cancel -> 0
+                  | _ -> 1)
+                 child.attempt;
+               assert (
+                 Option.equal
+                   P.Inference_origin.equal
+                   child.inference_origin
+                   (Some (Run receipt.run_id)));
+               let root_work =
+                 P.Run_work.create
+                   ~key:(Operation operation_id)
+                   ~generation:child.generation
+                 |> protocol_ok
+               in
+               let child_work = A.Run_job_occurrence.work child |> protocol_ok in
+               let run current =
+                 A.Run_state.find
+                   (Option.value_exn current.A.Session_state.run_state)
+                   receipt.run_id
+                 |> Option.value_exn
+               in
+               let terminal_receipts current =
+                 A.Run_state.receipts (Option.value_exn current.A.Session_state.run_state)
+                 |> List.filter ~f:(fun item ->
+                   P.Id.Run.equal item.run_id receipt.run_id
+                   && P.Run_receipt.Kind.equal item.kind Terminal)
+               in
+               let proof current work outcome =
+                 match
+                   List.filter (run current).terminal_work ~f:(fun item ->
+                     P.Run_work.equal item.work work)
+                 with
+                 | [ item ] ->
+                   assert (P.Run_work.Terminal.equal_outcome item.outcome outcome)
+                 | items ->
+                   raise_s
+                     [%sexp
+                       "expected exact immutable work proof"
+                     , (items : P.Run_work.Terminal.t list)]
+               in
+               let live current =
+                 (match (run current).lifecycle with
+                  | Admitted | Active | Waiting _ -> ()
+                  | Terminal _ -> failwith "Run completed with unresolved work");
+                 assert (List.is_empty (terminal_receipts current))
+               in
+               let same left right =
+                 match
+                   A.Session_state_document.equal_values
+                     left
+                     ~limits:Document_schema.Limits.default
+                     right
+                 with
+                 | Ok true -> ()
+                 | Ok false -> failwith "rejected completion changed full state"
+                 | Error error -> raise_s [%sexp (error : Document_schema.Error.t)]
+               in
+               let unchanged previous =
+                 same previous (state ());
+                 same previous (A.Memory_backend.state backend);
+                 assert (
+                   List.is_empty
+                     (A.Memory_backend.events_after
+                        backend
+                        previous.counters.event_sequence
+                      |> protocol_ok))
+               in
+               let finish job outcome =
+                 A.Session_actor.complete_job
+                   actor
+                   ~job_id:job.P.Job.id
+                   ~generation:job.generation
+                   ~attempt:job.attempt
+                   outcome
+               in
+               let success job =
+                 finish job (Model_succeeded (`String "actual child result"))
+                 |> protocol_ok
+               in
+               let root_done () =
+                 release_root ();
+                 let current = idle () in
+                 let events =
+                   A.Memory_backend.events_after backend before.counters.event_sequence
+                   |> protocol_ok
+                 in
+                 assert (
+                   List.exists events ~f:(fun event ->
+                     match
+                       P.Event.Durable.Payload.of_json ~kind:event.kind event.payload
+                       |> protocol_ok
+                     with
+                     | Operation_completed { id; state = Completed; _ } ->
+                       P.Id.Operation.equal id operation_id
+                     | _ -> false));
+                 proof current root_work Succeeded;
+                 current
+               in
+               let callback_original job =
+                 let observed = ref None in
+                 let resolved =
+                   Job_fixtures.with_job actor job (fun ~job:_ ~execute ->
+                     execute
+                       ~invocation:(Job_fixtures.root job)
+                       (fun ~dispatched ~capabilities ->
+                          let proof =
+                            capabilities.borrow_agent_actor ~invocation:dispatched
+                            |> protocol_ok
+                            |> Option.value_exn
+                          in
+                          assert (Operator_authorization.is_current proof);
+                          observed := Some proof;
+                          Ok (P.Invocation.Complete `Null)))
+                   |> protocol_ok
+                 in
+                 (match resolved.P.Invocation.status with
+                  | Resolved (Complete `Null) -> ()
+                  | _ -> failwith "Model original callback did not complete");
+                 assert (
+                   not (Operator_authorization.is_current (Option.value_exn !observed)))
+               in
+               let final, expected_work =
+                 match case with
+                 | `Child_first | `Workflow_success ->
+                   let completed = success child in
+                   assert (
+                     Option.equal
+                       Jsonaf.exactly_equal
+                       completed.result
+                       (Some (`String "actual child result")));
+                   let pending = state () in
+                   proof pending child_work Succeeded;
+                   live pending;
+                   assert (Option.is_some pending.active_operation);
+                   root_done (), [ root_work; child_work ]
+                 | `Root_first_ack_retry ->
+                   let pending = root_done () in
+                   live pending;
+                   [%test_eq: int] 1 (List.length (run pending).terminal_work);
+                   same pending (A.Memory_backend.state backend);
+                   reject_terminal := true;
+                   (match
+                      finish child (Model_succeeded (`String "actual child result"))
+                    with
+                    | Error error ->
+                      assert (P.Error.equal_code error.code Persistence_error);
+                      [%test_eq: string]
+                        "injected final Model completion ACK failure"
+                        error.message
+                    | Ok _ -> failwith "rejected terminal ACK unexpectedly succeeded");
+                   assert !rejected;
+                   unchanged pending;
+                   reject_terminal := false;
+                   let completed = success child in
+                   (match completed.status with
+                    | Succeeded -> ()
+                    | _ -> assert false);
+                   let current = state () in
+                   (match finish child (Model_succeeded (`String "late overwrite")) with
+                    | Error error ->
+                      assert (P.Error.equal_code error.code Already_resolved)
+                    | Ok _ -> failwith "duplicate terminal completion was accepted");
+                   unchanged current;
+                   current, [ root_work; child_work ]
+                 | `Safe_retry_overflow ->
+                   callback_original child;
+                   let before_terminal = state () in
+                   let before_commits = !backend_commits in
+                   reject_retry := true;
+                   (match finish child (Model_failed "actual unrepresentable retry") with
+                    | Error failure ->
+                      assert (P.Error.equal_code failure.code Persistence_error);
+                      [%test_eq: string]
+                        "injected Model pre-writer failure"
+                        failure.message
+                    | Ok _ -> failwith "rejected terminal completion was acknowledged");
+                   reject_retry := false;
+                   [%test_eq: int] before_commits !backend_commits;
+                   unchanged before_terminal;
+                   callback_original child;
+                   let completed =
+                     finish child (Model_failed "actual unrepresentable retry")
+                     |> protocol_ok
+                   in
+                   (match completed.status with
+                    | Failed failure ->
+                      assert (P.Error.equal_code failure.code Internal_error);
+                      [%test_eq: string] "actual unrepresentable retry" failure.message;
+                      assert (not failure.retryable)
+                    | _ -> failwith "unrepresentable retry did not finish the attempt");
+                   [%test_eq: int] 1 completed.attempt;
+                   assert (Option.is_none completed.next_run_at);
+                   assert (Option.is_some completed.completed_at);
+                   assert (Option.is_none completed.result);
+                   let pending = state () in
+                   proof pending child_work Failed;
+                   live pending;
+                   [%test_eq: int] 2 (List.length (run pending).owned_work);
+                   let final = root_done () in
+                   (match
+                      Job_fixtures.with_job actor completed (fun ~job:_ ~execute:_ ->
+                        failwith "failed Model lent fresh execution")
+                    with
+                    | Error failure -> assert (P.Error.equal_code failure.code Conflict)
+                    | Ok _ -> failwith "failed Model acquired a callback");
+                   (match finish child (Model_failed "late retry overwrite") with
+                    | Error failure ->
+                      assert (P.Error.equal_code failure.code Already_resolved)
+                    | Ok _ -> failwith "failed Model accepted duplicate completion");
+                   unchanged final;
+                   final, [ root_work; child_work ]
+                 | `Safe_retry ->
+                   callback_original child;
+                   let before_retry = state () in
+                   let before_commits = !backend_commits in
+                   reject_retry := true;
+                   (match finish child (Model_failed "actual attempt one failed") with
+                    | Error failure ->
+                      assert (P.Error.equal_code failure.code Persistence_error);
+                      [%test_eq: string]
+                        "injected Model pre-writer failure"
+                        failure.message
+                    | Ok _ -> failwith "rejected Model retry changed attempt");
+                   reject_retry := false;
+                   [%test_eq: int] before_commits !backend_commits;
+                   unchanged before_retry;
+                   callback_original child;
+                   let queued =
+                     finish child (Model_failed "actual attempt one failed")
+                     |> protocol_ok
+                   in
+                   (match queued.status with
+                    | Queued -> ()
+                    | _ -> assert false);
+                   let pending = state () in
+                   proof pending child_work Failed;
+                   live pending;
+                   let next_work = A.Run_job_occurrence.work queued |> protocol_ok in
+                   assert (not (P.Run_work.equal next_work child_work));
+                   assert (
+                     List.mem (run pending).owned_work next_work ~equal:P.Run_work.equal);
+                   live (root_done ());
+                   let next =
+                     A.Session_actor.claim_job
+                       actor
+                       ~job_id:queued.id
+                       ~generation:queued.generation
+                     |> protocol_ok
+                     |> Option.value_exn
+                   in
+                   [%test_eq: int] 2 next.attempt;
+                   (* The foreground original has retired; only the independently
+                      retained Job loan can lend the second callback's original. *)
+                   callback_original next;
+                   let before_obsolete = state () in
+                   (match
+                      finish child (Model_succeeded (`String "obsolete attempt one"))
+                    with
+                    | Error error -> assert (P.Error.equal_code error.code Conflict)
+                    | Ok _ -> failwith "obsolete attempt completed the successor");
+                   unchanged before_obsolete;
+                   let completed = success next in
+                   let after_terminal = state () in
+                   (match
+                      Job_fixtures.with_job actor completed (fun ~job:_ ~execute:_ ->
+                        failwith "terminal Model lent fresh execution")
+                    with
+                    | Error failure -> assert (P.Error.equal_code failure.code Conflict)
+                    | Ok _ -> failwith "terminal Model acquired a callback");
+                   unchanged after_terminal;
+                   proof (state ()) next_work Succeeded;
+                   state (), [ root_work; child_work; next_work ]
+                 | `Queued_cancel | `Current_cancel | `Current_interrupt ->
+                   live (root_done ());
+                   let terminal =
+                     match case with
+                     | `Queued_cancel | `Current_cancel ->
+                       A.Session_actor.cancel_job_internal actor ~job_id:child.id
+                       |> protocol_ok
+                     | `Current_interrupt ->
+                       A.Session_actor.interrupt_job
+                         actor
+                         ~job_id:child.id
+                         ~generation:child.generation
+                         ~attempt:child.attempt
+                         ~reason:"actual Model attempt interrupted"
+                       |> protocol_ok
+                     | `Child_first
+                     | `Root_first_ack_retry
+                     | `Safe_retry
+                     | `Safe_retry_overflow
+                     | `Workflow_success ->
+                       failwith "non-control scenario reached control writer"
+                   in
+                   [%test_eq: int] child.attempt terminal.attempt;
+                   (match case, terminal.status with
+                    | (`Queued_cancel | `Current_cancel), Cancelled ->
+                      proof (state ()) child_work Cancelled
+                    | `Current_interrupt, Interrupted reason ->
+                      [%test_eq: string] "actual Model attempt interrupted" reason;
+                      proof (state ()) child_work Interrupted
+                    | _ -> raise_s [%sexp (terminal : P.Job.t)]);
+                   let current = state () in
+                   (match case with
+                    | `Current_interrupt ->
+                      let repeated =
+                        A.Session_actor.cancel_job_internal actor ~job_id:child.id
+                        |> protocol_ok
+                      in
+                      assert (
+                        Jsonaf.exactly_equal
+                          (P.Job.to_json terminal)
+                          (P.Job.to_json repeated));
+                      unchanged current
+                    | `Queued_cancel | `Current_cancel -> ()
+                    | `Child_first
+                    | `Root_first_ack_retry
+                    | `Safe_retry
+                    | `Safe_retry_overflow
+                    | `Workflow_success ->
+                      failwith "non-control scenario reached control duplicate check");
+                   (match
+                      finish child (Model_succeeded (`String "late control overwrite"))
+                    with
+                    | Error error ->
+                      assert (P.Error.equal_code error.code Already_resolved)
+                    | Ok _ -> failwith "late completion replaced terminal control outcome");
+                   unchanged current;
+                   current, [ root_work; child_work ]
+               in
+               assert (Option.is_none final.active_operation);
+               let saved_child =
+                 List.find_exn final.jobs ~f:(fun job -> P.Id.Job.equal job.id child.id)
+               in
+               (match case, saved_child.status with
+                | ( ( `Child_first
+                    | `Root_first_ack_retry
+                    | `Safe_retry
+                    | `Workflow_success )
+                  , Succeeded ) ->
+                  [%test_eq: int]
+                    (match case with
+                     | `Safe_retry -> 2
+                     | _ -> 1)
+                    saved_child.attempt;
+                  assert (
+                    Option.equal
+                      Jsonaf.exactly_equal
+                      saved_child.result
+                      (Some (`String "actual child result")))
+                | `Safe_retry_overflow, Failed failure ->
+                  [%test_eq: int] 1 saved_child.attempt;
+                  [%test_eq: string] "actual unrepresentable retry" failure.message;
+                  assert (Option.is_none saved_child.next_run_at)
+                | (`Queued_cancel | `Current_cancel), Cancelled -> ()
+                | `Current_interrupt, Interrupted reason ->
+                  [%test_eq: string] "actual Model attempt interrupted" reason
+                | _ -> raise_s [%sexp (saved_child : P.Job.t)]);
+               assert (
+                 List.equal
+                   P.Run_work.equal
+                   (List.sort expected_work ~compare:P.Run_work.compare)
+                   (List.map (run final).terminal_work ~f:(fun item -> item.work)
+                    |> List.sort ~compare:P.Run_work.compare));
+               (match case, (run final).lifecycle with
+                | `Workflow_success, (Admitted | Active) ->
+                  assert (List.is_empty (terminal_receipts final));
+                  assert (
+                    List.is_empty (A.Run_state.intents (Option.value_exn final.run_state)))
+                | (`Safe_retry | `Safe_retry_overflow), Terminal (Failed _) ->
+                  [%test_eq: int] 1 (List.length (terminal_receipts final))
+                | (`Child_first | `Root_first_ack_retry), Terminal (Completed _) ->
+                  [%test_eq: int] 1 (List.length (terminal_receipts final))
+                | (`Queued_cancel | `Current_cancel), Terminal Cancelled
+                | `Current_interrupt, Terminal Interrupted ->
+                  [%test_eq: int] 1 (List.length (terminal_receipts final))
+                | _ -> raise_s [%sexp (run final : P.Run.t)]);
+               List.iter (terminal_receipts final) ~f:(fun (terminal : P.Run_receipt.t) ->
+                 let retained = run final in
+                 [%test_eq: int64] retained.revision terminal.run_revision;
+                 assert (P.Id.Principal.equal retained.principal_id terminal.principal_id);
+                 assert (P.Run_source.equal retained.source terminal.source);
+                 match retained.lifecycle with
+                 | Terminal outcome ->
+                   [%test_eq: string]
+                     (P.Run.Terminal.to_json outcome
+                      |> Jsonaf.to_string
+                      |> Digestif.SHA256.digest_string
+                      |> Digestif.SHA256.to_hex)
+                     terminal.request_sha256
+                 | Admitted | Active | Waiting _ -> assert false);
+               same final (A.Memory_backend.state backend)))))
 ;;

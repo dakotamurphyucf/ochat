@@ -65,7 +65,7 @@ test('catalog enforces explicit file ownership, paths, dependency edges, notices
     ['complete', 'template', 'illustration'].map(
       (kind) => input.filter((e) => e.kind === kind).length,
     ),
-    [20, 4, 1],
+    [21, 4, 1],
   );
   const source = input.find((e) => e.id === 'specialist');
   const reject = (mutate, pattern) => {
@@ -106,6 +106,22 @@ test('catalog enforces explicit file ownership, paths, dependency edges, notices
     () => validateExampleSelection([source, source], entries, tracked),
     /Duplicate example ID/,
   );
+});
+
+test('project dependencies may reach an approved sibling within the archive', () => {
+  const example = input.find((e) => e.id === 'goal-recurrence');
+  const parentProject = example.edges.find((e) => e.reference.startsWith('../../'));
+  assert.equal(parentProject.kind, 'project');
+  assert.equal(validateExampleSelection([example], entries, tracked).length, 1);
+  const reject = (replace, pattern) => {
+    const invalid = structuredClone(example);
+    const dependency = invalid.edges.find((e) => e.reference === parentProject.reference);
+    Object.assign(dependency, replace);
+    assert.throws(() => validateExampleSelection([invalid], entries, tracked), pattern);
+  };
+  reject({ kind: 'import' }, /contained relative/);
+  reject({ reference: `../${parentProject.reference}` }, /dependency edge/);
+  reject({ reference: 'safe/../../../outside' }, /relative project dependency/);
 });
 
 test('supplemental exact-file approval and download selection must agree in both directions', () => {
@@ -326,6 +342,10 @@ test('tutorial records keep stable IDs and navigation follows learning paths', (
   );
   assert.equal(
     byPage.get('tutorials/background-results').next.route,
+    '/docs/tutorials/goal-recurrence/',
+  );
+  assert.equal(
+    byPage.get('tutorials/goal-recurrence').next.route,
     '/docs/tutorials/',
   );
   assert.equal(

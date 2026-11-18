@@ -1,10 +1,30 @@
 open Core
 
-(** Scoped host admission/outcome persistence, without unrelated foreground
-    capabilities. The host controls its lifetime and cancellation ownership. *)
+(** Trusted source wiring for negative execution currentness, not a permit.
+    Default unavailable never becomes a successful modern guard. Local is chosen
+    only by actual authored/root construction; delegated guards are SAME existing
+    nonprompt checks, composed without authorizing or requesting approval. *)
+module Execution_check : sig
+  type t
+
+  val unavailable : t
+  val with_local_default : t -> t
+  val with_guard : t -> check:(unit -> (unit, Agent_protocol.Error.t) result) -> t
+end
+
+(** Explicit executor-issued borrow, qualified by the exact dispatched invocation.
+    Returned proofs must remain bound to the original authentication and physical
+    execution lifetime. This is not a source grant. *)
+type agent_actor_borrow =
+  invocation:Agent_protocol.Invocation.t
+  -> (Operator_authorization.t option, Agent_protocol.Error.t) result
+
+(** Scoped host admission/outcome persistence. The explicit callback borrow is
+    associated with this executor's actual dispatched invocation. *)
 type executor =
   invocation:Agent_protocol.Invocation.t
   -> (dispatched:Agent_protocol.Invocation.t
+      -> capabilities:Invocation_capabilities.t
       -> (Agent_protocol.Invocation.outcome, Agent_protocol.Error.t) result)
   -> (Agent_protocol.Invocation.t, Agent_protocol.Error.t) result
 
@@ -19,10 +39,19 @@ type owned_executor =
   -> (Agent_protocol.Host_invocation.t, Agent_protocol.Error.t) result
 
 (** Actor-owned handoff whose commit atomically saves moderator state and result.
-    It has no provider-history or general session mutation capability. *)
+    It has no provider-history or general session mutation capability.
+    [snapshot], when supplied, captures the same Manager before the handler under
+    the Actor's existing moderator gate, outside its mailbox. Capture failure
+    admits no invocation. It provides checkpoint DATA, never execution authority.
+    A known persisted checkpoint must match; first capture and result are saved
+    together. Omitted capture with no prior checkpoint retains the trusted
+    DATA-only first-completion path, with unavailable queue provenance. *)
 type moderator_executor =
-  invocation:Agent_protocol.Invocation.t
+  ?snapshot:
+    (unit -> (Session.Moderator_state.Identity_snapshot.t, Agent_protocol.Error.t) result)
+  -> invocation:Agent_protocol.Invocation.t
   -> (dispatched:Agent_protocol.Invocation.t
+      -> capabilities:Invocation_capabilities.t
       -> commit:
            (resolved:Agent_protocol.Invocation.t
             -> snapshot:Session.Moderator_state.Identity_snapshot.t
@@ -158,12 +187,39 @@ val borrowed_invocation : borrowed -> Agent_protocol.Invocation.t
     extend the owning scope's limits/lifetime. *)
 val borrowed_execution_context : borrowed -> Chatml_execution.context
 
+(** Host-only borrow from this exact native callback's actual actor executor.
+    Returns a narrowed proof retaining original authentication currentness and
+    the physical owner AND native callback epochs. Legacy/unbound execution returns None; foreign
+    or expired borrows reject without unrelated foreground fallback. This is not
+    a source grant, and retaining the object does not extend its lending owner. *)
+val borrowed_agent_actor
+  :  borrowed
+  -> (Operator_authorization.t option, Agent_protocol.Error.t) result
+
+(** Borrow the actual dispatched Actor admission for a delegated policy call.
+    This returns an expiring Caller view, not a newly authenticated actor or a
+    candidate native admission. The SAME lexical scope remains a negative lifetime
+    guard after return. Close the view after host preparation returns. *)
+val borrowed_policy_caller
+  :  borrowed
+  -> (Delegated_policy_caller.t, Agent_protocol.Error.t) result
+
 (** Actual selected tool bindings verified by the dispatch boundary, never a
     registration closure's broader registry. Fails before capability validation
     or after scope expiration. Reading this registry does not skip current policy. *)
 val borrowed_capabilities
   :  borrowed
   -> (Chat_response.Tool_capability.t, Agent_protocol.Error.t) result
+
+(** Negative currentness of SAME lexical dispatch, without ambient lookup,
+    original agent-creation custody or child eligibility. Refresh checks the
+    active selected borrow before/after yielding SAME admitted operation-view
+    refresh; check is callback-free on the issuing Actor domain. Explicit legacy
+    unavailable capabilities retain compatibility, never an expired-owner
+    fallback. Neither operation grants execution/admission/source permission. *)
+val refresh_borrowed_effect_current : borrowed -> (unit, Agent_protocol.Error.t) result
+
+val check_borrowed_effect_current : borrowed -> (unit, Agent_protocol.Error.t) result
 
 (** Require the exact currently executing native handler's completed admission.
     Ordinary dispatched scopes and capability borrows are not permission proofs.
@@ -177,6 +233,47 @@ val require_native_admission
   :  borrowed
   -> binding:Chat_response.Tool_capability.binding
   -> (unit, Agent_protocol.Error.t) result
+
+(** The SAME admitted native handler's actor-issued inference allocator. The
+    returned port checks both borrowed and native-handler lifetimes on every
+    allocation and composes them with the original final submission guard.
+    An acknowledged handle is returned even if the handler expires during
+    allocation, so its graph can register and release it. Expiry then rejects
+    submission. No source, Run or unrelated operation is selected here. *)
+val borrowed_inference_allocator
+  :  borrowed
+  -> (Inference_allocation.Port.t, Agent_protocol.Error.t) result
+
+module Admission : sig
+  (** Captured only inside a genuinely admitted native callback. Carries the
+      exact selected binding and borrowed/native callback epochs; it grants no
+      source access or session mutation by itself. There is no decoder or
+      ambient-current lookup at the consumer. *)
+  type t
+
+  val capture
+    :  borrowed
+    -> binding:Chat_response.Tool_capability.binding
+    -> (t, Agent_protocol.Error.t) result
+
+  (** Nonyielding final mailbox check. The consumer supplies its exact expected
+      binding/effect; a read admission cannot authorize a mutation. Retaining
+      this token does not extend either physical owner epoch. *)
+  val check_now
+    :  t
+    -> binding:Chat_response.Tool_capability.binding
+    -> (unit, Agent_protocol.Error.t) result
+
+  (** Routing identity only; retaining it never extends the native callback.
+      The actual Actor compares this with its physically registered callback. *)
+  val callback_scope : t -> Chat_response.Goal_native_scope.t option
+
+  val invocation : t -> Agent_protocol.Invocation.t
+
+  (** Exact checked503 borrow captured from this dispatched invocation. None is
+      legacy/unbound, never a reason to reconstruct authority from a principal. *)
+  val actor : t -> Operator_authorization.t option
+end
 
 (** Record only the actual readonly query service's private response. This checks
     the live borrow and scope/selection; final output matching and atomic outcome
@@ -235,6 +332,7 @@ val with_managed_scope
 val with_dispatched_scope
   :  execute:executor
   -> ?moderator_execute:moderator_executor
+  -> ?capabilities:Invocation_capabilities.t
   -> selected:Chat_response.Tool_capability.t
   -> invocation:Agent_protocol.Invocation.t
   -> (unit -> ('a, Agent_protocol.Error.t) result)
@@ -528,6 +626,64 @@ val run
     and cannot supply a driver or acquire foreground/history authority. *)
 val run_in_driver
   :  run_native:Chat_response.In_memory_stream.Tool_dispatch.native_runner
+  -> capabilities:Operation_worker.Capabilities.t
+  -> registry:(unit -> Chat_response.Tool_capability.t)
+  -> reference:Chat_response.Tool_capability.reference
+  -> invocation:Agent_protocol.Invocation.t
+  -> is_halted:(unit -> bool)
+  -> authorize:
+       (Agent_protocol.Invocation.t
+        -> Chat_response.Tool_capability.binding
+        -> (unit, Agent_protocol.Error.t) result)
+  -> prepare_output:
+       (Openai.Responses.Tool_output.Output.t
+        -> (Jsonaf.t, Agent_protocol.Error.t) result)
+  -> (Agent_protocol.Invocation.t, Agent_protocol.Error.t) result
+
+(** Same shared dispatch engine with explicit actual-source currentness.
+    A present unavailable/expired check rejects retained canonical MCP use. *)
+val run_scoped_current_with_managed
+  :  execution_check:Execution_check.t
+  -> on_progress:(Agent_protocol.Invocation.t -> Ochat_function.Progress.t -> unit) option
+  -> managed:managed_dispatch option
+  -> moderator_execute:moderator_executor option
+  -> execute:executor
+  -> registry:(unit -> Chat_response.Tool_capability.t)
+  -> reference:Chat_response.Tool_capability.reference
+  -> invocation:Agent_protocol.Invocation.t
+  -> is_halted:(unit -> bool)
+  -> authorize:
+       (Agent_protocol.Invocation.t
+        -> Chat_response.Tool_capability.binding
+        -> (unit, Agent_protocol.Error.t) result)
+  -> prepare_output:
+       (Openai.Responses.Tool_output.Output.t
+        -> (Jsonaf.t, Agent_protocol.Error.t) result)
+  -> (Agent_protocol.Invocation.t, Agent_protocol.Error.t) result
+
+(** Same shared dispatch engine with explicit actual-source currentness.
+    A present unavailable/expired check rejects retained canonical MCP use. *)
+val run_in_driver_current
+  :  execution_check:Execution_check.t
+  -> run_native:Chat_response.In_memory_stream.Tool_dispatch.native_runner
+  -> capabilities:Operation_worker.Capabilities.t
+  -> registry:(unit -> Chat_response.Tool_capability.t)
+  -> reference:Chat_response.Tool_capability.reference
+  -> invocation:Agent_protocol.Invocation.t
+  -> is_halted:(unit -> bool)
+  -> authorize:
+       (Agent_protocol.Invocation.t
+        -> Chat_response.Tool_capability.binding
+        -> (unit, Agent_protocol.Error.t) result)
+  -> prepare_output:
+       (Openai.Responses.Tool_output.Output.t
+        -> (Jsonaf.t, Agent_protocol.Error.t) result)
+  -> (Agent_protocol.Invocation.t, Agent_protocol.Error.t) result
+
+(** Same shared dispatch engine with explicit actual-source currentness.
+    A present unavailable/expired check rejects retained canonical MCP use. *)
+val run_current
+  :  execution_check:Execution_check.t
   -> capabilities:Operation_worker.Capabilities.t
   -> registry:(unit -> Chat_response.Tool_capability.t)
   -> reference:Chat_response.Tool_capability.reference

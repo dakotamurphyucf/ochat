@@ -140,6 +140,9 @@ type lookup =
   | Replay of record
   | Conflict of record
 
+module Removal_slot = Idempotency_removal
+module Removal = Removal_slot.Evidence
+
 module Persisted = struct
   type outcome =
     | Pending
@@ -156,6 +159,7 @@ module Persisted = struct
     ; created_at : Agent_protocol.Timestamp.t
     ; expires_at : Agent_protocol.Timestamp.t option
     ; retention : retention
+    ; removal : Removal_slot.t option
     }
   [@@deriving sexp_of]
 end
@@ -167,6 +171,7 @@ type t =
   ; mutable records : (Key.t, Persisted.record, Key.comparator_witness) Map.t
   ; mutable outcomes : Idempotency_outcome.t String.Map.t
   ; mutable carrier : Persisted.record list D.Extension_carrier.t
+  ; mutable removals : Removal_slot.Index.t
   }
 
 let version = 3
@@ -195,7 +200,13 @@ let restore_outcome outcomes = function
           | Failure error -> Failure error))
 ;;
 
-let persist_record (record : record) =
+let removal_scope (key : Key.t) retention =
+  if equal_retention retention Protected && String.equal key.method_name "session.delete"
+  then key.session_id
+  else None
+;;
+
+let persist_record (record : record) ~removal =
   Persisted.
     { key = record.key
     ; request_digest = record.request_digest
@@ -204,6 +215,7 @@ let persist_record (record : record) =
     ; created_at = record.created_at
     ; expires_at = record.expires_at
     ; retention = record.retention
+    ; removal
     }
 ;;
 
@@ -217,6 +229,28 @@ let restore_record outcomes (record : Persisted.record) =
     ; expires_at = record.expires_at
     ; retention = record.retention
     })
+;;
+
+let removed_evidence outcomes (record : Persisted.record) =
+  let open Result.Let_syntax in
+  let corrupt message = Error (Store_error.Corrupt message) in
+  match record.removal with
+  | None -> Ok None
+  | Some removal ->
+    let%bind session_id =
+      removal_scope record.key record.retention
+      |> Result.of_option
+           ~error:(Store_error.Corrupt "invalid private lifecycle removal scope")
+    in
+    let%bind result = restore_outcome outcomes record.outcome in
+    (match removal, result with
+     (* An older owner can preserve an unknown Reserved field while completing
+        its ordinary public receipt. It never gains positive Remove evidence. *)
+     | Reserved, (Pending | Success _ | Failure _) -> Ok None
+     | Applied generation, Success json ->
+       Removal.of_delete_json ~session_id ~generation json |> Result.map ~f:Option.some
+     | Applied _, (Pending | Failure _) ->
+       corrupt "private removal proof disagrees with its receipt outcome")
 ;;
 
 let record_id (key : Key.t) = Document_record.digest (Jsonaf.to_string (key_json key))
@@ -235,20 +269,22 @@ let persisted_json (record : Persisted.record) =
     | Reference reference -> Ok (Idempotency_outcome.Reference.to_jsonaf reference)
   in
   `Object
-    [ "record_id", `String (record_id record.key)
-    ; "key", key_json record.key
-    ; "request_digest", `String record.request_digest
-    ; ( "accepted_transaction_sequence"
-      , F.option_json record.accepted_transaction_sequence ~f:F.decimal_json )
-    ; "outcome", outcome
-    ; "created_at", Agent_protocol.Timestamp.to_json record.created_at
-    ; "expires_at", F.option_json record.expires_at ~f:Agent_protocol.Timestamp.to_json
-    ; ( "retention"
-      , `String
-          (match record.retention with
-           | Standard -> "standard"
-           | Protected -> "protected") )
-    ]
+    ([ "record_id", `String (record_id record.key)
+     ; "key", key_json record.key
+     ; "request_digest", `String record.request_digest
+     ; ( "accepted_transaction_sequence"
+       , F.option_json record.accepted_transaction_sequence ~f:F.decimal_json )
+     ; "outcome", outcome
+     ; "created_at", Agent_protocol.Timestamp.to_json record.created_at
+     ; "expires_at", F.option_json record.expires_at ~f:Agent_protocol.Timestamp.to_json
+     ; ( "retention"
+       , `String
+           (match record.retention with
+            | Standard -> "standard"
+            | Protected -> "protected") )
+     ]
+     @ Option.value_map record.removal ~default:[] ~f:(fun removal ->
+       [ Removal_slot.field, Removal_slot.to_json removal ]))
 ;;
 
 let decode_persisted json =
@@ -299,6 +335,17 @@ let decode_persisted json =
       | "protected" -> Ok Protected
       | _ -> F.invalid "retention" "unsupported retention policy")
   in
+  let%bind removal =
+    match D.Json.field json ~name:Removal_slot.field with
+    | Absent -> Ok None
+    | Null -> F.invalid Removal_slot.field "invalid null reservation"
+    | Value json -> Result.map (Removal_slot.of_json json) ~f:Option.some
+  in
+  let%bind () =
+    if Option.is_none removal || Option.is_some (removal_scope key retention)
+    then Ok ()
+    else F.invalid Removal_slot.field "requires an exact protected session.delete"
+  in
   let%map () =
     match expires_at with
     | Some expires when Agent_protocol.Timestamp.compare expires created_at < 0 ->
@@ -313,6 +360,7 @@ let decode_persisted json =
     ; created_at
     ; expires_at
     ; retention
+    ; removal
     }
 ;;
 
@@ -346,6 +394,7 @@ let codec =
       ; "created_at", D.Shape.value
       ; "expires_at", D.Shape.value
       ; "retention", D.Shape.value
+      ; Removal_slot.field, D.Shape.value
       ]
   in
   let records_shape =
@@ -681,7 +730,21 @@ let open_or_create ~env ~path =
             , String.Map.empty )
       in
       Result.bind loaded ~f:(fun (records, carrier, outcomes) ->
-        let t = { env; path; mutex = Eio.Mutex.create (); records; carrier; outcomes } in
+        let%bind removals =
+          Map.fold
+            records
+            ~init:(Ok Removal_slot.Index.empty)
+            ~f:(fun ~key:_ ~data:record accumulated ->
+              let%bind removals = accumulated in
+              let%map proof = removed_evidence outcomes record in
+              Option.value_map
+                proof
+                ~default:removals
+                ~f:(Removal_slot.Index.add removals))
+        in
+        let t =
+          { env; path; mutex = Eio.Mutex.create (); records; carrier; outcomes; removals }
+        in
         if exists then Ok t else Result.map (save t records) ~f:(fun () -> t))
     with
     | (Eio.Io _ | Core_unix.Unix_error _) as exn ->
@@ -791,7 +854,7 @@ let with_retained_references t ~candidates ~max_records ~max_bytes ~f =
     else Result.map (f (Blob_reference_scan.references scan)) ~f:Option.some)
 ;;
 
-let record t record =
+let record_with_removal t record ~removal =
   Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
     match Map.find t.records record.key with
     | Some existing when String.equal existing.request_digest record.request_digest ->
@@ -799,29 +862,103 @@ let record t record =
     | Some _ ->
       Error (Store_error.Corrupt "idempotency key conflicts with another request")
     | None ->
-      let records = Map.set t.records ~key:record.key ~data:(persist_record record) in
+      let records =
+        Map.set t.records ~key:record.key ~data:(persist_record record ~removal)
+      in
       Result.map (save t ~fresh:true records) ~f:(fun () -> record))
 ;;
 
-let complete t ~key ~request_digest ~accepted_transaction_sequence ~outcome =
+let record t record = record_with_removal t record ~removal:None
+
+let record_remove t record =
+  match removal_scope record.key record.retention, record.outcome with
+  | Some _, Pending -> record_with_removal t record ~removal:(Some Reserved)
+  | (None | Some _), (Pending | Success _ | Failure _) ->
+    Error (Store_error.Corrupt "Remove evidence requires a protected Pending receipt")
+;;
+
+let complete_with_removal
+      t
+      ~key
+      ~request_digest
+      ~accepted_transaction_sequence
+      ~outcome
+      ~generation
+  =
+  let open Result.Let_syntax in
   Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
     match Map.find t.records key with
     | None -> Error (Store_error.Corrupt "idempotency completion has no pending record")
     | Some existing when not (String.equal existing.request_digest request_digest) ->
       Error (Store_error.Corrupt "idempotency completion conflicts with another request")
+    | Some existing
+      when Option.is_some generation
+           && Option.is_none (removal_scope key existing.retention) ->
+      Error (Store_error.Corrupt "Remove completion has no protected session receipt")
     | Some ({ outcome = Success _ | Failure _ | Reference _; _ } as existing) ->
-      Ok (restore_record_exn t existing)
+      (match existing.removal, generation with
+       | Some (Applied current), Some supplied when current <> supplied ->
+         Error (Store_error.Corrupt "private lifecycle removal generation conflicts")
+       | _ -> Ok (restore_record_exn t existing))
     | Some existing ->
       let accepted_transaction_sequence =
         Option.first_some
           accepted_transaction_sequence
           existing.accepted_transaction_sequence
       in
-      let completed =
-        { existing with accepted_transaction_sequence; outcome = persist_outcome outcome }
+      let%bind removal =
+        match existing.removal, generation, outcome with
+        | None, _, _ | Some Reserved, None, Failure _ -> Ok None
+        | Some Reserved, Some generation, Success _ ->
+          Ok (Some (Removal_slot.Applied generation))
+        | Some Reserved, None, Pending -> Ok (Some Removal_slot.Reserved)
+        | Some _, _, _ ->
+          Error (Store_error.Corrupt "Remove completion lacks applied lifecycle proof")
       in
+      let completed =
+        { existing with
+          accepted_transaction_sequence
+        ; outcome = persist_outcome outcome
+        ; removal
+        }
+      in
+      let%bind proof = removed_evidence t.outcomes completed in
       let records = Map.set t.records ~key ~data:completed in
-      Result.map (save t records) ~f:(fun () -> restore_record_exn t completed))
+      let%map () = save t records in
+      Option.iter proof ~f:(fun proof ->
+        t.removals <- Removal_slot.Index.add t.removals proof);
+      restore_record_exn t completed)
+;;
+
+let complete t ~key ~request_digest ~accepted_transaction_sequence ~outcome =
+  complete_with_removal
+    t
+    ~key
+    ~request_digest
+    ~accepted_transaction_sequence
+    ~outcome
+    ~generation:None
+;;
+
+let complete_remove t ~key ~request_digest ~generation ~result =
+  let valid =
+    Option.exists key.Key.session_id ~f:(fun session_id ->
+      Removal.valid_result ~session_id ~generation result)
+  in
+  if (not valid) || not (String.equal key.method_name "session.delete")
+  then Error (Store_error.Corrupt "invalid private lifecycle removal completion")
+  else
+    complete_with_removal
+      t
+      ~key
+      ~request_digest
+      ~accepted_transaction_sequence:None
+      ~outcome:(Success (Agent_protocol.Method_result.Delete.to_json result))
+      ~generation:(Some generation)
+;;
+
+let removal t ~session_id =
+  Eio.Mutex.use_ro t.mutex (fun () -> Removal_slot.Index.find t.removals ~session_id)
 ;;
 
 let mark_accepted t ~key ~request_digest ~transaction_sequence =

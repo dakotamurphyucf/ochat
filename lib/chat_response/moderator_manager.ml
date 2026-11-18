@@ -37,7 +37,7 @@ module Registry = struct
     | Src { source_text; _ } -> source_text
   ;;
 
-  let source_hash (source_text : string) = Md5.digest_string source_text |> Md5.to_hex
+  let source_hash (source_text : string) = Chatmd_shell_spec.Source_ref.digest source_text
 
   let surface_key (surface : Builtin_surface.surface) =
     let names values ~f =
@@ -322,6 +322,25 @@ type tool_call =
   -> args:Jsonaf.t
   -> (Moderation.Capabilities.tool_call_result, string) result
 
+module Callback_services = struct
+  type t =
+    { model_recipes : Moderation.Capabilities.model_recipe String.Map.t
+    ; tool_call :
+        name:string
+        -> args:Jsonaf.t
+        -> (Moderation.Capabilities.tool_call_result, string) result
+    ; after_ms :
+        delay_ms:int -> payload:Chatml.Chatml_lang.value -> (string, string) result
+    ; cancel : id:string -> (unit, string) result
+    }
+end
+
+module Callback_selection = struct
+  type t =
+    | Boundary of Moderation.Event.t
+    | Queue_head
+end
+
 type t =
   { artifact : Registry.artifact
   ; runtime : Runtime.session
@@ -336,18 +355,65 @@ type t =
   ; mutable last_history : History_entry.t list
   ; mutable subscriptions : subscription list
   ; mutable suspended_phase : Moderation.Phase.t option
+  ; invocation_model_recipes :
+      Moderation.Capabilities.model_recipe String.Map.t option ref
   ; invocation_tool_call : tool_call option ref
+  ; goal_transaction : Goal_native_scope.t option ref
   ; run_transaction : Run_operations.transaction option ref
   ; job_transaction : Background_job_operations.transaction option ref
   ; subscription_transaction : Subscription_operations.transaction option ref
   ; schedule_transaction : Schedule_operations.transaction option ref
   ; notification_transaction : Notification_operations.transaction option ref
   ; ingress_transaction : Ingress_operations.transaction option ref
+  ; callback_handlers : (Runtime.default_handlers * bool Atomic.t) option ref
   }
+
+type callback =
+  { manager : t
+  ; live : bool Atomic.t
+  ; selection : Callback_selection.t
+  ; snapshot : Session.Moderator_state.Identity_snapshot.t
+  ; event : Session.Snapshot.t
+  }
+
+module Callback = struct
+  type t = callback
+
+  module Selection = Callback_selection
+
+  let source t : Agent_protocol.Invocation.observer =
+    { script_id = Registry.script_id t.manager.artifact
+    ; source_sha256 = Registry.source_hash t.manager.artifact
+    }
+  ;;
+
+  let snapshot t = t.snapshot
+  let event t = t.event
+  let selection t = t.selection
+
+  let consumes_head t =
+    match t.selection with
+    | Boundary _ -> false
+    | Queue_head -> true
+  ;;
+end
+
+let callback_is_current manager callback =
+  phys_equal manager callback.manager && Atomic.get callback.live
+;;
 
 type prepared_commit =
   { persist : unit -> (unit, string) result
   ; install : unit -> unit
+  }
+
+type callback_binding =
+  { services : Callback_services.t
+  ; authorize : unit -> (unit, string) result
+  ; prepare :
+      outcome:Moderation.Outcome.t
+      -> snapshot:Session.Moderator_state.Identity_snapshot.t
+      -> (prepared_commit, string) result
   }
 
 let memory_commit install = { persist = (fun () -> Ok ()); install }
@@ -544,13 +610,16 @@ let create
       ()
   : (t, string) result
   =
+  let invocation_model_recipes = ref None in
   let invocation_tool_call = ref None in
+  let goal_transaction = ref None in
   let run_transaction = ref None in
   let job_transaction = ref None in
   let subscription_transaction = ref None in
   let schedule_transaction = ref None in
   let notification_transaction = ref None in
   let ingress_transaction = ref None in
+  let callback_handlers = ref None in
   let capabilities =
     { capabilities with
       on_tool_call =
@@ -561,9 +630,73 @@ let create
     }
   in
   let handlers = Moderation.Capabilities.runtime_handlers capabilities in
+  let with_handlers f =
+    match !callback_handlers with
+    | None -> f handlers
+    | Some (selected, active) when Atomic.get active -> f selected
+    | Some _ -> Error "callback.services_expired: callback service scope has ended"
+  in
+  let handlers =
+    { handlers with
+      on_tool_call =
+        (fun session ~name ~args ->
+          with_handlers (fun h -> h.Runtime.on_tool_call session ~name ~args))
+    ; on_model_call =
+        (fun session ~recipe ~payload ->
+          with_handlers (fun h -> h.Runtime.on_model_call session ~recipe ~payload))
+    ; on_model_spawn =
+        (fun session ~recipe ~payload ->
+          with_handlers (fun h -> h.Runtime.on_model_spawn session ~recipe ~payload))
+    ; on_schedule_after_ms =
+        (fun session ~delay_ms ~payload ->
+          with_handlers (fun h ->
+            h.Runtime.on_schedule_after_ms session ~delay_ms ~payload))
+    ; on_schedule_cancel =
+        (fun session ~id ->
+          with_handlers (fun h -> h.Runtime.on_schedule_cancel session ~id))
+    }
+  in
+  let handlers =
+    let selected () =
+      Option.map !invocation_model_recipes ~f:(fun model_recipes ->
+        Moderation.Capabilities.runtime_handlers { capabilities with model_recipes })
+    in
+    { handlers with
+      on_model_call =
+        (fun session ~recipe ~payload ->
+          let current = Option.value (selected ()) ~default:handlers in
+          current.on_model_call session ~recipe ~payload)
+    ; on_model_spawn =
+        (fun session ~recipe ~payload ->
+          let current = Option.value (selected ()) ~default:handlers in
+          current.on_model_spawn session ~recipe ~payload)
+    }
+  in
   let handlers =
     match artifact.extension with
-    | None -> handlers
+    | None ->
+      { handlers with
+        on_tool_call =
+          (fun session ~name ~args ->
+            let result, receipts =
+              Goal_native_scope.collect !goal_transaction (fun () ->
+                handlers.on_tool_call session ~name ~args)
+            in
+            let open Result.Let_syntax in
+            match result with
+            | Error _ as failure ->
+              Option.iter !goal_transaction ~f:(fun scope ->
+                List.iter receipts ~f:(Goal_native_scope.handlers scope).rollback);
+              failure
+            | Ok value ->
+              let%map () =
+                Goal_native_operations.deliver
+                  !goal_transaction
+                  ~receipts
+                  ~perform:(Runtime.perform_local_effect session)
+              in
+              value)
+      }
     | Some _ ->
       { handlers with
         on_tool_call =
@@ -571,11 +704,24 @@ let create
             (* Native work may hand off to another domain. Collect there, then
                deliver on this interpreter's context before its continuation.
                Do not mutate the pending transaction from a worker domain. *)
-            let result, requests =
-              Runtime_request_scope.collect (fun () ->
-                handlers.on_tool_call session ~name ~args)
+            let (result, requests), goal_receipts =
+              Goal_native_scope.collect !goal_transaction (fun () ->
+                Runtime_request_scope.collect (fun () ->
+                  handlers.on_tool_call session ~name ~args))
             in
             let open Result.Let_syntax in
+            let%bind () =
+              match result with
+              | Ok _ ->
+                Goal_native_operations.deliver
+                  !goal_transaction
+                  ~receipts:goal_receipts
+                  ~perform:(Runtime.perform_local_effect session)
+              | Error _ ->
+                Option.iter !goal_transaction ~f:(fun scope ->
+                  List.iter goal_receipts ~f:(Goal_native_scope.handlers scope).rollback);
+                Ok ()
+            in
             let%bind () =
               List.fold_result requests ~init:() ~f:(fun () request ->
                 let request_effect : Chatml.Chatml_lang.eff =
@@ -635,6 +781,9 @@ let create
            ?control
            ~handlers:
              (Ingress_operations.dynamic_handlers (fun () -> !ingress_transaction))
+  in
+  let config =
+    Goal_native_operations.install ~current:(fun () -> !goal_transaction) config
   in
   let%bind () =
     match snapshot with
@@ -698,13 +847,16 @@ let create
     ; last_history = []
     ; subscriptions = []
     ; suspended_phase = None
+    ; invocation_model_recipes
     ; invocation_tool_call
+    ; goal_transaction
     ; run_transaction
     ; job_transaction
     ; subscription_transaction
     ; schedule_transaction
     ; notification_transaction
     ; ingress_transaction
+    ; callback_handlers
     }
 ;;
 
@@ -1143,7 +1295,7 @@ let handle_runtime_event ?prepare_commit ~control t ~context ~event =
       ~validate_state:(fun value -> Result.map (snapshot value) ~f:(fun _ -> ()))
 ;;
 
-let handle_event_unlocked
+let handle_event_unlocked_in_context
       (t : t)
       ~session_id
       ~now_ms
@@ -1175,23 +1327,40 @@ let handle_event_unlocked
     let open Result.Let_syntax in
     let prepared_outcome = ref None in
     let prepare_commit ~local_effects =
-      let%bind decoded = decode_effects t local_effects in
-      let%bind outcome = Moderation.Outcome.of_runtime_effects decoded in
-      let%map install =
-        match t.allocator with
-        | None -> Ok (fun () -> List.iter outcome.overlay_ops ~f:(apply_overlay_op t))
-        | Some _ ->
-          prepare_identity_ops t ~phase:(Moderation.Event.phase event) outcome.overlay_ops
+      let goal_receipts =
+        List.exists local_effects ~f:(fun operation ->
+          String.equal operation.Chatml.Chatml_lang.op Goal_native_operations.name)
       in
-      fun () ->
-        install ();
-        t.processed_effect_count <- t.processed_effect_count + List.length local_effects;
-        prepared_outcome := Some outcome
+      if Option.is_none t.artifact.extension && not goal_receipts
+      then Ok (fun () -> ())
+      else (
+        let effect_count = List.length local_effects in
+        let%bind local_effects =
+          Goal_native_operations.prepare !(t.goal_transaction) local_effects
+        in
+        let%bind decoded = decode_effects t local_effects in
+        let%bind outcome = Moderation.Outcome.of_runtime_effects decoded in
+        let%map install =
+          match t.allocator with
+          | None -> Ok (fun () -> List.iter outcome.overlay_ops ~f:(apply_overlay_op t))
+          | Some _ ->
+            prepare_identity_ops
+              t
+              ~phase:(Moderation.Event.phase event)
+              outcome.overlay_ops
+        in
+        fun () ->
+          install ();
+          t.processed_effect_count <- t.processed_effect_count + effect_count;
+          prepared_outcome := Some outcome)
     in
     let%bind () =
       handle_runtime_event
         ~control
-        ?prepare_commit:(Option.map t.artifact.extension ~f:(fun _ -> prepare_commit))
+        ?prepare_commit:
+          (if Option.is_some t.artifact.extension || Option.is_some !(t.goal_transaction)
+           then Some prepare_commit
+           else None)
         t
         ~context:(Moderation.Context.to_value ?control context)
         ~event:event_value
@@ -1199,7 +1368,10 @@ let handle_event_unlocked
     let%map outcome =
       match t.artifact.extension with
       | Some _ -> Ok !prepared_outcome
-      | None -> committed_outcome t
+      | None ->
+        (match !prepared_outcome with
+         | Some _ as outcome -> Ok outcome
+         | None -> committed_outcome t)
     in
     let outcome = Option.value outcome ~default:Moderation.Outcome.empty in
     Debug_log.emit (fun () ->
@@ -1212,6 +1384,32 @@ let handle_event_unlocked
         (List.length outcome.emitted_events)
         (Option.is_some outcome.tool_moderation));
     outcome)
+;;
+
+let with_goal_transaction t f =
+  let previous = !(t.goal_transaction) in
+  t.goal_transaction := Goal_native_scope.current ();
+  Exn.protect ~finally:(fun () -> t.goal_transaction := previous) ~f
+;;
+
+let handle_event_unlocked
+      t
+      ~session_id
+      ~now_ms
+      ~history
+      ~available_tools
+      ~session_meta
+      ~event
+  =
+  with_goal_transaction t (fun () ->
+    handle_event_unlocked_in_context
+      t
+      ~session_id
+      ~now_ms
+      ~history
+      ~available_tools
+      ~session_meta
+      ~event)
 ;;
 
 let stopped_outcome =
@@ -1395,6 +1593,8 @@ let with_work_transactions
       ingress
       f
   =
+  let previous_goals = !(t.goal_transaction) in
+  t.goal_transaction := Goal_native_scope.current ();
   let previous_runs = !(t.run_transaction) in
   t.run_transaction := run_actions;
   let previous = !(t.job_transaction) in
@@ -1409,6 +1609,7 @@ let with_work_transactions
   t.ingress_transaction := ingress;
   Exn.protect
     ~finally:(fun () ->
+      t.goal_transaction := previous_goals;
       t.run_transaction := previous_runs;
       t.job_transaction := previous;
       t.subscription_transaction := previous_subscriptions;
@@ -1529,17 +1730,27 @@ let handle_event_entries_transactional_unlocked
         |> Result.map ~f:(fun value -> Moderation.Event.Internal_event value)
       | _ -> Ok event
     in
+    let checked = Moderator_invocation.snapshot_state ?control ~limits:script.limits in
     let%bind event =
       match event with
       | Moderation.Event.Internal_event
           (Chatml.Chatml_lang.VVariant ("Internal_event", [ payload ])) ->
-        Moderator_invocation.internal_event ?control payload
+        let%bind event = Moderator_invocation.internal_event ?control payload in
+        let%map _ = checked event in
+        event
       | Internal_event _ ->
         Error "event.invalid_internal_event: requires a v1 Internal_event envelope"
-      | _ -> Ok (Moderation.Event.to_value_with_control ~control event)
+      | Session_start
+      | Session_resume
+      | Turn_start
+      | Item_appended _
+      | Pre_tool_call _
+      | Post_tool_response _
+      | Turn_end ->
+        (* Host observations use the live observer budget. The declaration's
+           snapshot limits still bound retained state and internal events. *)
+        Ok (Moderation.Event.to_value_with_control ~control event)
     in
-    let checked = Moderator_invocation.snapshot_state ?control ~limits:script.limits in
-    let%bind _ = checked event in
     let context =
       Moderation.Entry_projection.project_context_with_control
         ~control
@@ -1559,6 +1770,9 @@ let handle_event_entries_transactional_unlocked
     let prepare (transaction : Runtime.transaction) =
       let%bind run_action, local_effects =
         prepare_run_actions run_actions transaction.local_effects
+      in
+      let%bind local_effects =
+        Goal_native_operations.prepare !(t.goal_transaction) local_effects
       in
       let%bind starts, local_effects =
         Background_job_operations.split_starts local_effects
@@ -1665,7 +1879,15 @@ let handle_event_entries_transactional_unlocked
     !outcome)
 ;;
 
+let with_execution_model_recipes ?model_recipes t f =
+  with_execution_lock t (fun () ->
+    let previous = !(t.invocation_model_recipes) in
+    t.invocation_model_recipes := model_recipes;
+    Exn.protect ~f ~finally:(fun () -> t.invocation_model_recipes := previous))
+;;
+
 let handle_event_entries_transactional
+      ?model_recipes
       ?run_actions
       ?jobs
       ?subscriptions
@@ -1683,7 +1905,7 @@ let handle_event_entries_transactional
       ~on_tool_call
       ~prepare_event
   =
-  with_execution_lock t (fun () ->
+  with_execution_model_recipes ?model_recipes t (fun () ->
     handle_event_entries_transactional_unlocked
       ?run_actions
       ?jobs
@@ -1705,6 +1927,7 @@ let handle_event_entries_transactional
 ;;
 
 let handle_next_event_entries_transactional
+      ?model_recipes
       ?run_actions
       ?jobs
       ?subscriptions
@@ -1721,7 +1944,7 @@ let handle_next_event_entries_transactional
       ~on_tool_call
       ~prepare_event
   =
-  with_execution_lock t (fun () ->
+  with_execution_model_recipes ?model_recipes t (fun () ->
     let open Result.Let_syntax in
     match Runtime.peek_queued_event t.runtime with
     | None -> Ok None
@@ -1752,6 +1975,7 @@ let handle_next_event_entries_transactional
 ;;
 
 let handle_invocation_entries
+      ?model_recipes
       ?run_actions
       ?jobs
       ?subscriptions
@@ -1772,7 +1996,7 @@ let handle_invocation_entries
       ~validate_work
       ~prepare_resolution
   =
-  with_execution_lock t (fun () ->
+  with_execution_model_recipes ?model_recipes t (fun () ->
     run_controlled ?context:execution_context t.execution (fun () ->
       let open Result.Let_syntax in
       let control = Option.map t.execution ~f:Chatml_execution.runner_control in
@@ -1838,6 +2062,9 @@ let handle_invocation_entries
       let prepare_commit ~resolved ~(transaction : Runtime.transaction) =
         let%bind run_action, local_effects =
           prepare_run_actions run_actions transaction.local_effects
+        in
+        let%bind local_effects =
+          Goal_native_operations.prepare !(t.goal_transaction) local_effects
         in
         let%bind starts, local_effects =
           Background_job_operations.split_starts local_effects
@@ -1924,6 +2151,7 @@ let handle_invocation_entries
 ;;
 
 let handle_observation_entries
+      ?model_recipes
       ?run_actions
       ?jobs
       ?subscriptions
@@ -1940,7 +2168,7 @@ let handle_observation_entries
       ~now_ms
       ~prepare_observation
   =
-  with_execution_lock t (fun () ->
+  with_execution_model_recipes ?model_recipes t (fun () ->
     run_controlled t.execution (fun () ->
       let open Result.Let_syntax in
       let control = Option.map t.execution ~f:Chatml_execution.runner_control in
@@ -1999,7 +2227,7 @@ let handle_observation_entries
             ] )
       in
       let checked = Moderator_invocation.snapshot_state ?control ~limits:script.limits in
-      let%bind _ = checked event in
+      Option.iter control ~f:(fun c -> c.L.check_value event);
       let context =
         Moderation.Entry_projection.project_context_with_control
           ~control
@@ -2014,6 +2242,9 @@ let handle_observation_entries
       let prepare (transaction : Runtime.transaction) =
         let%bind run_action, local_effects =
           prepare_run_actions run_actions transaction.local_effects
+        in
+        let%bind local_effects =
+          Goal_native_operations.prepare !(t.goal_transaction) local_effects
         in
         let%bind starts, local_effects =
           Background_job_operations.split_starts local_effects
@@ -2524,4 +2755,173 @@ let enqueue_internal_event_entries t ~event ~prepare =
       let%map () = prepare ~before ~snapshot in
       install ();
       snapshot))
+;;
+
+let handle_legacy_callback_entries
+      t
+      ~selection
+      ~session_id
+      ~now_ms
+      ~history
+      ~available_tools
+      ~session_meta
+      ~with_admission
+  =
+  with_execution_lock t (fun () ->
+    run_controlled t.execution (fun () ->
+      let open Result.Let_syntax in
+      let%bind () =
+        match t.artifact.extension with
+        | None -> Ok ()
+        | Some _ ->
+          Error "callback.versioned_moderator: legacy boundary requires legacy source"
+      in
+      let%bind () =
+        if
+          Runtime.is_halted t.runtime
+          || Option.is_some (Runtime.pending_ui_request t.runtime)
+        then Error "callback.unavailable: halted or suspended moderator"
+        else Ok ()
+      in
+      let%bind selected =
+        match selection with
+        | Callback_selection.Boundary (Moderation.Event.Internal_event _) ->
+          Error "callback.invalid_selection: internal events require exact queue head"
+        | Boundary event -> Ok (Some event)
+        | Queue_head ->
+          Ok
+            (Option.map (Runtime.peek_queued_event t.runtime) ~f:(fun value ->
+               Moderation.Event.Internal_event value))
+      in
+      match selected with
+      | None -> Ok None
+      | Some event ->
+        let control = Option.map t.execution ~f:Chatml_execution.runner_control in
+        let%bind snapshot = identity_snapshot_unlocked t in
+        let%bind selected =
+          match event with
+          | Moderation.Event.Internal_event value -> Value_codec.Snapshot.of_value value
+          | _ ->
+            Moderation.Event.to_value_with_control ~control event
+            |> Value_codec.Snapshot.of_value
+        in
+        let active = Atomic.make true in
+        let used = Atomic.make false in
+        let callback =
+          { manager = t; live = active; selection; snapshot; event = selected }
+        in
+        Exn.protect
+          ~finally:(fun () -> Atomic.set active false)
+          ~f:(fun () ->
+            let%map outcome =
+              with_admission callback ~snapshot (fun binding ->
+                (* Admission installs the actual Actor callback scope. Capture it
+                   here, not before the Manager has entered that owned bracket. *)
+                with_goal_transaction t (fun () ->
+                  let%bind () =
+                    if not (callback_is_current t callback)
+                    then Error "callback.expired: admission callback has ended"
+                    else if not (Atomic.compare_and_set used false true)
+                    then Error "callback.reused: callback may execute only once"
+                    else Ok ()
+                  in
+                  let%bind () = binding.authorize () in
+                  let services = binding.services in
+                  let capabilities =
+                    { Moderation.Capabilities.default with
+                      model_recipes = services.model_recipes
+                    ; on_tool_call = services.tool_call
+                    ; on_schedule_after_ms = services.after_ms
+                    ; on_schedule_cancel = services.cancel
+                    }
+                  in
+                  let previous = !(t.callback_handlers) in
+                  t.callback_handlers
+                  := Some (Moderation.Capabilities.runtime_handlers capabilities, active);
+                  Exn.protect
+                    ~finally:(fun () -> t.callback_handlers := previous)
+                    ~f:(fun () ->
+                      let phase = Moderation.Event.phase event in
+                      let context =
+                        Moderation.Entry_projection.project_context_with_control
+                          ~control
+                          ~session_id
+                          ~now_ms
+                          ~phase
+                          ~history
+                          ~available_tools
+                          ~session_meta
+                        |> Moderation.Context.to_value ?control
+                      in
+                      let copy value =
+                        Option.iter control ~f:(fun c ->
+                          c.Chatml.Chatml_lang.before_json_export value);
+                        Result.bind
+                          (Value_codec.Snapshot.of_value value)
+                          ~f:Value_codec.Snapshot.to_value
+                      in
+                      let outcome = ref Moderation.Outcome.empty in
+                      let prepare (transaction : Runtime.transaction) =
+                        let%bind local_effects =
+                          Goal_native_operations.prepare
+                            !(t.goal_transaction)
+                            transaction.local_effects
+                        in
+                        let%bind decoded = decode_effects t local_effects in
+                        let%bind prepared =
+                          Moderation.Outcome.of_runtime_effects decoded
+                        in
+                        let%bind overlay, install_overlay =
+                          prepare_identity_overlay t ~phase prepared.overlay_ops
+                        in
+                        let%bind snapshot =
+                          identity_snapshot_of_state
+                            ?control
+                            t
+                            ~current_state:transaction.new_state
+                            ~queued_events:transaction.queued_events
+                            ~halted:transaction.halted
+                            ~overlay
+                        in
+                        let%bind commit = binding.prepare ~outcome:prepared ~snapshot in
+                        Option.iter control ~f:(fun c ->
+                          c.Chatml.Chatml_lang.checkpoint ());
+                        let%map () = commit.persist () in
+                        fun () ->
+                          install_overlay ();
+                          commit.install ();
+                          t.processed_effect_count
+                          <- t.processed_effect_count
+                             + List.length transaction.local_effects;
+                          outcome := prepared
+                      in
+                      t.last_history <- history;
+                      let%map () =
+                        match selection with
+                        | Callback_selection.Boundary _ ->
+                          Runtime.handle_event
+                            t.runtime
+                            ~context
+                            ~event:(Moderation.Event.to_value_with_control ~control event)
+                            ~copy_state:copy
+                            ~prepare_transaction:prepare
+                            ~validate_suspension:(fun () ->
+                              Error "callback.suspended: cannot retain a UI continuation")
+                        | Queue_head ->
+                          let%bind consumed =
+                            Runtime.handle_next_queued_event
+                              t.runtime
+                              ~context
+                              ~copy_state:copy
+                              ~copy_event:copy
+                              ~prepare_transaction:prepare
+                          in
+                          (match consumed with
+                           | Some () -> Ok ()
+                           | None ->
+                             Error "callback.queue_changed: selected head disappeared")
+                      in
+                      !outcome)))
+            in
+            Some outcome)))
 ;;

@@ -180,7 +180,15 @@ let%expect_test
        let receipt = send reference "two" 7 "second" |> protocol_ok in
        assert (M.equal_status (Terminal (Some operation, Completed)) receipt.status);
        [%test_eq: int] 1 !runs;
-       let legacy = { done_state with schema_version = 15 } in
+       (* Model the actual older shape, before child accounting was introduced. *)
+       let legacy =
+         { done_state with
+           schema_version = 15
+         ; goal_descendants = None
+         ; delegated_usage = None
+         ; child_contributions = None
+         }
+       in
        assert (Result.is_error (State.upgrade_schema legacy));
        let legacy = { legacy with managed_submissions = [] } in
        let migrated = State.upgrade_schema legacy |> protocol_ok in

@@ -40,9 +40,10 @@ type t =
 
 (** Repeat admission for directly constructed records before any owner is
     opened or contract is converted. Bound counts/aggregate text bytes; require
-    at least one principal grant and Project selection, distinct
+    at least one principal grant, distinct
     (root,principal,kind) grants and distinct (root,project,request)
-    selections. Every named root must exactly match an admitted administrative
+    selections. An empty selection list is explicit read-only mode: it supplies
+    no compiler target, project Build or execution. Every named root must exactly match an admitted administrative
     external root, and every selected root must have an explicit read grant;
     other configured roots may remain ungranted. Project strings decode
     through [Source.Portable_path.create]; entry/environment spellings are

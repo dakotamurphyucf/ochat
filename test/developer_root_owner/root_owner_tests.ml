@@ -679,6 +679,7 @@ let%test_unit "physical root job control preserves exact inactive attempts" =
       ; generation = 0
       ; kind = Async_tool
       ; launch = None
+      ; inference_origin = None
       ; progress = None
       ; payload = `Object []
       ; status = Queued

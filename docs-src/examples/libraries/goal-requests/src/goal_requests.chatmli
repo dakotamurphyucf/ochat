@@ -1,0 +1,43 @@
+(* Use the generation, source and revisions from the same authorized Get.
+   Save each complete request with its key for retry. These functions prepare
+   request data. The native codec validates timestamp, UTF-8 and encoded
+   input limits. Actual selected admission and staging remain host operations. *)
+
+type session = {server_id:string; session_id:string}
+type source = {script_id:string; source_sha256:string; generation:string; installation_epoch:string}
+type basis = {generation:string; catalog_revision:string; key:string}
+type goal_basis = {basis:basis; goal_id:string; goal_revision:string}
+
+type 'a setting = [ `Unset | `Set('a) ]
+type token_component = [ `Input | `Output | `Reported_total | `Cached_input | `Cache_write_input | `Reasoning_output ]
+type token_limit = {component:token_component; ceiling:string}
+type budget = {admitted_turns:string setting; admitted_attempts:string setting; observed_tokens:token_limit setting; deadline:string setting}
+type content_kind = [ `Plain_text | `Chatmd ]
+type submission = {kind:content_kind; text:string; attachments:json array}
+type start_input = [ `Authored_start | `User_submission(submission) ]
+
+type error = [ `Invalid_identity | `Mismatched_episode | `Invalid_revision | `Invalid_source | `Invalid_key | `Invalid_text | `Invalid_budget | `Invalid_input ]
+type 'a checked = [ `Ok('a) | `Error(error) ]
+
+val list : fun() -> json
+val get : fun(string) -> json checked
+
+(* Compare the source's observed JSON generation with the Get generation string
+   before constructing a typed source. Source-bearing requests require a
+   generation within 0..9007199254740991 for exact ChatML JSON encoding. *)
+val source_of_view : fun(json) -> source checked
+
+val create : fun(basis, source, string, string, budget) -> json checked
+val start : fun(goal_basis, source, start_input) -> json checked
+val objective : fun(goal_basis, source, string) -> json checked
+val progress : fun(goal_basis, source, string) -> json checked
+val hold : fun(goal_basis, string) -> json checked
+val abandon : fun(goal_basis, string) -> json checked
+
+(* Copy the Run ID and revision from the same Goal Get row's current_run.
+   No Resume request can be prepared from a null current_run. *)
+type catalog = {session:session; generation:string; revision:string; source:source}
+type goal = {id:string; session:session; revision:string; source:source}
+type episode = {goal_id:string; session:session; run_id:string; revision:string; source:source}
+
+val resume : fun(catalog, goal, episode, string) -> json checked

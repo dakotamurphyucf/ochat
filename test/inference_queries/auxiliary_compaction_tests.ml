@@ -215,7 +215,7 @@ let%expect_test
          ignore
            (S.Session_registry.remove (S.Daemon.registry daemon) session.id
             : S.Session_registry.entry option);
-         current.close ();
+         Agent_server.Session_registry.close_entry current;
          let restored =
            S.Session_factory.read_session (S.Daemon.factory daemon) indexed |> ok
          in

@@ -1,0 +1,7 @@
+(library
+ (name instruction_content)
+ (public_name ochat.instruction_content)
+ (modules instruction_content instruction_model instruction_metadata instruction_loaded instruction_snapshot)
+ (private_modules instruction_model instruction_metadata instruction_loaded instruction_snapshot)
+ (libraries core jsonaf source ochat.chatml_source ochat.document_schema ochat.agent_store)
+ (preprocess (pps ppx_jane)))

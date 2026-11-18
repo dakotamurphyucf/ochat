@@ -70,9 +70,9 @@ let run ctx input = Task.bind(Tool.call("counter", input), fun result -> match r
               assert (Agent_protocol.Id.Job.equal id job.id)
             | status -> raise_s [%sexp (status : I.status)]);
            assert (
-             J.equal_launch_owner
+             J.Birth_parent.equal
                (Option.value_exn job.launch).owner
-               (Invocation invocation.context.id));
+               (J.Birth_parent.callback (Invocation invocation.context.id)));
            (match J.terminal_completion job |> protocol_ok with
             | Some (Succeeded (`String text)) ->
               assert (String.is_substring text ~substring:(String.strip report_a))

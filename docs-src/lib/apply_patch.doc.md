@@ -34,6 +34,11 @@ callbacks (`open_fn`, `write_fn`, `remove_fn`) and `apply_patch`
 operates exclusively through them.  This makes it trivial to unit-test
 against an in-memory map or to plug into an Eio virtual file-system.
 
+Eio cancellation and timeout exceptions from any storage callback propagate with
+their original backtrace. Other read failures retain the structured missing-file
+diagnostic; write and remove failures propagate. Changes already applied before
+an error or cancellation are not rolled back.
+
 
 2  Patch format cheat-sheet
 --------------------------

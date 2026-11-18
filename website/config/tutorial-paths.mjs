@@ -37,6 +37,7 @@ export const tutorialPaths = [
       'tutorials/workflow',
       'tutorials/stateful-workflow',
       'tutorials/background-results',
+      'tutorials/goal-recurrence',
     ],
   },
   {

@@ -32,6 +32,7 @@ type t =
   { requests : request Eio.Stream.t
   ; session_id : Agent_protocol.Id.Session.t
   ; stopped : unit Eio.Promise.t
+  ; max_payload_length : int
   ; mutable availability : availability
   }
 
@@ -145,6 +146,7 @@ let create
       { requests = Eio.Stream.create queue_capacity
       ; session_id
       ; stopped
+      ; max_payload_length = Journal.max_payload_length journal
       ; availability = Available
       }
     in
@@ -161,6 +163,21 @@ let create
             t.availability <- Closed;
             Eio.Promise.resolve stopped_resolver ())));
     Ok t)
+;;
+
+let max_payload_length t = t.max_payload_length
+let session_id t = t.session_id
+
+let is_available t =
+  match t.availability with
+  | Available -> Option.is_none (Eio.Promise.peek t.stopped)
+  | Unavailable _ | Closed -> false
+;;
+
+let requires_recovery t =
+  match t.availability with
+  | Unavailable _ -> Option.is_none (Eio.Promise.peek t.stopped)
+  | Available | Closed -> false
 ;;
 
 let await_reply t ~promise ~enqueue ~if_stopped =

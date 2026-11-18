@@ -64,7 +64,14 @@ let%expect_test "moderator event tool preparation retains the actual event owner
           ~operation_id:None
           ~event:Session_start
           ~snapshot:(fun () -> Ok snapshot)
-          (fun ~executing ~retirement_reason:_ ~event:_ ~execute ~commit ->
+          (fun ~executing
+            ~policy_caller:_
+            ~model_jobs:_
+            ~allocate_inference:_
+            ~retirement_reason:_
+            ~event:_
+            ~execute
+            ~commit ->
              event_id := Some executing.context.id;
              let result =
                Tools.with_event tools ~definition ~execute ~executing (fun call ->
@@ -310,7 +317,13 @@ let%expect_test "host preparation routes canonical calls before owned admission"
               | `Legacy ->
                 Stream.Tool_dispatch.with_preparation native ~prepare:(fun _ ->
                   Ok (Some (Redirect ("legacy", `Object []))))
-              | _ -> Tools.with_model_preparation tools ~selected:declared ~input native
+              | _ ->
+                Tools.with_model_preparation
+                  tools
+                  ~capture_caller:caps.policy_caller
+                  ~selected:declared
+                  ~input
+                  native
             in
             let tool_tbl = String.Table.create () in
             Hashtbl.set tool_tbl ~key:"legacy" ~data:(fun ~invocation:_ _ ->
@@ -324,7 +337,7 @@ let%expect_test "host preparation routes canonical calls before owned admission"
                 ~dispatch_tool
                 { env
                 ; inference_context = inference.context
-                ; inference_identity = inference.identity
+                ; inference_identity = (fun _ -> inference.identity)
                 ; on_inference_attempt = ignore
                 ; on_inference_observation = ignore
                 ; on_inference_completion = ignore

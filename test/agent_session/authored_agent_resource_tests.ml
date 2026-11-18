@@ -93,7 +93,100 @@ let%expect_test
         {|<tool name="cycle" agent="root.chatmd" local persistence="persistent"/>|};
       check
         ~max_depth:1
-        {|<tool name="deep" agent="leaf.chatmd" local persistence="persistent"/>|}));
+        {|<tool name="deep" agent="leaf.chatmd" local persistence="persistent"/>|};
+      (* The same genuine immutable graph can stop before any native build.
+         Nested source identity retains its defining preparation, not root. *)
+      let revision =
+        Agent_session.Prompt_revision_builder.build
+          ~env
+          ~artifact_store
+          ~transaction_id:(P.Id.Transaction.create ())
+          ~created_at:timestamp
+          definition
+        |> Authored_agent_source_tests.built
+      in
+      let prepared = ref [] in
+      let policy = Fixtures.script_preparation () in
+      let plan =
+        Chat_response.Startup_compilation.with_context
+          ~limits:(Agent_session.Runtime_script_preparation.compilation policy)
+          ~env
+          ~checkpoint:Eio.Fiber.check
+          ~map_error:(fun error ->
+            P.Error.invalid_request error.Chatml_compilation.message)
+          ~f:(fun startup ->
+            Owned.Source_plan.capture
+              ~max_depth:8
+              ~revision
+              ~capture:(fun ~parent_revision ~tool_name ->
+                Agent_session.Authored_source_preparation.with_prepared
+                  ~startup:(Some startup)
+                  ~script_preparation:(Some policy)
+                  ~content_limits:None
+                  ~parent:parent_revision
+                  ~tool_name
+                  ~env
+                  ~checkpoint:Eio.Fiber.check
+                  ~f:(fun _ source ->
+                    prepared := source :: !prepared;
+                    Ok source)))
+          ()
+        |> protocol_ok
+      in
+      [%test_eq: int] 3 (List.length !prepared);
+      let module Prepared = Agent_session.Authored_source_preparation in
+      let selector prepared : Agent_store.Captured_source_kind.Authored_tool.t =
+        let source = Prepared.source prepared in
+        { name = (Source.identity source).tool_name
+        ; source_sha256 = Source.fingerprint source
+        }
+      in
+      List.iter !prepared ~f:(fun expected ->
+        let found =
+          Owned.Source_plan.find plan ~selector:(selector expected) |> protocol_ok
+        in
+        assert (phys_equal expected found));
+      let named name =
+        List.find_exn !prepared ~f:(fun prepared ->
+          String.equal (selector prepared).name name)
+      in
+      let nested = named "deep" in
+      let children plan expected =
+        let found, children =
+          Owned.Source_plan.find_direct plan ~selector:(selector expected) |> protocol_ok
+        in
+        assert (phys_equal expected found);
+        children
+      in
+      let leaf_children = children plan (named "first") in
+      let middle_children = children plan (named "later") in
+      ignore (children middle_children nested : Owned.Source_plan.t);
+      List.iter [ plan; leaf_children ] ~f:(fun wrong_parent ->
+        match Owned.Source_plan.find_direct wrong_parent ~selector:(selector nested) with
+        | Error { code = Permission_denied; _ } -> ()
+        | Error error -> raise_s [%sexp (error : P.Error.t)]
+        | Ok _ -> failwith "an authored selector escaped its defining parent");
+      assert (
+        not
+          (P.Id.Prompt_revision.equal
+             (Source.identity (Prepared.source nested)).parent_revision_id
+             (R.id revision)));
+      let missing = { (selector nested) with name = "missing" } in
+      let changed =
+        { (selector nested) with
+          source_sha256 = Chatmd_shell_spec.Source_ref.digest "different defining source"
+        }
+      in
+      List.iter [ missing; changed ] ~f:(fun selector ->
+        match Owned.Source_plan.find plan ~selector with
+        | Error { code = Permission_denied; _ } -> ()
+        | Error error -> raise_s [%sexp (error : P.Error.t)]
+        | Ok _ -> failwith "source metadata selected a foreign defining declaration");
+      save "middle.chatmd" "<developer>Changed original source.</developer>";
+      let retained =
+        Owned.Source_plan.find plan ~selector:(selector nested) |> protocol_ok
+      in
+      assert (phys_equal nested retained)));
   [%expect
     {|
     delegation.authored_graph: cyclic or excessive private ancestry
@@ -212,6 +305,44 @@ let run ctx input =
           ~approval_store:(Shell_access.Approval.create_store ())
       in
       let original = prepare () |> protocol_ok in
+      let selector : Agent_store.Captured_source_kind.Authored_tool.t =
+        { name = "researcher"; source_sha256 = Source.fingerprint original.source }
+      in
+      let publication =
+        Source.artifact
+          original.source
+          ~revision_id:(P.Id.Prompt_revision.create ())
+          ~created_at:timestamp
+        |> store_ok
+      in
+      Artifacts.install
+        artifact_store
+        ~transaction_id:(P.Id.Transaction.create ())
+        publication
+      |> store_ok;
+      let publication =
+        Artifacts.load artifact_store publication.revision_id |> store_ok
+      in
+      let module Publication = Agent_server.Recurrence_authored_source in
+      let check_publication ~selector ~artifact =
+        let metadata =
+          Publication.check_source_artifact original.source ~selector ~artifact
+        in
+        let resources = Publication.check_artifact original ~selector ~artifact in
+        [%test_eq: Sexp.t]
+          ([%sexp_of: (unit, P.Error.t) result] resources)
+          ([%sexp_of: (unit, P.Error.t) result] metadata);
+        metadata
+      in
+      check_publication ~selector ~artifact:publication |> protocol_ok;
+      let rejected_selector = { selector with name = "different wrapper" } in
+      List.iter
+        [ rejected_selector, publication; selector, R.artifact parent ]
+        ~f:(fun (selector, artifact) ->
+          match check_publication ~selector ~artifact with
+          | Error { code = Permission_denied; _ } -> ()
+          | Error error -> raise_s [%sexp (error : P.Error.t)]
+          | Ok () -> failwith "metadata accepted a different authored publication");
       let caps prepared = Runtime_resource_tests.capabilities prepared.B.resources in
       let registration =
         Agent_session.Authored_agent_call.registration

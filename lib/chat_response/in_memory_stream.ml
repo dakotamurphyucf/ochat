@@ -24,7 +24,7 @@ type post_stream =
   -> Openai.Responses.Response_stream.t Seq.t
 
 module Tool_dispatch = struct
-  type native_runner = Ochat_function.t -> payload:string -> Output.t
+  type native_runner = Tool_call.Native.t -> payload:string -> Output.t
 
   type rejection =
     | Invalid_input
@@ -233,8 +233,10 @@ type ctx =
   ; on_inference_completion : Inference_client.Completion.t -> unit
   ; on_inference_observation : Inference.Observation.t -> unit
   ; on_admitted_call : Admitted_call.t -> unit
+  ; agent_guidance : Agent_guidance.t option
   ; submission_guard : Inference_runtime.Submission_guard.t
   ; before_inference_dispatch : Inference_runtime.Prepared.t -> unit
+  ; before_tool_effect : (unit -> unit) option
   ; resolve_inference_assets : History_entry.t list -> Inference.Request.Asset.t list
   ; sw : Eio.Switch.t
   ; datadir : Eio.Fs.dir_ty Eio.Path.t
@@ -302,8 +304,10 @@ type args =
   ; on_inference_completion : Inference_client.Completion.t -> unit
   ; on_inference_observation : Inference.Observation.t -> unit
   ; on_admitted_call : Admitted_call.t -> unit
+  ; agent_guidance : Agent_guidance.t option
   ; submission_guard : Inference_runtime.Submission_guard.t
   ; before_inference_dispatch : Inference_runtime.Prepared.t -> unit
+  ; before_tool_effect : (unit -> unit) option
   ; resolve_inference_assets : History_entry.t list -> Inference.Request.Asset.t list
   ; datadir : Eio.Fs.dir_ty Eio.Path.t option
   ; history : History_entry.t list
@@ -1531,7 +1535,7 @@ let dispatch_tool
       ~synthetic_result
       ~rejection
       ~runtime_requests
-      (run_native : ?runner:Ochat_function.runner -> payload:string -> unit -> Output.t)
+      (run_native : ?native:Tool_call.Native.t -> payload:string -> unit -> Output.t)
   =
   let halted () =
     Option.value_map c.moderator ~default:false ~f:(fun moderator ->
@@ -1563,8 +1567,7 @@ let dispatch_tool
             History_entry.Id.equal (History_entry.id entry) id))
       in
       dispatch.run
-        ~run_native:(fun implementation ~payload ->
-          run_native ~runner:implementation.Ochat_function.run_with_progress ~payload ())
+        ~run_native:(fun native ~payload -> run_native ~native ~payload ())
         Tool_dispatch.
           { kind
           ; original_name
@@ -1631,7 +1634,7 @@ let prepare_tool_call (c : ctx) ~hist ~st ~kind ~name ~payload ~call_id ~item_id
         in
         moderate ~kind ~name ~payload ~call_id ~item_id
       with
-      | Eio.Cancel.Cancelled _ as exn -> raise exn
+      | (Eio.Cancel.Cancelled _ | Effect_rejection.Rejected _) as exn -> raise exn
       | exn ->
         if Option.is_none c.dispatch_tool
         then raise exn
@@ -1704,7 +1707,7 @@ let prepare_host_tool_entry
     in
     let decision =
       try prepare request with
-      | Eio.Cancel.Cancelled _ as exn -> raise exn
+      | (Eio.Cancel.Cancelled _ | Effect_rejection.Rejected _) as exn -> raise exn
       | _ -> Error "host preparation failed"
     in
     let moderated, rejection =
@@ -2012,7 +2015,7 @@ let accept_inference_candidate
           ~synthetic_result:moderated.synthetic_result
           ~rejection
           ~runtime_requests:moderated.runtime_requests
-          (fun ?runner ~payload () ->
+          (fun ?native ~payload () ->
              let on_fork =
                match kind with
                | Function ->
@@ -2030,11 +2033,12 @@ let accept_inference_candidate
              (* Bind delayed tool execution to the admitted candidate, rather
                 than the mutable current stream scope. *)
              Tool_call.run_tool
+               ?before_effect:c.before_tool_effect
                ~inference_parent
                ~kind
                ~name:moderated.name
                ~payload
-               ?runner
+               ?native
                ~call_id
                ~tool_tbl:c.tool_tbl
                ?on_tool_execution:c.on_tool_execution
@@ -2150,7 +2154,7 @@ let await_calls (c : ctx) ~(hist : History_entry.t list) (st : stream_state) =
             | Ok requests -> requests
             | Error exn -> raise exn
           with
-          | Eio.Cancel.Cancelled _ as exn -> raise exn
+          | (Eio.Cancel.Cancelled _ | Effect_rejection.Rejected _) as exn -> raise exn
           | Post_tool_moderation_failed _ as exn -> raise exn
           | _ ->
             raise
@@ -2274,39 +2278,47 @@ let run_turn (root_ctx : ctx) ~sw ~(history : History_entry.t list) =
           |> Result.ok_or_failwith
         in
         let receipt =
-          Neutral_turn.run
-            ~submission_guard:c.submission_guard
-            c.inference_context
-            ~sw
-            ~identity:c.inference_identity
-            ~relation:c.transcript_relation
+          Agent_guidance.with_request
+            c.agent_guidance
             ~request
-            ~before_dispatch:c.before_inference_dispatch
-            ~on_attempt:(fun attempt ->
-              on_dispatch (Inference_runtime.Attempt.configuration attempt);
-              c.on_inference_attempt attempt;
-              c.transcript_scope <- Some (Inference_runtime.Attempt.scope attempt);
-              admitted_attempt := Some attempt)
-            ~on_event:(fun event ->
-              match Inference.Event.view event with
-              | Live event -> publish_inference_live c ~st:!st event
-              | Candidate_ready { item; payload; local_execution } ->
-                st
-                := accept_inference_candidate
-                     ~turn:turn_for_fork
-                     c
-                     ~hist
-                     ~st:!st
-                     ~sem
-                     ~attempt:!admitted_attempt
-                     ~item
-                     ~payload
-                     ~local_execution
-              | Terminal _ -> ())
-            ~on_observation:c.on_inference_observation
-            ~on_completion:c.on_inference_completion
-          |> Result.map_error ~f:(fun error ->
-            Sexp.to_string_hum (Neutral_turn.Error.sexp_of_t error))
+            ~submission_guard:c.submission_guard
+            ~limits:Transcript.Admission.default
+            (fun request ~guard ~reserved_input_tokens:_ ->
+               Neutral_turn.run
+                 ~submission_guard:guard
+                 c.inference_context
+                 ~sw
+                 ~identity:c.inference_identity
+                 ~relation:c.transcript_relation
+                 ~request
+                 ~before_dispatch:c.before_inference_dispatch
+                 ~on_attempt:(fun attempt ->
+                   on_dispatch (Inference_runtime.Attempt.configuration attempt);
+                   c.on_inference_attempt attempt;
+                   c.transcript_scope <- Some (Inference_runtime.Attempt.scope attempt);
+                   admitted_attempt := Some attempt)
+                 ~on_event:(fun event ->
+                   match Inference.Event.view event with
+                   | Live event -> publish_inference_live c ~st:!st event
+                   | Candidate_ready { item; payload; local_execution } ->
+                     st
+                     := accept_inference_candidate
+                          ~turn:turn_for_fork
+                          c
+                          ~hist
+                          ~st:!st
+                          ~sem
+                          ~attempt:!admitted_attempt
+                          ~item
+                          ~payload
+                          ~local_execution
+                   | Terminal _ -> ())
+                 ~on_observation:c.on_inference_observation
+                 ~on_completion:c.on_inference_completion
+               |> Result.map_error ~f:(fun error ->
+                 Sexp.to_string_hum (Neutral_turn.Error.sexp_of_t error))
+               |> Result.ok_or_failwith)
+          |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
           |> Result.ok_or_failwith
         in
         c, receipt
@@ -2411,8 +2423,10 @@ let setup_ctx ~(sw : Eio.Switch.t) (a : args) =
     ; on_inference_completion = a.on_inference_completion
     ; on_inference_observation = a.on_inference_observation
     ; on_admitted_call = a.on_admitted_call
+    ; agent_guidance = a.agent_guidance
     ; submission_guard = a.submission_guard
     ; before_inference_dispatch = a.before_inference_dispatch
+    ; before_tool_effect = a.before_tool_effect
     ; resolve_inference_assets = a.resolve_inference_assets
     ; sw
     ; datadir
@@ -2480,10 +2494,12 @@ let run_completion_stream_in_memory_entries
       ~inference_identity
       ~on_inference_attempt
       ~on_inference_completion
+      ?agent_guidance
       ?(submission_guard = Inference_runtime.Submission_guard.empty)
       ?(inference_relation = Transcript.Scope.Root)
       ?(on_inference_observation = fun _ -> ())
       ?(on_admitted_call = fun _ -> ())
+      ?before_tool_effect
       ?(before_inference_dispatch = fun _ -> ())
       ?(resolve_inference_assets = fun _ -> [])
       ?datadir
@@ -2597,8 +2613,10 @@ let run_completion_stream_in_memory_entries
     ; on_inference_completion
     ; on_inference_observation
     ; on_admitted_call
+    ; agent_guidance
     ; submission_guard
     ; before_inference_dispatch
+    ; before_tool_effect
     ; resolve_inference_assets
     ; datadir
     ; history

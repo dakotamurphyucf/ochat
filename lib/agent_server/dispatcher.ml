@@ -77,6 +77,52 @@ let trace_envelope ~limits envelope =
     |> Result.map_error ~f:(fun _ -> error)
 ;;
 
+let query_envelope_limits ~max_depth ~max_fields ~max_nodes max_bytes =
+  Document_schema.Limits.create ~max_bytes ~max_depth ~max_fields ~max_nodes
+  |> Result.ok
+  |> Option.value_exn
+;;
+
+let goal_query_limits =
+  query_envelope_limits
+    ~max_depth:74
+    ~max_fields:16_384
+    ~max_nodes:32_768
+    Agent_protocol.Goal_query.max_envelope_bytes
+;;
+
+let recurrence_query_limits =
+  (* Up to 512 retained occurrences with eight attempts each, plus bounded
+     audit ranges. The complete correlated envelope shares the 4 MiB cap. *)
+  query_envelope_limits
+    ~max_depth:34
+    ~max_fields:131_072
+    ~max_nodes:262_144
+    Agent_protocol.Recurrence_query.max_envelope_bytes
+;;
+
+let operator_query_limits method_ =
+  if List.mem Agent_protocol.Goal_query.Request.methods method_ ~equal:String.equal
+  then Some ("Goal", goal_query_limits)
+  else if
+    List.mem Agent_protocol.Recurrence_query.Request.methods method_ ~equal:String.equal
+  then Some ("Recurrence", recurrence_query_limits)
+  else None
+;;
+
+let validate_query_envelope name limits envelope =
+  Document_schema.Json.validate_and_measure
+    ~limits
+    (Agent_protocol.Envelope.to_json envelope)
+  |> Result.map ~f:ignore
+  |> Result.map_error ~f:(fun _ ->
+    Agent_protocol.Error.create
+      Resource_limit
+      ~message:(name ^ " JSON-RPC envelope exceeds its response bound")
+      ~retryable:false
+      ())
+;;
+
 let trace_request_id request_id =
   let error =
     Agent_protocol.Error.create
@@ -311,7 +357,16 @@ let request t ?actor context (request : Agent_protocol.Envelope.request) =
        Refuse publication through the transport error path in that case. *)
       Inference_query_budget.validate_envelope t.inference_response_policy response
       |> Result.map ~f:(fun () -> Some response)
-    else Ok (Some response))
+    else (
+      match operator_query_limits request.method_ with
+      | None -> Ok (Some response)
+      | Some (name, limits) ->
+        (match validate_query_envelope name limits response with
+         | Ok () -> Ok (Some response)
+         | Error failure ->
+           let response = Agent_protocol.Envelope.failure ~id:request.id failure in
+           validate_query_envelope name limits response
+           |> Result.map ~f:(fun () -> Some response))))
 ;;
 
 let notification_safe = function

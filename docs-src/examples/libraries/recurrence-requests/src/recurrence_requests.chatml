@@ -1,0 +1,202 @@
+type session = {server_id:string; session_id:string}
+type source = {script_id:string; source_sha256:string; generation:int; installation_epoch:string}
+type basis = {generation:int; catalog_revision:string; source:source; lifecycle_revision:string; key:string}
+type safe_basis = {generation:int; catalog_revision:string; key:string}
+type content_kind = [ `Plain_text | `Chatmd ]
+type input = {kind:content_kind; text:string; attachments:json array}
+type mode = [ `Single_turn | `Workflow ]
+type target = [ `Existing({session:session; input:input}) | `Authored({name:string; mode:mode}) ]
+type capture = {schedule:json; target:target; policy:json}
+type error = [ `Invalid_generation | `Invalid_revision | `Invalid_key | `Invalid_source | `Invalid_target | `Input_too_large | `Invalid_schedule | `Invalid_policy ]
+type 'a checked = [ `Ok('a) | `Error(error) ]
+
+let failure : fun(error) -> error = fun error -> error
+let revision = fun text ->
+  let size = String.length(text) in
+  let rec digits = fun index ->
+    if index == size then true
+    else if String.contains("0123456789", String.slice(text, index, 1)) then digits(index + 1)
+    else false in
+  if size == 0 then false
+  else if size > 19 then false
+  else if size == 1 then digits(0)
+  else if String.slice(text, 0, 1) == "0" then false
+  else digits(0)
+
+let target_json = fun target ->
+  match target with
+  | `Authored(worker) ->
+      if (if String.is_empty(worker.name) then true else String.length(worker.name) > 1024) then `Error(failure(`Invalid_target))
+      else `Ok(`Object([
+        {key = "kind"; value = `String("authored_child")},
+        {key = "name"; value = `String(worker.name)},
+        {key = "mode"; value = `String(match worker.mode with | `Single_turn -> "single_turn" | `Workflow -> "workflow")}]))
+  | `Existing(selected) ->
+      if (if String.length(selected.input.text) > 262144 then true else Array.length(selected.input.attachments) > 1024)
+      then `Error(failure(`Input_too_large))
+      else `Ok(`Object([
+        {key = "kind"; value = `String("existing_session")},
+        {key = "session"; value = `Object([
+          {key = "server_id"; value = `String(selected.session.server_id)},
+          {key = "session_id"; value = `String(selected.session.session_id)}])},
+        {key = "input"; value = `Object([
+          {key = "kind"; value = `String(match selected.input.kind with | `Plain_text -> "plain_text" | `Chatmd -> "chatmd")},
+          {key = "text"; value = `String(selected.input.text)},
+          {key = "attachments"; value = `Array(selected.input.attachments)}])}]))
+
+let source_json : fun(source) -> json = fun source -> `Object([
+  {key = "script_id"; value = `String(source.script_id)},
+  {key = "source_sha256"; value = `String(source.source_sha256)},
+  {key = "generation"; value = Json.parse(to_string(source.generation))},
+  {key = "installation_epoch"; value = `String(source.installation_epoch)}])
+
+let basis_json : fun(basis, json) -> json checked = fun basis control ->
+  if (if basis.generation < 0 then true else if basis.generation > 9007199254740991 then true else (basis.source.generation == basis.generation) == false) then `Error(failure(`Invalid_generation))
+  else if (if revision(basis.catalog_revision) == false then true else revision(basis.lifecycle_revision) == false) then `Error(failure(`Invalid_revision))
+  else if (if String.is_empty(basis.key) then true else String.length(basis.key) > 256) then `Error(failure(`Invalid_key))
+  else if (if String.is_empty(basis.source.script_id) then true
+           else if (String.length(basis.source.source_sha256) == 64) == false then true
+           else if revision(basis.source.installation_epoch) == false then true
+           else basis.source.installation_epoch == "0")
+  then `Error(failure(`Invalid_source))
+  else `Ok(`Object([
+    {key = "generation"; value = Json.parse(to_string(basis.generation))},
+    {key = "expected_catalog_revision"; value = `String(basis.catalog_revision)},
+    {key = "expected_control_revision"; value = control},
+    {key = "source"; value = source_json(basis.source)},
+    {key = "expected_lifecycle_revision"; value = `String(basis.lifecycle_revision)},
+    {key = "key"; value = `String(basis.key)}]))
+
+let id_fields = fun id -> [{key = "id"; value = `String(id)}]
+let list = fun () -> `Object([])
+let get = fun id -> `Object(id_fields(id))
+let status = fun id -> `Object(id_fields(id))
+let history = fun id -> `Object(id_fields(id))
+let captured = fun id basis control capture ->
+  match basis_json(basis, control) with
+  | `Error(error) -> `Error(error)
+  | `Ok(basis) -> match target_json(capture.target) with
+      | `Error(error) -> `Error(error)
+      | `Ok(target) -> `Ok(`Object(Array.append(id_fields(id), [
+          {key = "basis"; value = basis},
+          {key = "capture"; value = `Object([
+            {key = "schedule"; value = capture.schedule},
+            {key = "target"; value = target},
+            {key = "policy"; value = capture.policy}])}])))
+let create = fun id basis capture -> captured(id, basis, `Null, capture)
+let edit = fun id basis control capture ->
+  if revision(control) then captured(id, basis, `String(control), capture)
+  else `Error(failure(`Invalid_revision))
+let resume = fun id basis control ->
+  if revision(control) == false then `Error(failure(`Invalid_revision))
+  else match basis_json(basis, `String(control)) with
+    | `Error(error) -> `Error(error)
+    | `Ok(basis) -> `Ok(`Object(Array.append(id_fields(id), [{key = "basis"; value = basis}])))
+let safe : fun(string, safe_basis, string) -> json checked = fun id basis control ->
+  if (if basis.generation < 0 then true else basis.generation > 9007199254740991) then `Error(failure(`Invalid_generation))
+  else if (if revision(control) == false then true else revision(basis.catalog_revision) == false) then `Error(failure(`Invalid_revision))
+  else if (if String.is_empty(basis.key) then true else String.length(basis.key) > 256) then `Error(failure(`Invalid_key))
+  else `Ok(`Object(Array.append(id_fields(id), [{key = "basis"; value = `Object([
+    {key = "generation"; value = Json.parse(to_string(basis.generation))},
+    {key = "expected_catalog_revision"; value = `String(basis.catalog_revision)},
+    {key = "expected_control_revision"; value = `String(control)},
+    {key = "source"; value = `Null},
+    {key = "expected_lifecycle_revision"; value = `Null},
+    {key = "key"; value = `String(basis.key)}])}])))
+let pause = fun id basis control -> safe(id, basis, control)
+let cancel = fun id basis control -> safe(id, basis, control)
+
+type interval_mode = [ `Fixed_rate | `Fixed_delay ]
+type pattern = [ `Daily | `Weekdays(int array) | `Month_days(int array) ]
+type gap = [ `Skip_gap | `At_gap_end ]
+type repeat = [ `Earlier | `Later | `Both ]
+type ending = [ `No_end | `Through(string) ]
+type calendar = {pattern:pattern; ofday:string; zone:string; start_date:string; ending:ending; gap:gap; repeat:repeat}
+type misfire = [ `Skip_missed | `Coalesce | `Catch_up(int) ]
+type policy = {misfire:misfire; grace_ms:string; max_pending:int; max_history:int; max_calendar_steps:int}
+
+let interval : fun(interval_mode, string, string) -> json checked = fun mode period_ms first_due ->
+  if (if revision(period_ms) == false then true
+      else if period_ms == "0" then true
+      else if String.length(period_ms) > 13 then true
+      else String.is_empty(first_due))
+  then `Error(failure(`Invalid_schedule))
+  else `Ok(`Object([
+    {key = "kind"; value = `String("interval")},
+    {key = "rule"; value = `Object([
+      {key = "version"; value = `Number(1.0)},
+      {key = "kind"; value = `String("interval")},
+      {key = "mode"; value = `String(match mode with | `Fixed_rate -> "fixed_rate" | `Fixed_delay -> "fixed_delay")},
+      {key = "period_ms"; value = Json.parse(period_ms)}])},
+    {key = "first_due"; value = `String(first_due)}]))
+
+let unique_range = fun values low high ->
+  let size = Array.length(values) in
+  let rec visit = fun index ->
+    if index == size then true else
+    let value = Array.get(values, index) in
+    let rec different = fun previous ->
+      if previous == index then true
+      else if Array.get(values, previous) == value then false else different(previous + 1) in
+    if value < low then false
+    else if value > high then false
+    else if different(0) == false then false
+    else visit(index + 1) in
+  if size == 0 then false else if size > high - low + 1 then false else visit(0)
+
+let calendar : fun(calendar) -> json checked = fun selected ->
+  let pattern = match selected.pattern with
+    | `Daily -> `Ok(`Object([{key = "kind"; value = `String("daily")}]))
+    | `Weekdays(days) -> if unique_range(days, 0, 6) then
+        `Ok(`Object([{key = "kind"; value = `String("weekdays")},
+          {key = "days"; value = `Array(Array.map(days, fun day -> Json.parse(to_string(day))))}]))
+        else `Error(failure(`Invalid_schedule))
+    | `Month_days(days) -> if unique_range(days, 1, 31) then
+        `Ok(`Object([{key = "kind"; value = `String("month_days")},
+          {key = "days"; value = `Array(Array.map(days, fun day -> Json.parse(to_string(day))))}]))
+        else `Error(failure(`Invalid_schedule)) in
+  match pattern with
+  | `Error(error) -> `Error(error)
+  | `Ok(pattern) ->
+      if (if String.is_empty(selected.zone) then true
+          else if String.length(selected.zone) > 255 then true
+          else if String.is_empty(selected.ofday) then true
+          else (String.length(selected.start_date) == 10) == false)
+      then `Error(failure(`Invalid_schedule))
+      else `Ok(`Object([
+        {key = "kind"; value = `String("calendar")},
+        {key = "rule"; value = `Object([
+          {key = "version"; value = `Number(1.0)},
+          {key = "kind"; value = `String("calendar")},
+          {key = "pattern"; value = pattern},
+          {key = "ofday"; value = `String(selected.ofday)},
+          {key = "zone"; value = `String(selected.zone)},
+          {key = "start_date"; value = `String(selected.start_date)},
+          {key = "end_date"; value = (match selected.ending with | `No_end -> `Null | `Through(date) -> `String(date))},
+          {key = "gap"; value = `String(match selected.gap with | `Skip_gap -> "skip" | `At_gap_end -> "at_gap_end")},
+          {key = "repeat"; value = `String(match selected.repeat with | `Earlier -> "earlier" | `Later -> "later" | `Both -> "both")}])}]))
+
+let policy : fun(policy) -> json checked = fun selected ->
+  let misfire = match selected.misfire with
+    | `Skip_missed -> `Ok(`Object([{key = "kind"; value = `String("skip")}]))
+    | `Coalesce -> `Ok(`Object([{key = "kind"; value = `String("coalesce")}]))
+    | `Catch_up(limit) -> if (if limit < 1 then true else limit > 32) then `Error(failure(`Invalid_policy))
+      else `Ok(`Object([{key = "kind"; value = `String("catch_up")}, {key = "limit"; value = Json.parse(to_string(limit))}])) in
+  match misfire with
+  | `Error(error) -> `Error(error)
+  | `Ok(misfire) ->
+      if (if revision(selected.grace_ms) == false then true
+          else if String.length(selected.grace_ms) > 13 then true
+          else if selected.max_pending < 1 then true
+          else if selected.max_pending > 32 then true
+          else if selected.max_history < 1 then true
+          else if selected.max_history > 256 then true
+          else if selected.max_calendar_steps < 1 then true
+          else selected.max_calendar_steps > 4096)
+      then `Error(failure(`Invalid_policy))
+      else `Ok(`Object([
+        {key = "misfire"; value = misfire},
+        {key = "grace_ms"; value = `String(selected.grace_ms)},
+        {key = "max_pending"; value = Json.parse(to_string(selected.max_pending))},
+        {key = "max_history"; value = Json.parse(to_string(selected.max_history))},
+        {key = "max_calendar_steps"; value = Json.parse(to_string(selected.max_calendar_steps))}]))

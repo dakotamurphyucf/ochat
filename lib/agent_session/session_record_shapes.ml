@@ -270,6 +270,15 @@ let authoring_reference =
     ]
 ;;
 
+let inference_origin =
+  n
+    (tag
+       "type"
+       [ "unbound", f [ "schema_version"; "type" ]
+       ; "run", f [ "schema_version"; "type"; "run_id" ]
+       ])
+;;
+
 let invocation =
   o
     [ "id", v
@@ -290,6 +299,8 @@ let invocation =
     ; "handler_intent", n (o [ "follow_up", follow_up; "compaction_operation_id", v ])
     ; "completion_contract", n completion_contract
     ; "authoring_reference", n authoring_reference
+    ; "inference_origin", inference_origin
+    ; "native_goal_action", Agent_protocol.Goal_native_action_intent.shape
     ]
 ;;
 
@@ -350,6 +361,12 @@ let job =
           ; "moderator_source", observer
           ; "parent_job", f [ "id"; "attempt" ]
           ] )
+    ; ( "inference_origin"
+      , tag
+          "type"
+          [ "unbound", f [ "schema_version"; "type" ]
+          ; "run", f [ "schema_version"; "type"; "run_id" ]
+          ] )
     ; ( "progress"
       , o
           [ "version", v
@@ -406,6 +423,13 @@ let schedule =
     ; "last_delivery_at", v
     ; "ownership", n schedule_ownership
     ; "delivery_cancellation", v
+    ; ( "inference_provenance"
+      , n
+          (o
+             [ "schema_version", v
+             ; "source", Run_record_shapes.source
+             ; "origin", inference_origin
+             ]) )
     ]
 ;;
 
@@ -450,6 +474,13 @@ let moderator_execution =
           ; "admission_sha256"
           ] )
     ; "decision", decision
+    ; ( "queue_occurrence"
+      , o
+          [ "source", Run_record_shapes.source
+          ; "ordinal", v
+          ; "origin", inference_origin
+          ; "producer", Document_schema.Shape.nullable Queue_producer.shape
+          ] )
     ; ( "intent"
       , tag
           "kind"
@@ -680,7 +711,14 @@ let public_schedule =
   o
     [ "schema_version", v
     ; "schedule", schedule_body
-    ; "ownership", schedule_ownership
+    ; "ownership", n schedule_ownership
+    ; ( "inference_provenance"
+      , n
+          (o
+             [ "schema_version", v
+             ; "source", Run_record_shapes.source
+             ; "origin", inference_origin
+             ]) )
     ; "delivery_cancellation", v
     ; "id", v
     ; "session_id", v
@@ -703,6 +741,7 @@ let snapshot =
   o
     [ "session", session_summary
     ; "canonical_history", history_window
+    ; "goals", v
     ; "archived_revisions", v
     ; "effective_history", n history_window
     ; "deferred_entries", a ~identity_field:"id" history_entry

@@ -334,9 +334,15 @@ end
     local source owner and existing per-operation path/byte/work ceilings; no
     project context, resolver or native path grant is minted. Concurrent root
     operations return Busy. [read_root_member] constructs one exact immutable
-    host-owned source capture; later use still requires a context admission. *)
+    host-owned source capture; later use still requires a context admission.
+
+    Optional caps may only narrow existing host/project policy before native IO.
+    Negative entry caps and nonpositive byte caps reject; zero entry caps admit
+    only an empty directory. Omitted caps
+    preserve existing caller behavior and joined lifecycle/accounting. *)
 val list_root_directory
-  :  t
+  :  ?max_entries:int
+  -> t
   -> actor:Operator_authorization.t
   -> root:Root.t
   -> directory:Source.Portable_path.t option
@@ -344,7 +350,8 @@ val list_root_directory
   -> (Entry.t list, Error.t) Result.t
 
 val read_root_member
-  :  t
+  :  ?max_bytes:int
+  -> t
   -> actor:Operator_authorization.t
   -> root:Root.t
   -> member:Source.Portable_path.t

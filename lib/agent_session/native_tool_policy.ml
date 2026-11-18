@@ -3,6 +3,9 @@ module I = Agent_protocol.Invocation
 module H = Agent_protocol.Host_invocation
 module C = Chat_response.Tool_capability
 module S = Chatmd_shell_spec.Tool_schema
+module Native = Chat_response.Tool_call.Native
+
+exception Admission_rejected of I.outcome
 
 let fail code message = I.Fail { code; message; retryable = false; details = `Null }
 
@@ -11,6 +14,7 @@ let checked failure f =
   | Ok value -> Ok value
   | Error _ -> Error failure
   | exception (Eio.Cancel.Cancelled _ as exn) -> raise exn
+  | exception Admission_rejected outcome -> Error outcome
   | exception _ -> Error failure
 ;;
 
@@ -179,12 +183,33 @@ let run_policy
                    "The registered tool kind is unsupported.")
           in
           let%bind output =
-            with_native_admission dispatched binding (fun () ->
+            with_native_admission dispatched binding (fun ~current ->
               checked
                 (fail "invocation.handler_failed" "Tool execution failed.")
                 (fun () ->
+                   let prepare_invocation invocation =
+                     let checked =
+                       let%bind () = check_halted () in
+                       let%bind binding, _ = resolve () in
+                       let%bind () = check_halted () in
+                       match C.native_implementation binding with
+                       | Some selected when phys_equal selected implementation -> Ok ()
+                       | None | Some _ ->
+                         Error
+                           (fail
+                              "invocation.stale_binding"
+                              "The selected tool capability is no longer valid.")
+                     in
+                     match checked with
+                     | Error outcome -> raise (Admission_rejected outcome)
+                     | Ok () ->
+                       Ochat_function.Invocation.with_effect_check
+                         invocation
+                         ~check:current
+                   in
+                   let native = Native.create implementation ~prepare_invocation in
                    match run_native with
-                   | Some run_native -> Ok (run_native implementation ~payload)
+                   | Some run_native -> Ok (run_native native ~payload)
                    | None ->
                      let active = Atomic.make true in
                      let invocation =
@@ -216,8 +241,7 @@ let run_policy
                      in
                      Exn.protect
                        ~finally:(fun () -> Atomic.set active false)
-                       ~f:(fun () ->
-                         Ok (implementation.run_with_progress ~invocation payload))))
+                       ~f:(fun () -> Ok (Native.run native ~invocation payload))))
           in
           validate_output
             ~validate_work:(fun _ ->

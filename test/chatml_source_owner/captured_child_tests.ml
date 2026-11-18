@@ -32,7 +32,8 @@ let with_parent f =
     save
       root
       "child.chatmd"
-      {|<user><doc src="notes.md" local capture/></user>
+      {|<config model="captured-preview" max_tokens="333"/>
+<user><doc src="notes.md" local capture/></user>
 <script id="owner" language="chatml" kind="moderator" api="extensibility-v1" project="chatml.project.json">let captured_answer = Numbers.answer
 let initial_state = fail("initializer must remain inert")
 let on_event = fun ctx state event -> Task.pure(state)</script>|};
@@ -155,6 +156,22 @@ let%expect_test "ordinary and projected content use their captured child graph" 
         reference
         ~f:(fun startup ~revision ~compilation_limits:_ ~programs ->
           borrowed := Some startup;
+          (* The preview must replay the same full captured custody even when
+             its logical source directory no longer contains authored inputs.
+             The ordinary child preparation below still owns installed-tree,
+             per-script project and retained-content verification. *)
+          let preview =
+            Builder.captured_config
+              ~content_limits
+              ~logical_tree:(root :> Eio.Fs.dir_ty Eio.Path.t)
+              (Revision.artifact revision)
+            |> ok
+          in
+          let installed = Chat_response.Config.of_elements (Revision.elements revision) in
+          [%test_eq: string option] (Some "captured-preview") preview.model;
+          [%test_eq: string option] installed.model preview.model;
+          [%test_eq: int option] (Some 333) preview.max_tokens;
+          [%test_eq: int option] installed.max_tokens preview.max_tokens;
           let parsed = Revision.parser_context revision |> Option.value_exn in
           assert (
             not (phys_equal parsed (Option.value_exn (Revision.parser_context parent))));

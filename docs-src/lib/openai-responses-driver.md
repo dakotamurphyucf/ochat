@@ -46,6 +46,13 @@ for example, `function_call.namespace` remains non-null while
 `function_call_output.namespace` permits null. Tool names are unique, and
 schemas grant no authority.
 
+Through `Openai.Inference_adapter`, optional neutral request guidance becomes
+exactly one User `input_text` message before mapped canonical history. Both
+Public API and Direct Codex profiles use this projection. Authored
+System/Developer messages and the captured `instructions` setting are preserved.
+The prefix is derived per request, without allocating history IDs or appending
+to a transcript. Replacing or clearing guidance requires a new preparation.
+
 The host resolves assets before capture. Images use validated base64 data URIs;
 files use base64 bytes or base64 data URIs. Remote URLs and provider-only file IDs
 cannot represent the immutable effective asset and reject. Captured assets are
@@ -58,7 +65,9 @@ by HTTP and WebSocket preparation. It never emits automatic truncation or uses
 a provider conversation or `previous_response_id`.
 
 The SHA-256 fingerprint includes profile/account/endpoint identity, the exact
-encoded request and effective setting provenance. Final guidance and asset/tool
+encoded request, effective setting provenance and any private request-guidance
+provenance label. The label is bounded private identity evidence and is not
+sent to the provider or exposed in safe configuration. Final guidance and asset/tool
 changes therefore change the fingerprint. Changing any prepared input requires
 preparing again and repeating the host's final admission. The fingerprint is an
 admission/correlation aid, not a new persisted-history identity or a signature.

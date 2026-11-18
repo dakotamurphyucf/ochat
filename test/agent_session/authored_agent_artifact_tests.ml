@@ -65,6 +65,8 @@ let%expect_test "authored reservations preserve source identity through durable 
               ; parent_stop_epoch = Some 0L
               ; authority_sha256 = Chatmd_shell_spec.Source_ref.digest "parent-policy"
               ; authored_tool = origin
+              ; goal_origin = None
+              ; captured_recurrence = None
               ; capability_pins = pins
               ; lifetime = Owned
               ; created_at = artifact.created_at
@@ -293,6 +295,28 @@ let%expect_test "authored reservations preserve source identity through durable 
           |> ignore;
           Source.load_recorded_artifact ~artifact_store:artifacts ~reservation:generated
           |> denied;
+          (* A real installed authored record must reject before the generated
+             metadata parser, even after its public ledger reaches Linked. *)
+          let linked =
+            D.resolve (Store.delegations !store) (D.reference inherited) |> store_ok
+          in
+          let linked =
+            D.advance (Store.delegations !store) linked Child_installed |> store_ok
+          in
+          let linked = D.advance (Store.delegations !store) linked Linked |> store_ok in
+          (match
+             Agent_session.Generated_definition.Metadata_source.load
+               ~artifact_store:artifacts
+               ~record:linked
+               ()
+           with
+           | Error errors ->
+             assert (
+               List.exists errors ~f:(fun error ->
+                 String.equal
+                   error.Chatmd_shell_spec.Diagnostic.code
+                   "delegation.metadata_source_record"))
+           | Ok _ -> failwith "authored record accepted as generated metadata");
           let root = Artifacts.materialized_tree artifacts retained.revision_id in
           let file = Eio.Path.(root / retained.root_relative_path) in
           Core_unix.chmod (Eio.Path.native_exn file) ~perm:0o600;

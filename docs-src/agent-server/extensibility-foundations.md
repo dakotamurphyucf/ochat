@@ -143,8 +143,13 @@ boundary. The lower-level builder queue functions accept an optional preparation
 callback for embedded hosts; those hosts must supply equivalent ownership and
 persistence checks. Versioned queue ingress currently accepts validated
 `Internal_event` envelopes. Legacy model-job events keep their legacy path;
-the versioned `Job_completed` adapter validates and delivers owned background-work
-completions through the corresponding event transaction.
+modern Model completion uses the same bounded JSON envelope with
+`kind: "model_job_completed"`, actual `job_id`, decimal-string `attempt`, `recipe`
+and checked stored-completion `result`. Runtime enqueue and Actor append validation
+share one pure projection selected from the actual Manager API, while the queue
+producer retains the exact Job attempt and original inference origin. The existing
+versioned generic-background adapter keeps its own source/disclosure contract;
+Model completion does not widen the Async Job API or authored Run Wait producer.
 
 ## Background request reconstruction
 
@@ -210,6 +215,65 @@ wall-time budget, so queueing and retries do not reset that budget. This also wo
 for native-only ChatMD prompts on explicitly qualified hosts. Default public
 feature availability is unchanged.
 
+Persisted Job launch provenance distinguishes a callback producer from a direct
+Job-attempt producer. The callback selector still names only an Invocation or
+moderator event, with unchanged launch schema1/2 encoding. Schema3 names the
+immediate parent Job and its exact positive attempt; only Model Jobs admit this
+form. The stored parent attempt stays frozen when the parent later retries,
+while a new birth requires the current attempt. A direct child's optional
+moderator source must equal its immediate parent's captured source, including
+absence. Loading a later Manager cannot supply missing historical provenance.
+These records describe ancestry, not execution authority: live admission still
+requires the actual Job scope and original permission at the native writer.
+Policy ancestry distinguishes an Async Job lifetime from a Model Job lifetime;
+only actual Invocation or Model-job-attempt ledger work allocates inference.
+
+Native births pair their actual Invocation, Model Job, Async Job or Job-event
+record with any required policy membership in the same ordered checkpoint.
+The source walk follows the recorded immediate producer and actual Job kind;
+a missing delegated seed or missing caused membership is an error, including
+when no accounting component is present. An ordinary unrelated parent does not
+require rebuilding the complete policy inventory. Recorded Event and Job execution
+sources are checked where available; absence of optional evidence proves no
+installation or permission. An Invocation observation observer is a deferred
+notification target, not its execution source. Its exact value remains part of
+the native record and policy projection. Native execution may complete before
+that target is installed, or with a target that later fails validation; the
+notification claim still requires the currently installed observer. Cause and
+retained-owner full source, original admission and native parent checks remain
+independent of that target.
+
+A controller-free standalone claim can retain an explicit process-local
+unrelated association on its existing execution owner. It records the exact
+native subject, generation, Run or genuine Unbound origin, and full source
+installation. Job birth ACKs retain that fact with their existing admission;
+claim, retry and completion preserve it without renewing the original. A real
+completed Job transfers it with the exact queue occurrence, and a completed
+Invocation transfers it with its existing observation continuation. A later
+claim validates that same subject, source and occurrence before taking a loan.
+These associations have no codec and cannot be reconstructed from restored
+records or from an absent accounting component. Missing or expired original
+custody still rejects fresh work; preserving a truthful result does not renew it.
+
+A consumed completion-queue occurrence retains its exact producer and original
+attempt. Policy ancestry uses that captured occurrence, not a later retry's
+current Job row. When the original Async Job has advanced or been pruned, the
+existing terminal delivery in the Run index supplies its exact frame, source and
+payload; the same canonical Cause and typed Async membership supply its original
+ancestry. Both are required. This does not recreate a live Job, a new inference
+handle or execution permission. Model completions use their real retained Model
+row; a generic Async frame is never invented for a missing Model row.
+
+Missing historical producer or delivery evidence remains unavailable. A factual
+queue claim may preserve its receipt and checkpoint without adding policy
+membership, but querying that unavailable ancestry or admitting descendant native
+work still fails unless the actual retained owner supplies its separately checked
+positive boundary. Known contradictory producer, source or payload evidence is an
+error. External timer, ingress and setup families keep their own admission checks;
+being a root of the policy-ancestry walk proves neither absence of governing Goals
+nor original permission. Ordinary unrelated births still avoid rebuilding the
+complete inventory; named queued queries use the actual immutable Run index.
+
 The internal `Job_capacity` admission path can reserve a slot before the owning
 job/acknowledgement transaction commits. Staged reservations consume the existing
 hierarchical quotas but cannot execute. After durable commit, the host publishes
@@ -261,10 +325,86 @@ context. Cleanup failure does not authorize replay of the handler or its effects
 Generic admission failures use separate workers, with at most one awaiting save
 per session, so one failed save does not block the shared scheduling loop.
 
-`Runtime_owner.close_and_wait` joins retained callback cleanup before the factory
-closes the actor and its persistence writer. It is for external session teardown;
-a callback closing its own owner must use nonblocking `close`. Daemon acceptance
-tests verify real file reads, script/standalone state isolation, typed failures,
+`Runtime_owner.close_and_wait_reported` joins retained runtime cleanup and
+returns resource disposition separately from cleanup diagnostics. Its `Joined`
+result permits the enclosing session's remaining disposal stages; it does not
+itself certify Actor, writer or Handle closure. Session-level reported close
+exposes `disposed` only after those adopted resources have been released. An
+independent callback or initializer cleanup failure remains inspectable after
+physical repair. Unresolved custody stays `Retained`, with the same unfinished
+resources owned for a later permitted cleanup retry; the handler and initializer never
+replay as part of that retry.
+
+Reports and earlier snapshots are immutable. Repeating a completed reported close
+returns the cached report without running disposal stages again, unless new
+resource-retirement work has been accepted. That work supersedes the cache and
+must be joined by the next close; the resulting report forwards the prior report's
+same diagnostic groups and leaves earlier reports unchanged. Legacy close
+functions deliver a completed report's diagnostic once, preserving raw exception
+backtraces; repeating that completed close does not raise the already-delivered
+diagnostic again. A newly failing retry still reports its own failure, and
+consuming a diagnostic never turns retained custody into success.
+
+Original diagnostic carriers belong to actual cleanup outcomes, not to each
+observation call. Fresh views follow the same retained scope graph and can include
+an original child finalizer that completed after its parent. Earlier views remain
+unchanged, and repeated views do not remint or redeliver the same original failure.
+Different actual producers remain distinct even when they report identical raw
+failures. This forwards existing owned scopes; it adds no historical owner lookup,
+replacement selection or cleanup execution path. Positive disposal still requires
+both complete original diagnostics and the independent actual custody joins.
+
+Callback cleanup keeps the exact Completion and write-once failure slot for each
+original diagnostic. A later release failure can therefore add its stable carrier
+to a fresh original view without changing an earlier view or making incomplete
+original Init evidence complete. The original graph retains its established
+ownership order. A current first-error projection separately carries its actual
+selected primary and current failure order; consumers must not substitute the
+first group in an original graph for that primary.
+
+Foreground callback receipts stay on their actual Product attachment across
+later operations and retained runtime bindings. Installed idle and resume calls
+instead use the cleanup holder of their individual admitted lease. Reading an
+old observation does not select a newer operation or execute cleanup. A retired
+physical resource whose selected callback custody is still unknown stays retained
+for factual observation; a repeated close cannot forget that state or repeat the
+physical closer.
+
+Native hosts that activate a loaded runtime use
+`Runtime_owner.with_background_runtime_activation` to obtain an activation bound
+to that lease. The function preserves the actual runtime and activation absence.
+Calling the supplied activation after the lease ends, or from another domain,
+returns `Conflict` before running it. Session authorization and source checks
+remain required; this helper grants no execution authority.
+
+Source and retirement completion retain the raw outcome together with these
+actual producer origins before resolving their existing join promises. Physical
+close/join aliases forward the same carriers, while independent selection,
+commit, release and clear failures remain distinct. Captured body/finalizer
+outcomes preserve the original exception precedence without repeating either
+effect. These producer receipts do not create another cleanup executor or grant
+physical custody from diagnostic completeness.
+
+Each joined close retains the actual retirement and source roots it selects
+before a permitted retry can replace their Owner association. Its report combines
+fresh original views of those roots with the actual invocation's selected
+producer carriers. This preserves a late child cleanup failure without searching
+Owner history or choosing a primary from the first historical diagnostic.
+
+Strict close keeps its existing stopping point and original exception/backtrace.
+Its optional `capture_report` hook runs outside the Owner state mutex, under the
+joined-close coordinator, before legacy presentation. The hook is a trusted local
+assignment, not retained cleanup or a reentrant callback. Successful uncached
+Strict close consumes no diagnostic; a negative invocation acknowledges only its
+selected producer group, leaving historical and independent secondary groups
+available. Cached legacy close keeps whole-report one-shot delivery. Registry
+Entry cleanup captures this exact Strict prefix report: a prefix failure stops
+before the Entry closer, while success invokes that closer once and retains its
+actual selected primary alongside prefix diagnostics.
+
+Joined close is for external session teardown; a callback closing its own owner
+must use nonblocking `close`. Daemon acceptance tests verify real file reads,
+script/standalone state isolation, typed failures,
 permission cancellation, and results retained across restart without model calls.
 Work interrupted by shutdown is recorded explicitly rather than automatically
 re-executed on restart.
@@ -3751,6 +3891,13 @@ creating children does not reconnect to the server or expose its other tools.
 Observed schema changes or removal reject before the remote call, and saved
 capability pins reject a changed schema when a stopped child starts after restart.
 Restoring the original catalog permits matching bindings to be reconstructed.
+For canonical native resources, connection setup and later invocation checks are
+separate. Each admitted caller carries its own currentness check through normal
+and driver execution. Discovery can wait, so the runtime rechecks that same
+caller after discovery and before sending `tools/call`, without requesting
+approval again. A revoked or expired call fails before the remote effect. Raw
+calls without admitted dispatch retain the original context guard. Resource
+health alone never supplies caller authorization.
 The daemon regression exercises a parent, child and grandchild across four starts,
 checks child-owned one-off approvals and invocation records, rejects an unselected
 catalog-control tool, and audits actual remote calls. Its provider is fake and
@@ -3969,6 +4116,62 @@ the whole runtime, verify context bindings and sibling isolation, and check late
 requests and owner cleanup. Generated runtime/actor tests also exercise the scope
 with real inherited file tools and fake provider turns.
 
+### Ordinary delegated runtime loading
+
+An ordinary generated or authored child uses its actual Factory-owned runtime
+owner and selected immutable source. Factory verifies the exact child Actor and
+Store Handle, retains the parent resource loan and rechecks the current delegation
+and source. An identifier, saved creator principal or captured source document
+cannot replace those checks. A supplied original remains the same live original;
+a genuine Run preparation retains its existing required principal and custody.
+Loading supplies no new Goal, Run or ancestor-control grant.
+
+The Owner reserves one exclusive source stage before construction. Source
+verification, parent loans, native setup and yielding execution-authority checks
+run outside the Owner mutex. The same stage excludes competing construction and
+remains registered through callback/resource cleanup and Actor preparation
+closure. Loaded resources stay protected by their actual cancellation lease while
+authority is checked outside the mutex; cancellation and physical ownership are
+checked again before exposing them to the caller.
+
+Pending initialization and eligible authenticated Ready initialization use the
+existing Init scope and shared constructor. Fresh Pending authored-child
+construction may allocate initial history only under its actual source-bound
+`Runtime_construction` selecting `Authored_child`, the `Scoped` initialization
+route and admitted Init scope. Existing authored reconstruction otherwise requires
+canonical stored history; source-kind data alone grants no authority. The separate
+captured Held construction retains its existing occurrence and Init admission.
+Generated and authored delegated children support extensibility-v1 lifecycle
+moderators. Their constructor prepares and checkpoints the Manager; it does not
+run the v1 `Session_start` or
+`Session_resume` lifecycle event. That activation runs separately after installation
+through the actual Owner callback port and Actor event admission. A Ready child
+loaded without an original retains this installed callback route without acquiring
+an Init scope. Genuine legacy `Installed_resume` remains an ordinary authored-root
+behavior: its deferred callback acquires ordinary callback custody after runtime
+installation. Installing an ordinary runtime records no activation handoff.
+Captured recurrence children retain their separate occurrence admission: ordinary
+loading rejects their captured source even if an original or Run preparation is
+supplied. Their authorized Held construction still uses the same constructor
+through its actual admitted source and activation owner.
+
+Delegated administrative rebuilds reserve the same source stage before committing
+and releasing the Owner mutex. There is one command commit and audit. After Init,
+the Owner reads the actual desired state: a stopped runtime is retired before the
+stage completes; a running runtime may remain loaded. Public unload waits outside
+the mutex for that administrative stage to finish, then performs the full ordinary
+dependency and runtime retirement. Explicit close instead cancels the same pending
+administrative source lease so a blocked source wait can unwind; it joins that
+cleanup before finishing retirement. Ordinary source waits remain cancellable by
+Stop. A stage-completion signal is only a local join point: it does not erase a
+cleanup failure, certify a journal acknowledgement or prove absence of effects.
+A known command admission survives a later error or cancellation; neither an
+exceptional reply nor failed cleanup permits replaying the command as unattempted.
+If initialization is cancelled after that admission, receipt reconciliation retains
+its accepted transaction sequence while the final command result remains pending.
+Expected cancellation releases the shared command-receipt lock before propagating,
+so subsequent independent mutations remain available.
+
 ### Executable generated factory loads and recovery
 
 The host also has a resource-only construction path:
@@ -4005,9 +4208,12 @@ creation. Actual process-kill tests cover independent creation and an owned chil
 under an independent coordinator whose original ancestor is stopped, with two
 daemon reopenings per boundary.
 
-An ancestor with stateful moderation is currently rejected for independent
-delegation, because a separately available original policy owner is required.
-The factory does not clone moderator state or silently omit its restrictions.
+Stateful Independent delegation requires the original policy owner and an exact
+eligible `extensibility-v1` source. The factory verifies each ancestor and uses
+its retained policy state under fresh caller admission. A stopped ancestor can
+supply policy through its scoped resources while its ordinary runtime stays
+unloaded. Missing, stale or legacy moderation evidence prevents new admission.
+
 Offline daemon tests cover temporary-root retention, actual inherited file reads,
 owned descendants, stop/restart, lazy ancestor loading and deletion. They also
 exercise inherited shell approvals/grants, MCP connection sharing and schema pins,
@@ -4067,20 +4273,28 @@ retry. The existing actor-only parent-cancellation callback remains separate;
 calling the same child's runtime owner from that callback would still deadlock.
 Permanent close also joins the dependency barrier. For an owner with inherited
 dependencies, `close` excludes new admissions; `close_and_wait` performs or joins
-cleanup before cancelling leases and retiring resources. A background callback can
+cleanup before cancelling ordinary resource leases and retiring resources. The
+pending administrative source lease described above is cancelled early so its
+construction can release the stage that retirement must join. A background callback can
 request close without waiting on itself. Typed cleanup failures remain observable
 and retain resources for retry, even after admission has permanently closed.
 
 During daemon shutdown, a running parent's barrier closes owned child runtimes
 without requesting durable session stop. A stopped parent still applies its
 durable stop epoch to descendants. The registry rejects new registrations and
-loads, but retains the loaded relationship graph and all actors until runtime
-cleanup completes. Only then does it close actor mailboxes and persistence writers.
+loads, but retains the loaded relationship graph and all actors until every
+selected runtime has positively joined. This preparation barrier includes retained
+recovery owners as well as loaded entries; no graph Actor, writer or Handle is
+released while another selected runtime still owns unresolved work. Only then do
+the enclosing entry and recovery-owner stages release their remaining resources.
 This prevents a parent's stop acknowledgement from racing a child's mailbox closure.
-Failed runtime cleanup leaves the loaded graph available for a shutdown retry.
-Once registry shutdown begins, cancellation or the grace deadline cannot skip
-actor and writer closure after runtime cleanup. Protected cleanup can therefore
-finish after that deadline; shutdown does not return with live actor mailboxes.
+
+A reported shutdown can finish resource disposal while preserving earlier cleanup
+diagnostics. If runtime custody remains unresolved, it instead reports `Retained`
+and keeps the graph available for an explicit shutdown retry. Neither an empty
+failure list nor prior legacy diagnostic delivery substitutes for the actual joins.
+Protected admitted cleanup can finish after cancellation or the grace deadline;
+a retained report does not claim that live actor mailboxes have been closed.
 
 Dependency cancellation begins after the durable stop request, even while the
 parent's foreground operation is still unwinding. The factory schedules this work
@@ -4338,9 +4552,9 @@ The offline factory regression creates a real persisted child, checks rewritten
 file contents and a rejected subsequent call, and verifies decision provenance and
 the parent's state counter. After daemon restart, a grandchild still reaches the
 root policy through an unmoderated child. A subsequent policy end-session stops
-the entire owned subtree. A companion admission check proves that an Independent
-request cannot omit these parent rules: it rejects before creating a private
-delegation record or child. Public creation tools remain a separate phase.
+the entire owned subtree. The Independent lifetime checks require the original
+parent rules when that parent is stopped. The legacy admission control rejects
+before creating a private delegation record or child.
 
 ### Qualified persisted child creation
 
@@ -4953,3 +5167,75 @@ child-stage acknowledgement, verify that public start leaves the unlinked actor
 exactly unchanged, and qualify stopped/deleted-parent revocation with retained
 history and no runtime/provider activity. These tests exercise process death and
 the existing flush operations; they do not establish power-loss survival.
+
+
+### Current native source identity
+
+Native admission keeps the existing lifecycle-State identity proof when a policy
+has a lifecycle pointer. A modern loaded policy without that pointer, including
+one with an installed Run source, instead requires the immutable Source already
+selected by its actual Owner and physical resource Cell. The selected Extension
+source must match its nonhalted checkpoint and any present Run-source
+installation. An invalid present lifecycle pointer never selects another proof.
+This observation checks the same Actor,
+Handle, generation, profile, native unit and open construction state; matching a
+checkpoint or recompiling prompt bytes does not supply it. A missing or stale
+unit cannot be activated to manufacture evidence. Failed State validation never
+falls back to a different proof.
+
+The short-lived comparison retains its exact proof kind and selected Source
+identity separately from the full installed Run-source option. Installed evidence
+is reread through the same Owner Actor after capture waits; its identity, Stop
+epochs and liveness must remain valid without freezing ordinary revision or
+execution-receipt progress. Specific Invocation ownership is rechecked using the
+actual selected private record, never unrelated invocation receipts. Pure checks
+run immediately before a native pin. They create no borrower,
+policy callback, Caller or Goal permission. Genuine construction keeps its
+existing selected-source preparation contract, including pending Init. Factual
+cleanup can proceed after a current-use Source observation expires.
+
+### Moderated Independent eligibility
+
+The Factory checks the current Actor and durable ancestry at creation, start,
+runtime construction and unfinished creation recovery. An unmoderated State
+uses the existing fingerprint. A moderated State requires a current modern
+Extension checkpoint and an exact matching Source. The Factory observes the
+actual retained Source when its native resources are available. If the Owner has
+no such resource unit, the Factory verifies the saved publication for the
+eligibility fingerprint.
+
+| Saved source | Publication and role used for eligibility |
+| --- | --- |
+| Authored root | Pinned catalog revision and the root's stored UI or headless role |
+| Plain generated child | Linked admission and its exact generated publication and inherited names |
+| Authored child | Exact installed revision selected by the immediate parent's original authored declaration, with its restricted delegated UI role |
+| Captured artifact | Captured occurrence publication and the root role from its validated origin |
+| Captured authored child | Captured occurrence publication, the exact authored selector, and its restricted delegated UI role |
+
+A stale retained Source or a Legacy moderator fails eligibility. The existing
+ancestry walk still validates Linked relationships, current host grants, edge
+digests and inherited profiles. The Factory rechecks the same Actor, runtime
+Owner and Store Handle before publication and recomputes fingerprints from
+current State. Actual native setup, private wrapper admission, policy execution
+and final effect authorization continue to use their original guards.
+
+### Testing native resource ownership
+
+External integration fixtures use `Session_factory.For_testing` to construct and
+inspect actual runtime resources. Its implementation, `Runtime_resource_testing`,
+keeps the underlying Cell, lifetime and driver modules private. The public test
+interface provides opaque scoped handles; it does not issue execution permissions
+or add daemon protocol operations. Fixtures must still establish real Actor,
+source, restoration and caller authority through the normal host APIs.
+
+Leaving a probe scope prevents new selection, publication and resource access.
+Existing cleanup handles remain usable on their creating domain, including after
+a callback fails. Cleanup reports describe the actual resource operation; closing
+an old released handle cannot close its replacement. Ordinary and native empty
+construction callbacks preserve their original exceptions and leave their selected
+resources available for explicit cleanup.
+
+Tests outside `agent_server` must depend on this declared public interface instead
+of directly invoking private modules. Validate both fresh compilation and
+incremental recompilation after an interface change: a previously built object
+or a hidden compiler include path does not establish a supported dependency.

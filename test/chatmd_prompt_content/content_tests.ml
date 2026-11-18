@@ -271,6 +271,83 @@ let%test_module "bounded rendered document custody" =
         replace json "payload" (replace payload "documents" (`Array docs)))
     ;;
 
+    let%expect_test "constructed prior edition resumes until explicit fresh capture" =
+      with_parser (fun parse ->
+        let parsed = parse {|<system><doc src="builtin:goals"/></system>|} in
+        let current = capture [ parsed ] (render parsed) |> ok in
+        (* A self-consistent constructed prior edition, not a claimed authentic
+           earlier installation or a native acquisition receipt. The same logical
+           selector and parser occurrence retain different exact content bytes. *)
+        let old_bytes = "Prior goal guidance: retain this selected edition.\n" in
+        let old_payload =
+          Storage.Payload.create old_bytes
+          |> Result.map_error ~f:(fun _ -> "prior payload rejected")
+          |> Result.ok_or_failwith
+        in
+        let old_digest = Storage.Payload.sha256 old_payload in
+        let old_size = `Number (Int.to_string (String.length old_bytes)) in
+        let changed =
+          change_doc current (fun doc ->
+            let source = get doc "source" in
+            let source = replace source "input_digest" (`String old_digest) in
+            let source = replace source "output_digest" (`String old_digest) in
+            let source = replace source "input_bytes" old_size in
+            let source = replace source "output_bytes" old_size in
+            replace doc "source" source)
+        in
+        let prior_storage =
+          Storage.create
+            ~metadata:(Storage.Manifest.metadata (Storage.manifest changed))
+            ~payloads:[ old_payload ]
+          |> Result.map_error ~f:(fun _ -> "prior inventory rejected")
+          |> Result.ok_or_failwith
+        in
+        let restore () =
+          C.of_storage
+            prior_storage
+            ~inputs:(inputs [ parsed ])
+            ~limits:(limits ())
+            ~checkpoint:ignore
+          |> ok
+        in
+        let prior = restore () in
+        assert (
+          List.equal
+            equal_output
+            (outputs (materialize prior parsed))
+            [ Some old_bytes, None ]);
+        (* This is the explicit update: actual current lookup, rendering and
+           capture. Restoring the old immutable inventory still uses old bytes. *)
+        let updated = capture [ parsed ] (render parsed) |> ok in
+        let asset =
+          Builtin_instructions.Id.of_string "goals"
+          |> Or_error.ok_exn
+          |> Builtin_instructions.find
+          |> Result.map_error ~f:(fun _ -> "goals missing")
+          |> Result.ok_or_failwith
+        in
+        assert (not (String.equal old_digest (Builtin_instructions.Asset.sha256 asset)));
+        assert (
+          List.equal
+            equal_output
+            (outputs (materialize updated parsed))
+            [ Some (Builtin_instructions.Asset.contents asset), None ]);
+        assert (
+          List.equal
+            equal_output
+            (outputs (materialize (restore ()) parsed))
+            (outputs (materialize prior parsed)));
+        assert (
+          List.equal
+            String.equal
+            (List.map (Storage.payloads (storage updated)) ~f:Storage.Payload.sha256)
+            [ Builtin_instructions.Asset.sha256 asset ]);
+        print_endline
+          "same builtin ID: retained prior bytes; explicit capture selects current bytes");
+      [%expect
+        {| same builtin ID: retained prior bytes; explicit capture selects current bytes |}]
+    ;;
+
     let%test_unit "complete inactive metadata and exact payloads reject tampering" =
       with_parser (fun parse ->
         let parsed = parse root_text in

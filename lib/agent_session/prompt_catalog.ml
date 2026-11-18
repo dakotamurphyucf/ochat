@@ -914,3 +914,39 @@ let restore_revision t ~definition_id ~revision_id =
              ~data:revision;
         Ok revision)
 ;;
+
+let restore_verified_revision t ~definition_id ~revision_id =
+  let open Result.Let_syntax in
+  let%bind revision = restore_revision t ~definition_id ~revision_id in
+  let verify result =
+    Result.map_error result ~f:(fun failure ->
+      let failure = Agent_store.Store_error.to_protocol_error failure in
+      [ Prompt_revision_builder.Diagnostic.
+          { code = "prompt.retained_artifact_unavailable"
+          ; message = failure.message
+          ; source = None
+          }
+      ])
+  in
+  let%bind artifact =
+    Agent_store.Prompt_artifact_store.load t.artifact_store revision_id |> verify
+  in
+  let%bind () =
+    if
+      String.equal
+        artifact.manifest_sha256
+        (Prompt_revision.artifact revision).manifest_sha256
+    then Ok ()
+    else
+      restore_error
+        "prompt.revision_conflict"
+        "verified publication differs from the retained prompt revision"
+  in
+  let%map () =
+    Agent_store.Prompt_artifact_store.verify_tree
+      ~root:(Prompt_revision.materialized_tree revision)
+      artifact
+    |> verify
+  in
+  revision
+;;

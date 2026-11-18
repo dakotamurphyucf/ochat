@@ -1,14 +1,127 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
+import { bootstrapEnvironment, bootstrapCommands } from "../../scripts/bootstrap-opam.mjs";
 import { createHash } from "node:crypto";
 import {
+  overlayInputs, overlayInventory, checkOverlayInventory, checkOverlay, checkOverlayMetadata, checkOverlayRepository,
   cacheKey,
   describeCacheIdentity,
   keyInputs,
   checkInstalled,
   checkRunner,
 } from "../scripts/toolchain.mjs";
+
+const checkout = fileURLToPath(new URL("../../", import.meta.url));
+const readCheckout = (name) => fs.readFileSync(path.join(checkout, name));
+const overlayConfig = () => JSON.parse(readCheckout(".github/ci-toolchain.json"));
+
+test("reviewed overlay rejects content, family and installed-definition drift", () => {
+  const config = overlayConfig();
+  checkOverlay(config, readCheckout);
+  for (const changed of overlayInputs)
+    assert.throws(() => checkOverlay(config, (name) => name === changed
+      ? Buffer.concat([readCheckout(name), Buffer.from("changed")]) : readCheckout(name)),
+    /overlay changed/);
+  for (const name of config.eioOverlay.packages) {
+    const changed = structuredClone(config);
+    changed.packages[name] = "1.3";
+    assert.throws(() => checkOverlay(changed, readCheckout), /family version mismatch/);
+  }
+  const canonical = 'depends: ["ocaml" {>= "5.2.0"}]\nbuild: [["dune" "build"]]\n';
+  checkOverlayMetadata("eio", canonical, canonical);
+  for (const changed of [canonical.replace("5.2.0", "5.3.0"),
+    canonical.replace('"dune"', '"other"'), canonical + 'patches: ["extra.patch"]\n'])
+    assert.throws(() => checkOverlayMetadata("eio", canonical, changed), /metadata differs/);
+});
+
+test("overlay inventory rejects unreviewed packages and links without following them", () => {
+  checkOverlayInventory(overlayInventory(checkout));
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ochat-overlay-"));
+  try {
+    fs.mkdirSync(path.join(temporary, "tooling"));
+    const root = path.join(temporary, "tooling/opam-overlay");
+    fs.cpSync(path.join(checkout, "tooling/opam-overlay"), root, { recursive: true });
+    checkOverlayInventory(overlayInventory(temporary));
+    const extra = path.join(root, "packages/unreviewed");
+    fs.mkdirSync(extra);
+    assert.throws(() => checkOverlayInventory(overlayInventory(temporary)), /Unreviewed/);
+    fs.rmdirSync(extra);
+    const metadata = path.join(root, "repo");
+    fs.unlinkSync(metadata);
+    assert.throws(() => checkOverlayInventory(overlayInventory(temporary)), /Missing/);
+    fs.symlinkSync("../../missing-target", metadata);
+    assert.throws(() => checkOverlayInventory(overlayInventory(temporary)), /symlink/);
+  } finally { fs.rmSync(temporary, { recursive: true, force: true }); }
+});
+
+test("bootstrap commands target one isolated environment and discard inherited switch selection", () => {
+  const config = overlayConfig();
+  const destination = path.join(os.tmpdir(), "new ochat environment");
+  const commands = bootstrapCommands(config, destination, checkout);
+  for (const args of commands)
+    assert.ok(args.includes(`--root=${path.join(destination, "root")}`));
+  assert.ok(commands[1].includes(path.join(destination, "switch")));
+  assert.ok(commands[2].includes(`--switch=${path.join(destination, "switch")}`));
+  assert.ok(commands[0].includes("--no-setup"));
+  assert.ok(commands[2].includes("--this-switch"));
+  const clean = bootstrapEnvironment({
+    PATH: "/custom/old/bin:/usr/bin:/home/user/.opam/default/bin:/tmp/project/_opam/bin",
+    OPAMROOT: "/custom", OPAMSWITCH: "old", OPAM_SWITCH_PREFIX: "/custom/old",
+    OPAMCLI: "2.0", OPAMVAR_os: "other", OCAMLPATH: "/old/lib", CAML_LD_LIBRARY_PATH: "/old/stubs",
+    HOME: "/home/user", KEEP: "unchanged",
+  });
+  assert.deepEqual(clean, { PATH: "/usr/bin", HOME: "/home/user", KEEP: "unchanged" });
+});
+
+test("bootstrap preflight refuses existing destinations and wrong opam before creating an environment", () => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ochat-bootstrap-"));
+  try {
+    const executable = path.join(temporary, "fake-opam");
+    const calls = path.join(temporary, "calls");
+    fs.writeFileSync(executable, `#!${process.execPath}\n` +
+      'require("node:fs").appendFileSync(process.env.OCHAT_TEST_CALLS, JSON.stringify(process.argv.slice(2))+"\\n");\n' +
+      'console.log("0.0.0");\n', { mode: 0o700 });
+    const invoke = (destination) => spawnSync(process.execPath,
+      [path.join(checkout, "scripts/bootstrap-opam.mjs"), destination, executable],
+      { encoding: "utf8", env: { PATH: process.env.PATH, HOME: temporary, OCHAT_TEST_CALLS: calls } });
+    const existing = path.join(temporary, "existing");
+    fs.mkdirSync(existing);
+    fs.writeFileSync(path.join(existing, "keep"), "unchanged");
+    let result = invoke(existing);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /destination must not exist/);
+    assert.equal(fs.existsSync(calls), false);
+    assert.equal(fs.readFileSync(path.join(existing, "keep"), "utf8"), "unchanged");
+    const dangling = path.join(temporary, "dangling");
+    fs.symlinkSync("missing", dangling);
+    result = invoke(dangling);
+    assert.notEqual(result.status, 0);
+    assert.equal(fs.existsSync(calls), false);
+    const absent = path.join(temporary, "new", "environment");
+    result = invoke(absent);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /Expected opam/);
+    assert.deepEqual(fs.readFileSync(calls, "utf8").trim().split("\n").map(JSON.parse), [["--version"]]);
+    assert.equal(fs.existsSync(path.dirname(absent)), false);
+    fs.writeFileSync(executable, `#!${process.execPath}\n` +
+      'require("node:fs").appendFileSync(process.env.OCHAT_TEST_CALLS, JSON.stringify(process.argv.slice(2))+"\\n");\n' +
+      `console.log(${JSON.stringify(overlayConfig().opam)});\n`, { mode: 0o700 });
+    fs.unlinkSync(calls);
+    result = invoke(absent);
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(fs.readFileSync(calls, "utf8").trim().split("\n").map(JSON.parse),
+      [["--version"], ...bootstrapCommands(overlayConfig(), absent, checkout)]);
+    const saved = JSON.parse(fs.readFileSync(path.join(absent, "environment.json")));
+    assert.equal(saved.root, path.join(absent, "root"));
+    assert.equal(saved.switch, path.join(absent, "switch"));
+    assert.match(result.stdout, /Project dependencies are not installed/);
+  } finally { fs.rmSync(temporary, { recursive: true, force: true }); }
+});
 
 test("committed dependency definition and Linux lock match the CI manifest", () => {
   const read = (name) =>
@@ -161,4 +274,23 @@ test("cache diagnostics explain native and dependency identity without changing 
     identity.dependencyContractSha256,
   );
   assert.equal(changedContract.cpuTargetSha256, identity.cpuTargetSha256);
+});
+
+// Public opam 2.5.2 --all table uses padded columns; URLs may contain spaces.
+test("overlay provenance requires the configured local repository URL", () => {
+  const listing = (rows) => [
+    "# Repository".padEnd(20) + "# Url".padEnd(100) + "# Switches(rank)",
+    ...rows.map(([name, url]) => name.padEnd(20) + url.padEnd(100) + "local(1/2)"),
+  ].join("\n");
+  const target = "/tmp/ochat checkout/tooling/opam-overlay";
+  const valid = "file:///tmp/ochat%20checkout/tooling/opam-overlay";
+  assert.equal(checkOverlayRepository("ochat-eio", target,
+    listing([["default", "https://example.invalid/repository"], ["ochat-eio", valid]])), valid);
+  for (const wrong of ["file:///tmp/other", "https://example.invalid/repository",
+    valid + "#other", valid + "?other", "file://remote/tmp/ochat%20checkout/tooling/opam-overlay"])
+    assert.throws(() => checkOverlayRepository("ochat-eio", target,
+      listing([["ochat-eio", wrong]])), /repository URL differs/);
+  for (const invalid of ["changed format", listing([]),
+    listing([["ochat-eio", valid], ["ochat-eio", valid]])])
+    assert.throws(() => checkOverlayRepository("ochat-eio", target, invalid));
 });

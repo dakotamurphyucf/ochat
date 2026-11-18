@@ -63,7 +63,8 @@ val validate_registrations : Registration.t list -> (unit, Error.t list) Result.
     This classification grants no permissions: inherited capability, actor and
     runtime authorization checks remain mandatory at actual dispatch. *)
 val create
-  :  sw:Eio.Switch.t
+  :  ?mcp_checks:Tool.Mcp_checks.t
+  -> sw:Eio.Switch.t
   -> ctx:Eio_unix.Stdenv.base Ctx.t
   -> host:Shell_runtime.Host.t
   -> shell:Shell_view.t

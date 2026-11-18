@@ -114,6 +114,8 @@ let build env sw root fixture target (state : State.t) revision ~startup ~snapsh
   let paths = paths root revision in
   Eio.Path.mkdirs ~perm:0o700 ~exists_ok:true paths.cache_dir;
   B.build
+    ~construction_checkpoint:None
+    ~legacy_construction:None
     ~agent_source:None
     ~startup
     ~root_invocation:state.State.spec.root_invocation
@@ -122,6 +124,7 @@ let build env sw root fixture target (state : State.t) revision ~startup ~snapsh
     ~env
     ~inference_context:((Inference_fixture.resolve fixture) target |> ok)
     ~inference_identity:(Inference_fixture.identity fixture)
+    ~bind_inference_identity:(fun _ -> Inference_fixture.identity fixture)
     ~on_inference_attempt:ignore
     ~on_inference_completion:ignore
     ~on_inference_observation:ignore
@@ -144,10 +147,14 @@ let build env sw root fixture target (state : State.t) revision ~startup ~snapsh
       ; cancel = (fun ~id:_ -> failwith "unexpected timer")
       }
     ~job_services:
-      { spawn_model = (fun ~recipe:_ ~payload:_ -> failwith "unexpected model spawn")
-      ; call_model =
-          (fun ~recipe:_ ~payload:_ ~execute:_ -> failwith "unexpected model call")
-      }
+      (let initialization : Agent_session.Runtime_model_services.t =
+         { spawn_model = (fun ~recipe:_ ~payload:_ -> failwith "unexpected model spawn")
+         ; call_model =
+             (fun ~recipe:_ ~payload:_ ~execute:_ -> failwith "unexpected model call")
+         }
+       in
+       Agent_session.Runtime_model_services.
+         { initialization; for_execution = (fun _ -> initialization) })
 ;;
 
 let%expect_test "captured root role survives source removal and real moderator restart" =
@@ -248,17 +255,21 @@ let on_event ctx state event = if ctx.session_id == "ses_root_contract" then Tas
           |> ok
         in
         let snapshot =
-          Fun.protect ~finally:first.close (fun () ->
-            let snapshot = first.start_moderator () |> ok in
-            snapshot_state first 41;
-            snapshot)
+          Fun.protect
+            ~finally:(fun () -> B.close first)
+            (fun () ->
+               let snapshot = first.start_moderator () |> ok in
+               snapshot_state first 41;
+               snapshot)
         in
         let second =
           build env sw root fixture target retained restored ~startup:None ~snapshot |> ok
         in
-        Fun.protect ~finally:second.close (fun () ->
-          ignore (second.start_moderator () |> ok : Jsonaf.t option);
-          snapshot_state second 42);
+        Fun.protect
+          ~finally:(fun () -> B.close second)
+          (fun () ->
+             ignore (second.start_moderator () |> ok : Jsonaf.t option);
+             snapshot_state second 42);
         [%test_eq: int] 0 !providers;
         print_s
           [%sexp

@@ -6,12 +6,14 @@ module S = Session.Moderator_state.Identity_snapshot
 
 let ok = Result.ok_or_failwith
 
-let artifact env source =
+let artifact env ?(script_limits = "") source =
   let elements =
     Prompt.Chat_markdown.parse_chat_inputs
       ~dir:(Eio.Stdenv.cwd env)
       ("<script id=\"bounded\" language=\"chatml\" kind=\"moderator\" \
-        api=\"extensibility-v1\">"
+        api=\"extensibility-v1\" "
+       ^ script_limits
+       ^ ">"
        ^ source
        ^ "</script>")
   in
@@ -36,14 +38,19 @@ let artifact env source =
   Option.value_exn artifact
 ;;
 
-let create env ?(policy = X.Bounded { X.default_limits with fuel = 3000 }) source =
+let create
+      env
+      ?(policy = X.Bounded { X.default_limits with fuel = 3000 })
+      ?script_limits
+      source
+  =
   let allocator =
     History_entry.Allocator.create ~namespace:"budget-fixture" ~next_sequence:0 |> ok
   in
   M.create_entries
     ~env
     ~execution_policy:policy
-    ~artifact:(artifact env source)
+    ~artifact:(artifact env ?script_limits source)
     ~capabilities:Chat_response.Moderation.Capabilities.default
     ~allocator
     ()
@@ -108,6 +115,113 @@ let%expect_test "legacy manager diagnostics cannot recurse forever or invalidate
     {|
     ok
     (ok (Int 2) 1)
+    |}]
+;;
+
+let%expect_test "host observations keep observer budgets separate from retained state" =
+  Eio_main.run (fun env ->
+    let event =
+      Chat_response.Moderation.Event.Item_appended
+        (Chat_response.Moderation.Item.create
+           ~id:"large-observation"
+           ~value:(`String (String.make 4096 'x')))
+    in
+    let source ~retain =
+      {|let initial_state = ""
+        let on_event ctx state event = match event with
+        | `Item_appended(item) -> (match item.value with
+          | `String(value) -> Task.pure(|}
+      ^ (if retain then "value" else "\"small\"")
+      ^ {|)
+          | _ -> Task.pure(state))
+        | _ -> Task.pure(state)|}
+    in
+    let manager
+          ?(policy = X.Bounded { X.default_limits with max_value_bytes = 64 * 1024 })
+          ~retain
+          ()
+      =
+      create env ~policy ~script_limits:{|max_value="1KiB"|} (source ~retain) |> ok
+    in
+    let owned manager installs =
+      M.handle_event_entries_transactional
+        manager
+        ~session_id:"budget-fixture"
+        ~now_ms:0
+        ~history:[]
+        ~available_tools:[]
+        ~session_meta:`Null
+        ~event
+        ~authorize:(fun () -> Ok ())
+        ~on_tool_call:(fun ~name:_ ~args:_ -> failwith "unexpected tool call")
+        ~prepare_event:(fun ~outcome:_ ~snapshot:_ ->
+          Ok (M.memory_commit (fun () -> incr installs)))
+    in
+    List.iter [ `Raw; `Owned ] ~f:(fun route ->
+      List.iter [ false; true ] ~f:(fun retain ->
+        let manager = manager ~retain () in
+        let before = snapshot manager in
+        let installs = ref 0 in
+        let result =
+          match route with
+          | `Raw ->
+            M.handle_event_entries
+              manager
+              ~session_id:"budget-fixture"
+              ~now_ms:0
+              ~history:[]
+              ~available_tools:[]
+              ~session_meta:`Null
+              ~event
+          | `Owned -> owned manager installs
+        in
+        let unchanged = same_snapshot before (snapshot manager) in
+        assert (Bool.equal unchanged retain);
+        (match retain with
+         | true -> assert (String.equal (code result) "invocation.invalid_state")
+         | false ->
+           ignore (ok result : Chat_response.Moderation.Outcome.t);
+           (match (snapshot manager).current_state with
+            | Session.Snapshot.String value -> assert (String.equal value "small")
+            | _ -> failwith "observer did not retain its small state"));
+        let owned_installs =
+          match route with
+          | `Raw -> None
+          | `Owned ->
+            assert (!installs = Bool.to_int (not retain));
+            Some !installs
+        in
+        print_s
+          [%sexp
+            (route : [ `Raw | `Owned ])
+          , (retain : bool)
+          , (code result : string)
+          , (unchanged : bool)
+          , (owned_installs : int option)]));
+    let manager = manager ~policy:X.Unrestricted ~retain:false () in
+    let before = snapshot manager in
+    let installs = ref 0 in
+    let blocked =
+      X.with_control
+        ~env
+        ~policy:(Bounded { X.default_limits with max_value_bytes = 2048 })
+        (fun _ -> owned manager installs)
+      |> Result.map_error ~f:(fun error -> error.X.code ^ ": " ^ error.message)
+      |> Result.join
+    in
+    assert (same_snapshot before (snapshot manager));
+    assert (!installs = 0);
+    let after_ancestor = owned manager installs in
+    ignore (ok after_ancestor : Chat_response.Moderation.Outcome.t);
+    assert (!installs = 1);
+    print_s [%sexp (code blocked : string), (code after_ancestor : string)]);
+  [%expect
+    {|
+    (Raw false ok false ())
+    (Raw true invocation.invalid_state true ())
+    (Owned false ok false (1))
+    (Owned true invocation.invalid_state true (0))
+    (chatml.value_limit ok)
     |}]
 ;;
 

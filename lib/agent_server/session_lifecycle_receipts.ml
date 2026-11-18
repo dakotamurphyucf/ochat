@@ -74,12 +74,22 @@ let complete t ~key ~request_digest outcome =
   then corrupt "lifecycle command receipt has no protected retention"
   else (
     let%bind completed =
-      I.complete
-        t.store
-        ~key
-        ~request_digest
-        ~accepted_transaction_sequence:original.accepted_transaction_sequence
-        ~outcome:(I.Success expected)
+      match outcome.R.Outcome.action, outcome.disposition, value with
+      | Remove, Applied, P.Method_result.Session_delete result ->
+        I.complete_remove
+          t.store
+          ~key
+          ~request_digest
+          ~generation:outcome.anchor.generation
+          ~result
+      | Remove, _, _ -> corrupt "missing applied lifecycle removal result"
+      | (Archive | Restore | Resume), _, _ ->
+        I.complete
+          t.store
+          ~key
+          ~request_digest
+          ~accepted_transaction_sequence:original.accepted_transaction_sequence
+          ~outcome:(I.Success expected)
     in
     match completed.outcome with
     | I.Success actual when Jsonaf.exactly_equal actual expected -> Ok ()

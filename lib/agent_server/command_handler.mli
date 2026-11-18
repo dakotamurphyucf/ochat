@@ -6,6 +6,43 @@ type create_session =
   -> Agent_protocol.Session.Create_request.t
   -> (Session_registry.entry, Agent_protocol.Error.t) result
 
+type create_session_authenticated =
+  command_audit:Document_schema.Document.t option
+  -> actor:Operator_authorization.t
+  -> Agent_protocol.Session.Create_request.t
+  -> (Session_registry.entry, Agent_protocol.Error.t) result
+
+type goal_read =
+  actor:Operator_authorization.t
+  -> context:Connection_context.t
+  -> Agent_protocol.Goal_query.Request.t
+  -> (Agent_protocol.Goal_query.Result.t, Agent_protocol.Error.t) result
+
+type goal_operator =
+  actor:Operator_authorization.t
+  -> context:Connection_context.t
+  -> Agent_protocol.Goal_control.Request.t
+  -> (Agent_protocol.Goal_control.Result.t, Agent_protocol.Error.t) result
+
+type recurrence_read =
+  actor:Operator_authorization.t
+  -> context:Connection_context.t
+  -> Agent_protocol.Recurrence_query.Request.t
+  -> (Agent_protocol.Recurrence_query.Result.t, Agent_protocol.Error.t) result
+
+type recurrence_operator =
+  { execute :
+      actor:Operator_authorization.t
+      -> context:Connection_context.t
+      -> Agent_protocol.Recurrence_control.Request.t
+      -> (Agent_protocol.Recurrence_control.Result.t, Agent_protocol.Error.t) result
+  ; check_disclosure :
+      actor:Operator_authorization.t
+      -> context:Connection_context.t
+      -> Agent_protocol.Recurrence_control.Request.t
+      -> (unit, Agent_protocol.Error.t) result
+  }
+
 type t
 
 val create
@@ -20,6 +57,10 @@ val create
   -> blob_store:Agent_store.Blob_store.t
   -> session_store:Agent_store.Session_store.t
   -> authoring:Authoring_installation.t option
+  -> goal_read:goal_read option
+  -> recurrence_read:recurrence_read option
+  -> goal_operator:goal_operator option
+  -> recurrence_operator:recurrence_operator option
   -> lifecycle_service:Session_lifecycle_service.t
   -> retained:Retained_session.t
   -> archive_payload_limit:int
@@ -32,6 +73,7 @@ val create
   -> server_health:(Agent_protocol.Health.Request.t -> Agent_protocol.Health.Response.t)
   -> cancel_job:(actor:Agent_session.Session_actor.t -> job:Agent_protocol.Job.t -> unit)
   -> create_session:create_session
+  -> create_session_authenticated:create_session_authenticated option
   -> seed_factory:Session_factory.t option
   -> seed_recovery_limits:Session_factory.Seed_recovery_limits.t
        (** [Some factory] borrows the actual same Store/Registry factory used by this

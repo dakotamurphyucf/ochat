@@ -76,7 +76,7 @@ let%expect_test
             let session, _ = create_session ~key:"archived-retention" client in
             let entry = R.find (Daemon.registry daemon) session.id |> Option.value_exn in
             let state = Agent_session.Session_actor.state entry.actor |> protocol_ok in
-            entry.close ();
+            Agent_server.Session_registry.close_entry entry;
             R.remove (Daemon.registry daemon) session.id |> ignore;
             S.archive_session (Daemon.store daemon) session.id |> store_ok;
             state.spec.prompt_revision_id)
@@ -147,6 +147,8 @@ let%expect_test
                 ; parent_revision_id = state.spec.prompt_revision_id
                 ; parent_stop_epoch = Some state.stop_epoch
                 ; authored_tool = None
+                ; goal_origin = None
+                ; captured_recurrence = None
                 ; authority_sha256 =
                     Agent_session.Delegation_authority.fingerprint state |> protocol_ok
                 ; capability_pins = G.capability_pins definition

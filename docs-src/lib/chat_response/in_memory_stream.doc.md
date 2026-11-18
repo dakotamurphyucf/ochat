@@ -68,11 +68,12 @@ type post_stream =
   -> Openai.Responses.Response_stream.t Seq.t
 
 module Tool_dispatch : sig
-  (** Trusted driver adapter. Invoke only after revalidating the selected native
-      binding and authorizing its effects. Executes that binding with the driver's
-      progress/trace observer and legacy fork handler; it performs no admission. *)
+  (** Trusted driver adapter. The host supplies its original, revalidated
+      binding with invocation-local effect checks as one value. This adapter
+      neither admits tools nor grants authority. Use [Tool_call.run_tool] to
+      preserve currentness checks, observers and built-in fork substitution. *)
   type native_runner =
-    Ochat_function.t -> payload:string -> Openai.Responses.Tool_output.Output.t
+    Tool_call.Native.t -> payload:string -> Openai.Responses.Tool_output.Output.t
 
   type rejection =
     | Invalid_input
@@ -177,7 +178,10 @@ exception Openai_stream_idle_timeout of float
 (** Host-owned event routing for identity-bearing streams. The host must claim
     durable event ownership, install the prospective checkpoint atomically, and
     define how returned runtime requests are consumed. Legacy raw-item APIs reject
-    these handlers rather than discarding identity or bypassing ownership. *)
+    these handlers rather than discarding identity or bypassing ownership.
+    Typed host effect rejection may raise [Ctx.Effect_rejected]; pre/post-tool
+    observer exception adapters preserve it for the owning worker. Already
+    committed calls/results remain factual when a later observer rejects. *)
 type moderator_event_handlers =
   { before_model_call : unit -> (unit, string) result
     (** Called once before provider dispatch, after turn preparation and budget
@@ -410,10 +414,14 @@ val run_completion_stream_in_memory_entries
   -> inference_identity:Neutral_turn.Identity.t
   -> on_inference_attempt:(Inference_runtime.Attempt.t -> unit)
   -> on_inference_completion:(Inference_client.Completion.t -> unit)
+  -> ?agent_guidance:Agent_guidance.t
   -> ?submission_guard:Inference_runtime.Submission_guard.t
   -> ?inference_relation:Transcript.Scope.relation
   -> ?on_inference_observation:(Inference.Observation.t -> unit)
   -> ?on_admitted_call:(Admitted_call.t -> unit)
+  -> ?before_tool_effect:(unit -> unit)
+       (** Strict selected-owner check after Started and before each native runner,
+      including delayed calls. Existing admission and moderation still apply. *)
   -> ?before_inference_dispatch:(Inference_runtime.Prepared.t -> unit)
   -> ?resolve_inference_assets:(History_entry.t list -> Inference.Request.Asset.t list)
   -> ?datadir:Eio.Fs.dir_ty Eio.Path.t

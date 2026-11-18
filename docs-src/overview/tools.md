@@ -396,6 +396,10 @@ queue and can discard `notifications/tools/list_changed` before it is handled.
 
 Tool names, schemas and wrappers are constructed when the runtime starts;
 cache invalidation does not hot-reload an active agent's advertised catalog.
+Managed native calls recheck the admitted caller after catalog discovery and
+before the remote tool call. Revocation during that wait prevents the call;
+sharing a connection does not share another caller's permission. These checks do
+not repeat an approval prompt or undo a remote effect that has already started.
 Recreate the runtime to pick up catalog changes. See the
 [implementation gaps](../development/code-documentation-audit.md#mcp-discovery-and-notifications).
 MCP tools remain maintained; only the old ChatMD-prompt-serving MCP host is deprecated.

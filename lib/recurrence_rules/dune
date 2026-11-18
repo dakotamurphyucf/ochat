@@ -1,0 +1,7 @@
+(library
+ (name recurrence_rules)
+ (public_name ochat.recurrence_rules)
+ (modules timing_error codec time_arithmetic zone rule clock cursor)
+ (private_modules codec time_arithmetic)
+ (libraries core jsonaf)
+ (preprocess (pps ppx_jane)))

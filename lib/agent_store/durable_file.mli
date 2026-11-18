@@ -11,9 +11,11 @@ type durability =
 val temporary_target : string -> string option
 
 (** [replace ~env ~durability ~path contents] atomically replaces [path].
-    The target must be an absolute path whose parent already exists. *)
+    The target must be an absolute path whose parent already exists.
+    [before_rename] has the same final-admission contract as [replace_in]. *)
 val replace
-  :  env:Eio_unix.Stdenv.base
+  :  ?before_rename:(unit -> unit)
+  -> env:Eio_unix.Stdenv.base
   -> durability:durability
   -> path:string
   -> string

@@ -46,6 +46,42 @@ typeahead eligibility after layout publication. The existing
 `@agent-e2e-typeahead` and `@agent-e2e-tui-auto` gates exercise real headless
 terminal/client adapters; they do not replace a human visual check in Zed.
 
+## Independent and native release reports
+
+Independent ancestor resources keep script outcomes separate from actual
+resource cleanup. The existing graph/Switch bracket records graph sealing,
+queued release callbacks and graph finishing even when the script fails or is
+cancelled. A hook raising the same exception as the script remains a cleanup
+failure. The primary exception and its original backtrace remain primary.
+
+`Independent_cleanup` reports only this bracket. A joined graph/Switch does not
+certify outer ancestor Owner finalizers or the separate delegated child runtime
+Switch. Its explicit retry uses the same failed factual graph legs; successful
+legs and release hooks are not replayed. Graph registration closes before sealing;
+escaped callbacks, foreign domains and duplicate physical registrations are
+rejected. Only one factual retry can run at a time; a concurrent call returns
+Conflict while the prior report stays immutable. An immutable release-hook failure stays
+negative after graph repair. Native child close likewise normalizes requested
+cancellation only after its actual Switch release completed without hook
+failures.
+
+Normal inline tests in `lib/agent_server` exercise real blocked child joining,
+healthy failed/cancelled script cleanup and immutable native hook cancellation.
+`test/agent_session/delegation_resource_tests.ml` uses the actual Actor, graph and
+rejected persistence boundary to verify primary preservation and same-graph
+factual recovery without erasing a release failure. These tests use no provider
+or network credentials. The separate public Eio release-report tests qualify the
+dependency observer; these consumer tests qualify its runtime use.
+
+The delegated child runtime also records its own Switch release outcome and the
+original runtime's close outcome. Cancellation-valued failures from a queued
+hook, the revocation callback or original close remain visible through returned
+close. Repeated close observes the same terminal outcome without replaying
+cleanup. Actual worker aggregates and `Exn.protect` finalizer precedence remain
+intact. Tests in `test/agent_session/delegated_runtime_tests.ml` use real Owner,
+activity and cancellation boundaries; they do not certify outer Owner ancestry
+finalizers or Independent parent-resource graph cleanup.
+
 ## Choose the appropriate tier
 
 ```sh
@@ -68,6 +104,30 @@ before execution, and separation of child history from the root conversation.
 These use offline providers, production hosts and retained E2E artifacts. The
 required framework CI runs this alias in its E2E tier alongside the separate
 forced normal-test tier.
+
+The [full-profile Goal accounting retirement qualification](https://github.com/dakotamurphyucf/ochat/blob/main/test/goal_accounting_retirement/README.md)
+is an explicit slow local executable, outside normal CI and `runtest`:
+
+```sh
+dune build @test/goal_accounting_retirement/goal-accounting-retirement-local
+```
+
+It retains the real 256-admission boundary, atomic fold and physical reopen
+oracles, with phase/count progress and a 900-second fixture timeout. The shared
+Factory fixture keeps its normal 30-second default. Small accounting/retirement
+laws remain in ordinary testing; this local executable adds full-profile evidence
+when it completes, rather than turning a partial timeout into a pass.
+
+The Goal recovery cases in `@test/factory_catalog_publication/runtest` use
+controlled offline providers and the actual Factory, Actor and session store.
+`goal_resume_tests.ml` fails the Factory handoff after the Actor has
+acknowledged Resume, before the continuation runs. Replay returns the same
+command receipt and keeps its original Run. `goal_finish_tests.ml` fails the
+writer acknowledgement after syncing the authored `Goal.finish` checkpoint.
+The old Actor leaves the projected bytes intact and reports retained cleanup.
+A hard process exit releases the old store, then reopening recovers the pending
+request and records the actual Interrupted Run settlement. The earlier unrelated
+provider work stays intact.
 
 The ordinary `@test/agent_transport_stdio_client/runtest` suite runs a real
 Eio-owned child with separate stderr, checks bounded stderr retention and typed
@@ -116,6 +176,12 @@ ran. Keep their results with the reviewed revision when reporting qualification.
 The focused tests retain real execution and permission boundaries. Broader tests
 must not be deleted merely to shorten the normal suite, and adding a focused test
 does not imply that it covers every combination in its qualification counterpart.
+
+The `background-orchestration` scenario starts legacy Model Jobs with a timer
+issued by the authored `Session_start` callback. Its receipt identifies the
+exact timer delivery consumed by the later idle callback. A raw operator timer
+can drive a state-only wake, including after daemon restart. A raw `Go` event
+with the same payload reaches the queue without a Model Job or provider request.
 
 The docs check covers local inline links and heading anchors throughout
 `docs-src`, the promoted `Readme.md`, and `DEVELOPMENT.md`, plus

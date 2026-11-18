@@ -324,6 +324,39 @@ let%expect_test "durable structural limits agree from authored children through 
 
 let%expect_test "restored transaction digests are exact original bytes across edits" =
   let restored = S.Transaction.decode original_transaction |> ok in
+  (* Recognizing queue provenance never makes unrelated child semantics safe. *)
+  let marker = "future.queue-authority" in
+  let with_unknown_semantics document =
+    match D.Document.json document with
+    | `Object fields ->
+      D.Document.inspect
+        ~limits
+        (`Object (fields @ [ "required_semantics", `Array [ `String marker ] ]))
+      |> doc_ok
+    | _ -> assert false
+  in
+  let rejects_unknown = function
+    | Error (S.Store_error.Document (D.Error.Required_semantics_unknown actual)) ->
+      String.equal marker actual
+    | Error _ | Ok _ -> false
+  in
+  assert (
+    rejects_unknown
+      (S.Transaction.with_value
+         restored
+         ~limits
+         { (S.Transaction.value restored) with
+           delta = with_unknown_semantics restored.delta
+         }));
+  let snapshot = snapshot_document 0L None "initial" in
+  assert (
+    rejects_unknown
+      (S.Snapshot.with_value
+         snapshot
+         ~limits
+         { (S.Snapshot.value snapshot) with
+           payload = with_unknown_semantics snapshot.payload
+         }));
   let normalized =
     D.Extension_carrier.template (S.Transaction.carrier restored)
     |> Option.value_exn
@@ -1504,7 +1537,9 @@ let%expect_test "shared preflight unequal unknown carriers continue and reject r
   [%expect {| equal counters with unequal unknown fields cannot skip failing tail |}]
 ;;
 
-let retention_preflight
+let retention_preflight_with_restore
+      ~restoration_budget
+      ~restore_snapshot
       ~env
       ~journal
       ~snapshot_directory
@@ -1513,15 +1548,35 @@ let retention_preflight
       ~validate
   =
   S.Recovery.Retention_preflight.create
+    ~restoration_budget
     ~env
     ~journal
     ~snapshot_directory
     ~max_snapshot_payload_length:16384
     ~session_id
     ~initial:(snapshot_document 0L None "same").payload
-    ~restore_snapshot:(fun snapshot -> Ok snapshot.S.Snapshot.payload)
+    ~restore_snapshot
     ~apply
     ~equivalent:equivalent_shared_document
+    ~validate_transaction
+    ~validate
+;;
+
+let retention_preflight
+      ~env
+      ~journal
+      ~snapshot_directory
+      ~apply
+      ~validate_transaction
+      ~validate
+  =
+  retention_preflight_with_restore
+    ~restoration_budget:S.Recovery.Retention_preflight.Budget.default
+    ~restore_snapshot:(fun snapshot -> Ok snapshot.S.Snapshot.payload)
+    ~env
+    ~journal
+    ~snapshot_directory
+    ~apply
     ~validate_transaction
     ~validate
 ;;
@@ -1793,9 +1848,14 @@ let overwrite_retention_snapshot
 
 let%expect_test "changed snapshot bytes cannot borrow the previous replay seed" =
   with_retention_files (fun env root journal directory _ snapshots ->
-    let applies = ref 0 in
+    let applies = ref 0
+    and restorations = ref 0 in
     let scope =
-      retention_preflight
+      retention_preflight_with_restore
+        ~restoration_budget:S.Recovery.Retention_preflight.Budget.default
+        ~restore_snapshot:(fun snapshot ->
+          incr restorations;
+          Ok snapshot.S.Snapshot.payload)
         ~env
         ~journal
         ~snapshot_directory:directory
@@ -1811,6 +1871,8 @@ let%expect_test "changed snapshot bytes cannot borrow the previous replay seed" 
         ~validate:(fun _ -> Ok ())
     in
     S.Recovery.Retention_preflight.check scope |> ok;
+    assert (!restorations = 3);
+    restorations := 0;
     let oldest = List.hd_exn snapshots in
     let oldest_path =
       Eio.Path.(Eio.Stdenv.fs env / directory / oldest.S.Snapshot.filename)
@@ -1825,12 +1887,15 @@ let%expect_test "changed snapshot bytes cannot borrow the previous replay seed" 
     assert_retention_read_only ~env ~root (fun () ->
       assert (Result.is_error (S.Recovery.Retention_preflight.check scope)));
     assert (!applies = 3);
+    assert (!restorations = 1);
+    restorations := 0;
     (* An unsuccessful check did not replace the previously certified proof. *)
     Eio.Path.save ~create:(`Or_truncate 0o600) oldest_path original;
     applies := 0;
     assert_retention_read_only ~env ~root (fun () ->
       S.Recovery.Retention_preflight.check scope |> ok);
-    assert (!applies = 0));
+    assert (!applies = 0);
+    assert (!restorations = 0));
   print_endline
     "same counters with changed unknown bytes replay and reject; failure keeps prior \
      proof";
@@ -1842,7 +1907,8 @@ let%expect_test
     "rewritten covered transaction prefix requires replay despite valid rechaining"
   =
   with_retention_files (fun env root journal directory transactions snapshots ->
-    let seen = ref [] in
+    let seen = ref []
+    and validated = ref [] in
     let scope =
       retention_preflight
         ~env
@@ -1853,10 +1919,14 @@ let%expect_test
           if String.equal (text transaction.delta) "invalid transition"
           then Error (S.Store_error.Corrupt "invalid covered transition")
           else apply_shared_document state transaction)
-        ~validate_transaction:(fun _ -> Ok ())
+        ~validate_transaction:(fun transaction ->
+          validated := transaction :: !validated;
+          Ok ())
         ~validate:(fun _ -> Ok ())
     in
     S.Recovery.Retention_preflight.check scope |> ok;
+    let originally_validated = List.rev !validated in
+    validated := [];
     let first = List.hd_exn transactions in
     let first =
       S.Transaction.with_value
@@ -1897,7 +1967,11 @@ let%expect_test
     seen := [];
     assert_retention_read_only ~env ~root (fun () ->
       assert (Result.is_error (S.Recovery.Retention_preflight.check scope)));
-    assert (List.mem !seen 1L ~equal:Int64.equal));
+    assert (List.mem !seen 1L ~equal:Int64.equal);
+    List.iter2_exn originally_validated (List.rev !validated) ~f:(fun before after ->
+      assert (not (phys_equal before after));
+      assert (
+        not (String.equal (S.Transaction.encode before) (S.Transaction.encode after)))));
   print_endline
     "valid new checksums, chain and anchors cannot reuse an old covered prefix";
   [%expect
@@ -1908,19 +1982,30 @@ let%expect_test "missing certified head replays and malformed prefix refuses bef
   =
   List.iter [ false; true ] ~f:(fun gap ->
     with_retention_files (fun env root journal directory transactions _ ->
-      let applies = ref 0 in
+      let applies = ref 0
+      and restorations = ref 0
+      and validations = ref 0 in
       let scope =
-        retention_preflight
+        retention_preflight_with_restore
+          ~restoration_budget:S.Recovery.Retention_preflight.Budget.default
+          ~restore_snapshot:(fun snapshot ->
+            incr restorations;
+            Ok snapshot.S.Snapshot.payload)
           ~env
           ~journal
           ~snapshot_directory:directory
           ~apply:(fun state transaction ->
             incr applies;
             apply_shared_document state transaction)
-          ~validate_transaction:(fun _ -> Ok ())
+          ~validate_transaction:(fun _ ->
+            incr validations;
+            Ok ())
           ~validate:(fun _ -> Ok ())
       in
       S.Recovery.Retention_preflight.check scope |> ok;
+      assert (!restorations = 3);
+      restorations := 0;
+      validations := 0;
       let changed =
         if gap
         then
@@ -1937,10 +2022,14 @@ let%expect_test "missing certified head replays and malformed prefix refuses bef
       if gap
       then (
         assert (Result.is_error result);
-        assert (!applies = 0))
+        assert (!applies = 0);
+        assert (!restorations = 0);
+        assert (!validations = 0))
       else (
         result |> ok;
-        assert (!applies = 4))));
+        assert (!applies = 4);
+        assert (!restorations = 0);
+        assert (!validations = 4))));
   print_endline
     "truncated head requires full replay; missing prefix link rejects before any apply";
   [%expect
@@ -1981,6 +2070,451 @@ let%expect_test "certified equal heads retain distinct unknown carriers" =
     assert !rejected);
   print_endline "certified counter equality cannot substitute a different unknown carrier";
   [%expect {| certified counter equality cannot substitute a different unknown carrier |}]
+;;
+
+module Restoration_observation = struct
+  type t =
+    { mutable restorations : int64 list
+    ; mutable transactions : S.Transaction.t list
+    ; mutable states : string list
+    }
+
+  let create () = { restorations = []; transactions = []; states = [] }
+
+  let clear t =
+    t.restorations <- [];
+    t.transactions <- [];
+    t.states <- []
+  ;;
+
+  let restore_snapshot t snapshot =
+    t.restorations <- snapshot.S.Snapshot.transaction_sequence :: t.restorations;
+    Ok snapshot.payload
+  ;;
+
+  let validate_transaction t transaction =
+    t.transactions <- transaction :: t.transactions;
+    Ok ()
+  ;;
+
+  let validate_state t state =
+    t.states <- D.Document.to_string state :: t.states;
+    Ok ()
+  ;;
+
+  let restored t = List.rev t.restorations
+  let transactions t = List.rev t.transactions
+  let states t = List.rev t.states
+  let transaction_bytes t = List.map (transactions t) ~f:S.Transaction.encode
+
+  let reused_sequences t ~previous =
+    List.filter_map (transactions t) ~f:(fun transaction ->
+      let sequence = transaction.S.Transaction.transaction_sequence in
+      match
+        List.find previous ~f:(fun old ->
+          Int64.equal old.S.Transaction.transaction_sequence sequence)
+      with
+      | None -> None
+      | Some old ->
+        (* Physical identity deliberately observes the private conversion reuse;
+           complete original bytes remain a separate preservation oracle. *)
+        assert (String.equal (S.Transaction.encode old) (S.Transaction.encode transaction));
+        if phys_equal old transaction then Some sequence else None)
+  ;;
+end
+
+let observed_retention_scope ~budget ~env ~journal ~directory observation =
+  retention_preflight_with_restore
+    ~restoration_budget:budget
+    ~restore_snapshot:(Restoration_observation.restore_snapshot observation)
+    ~env
+    ~journal
+    ~snapshot_directory:directory
+    ~apply:apply_shared_document
+    ~validate_transaction:(Restoration_observation.validate_transaction observation)
+    ~validate:(Restoration_observation.validate_state observation)
+;;
+
+let%expect_test "restoration reuse matches zero cache and remains local to one owner" =
+  with_retention_files (fun env _root journal directory _ snapshots ->
+    let oldest = List.hd_exn snapshots in
+    overwrite_retention_snapshot
+      ~env
+      ~directory
+      oldest
+      (snapshot_with_opaque_state oldest.snapshot);
+    let run budget ~cached =
+      let observation = Restoration_observation.create () in
+      let scope = observed_retention_scope ~budget ~env ~journal ~directory observation in
+      S.Recovery.Retention_preflight.check scope |> ok;
+      assert (List.length (Restoration_observation.restored observation) = 3);
+      let previous = Restoration_observation.transactions observation in
+      let cold_states = Restoration_observation.states observation in
+      assert (List.length cold_states = 6);
+      assert (List.length previous = 6);
+      let bytes = Restoration_observation.transaction_bytes observation in
+      Restoration_observation.clear observation;
+      S.Recovery.Retention_preflight.check scope |> ok;
+      assert (
+        List.length (Restoration_observation.restored observation)
+        = if cached then 0 else 3);
+      (* Certified effective anchors can reorder final validators on warm checks.
+         Compare cold/cold and warm/warm traces across restoration budgets. *)
+      let states = [ cold_states; Restoration_observation.states observation ] in
+      assert (
+        List.equal
+          String.equal
+          bytes
+          (Restoration_observation.transaction_bytes observation));
+      assert (List.length (Restoration_observation.transactions observation) = 6);
+      assert (List.length (Restoration_observation.states observation) = 6);
+      assert (
+        List.equal
+          Int64.equal
+          (Restoration_observation.reused_sequences observation ~previous)
+          (if cached then [ 1L; 2L; 3L; 4L; 5L; 6L ] else []));
+      states, bytes
+    in
+    let zero =
+      S.Recovery.Retention_preflight.Budget.create ~max_entries:0 ~max_original_bytes:0
+      |> ok
+    in
+    let expected_states, expected_bytes = run zero ~cached:false in
+    List.iter [ (); () ] ~f:(fun () ->
+      let states, bytes =
+        run S.Recovery.Retention_preflight.Budget.default ~cached:true
+      in
+      assert (List.equal (List.equal String.equal) states expected_states);
+      assert (List.equal String.equal bytes expected_bytes)));
+  print_endline "zero and warm owners preserve all carrier bytes; fresh owners start cold";
+  [%expect {| zero and warm owners preserve all carrier bytes; fresh owners start cold |}]
+;;
+
+let retention_state_sequence state =
+  match D.Json.field (D.Document.payload state) ~name:"counters" with
+  | Value counters ->
+    (match D.Json.field counters ~name:"transaction_sequence" with
+     | Value (`String sequence) -> Int64.of_string sequence
+     | Absent | Null | Value _ -> assert false)
+  | Absent | Null -> assert false
+;;
+
+let%expect_test "warm restoration keeps eager validators and their original first error" =
+  with_retention_files (fun env _root journal directory _ _ ->
+    let observation = Restoration_observation.create () in
+    let reject_snapshot = ref None
+    and reject_transaction = ref false in
+    let state_sequences = ref [] in
+    let scope =
+      retention_preflight_with_restore
+        ~restoration_budget:S.Recovery.Retention_preflight.Budget.default
+        ~restore_snapshot:(Restoration_observation.restore_snapshot observation)
+        ~env
+        ~journal
+        ~snapshot_directory:directory
+        ~apply:apply_shared_document
+        ~validate_transaction:(fun transaction ->
+          let open Result.Let_syntax in
+          let%bind () =
+            Restoration_observation.validate_transaction observation transaction
+          in
+          if
+            !reject_transaction
+            && Int64.equal transaction.S.Transaction.transaction_sequence 1L
+          then Error (S.Store_error.Corrupt "first transaction validator")
+          else Ok ())
+        ~validate:(fun state ->
+          let sequence = retention_state_sequence state in
+          state_sequences := sequence :: !state_sequences;
+          let open Result.Let_syntax in
+          let%bind () = Restoration_observation.validate_state observation state in
+          match !reject_snapshot with
+          | Some rejected when Int64.equal sequence rejected ->
+            Error (S.Store_error.Corrupt "first snapshot validator")
+          | None | Some _ -> Ok ())
+    in
+    let expect_failure reason = function
+      | Error (S.Store_error.Corrupt actual) -> assert (String.equal actual reason)
+      | Error _ | Ok () -> assert false
+    in
+    S.Recovery.Retention_preflight.check scope |> ok;
+    let initial_snapshot_order = List.take (List.rev !state_sequences) 3 in
+    assert (List.length initial_snapshot_order = 3);
+    let first_snapshot = List.hd_exn initial_snapshot_order in
+    Restoration_observation.clear observation;
+    state_sequences := [];
+    reject_snapshot := Some first_snapshot;
+    S.Recovery.Retention_preflight.check scope
+    |> expect_failure "first snapshot validator";
+    assert (List.equal Int64.equal (List.rev !state_sequences) initial_snapshot_order);
+    assert (List.is_empty (Restoration_observation.restored observation));
+    assert (List.is_empty (Restoration_observation.transactions observation));
+    reject_snapshot := None;
+    reject_transaction := true;
+    Restoration_observation.clear observation;
+    state_sequences := [];
+    S.Recovery.Retention_preflight.check scope
+    |> expect_failure "first transaction validator";
+    assert (List.equal Int64.equal (List.rev !state_sequences) initial_snapshot_order);
+    assert (List.length (Restoration_observation.transactions observation) = 6);
+    assert (List.is_empty (Restoration_observation.restored observation));
+    reject_transaction := false;
+    Restoration_observation.clear observation;
+    S.Recovery.Retention_preflight.check scope |> ok;
+    assert (List.is_empty (Restoration_observation.restored observation));
+    assert (List.length (Restoration_observation.transactions observation) = 6);
+    assert (List.length (Restoration_observation.states observation) = 6));
+  print_endline
+    "snapshot and transaction errors keep eager callbacks and the prior successful cache";
+  [%expect
+    {| snapshot and transaction errors keep eager callbacks and the prior successful cache |}]
+;;
+
+let%expect_test "failed and cancelled checks cannot publish new restoration prefixes" =
+  with_retention_files (fun env root journal directory transactions _ ->
+    let observation = Restoration_observation.create () in
+    let reject_seventh = ref false
+    and block_eighth = ref false in
+    let entered, enter = Eio.Promise.create () in
+    let scope =
+      retention_preflight_with_restore
+        ~restoration_budget:S.Recovery.Retention_preflight.Budget.default
+        ~restore_snapshot:(Restoration_observation.restore_snapshot observation)
+        ~env
+        ~journal
+        ~snapshot_directory:directory
+        ~apply:apply_shared_document
+        ~validate_transaction:(fun transaction ->
+          let open Result.Let_syntax in
+          let%bind () =
+            Restoration_observation.validate_transaction observation transaction
+          in
+          let sequence = transaction.S.Transaction.transaction_sequence in
+          if !reject_seventh && Int64.equal sequence 7L
+          then Error (S.Store_error.Corrupt "new transaction validator")
+          else (
+            if !block_eighth && Int64.equal sequence 8L
+            then (
+              Eio.Promise.resolve enter ();
+              Eio.Fiber.await_cancel ());
+            Ok ()))
+        ~validate:(Restoration_observation.validate_state observation)
+    in
+    let transaction_at sequence values =
+      List.find_exn values ~f:(fun transaction ->
+        Int64.equal transaction.S.Transaction.transaction_sequence sequence)
+    in
+    S.Recovery.Retention_preflight.check scope |> ok;
+    let initial_transactions = Restoration_observation.transactions observation in
+    let seventh = next_retention_transaction (List.last_exn transactions) 7L in
+    append_retention_transaction journal seventh;
+    let transactions = transactions @ [ seventh ] in
+    install_retention_snapshot ~env ~directory transactions 7L |> ignore;
+    rewrite_retention_journal ~env ~root transactions;
+    Restoration_observation.clear observation;
+    reject_seventh := true;
+    assert (Result.is_error (S.Recovery.Retention_preflight.check scope));
+    assert (List.equal Int64.equal (Restoration_observation.restored observation) [ 7L ]);
+    let failed_seventh =
+      transaction_at 7L (Restoration_observation.transactions observation)
+    in
+    reject_seventh := false;
+    Restoration_observation.clear observation;
+    S.Recovery.Retention_preflight.check scope |> ok;
+    assert (List.equal Int64.equal (Restoration_observation.restored observation) [ 7L ]);
+    assert (
+      List.equal
+        Int64.equal
+        (Restoration_observation.reused_sequences
+           observation
+           ~previous:initial_transactions)
+        [ 1L; 2L; 3L; 4L; 5L; 6L ]);
+    assert (
+      not
+        (phys_equal
+           failed_seventh
+           (transaction_at 7L (Restoration_observation.transactions observation))));
+    let seventh_transactions = Restoration_observation.transactions observation in
+    let eighth = next_retention_transaction seventh 8L in
+    append_retention_transaction journal eighth;
+    let transactions = transactions @ [ eighth ] in
+    install_retention_snapshot ~env ~directory transactions 8L |> ignore;
+    rewrite_retention_journal ~env ~root transactions;
+    Restoration_observation.clear observation;
+    block_eighth := true;
+    let marker = Failure "retention check cancellation witness" in
+    Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
+      Eio.Switch.run (fun sw ->
+        let cancellation, cancel = Eio.Promise.create () in
+        let caller =
+          Eio.Fiber.fork_promise ~sw (fun () ->
+            Eio.Cancel.sub (fun context ->
+              Eio.Promise.resolve cancel context;
+              S.Recovery.Retention_preflight.check scope))
+        in
+        Eio.Promise.await entered;
+        Eio.Cancel.cancel (Eio.Promise.await cancellation) marker;
+        match Eio.Promise.await caller with
+        | Error (Eio.Cancel.Cancelled actual) -> assert (phys_equal actual marker)
+        | Error _ | Ok _ -> assert false));
+    assert (List.equal Int64.equal (Restoration_observation.restored observation) [ 8L ]);
+    let cancelled_eighth =
+      transaction_at 8L (Restoration_observation.transactions observation)
+    in
+    block_eighth := false;
+    Restoration_observation.clear observation;
+    S.Recovery.Retention_preflight.check scope |> ok;
+    assert (List.equal Int64.equal (Restoration_observation.restored observation) [ 8L ]);
+    assert (
+      List.equal
+        Int64.equal
+        (Restoration_observation.reused_sequences
+           observation
+           ~previous:seventh_transactions)
+        [ 1L; 2L; 3L; 4L; 5L; 6L; 7L ]);
+    assert (
+      not
+        (phys_equal
+           cancelled_eighth
+           (transaction_at 8L (Restoration_observation.transactions observation))));
+    let successful_transactions = Restoration_observation.transactions observation in
+    Restoration_observation.clear observation;
+    S.Recovery.Retention_preflight.check scope |> ok;
+    assert (List.is_empty (Restoration_observation.restored observation));
+    assert (
+      List.equal
+        Int64.equal
+        (Restoration_observation.reused_sequences
+           observation
+           ~previous:successful_transactions)
+        [ 1L; 2L; 3L; 4L; 5L; 6L; 7L; 8L ]));
+  print_endline
+    "new snapshot and transaction conversions publish only after full success; Eio \
+     cancellation survives";
+  [%expect
+    {| new snapshot and transaction conversions publish only after full success; Eio cancellation survives |}]
+;;
+
+let%expect_test
+    "restoration budgets bound entries and original bytes without admitting less data"
+  =
+  let module Budget = S.Recovery.Retention_preflight.Budget in
+  let invalid_budget = function
+    | Error (S.Store_error.Document (D.Error.Invalid_configuration _)) -> ()
+    | Error _ | Ok _ -> assert false
+  in
+  Budget.create ~max_entries:(-1) ~max_original_bytes:1 |> invalid_budget;
+  Budget.create ~max_entries:1 ~max_original_bytes:(-1) |> invalid_budget;
+  with_retention_files (fun env root journal directory transactions snapshots ->
+    let zero = Budget.create ~max_entries:0 ~max_original_bytes:0 |> ok in
+    let oversized = Budget.create ~max_entries:128 ~max_original_bytes:1 |> ok in
+    let count_bound =
+      Budget.create ~max_entries:4 ~max_original_bytes:Int.max_value |> ok
+    in
+    let snapshot_bytes =
+      List.sum
+        (module Int)
+        snapshots
+        ~f:(fun installed ->
+          S.Snapshot.stored installed.S.Snapshot.snapshot
+          |> S.Snapshot.Stored.record
+          |> S.Document_record.stored_bytes
+          |> String.length)
+    in
+    let latest_bytes =
+      S.Transaction.encode (List.last_exn transactions) |> String.length
+    in
+    let byte_bound =
+      Budget.create ~max_entries:128 ~max_original_bytes:(snapshot_bytes + latest_bytes)
+      |> ok
+    in
+    let run budget ~restores ~reused =
+      let observation = Restoration_observation.create () in
+      let scope = observed_retention_scope ~budget ~env ~journal ~directory observation in
+      S.Recovery.Retention_preflight.check scope |> ok;
+      let previous = Restoration_observation.transactions observation in
+      let cold_states = Restoration_observation.states observation in
+      assert (List.length cold_states = 6);
+      assert (List.length previous = 6);
+      let bytes = Restoration_observation.transaction_bytes observation in
+      Restoration_observation.clear observation;
+      S.Recovery.Retention_preflight.check scope |> ok;
+      assert (List.length (Restoration_observation.restored observation) = restores);
+      assert (
+        List.equal
+          Int64.equal
+          (Restoration_observation.reused_sequences observation ~previous)
+          reused);
+      assert (List.length (Restoration_observation.states observation) = 6);
+      let states = [ cold_states; Restoration_observation.states observation ] in
+      assert (
+        List.equal
+          String.equal
+          (Restoration_observation.transaction_bytes observation)
+          bytes);
+      observation, scope, states, bytes
+    in
+    let _, _, expected_states, expected_bytes = run zero ~restores:3 ~reused:[] in
+    List.iter
+      [ oversized, 3, []; byte_bound, 0, [ 6L ] ]
+      ~f:(fun (budget, restores, reused) ->
+        let _, _, states, bytes = run budget ~restores ~reused in
+        assert (List.equal (List.equal String.equal) states expected_states);
+        assert (List.equal String.equal bytes expected_bytes));
+    let observation, scope, states, bytes = run count_bound ~restores:0 ~reused:[ 6L ] in
+    assert (List.equal (List.equal String.equal) states expected_states);
+    assert (List.equal String.equal bytes expected_bytes);
+    let previous = Restoration_observation.transactions observation in
+    let seventh = next_retention_transaction (List.last_exn transactions) 7L in
+    let eighth = next_retention_transaction seventh 8L in
+    List.iter [ seventh; eighth ] ~f:(append_retention_transaction journal);
+    rewrite_retention_journal ~env ~root (transactions @ [ seventh; eighth ]);
+    Restoration_observation.clear observation;
+    S.Recovery.Retention_preflight.check scope |> ok;
+    assert (
+      List.equal
+        Int64.equal
+        (Restoration_observation.reused_sequences observation ~previous)
+        [ 6L ]);
+    let previous = Restoration_observation.transactions observation in
+    Restoration_observation.clear observation;
+    S.Recovery.Retention_preflight.check scope |> ok;
+    assert (
+      List.equal
+        Int64.equal
+        (Restoration_observation.reused_sequences observation ~previous)
+        [ 8L ]);
+    S.Snapshot.prune_older ~env ~directory ~max_payload_length:16384 ~keep:2
+    |> ok
+    |> ignore;
+    Restoration_observation.clear observation;
+    S.Recovery.Retention_preflight.check scope |> ok;
+    let previous = Restoration_observation.transactions observation in
+    Restoration_observation.clear observation;
+    S.Recovery.Retention_preflight.check scope |> ok;
+    assert (
+      List.equal
+        Int64.equal
+        (Restoration_observation.reused_sequences observation ~previous)
+        [ 7L; 8L ]);
+    let oldest = List.hd_exn snapshots in
+    overwrite_retention_snapshot ~env ~directory oldest oldest.snapshot;
+    Restoration_observation.clear observation;
+    S.Recovery.Retention_preflight.check scope |> ok;
+    assert (List.equal Int64.equal (Restoration_observation.restored observation) [ 0L ]);
+    let previous = Restoration_observation.transactions observation in
+    Restoration_observation.clear observation;
+    S.Recovery.Retention_preflight.check scope |> ok;
+    assert (
+      List.equal
+        Int64.equal
+        (Restoration_observation.reused_sequences observation ~previous)
+        [ 8L ]));
+  print_endline
+    "zero and oversized entries miss; entry/byte pressure evicts, pruned originals must \
+     restore again";
+  [%expect
+    {| zero and oversized entries miss; entry/byte pressure evicts, pruned originals must restore again |}]
 ;;
 
 let%expect_test

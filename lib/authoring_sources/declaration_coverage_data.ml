@@ -158,15 +158,21 @@ let features =
       ; "test/generated_admission_test.ml"
       ] )
   ; ( "tools.file_roots"
-    , "Configured readable roots, source/host path variables and confined calls"
+    , "Configured readable roots, confined calls and file-tool control exceptions"
     , [ "lib/chatmd/chatmd_read_file_declaration.ml"
       ; "lib/chatmd/chatmd_read_file_spec.ml"
       ; "lib/chatmd_shell_spec/path_expr.ml"
       ; "lib/chat_response/tool.ml"
       ; "lib/functions.ml"
+      ; "lib/apply_patch.ml"
       ]
     , "chatmd.capabilities"
-    , [ "test/agent_docs/docs_chatmd_capabilities.ml"; "test/read_file_roots_test.ml" ] )
+    , [ "test/agent_docs/docs_chatmd_capabilities.ml"
+      ; "test/read_file_roots_test.ml"
+      ; "test/native_tool_cancellation/cancellation_tests.ml"
+      ; "test/apply_patch_test.ml"
+      ; "test/apply_patch_snippets_test.ml"
+      ] )
   ; ( "tools.shell_binding"
     , "Named shell runtimes, explicit modes and centralized process authority"
     , [ "lib/chatmd/chatmd_shell_declaration.ml"
@@ -236,7 +242,7 @@ let implementation_sources =
   ; ( "lib/chat_response/authoring_policy.ml"
     , "78a9aaae6ad9a0626577dbcd83c8138458550c104bb99fa7808bbed1eb97a1d3" )
   ; ( "lib/chat_response/generated_admission.ml"
-    , "8c422ff1ad004059d86a2160219fb2a5d493899dbf780d6f77ba7c2f52548add" )
+    , "781909db7e778943cbca05cf969eb93a4bff646bd6711f8dcda4d0e272062651" )
   ; ( "lib/chat_response/initial_prompt_history.ml"
     , "daf50b9c9a5337b562b5d78c8f37b12033aba72f561491f506443095e694fed9" )
   ; ( "lib/chatmd/chatmd_tag_scope.ml"
@@ -271,7 +277,7 @@ let implementation_sources =
   ; ( "lib/chatmd/prompt.ml"
     , "9d35e23e50ad499469c2a6c067d9c20ae8683c23d0c26c8b6dcc1883e7feef6d" )
   ; ( "lib/chatmd/source_loader.ml"
-    , "82bf509199938ddef8dec39ca7450968b11f4f63e94d1f90b142fa0ed225a77b" )
+    , "12c1ef9c5380aef91967e1e33a918678d6cac6b3d74594b4496834ddff2e3c12" )
   ; ( "lib/chatmd_shell_spec/authoring_metadata.ml"
     , "8fa283f545896b7efbaab8bcf17a3ab7549d61c04873403c94961fc4ca0b789d" )
   ; ( "lib/chatmd_shell_spec/duration.ml"
@@ -287,13 +293,13 @@ let implementation_sources =
   ; ( "lib/chat_response/converter.ml"
     , "c6cdff248b4433655daa72064ce42e90d9522a7e2a632b78f555f86961bc0b0e" )
   ; ( "lib/chat_response/fetch.ml"
-    , "170db560c0693c7ec37f2a34c1907133feaffddd079571fcc32552bab59549ca" )
+    , "4a05211b42c66f2191cbf264002358f8eda48794c10ccc6bd40923b5f0cb3907" )
   ; ( "lib/chat_response/mcp_discovery_cache.ml"
     , "9365e8d63b16864e3535ec8c961282d259797cb84f8046691691f2c98eaecc8a" )
   ; ( "lib/chat_response/shell_tool.ml"
     , "2450c632c18067d0c984087461b9085f24314dd79a026a42a4f35b1014816f92" )
   ; ( "lib/chat_response/tool.ml"
-    , "794ed9c2a672118538f328a07a2ca627282291c405a939f1ec864295aa489761" )
+    , "49ae0443df34f71367025841049b49391260259f4faa79ac96866f1ba0c65fdb" )
   ; ( "lib/chatmd/chatmd_read_file_declaration.ml"
     , "446e56ceec98db2b0eeabed3b6f86e37127d71c03fb0594380b3daba9ba78eba" )
   ; ( "lib/chatmd/chatmd_read_file_spec.ml"
@@ -310,7 +316,9 @@ let implementation_sources =
     , "76b1afa4036446a644dd4d4e1c04f6ce35e43240bc42d33b43678cd0f7e9f71f" )
   ; ( "lib/chatmd_shell_spec/shell_tool_spec.ml"
     , "6b4ef1c95060cb600baa51d813502519a6fd4bac47c5716ad84de326555c324b" )
-  ; "lib/functions.ml", "05c5428d7870e3fe9711a3f3239ae1e0919c86fa5022c4ea5c7944559d7d2eb2"
+  ; "lib/functions.ml", "431ea6f1c8af60d39e19d466fd6a2d7ed6536b5e7d00c833e6a2a61a688039f9"
+  ; ( "lib/apply_patch.ml"
+    , "4379bae166f7bdb7da955e659a2ccf6dcffe2ce372e3ede5d07d46203726a4cb" )
   ; ( "lib/mcp/mcp_tool.ml"
     , "f9e69c49231b625fb479a77182b606113ae9369dce8df1c67c99c3eaddfdac49" )
   ; ( "lib/chatmd/chatmd_parser.ml"
@@ -326,7 +334,7 @@ let implementation_sources =
   ; ( "lib/chatmd/chatmd_owned_parser.ml"
     , "54814044e438ec34474351f6e0c7f8e4c926626013089c6c8183b2ac0717cf2b" )
   ; ( "lib/agent_session/prompt_revision_builder.ml"
-    , "200602c8d27e63bed00a17756b91d62642f93d4907b6c24185b1ee7da89d356b" )
+    , "eaa1553325dd9a63b75c7c15b4450bf23037774e567d75d898f11d1c819af0bf" )
   ; ( "lib/agent_session/prompt_script_sources.ml"
     , "996751e15ce03b37c6d144c2e5fd576963b3e72d37803c31cefb9400fa1a34c6" )
   ]
@@ -353,12 +361,12 @@ let topic_contracts =
     , "f5657829c37cc2ab561768a6c0b4a9cbd441c7672e0401ed458b61969ddcfb35" )
   ; ( "tool_v1"
     , "chatmd.capabilities"
-    , "78c0b817ac77f944b95d709eb2ae3ebf65255258ac1df8c816bdb372edbc689c" )
+    , "ee9ed65e38c6c8141a732004a482f8c91253c4d52caa647567a8b4ded7266bad" )
   ; ( "moderator_v1"
     , "chatmd.capabilities"
-    , "4f01ba1662978b0de549c6a3a680ba831f89d757155610763ec323db14b57d18" )
+    , "5facb5c31b7526c2600b24c4c97d61a88ac8ccfd169868c5fcc2cc1cfb2d5088" )
   ; ( "delegated_moderator_v1"
     , "chatmd.capabilities"
-    , "51955def80615c5f261d495ab80a9cbefb198ae2b89a39c3a348a4ca15f7f47f" )
+    , "f0e284e6f9be19db39458d28d9438c06f807a2bff2a744b050297308f56f000b" )
   ]
 ;;

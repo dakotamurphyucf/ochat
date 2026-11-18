@@ -123,6 +123,15 @@ val select_standalone_tools
   -> names:string list
   -> (definition, Tool_capability.error) result
 
+(** Pure generated lifecycle source validation shared with inert artifact
+    selection. Enforces the existing one-moderator/single-file contract and host
+    source/execution/compilation limit bounds. Does not compile, instantiate a
+    Program, resolve capabilities or grant permission. *)
+val validate_delegated_source
+  :  limits:Chatml_compilation.limits
+  -> Spec.script list
+  -> (unit, Chatmd_shell_spec.Diagnostic.t list) result
+
 (** Compile zero or one generated lifecycle moderator under the delegated v1
     surface, which omits direct Model, Process and stdout print. Retains the same
     definition interface used by the owning moderator manager, without adding any

@@ -21,7 +21,10 @@ val spawn
 val output : t -> string
 
 val send : t -> string -> unit
-val await_text : t -> clock:_ Eio.Time.clock -> string -> unit
+
+(** [after] is the byte length of a previous capture. Matching starts at this
+    offset and uses the same five-second bound. *)
+val await_text : t -> ?after:int -> clock:_ Eio.Time.clock -> string -> unit
 
 (** [await_exit t] waits at most five seconds. A timeout is a test failure,
     not a successful graceful exit; switch cleanup still owns process reaping. *)

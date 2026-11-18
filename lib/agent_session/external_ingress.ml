@@ -42,10 +42,108 @@ type receipt =
   }
 [@@deriving equal, sexp]
 
+module Provenance = struct
+  module D = Document_schema
+
+  type t =
+    { source : P.Run_source.t
+    ; origin : P.Inference_origin.t option
+    }
+  [@@deriving equal]
+
+  let source t = t.source
+  let origin t = t.origin
+
+  let validate t =
+    let open Result.Let_syntax in
+    let%bind () = P.Run_source.validate t.source in
+    Option.value_map t.origin ~default:(Ok ()) ~f:P.Inference_origin.validate
+  ;;
+
+  let create ~source ~origin =
+    let t = { source; origin } in
+    Result.map (validate t) ~f:(fun () -> t)
+  ;;
+
+  let to_jsonaf t =
+    `Object
+      [ "schema_version", `Number "1"
+      ; "source", P.Run_source.to_json t.source
+      ; "origin", Option.value_map t.origin ~default:`Null ~f:P.Inference_origin.to_json
+      ]
+  ;;
+
+  let validate_encoded_capacity json =
+    let open Result.Let_syntax in
+    let document_error error =
+      P.Error.invalid_request (Sexp.to_string_hum (D.Error.sexp_of_t error))
+    in
+    let%bind limits =
+      D.Limits.create ~max_bytes:4096 ~max_depth:8 ~max_fields:32 ~max_nodes:64
+      |> Result.map_error ~f:document_error
+    in
+    D.Json.validate ~limits json |> Result.map_error ~f:document_error
+  ;;
+
+  let of_jsonaf json =
+    let open Result.Let_syntax in
+    let%bind () = validate_encoded_capacity json in
+    let%bind fields = P.Json_codec.fields json in
+    let%bind _ =
+      P.Json_codec.required_as
+        fields
+        "schema_version"
+        (P.Json_codec.bounded_int ~min:1 ~max:1)
+    in
+    let%bind source = P.Json_codec.required_as fields "source" P.Run_source.of_json in
+    let%bind origin =
+      P.Json_codec.required_as fields "origin" (function
+        | `Null -> Ok None
+        | value -> Result.map (P.Inference_origin.of_json value) ~f:Option.some)
+    in
+    create ~source ~origin
+  ;;
+
+  let sexp_of_t t = Jsonaf.sexp_of_t (to_jsonaf t)
+
+  let t_of_sexp sexp =
+    match of_jsonaf (Jsonaf.t_of_sexp sexp) with
+    | Ok t -> t
+    | Error error -> Sexplib.Conv.of_sexp_error error.P.Error.message sexp
+  ;;
+
+  let shape =
+    Persistence_codec.shape_exn
+      [ "schema_version", D.Shape.value
+      ; "source", Run_record_shapes.source
+      ; ( "origin"
+        , D.Shape.nullable
+            (D.Shape.tagged_object
+               ~discriminator:"type"
+               [ "unbound", Persistence_codec.fields_shape [ "schema_version"; "type" ]
+               ; ( "run"
+                 , Persistence_codec.fields_shape [ "schema_version"; "type"; "run_id" ] )
+               ]
+             |> function
+             | Ok shape -> shape
+             | Error error -> raise_s [%sexp (error : D.Error.t)]) )
+      ]
+  ;;
+end
+
+let validate_encoded_provenance json =
+  let open Result.Let_syntax in
+  let%bind fields = P.Json_codec.fields json in
+  match P.Json_codec.optional fields "inference_provenance" with
+  | None | Some `Null -> Ok ()
+  | Some raw -> Provenance.validate_encoded_capacity raw
+;;
+
 type t =
   { context : context
   ; receipts : receipt list
   ; revoked : string option
+  ; inference_provenance : Provenance.t option [@sexp.option]
   }
 [@@deriving equal, sexp]
 
@@ -141,6 +239,18 @@ let validate t =
     | true -> Ok ()
     | false -> error Invalid_request "invalid external ingress registration"
   in
+  let%bind () =
+    match t.inference_provenance with
+    | None -> Ok ()
+    | Some provenance ->
+      let%bind () = Provenance.validate provenance in
+      let source = Provenance.source provenance in
+      if
+        Int.equal source.generation c.generation
+        && P.Invocation.equal_observer source.observer c.source
+      then Ok ()
+      else error Invalid_request "ingress original source differs from registration"
+  in
   let%bind _ = schema c in
   let%bind () =
     match
@@ -215,9 +325,9 @@ let live t subscription now =
   | None -> Ok ()
 ;;
 
-let create context ~subscription =
+let create ?inference_provenance context ~subscription =
   let open Result.Let_syntax in
-  let t = { context; receipts = []; revoked = None } in
+  let t = { context; receipts = []; revoked = None; inference_provenance } in
   let%bind () = validate t in
   let%map () = live t subscription context.created_at in
   t
@@ -331,7 +441,13 @@ let validate_transition ~subscription ~previous next =
      | _ -> error Conflict "new external ingress registration already has outcomes")
   | Some previous ->
     let%bind () =
-      match equal_context previous.context next.context with
+      match
+        equal_context previous.context next.context
+        && Option.equal
+             Provenance.equal
+             previous.inference_provenance
+             next.inference_provenance
+      with
       | true -> Ok ()
       | false -> error Conflict "external ingress registration binding is immutable"
     in
@@ -526,11 +642,14 @@ let receipt_shape =
 ;;
 
 let storage_to_jsonaf (t : t) =
-  `Object
-    [ "context", context_to_jsonaf t.context
-    ; "receipts", (X.list_json receipt_to_jsonaf) t.receipts
-    ; "revoked", (X.option_json X.text_json) t.revoked
-    ]
+  [ "context", context_to_jsonaf t.context
+  ; "receipts", (X.list_json receipt_to_jsonaf) t.receipts
+  ; "revoked", (X.option_json X.text_json) t.revoked
+  ]
+  @ Option.to_list
+      (Option.map t.inference_provenance ~f:(fun provenance ->
+         "inference_provenance", Provenance.to_jsonaf provenance))
+  |> fun fields -> `Object fields
 ;;
 
 let storage_of_jsonaf json =
@@ -539,7 +658,12 @@ let storage_of_jsonaf json =
   let%bind context = X.required fields "context" context_of_jsonaf in
   let%bind receipts = X.required fields "receipts" (X.list receipt_of_jsonaf) in
   let%bind revoked = X.required fields "revoked" (X.nullable J.string) in
-  let t : t = { context; receipts; revoked } in
+  let%bind inference_provenance =
+    match J.optional fields "inference_provenance" with
+    | None | Some `Null -> Ok None
+    | Some value -> Result.map (Provenance.of_jsonaf value) ~f:Option.some
+  in
+  let t : t = { context; receipts; revoked; inference_provenance } in
   let%map () = validate t in
   t
 ;;
@@ -549,6 +673,7 @@ let storage_shape =
     [ "context", context_shape
     ; "receipts", X.array_shape_exn ~identity_field:"id" receipt_shape
     ; "revoked", X.nullable_shape Document_schema.Shape.value
+    ; "inference_provenance", X.nullable_shape Provenance.shape
     ]
 ;;
 
@@ -574,5 +699,6 @@ let shape =
     ; "context", context_shape
     ; "receipts", X.array_shape_exn ~identity_field:"id" receipt_shape
     ; "revoked", X.nullable_shape Document_schema.Shape.value
+    ; "inference_provenance", X.nullable_shape Provenance.shape
     ]
 ;;

@@ -1,0 +1,5 @@
+(library
+ (name capability_source_export)
+ (public_name ochat.capability_source_export)
+ (libraries core eio eio.unix eio_posix ochat.source ochat.chatml_source ochat.capability_sources)
+ (preprocess (pps ppx_jane)))

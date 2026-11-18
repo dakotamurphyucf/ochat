@@ -34,6 +34,7 @@ end
 type t =
   { original_native : Runtime.t
   ; selected : Prompt_revision.t
+  ; prepared_revision : Runtime_source_preparation.Prepared_revision.t
   ; native : Runtime.t
   ; definition : EC.definition option
   ; managed : Managed.t option
@@ -43,6 +44,7 @@ type t =
   }
 
 let revision t = t.selected
+let prepared_revision t = t.prepared_revision
 let native t = t.native
 let definition t = t.definition
 let managed t = t.managed
@@ -403,7 +405,7 @@ let prepare
   let open Result.Let_syntax in
   try
     admit ();
-    let%bind managed, definition, shell, view, runner, native =
+    let%bind managed, definition, shell, view, runner, native, prepared_revision =
       Startup.within startup ~map_error:compilation_error ~f:(fun () ->
         preflight ();
         Eio.Switch.check sw;
@@ -430,14 +432,14 @@ let prepare
             ~selected:(CM.Parsed.elements selected_parsed)
             ~checkpoint:preflight
         in
-        Runtime_script_preparation.with_revision
+        Runtime_script_preparation.with_revision_plan
           (Some script_preparation)
           ~startup
           selected
           ~env
           ~invocation:Delegated_ui
           ~checkpoint:preflight
-          ~f:(fun startup ~compilation_limits ~programs ->
+          ~f:(fun startup ~compilation_limits ~plan ~programs ->
             let%bind managed, definition =
               rebind_managed
                 original
@@ -481,15 +483,26 @@ let prepare
                 ~sw
                 ~checkpoint:preflight
             in
-            let%map native_registrations =
+            let%bind native_registrations =
               registrations original ~capabilities ~view ~runner ~checkpoint:preflight
+            in
+            let%map prepared_revision =
+              Runtime_source_preparation.Prepared_revision.capture
+                selected
+                ~invocation:Delegated_ui
+                ~startup
+                ~compilation_limits
+                ~plan
+                ~programs
+                ~checkpoint:preflight
             in
             ( managed
             , definition
             , shell
             , view
             , runner
-            , { original.native with native_registrations } )))
+            , { original.native with native_registrations }
+            , prepared_revision )))
     in
     admit ();
     let%bind shell_code_view =
@@ -515,6 +528,7 @@ let prepare
     Ok
       { original_native = original.native
       ; selected
+      ; prepared_revision
       ; native
       ; definition
       ; managed

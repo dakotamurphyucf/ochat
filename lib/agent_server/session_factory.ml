@@ -1,5 +1,160 @@
 open! Core
 module Catalogs = Session_factory_catalogs
+module For_testing = Runtime_resource_testing
+
+module Constructor_owner = struct
+  type selection =
+    | Initial of Agent_session.Run_preparation.t
+    | Runtime_construction of Agent_session.Session_actor.Runtime_construction.t
+
+  type t =
+    | Ordinary of Agent_session.Run_preparation.t option ref
+    | Admitted of Agent_session.Session_actor.Runtime_construction.t option ref
+    | Installed_resume of
+        { construction : Agent_session.Session_actor.Runtime_construction.t option ref
+        ; preparation : Agent_session.Run_preparation.t option ref
+        }
+    | Shared of (unit -> selection option)
+
+  let current = function
+    | Shared current -> current ()
+    | Ordinary preparation -> Option.map !preparation ~f:(fun value -> Initial value)
+    | Admitted construction | Installed_resume { construction; _ } ->
+      Option.map !construction ~f:(fun value -> Runtime_construction value)
+  ;;
+
+  let clear = function
+    | Shared _ -> () (* Non-owning routing; its lexical bracket clears it. *)
+    | Ordinary preparation -> preparation := None
+    | Admitted construction -> construction := None
+    | Installed_resume { construction; preparation } ->
+      construction := None;
+      preparation := None
+  ;;
+end
+
+module Native_constructor_routing = struct
+  module Active = struct
+    type t =
+      { selection : Constructor_owner.selection option
+      ; initialization : Agent_session.Session_actor.Initialization_scope.t option
+      ; mutable shell : Session.Shell_state.t ref option
+      }
+  end
+
+  type phase =
+    | Idle
+    | Active of Active.t
+
+  type t =
+    { domain : int
+    ; mutable phase : phase
+    }
+
+  let create () = { domain = (Stdlib.Domain.self () :> int); phase = Idle }
+
+  let current t =
+    match t.phase with
+    | Idle -> None
+    | Active value -> value.selection
+  ;;
+
+  let constructor t = Constructor_owner.Shared (fun () -> current t)
+
+  let initialization_scope t =
+    match t.phase with
+    | Idle -> None
+    | Active value -> value.initialization
+  ;;
+
+  let check_domain t =
+    if Int.equal t.domain (Stdlib.Domain.self () :> int)
+    then Ok ()
+    else
+      Error
+        (Agent_protocol.Error.invalid_request
+           "native constructor routing belongs to another domain")
+  ;;
+
+  let with_constructor t ~owner ~initialization ~f =
+    let open Result.Let_syntax in
+    let%bind () = check_domain t in
+    let%bind selection =
+      match owner with
+      | Constructor_owner.Shared _ ->
+        Error
+          (Agent_protocol.Error.invalid_request
+             "native constructor routing requires original ownership")
+      | Ordinary preparation ->
+        Ok (Option.map !preparation ~f:(fun value -> Constructor_owner.Initial value))
+      | Admitted construction | Installed_resume { construction; _ } ->
+        Result.of_option
+          !construction
+          ~error:
+            (Agent_protocol.Error.create
+               Conflict
+               ~message:"native constructor lost its scoped owner"
+               ~retryable:true
+               ())
+        |> Result.map ~f:(fun value ->
+          Some (Constructor_owner.Runtime_construction value))
+    in
+    match t.phase with
+    | Active _ ->
+      Error
+        (Agent_protocol.Error.create
+           Conflict
+           ~message:"native constructor routing is already selected"
+           ~retryable:true
+           ())
+    | Idle ->
+      (* Ordinary None preserves the existing direct Init-scope-only route as
+         well as Ready/no-Init. A missing admitted constructor never uses it. *)
+      t.phase <- Active { selection; initialization; shell = None };
+      Exn.protect ~f ~finally:(fun () -> Eio.Cancel.protect (fun () -> t.phase <- Idle))
+  ;;
+
+  let bind_shell t shell =
+    let open Result.Let_syntax in
+    let%bind () = check_domain t in
+    match t.phase with
+    | Idle ->
+      Error
+        (Agent_protocol.Error.create
+           Conflict
+           ~message:"native constructor shell projection has no selected owner"
+           ~retryable:true
+           ())
+    | Active active ->
+      (match active.shell with
+       | None ->
+         active.shell <- Some shell;
+         Ok ()
+       | Some actual when phys_equal actual shell -> Ok ()
+       | Some _ ->
+         Error
+           (Agent_protocol.Error.create
+              Conflict
+              ~message:"native constructor shell projection is already selected"
+              ~retryable:true
+              ()))
+  ;;
+
+  let shell_projection t =
+    match t.phase with
+    | Idle -> None
+    | Active value -> value.shell
+  ;;
+end
+
+type recovery_purpose =
+  | Ordinary_recovery
+  | Metadata_target_recovery
+
+type recovery_selection =
+  | Explicit_recovery of recovery_purpose
+  | Registered_recovery
+  | Ordinary_entry_recovery
 
 type generated_lifetime =
   | Owned
@@ -116,13 +271,27 @@ type t =
   ; env : Eio_unix.Stdenv.base
   ; store : Agent_store.Session_store.t
   ; registry : Session_registry.t
+  ; runtime_source_owner : Agent_session.Runtime_source_owner.t
   ; authored_resources : Authored_resources.t
+  ; native_metadata_target :
+      Agent_protocol.Id.Session.t
+      -> ( Session_registry.entry * Agent_session.Session_state.t
+           , Agent_protocol.Error.t )
+           result
   ; authored_services :
       Agent_session.Runtime_builder.authored_resources
       -> Agent_session.Native_tool_invocation.borrowed
       -> ( Agent_session.Authored_agent_call.host * Agent_session.Managed_session_service.t
            , Agent_protocol.Invocation.tool_error )
            result
+  ; recurrence_service :
+      Agent_session.Permission_policy.t
+      -> Agent_session.Session_actor.t option ref
+      -> Agent_session.Recurrence_service.t
+  ; goal_metadata_service :
+      Agent_session.Permission_policy.t
+      -> Agent_session.Session_actor.t option ref
+      -> Agent_session.Goal_native_metadata_service.t
   ; generated_creation_mutex : Eio.Mutex.t
   ; idempotency_store : Agent_store.Idempotency_store.t
   ; blob_store : Agent_store.Blob_store.t
@@ -138,17 +307,24 @@ type t =
   ; independent_lifetime_policy : string option
   ; chatml_runtime_policy : Chat_response.Runtime_semantics.policy
   ; authoring_validation_host : Chat_response.Authoring_validation.host option
+  ; mutable instruction_sources : Agent_session.Instruction_source_port.t option
   ; script_preparation : Agent_session.Runtime_script_preparation.t option
   ; content_limits : Chatmd_prompt_content.Limits.t option
   ; child_sources : Child_source_policy.t option
+  ; recurrence_planning_host : Agent_session.Recurrence_planning_host.t option
   ; generated_creation : Agent_session.Generated_session_request.service
   ; managed_sessions : Agent_session.Managed_session_service.t
   ; managed_output_cursors : Managed_output_cursor.t
   ; durability : Agent_store.Journal_segment.durability
   ; limits : limits
   ; document_limits : Document_schema.Limits.t
+  ; recovery_cpu : Agent_session.Session_recovery_cpu.t
   ; journal_document_limits : Document_schema.Limits.t
   }
+
+(* One actual host ceiling feeds native execution, notification disclosure and
+   immutable pre-resource preparation. This DATA is never selected by a Job. *)
+let execution_request_policy = Chat_response.One_off_request.default_policy
 
 module Legacy_provenance = struct
   type t =
@@ -166,6 +342,7 @@ end
 
 type runtime_source =
   | Authored of Agent_session.Prompt_revision.t
+  | Captured_delegation of Agent_session.Captured_recurrence_source.t
   | Generated_artifact of
       { artifact : Agent_store.Prompt_artifact_store.Artifact.t
       ; materialized_tree : Eio.Fs.dir_ty Eio.Path.t
@@ -202,6 +379,16 @@ module Developer_catalog = struct
 end
 
 let developer_catalog t = t.catalogs
+
+let install_instruction_sources t source =
+  match t.instruction_sources with
+  | Some _ ->
+    Error
+      (Agent_protocol.Error.invalid_request "instruction source port already installed")
+  | None ->
+    t.instruction_sources <- Some source;
+    Ok ()
+;;
 
 let now t =
   Eio.Time.now (Eio.Stdenv.clock t.env)
@@ -393,6 +580,42 @@ let imported_state provisional legacy =
 let metadata = Session_projection.metadata
 let index_entry = Session_projection.index_entry
 
+let goal_descendant_profile t =
+  Agent_session.Goal_descendants.Profile.create
+    ~max_scopes:t.limits.delegation_max_depth
+    ~max_roots:16
+    ~max_branches:t.limits.delegation_recovery_max_count
+    ~max_encoded_bytes:(256 * 1024)
+    ~child_max_encoded_bytes:t.limits.delegation_recovery_max_bytes
+;;
+
+let initialize_child_accounting t ~goal_origin state =
+  let open Result.Let_syntax in
+  let%bind state =
+    Agent_session.Child_accounting.initialize_new
+      state
+      ~max_children:t.limits.delegation_recovery_max_count
+      ~max_encoded_bytes:t.limits.delegation_recovery_max_bytes
+  in
+  match goal_origin with
+  | None -> Ok state
+  | Some origin ->
+    let%bind profile = goal_descendant_profile t in
+    let session =
+      Agent_protocol.Session_ref.create
+        ~server_id:(Agent_store.Session_store.server_id t.store)
+        ~session_id:state.identity.session_id
+    in
+    let%map accounting =
+      Agent_session.Goal_descendants.create_new
+        ~profile
+        ~session
+        ~origin
+        ~ledger:state.inference_ledger
+    in
+    { state with goal_descendants = Some accounting }
+;;
+
 let initialize_layout
       t
       ~principal
@@ -430,6 +653,14 @@ let initialize_layout
       profile
       ~inference_target
   in
+  let%bind state =
+    initialize_child_accounting
+      t
+      ~goal_origin:(Some Agent_store.Delegation_goal_origin.unrelated)
+      state
+    |> Result.map_error ~f:(fun error ->
+      Agent_store.Store_error.Corrupt error.Agent_protocol.Error.message)
+  in
   on_state state;
   Agent_store.Session_store.Initial_projection.create
     ~metadata:(metadata state)
@@ -444,6 +675,8 @@ let prompt_directory revision =
 
 let source_prompt_directory = function
   | Authored revision -> prompt_directory revision
+  | Captured_delegation source ->
+    prompt_directory (Agent_session.Captured_recurrence_source.revision source)
   | Generated_artifact { artifact; materialized_tree } ->
     Filename.concat
       (Eio.Path.native_exn materialized_tree)
@@ -501,28 +734,42 @@ let lookup_state_source t (state : Agent_session.Session_state.t) =
              (Agent_store.Session_store.data_root t.store))
       |> Result.map_error ~f:protocol_of_store
     in
-    let%map artifact =
-      match record.admission.authored_tool with
-      | Some _ ->
-        Agent_session.Authored_agent_source.load_recorded_artifact
-          ~artifact_store
-          ~reservation:record
-      | None ->
-        Agent_session.Generated_definition.load_artifact
-          ~artifact_store
-          ~revision_id
-          ~manifest_sha256:record.admission.manifest_sha256
-        |> Result.map_error ~f:(fun diagnostics ->
-          unavailable
-            Prompt_unavailable
-            (List.map diagnostics ~f:Chatmd_shell_spec.Diagnostic.to_string
-             |> String.concat ~sep:"\n"))
-    in
-    Generated_artifact
-      { artifact
-      ; materialized_tree =
-          Agent_store.Prompt_artifact_store.materialized_tree artifact_store revision_id
-      }
+    (match record.admission.captured_recurrence with
+     | Some _ ->
+       let%map source =
+         Agent_session.Captured_recurrence_source.restore
+           ~artifact_store
+           ~content_limits:t.content_limits
+           ~record
+           ~state
+           ~checkpoint:Eio.Fiber.check
+       in
+       Captured_delegation source
+     | None ->
+       let%map artifact =
+         match record.admission.authored_tool with
+         | Some _ ->
+           Agent_session.Authored_agent_source.load_recorded_artifact
+             ~artifact_store
+             ~reservation:record
+         | None ->
+           Agent_session.Generated_definition.load_artifact
+             ~artifact_store
+             ~revision_id
+             ~manifest_sha256:record.admission.manifest_sha256
+           |> Result.map_error ~f:(fun diagnostics ->
+             unavailable
+               Prompt_unavailable
+               (List.map diagnostics ~f:Chatmd_shell_spec.Diagnostic.to_string
+                |> String.concat ~sep:"\n"))
+       in
+       Generated_artifact
+         { artifact
+         ; materialized_tree =
+             Agent_store.Prompt_artifact_store.materialized_tree
+               artifact_store
+               revision_id
+         })
   | _ ->
     (match state.spec.prompt_definition_id with
      | None ->
@@ -550,6 +797,133 @@ let restore_state_profile t (state : Agent_session.Session_state.t) =
   permission_profile_revision t state.spec.permission_profile_digest
 ;;
 
+(* Proof choice is structural, before any validation Error. A genuine State
+   lifecycle proof stays usable during native construction. A moderated policy
+   with no lifecycle pointer, even with an installed Run source, needs the
+   existing SAME physical Cell Source; invalid present pointers stay State. *)
+module Native_current_source = struct
+  type t =
+    | State
+    | Installed of
+        { observed : Runtime_owner.Native_source.t
+        ; profile : Agent_session.Permission_policy.t
+        ; window : Native_resource_authority.Source_window.t
+        ; current : Agent_session.Session_state.t
+        }
+
+  let source = function
+    | State -> None
+    | Installed { observed; _ } -> Some (Runtime_owner.Native_source.source observed)
+  ;;
+
+  let state t ~expected =
+    match t with
+    | State -> expected
+    | Installed { current; _ } -> current
+  ;;
+
+  let changed () =
+    unavailable Conflict "native source proof kind changed during validation"
+  ;;
+
+  let check t ~expected =
+    match t, Native_resource_authority.requires_installed_source expected with
+    | State, false -> Ok ()
+    | Installed { observed; profile; window; _ }, true ->
+      let open Result.Let_syntax in
+      let%bind () = Native_resource_authority.Source_window.check window ~expected in
+      Runtime_owner.Native_source.check observed ~profile ~expected
+    | State, true | Installed _, false -> Error (changed ())
+  ;;
+
+  let refresh t ~expected =
+    let open Result.Let_syntax in
+    let%bind () = check t ~expected in
+    match t with
+    | State -> Ok expected
+    | Installed { observed; _ } ->
+      let%bind current = Runtime_owner.Native_source.state observed in
+      let%bind () = check t ~expected:current in
+      let%map () = check t ~expected in
+      current
+  ;;
+
+  let capture factory ~runtime ~handle expected =
+    if not (Native_resource_authority.requires_installed_source expected)
+    then Ok State
+    else
+      let open Result.Let_syntax in
+      let%bind handle =
+        Result.of_option
+          handle
+          ~error:
+            (unavailable Permission_denied "installed native Source has no actual Handle")
+      in
+      let%bind profile = restore_state_profile factory expected in
+      let%bind observed =
+        Runtime_owner.observe_native_source runtime ~handle ~profile ~expected
+      in
+      match observed with
+      | Some observed ->
+        let%bind window =
+          Native_resource_authority.Source_window.capture
+            ~source:(Runtime_owner.Native_source.source observed)
+            expected
+        in
+        let result = Installed { observed; profile; window; current = expected } in
+        let%map current = refresh result ~expected in
+        Installed { observed; profile; window; current }
+      | None ->
+        (* Empty is genuine absence, never authority. Preserve the original
+           unavailable identity result; do not construct or activate evidence. *)
+        (match Native_resource_authority.moderation_source expected with
+         | Error error -> Error error
+         | Ok _ ->
+           Error (unavailable Permission_denied "installed native Source is required"))
+  ;;
+
+  let moderation t ~expected =
+    let open Result.Let_syntax in
+    let%bind () = check t ~expected in
+    Native_resource_authority.moderation_source ?installed_source:(source t) expected
+  ;;
+
+  let fingerprint t ~expected =
+    let open Result.Let_syntax in
+    let%bind () = check t ~expected in
+    Native_resource_authority.current_fingerprint ?installed_source:(source t) expected
+  ;;
+end
+
+let native_current_source t (state : Agent_session.Session_state.t) =
+  if not (Native_resource_authority.requires_installed_source state)
+  then Ok Native_current_source.State
+  else
+    let open Result.Let_syntax in
+    let%bind parent =
+      Session_registry.find t.registry state.identity.session_id
+      |> Result.of_option
+           ~error:(unavailable Permission_denied "native source parent is not registered")
+    in
+    Native_current_source.capture
+      t
+      ~runtime:parent.runtime
+      ~handle:parent.store_handle
+      state
+;;
+
+let parent_moderation_source_for_state (state : Agent_session.Session_state.t) ~read =
+  match state.moderator, state.lifecycle.desired with
+  | None, _ -> Ok None
+  | Some _, Running -> read ()
+  | Some _, Stopped ->
+    Error
+      (unavailable
+         Permission_denied
+         "delegation.owner_mediation_unavailable: stopped parent policy cannot be \
+          activated for a child")
+;;
+
 let parent_moderation_source t session_id =
   match Session_registry.find t.registry session_id with
   | Some parent ->
@@ -558,12 +932,7 @@ let parent_moderation_source t session_id =
     (match state.moderator, state.lifecycle.desired with
      | None, _ -> Ok None
      | Some _, Running -> Runtime_owner.moderation_source parent.runtime
-     | Some _, Stopped ->
-       Error
-         (unavailable
-            Permission_denied
-            "delegation.owner_mediation_unavailable: stopped parent policy cannot be \
-             activated for a child"))
+     | Some _, Stopped -> Runtime_owner.retained_moderation_source parent.runtime)
   | None ->
     Error
       (unavailable
@@ -610,13 +979,23 @@ let requested_lifetime t = function
              authorization"))
 ;;
 
+let native_current_moderation t record ~expected =
+  let open Result.Let_syntax in
+  let%bind source = native_current_source t expected in
+  let current = Native_current_source.state source ~expected in
+  let%bind () =
+    Agent_session.Delegation_authority.check_invocation_owner record current
+  in
+  Native_current_source.moderation source ~expected:current
+;;
+
 let parent_authority_fingerprint t (state : Agent_session.Session_state.t) =
   let open Result.Let_syntax in
   let%bind moderator = parent_moderation_source t state.identity.session_id in
   Agent_session.Delegation_authority.fingerprint ?moderator state
 ;;
 
-let generated_parent ?(check_stop_epoch = true) t (state : Agent_session.Session_state.t) =
+let generated_parent_record t (state : Agent_session.Session_state.t) =
   let open Result.Let_syntax in
   let missing_host () =
     Error
@@ -644,51 +1023,151 @@ let generated_parent ?(check_stop_epoch = true) t (state : Agent_session.Session
     in
     (match Session_registry.find t.registry record.key.parent_session_id with
      | None -> missing_host ()
-     | Some parent ->
-       let%bind current = Agent_session.Session_actor.state parent.actor in
-       let%bind () =
-         Agent_session.Delegation_authority.check_invocation_owner record current
-       in
-       let%bind fingerprint = parent_authority_fingerprint t current in
-       let%bind () = authorize_independent t record in
-       (match
-          ( current.lifecycle.desired
-          , current.lifecycle.observed
-          , current.halted
-          , current.failure
-          , record.revocation
-          , record.admission.lifetime )
-        with
-        | ( Running
-          , (Idle | Running_turn _ | Waiting_for_permission _)
-          , false
-          , None
-          , None
-          , (Owned | Invocation_owned _) )
-          when String.equal fingerprint record.admission.authority_sha256
-               && ((not check_stop_epoch)
-                   || Int64.equal
-                        current.stop_epoch
-                        (Option.value
-                           state.parent_stop_epoch
-                           ~default:
-                             (Option.value record.admission.parent_stop_epoch ~default:0L))
-                  ) -> Ok (parent, record)
-        | _, _, _, _, None, Independent _
-          when String.equal fingerprint record.admission.authority_sha256 ->
-          Ok (parent, record)
-        | _ ->
-          Error
-            (unavailable
-               Permission_denied
-               "delegation.parent_authority: parent authority or lifetime does not \
-                permit execution")))
+     | Some parent -> Ok (parent, record))
   | _ -> missing_host ()
+;;
+
+let check_generated_parent_authority
+      t
+      ~check_stop_epoch
+      ~(state : Agent_session.Session_state.t)
+      ~(record : Agent_store.Delegation_store.record)
+      ~(current : Agent_session.Session_state.t)
+      ~fingerprint
+  =
+  let open Result.Let_syntax in
+  let%bind () = authorize_independent t record in
+  match
+    ( current.lifecycle.desired
+    , current.lifecycle.observed
+    , current.halted
+    , current.failure
+    , record.revocation
+    , record.admission.lifetime )
+  with
+  | ( Running
+    , (Idle | Running_turn _ | Waiting_for_permission _)
+    , false
+    , None
+    , None
+    , (Owned | Invocation_owned _) )
+    when String.equal fingerprint record.admission.authority_sha256
+         && ((not check_stop_epoch)
+             || Int64.equal
+                  current.stop_epoch
+                  (Option.value
+                     state.parent_stop_epoch
+                     ~default:
+                       (Option.value record.admission.parent_stop_epoch ~default:0L))) ->
+    Ok ()
+  | _, _, _, _, None, Independent _
+    when String.equal fingerprint record.admission.authority_sha256 -> Ok ()
+  | _ ->
+    Error
+      (unavailable
+         Permission_denied
+         "delegation.parent_authority: parent authority or lifetime does not permit \
+          execution")
+;;
+
+let check_loaded_generated_parent
+      ~check_stop_epoch
+      ~fingerprint
+      t
+      state
+      ~(parent : Session_registry.entry)
+      ~record
+  =
+  let open Result.Let_syntax in
+  let%bind current = Agent_session.Session_actor.state parent.actor in
+  let%bind () =
+    Agent_session.Delegation_authority.check_invocation_owner record current
+  in
+  let%bind fingerprint = fingerprint current in
+  check_generated_parent_authority
+    t
+    ~check_stop_epoch
+    ~state
+    ~record
+    ~current
+    ~fingerprint
+;;
+
+let generated_parent_with_fingerprint ?(check_stop_epoch = true) ~fingerprint t state =
+  let open Result.Let_syntax in
+  let%bind parent, record = generated_parent_record t state in
+  let%map () =
+    check_loaded_generated_parent ~check_stop_epoch ~fingerprint t state ~parent ~record
+  in
+  parent, record
+;;
+
+let generated_parent ?check_stop_epoch t state =
+  generated_parent_with_fingerprint
+    ?check_stop_epoch
+    ~fingerprint:(parent_authority_fingerprint t)
+    t
+    state
+;;
+
+let generated_parent_native t state =
+  let open Result.Let_syntax in
+  let%bind parent, record = generated_parent_record t state in
+  let%bind expected = Agent_session.Session_actor.state parent.actor in
+  let%bind () =
+    Agent_session.Delegation_authority.check_invocation_owner record expected
+  in
+  let%bind source =
+    Native_current_source.capture
+      t
+      ~runtime:parent.runtime
+      ~handle:parent.store_handle
+      expected
+  in
+  let current = Native_current_source.state source ~expected in
+  (* Only the SAME actual record's one-off invocation is relevant after the new
+     installed capture wait. Unrelated invocation completion is factual progress. *)
+  let%bind () =
+    Agent_session.Delegation_authority.check_invocation_owner record current
+  in
+  let%bind fingerprint = Native_current_source.fingerprint source ~expected:current in
+  let%map () =
+    check_generated_parent_authority
+      t
+      ~check_stop_epoch:true
+      ~state
+      ~record
+      ~current
+      ~fingerprint
+  in
+  parent, record
 ;;
 
 let check_source_for_execution t state = function
   | Authored _ -> Ok ()
-  | Generated_artifact _ -> Result.map (generated_parent t state) ~f:ignore
+  | Captured_delegation _ ->
+    Error
+      (unavailable
+         Invalid_state
+         "captured recurrence child requires reciprocal occurrence Run admission")
+  | Generated_artifact _ -> Result.map (generated_parent_native t state) ~f:ignore
+;;
+
+let legacy_checkpoint_activation_blocked (state : Agent_session.Session_state.t)
+  = function
+  | Generated_artifact _ | Captured_delegation _ -> Ok None
+  | Authored revision ->
+    Agent_session.Legacy_moderator_checkpoint.classify
+      revision
+      ~checkpoint:state.moderator
+      ~poll:Eio.Fiber.check
+    |> Result.map ~f:(function
+      | No_migration -> None
+      | Rebuild_required ->
+        Some
+          (unavailable
+             Migration_required
+             "historical moderator identity requires Stop and an explicit Pinned rebuild"))
 ;;
 
 type parent_stop_recovery =
@@ -969,7 +1448,12 @@ let shell_store_error (error : Agent_protocol.Error.t) =
     { code = "shell.actor_store_failed"; message = error.message }
 ;;
 
-let shell_approval_store ?(run_preparation = ref None) state actor_ref shell_state =
+let shell_approval_store
+      ?(run_preparation = Constructor_owner.Ordinary (ref None))
+      state
+      actor_ref
+      shell_state
+  =
   let load () =
     match !actor_ref with
     | None -> Ok !shell_state.Session.Shell_state.approval_grants
@@ -983,13 +1467,19 @@ let shell_approval_store ?(run_preparation = ref None) state actor_ref shell_sta
       shell_state := { !shell_state with approval_grants };
       Ok ()
     | Some actor ->
-      (match !run_preparation with
+      (match Constructor_owner.current run_preparation with
        | None ->
          Agent_session.Session_actor.replace_shell_approval_grants actor approval_grants
-       | Some preparation ->
+       | Some (Constructor_owner.Initial preparation) ->
          Agent_session.Session_actor.Constructor_mutations.replace_shell_approval_grants
            actor
            ~preparation
+           approval_grants
+       | Some (Runtime_construction construction) ->
+         Agent_session.Session_actor.Runtime_constructor_mutations
+         .replace_shell_approval_grants
+           actor
+           ~construction
            approval_grants)
       |> Result.map_error ~f:shell_store_error
   in
@@ -1068,7 +1558,7 @@ let operator_manifest_authorizer
 
 let manifest_authorizer
       ?manifest_sha256
-      ?(run_preparation = ref None)
+      ?(run_preparation = Constructor_owner.Ordinary (ref None))
       t
       profile
       revision
@@ -1090,12 +1580,18 @@ let manifest_authorizer
       := { !shell_state with manifest_grants = grant :: !shell_state.manifest_grants };
       Ok ()
     | Some actor ->
-      (match !run_preparation with
+      (match Constructor_owner.current run_preparation with
        | None -> Agent_session.Session_actor.add_shell_manifest_grant actor grant
-       | Some preparation ->
+       | Some (Constructor_owner.Initial preparation) ->
          Agent_session.Session_actor.Constructor_mutations.add_shell_manifest_grant
            actor
            ~preparation
+           grant
+       | Some (Runtime_construction construction) ->
+         Agent_session.Session_actor.Runtime_constructor_mutations
+         .add_shell_manifest_grant
+           actor
+           ~construction
            grant)
       |> Result.map_error ~f:manifest_store_error
   in
@@ -1131,12 +1627,17 @@ type pending_schedule_operation =
 let add_bound_schedule actor_ref pending ~run_preparation schedule =
   match !actor_ref with
   | Some actor ->
-    (match !run_preparation with
+    (match Constructor_owner.current run_preparation with
      | None -> Agent_session.Session_actor.add_schedule actor schedule
-     | Some preparation ->
+     | Some (Constructor_owner.Initial preparation) ->
        Agent_session.Session_actor.add_run_constructor_schedule
          actor
          ~preparation
+         schedule
+     | Some (Runtime_construction construction) ->
+       Agent_session.Session_actor.Runtime_constructor_mutations.add_schedule
+         actor
+         ~construction
          schedule)
     |> Result.map ~f:(fun schedule ->
       Agent_protocol.Id.Schedule.to_string schedule.Agent_protocol.Schedule.id)
@@ -1171,6 +1672,7 @@ let schedule_services t state actor_ref pending ~run_preparation =
           ; status = Scheduled
           ; delivery_count = 0
           ; last_delivery_at = None
+          ; inference_provenance = None
           ; delivery_cancellation = None
           ; ownership = None
           }
@@ -1185,12 +1687,17 @@ let schedule_services t state actor_ref pending ~run_preparation =
     in
     match !actor_ref with
     | Some actor ->
-      (match !run_preparation with
+      (match Constructor_owner.current run_preparation with
        | None -> Agent_session.Session_actor.cancel_schedule_internal actor ~schedule_id
-       | Some preparation ->
+       | Some (Constructor_owner.Initial preparation) ->
          Agent_session.Session_actor.cancel_run_constructor_schedule
            actor
            ~preparation
+           ~schedule_id
+       | Some (Runtime_construction construction) ->
+         Agent_session.Session_actor.Runtime_constructor_mutations.cancel_schedule
+           actor
+           ~construction
            ~schedule_id)
       |> Result.map ~f:(fun _ -> ())
       |> Result.map_error ~f:(fun error -> error.message)
@@ -1206,19 +1713,29 @@ let flush_pending_schedules ?run_preparation actor operations =
     | Add schedule ->
       (match run_preparation with
        | None -> Agent_session.Session_actor.add_schedule actor schedule
-       | Some preparation ->
+       | Some (Constructor_owner.Initial preparation) ->
          Agent_session.Session_actor.add_run_constructor_schedule
            actor
            ~preparation
+           schedule
+       | Some (Runtime_construction construction) ->
+         Agent_session.Session_actor.Runtime_constructor_mutations.add_schedule
+           actor
+           ~construction
            schedule)
       |> Result.map ~f:(fun _ -> ())
     | Cancel schedule_id ->
       (match run_preparation with
        | None -> Agent_session.Session_actor.cancel_schedule_internal actor ~schedule_id
-       | Some preparation ->
+       | Some (Constructor_owner.Initial preparation) ->
          Agent_session.Session_actor.cancel_run_constructor_schedule
            actor
            ~preparation
+           ~schedule_id
+       | Some (Runtime_construction construction) ->
+         Agent_session.Session_actor.Runtime_constructor_mutations.cancel_schedule
+           actor
+           ~construction
            ~schedule_id)
       |> Result.map ~f:(fun _ -> ())
   in
@@ -1246,6 +1763,7 @@ let model_job t state ~recipe ~payload ~delivery =
     ; result = None
     ; delivery
     ; launch = None
+    ; inference_origin = None
     ; progress = None
     }
 ;;
@@ -1573,11 +2091,10 @@ let extension_jobs t actor_ref registry native =
         ~binding
         ~launch:(Chat_response.Source_launch.conversation owner)
         ~request
-        ~max_registrations:
-          Chat_response.One_off_request.default_policy.execution.max_array_items
+        ~max_registrations:execution_request_policy.execution.max_array_items
         ~checkpoint)
     ~env:t.env
-    ~policy:Chat_response.One_off_request.default_policy
+    ~policy:execution_request_policy
     ~current_capabilities:(fun () -> registry)
     ~host
 ;;
@@ -1736,7 +2253,27 @@ let extension_schedules actor_ref =
   Service.create ~host
 ;;
 
-let extension_services t profile actor_ref ~(state : Agent_session.Session_state.t) =
+let instruction_service t actor_ref =
+  let module A = Agent_session.Session_actor in
+  Agent_session.Instruction_service.create
+    ~state:(fun () -> Result.bind (extension_actor actor_ref) ~f:A.state)
+    ~apply:(fun ~admission ~source ~request ->
+      Result.bind (extension_actor actor_ref) ~f:(fun actor ->
+        A.instruction_command actor ~admission ~source ~request))
+    ~sources:(fun () -> t.instruction_sources)
+    ~selection_current:(fun basis ->
+      match extension_actor actor_ref with
+      | Error _ -> false
+      | Ok actor -> A.instruction_selection_current actor basis)
+;;
+
+let native_script_tools
+      t
+      profile
+      actor_ref
+      ~(state : Agent_session.Session_state.t)
+      native
+  =
   let module A = Agent_session.Session_actor in
   let shell_provider = shell_approval_provider t profile actor_ref in
   let shell_store = shell_approval_store state actor_ref (ref state.shell) in
@@ -1771,6 +2308,94 @@ let extension_services t profile actor_ref ~(state : Agent_session.Session_state
       ; check
       }
   in
+  let registry =
+    Lazy.force native.Chat_response.Agent_runtime.capabilities
+    |> Result.map_error ~f:(fun error -> error.Chat_response.Tool_capability.message)
+    |> Result.ok_or_failwith
+  in
+  Agent_session.Script_tool_calls.create
+    ~registry:(fun () -> registry)
+    ~moderator_names:String.Set.empty
+    ~now:(fun () -> now t)
+    ~is_halted:(fun () ->
+      match Result.bind (extension_actor actor_ref) ~f:A.state with
+      | Error _ -> true
+      | Ok state ->
+        state.halted
+        || Option.is_some state.failure
+        || Agent_protocol.Session.equal_desired_state state.lifecycle.desired Stopped
+        || Option.exists state.active_operation ~f:(fun operation ->
+          match operation.state with
+          | Cancelling | Cancelled | Failed _ | Interrupted _ -> true
+          | Starting | Running | Completed -> false))
+    ~requires_active_moderator:(fun _ -> false)
+    ~authorize:(authorize_extension_native t actor_ref profile native)
+    ~prepare_output:(function
+      | Openai.Responses.Tool_output.Output.Text text -> Ok (`String text)
+      | output -> Ok (Openai.Responses.Tool_output.Output.jsonaf_of_t output))
+    ~defer_observation:(fun _ -> Ok ())
+  |> fun tools ->
+  Agent_session.Script_tool_calls.with_admission_check
+    tools
+    ~check:(fun invocation _binding ->
+      check_extension_native actor_ref profile invocation |> Result.map ~f:ignore)
+  |> fun tools ->
+  Agent_session.Script_tool_calls.with_generated_creation_service
+    tools
+    t.generated_creation
+  |> fun tools ->
+  Agent_session.Script_tool_calls.with_managed_session_service tools t.managed_sessions
+  |> fun tools ->
+  Agent_session.Script_tool_calls.with_instruction_service
+    tools
+    (instruction_service t actor_ref)
+  |> fun tools ->
+  Agent_session.Script_tool_calls.with_recurrence_service
+    tools
+    (t.recurrence_service profile actor_ref)
+  |> fun tools ->
+  Agent_session.Script_tool_calls.with_goal_metadata_service
+    tools
+    (t.goal_metadata_service profile actor_ref)
+  |> fun tools ->
+  Agent_session.Script_tool_calls.with_shell_context tools shell_context
+  |> fun tools ->
+  Agent_session.Script_tool_calls.with_session_helpers tools t.session_helpers
+  |> fun tools ->
+  Agent_session.Script_tool_calls.with_job_service
+    tools
+    (extension_jobs t actor_ref registry native)
+  |> fun tools ->
+  Agent_session.Script_tool_calls.with_subscription_service
+    tools
+    (extension_subscriptions t actor_ref)
+  |> fun tools ->
+  Agent_session.Script_tool_calls.with_schedule_service
+    tools
+    (extension_schedules actor_ref)
+  |> fun tools ->
+  Agent_session.Script_tool_calls.with_notification_service
+    tools
+    (extension_notifications actor_ref)
+  |> fun tools ->
+  Agent_session.Script_tool_calls.with_ingress_service tools (extension_ingress actor_ref)
+  |> fun tools ->
+  Agent_session.Script_tool_calls.with_progress tools ~emit:(fun invocation progress ->
+    match extension_actor actor_ref with
+    | Error _ -> ()
+    | Ok actor ->
+      A.publish_job_progress actor ~invocation_id:invocation.context.id progress)
+;;
+
+let extension_services
+      ?current_initialization
+      t
+      profile
+      actor_ref
+      ~initialization_scope
+      ~(state : Agent_session.Session_state.t)
+  =
+  let module A = Agent_session.Session_actor in
   let notification_snapshot () =
     let open Result.Let_syntax in
     let%bind actor = extension_actor actor_ref in
@@ -1807,82 +2432,7 @@ let extension_services t profile actor_ref ~(state : Agent_session.Session_state
         (match state.automatic_turn_budget with
          | Some budget -> budget.policy
          | None -> t.chatml_runtime_policy)
-    ; script_tools =
-        (fun native ->
-          let registry =
-            Lazy.force native.Chat_response.Agent_runtime.capabilities
-            |> Result.map_error ~f:(fun error ->
-              error.Chat_response.Tool_capability.message)
-            |> Result.ok_or_failwith
-          in
-          Agent_session.Script_tool_calls.create
-            ~registry:(fun () -> registry)
-            ~moderator_names:String.Set.empty
-            ~now:(fun () -> now t)
-            ~is_halted:(fun () ->
-              match Result.bind (extension_actor actor_ref) ~f:A.state with
-              | Error _ -> true
-              | Ok state ->
-                state.halted
-                || Option.is_some state.failure
-                || Agent_protocol.Session.equal_desired_state
-                     state.lifecycle.desired
-                     Stopped
-                || Option.exists state.active_operation ~f:(fun operation ->
-                  match operation.state with
-                  | Cancelling | Cancelled | Failed _ | Interrupted _ -> true
-                  | Starting | Running | Completed -> false))
-            ~requires_active_moderator:(fun _ -> false)
-            ~authorize:(authorize_extension_native t actor_ref profile native)
-            ~prepare_output:(function
-              | Openai.Responses.Tool_output.Output.Text text -> Ok (`String text)
-              | output -> Ok (Openai.Responses.Tool_output.Output.jsonaf_of_t output))
-            ~defer_observation:(fun _ -> Ok ())
-          |> fun tools ->
-          Agent_session.Script_tool_calls.with_admission_check
-            tools
-            ~check:(fun invocation _binding ->
-              check_extension_native actor_ref profile invocation |> Result.map ~f:ignore)
-          |> fun tools ->
-          Agent_session.Script_tool_calls.with_generated_creation_service
-            tools
-            t.generated_creation
-          |> fun tools ->
-          Agent_session.Script_tool_calls.with_managed_session_service
-            tools
-            t.managed_sessions
-          |> fun tools ->
-          Agent_session.Script_tool_calls.with_shell_context tools shell_context
-          |> fun tools ->
-          Agent_session.Script_tool_calls.with_session_helpers tools t.session_helpers
-          |> fun tools ->
-          Agent_session.Script_tool_calls.with_job_service
-            tools
-            (extension_jobs t actor_ref registry native)
-          |> fun tools ->
-          Agent_session.Script_tool_calls.with_subscription_service
-            tools
-            (extension_subscriptions t actor_ref)
-          |> fun tools ->
-          Agent_session.Script_tool_calls.with_schedule_service
-            tools
-            (extension_schedules actor_ref)
-          |> fun tools ->
-          Agent_session.Script_tool_calls.with_notification_service
-            tools
-            (extension_notifications actor_ref)
-          |> fun tools ->
-          Agent_session.Script_tool_calls.with_ingress_service
-            tools
-            (extension_ingress actor_ref)
-          |> fun tools ->
-          Agent_session.Script_tool_calls.with_progress
-            tools
-            ~emit:(fun invocation progress ->
-              match extension_actor actor_ref with
-              | Error _ -> ()
-              | Ok actor ->
-                A.publish_job_progress actor ~invocation_id:invocation.context.id progress))
+    ; script_tools = native_script_tools t profile actor_ref ~state
     ; standalone_execution_limits =
         Agent_session.Standalone_tool_dispatch.declared_execution_limits
     ; standalone_completion =
@@ -1895,11 +2445,25 @@ let extension_services t profile actor_ref ~(state : Agent_session.Session_state
             ~job
             ~current_capabilities:
               (Agent_session.Script_tool_calls.current_capabilities tools)
-            ~policy:Chat_response.One_off_request.default_policy)
-    ; one_off_policy = Chat_response.One_off_request.default_policy
+            ~policy:execution_request_policy)
+    ; one_off_policy = execution_request_policy
     ; native_service_revision =
         Agent_session.Session_management_channel.policy_fingerprint t.session_helpers
     ; authoring_validation_host = t.authoring_validation_host
+    ; initial_agent_guidance =
+        Some
+          (Agent_session.Instruction_service.agent_guidance
+             (instruction_service t actor_ref)
+             ~borrow_actor:(fun () ->
+               match
+                 match current_initialization with
+                 | None -> !initialization_scope
+                 | Some current -> current ()
+               with
+               | None -> Ok None
+               | Some scope ->
+                 Result.bind (extension_actor actor_ref) ~f:(fun actor ->
+                   A.initialization_agent_actor actor ~scope)))
     ; claim_lifecycle =
         (fun ~event ~snapshot handle ->
           let open Result.Let_syntax in
@@ -1937,7 +2501,7 @@ let extension_services t profile actor_ref ~(state : Agent_session.Session_state
               ~source
               ~current_capabilities:
                 (Agent_session.Script_tool_calls.current_capabilities tools)
-              ~policy:Chat_response.One_off_request.default_policy
+              ~policy:execution_request_policy
               ~max_count:t.limits.notifications.max_per_source
           in
           match
@@ -1957,7 +2521,7 @@ let extension_services t profile actor_ref ~(state : Agent_session.Session_state
               ~source
               ~current_capabilities:
                 (Agent_session.Script_tool_calls.current_capabilities tools)
-              ~policy:Chat_response.One_off_request.default_policy
+              ~policy:execution_request_policy
               ~max_count:t.limits.notifications.max_per_source
           in
           match
@@ -1977,12 +2541,10 @@ let extension_services t profile actor_ref ~(state : Agent_session.Session_state
               ~source
               ~current_capabilities:
                 (Agent_session.Script_tool_calls.current_capabilities tools)
-              ~policy:Chat_response.One_off_request.default_policy
+              ~policy:execution_request_policy
               ~max_count:t.limits.notifications.max_per_source
           in
-          match
-            Eio.Cancel.protect (fun () -> A.deliver_idle_notifications actor plan)
-          with
+          match A.deliver_idle_notifications actor plan with
           | Error { code = Conflict; _ } -> Ok false
           | result -> result)
     ; history =
@@ -1999,27 +2561,13 @@ let extension_services t profile actor_ref ~(state : Agent_session.Session_state
     }
 ;;
 
-let add_bound_job actor_ref pending ~run_preparation job =
-  match !actor_ref with
-  | Some actor ->
-    (match !run_preparation with
-     | None -> Agent_session.Session_actor.add_job actor job
-     | Some preparation ->
-       Agent_session.Session_actor.add_run_constructor_job actor ~preparation job)
-    |> Result.map ~f:(fun job -> Agent_protocol.Id.Job.to_string job.id)
-    |> Result.map_error ~f:(fun error -> error.message)
-  | None ->
-    pending := !pending @ [ job ];
-    Ok (Agent_protocol.Id.Job.to_string job.id)
-;;
-
 let rec await_call_cancellation t actor initialization_scope (job : Agent_protocol.Job.t) =
   let state = Agent_session.Session_actor.state actor in
   let scope_active =
     match initialization_scope with
     | None -> true
     | Some scope ->
-      Agent_session.Session_actor.initialization_model_job_is_current
+      Agent_session.Session_actor.initialization_model_job_is_running
         actor
         ~scope
         ~job_id:job.id
@@ -2057,10 +2605,18 @@ let interrupt_constructor_job actor ~run_preparation (job : Agent_protocol.Job.t
       ~generation:job.generation
       ~attempt:job.attempt
       ~reason
-  | Some preparation ->
+  | Some (Constructor_owner.Initial preparation) ->
     Agent_session.Session_actor.interrupt_run_constructor_job
       actor
       ~preparation
+      ~job_id:job.id
+      ~generation:job.generation
+      ~attempt:job.attempt
+      ~reason
+  | Some (Runtime_construction construction) ->
+    Agent_session.Session_actor.Runtime_constructor_mutations.interrupt_model_job
+      actor
+      ~construction
       ~job_id:job.id
       ~generation:job.generation
       ~attempt:job.attempt
@@ -2082,7 +2638,7 @@ let cancelled_call actor ~run_preparation (job : Agent_protocol.Job.t) =
 ;;
 
 let prepare_model_job_inference
-      ?(run_preparation = ref None)
+      ?(run_preparation = Constructor_owner.Ordinary (ref None))
       t
       actor
       ~initialization_scope
@@ -2117,7 +2673,7 @@ let prepare_model_job_inference
             (Sexp.to_string_hum (Inference_runtime.Preparation_error.sexp_of_t error)))
       in
       let%map () =
-        match !run_preparation with
+        match Constructor_owner.current run_preparation with
         | None ->
           Agent_session.Session_actor.capture_model_job_source
             actor
@@ -2125,10 +2681,18 @@ let prepare_model_job_inference
             ~generation:job.generation
             ~target
             ~limits:t.journal_document_limits
-        | Some preparation ->
+        | Some (Constructor_owner.Initial preparation) ->
           Agent_session.Session_actor.capture_run_constructor_model_source
             actor
             ~preparation
+            ~job_id:job.id
+            ~generation:job.generation
+            ~target
+            ~limits:t.journal_document_limits
+        | Some (Runtime_construction construction) ->
+          Agent_session.Session_actor.Runtime_constructor_mutations.capture_model_source
+            actor
+            ~construction
             ~job_id:job.id
             ~generation:job.generation
             ~target
@@ -2148,7 +2712,7 @@ let prepare_model_job_inference
       (fun target ->
         match initialization_scope with
         | None ->
-          (match !run_preparation with
+          (match Constructor_owner.current run_preparation with
            | None ->
              Agent_session.Session_actor.capture_recipe_target
                actor
@@ -2157,10 +2721,20 @@ let prepare_model_job_inference
                ~attempt:job.attempt
                ~target
                ~limits:t.journal_document_limits
-           | Some preparation ->
+           | Some (Constructor_owner.Initial preparation) ->
              Agent_session.Session_actor.capture_run_constructor_recipe_target
                actor
                ~preparation
+               ~job_id:job.id
+               ~generation:job.generation
+               ~attempt:job.attempt
+               ~target
+               ~limits:t.journal_document_limits
+           | Some (Runtime_construction construction) ->
+             Agent_session.Session_actor.Runtime_constructor_mutations
+             .capture_recipe_target
+               actor
+               ~construction
                ~job_id:job.id
                ~generation:job.generation
                ~attempt:job.attempt
@@ -2187,24 +2761,15 @@ let model_job_inference t entry job =
 ;;
 
 let job_services
+      ?construction_checkpoint
       t
       (state : Agent_session.Session_state.t)
       actor_ref
-      pending
+      _pending
       ~initialization_scope
       ~initialization_jobs
       ~run_preparation
   =
-  let spawn_model ~recipe ~payload =
-    let job = model_job t state ~recipe ~payload ~delivery:Pending in
-    match !actor_ref, !initialization_scope with
-    | Some actor, Some scope ->
-      Agent_session.Session_actor.add_initialization_model_job actor ~scope job
-      |> Result.map ~f:(fun job -> Agent_protocol.Id.Job.to_string job.id)
-      |> Result.map_error ~f:(fun error -> error.message)
-    | _, None -> add_bound_job actor_ref pending ~run_preparation job
-    | None, Some _ -> Error "initialization model admission requires its issuing actor"
-  in
   let capacity_key () =
     let prompt =
       Option.value_map
@@ -2220,17 +2785,22 @@ let job_services
       ~kind:Agent_protocol.Job.Model_call
       ~nested_depth:0
   in
-  let complete_call actor scope job result =
-    let outcome =
-      match result with
-      | Ok (Chat_response.Moderation.Capabilities.Model_ok payload) ->
-        Agent_session.Runtime_builder.Model_succeeded payload
-      | Ok (Model_refused message) | Ok (Model_error message) | Error message ->
-        Model_failed message
-    in
-    (match scope with
-     | None ->
-       (match !run_preparation with
+  let model_outcome = function
+    | Ok (Chat_response.Moderation.Capabilities.Model_ok payload) ->
+      Agent_session.Runtime_builder.Model_succeeded payload
+    | Ok (Model_refused message) | Ok (Model_error message) | Error message ->
+      Model_failed message
+  in
+  let complete_call ?producer actor scope job result =
+    let outcome = model_outcome result in
+    (match producer, scope with
+     | Some producer, _ ->
+       Agent_session.Session_actor.complete_initialization_model_call
+         actor
+         producer
+         outcome
+     | None, None ->
+       (match Constructor_owner.current run_preparation with
         | None ->
           Agent_session.Session_actor.complete_job
             actor
@@ -2238,15 +2808,23 @@ let job_services
             ~generation:job.generation
             ~attempt:job.attempt
             outcome
-        | Some preparation ->
+        | Some (Constructor_owner.Initial preparation) ->
           Agent_session.Session_actor.complete_run_constructor_model_job
             actor
             ~preparation
             ~job_id:job.id
             ~generation:job.generation
             ~attempt:job.attempt
+            outcome
+        | Some (Runtime_construction construction) ->
+          Agent_session.Session_actor.Runtime_constructor_mutations.complete_model_job
+            actor
+            ~construction
+            ~job_id:job.id
+            ~generation:job.generation
+            ~attempt:job.attempt
             outcome)
-     | Some scope ->
+     | None, Some scope ->
        Agent_session.Session_actor.complete_initialization_model_job
          actor
          ~scope
@@ -2257,144 +2835,341 @@ let job_services
     |> Result.map_error ~f:(fun error -> error.message)
     |> Result.bind ~f:(fun _ -> result)
   in
-  let run_call actor scope job execute =
+  let run_call ?producer actor scope job execute =
     match
       Eio.Fiber.first
-        (fun () -> `Completed (execute ()))
+        (fun () ->
+           let result =
+             match producer with
+             | None -> execute ()
+             | Some _ ->
+               (match execute () with
+                | result -> result
+                | exception (Eio.Cancel.Cancelled _ as exn) ->
+                  let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+                  Exn.raise_with_original_backtrace exn backtrace
+                | exception exn ->
+                  Error ("synchronous model call failed: " ^ Exn.to_string exn))
+           in
+           let retained =
+             match producer with
+             | None -> Ok ()
+             | Some producer ->
+               Agent_session.Session_actor.retain_initialization_model_call_result
+                 actor
+                 producer
+                 (model_outcome result)
+           in
+           `Completed (result, retained))
         (fun () ->
            await_call_cancellation t actor scope job;
            `Cancelled)
     with
-    | `Completed result -> complete_call actor scope job result
-    | `Cancelled -> cancelled_call actor ~run_preparation:!run_preparation job
+    | `Completed (result, retained) ->
+      let%bind.Result () =
+        Result.map_error retained ~f:(fun error -> error.Agent_protocol.Error.message)
+      in
+      complete_call ?producer actor scope job result
+    | `Cancelled ->
+      (match producer with
+       | Some producer ->
+         Agent_session.Session_actor.interrupt_initialization_model_call actor producer
+         |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
+         |> Result.bind ~f:(fun _ -> Error "synchronous model call was cancelled")
+       | None ->
+         cancelled_call
+           actor
+           ~run_preparation:(Constructor_owner.current run_preparation)
+           job)
     | exception (Eio.Cancel.Cancelled _ as exn) ->
-      Eio.Cancel.protect (fun () ->
-        ignore
-          (interrupt_constructor_job
-             actor
-             ~run_preparation:!run_preparation
-             job
-             ~reason:"synchronous model call was cancelled"
-           : (Agent_protocol.Job.t, Agent_protocol.Error.t) result));
-      raise exn
+      let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+      (match producer with
+       | Some _ ->
+         (* The producer extent records the joined cancellation without another
+            RPC that could replace it. Its real Claimed ACK remains Actor-owned. *)
+         ()
+       | None ->
+         Eio.Cancel.protect (fun () ->
+           ignore
+             (interrupt_constructor_job
+                actor
+                ~run_preparation:(Constructor_owner.current run_preparation)
+                job
+                ~reason:"synchronous model call was cancelled"
+              : (Agent_protocol.Job.t, Agent_protocol.Error.t) result)));
+      Exn.raise_with_original_backtrace exn backtrace
     | exception exn ->
       complete_call
+        ?producer
         actor
         scope
         job
         (Error ("synchronous model call failed: " ^ Exn.to_string exn))
   in
-  let call_model ~recipe ~payload ~execute =
-    match !actor_ref with
-    | None -> Error "synchronous model call requires an initialized session actor"
-    | Some actor ->
+  let module Service_owner = struct
+    type t =
+      | Installed of Agent_session.Model_job_admission.t
+      | Constructor of
+          { admission : Agent_session.Model_job_admission.t
+          ; scope : Agent_session.Session_actor.Initialization_scope.t option
+          }
+  end
+  in
+  let services ~construction_checkpoint (owner : Service_owner.t)
+    : Agent_session.Runtime_model_services.t
+    =
+    let scope, admission =
+      match owner with
+      | Installed admission -> None, admission
+      | Constructor { admission; scope } -> scope, admission
+    in
+    let checkpoint () =
+      Option.value_map construction_checkpoint ~default:(Ok ()) ~f:(fun check -> check ())
+      |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
+    in
+    let admit job =
       let open Result.Let_syntax in
-      let%bind current =
-        Agent_session.Session_actor.state actor
-        |> Result.map_error ~f:(fun error -> error.message)
-      in
-      let scope = !initialization_scope in
-      let%bind () =
-        match scope, current.lifecycle.desired with
-        | Some _, (Running | Stopped) | None, Running -> Ok ()
-        | None, Stopped -> Error "synchronous model call requires a running session"
-      in
-      (match Job_capacity.try_acquire t.job_capacity (capacity_key ()) with
-       | Error error -> Error error.message
-       | Ok None -> Error "synchronous model call capacity is currently unavailable"
-       | Ok (Some lease) ->
-         Exn.protect
-           ~finally:(fun () -> Job_capacity.release lease)
-           ~f:(fun () ->
-             let open Result.Let_syntax in
-             let job = model_job t state ~recipe ~payload ~delivery:Not_required in
-             let%bind job =
-               (match scope with
-                | Some scope ->
-                  Agent_session.Session_actor.start_initialization_model_job
-                    actor
-                    ~scope
-                    job
-                | None ->
-                  (match !run_preparation with
-                   | Some preparation ->
-                     Agent_session.Session_actor.start_run_constructor_model_job
-                       actor
-                       ~preparation
+      let%bind () = checkpoint () in
+      Agent_session.Model_job_admission.admit admission job
+      |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
+    in
+    let spawn_model ~recipe ~payload =
+      model_job t state ~recipe ~payload ~delivery:Pending
+      |> admit
+      |> Result.map ~f:(fun job -> Agent_protocol.Id.Job.to_string job.id)
+    in
+    let call_model ~recipe ~payload ~execute =
+      match !actor_ref with
+      | None -> Error "synchronous model call requires an initialized session actor"
+      | Some actor ->
+        let open Result.Let_syntax in
+        let%bind current =
+          Agent_session.Session_actor.state actor
+          |> Result.map_error ~f:(fun error -> error.message)
+        in
+        let%bind () =
+          (* Installed services already carry the real Event/Invocation admission
+             port, including an active stopped Policy_only claim. That port must
+             decide fresh effects before claim/provider work; desired Stopped is
+             not a substitute for its exact owner checks. Unscoped constructor
+             services retain their existing running-only boundary. *)
+          match owner, current.lifecycle.desired with
+          | Installed _, (Running | Stopped)
+          | Constructor { scope = Some _; _ }, (Running | Stopped)
+          | Constructor { scope = None; _ }, Running -> Ok ()
+          | Constructor { scope = None; _ }, Stopped ->
+            Error "synchronous model call requires a running session"
+        in
+        (match Job_capacity.try_acquire t.job_capacity (capacity_key ()) with
+         | Error error -> Error error.message
+         | Ok None -> Error "synchronous model call capacity is currently unavailable"
+         | Ok (Some lease) ->
+           Exn.protect
+             ~finally:(fun () -> Job_capacity.release lease)
+             ~f:(fun () ->
+               let invoke producer =
+                 let open Result.Let_syntax in
+                 let job = model_job t state ~recipe ~payload ~delivery:Not_required in
+                 let admit job =
+                   match producer with
+                   | None -> admit job
+                   | Some producer ->
+                     let%bind () = checkpoint () in
+                     Agent_session.Model_job_admission.admit
+                       (Agent_session.Session_actor
+                        .initialization_model_producer_admission
+                          producer)
                        job
-                   | None ->
-                     let%bind job = Agent_session.Session_actor.add_job actor job in
-                     let%bind claimed =
-                       Agent_session.Session_actor.claim_job
-                         actor
-                         ~job_id:job.id
-                         ~generation:job.generation
-                     in
-                     Result.of_option
-                       claimed
-                       ~error:
-                         (unavailable
-                            Conflict
-                            "synchronous model call could not claim its durable job")))
-               |> Result.map_error ~f:(fun error -> error.message)
-             in
-             Option.iter scope ~f:(fun _ ->
-               initialization_jobs := job :: !initialization_jobs);
-             let%bind inference =
-               prepare_model_job_inference
-                 ~run_preparation
-                 t
-                 actor
-                 ~initialization_scope:scope
-                 job
-               |> Result.map_error ~f:(fun error -> error.message)
-             in
-             run_call actor scope job (fun () ->
-               execute
-                 ~inference_context:inference.context
-                 ~before_inference_attempt:(fun _attempt ->
-                   match scope with
-                   | None -> ()
-                   | Some scope ->
-                     (match
-                        Agent_session.Session_actor.initialization_model_job_is_current
+                     |> Result.map_error ~f:(fun error ->
+                       error.Agent_protocol.Error.message)
+                 in
+                 let%bind job =
+                   Eio.Cancel.protect (fun () ->
+                     let%bind job = admit job in
+                     let%bind () = checkpoint () in
+                     (match producer, scope with
+                      | Some producer, _ ->
+                        Agent_session.Session_actor.claim_initialization_model_call
+                          actor
+                          producer
+                      | None, Some scope ->
+                        Agent_session.Session_actor.claim_initialization_model_job
                           actor
                           ~scope
                           ~job_id:job.id
                           ~generation:job.generation
-                          ~attempt:job.attempt
-                      with
-                      | Ok true -> ()
-                      | Ok false | Error _ ->
-                        raise Chat_response.Ctx.Inference_admission_rejected))
-                 ~capture_recipe_target:inference.capture_recipe_target)))
+                      | None, None ->
+                        let open Result.Let_syntax in
+                        let%bind claimed =
+                          Agent_session.Session_actor.claim_job
+                            actor
+                            ~job_id:job.id
+                            ~generation:job.generation
+                        in
+                        Result.of_option
+                          claimed
+                          ~error:
+                            (unavailable
+                               Conflict
+                               "synchronous model call could not claim its durable job"))
+                     |> Result.map_error ~f:(fun error ->
+                       error.Agent_protocol.Error.message))
+                 in
+                 (match producer, scope with
+                  | Some _, _ -> ()
+                  | None, Some _ -> initialization_jobs := job :: !initialization_jobs
+                  | None, None -> ());
+                 run_call ?producer actor scope job (fun () ->
+                   (* Preparation can reject or be cancelled after the durable Job
+                    claim. Keep it inside the same terminal-outcome owner as
+                    execution so it cannot strand a Run-owned child. *)
+                   let%bind () = checkpoint () in
+                   let%bind inference =
+                     prepare_model_job_inference
+                       ~run_preparation
+                       t
+                       actor
+                       ~initialization_scope:scope
+                       job
+                     |> Result.map_error ~f:(fun error -> error.message)
+                   in
+                   let%bind () = checkpoint () in
+                   let execute_owned allocate_inference =
+                     execute
+                       ~inference_context:inference.context
+                       ~allocate_inference
+                       ~before_inference_attempt:(fun _attempt ->
+                         (match checkpoint () with
+                          | Ok () -> ()
+                          | Error _ ->
+                            raise Chat_response.Ctx.Inference_admission_rejected);
+                         (match scope with
+                          | None -> ()
+                          | Some scope ->
+                            (match
+                               Agent_session.Session_actor
+                               .initialization_model_job_is_current
+                                 actor
+                                 ~scope
+                                 ~job_id:job.id
+                                 ~generation:job.generation
+                                 ~attempt:job.attempt
+                             with
+                             | Ok true -> ()
+                             | Ok false | Error _ ->
+                               raise Chat_response.Ctx.Inference_admission_rejected));
+                         match checkpoint () with
+                         | Ok () -> ()
+                         | Error _ -> raise Chat_response.Ctx.Inference_admission_rejected)
+                       ~capture_recipe_target:(fun target ->
+                         let open Result.Let_syntax in
+                         let check_construction () =
+                           Option.value_map
+                             construction_checkpoint
+                             ~default:(Ok ())
+                             ~f:(fun check -> check ())
+                         in
+                         let%bind () = check_construction () in
+                         let%bind () = inference.capture_recipe_target target in
+                         (* The actual capture ACK rotates target Store custody.
+                          Refresh outside the mailbox before graph allocation. *)
+                         check_construction ())
+                   in
+                   match scope with
+                   | Some scope ->
+                     execute_owned
+                       (Agent_session.Session_actor.initialization_model_allocation
+                          actor
+                          ~scope
+                          ~job)
+                   | None ->
+                     Agent_session.Session_actor.with_job_execution
+                       actor
+                       ~job_id:job.id
+                       ~generation:job.generation
+                       ~attempt:job.attempt
+                       ~deadline:None
+                       (fun services -> Ok (execute_owned services.allocate_inference))
+                     |> Result.map_error ~f:(fun error ->
+                       error.Agent_protocol.Error.message)
+                     |> Result.join)
+               in
+               match scope with
+               | None -> invoke None
+               | Some scope ->
+                 Agent_session.Session_actor.with_initialization_model_producer
+                   actor
+                   ~scope
+                   ~f:(fun producer -> invoke (Some producer))))
+    in
+    { spawn_model; call_model }
   in
-  Agent_session.Runtime_builder.{ spawn_model; call_model }
+  let initialization =
+    let scope = !initialization_scope in
+    let admission =
+      match !actor_ref, scope with
+      | Some actor, Some scope ->
+        Agent_session.Session_actor.initialization_model_admission actor ~scope
+      | (None | Some _), None | None, Some _ ->
+        Agent_session.Invocation_capabilities.unavailable.model_jobs
+    in
+    services ~construction_checkpoint (Constructor { admission; scope })
+  in
+  Agent_session.Runtime_model_services.
+    { initialization
+    ; for_execution =
+        (fun admission -> services ~construction_checkpoint:None (Installed admission))
+    }
 ;;
 
 let flush_pending_jobs ?run_preparation actor jobs =
   List.fold_result jobs ~init:() ~f:(fun () job ->
     (match run_preparation with
      | None -> Agent_session.Session_actor.add_job actor job
-     | Some preparation ->
-       Agent_session.Session_actor.add_run_constructor_job actor ~preparation job)
+     | Some (Constructor_owner.Initial preparation) ->
+       Agent_session.Session_actor.add_run_constructor_job actor ~preparation job
+     | Some (Runtime_construction construction) ->
+       Agent_session.Session_actor.Runtime_constructor_mutations.add_job
+         actor
+         ~construction
+         job)
     |> Result.map ~f:(fun _ -> ()))
 ;;
 
-let install_moderator_if_changed ?run_preparation actor moderator_snapshot =
+let install_moderator_if_changed
+      ?run_preparation
+      ?moderator_manager
+      actor
+      moderator_snapshot
+  =
   let open Result.Let_syntax in
-  let%bind state = Agent_session.Session_actor.state actor in
-  if Option.equal Jsonaf.exactly_equal state.moderator moderator_snapshot
-  then Ok ()
-  else
-    (match run_preparation with
-     | None -> Agent_session.Session_actor.change_moderator actor moderator_snapshot
-     | Some preparation ->
-       Agent_session.Session_actor.checkpoint_run_moderator
-         actor
-         ~preparation
-         moderator_snapshot)
-    |> Result.map ~f:(fun _ -> ())
+  match run_preparation with
+  | Some (Constructor_owner.Initial preparation) ->
+    Agent_session.Session_actor.checkpoint_run_moderator
+      ?moderator_manager
+      actor
+      ~preparation
+      moderator_snapshot
+    |> Result.map ~f:ignore
+  | Some (Runtime_construction construction) ->
+    Agent_session.Session_actor.Runtime_constructor_mutations.checkpoint_moderator
+      ?moderator_manager
+      actor
+      ~construction
+      moderator_snapshot
+    |> Result.map ~f:ignore
+  | None ->
+    let%bind state = Agent_session.Session_actor.state actor in
+    let%bind moderator_snapshot =
+      Agent_session.Moderator_checkpoint.reuse_unchanged_snapshot
+        ~previous:state.moderator
+        ~incoming:moderator_snapshot
+    in
+    if Option.equal Jsonaf.exactly_equal state.moderator moderator_snapshot
+    then Ok ()
+    else
+      Agent_session.Session_actor.change_moderator actor moderator_snapshot
+      |> Result.map ~f:ignore
 ;;
 
 let runtime_inference_ports t actor_ref =
@@ -2414,7 +3189,15 @@ let runtime_inference_ports t actor_ref =
       (Sexp.to_string_hum (Inference_runtime.Preparation_error.sexp_of_t error)))
 ;;
 
-let create_graph_tracking ?run_preparation t actor_ref =
+let create_graph_source () =
+  Transcript.Source_id.of_string
+    ("graph/"
+     ^ (Agent_protocol.Id.Transaction.create () |> Agent_protocol.Id.Transaction.to_string)
+    )
+  |> Result.map_error ~f:(unavailable Internal_error)
+;;
+
+let create_graph_tracking ?policy_restoration ?run_preparation t actor_ref =
   let open Result.Let_syntax in
   let%bind actor =
     Result.of_option
@@ -2423,14 +3206,27 @@ let create_graph_tracking ?run_preparation t actor_ref =
         (unavailable Invalid_state "inference graph requires an actual durable actor")
   in
   let%bind upstream = runtime_inference_ports t actor_ref in
-  let%bind source =
-    Transcript.Source_id.of_string
-      ("graph/"
-       ^ (Agent_protocol.Id.Transaction.create ()
-          |> Agent_protocol.Id.Transaction.to_string))
-    |> Result.map_error ~f:(unavailable Internal_error)
-  in
-  Graph_tracking.create ?run_preparation actor ~source ~upstream
+  let%bind source = create_graph_source () in
+  match policy_restoration, run_preparation with
+  | Some restoration, _ ->
+    Graph_tracking.create_for_policy_restoration actor ~restoration ~source ~upstream
+  | None, None -> Graph_tracking.create actor ~source ~upstream
+  | None, Some (Constructor_owner.Ordinary preparation) ->
+    Graph_tracking.create ~run_preparation:preparation actor ~source ~upstream
+  | None, Some (Installed_resume { preparation; _ }) ->
+    Graph_tracking.create ~run_preparation:preparation actor ~source ~upstream
+  | None, Some (Constructor_owner.Shared _) ->
+    Error (unavailable Invalid_state "callback routing cannot issue graph construction")
+  | None, Some (Admitted construction) ->
+    let%bind construction =
+      Result.of_option
+        !construction
+        ~error:
+          (unavailable
+             Invalid_state
+             "runtime construction graph requires its actual constructor")
+    in
+    Graph_tracking.create_for_runtime_construction actor ~construction ~source ~upstream
 ;;
 
 exception Inference_graph_cleanup_failed of Agent_protocol.Error.t
@@ -2463,7 +3259,7 @@ let with_auxiliary_graph tracking f =
         try Ok (callback ()) with
         | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())
       in
-      (* The compactor's request scopes have joined before returning. Both
+      (* The request scopes have joined before returning. Both
          tracking steps are attempted while its actor and writer remain live. *)
       let sealed = capture (fun () -> Graph_tracking.seal tracking) in
       let finished = capture (fun () -> Graph_tracking.finish tracking) in
@@ -2477,45 +3273,1066 @@ let with_auxiliary_graph tracking f =
       value)
 ;;
 
-let tracked_runtime tracking (runtime : Agent_session.Runtime_builder.t) =
-  let closed = Atomic.make false in
-  let finished, finished_u = Eio.Promise.create () in
-  let unwrap = function
-    | Ok () -> ()
-    | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
+let prepare_held_input
+      t
+      ~(entry : Session_registry.entry)
+      ~(runtime : Agent_session.Runtime_builder.t)
+      ~scope
+  =
+  let module A = Agent_session in
+  let module Store = Agent_store.Session_store in
+  let open Result.Let_syntax in
+  let%bind execution = A.Session_actor.Held_input_scope.execution scope in
+  let%bind () = execution.checkpoint () in
+  let%bind handle =
+    Result.of_option
+      entry.store_handle
+      ~error:(unavailable Invalid_state "held input requires an owned session store")
   in
-  let capture f =
-    try Ok (f ()) with
-    | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())
+  let%bind () =
+    if
+      Store.owns_handle t.store handle
+      && Agent_protocol.Id.Session.equal
+           (Store.Handle.session_id handle)
+           execution.request.session_id
+    then Ok ()
+    else Error (unavailable Permission_denied "held input has a foreign session store")
   in
-  let require = function
-    | Ok () -> ()
-    | Error error -> raise (Inference_graph_cleanup_failed error)
+  let%bind _ =
+    Store.Handle.metadata_checked handle |> Result.map_error ~f:protocol_of_store
   in
-  let close () =
-    Eio.Cancel.protect (fun () ->
-      if Atomic.exchange closed true
-      then Eio.Promise.await finished |> unwrap
-      else (
-        (* All lifecycle steps are attempted. The existing runtime's primary
-           close exception retains precedence over secondary tracking cleanup. *)
-        let sealed = capture (fun () -> Graph_tracking.seal tracking) in
-        let closed = capture runtime.close in
-        let tracked = capture (fun () -> Graph_tracking.finish tracking) in
-        let outcome =
-          capture (fun () ->
-            unwrap closed;
-            (match sealed with
-             | Ok result -> require result
-             | Error failure -> unwrap (Error failure));
-            match tracked with
-            | Ok result -> require result
-            | Error failure -> unwrap (Error failure))
+  let%bind upstream = runtime_inference_ports t (ref (Some entry.actor)) in
+  let%bind source = create_graph_source () in
+  let%bind tracking =
+    Graph_tracking.create_for_held_input entry.actor ~scope ~source ~upstream
+  in
+  (* This graph belongs to the actual input scope, not to the constructor's
+     already-cleared preparation cell. Join and finish it before the Actor can
+     publish Parsed_ready or transfer startup into a root Operation. *)
+  with_auxiliary_graph tracking (fun () ->
+    let%bind () = execution.checkpoint () in
+    let services : A.Runtime_input_preparation.Tracking.t =
+      { identity =
+          Graph_tracking.bind_identity tracking ~allocate:execution.allocate_inference
+      ; on_attempt = Graph_tracking.on_attempt tracking
+      ; on_observation = Graph_tracking.on_observation tracking
+      ; on_completion = Graph_tracking.on_completion tracking
+      }
+    in
+    try runtime.parse_prepared_input ~execution ~tracking:services with
+    | Graph_tracking.Rejected error -> Error error)
+;;
+
+(* Exact child's factual parent custody. Original returned pin/outer reports
+   remain immutable; later explicit repair uses only their same physical witness
+   or same normally returned Lease holder after dependent local/graph exit. *)
+module Native_parent_cleanup = struct
+  module Native = Runtime_owner.Native_borrow_outcome
+  module Scope = Runtime_owner.Scope_outcome
+  module Failure = Constructor_inference_graph.Failure
+  module Repair = Native_resource_lifetime.Parent_cleanup_repair
+
+  type phase =
+    | Fresh
+    | Entered
+    | Completed of unit Native.t
+
+  type t =
+    { domain : int
+    ; owner : Runtime_owner.t
+    ; mutable release : Runtime_owner.Native_release.t option
+    ; mutable phase : phase
+    }
+
+  let create ~owner =
+    { domain = (Stdlib.Domain.self () :> int); owner; release = None; phase = Fresh }
+  ;;
+
+  let same_domain t = Int.equal t.domain (Stdlib.Domain.self () :> int)
+
+  let check_domain t =
+    if not (same_domain t)
+    then invalid_arg "native parent cleanup belongs to another Eio domain"
+  ;;
+
+  let begin_original t =
+    check_domain t;
+    match t.phase with
+    | Fresh -> t.phase <- Entered
+    | Entered | Completed _ -> invalid_arg "native parent original already entered"
+  ;;
+
+  let capture_release t release =
+    check_domain t;
+    (match t.phase with
+     | Entered -> ()
+     | Fresh | Completed _ -> invalid_arg "native parent release outside original call");
+    match t.release with
+    | None -> t.release <- Some release
+    | Some _ -> invalid_arg "native parent release already captured"
+  ;;
+
+  let record t outcome =
+    check_domain t;
+    (match t.phase with
+     | Entered -> ()
+     | Fresh | Completed _ ->
+       invalid_arg "native parent cleanup report outside original call");
+    (match t.release, Native.Cleanup.pin (Native.cleanup outcome) with
+     | None, Not_acquired -> ()
+     | Some captured, Acquired { release; _ } when phys_equal captured release -> ()
+     | (Some _ | None), (Not_acquired | Acquired _) ->
+       invalid_arg "native parent report changed its actual captured release");
+    t.phase <- Completed outcome
+  ;;
+
+  let original_cleanup t =
+    if not (same_domain t)
+    then
+      Error
+        (Failure.Protocol
+           (Agent_protocol.Error.invalid_request
+              "native parent cleanup belongs to another Eio domain"))
+    else (
+      match t.phase with
+      | Fresh | Entered ->
+        Error
+          (Failure.Protocol
+             (unavailable Conflict "native parent cleanup report is unavailable"))
+      | Completed outcome ->
+        (match
+           Scope.Cleanup.status (Native.Cleanup.combined (Native.cleanup outcome))
+         with
+         | Never_acquired | Joined -> Ok ()
+         | Failed (Protocol error, _) -> Error (Failure.Protocol error)
+         | Failed (Raised (exn, backtrace), _) -> Error (Failure.Raised (exn, backtrace))))
+  ;;
+
+  module Original = struct
+    module CO = Agent_session.Close_observation
+
+    type observation = (unit, Agent_protocol.Error.t) result CO.t
+
+    module Primary = struct
+      type t =
+        | Positive
+        | Callback_alias
+        | Preparation_failure of observation
+        | Prior_loan_failure of observation
+        | Cleanup_alias of observation
+        | Own_control of observation
+    end
+
+    type t =
+      { cleanup : Repair.t
+      ; primary : Primary.t
+      }
+
+    let current_cleanup t ~current = Repair.observation t.cleanup ~current
+    let repair t ~pin ~current = Repair.retry t.cleanup ~pin ~current
+    let primary t = t.primary
+  end
+
+  module Original_state = struct
+    type t =
+      | Never_entered
+      | Completed of Original.t
+  end
+
+  (* Fresh is an explicit original-entry fact, not an absent outcome. Only the
+     shared owner after actual Driver completion may use it as no invocation. *)
+  let original t ~local =
+    let module CO = Agent_session.Close_observation in
+    let module D = Agent_session.Cleanup_diagnostic in
+    let open Result.Let_syntax in
+    let missing_origin () =
+      Error
+        (unavailable Conflict "native parent original has unavailable producer evidence")
+    in
+    let selected observation =
+      match CO.exit observation with
+      | Returned (Ok ()) -> Ok None
+      | Returned (Error _) | Raised _ ->
+        (match CO.primary observation with
+         | Some primary when not (List.is_empty (D.failures primary)) -> Ok (Some primary)
+         | None | Some _ -> missing_origin ())
+    in
+    if not (same_domain t)
+    then
+      Error
+        (Agent_protocol.Error.invalid_request
+           "native parent cleanup belongs to another Eio domain")
+    else (
+      match t.phase with
+      | Fresh -> Ok Original_state.Never_entered
+      | Entered ->
+        Error (unavailable Conflict "native parent cleanup report is unavailable")
+      | Completed outcome ->
+        let cleanup = Native.Cleanup.observation (Native.cleanup outcome) in
+        let%bind _cleanup_selected = selected cleanup in
+        let%bind callback_selected =
+          selected (Delegated_runtime.Cleanup.Local.observation local)
         in
-        Eio.Promise.resolve finished_u outcome;
-        unwrap outcome))
-  in
-  { runtime with close }
+        let%bind primary =
+          match Native.primary outcome with
+          | Scope.Returned (Ok ()) ->
+            (* A selected negative in the whole Native observation now belongs
+               to cleanup, notably a repairable exact returned pin. *)
+            (match callback_selected with
+             | None -> Ok Original.Primary.Positive
+             | Some _ -> missing_origin ())
+          | Scope.Returned (Error _) | Scope.Raised _ ->
+            let observed = Native.observation outcome in
+            let%bind selected = selected observed in
+            (match selected with
+             | None -> missing_origin ()
+             | Some selected ->
+               let original_primary =
+                 CO.create
+                   (match Native.primary outcome with
+                    | Scope.Returned result -> CO.Returned result
+                    | Raised (exn, trace) -> Raised (exn, trace))
+                   ~diagnostics:(CO.diagnostics observed)
+                   ~primary:selected
+                   ()
+               in
+               if Option.exists callback_selected ~f:(D.equal selected)
+               then Ok Original.Primary.Callback_alias
+               else (
+                 match Native.preadmission outcome with
+                 | Some (Scope.Returned (Error _) | Raised _) ->
+                   (* This invocation never acquired a new pin. Existing loans
+                      remain the provider's independent cleanup obligation. *)
+                   Ok (Original.Primary.Prior_loan_failure original_primary)
+                 | None | Some (Scope.Returned (Ok ())) ->
+                   if
+                     Option.exists (Native.preparation_failure outcome) ~f:(fun failure ->
+                       let observed = Native.Preparation_failure.observation failure in
+                       Option.exists (CO.primary observed) ~f:(D.equal selected))
+                   then Ok (Original.Primary.Preparation_failure original_primary)
+                   else if List.mem (CO.diagnostics cleanup) selected ~equal:D.equal
+                   then
+                     (* Keep its negative raw selection even if this SAME group
+                        also appears as positive historical cleanup data. Alias
+                        provenance does not make the selected primary success. *)
+                     Ok (Original.Primary.Cleanup_alias original_primary)
+                   else Ok (Original.Primary.Own_control original_primary)))
+        in
+        Ok
+          (Original_state.Completed
+             { Original.cleanup = Repair.create (Native.cleanup outcome) ~owner:t.owner
+             ; primary
+             }))
+  ;;
+
+  let eligible_pin t =
+    if not (same_domain t)
+    then None
+    else (
+      match t.phase, t.release with
+      | Completed outcome, Some captured ->
+        (match
+           ( Native.primary outcome
+           , Native.Cleanup.pin_only_failure (Native.cleanup outcome) )
+         with
+         | Returned (Ok ()), Some actual when phys_equal actual captured -> Some actual
+         | (Returned _ | Raised _), (Some _ | None) -> None)
+      | (Fresh | Entered | Completed _), (Some _ | None) -> None)
+  ;;
+
+  (* A failed constructor may still owe the exact acquired pin. This evidence
+     alone cannot authorize repair; the shared owner separately requires its
+     actual Not_created/Local-joined partial state and completed child graph. *)
+  let eligible_preparation_pin t =
+    if not (same_domain t)
+    then None
+    else (
+      match t.phase, t.release with
+      | Completed outcome, Some captured ->
+        (match
+           ( Native.preparation_failure outcome
+           , Native.Cleanup.pin_only_failure (Native.cleanup outcome) )
+         with
+         | Some _, Some actual when phys_equal actual captured -> Some actual
+         | (None | Some _), (None | Some _) -> None)
+      | (Fresh | Entered | Completed _), (None | Some _) -> None)
+  ;;
+end
+
+module Runtime_close_observation = struct
+  module Observation = Agent_session.Close_observation
+  module Diagnostic = Agent_session.Cleanup_diagnostic
+
+  let raised exn backtrace =
+    let diagnostic =
+      Diagnostic.create [ Agent_session.Callback_cleanup.Failure.Raised (exn, backtrace) ]
+    in
+    Observation.create
+      (Raised (exn, backtrace))
+      ~diagnostics:[ diagnostic ]
+      ~primary:diagnostic
+      ()
+  ;;
+
+  let capture f =
+    match f () with
+    | () -> Observation.create (Returned ()) ~diagnostics:[] ()
+    | exception exn -> raised exn (Stdlib.Printexc.get_raw_backtrace ())
+  ;;
+
+  let failed (observation : unit Observation.t) =
+    match Observation.exit observation with
+    | Returned () -> false
+    | Raised _ -> true
+  ;;
+
+  let combine (first : unit Observation.t) (second : unit Observation.t) =
+    let primary = if failed first then first else second in
+    Observation.create
+      (Observation.exit primary)
+      ~diagnostics:(Observation.diagnostics first @ Observation.diagnostics second)
+      ?primary:(Observation.primary primary)
+      ()
+  ;;
+
+  (* Materialize the existing legacy protocol-exception wrapper only when
+     publishing an actual close result. Keep the supplied producer identity;
+     callers retain this value rather than rebuilding it from a later getter. *)
+  let of_result observation ~protocol_error =
+    let exit =
+      match Observation.exit observation with
+      | Returned (Ok ()) -> Observation.Returned ()
+      | Raised (exn, backtrace) -> Raised (exn, backtrace)
+      | Returned (Error error) ->
+        (match raise (protocol_error error) with
+         | () -> assert false
+         | exception exn -> Raised (exn, Stdlib.Printexc.get_raw_backtrace ()))
+    in
+    Observation.create
+      exit
+      ~diagnostics:(Observation.diagnostics observation)
+      ?primary:
+        (match exit with
+         | Returned () -> None
+         | Raised _ -> Observation.primary observation)
+      ()
+  ;;
+
+  (* Sequential ownership wrappers used to skip the second operation when the
+     first raised. Keep that control law separate from unconditional cleanup. *)
+  let continue first ~f = if failed first then first else combine first (f ())
+end
+
+module Runtime_result_observation = struct
+  module CO = Agent_session.Close_observation
+  module O = Native_cleanup_observation
+
+  type 'a t = ('a, Agent_protocol.Error.t) result CO.t
+
+  let raw = O.capture
+
+  let bind observation ~f =
+    match CO.exit observation with
+    | Returned (Error error) ->
+      CO.create
+        (Returned (Error error))
+        ~diagnostics:(CO.diagnostics observation)
+        ?primary:(CO.primary observation)
+        ()
+    | Raised (exn, trace) ->
+      CO.create
+        (Raised (exn, trace))
+        ~diagnostics:(CO.diagnostics observation)
+        ?primary:(CO.primary observation)
+        ()
+    | Returned (Ok value) ->
+      let result = O.capture_observed (fun () -> f value) in
+      CO.create
+        (CO.exit result)
+        ~diagnostics:(CO.diagnostics observation @ CO.diagnostics result)
+        ?primary:(CO.primary result)
+        ()
+  ;;
+
+  (* The existing Result CPS may validate and fail before invoking its callback.
+     Only observation DATA crosses its successful branch; no known negative is
+     resumed and re-caught to fit that Result boundary. *)
+  let through_result f = bind (raw f) ~f:Fn.id
+end
+
+module Tracking_cleanup_observation = struct
+  module CO = Agent_session.Close_observation
+  module Observation = Native_cleanup_observation
+  module Close = Runtime_close_observation
+
+  type t =
+    { sealed : unit Observation.t
+    ; finished : unit Observation.t
+    }
+
+  let is_positive t =
+    not (Observation.is_negative t.sealed || Observation.is_negative t.finished)
+  ;;
+
+  let close_result t ~resource =
+    let selected =
+      if Close.failed resource
+      then resource
+      else
+        Close.of_result
+          (if Observation.is_negative t.sealed then t.sealed else t.finished)
+          ~protocol_error:(fun error -> Inference_graph_cleanup_failed error)
+    in
+    (* Execution is seal, resource, finish; legacy result precedence is
+       resource, seal, finish. Diagnostic order must not choose the raw exit. *)
+    CO.create
+      (CO.exit selected)
+      ~diagnostics:
+        (CO.diagnostics t.sealed @ CO.diagnostics resource @ CO.diagnostics t.finished)
+      ?primary:(if Close.failed selected then CO.primary selected else None)
+      ()
+  ;;
+end
+
+module Fixed_control_observation = struct
+  module CO = Agent_session.Close_observation
+  module Diagnostic = Agent_session.Cleanup_diagnostic
+  module Normalization = Delegated_runtime.Cleanup.Normalization
+  module Observation = Native_cleanup_observation
+
+  let unavailable () =
+    Error
+      (Agent_protocol.Error.create
+         Conflict
+         ~message:"original scope control has unavailable producer evidence"
+         ~retryable:false
+         ())
+  ;;
+
+  let normalize observation ~normalization =
+    match CO.exit observation with
+    | Returned (Ok ()) -> Ok observation
+    | Returned (Error _) | Raised _ ->
+      (match CO.primary observation with
+       | None -> unavailable ()
+       | Some selected ->
+         if List.is_empty (Diagnostic.failures selected)
+         then unavailable ()
+         else if
+           Option.exists normalization ~f:(fun normalization ->
+             Diagnostic.equal selected (Normalization.selected normalization))
+         then
+           Ok (CO.create (Returned (Ok ())) ~diagnostics:(CO.diagnostics observation) ())
+         else Ok observation)
+  ;;
+
+  module Normalized_delivery = struct
+    module Ancestry = Independent_resources.Cleanup
+    module Driver = Delegated_runtime.Cleanup
+
+    type t = Diagnostic.t
+
+    let of_original original ~ancestry =
+      let local = Driver.Original.local original in
+      match
+        ( Driver.Original.normalization original
+        , CO.exit (Driver.Original.terminal original)
+        , Driver.Local.status local
+        , CO.exit (Driver.Local.observation local) )
+      with
+      | Some normalization, Returned (Ok ()), Joined, Returned (Ok ()) ->
+        (match CO.exit (Normalization.original normalization) with
+         | Raised (Eio.Cancel.Cancelled _, _) ->
+           (match Ancestry.Snapshot.cleanup ancestry with
+            | Error _ -> None
+            | Ok factual ->
+              let selected = Normalization.selected normalization in
+              let excluded = Driver.Local.diagnostics local @ CO.diagnostics factual in
+              List.find_map
+                (Ancestry.Snapshot.own_post_callback_checks ancestry)
+                ~f:(fun check ->
+                  if Ancestry.Own_post_callback_check.eligible check ~selected ~excluded
+                  then Some (Ancestry.Own_post_callback_check.diagnostic check)
+                  else None))
+         | Returned _ | Raised _ -> None)
+      | _ -> None
+    ;;
+
+    (* This effect belongs to the elected successful owner publication, never
+       observation/getter code. The singleton receipt excludes other supporting
+       failures, callbacks, Local and actual factual-cleanup groups. *)
+    let acknowledge diagnostic =
+      ignore
+        (Diagnostic.take_legacy_diagnostic_exn ~primary:diagnostic [ diagnostic ]
+         : (Diagnostic.t * Agent_session.Callback_cleanup.Failure.t) option)
+    ;;
+  end
+
+  (* Only original own-scope controls reach this projection. Local release,
+     runtime close, revocation and current cleanup never pass through it. A
+     positive empty control partition establishes no resource custody. *)
+  let observe controls ~normalization =
+    List.fold_result controls ~init:(Observation.return ()) ~f:(fun combined control ->
+      Result.map (normalize control ~normalization) ~f:(Observation.combine combined))
+  ;;
+end
+
+module Shared_tracking_cleanup = struct
+  module B = Agent_session.Runtime_builder
+  module CO = Agent_session.Close_observation
+  module O = Native_cleanup_observation
+  module Close = Runtime_close_observation
+  module Driver = Delegated_runtime.Cleanup
+  module Ancestry = Independent_resources.Cleanup
+  module Parent = Native_parent_cleanup
+  module Repair = Native_resource_lifetime.Parent_cleanup_repair
+
+  module Resource = struct
+    type t =
+      | Ordinary of B.t
+      | Owned of
+          { driver : Driver.t
+          ; parent : Parent.t
+          }
+      | Independent of
+          { driver : Driver.t
+          ; ancestry : Ancestry.t
+          }
+  end
+
+  module Entry = struct
+    type t =
+      | Partial
+      | Runtime
+  end
+
+  module Original = struct
+    type t =
+      | Ordinary of unit CO.t
+      | Owned of
+          { driver : Driver.Original.t
+          ; parent : (Parent.Original_state.t, Agent_protocol.Error.t) result
+          }
+      | Independent of Driver.Original.t
+      | Join_failed of unit CO.t
+      | Join_refused of Agent_protocol.Error.t
+  end
+
+  type completed =
+    { graph : Tracking_cleanup_observation.t
+    ; resource : Original.t
+    ; repair : Repair.Current.t option
+    ; original : unit CO.t
+    ; latest : unit CO.t
+    ; normalized_delivery : Fixed_control_observation.Normalized_delivery.t option
+    }
+
+  type phase =
+    | Open
+    | Running of unit CO.t Eio.Promise.t
+    | Complete of completed
+    | Fixed_escape of unit CO.t
+
+  type t =
+    { domain : int
+    ; tracking : Graph_tracking.t
+    ; resource : Resource.t
+    ; phase : phase Atomic.t
+    }
+
+  let create ~tracking ~resource =
+    { domain = (Stdlib.Domain.self () :> int)
+    ; tracking
+    ; resource
+    ; phase = Atomic.make Open
+    }
+  ;;
+
+  let same_domain t = Int.equal t.domain (Stdlib.Domain.self () :> int)
+  let positive () = CO.create (Returned ()) ~diagnostics:[] ()
+
+  (* Lifecycle/missing-evidence refusals are not producer failures. The actual
+     closer can return this negative raw projection, but no diagnostic is minted
+     by a getter or by the absence of a receipt. *)
+  let refusal error =
+    Close.of_result
+      (CO.create (Returned (Error error)) ~diagnostics:[] ())
+      ~protocol_error:(fun error -> Runtime_owner.Cleanup_failed error)
+  ;;
+
+  let conflict message = unavailable Conflict message
+
+  let observe_close f =
+    match f () with
+    | observed -> observed
+    | exception exn -> Close.raised exn (Stdlib.Printexc.get_raw_backtrace ())
+  ;;
+
+  let driver_of_resource = function
+    | Resource.Ordinary _ -> None
+    | Owned { driver; _ } | Independent { driver; _ } -> Some driver
+  ;;
+
+  let partial_ready t =
+    match driver_of_resource t.resource with
+    | None -> true
+    | Some driver ->
+      (match Driver.adoption driver with
+       | Original_running -> false
+       | Not_created | Closed_runtime _ -> true)
+  ;;
+
+  let not_created t =
+    Option.exists (driver_of_resource t.resource) ~f:(fun driver ->
+      match Driver.adoption driver with
+      | Not_created -> true
+      | Original_running | Closed_runtime _ -> false)
+  ;;
+
+  let original_resource t =
+    match t.resource with
+    | Ordinary runtime ->
+      Original.Ordinary (observe_close (fun () -> B.close_reported runtime))
+    | Owned { driver; parent } ->
+      (match Driver.join_original driver with
+       | Error error -> Original.Join_refused error
+       | Ok observed ->
+         (match CO.exit observed with
+          | Raised (exn, trace) ->
+            Original.Join_failed
+              (CO.create
+                 (Raised (exn, trace))
+                 ~diagnostics:(CO.diagnostics observed)
+                 ?primary:(CO.primary observed)
+                 ())
+          | Returned original ->
+            Original.Owned
+              { driver = original
+              ; parent = Parent.original parent ~local:(Driver.Original.local original)
+              }))
+    | Independent { driver; _ } ->
+      (match Driver.join_original driver with
+       | Error error -> Original.Join_refused error
+       | Ok observed ->
+         (match CO.exit observed with
+          | Raised (exn, trace) ->
+            Original.Join_failed
+              (CO.create
+                 (Raised (exn, trace))
+                 ~diagnostics:(CO.diagnostics observed)
+                 ?primary:(CO.primary observed)
+                 ())
+          | Returned original -> Original.Independent original))
+  ;;
+
+  let result_close observed =
+    Close.of_result observed ~protocol_error:(fun error ->
+      Runtime_owner.Cleanup_failed error)
+  ;;
+
+  let driver_close observed =
+    Close.of_result observed ~protocol_error:(fun error ->
+      Delegated_runtime.Cleanup_failed error)
+  ;;
+
+  let completed_partial t ~entry original =
+    match entry with
+    | Entry.Runtime -> false
+    | Partial ->
+      not_created t
+      && Driver.Local.equal_status
+           (Driver.Local.status (Driver.Original.local original))
+           Joined
+  ;;
+
+  let local_projection t ~entry original =
+    let local = Driver.Original.local original in
+    let observed = Driver.Local.observation local in
+    if completed_partial t ~entry original
+    then
+      (* The constructor already delivered its body error and never returned a
+         runtime. Keep its groups, but inspect all real cleanup debts separately. *)
+      CO.create (Returned ()) ~diagnostics:(CO.diagnostics observed) ()
+    else (
+      let closed = driver_close observed in
+      if
+        (not (Close.failed closed))
+        && not (Driver.Local.equal_status (Driver.Local.status local) Joined)
+      then (
+        let missing =
+          refusal
+            (conflict "delegated local cleanup has incomplete or failed custody evidence")
+        in
+        CO.create (CO.exit missing) ~diagnostics:(CO.diagnostics observed) ())
+      else closed)
+  ;;
+
+  let controls original own =
+    Fixed_control_observation.observe
+      (Option.to_list (Driver.Original.outer_control original) @ own)
+      ~normalization:(Driver.Original.normalization original)
+  ;;
+
+  let snapshot ancestry ~not_created =
+    let open Result.Let_syntax in
+    let%bind current = Ancestry.snapshot ancestry in
+    match current with
+    | Some current -> Ok current
+    | None when not_created -> Ancestry.finish_without_entry ancestry
+    | None -> Error (conflict "independent original ancestry has not completed")
+  ;;
+
+  module Ancestry_read = struct
+    type t =
+      | Observed of Ancestry.Snapshot.t
+      | Refused of
+          { refusal : Agent_protocol.Error.t
+          ; current : Ancestry.Snapshot.t option
+          }
+  end
+
+  let refused_ancestry ancestry refusal =
+    let current =
+      match Ancestry.snapshot ancestry with
+      | Ok current -> current
+      | Error _ -> None
+    in
+    Ancestry_read.Refused { refusal; current }
+  ;;
+
+  let update_ancestry ancestry ~retry ~not_created =
+    if not retry
+    then (
+      match snapshot ancestry ~not_created with
+      | Ok current -> Ancestry_read.Observed current
+      | Error refusal -> refused_ancestry ancestry refusal)
+    else (
+      match Ancestry.retry_observed ancestry with
+      | Completed current -> Ancestry_read.Observed current
+      | Stopped { refusal; current } -> Refused { refusal; current = Some current }
+      | Not_started refusal ->
+        (match Ancestry.snapshot ancestry with
+         | Ok None when not_created ->
+           (match Ancestry.finish_without_entry ancestry with
+            | Ok current -> Observed current
+            | Error refusal -> Refused { refusal; current = None })
+         | Ok current -> Refused { refusal; current }
+         | Error _ -> Refused { refusal; current = None }))
+  ;;
+
+  let ancestry_diagnostics current =
+    let original =
+      Cleanup_original_view.diagnostics (Ancestry.Snapshot.original_view current)
+    in
+    let cleanup =
+      match Ancestry.Snapshot.cleanup current with
+      | Ok observed -> CO.diagnostics observed
+      | Error _ -> []
+    in
+    let controls =
+      match Ancestry.Snapshot.fixed_controls current with
+      | Ok controls -> List.concat_map controls ~f:CO.diagnostics
+      | Error _ -> []
+    in
+    original @ cleanup @ controls
+  ;;
+
+  module Resource_projection = struct
+    type t =
+      { observation : unit CO.t
+      ; normalized_delivery : Fixed_control_observation.Normalized_delivery.t option
+      }
+
+    let plain observation = { observation; normalized_delivery = None }
+  end
+
+  let ancestry_refusal error current =
+    let observed = refusal error in
+    CO.create
+      (CO.exit observed)
+      ~diagnostics:(Option.value_map current ~default:[] ~f:ancestry_diagnostics)
+      ()
+  ;;
+
+  let independent_projection t ~entry ~retry original ancestry =
+    match update_ancestry ancestry ~retry ~not_created:(not_created t) with
+    | Ancestry_read.Refused { refusal; current } ->
+      Ok (Resource_projection.plain (ancestry_refusal refusal current))
+    | Observed current ->
+      let projected =
+        let open Result.Let_syntax in
+        let%bind own =
+          if completed_partial t ~entry original
+          then Ancestry.Snapshot.cleanup_controls current
+          else Ancestry.Snapshot.fixed_controls current
+        in
+        let%bind fixed = controls original own in
+        let%map factual = Ancestry.Snapshot.cleanup current in
+        Close.combine
+          (result_close fixed)
+          (Close.combine (local_projection t ~entry original) (result_close factual))
+      in
+      (match projected with
+       | Error refusal ->
+         Ok (Resource_projection.plain (ancestry_refusal refusal (Some current)))
+       | Ok combined ->
+         if
+           (not (Close.failed combined)) && not (Ancestry.Snapshot.custody_joined current)
+         then
+           Ok
+             (Resource_projection.plain
+                (ancestry_refusal
+                   (conflict "independent original ancestry custody is not joined")
+                   (Some current)))
+         else
+           Ok
+             { Resource_projection.observation =
+                 CO.create
+                   (CO.exit combined)
+                   ~diagnostics:(CO.diagnostics combined @ ancestry_diagnostics current)
+                   ?primary:(CO.primary combined)
+                   ()
+             ; normalized_delivery =
+                 Fixed_control_observation.Normalized_delivery.of_original
+                   original
+                   ~ancestry:current
+             })
+  ;;
+
+  let parent_projection t = function
+    | Error error -> Error error
+    | Ok Parent.Original_state.Never_entered ->
+      if not_created t
+      then Ok None
+      else
+        Error (conflict "returned delegated runtime has no original native parent scope")
+    | Ok (Completed original_parent) -> Ok (Some original_parent)
+  ;;
+
+  let owned_projection t ~entry original parent ~repair =
+    let open Result.Let_syntax in
+    let%bind parent = parent_projection t parent in
+    let%bind own =
+      match parent with
+      | None -> Ok []
+      | Some parent ->
+        (match Parent.Original.primary parent with
+         | Positive | Callback_alias -> Ok []
+         | Own_control observed -> Ok [ observed ]
+         | Preparation_failure _ | Prior_loan_failure _ | Cleanup_alias _ -> Ok [])
+    in
+    let%bind fixed = controls original own in
+    let primary_alias =
+      match parent with
+      | None -> positive ()
+      | Some parent ->
+        (match Parent.Original.primary parent with
+         | Positive | Callback_alias | Own_control _ -> positive ()
+         | Preparation_failure observed ->
+           if completed_partial t ~entry original
+           then positive ()
+           else result_close observed
+         | Prior_loan_failure observed | Cleanup_alias observed -> result_close observed)
+    in
+    let cleanup =
+      match parent with
+      | None -> O.return ()
+      | Some parent -> Parent.Original.current_cleanup parent ~current:repair
+    in
+    Ok
+      (Close.combine
+         (result_close fixed)
+         (Close.combine
+            primary_alias
+            (Close.combine (local_projection t ~entry original) (result_close cleanup))))
+  ;;
+
+  let resource_projection t ~entry ~retry resource ~repair =
+    match t.resource, resource with
+    | Ordinary _, Original.Ordinary observed -> Ok (Resource_projection.plain observed)
+    | Owned _, Original.Owned { driver; parent } ->
+      Result.map
+        (owned_projection t ~entry driver parent ~repair)
+        ~f:Resource_projection.plain
+    | Independent { ancestry; _ }, Original.Independent original ->
+      independent_projection t ~entry ~retry original ancestry
+    | _, Original.Join_failed observed -> Ok (Resource_projection.plain observed)
+    | _, Original.Join_refused error -> Error error
+    | ( (Ordinary _ | Owned _ | Independent _)
+      , (Original.Ordinary _ | Owned _ | Independent _) ) ->
+      invalid_arg "shared tracking cleanup changed its original resource family"
+  ;;
+
+  let original_projection t ~entry resource current =
+    let original =
+      match resource with
+      | Original.Ordinary observed | Join_failed observed -> observed
+      | Join_refused error -> refusal error
+      | Owned { driver; _ } | Independent driver ->
+        if completed_partial t ~entry driver
+        then
+          CO.create
+            (Returned ())
+            ~diagnostics:(CO.diagnostics (Driver.Original.terminal driver))
+            ()
+        else driver_close (Driver.Original.terminal driver)
+    in
+    Close.combine original current
+  ;;
+
+  let retry_step previous f = if O.is_negative previous then O.capture f else previous
+
+  let repair_parent t ~entry resource ~graph previous =
+    match t.resource, resource with
+    | ( Resource.Owned { parent; _ }
+      , Original.Owned { driver; parent = Ok (Parent.Original_state.Completed original) }
+      )
+      when Tracking_cleanup_observation.is_positive graph
+           && Driver.Local.equal_status
+                (Driver.Local.status (Driver.Original.local driver))
+                Joined ->
+      let pin =
+        match Parent.eligible_pin parent with
+        | Some pin -> Some pin
+        | None ->
+          if completed_partial t ~entry driver
+          then Parent.eligible_preparation_pin parent
+          else None
+      in
+      (match Parent.Original.repair original ~pin ~current:previous with
+       | Error _ -> previous, false
+       | Ok current -> current, true)
+    | (Ordinary _ | Owned _ | Independent _), _ -> previous, false
+  ;;
+
+  let perform t ~entry previous =
+    let first = Option.is_none previous in
+    let sealed =
+      match previous with
+      | None -> O.capture (fun () -> Graph_tracking.seal t.tracking)
+      | Some previous ->
+        retry_step previous.graph.sealed (fun () -> Graph_tracking.seal t.tracking)
+    in
+    let resource =
+      match previous with
+      | None ->
+        (match original_resource t with
+         | original -> original
+         | exception exn ->
+           Original.Join_failed (Close.raised exn (Stdlib.Printexc.get_raw_backtrace ())))
+      | Some previous -> previous.resource
+    in
+    let repair = Option.bind previous ~f:(fun previous -> previous.repair) in
+    let capture_projection f =
+      match f () with
+      | result -> result
+      | exception exn ->
+        Ok
+          (Resource_projection.plain
+             (Close.raised exn (Stdlib.Printexc.get_raw_backtrace ())))
+    in
+    let current =
+      capture_projection (fun () ->
+        resource_projection t ~entry ~retry:(not first) resource ~repair)
+    in
+    (* Finish always runs, even after a seal/resource negative. Successful legs
+       retain their actual old observation and never replay. *)
+    let finished =
+      match previous with
+      | None -> O.capture (fun () -> Graph_tracking.finish t.tracking)
+      | Some previous ->
+        retry_step previous.graph.finished (fun () -> Graph_tracking.finish t.tracking)
+    in
+    let graph = { Tracking_cleanup_observation.sealed; finished } in
+    let repaired, attempted_repair =
+      if first then repair, false else repair_parent t ~entry resource ~graph repair
+    in
+    let current =
+      if attempted_repair
+      then
+        capture_projection (fun () ->
+          resource_projection t ~entry ~retry:false resource ~repair:repaired)
+      else current
+    in
+    let projected, normalized_delivery =
+      match current with
+      | Ok projection -> projection.observation, projection.normalized_delivery
+      | Error error -> refusal error, None
+    in
+    let selected =
+      if first then original_projection t ~entry resource projected else projected
+    in
+    let latest = Tracking_cleanup_observation.close_result graph ~resource:selected in
+    let original =
+      Option.value_map previous ~default:latest ~f:(fun previous -> previous.original)
+    in
+    let latest =
+      if first
+      then latest
+      else
+        CO.create
+          (CO.exit latest)
+          ~diagnostics:(CO.diagnostics original @ CO.diagnostics latest)
+          ?primary:(CO.primary latest)
+          ()
+    in
+    { graph; resource; repair = repaired; original; latest; normalized_delivery }
+  ;;
+
+  let rec close t ~entry () =
+    if not (same_domain t)
+    then
+      refusal
+        (Agent_protocol.Error.invalid_request
+           "shared tracking closer belongs to another domain")
+    else if
+      match entry with
+      | Entry.Partial -> not (partial_ready t)
+      | Runtime -> false
+    then refusal (conflict "partial delegated driver original has not completed")
+    else
+      Eio.Cancel.protect (fun () ->
+        match Atomic.get t.phase with
+        | Running pending -> Eio.Promise.await pending
+        | Fixed_escape observed -> observed
+        | Complete previous when not (Close.failed previous.latest) -> previous.latest
+        | (Open | Complete _) as before ->
+          let pending, resolver = Eio.Promise.create () in
+          if not (Atomic.compare_and_set t.phase before (Running pending))
+          then close t ~entry ()
+          else (
+            let previous =
+              match before with
+              | Open -> None
+              | Complete previous -> Some previous
+              | Running _ | Fixed_escape _ -> assert false
+            in
+            match
+              let completed = perform t ~entry previous in
+              if not (Close.failed completed.latest)
+              then
+                Option.iter
+                  completed.normalized_delivery
+                  ~f:Fixed_control_observation.Normalized_delivery.acknowledge;
+              completed
+            with
+            | completed ->
+              Atomic.set t.phase (Complete completed);
+              Eio.Promise.resolve resolver completed.latest;
+              completed.latest
+            | exception exn ->
+              let escaped = Close.raised exn (Stdlib.Printexc.get_raw_backtrace ()) in
+              Atomic.set t.phase (Fixed_escape escaped);
+              Eio.Promise.resolve resolver escaped;
+              escaped))
+  ;;
+
+  let partial_closer t = B.Close.reported (close t ~entry:Entry.Partial)
+  let runtime_closer t = B.Close.reported (close t ~entry:Entry.Runtime)
+end
+
+let tracked_runtime ~cleanup (runtime : Agent_session.Runtime_builder.t) =
+  { runtime with close = Shared_tracking_cleanup.runtime_closer cleanup }
 ;;
 
 let resolve_state_inference_context t (state : Agent_session.Session_state.t) =
@@ -2575,7 +4392,7 @@ let source_attachment_error error =
   unavailable Invalid_state (Core.Error.to_string_hum error)
 ;;
 
-let restore_authored_code
+let restore_authored_child
       t
       ~artifacts
       ~source
@@ -2607,25 +4424,1313 @@ let restore_authored_code
        ~manifest_sha256
        ~root_relative_path)
     ~checkpoint:Eio.Fiber.check
+;;
+
+let restore_authored_code t ~artifacts ~source record =
+  restore_authored_child t ~artifacts ~source record
   |> Result.map ~f:Agent_session.Prompt_child_source.revision
+;;
+
+(* Only actual Factory allocation/entry paths construct this private tuple.
+   It is association DATA; source binding and selected execution remain checked
+   by the authentic Actor/Owner receivers. Pre-publication children use the same
+   owned Handle/Actor/Owner instead of inventing a temporary registry entry. *)
+module Source_target = struct
+  type t =
+    { actor : Agent_session.Session_actor.t
+    ; runtime : Runtime_owner.t
+    ; store_handle : Agent_store.Session_store.Handle.t option
+    }
+
+  let of_entry (entry : Session_registry.entry) =
+    { actor = entry.actor; runtime = entry.runtime; store_handle = entry.store_handle }
+  ;;
+end
+
+module Native_origin_leaf = struct
+  type t =
+    { domain : int
+    ; target : Source_target.t
+    ; consumer : Runtime_owner.Native_consumer.t
+    ; reference : Agent_store.Delegation_store.Reference.t
+    }
+
+  let create ~target ~consumer ~reference =
+    { domain = (Stdlib.Domain.self () :> int); target; consumer; reference }
+  ;;
+
+  let check leaf t =
+    let module A = Agent_session in
+    let module D = Agent_store.Delegation_store in
+    let module S = Agent_store.Session_store in
+    let module P = Agent_protocol in
+    let open Result.Let_syntax in
+    let%bind () =
+      if Int.equal leaf.domain (Stdlib.Domain.self () :> int)
+      then Ok ()
+      else Error (P.Error.invalid_request "native origin belongs to another domain")
+    in
+    let target = leaf.target in
+    let%bind () =
+      Runtime_owner.Native_consumer.check_owner leaf.consumer ~owner:target.runtime
+    in
+    let%bind handle =
+      Result.of_option
+        target.store_handle
+        ~error:(unavailable Invalid_state "native origin has no actual Store Handle")
+    in
+    let%bind () =
+      if
+        S.owns_handle t.store handle
+        && Runtime_owner.belongs_to_actor target.runtime target.actor
+        && Option.exists
+             (A.Session_actor.runtime_source_owner_identity target.actor)
+             ~f:(A.Runtime_source_owner.matches t.runtime_source_owner)
+      then Ok ()
+      else
+        Error
+          (unavailable
+             Permission_denied
+             "native origin is not this Factory's actual owner")
+    in
+    let%bind _ =
+      S.Handle.metadata_checked handle |> Result.map_error ~f:protocol_of_store
+    in
+    let%bind () =
+      match Session_registry.find t.registry (S.Handle.session_id handle) with
+      | None -> Ok () (* Actual pre-publication tuple, not a fabricated Registry entry. *)
+      | Some actual ->
+        if
+          phys_equal actual.actor target.actor
+          && phys_equal actual.runtime target.runtime
+          && Option.exists actual.store_handle ~f:(phys_equal handle)
+        then Ok ()
+        else Error (unavailable Permission_denied "native origin was replaced")
+    in
+    let%bind state = A.Session_actor.state target.actor in
+    let%bind () =
+      Runtime_owner.Native_consumer.check_owner leaf.consumer ~owner:target.runtime
+    in
+    if
+      P.Id.Session.equal state.identity.session_id (S.Handle.session_id handle)
+      && P.Id.Session.equal state.identity.session_id leaf.reference.child_session_id
+      && P.Id.Prompt_revision.equal
+           state.spec.prompt_revision_id
+           leaf.reference.revision_id
+      && Option.equal D.Reference.equal state.spec.delegation (Some leaf.reference)
+    then Ok state
+    else Error (unavailable Permission_denied "native origin's original leaf changed")
+  ;;
+end
+
+let native_parent_metadata t (state : Agent_session.Session_state.t) =
+  let module D = Agent_store.Delegation_store in
+  let module P = Agent_protocol in
+  let open Result.Let_syntax in
+  let%bind reference =
+    Result.of_option
+      state.spec.delegation
+      ~error:(unavailable Permission_denied "native source has no private parent")
+  in
+  let%bind record =
+    D.resolve (Agent_store.Session_store.delegations t.store) reference
+    |> Result.map_error ~f:protocol_of_store
+  in
+  let%bind () =
+    match record.stage, record.revocation with
+    | Linked, None
+      when D.Reference.equal reference (D.reference record)
+           && P.Id.Session.equal state.identity.session_id reference.child_session_id
+           && P.Id.Prompt_revision.equal
+                state.spec.prompt_revision_id
+                reference.revision_id -> Ok ()
+    | (Reserved | Artifact_installed | Child_installed | Linked), _ ->
+      Error (unavailable Permission_denied "native source private parent changed")
+  in
+  let%bind parent, current = t.native_metadata_target record.key.parent_session_id in
+  if
+    P.Id.Session.equal current.identity.session_id record.key.parent_session_id
+    && Int.equal current.identity.generation record.key.parent_generation
+  then Ok (parent, record, current)
+  else Error (unavailable Permission_denied "native parent metadata changed generation")
+;;
+
+let native_parent_record t state =
+  let%map.Result parent, record, _ = native_parent_metadata t state in
+  parent, record
+;;
+
+let native_path_host t (leaf : Native_origin_leaf.t) =
+  let module A = Agent_session in
+  let state id =
+    if Agent_protocol.Id.Session.equal id leaf.reference.child_session_id
+    then Native_origin_leaf.check leaf t
+    else Result.map (t.native_metadata_target id) ~f:snd
+  in
+  A.Delegation_authority.Resource_path.Host.
+    { state
+    ; resolve =
+        (fun reference ->
+          Agent_store.Delegation_store.resolve
+            (Agent_store.Session_store.delegations t.store)
+            reference
+          |> Result.map_error ~f:protocol_of_store)
+    ; moderation =
+        (fun id -> Result.bind (state id) ~f:Native_resource_authority.moderation_source)
+    ; authorize_independent = authorize_independent t
+    }
+;;
+
+let native_observe_origin t leaf prefix ~expected =
+  let module Path = Agent_session.Delegation_authority.Resource_path in
+  let open Result.Let_syntax in
+  let%bind actual_leaf = Native_origin_leaf.check leaf t in
+  let%bind observed =
+    Path.observe_prefix
+      ~moderation_current:(native_current_moderation t)
+      prefix
+      ~source_owner:t.runtime_source_owner
+      ~host:(native_path_host t leaf)
+      ~actual_leaf
+  in
+  let%bind () =
+    Path.Observation.check_prefix observed ~source_owner:t.runtime_source_owner ~prefix
+  in
+  let actual = Path.Observation.state observed in
+  let%bind source = native_current_source t actual in
+  let%bind basis =
+    Native_resource_authority.Basis.capture_resource_path
+      ?installed_source:(Native_current_source.source source)
+      observed
+  in
+  let%bind () = Native_current_source.check source ~expected in
+  let%bind () =
+    Native_resource_authority.Basis.check
+      ?installed_source:(Native_current_source.source source)
+      basis
+      ~expected
+  in
+  let%bind _ = Native_origin_leaf.check leaf t in
+  let%bind current = Native_current_source.refresh source ~expected in
+  let%map () =
+    Agent_session.Delegation_authority.check_invocation_owner
+      (Path.Observation.record observed)
+      current
+  in
+  observed
+;;
+
+let native_resource_origin t ~target ~consumer ~reference =
+  let module A = Agent_session in
+  let module D = Agent_store.Delegation_store in
+  let module P = Agent_protocol in
+  let module Path = A.Delegation_authority.Resource_path in
+  let open Result.Let_syntax in
+  let leaf = Native_origin_leaf.create ~target ~consumer ~reference in
+  let%bind actual_leaf = Native_origin_leaf.check leaf t in
+  let rec collect visited (state : A.Session_state.t) =
+    if
+      List.length visited >= t.limits.delegation_max_depth
+      || List.mem visited state.identity.session_id ~equal:P.Id.Session.equal
+    then
+      Error
+        (unavailable
+           Permission_denied
+           "delegation.ancestry_limit: cyclic or excessive ancestry")
+    else (
+      let%bind _, record, parent_state = native_parent_metadata t state in
+      let%map rest =
+        match parent_state.spec.delegation with
+        | None -> Ok []
+        | Some _ -> collect (state.identity.session_id :: visited) parent_state
+      in
+      record :: rest)
+  in
+  let%bind records = collect [] actual_leaf in
+  let%bind path =
+    Path.of_records
+      ~source_owner:t.runtime_source_owner
+      ~max_depth:t.limits.delegation_max_depth
+      ~actual_leaf
+      ~reference
+      ~records
+  in
+  let%map _ = Native_origin_leaf.check leaf t in
+  Runtime_owner.Native_resource_origin.create
+    ~source_owner:t.runtime_source_owner
+    ~route:(Ancestry (Path.first path))
+    ~authorize:(fun ~route ~target:expected ->
+      match route with
+      | Direct _ ->
+        Error (unavailable Permission_denied "native ancestry origin changed route")
+      | Ancestry prefix ->
+        Result.map (native_observe_origin t leaf prefix ~expected) ~f:(fun observed ->
+          Runtime_owner.Native_resource_origin.Validation.Ancestry observed))
+;;
+
+let native_parent_origin t ~origin ~target ~consumer ~reference =
+  let module Origin = Runtime_owner.Native_resource_origin in
+  let module Path = Agent_session.Delegation_authority.Resource_path in
+  let module D = Agent_store.Delegation_store in
+  let open Result.Let_syntax in
+  let%bind selected =
+    match Origin.route origin with
+    | Direct _ -> native_resource_origin t ~target ~consumer ~reference
+    | Ancestry _ ->
+      let%bind next = Origin.parent origin in
+      Result.of_option
+        next
+        ~error:(unavailable Permission_denied "native origin omitted its actual parent")
+  in
+  let current =
+    match Origin.route selected with
+    | Direct current -> current
+    | Ancestry prefix -> Path.Prefix.reference prefix
+  in
+  if D.Reference.equal reference current
+  then Ok selected
+  else Error (unavailable Permission_denied "native origin has a different parent edge")
+;;
+
+let native_parent_checked t state ~check =
+  let open Result.Let_syntax in
+  let%bind () = check () in
+  let%bind parent, record = native_parent_record t state in
+  let%map () = check () in
+  parent, record
+;;
+
+let with_parent_native_origin_source_resources_observed
+      t
+      owner
+      ~origin
+      ~(physical_target : Source_target.t)
+      ~consumer
+      ~capture_release
+      ~f
+  =
+  let reference =
+    match Runtime_owner.Native_resource_origin.route origin with
+    | Direct reference -> reference
+    | Ancestry prefix ->
+      Agent_session.Delegation_authority.Resource_path.Prefix.reference prefix
+  in
+  let physical = Native_origin_leaf.create ~target:physical_target ~consumer ~reference in
+  let check_physical () =
+    let open Result.Let_syntax in
+    let%bind state = Native_origin_leaf.check physical t in
+    let%bind parent, record = native_parent_record t state in
+    let%bind () =
+      if
+        phys_equal parent.runtime owner
+        && Runtime_owner.belongs_to_actor owner parent.actor
+        && Agent_store.Delegation_store.Reference.equal
+             (Agent_store.Delegation_store.reference record)
+             reference
+      then Ok ()
+      else
+        Error
+          (unavailable
+             Permission_denied
+             "native resource parent differs from its actual provider Owner")
+    in
+    Runtime_owner.Native_consumer.check_owner consumer ~owner:physical_target.runtime
+  in
+  let guarded ~check ~custody ~source resources =
+    let check_current () =
+      let open Result.Let_syntax in
+      let%bind () = check_physical () in
+      let%bind () = check () in
+      check_physical ()
+    in
+    Runtime_result_observation.bind
+      (Runtime_result_observation.raw check_current)
+      ~f:(fun () -> f ~check:check_current ~custody ~source resources)
+  in
+  Runtime_owner.with_native_source_resources_for_origin_observed
+    owner
+    ~consumer
+    ~source_owner:t.runtime_source_owner
+    ~origin
+    ~capture_release
+    ~f:guarded
+;;
+
+(* This adapter closes over the actual caller-selected child target. The Owner
+   receives only its per-consumer Reference/guard, never a new source permission. *)
+let with_parent_native_resources_using
+      ?consumer
+      ~borrow
+      t
+      owner
+      ~reference
+      ~(target : Source_target.t)
+      ~capture_release
+      ~f
+  =
+  let module A = Agent_session.Session_actor in
+  let module D = Agent_store.Delegation_store in
+  let open Result.Let_syntax in
+  let authorize ~reference:current ~target:parent_state =
+    let%bind () =
+      Option.value_map consumer ~default:(Ok ()) ~f:(fun consumer ->
+        Runtime_owner.Native_consumer.check_owner consumer ~owner:target.runtime)
+    in
+    let%bind () =
+      if
+        D.Reference.equal reference current
+        && Runtime_owner.belongs_to_actor target.runtime target.actor
+        && Option.exists
+             (A.runtime_source_owner_identity target.actor)
+             ~f:(Agent_session.Runtime_source_owner.matches t.runtime_source_owner)
+      then Ok ()
+      else
+        Error (unavailable Permission_denied "native source consumer association changed")
+    in
+    let%bind handle =
+      Result.of_option
+        target.store_handle
+        ~error:
+          (unavailable Invalid_state "native source consumer has no actual Store Handle")
+    in
+    let%bind () =
+      if Agent_store.Session_store.owns_handle t.store handle
+      then Ok ()
+      else
+        Error (unavailable Permission_denied "native source consumer has a foreign Store")
+    in
+    let%bind _ =
+      Agent_store.Session_store.Handle.metadata_checked handle
+      |> Result.map_error ~f:protocol_of_store
+    in
+    let%bind child = A.state target.actor in
+    let%bind () =
+      if
+        Agent_protocol.Id.Session.equal
+          child.identity.session_id
+          reference.child_session_id
+        && Agent_protocol.Id.Session.equal
+             (Agent_store.Session_store.Handle.session_id handle)
+             child.identity.session_id
+        && Option.equal D.Reference.equal child.spec.delegation (Some reference)
+      then Ok ()
+      else
+        Error
+          (unavailable Permission_denied "native source consumer private target changed")
+    in
+    let%bind parent, record = generated_parent_native t child in
+    if
+      Runtime_owner.belongs_to_actor owner parent.actor
+      && phys_equal parent.runtime owner
+      && D.Reference.equal (D.reference record) reference
+      && Agent_protocol.Id.Session.equal
+           parent_state.Agent_session.Session_state.identity.session_id
+           record.key.parent_session_id
+    then Ok ()
+    else
+      Error
+        (unavailable
+           Permission_denied
+           "native source parent differs from private admission")
+  in
+  borrow
+    ?consumer
+    owner
+    ~source_owner:t.runtime_source_owner
+    ~reference
+    ~authorize
+    ~capture_release
+    ~f
+;;
+
+let with_parent_native_resources_outcome
+      ?consumer
+      t
+      owner
+      ~reference
+      ~target
+      ~capture_release
+      ~f
+  =
+  with_parent_native_resources_using
+    ?consumer
+    ~borrow:Runtime_owner.with_native_resources_outcome
+    t
+    owner
+    ~reference
+    ~target
+    ~capture_release
+    ~f
+;;
+
+let with_parent_native_resources_observed
+      ?consumer
+      t
+      owner
+      ~reference
+      ~target
+      ~capture_release
+      ~f
+  =
+  with_parent_native_resources_using
+    ?consumer
+    ~borrow:Runtime_owner.with_native_resources_observed
+    t
+    owner
+    ~reference
+    ~target
+    ~capture_release
+    ~f
+;;
+
+let parent_native_public resources ~check =
+  let open Result.Let_syntax in
+  let%bind () = check () in
+  let%bind public =
+    Lazy.force resources.Agent_session.Runtime_builder.native.capabilities
+    |> Result.map_error ~f:(fun error ->
+      unavailable Permission_denied error.Chat_response.Tool_capability.message)
+  in
+  let%map () = check () in
+  public
+;;
+
+let with_parent_native_capabilities_outcome
+      ?consumer
+      t
+      owner
+      ~reference
+      ~target
+      ~capture_release
+      f
+  =
+  with_parent_native_resources_outcome
+    ?consumer
+    t
+    owner
+    ~reference
+    ~target
+    ~capture_release
+    ~f:(fun ~check resources -> Result.bind (parent_native_public resources ~check) ~f)
+;;
+
+let with_parent_native_capabilities_observed
+      ?consumer
+      t
+      owner
+      ~reference
+      ~target
+      ~capture_release
+      f
+  =
+  with_parent_native_resources_observed
+    ?consumer
+    t
+    owner
+    ~reference
+    ~target
+    ~capture_release
+    ~f:(fun ~check resources ->
+      Runtime_result_observation.bind
+        (Runtime_result_observation.raw (fun () -> parent_native_public resources ~check))
+        ~f)
+;;
+
+let with_parent_native_capabilities_reported ?consumer t owner ~reference ~target f =
+  with_parent_native_capabilities_outcome
+    ?consumer
+    t
+    owner
+    ~reference
+    ~target
+    ~capture_release:ignore
+    f
+  |> Runtime_owner.Native_borrow_outcome.to_scope_outcome
+;;
+
+let with_selected_source_target
+      ?(parent_record = generated_parent_record)
+      ?(parent_check = fun t state -> generated_parent t state)
+      t
+      (entry : Source_target.t)
+      ~with_parent
+      ~with_source
+      ~check_selected
+      f
+  =
+  let module A = Agent_session in
+  let module Source = A.Runtime_builder.Source in
+  let module Store = Agent_store.Session_store in
+  let open Result.Let_syntax in
+  let%bind handle =
+    Result.of_option
+      entry.store_handle
+      ~error:(unavailable Invalid_state "source staging requires an owned session store")
+  in
+  let%bind () =
+    if Store.owns_handle t.store handle
+    then Ok ()
+    else
+      Error (unavailable Permission_denied "source staging has a foreign session store")
+  in
+  let%bind () =
+    if
+      Runtime_owner.belongs_to_actor entry.runtime entry.actor
+      && Option.exists
+           (A.Session_actor.runtime_source_owner_identity entry.actor)
+           ~f:(A.Runtime_source_owner.matches t.runtime_source_owner)
+    then Ok ()
+    else
+      Error (unavailable Conflict "source target differs from its actual Factory owner")
+  in
+  let%bind _ =
+    Store.Handle.metadata_checked handle |> Result.map_error ~f:protocol_of_store
+  in
+  let%bind state = A.Session_actor.state entry.actor in
+  let%bind () =
+    if
+      Agent_protocol.Id.Session.equal
+        (Store.Handle.session_id handle)
+        state.identity.session_id
+    then Ok ()
+    else
+      Error
+        (unavailable Invalid_state "source staging session owner differs from its Handle")
+  in
+  let%bind retained = restore_state_source t state in
+  let invocation =
+    A.Runtime_script_preparation.Invocation.of_root state.spec.root_invocation
+  in
+  let select revision =
+    Source.prepare
+      revision
+      ~script_preparation:t.script_preparation
+      ~invocation
+      ~env:t.env
+      ~checkpoint:Eio.Fiber.check
+  in
+  let diagnostics values =
+    unavailable
+      Prompt_unavailable
+      (List.map values ~f:(fun (value : A.Prompt_revision_builder.Diagnostic.t) ->
+         value.message)
+       |> String.concat ~sep:"\n")
+  in
+  let with_delegated ~captured artifact =
+    let%bind parent, record = parent_record t state in
+    let with_live_parent () =
+      (* A source witness may select existing grants, never cause their creation.
+       This lease spans the target's prepared callback, including any held ACK. *)
+      with_parent
+        parent.runtime
+        ~reference:(Agent_store.Delegation_store.reference record)
+        ~target:entry
+        (fun public ->
+           let%bind current_parent, current_record = parent_check t state in
+           let%bind () =
+             if
+               phys_equal parent.actor current_parent.actor
+               && Agent_store.Delegation_store.equal_record record current_record
+             then Ok ()
+             else
+               Error
+                 (unavailable
+                    Conflict
+                    "delegation source owner changed before preparation")
+           in
+           let%bind artifacts =
+             Agent_store.Prompt_artifact_store.open_existing
+               ~env:t.env
+               ~root:
+                 (Agent_store.Data_root.prompt_artifacts_path
+                    (Agent_store.Session_store.data_root t.store))
+             |> Result.map_error ~f:protocol_of_store
+           in
+           let%bind authored =
+             Agent_store.Delegation_store.Admission.authored_source record.admission
+             |> Result.map_error ~f:protocol_of_store
+           in
+           let%bind source =
+             match authored with
+             | Some origin ->
+               let%bind resources =
+                 Authored_resources.find t.authored_resources ~public ~name:origin.name
+               in
+               let%bind _ =
+                 Authored_resources.resolve t.authored_resources record ~public
+               in
+               (match captured with
+                | Some retained ->
+                  let%bind () =
+                    Recurrence_authored_source.check_artifact
+                      resources
+                      ~selector:origin
+                      ~artifact
+                  in
+                  Source.prepare_captured
+                    retained
+                    ~script_preparation:t.script_preparation
+                    ~invocation
+                    ~env:t.env
+                    ~checkpoint:Eio.Fiber.check
+                | None ->
+                  let%bind child =
+                    restore_authored_child t ~artifacts ~source:resources.source record
+                  in
+                  Source.prepare_authored_child
+                    child
+                    ~record
+                    ~script_preparation:t.script_preparation
+                    ~invocation
+                    ~env:t.env
+                    ~checkpoint:Eio.Fiber.check)
+             | None when Option.is_some captured ->
+               Error
+                 (unavailable
+                    Permission_denied
+                    "captured authored source has no authored admission")
+             | None ->
+               let%bind definition =
+                 A.Generated_definition.restore
+                   ?limits:
+                     (Option.map
+                        t.authoring_validation_host
+                        ~f:Chat_response.Authoring_validation.compilation_limits)
+                   ?source_limits:
+                     (Option.map
+                        t.authoring_validation_host
+                        ~f:Chat_response.Authoring_validation.bundle_limits)
+                   ?catalog:
+                     (Option.bind
+                        t.authoring_validation_host
+                        ~f:Chat_response.Authoring_validation.delegated_catalog)
+                   ~env:t.env
+                   ~artifact_store:artifacts
+                   ~revision_id:artifact.revision_id
+                   ~manifest_sha256:record.admission.manifest_sha256
+                   ~current_capabilities:(fun () -> public)
+                   ~pins:record.admission.capability_pins
+                   ()
+                 |> Result.map_error ~f:(fun diagnostics ->
+                   unavailable
+                     Prompt_unavailable
+                     (List.map diagnostics ~f:Chatmd_shell_spec.Diagnostic.to_string
+                      |> String.concat ~sep:"\n"))
+               in
+               Source.prepare_generated definition ~invocation
+           in
+           with_source source (fun prepared ->
+             let%bind current_parent, current_record = parent_check t state in
+             let%bind () =
+               if
+                 phys_equal parent.actor current_parent.actor
+                 && Agent_store.Delegation_store.equal_record record current_record
+               then Ok ()
+               else
+                 Error
+                   (unavailable
+                      Conflict
+                      "delegation source owner changed during preparation")
+             in
+             let%bind () =
+               match authored with
+               | None -> Ok ()
+               | Some _ ->
+                 Authored_resources.resolve t.authored_resources record ~public
+                 |> Result.map ~f:ignore
+             in
+             let%bind () = check_selected prepared in
+             f prepared))
+    in
+    match
+      ( record.admission.lifetime
+      , captured
+      , record.admission.authored_tool
+      , record.admission.captured_recurrence )
+    with
+    | Independent _, None, None, None ->
+      (* Source metadata must not load a stopped Independent parent or construct
+         its native ancestry before the Actor's execution barrier. Full live
+         capability restoration still occurs inside admitted construction. *)
+      let recheck () =
+        let%bind current_parent, current_record = parent_check t state in
+        if
+          phys_equal parent.actor current_parent.actor
+          && Agent_store.Delegation_store.equal_record record current_record
+        then Ok ()
+        else Error (unavailable Conflict "Independent source private record changed")
+      in
+      let%bind () = recheck () in
+      let%bind artifacts =
+        Agent_store.Prompt_artifact_store.open_existing
+          ~env:t.env
+          ~root:
+            (Agent_store.Data_root.prompt_artifacts_path
+               (Agent_store.Session_store.data_root t.store))
+        |> Result.map_error ~f:protocol_of_store
+      in
+      let%bind retained =
+        A.Generated_definition.Source.load
+          ?limits:
+            (Option.map
+               t.authoring_validation_host
+               ~f:Chat_response.Authoring_validation.compilation_limits)
+          ?source_limits:
+            (Option.map
+               t.authoring_validation_host
+               ~f:Chat_response.Authoring_validation.bundle_limits)
+          ~artifact_store:artifacts
+          ~record
+          ()
+        |> Result.map_error ~f:(fun errors ->
+          unavailable
+            Prompt_unavailable
+            (List.map errors ~f:Chatmd_shell_spec.Diagnostic.to_string
+             |> String.concat ~sep:"\n"))
+      in
+      let%bind () =
+        if
+          Agent_store.Prompt_artifact_store.Artifact.same_content
+            artifact
+            (A.Generated_definition.Source.artifact retained)
+        then Ok ()
+        else Error (unavailable Conflict "Independent source artifact changed")
+      in
+      let%bind source = Source.prepare_generated_artifact retained ~invocation in
+      with_source source (fun prepared ->
+        let%bind () = recheck () in
+        let%bind () = check_selected prepared in
+        f prepared)
+    | (Owned | Invocation_owned _), _, _, _
+    | Independent _, Some _, _, _
+    | Independent _, None, Some _, _
+    | Independent _, None, None, Some _ -> with_live_parent ()
+  in
+  match retained with
+  | Authored _ ->
+    let%bind definition_id =
+      Result.of_option
+        state.spec.prompt_definition_id
+        ~error:(unavailable Prompt_unavailable "session has no catalog prompt identity")
+    in
+    let%bind revision =
+      A.Prompt_catalog.restore_verified_revision
+        t.prompts
+        ~definition_id
+        ~revision_id:state.spec.prompt_revision_id
+      |> Result.map_error ~f:diagnostics
+    in
+    let%bind source = select revision in
+    with_source source f
+  | Captured_delegation retained ->
+    (match
+       A.Recurrence_child_origin.source_kind
+         (A.Captured_recurrence_source.origin retained)
+     with
+     | Artifact ->
+       let%bind source =
+         Source.prepare_captured
+           retained
+           ~script_preparation:t.script_preparation
+           ~invocation
+           ~env:t.env
+           ~checkpoint:Eio.Fiber.check
+       in
+       with_source source f
+     | Authored_tool _ ->
+       with_delegated
+         ~captured:(Some retained)
+         (A.Prompt_revision.artifact (A.Captured_recurrence_source.revision retained)))
+  | Generated_artifact { artifact; _ } -> with_delegated ~captured:None artifact
+;;
+
+(* Every callback in the shared selection engine is tail-returned. Preserve that
+   law: these adapters transport a known observation as Result DATA, including
+   an observed failure, instead of raising it through an opaque raw callback. *)
+let with_selected_source_target_observed
+      ?parent_record
+      ?parent_check
+      t
+      entry
+      ~with_parent
+      ~with_source
+      ~check_selected
+      f
+  =
+  let module O = Runtime_result_observation in
+  O.through_result (fun () ->
+    with_selected_source_target
+      ?parent_record
+      ?parent_check
+      t
+      entry
+      ~with_parent:(fun owner ~reference ~target next ->
+        Ok
+          (with_parent owner ~reference ~target (fun public ->
+             O.through_result (fun () -> next public))))
+      ~with_source:(fun source next ->
+        Ok
+          (with_source source (fun prepared -> O.through_result (fun () -> next prepared))))
+      ~check_selected
+      (fun prepared ->
+         Ok (Native_cleanup_observation.capture_observed (fun () -> f prepared))))
+;;
+
+let with_selected_source t entry ~with_parent ~with_source ~check_selected f =
+  with_selected_source_target
+    t
+    (Source_target.of_entry entry)
+    ~with_parent
+    ~with_source
+    ~check_selected
+    f
+;;
+
+let delegated_runtime_driver
+      t
+      handle
+      actor
+      runtime_owner
+      (state : Agent_session.Session_state.t)
+  =
+  match state.spec.delegation with
+  | None -> None
+  | Some reference ->
+    Some
+      (fun ~source ~retention ->
+        let module O = Runtime_result_observation in
+        O.bind
+          (O.raw (fun () ->
+             let open Result.Let_syntax in
+             let%bind runtime =
+               Result.of_option
+                 !runtime_owner
+                 ~error:
+                   (unavailable Conflict "delegated runtime driver lost its actual Owner")
+             in
+             let%map consumer =
+               Runtime_owner.Native_consumer.source
+                 ~owner:runtime
+                 (Runtime_owner.Delegated_load_source.consumer source)
+             in
+             runtime, consumer))
+          ~f:(fun (runtime, consumer) ->
+            let target : Source_target.t =
+              { actor; runtime; store_handle = Some handle }
+            in
+            O.bind
+              (O.raw (fun () -> native_resource_origin t ~target ~consumer ~reference))
+              ~f:(fun origin ->
+                let source_leaf =
+                  Native_origin_leaf.create ~target ~consumer ~reference
+                in
+                let parent_check t state =
+                  let open Result.Let_syntax in
+                  let%bind parent, record, expected = native_parent_metadata t state in
+                  let%map _ =
+                    match Runtime_owner.Native_resource_origin.route origin with
+                    | Ancestry prefix ->
+                      native_observe_origin t source_leaf prefix ~expected
+                    | Direct _ ->
+                      Error
+                        (unavailable
+                           Permission_denied
+                           "native source origin changed route")
+                  in
+                  parent, record
+                in
+                with_selected_source_target_observed
+                  ~parent_record:native_parent_record
+                  ~parent_check
+                  t
+                  target
+                  ~with_parent:(fun parent ~reference:_ ~target f ->
+                    let outcome =
+                      with_parent_native_origin_source_resources_observed
+                        t
+                        parent
+                        ~origin
+                        ~physical_target:target
+                        ~consumer
+                        ~capture_release:ignore
+                        ~f:(fun ~check ~custody:_ ~source:_ resources ->
+                          O.through_result (fun () ->
+                            let open Result.Let_syntax in
+                            let%bind public = parent_native_public resources ~check in
+                            Ok (f public)))
+                    in
+                    Runtime_owner.Native_borrow_outcome.observation outcome)
+                  ~with_source:(fun selected f ->
+                    O.bind
+                      (O.raw (fun () ->
+                         match
+                           Agent_session.Runtime_builder.Source.selection selected
+                         with
+                         | Captured _ ->
+                           Error
+                             (unavailable
+                                Invalid_state
+                                "captured recurrence child requires reciprocal \
+                                 occurrence Run admission")
+                         | Authored _
+                         | Authored_child _
+                         | Generated _
+                         | Generated_artifact _ ->
+                           Runtime_owner.Delegated_load_source.prepare
+                             source
+                             ~source:selected))
+                      ~f)
+                  ~check_selected:Runtime_owner.Prepared_delegated_load.check_basis
+                  (fun prepared ->
+                     Runtime_owner.load_delegated_runtime_observed
+                       runtime
+                       ~prepared
+                       ~retention))))
+;;
+
+let with_selected_run_source t entry ~with_parent ~with_source f =
+  with_selected_source
+    t
+    entry
+    ~with_parent
+    ~with_source
+    ~check_selected:Runtime_owner.Prepared.check_basis
+    f
+;;
+
+let with_prepared_run_source t entry ~preparation f =
+  with_selected_run_source
+    t
+    entry
+    ~with_parent:(fun owner ~reference:_ ~target:_ f ->
+      Runtime_owner.with_loaded_source_capabilities_reported
+        owner
+        ~source_owner:t.runtime_source_owner
+        f
+      |> Runtime_owner.Scope_outcome.resume)
+    ~with_source:(fun source f ->
+      Runtime_owner.with_prepared_source entry.runtime ~preparation ~source f)
+    f
+;;
+
+module Deferred_run_attempt = struct
+  type 'a t =
+    { result : ('a, Agent_protocol.Error.t) result
+    ; no_effects : Agent_session.Session_actor.No_effects_observation.t option
+    ; retry : Agent_session.Session_actor.Recurrence_retry.t option
+    }
+
+  let result t = t.result
+  let no_effects t = t.no_effects
+  let retry t = t.retry
+
+  module Outcome = struct
+    type 'a attempt = 'a t
+
+    type 'a t =
+      | Retained of Agent_protocol.Run_receipt.t
+      | Attempted of 'a attempt
+  end
+end
+
+module Deferred_parent_cleanup = struct
+  type t =
+    | Not_acquired
+    | Awaiting_report
+    | Reported of Runtime_owner.Scope_outcome.Cleanup.t
+
+  let succeeded = function
+    | Not_acquired -> true
+    | Awaiting_report -> false
+    | Reported report ->
+      (match Runtime_owner.Scope_outcome.Cleanup.status report with
+       | Never_acquired | Joined -> true
+       | Failed _ -> false)
+  ;;
+end
+
+module Deferred_observation = struct
+  type t =
+    | Operator of
+        { actor : Operator_authorization.t
+        ; authorize :
+            Agent_session.Session_state.t -> (unit, Agent_protocol.Error.t) result
+        }
+    | Native_goal_start of Agent_session.Session_actor.Goal_native_start.Selection.t
+end
+
+let with_deferred_run_source t entry ~observation ~with_source_stage f =
+  let module A = Agent_session in
+  let module Scope = Runtime_owner.Scope_outcome in
+  let module Deferred = Runtime_owner.Deferred_source in
+  let open Result.Let_syntax in
+  let%bind () =
+    if Runtime_owner.belongs_to_actor entry.Session_registry.runtime entry.actor
+    then Ok ()
+    else Error (unavailable Invalid_state "source runtime belongs to another Actor")
+  in
+  let capture f =
+    try Ok (f ()) with
+    | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())
+  in
+  let parent_cleanup = ref Deferred_parent_cleanup.Not_acquired in
+  let report =
+    with_source_stage (fun deferred ->
+      let%bind consumer =
+        Runtime_owner.Native_consumer.source
+          ~owner:entry.runtime
+          (Deferred.consumer deferred)
+      in
+      with_selected_run_source
+        t
+        entry
+        ~with_parent:(fun owner ~reference:_ ~target:_ f ->
+          parent_cleanup := Awaiting_report;
+          let outcome =
+            Runtime_owner.with_loaded_source_capabilities_reported
+              ~consumer
+              owner
+              ~source_owner:t.runtime_source_owner
+              f
+          in
+          parent_cleanup := Reported (Scope.cleanup outcome);
+          Scope.resume outcome)
+        ~with_source:(fun source f -> Result.bind (Deferred.prepare deferred ~source) ~f)
+        (f deferred))
+  in
+  let outcome = Deferred.Report.outcome report in
+  (* Resumption only applies the established primary/cleanup precedence. Capture
+     its exception until the exact Actor preparation has been factually closed. *)
+  let primary = capture (fun () -> Scope.resume outcome) in
+  match Deferred.Report.deferred report with
+  | None ->
+    (match primary with
+     | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
+     | Ok (Error _ as failure) -> failure
+     | Ok (Ok (Deferred.Decision.Retained receipt)) ->
+       Ok (Deferred_run_attempt.Outcome.Retained receipt)
+     | Ok (Ok (Fresh _)) ->
+       Error (unavailable Invalid_state "deferred source lost its issued preparation"))
+  | Some preparation ->
+    let closed =
+      Eio.Cancel.protect (fun () ->
+        capture (fun () ->
+          A.Session_actor.close_effect_deferred_preparation entry.actor preparation))
+    in
+    let closed =
+      match Scope.Cleanup.status (Scope.cleanup outcome), closed, observation with
+      | Joined, Ok (Ok completion), Deferred_observation.Native_goal_start selection
+        when Deferred_parent_cleanup.succeeded !parent_cleanup ->
+        Eio.Cancel.protect (fun () ->
+          capture (fun () ->
+            let%map () =
+              A.Session_actor.finish_native_goal_start_dispatch
+                entry.actor
+                ~selection
+                ~completion
+            in
+            completion))
+      | (Never_acquired | Joined | Failed _), _, _ -> closed
+    in
+    let completion =
+      lazy
+        (Eio.Cancel.protect (fun () ->
+           capture (fun () ->
+             match Scope.Cleanup.status (Scope.cleanup outcome), closed with
+             | Joined, Ok (Ok closed)
+               when Deferred_parent_cleanup.succeeded !parent_cleanup ->
+               A.Run_preparation.Closed_attempt.complete
+                 closed
+                 ~source_owner:t.runtime_source_owner
+             | (Never_acquired | Joined | Failed _), _ ->
+               Error
+                 (unavailable
+                    Conflict
+                    "deferred source cleanup did not establish closure"))))
+    in
+    let retry_completion =
+      Option.map (Deferred.Report.retry report) ~f:(fun retry ->
+        let completed =
+          match Lazy.force completion with
+          | Error failure -> Error failure
+          | Ok (Error failure) -> Ok (Error failure)
+          | Ok (Ok completion) ->
+            Eio.Cancel.protect (fun () ->
+              capture (fun () ->
+                A.Session_actor.complete_recurrence_retry_source
+                  entry.actor
+                  ~retry
+                  ~completion))
+        in
+        retry, completed)
+    in
+    let resumable_retry =
+      match retry_completion with
+      | Some (retry, Ok (Ok ())) -> Some retry
+      | Some (_, (Error _ | Ok (Error _))) | None -> None
+    in
+    let no_effects () =
+      match observation with
+      | Deferred_observation.Native_goal_start _ ->
+        (* Joined native closure above does not request an operator NEXT/retry
+           capability or evaluate its separate eligibility calculation. *)
+        Ok None
+      | Operator { actor; authorize } ->
+        let%bind completion =
+          match Lazy.force completion with
+          | Ok result -> result
+          | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
+        in
+        A.Session_actor.observe_no_run_effects entry.actor ~actor ~authorize ~completion
+        |> Result.map ~f:Option.some
+    in
+    let finish result =
+      (* Even a raised/cancelled body has already factually closed its issued
+         retry above. Completion errors cannot replace the original failure. *)
+      (match retry_completion, result with
+       | Some (_, Error (exn, backtrace)), Ok _ ->
+         Exn.raise_with_original_backtrace exn backtrace
+       | Some (_, (Error _ | Ok _)), Error _ | Some (_, Ok _), Ok _ | None, _ -> ());
+      let observation =
+        match resumable_retry with
+        | Some _ ->
+          (* Pending rotation retains only this exact frozen retry. It cannot
+             fork another request through an independent NEXT observation. *)
+          None
+        | None ->
+          (* Failure to close as prewriter custody is never interpreted as ACK.
+             The Actor independently rejects every pending/unconfirmed lineage. *)
+          (match Eio.Cancel.protect (fun () -> capture no_effects) with
+           | Ok observation -> Option.join (Result.ok observation)
+           | Error (exn, backtrace) ->
+             (match result with
+              | Error _ -> None
+              | Ok _ -> Exn.raise_with_original_backtrace exn backtrace))
+      in
+      Ok
+        (Deferred_run_attempt.Outcome.Attempted
+           { result; no_effects = observation; retry = resumable_retry })
+    in
+    (match primary with
+     | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
+     | Ok (Error _ as failure) -> finish failure
+     | Ok (Ok decision) ->
+       (match closed with
+        | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
+        | Ok (Error error) -> finish (Error error)
+        | Ok (Ok _) ->
+          (match decision with
+           | Fresh value -> finish (Ok value)
+           | Retained _ ->
+             Error
+               (unavailable
+                  Invalid_state
+                  "retained Run unexpectedly issued a preparation"))))
+;;
+
+let with_effect_deferred_run_source t entry ~actor ~authorize ~request f =
+  with_deferred_run_source
+    t
+    entry
+    ~observation:(Deferred_observation.Operator { actor; authorize })
+    ~with_source_stage:
+      (Runtime_owner.with_effect_deferred_source_reported
+         entry.Session_registry.runtime
+         ~source_owner:t.runtime_source_owner
+         ~actor
+         ~authorize
+         ~request)
+    (fun source -> f (Runtime_owner.Deferred_source.preparation source))
+;;
+
+let retry_source_callback f source prepared =
+  match Runtime_owner.Deferred_source.retry source with
+  | Some retry -> f retry prepared
+  | None -> Error (unavailable Invalid_state "retry source lost its issued retry")
+;;
+
+let retry_source_attempt = function
+  | Deferred_run_attempt.Outcome.Attempted attempt -> Ok attempt
+  | Retained _ -> Error (unavailable Invalid_state "retry source returned retained DATA")
+;;
+
+let with_recurrence_retry_run_source
+      t
+      entry
+      ~observation
+      ~actor
+      ~authorize
+      ~intent
+      ~previous
+      ~request
+      f
+  =
+  with_deferred_run_source
+    t
+    entry
+    ~observation:(Deferred_observation.Operator { actor; authorize })
+    ~with_source_stage:
+      (Runtime_owner.with_recurrence_retry_source_reported
+         entry.Session_registry.runtime
+         ~source_owner:t.runtime_source_owner
+         ~observation
+         ~actor
+         ~authorize
+         ~intent
+         ~previous
+         ~request)
+    (retry_source_callback f)
+  |> Result.bind ~f:retry_source_attempt
+;;
+
+let resume_recurrence_retry_run_source t entry ~retry ~actor ~authorize f =
+  with_deferred_run_source
+    t
+    entry
+    ~observation:(Deferred_observation.Operator { actor; authorize })
+    ~with_source_stage:
+      (Runtime_owner.resume_recurrence_retry_source_reported
+         entry.Session_registry.runtime
+         ~source_owner:t.runtime_source_owner
+         ~retry
+         ~actor
+         ~authorize)
+    (retry_source_callback f)
+  |> Result.bind ~f:retry_source_attempt
 ;;
 
 let restore_authored_selection t ~artifacts ~public record =
   let module Source = Agent_session.Authored_agent_source in
   let open Result.Let_syntax in
+  let%bind source =
+    Agent_store.Delegation_store.Admission.authored_source
+      record.Agent_store.Delegation_store.admission
+    |> Result.map_error ~f:protocol_of_store
+  in
   let%bind origin =
     Result.of_option
-      record.Agent_store.Delegation_store.admission.authored_tool
+      source
       ~error:(unavailable Permission_denied "authored selection has no original wrapper")
   in
   let%bind prepared =
     Authored_resources.find t.authored_resources ~public ~name:origin.name
   in
-  match Source.defining_reference prepared.source with
-  | None -> Source.load_artifact ~artifact_store:artifacts ~reservation:record
+  let%bind _ = Authored_resources.resolve t.authored_resources record ~public in
+  match record.admission.captured_recurrence with
   | Some _ ->
-    restore_authored_code t ~artifacts ~source:prepared.source record
-    |> Result.map ~f:Agent_session.Prompt_revision.artifact
+    let%bind artifact =
+      Source.load_recorded_artifact ~artifact_store:artifacts ~reservation:record
+    in
+    let%map () =
+      Recurrence_authored_source.check_artifact prepared ~selector:origin ~artifact
+    in
+    artifact
+  | None ->
+    (match Source.defining_reference prepared.source with
+     | None -> Source.load_artifact ~artifact_store:artifacts ~reservation:record
+     | Some _ ->
+       restore_authored_code t ~artifacts ~source:prepared.source record
+       |> Result.map ~f:Agent_session.Prompt_revision.artifact)
 ;;
 
 let select_authored_code t ~binding ~parent ~reference ~recorded ~checkpoint =
@@ -2703,7 +5808,7 @@ let prepare_authored_job_source
     |> Result.of_option
          ~error:(unavailable Invalid_state "authored source runtime is not installed")
   in
-  Runtime_owner.with_background_runtime parent.runtime (fun runtime ->
+  Runtime_owner.with_execution_runtime parent.runtime ~owner (fun runtime ->
     let%bind native =
       Result.of_option
         runtime.Agent_session.Runtime_builder.native_runtime
@@ -2785,6 +5890,9 @@ let prepare_authored_job_source
 ;;
 
 let prepare_authored_code
+      ~preparation
+      ?construction_checkpoint
+      ?shell_projection
       t
       ~prepared
       ~revision
@@ -2817,8 +5925,17 @@ let prepare_authored_code
     in
     let authorize () =
       let artifact = Agent_session.Prompt_revision.artifact revision in
-      Agent_session.Delegation_authority.check_authored_preparation
-        authority
+      let check =
+        match preparation with
+        | B.Native_preparation.Original_execution ->
+          Agent_session.Delegation_authority.check_authored_preparation authority
+        | Resource_setup { prefix; check_resource } ->
+          Agent_session.Delegation_authority.check_native_resource_authored_preparation
+            authority
+            ~prefix
+            ~check_resource
+      in
+      check
         ~origin:
           { name =
               (Agent_session.Authored_agent_source.identity prepared.source).tool_name
@@ -2835,7 +5952,12 @@ let prepare_authored_code
     let exception Admission_rejected of Agent_protocol.Error.t in
     let check_authority () =
       Eio.Fiber.check ();
-      match authorize () with
+      let admitted =
+        let%bind () = authorize () in
+        Option.value_map construction_checkpoint ~default:(Ok ()) ~f:(fun check ->
+          check ())
+      in
+      match admitted with
       | Ok () -> Eio.Fiber.check ()
       | Error error -> raise (Admission_rejected error)
     in
@@ -2890,23 +6012,32 @@ let prepare_authored_code
         match !actor_ref with
         | None -> Ok ()
         | Some actor ->
-          (match !run_preparation with
+          (match Constructor_owner.current run_preparation with
            | None ->
              Agent_session.Session_actor.replace_shell_extension_snapshots
                actor
                extension_snapshots
-           | Some preparation ->
+           | Some (Constructor_owner.Initial preparation) ->
              Agent_session.Session_actor.Constructor_mutations
              .replace_shell_extension_snapshots
                actor
                ~preparation
+               extension_snapshots
+           | Some (Runtime_construction construction) ->
+             Agent_session.Session_actor.Runtime_constructor_mutations
+             .replace_shell_extension_snapshots
+               actor
+               ~construction
                extension_snapshots)
           |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
       in
       Result.map saved ~f:(fun () ->
         (* Initialization transfers this same projection into its candidate only
            after the actor's acknowledged write; it must not restore stale state. *)
-        shell_state := { !shell_state with Session.Shell_state.extension_snapshots })
+        shell_state := { !shell_state with Session.Shell_state.extension_snapshots };
+        Option.iter shell_projection ~f:(fun current ->
+          Option.iter (current ()) ~f:(fun actual ->
+            actual := { !actual with Session.Shell_state.extension_snapshots })))
     in
     Chat_response.Startup_compilation.with_context
       ~limits:(Agent_session.Runtime_script_preparation.compilation policy)
@@ -2948,6 +6079,7 @@ let prepare_authored_code
 ;;
 
 let prepare_authored_graph
+      ?construction_checkpoint
       t
       ~startup
       ~sw
@@ -2985,6 +6117,10 @@ let prepare_authored_graph
         ~checkpoint:Eio.Fiber.check
         ~f:(fun _ source -> Ok source))
     ~build:(fun ~source ~native_registrations ->
+      let%bind () =
+        Option.value_map construction_checkpoint ~default:(Ok ()) ~f:(fun check ->
+          check ())
+      in
       Agent_session.Runtime_builder.prepare_authored_resources_from_source
         source
         ~agent_source
@@ -3030,7 +6166,7 @@ let prepare_authored_graph
         |> Result.map_error ~f:source_attachment_error))
 ;;
 
-let independent_resource_host t =
+let independent_resource_host ?construction_checkpoint t =
   let module R = Independent_resources in
   let module B = Agent_session.Runtime_builder in
   let module G = Agent_session.Generated_definition in
@@ -3089,9 +6225,11 @@ let independent_resource_host t =
         in
         let%bind source = restore_state_source t state in
         match source with
-        | Generated_artifact _ ->
+        | Generated_artifact _ | Captured_delegation _ ->
           Error
-            (unavailable Permission_denied "independent ancestry has no authored root")
+            (unavailable
+               Permission_denied
+               "independent ancestry has no authorized authored root")
         | Authored revision ->
           Agent_session.Runtime_script_preparation.with_revision
             t.script_preparation
@@ -3111,6 +6249,7 @@ let independent_resource_host t =
               let source_lease = original_source_lease t ~sw ~revision in
               let%bind prepared, native_registrations =
                 prepare_authored_graph
+                  ?construction_checkpoint
                   t
                   ~startup
                   ~sw
@@ -3126,11 +6265,15 @@ let independent_resource_host t =
                   ~native_service_revision:
                     (Agent_session.Session_management_channel.policy_fingerprint
                        t.session_helpers)
-                  ~one_off_policy:Chat_response.One_off_request.default_policy
+                  ~one_off_policy:execution_request_policy
                   ~authoring_validation_host:t.authoring_validation_host
               in
               let%bind inference_context = resolve_state_inference_context t state in
               let%bind agent_source = source_binding t ~source_lease in
+              let%bind () =
+                Option.value_map construction_checkpoint ~default:(Ok ()) ~f:(fun check ->
+                  check ())
+              in
               let%bind resources =
                 B.prepare_resources
                   ~agent_source
@@ -3152,7 +6295,7 @@ let independent_resource_host t =
                   ~storage_paths:paths
                   ~revision
                   ~session_id:state.identity.session_id
-                  ~one_off_policy:Chat_response.One_off_request.default_policy
+                  ~one_off_policy:execution_request_policy
                   ~authoring_validation_host:t.authoring_validation_host
                   ~manifest_authorizer:
                     (manifest_authorizer t profile revision state actor_ref shell_state)
@@ -3197,7 +6340,11 @@ let independent_resource_host t =
           |> Result.map_error ~f:(fun error ->
             unavailable Permission_denied error.Chat_response.Tool_capability.message)
         in
-        match record.admission.authored_tool with
+        let%bind authored =
+          Agent_store.Delegation_store.Admission.authored_source record.admission
+          |> Result.map_error ~f:protocol_of_store
+        in
+        match authored with
         | Some origin ->
           let%bind prepared =
             Authored_resources.find
@@ -3259,6 +6406,49 @@ let independent_resource_host t =
   }
 ;;
 
+let prepare_independent_eligibility
+      ?retained_sources
+      ?construction_checkpoint
+      t
+      ~parent
+      ~check_request
+  =
+  let validation = t.authoring_validation_host in
+  let host =
+    Independent_eligibility.
+      { registry = t.registry
+      ; store = t.store
+      ; env = t.env
+      ; prompts = t.prompts
+      ; script_preparation = t.script_preparation
+      ; content_limits = t.content_limits
+      ; max_depth = t.limits.delegation_max_depth
+      ; generated_limits =
+          Option.map validation ~f:Chat_response.Authoring_validation.compilation_limits
+      ; generated_source_limits =
+          Option.map validation ~f:Chat_response.Authoring_validation.bundle_limits
+      ; target = (fun id -> Result.map (t.native_metadata_target id) ~f:fst)
+      ; profile = restore_state_profile t
+      }
+  in
+  Independent_eligibility.prepare
+    ?retained_sources
+    host
+    ~walk:(independent_resource_host ?construction_checkpoint t)
+    ~parent
+    ~check_request
+;;
+
+let recheck_independent_eligibility t eligibility =
+  Independent_eligibility.recheck eligibility ~walk:(independent_resource_host t)
+;;
+
+let check_independent_eligibility_current eligibility =
+  let open Result.Let_syntax in
+  let%bind () = Independent_eligibility.check_reservations eligibility in
+  Independent_eligibility.check_current eligibility
+;;
+
 let prepare_extension_runtime_scope t build =
   let ready, ready_u = Eio.Promise.create () in
   let stop, stop_u = Eio.Promise.create () in
@@ -3305,30 +6495,35 @@ let prepare_extension_runtime_scope t build =
             | Ok runtime ->
               let close_started = Atomic.make false in
               let closed, closed_u = Eio.Promise.create () in
-              let close () =
+              let close_reported () =
                 Eio.Cancel.protect (fun () ->
                   if Atomic.exchange close_started true
-                  then Eio.Promise.await closed |> unwrap
+                  then Eio.Promise.await closed
                   else (
-                    let primary = capture runtime.Agent_session.Runtime_builder.close in
-                    let joined = capture stop_and_join in
-                    let result =
-                      match primary with
-                      | Error _ -> primary
-                      | Ok () -> joined
-                    in
+                    let primary = Agent_session.Runtime_builder.close_reported runtime in
+                    let joined = Runtime_close_observation.capture stop_and_join in
+                    let result = Runtime_close_observation.combine primary joined in
                     Eio.Promise.resolve closed_u result;
-                    unwrap result))
+                    result))
               in
-              deliver (Ok (Ok { runtime with close }));
+              deliver
+                (Ok
+                   (Ok
+                      { runtime with
+                        close =
+                          Agent_session.Runtime_builder.Close.reported close_reported
+                      }));
               Eio.Promise.await stop)))
     in
-    let outcome =
+    let joined =
       match outcome with
       | Error (Eio.Cancel.Cancelled Exit, _) when Atomic.get stopping -> Ok ()
       | outcome -> outcome
     in
-    Eio.Promise.resolve exited_u outcome;
+    (* An intentional stop is a successful join, but it is still a failed
+       construction if no runtime was delivered. Keep that original outcome
+       for the waiting constructor rather than turning it into success. *)
+    Eio.Promise.resolve exited_u joined;
     match !delivered, outcome, Atomic.get stopping with
     | false, Error failure, _ -> deliver (Error failure)
     | false, Ok (), _ -> assert false
@@ -3349,29 +6544,32 @@ let prepare_extension_runtime_scope t build =
     Exn.raise_with_original_backtrace exn backtrace
 ;;
 
-(* Shared active-owner, nested dependency and ancestor-moderator admission.
-   Resource selection is supplied by the source
-   adapter; it never substitutes a parent's public registry for private tools. *)
+(* Request-local membership and resource scopes. Native ancestry and policy
+   effects retain their existing independent admission/cleanup engines. *)
+(* The original actual request/owner/private/dependency check remains shared;
+   complete Source membership and all resource pins precede policy evaluation. *)
 let delegated_tool_preparation
+      ~ancestor_sources
       t
       ~authority
       ~actor_ref
       ~reference
       ~selected
       ~(inherited_managed : Agent_session.Runtime_builder.inherited_managed option)
-      ~(lookup :
-         Agent_protocol.Id.Session.t
-         -> (Session_registry.entry, Agent_protocol.Error.t) result)
       (request : Agent_session.Script_tool_calls.preparation)
   =
   let open Result.Let_syntax in
   let module P = Agent_protocol in
   let module D = Agent_store.Delegation_store in
   let module C = Chat_response.Tool_capability in
+  let module A = Agent_session.Delegation_authority in
   let reject message = Error (unavailable Permission_denied message) in
-  let check () =
-    let%bind () = Agent_session.Delegation_authority.check_execution authority in
+  let check ~check_execution () =
+    let%bind () = check_execution () in
     let%bind actor = extension_actor actor_ref in
+    let%bind () =
+      Agent_session.Session_actor.check_delegated_policy_caller actor request
+    in
     let%bind child = Agent_session.Session_actor.state actor in
     let%bind () =
       match child.lifecycle.desired, child.halted, child.failure with
@@ -3527,106 +6725,1710 @@ let delegated_tool_preparation
           | false -> reject "delegation.candidate_tools: handler dependencies changed")
        | _ -> reject "delegation.candidate_tools: selected ceiling changed")
   in
-  let%bind () = check () in
-  let rec evaluate visited depth (edge : D.Reference.t) call =
-    let%bind () =
-      if
-        depth >= t.limits.delegation_max_depth
-        || List.mem visited edge.child_session_id ~equal:P.Id.Session.equal
-      then reject "delegation.ancestry_limit: policy ancestry is cyclic or excessive"
-      else Ok ()
-    in
-    let%bind record =
-      D.resolve (Agent_store.Session_store.delegations t.store) edge
-      |> Result.map_error ~f:protocol_of_store
-    in
-    let%bind parent = lookup record.key.parent_session_id in
-    let%bind source = parent_moderation_source t record.key.parent_session_id in
-    let%bind decision =
-      match source with
-      | None -> Ok P.Moderator_execution.Decision.Approve
-      | Some _ ->
-        Runtime_owner.prepare_delegated_tool
-          parent.runtime
-          ~delegation:
-            { child_session_id = request.session_id
-            ; child_generation = request.generation
-            ; child_invocation_id = request.invocation_id
-            ; admission_sha256 = reference.admission_sha256
-            }
-          ~event:(Pre_tool_call call)
-          ~authorize:check
-    in
-    let%bind () = check () in
-    match decision with
-    | Reject _ ->
-      Ok
-        (Some
-           (Chat_response.Moderation.Tool_moderation.Reject
-              "Parent policy rejected the call."))
-    | Approve | Rewrite_args _ | Redirect _ ->
-      let name, args =
-        match decision with
-        | Approve -> call.Chat_response.Moderation.Tool_call.name, call.args
-        | Rewrite_args args -> call.name, args
-        | Redirect (name, args) -> name, args
-        | Reject _ -> assert false
-      in
-      let%bind binding =
-        C.find request.selected ~name
-        |> Result.map_error ~f:(fun e -> unavailable Permission_denied e.C.message)
-      in
-      let kind =
-        if String.equal (C.descriptor binding).type_ "custom"
-        then Chat_response.Moderation.Tool_call.Custom
-        else Function
-      in
-      let%bind () =
-        match request.owner, request.call.kind, kind with
-        | Model_call _, Function, Custom | Model_call _, Custom, Function ->
-          reject "delegation.candidate_kind: model tool kind cannot change"
-        | _ -> Ok ()
-      in
-      let%bind schema =
-        Chatmd_shell_spec.Tool_schema.compile (C.reference binding).input_schema
-        |> Result.map_error ~f:(fun _ ->
-          unavailable Permission_denied "invalid delegated target schema")
-      in
-      let%bind () =
-        Chatmd_shell_spec.Tool_schema.validate schema args
-        |> Result.map_error ~f:(fun _ ->
-          unavailable Permission_denied "invalid delegated target arguments")
-      in
-      let payload_text =
-        match kind, args with
-        | Custom, `String text -> text
-        | _ -> Jsonaf.to_string args
-      in
-      let call = { call with name; args; kind; payload_text } in
-      let%bind parent_state = Agent_session.Session_actor.state parent.actor in
-      (match parent_state.spec.delegation with
-       | Some ancestor ->
-         evaluate (edge.child_session_id :: visited) (depth + 1) ancestor call
-       | None ->
-         if not (String.equal call.name request.call.name)
-         then
-           Ok
-             (Some
-                (Chat_response.Moderation.Tool_moderation.Redirect (call.name, call.args)))
-         else if Jsonaf.exactly_equal call.args request.call.args
-         then Ok None
-         else Ok (Some (Chat_response.Moderation.Tool_moderation.Rewrite_args call.args)))
+  let validation : Delegated_policy_vector.validation =
+    { authorize = check ~check_execution:(fun () -> A.check_execution authority)
+    ; read_ancestry = (fun () -> A.check_ancestry authority)
+    }
   in
-  let%bind result = evaluate [] 0 reference request.call in
-  let%map () = check () in
-  result
+  let%bind () = validation.authorize () in
+  let%bind sources =
+    Result.of_option
+      ancestor_sources
+      ~error:
+        (unavailable
+           Permission_denied
+           "delegation.resources_unavailable: complete ancestor Sources are not retained")
+  in
+  let%bind ancestry = validation.read_ancestry () in
+  let host : Delegated_policy_vector.host =
+    { registry = t.registry
+    ; runtime_source_owner = t.runtime_source_owner
+    ; native_metadata_target = t.native_metadata_target
+    }
+  in
+  Delegated_policy_vector.with_members
+    host
+    ~ancestry
+    ~sources
+    ~validation
+    ~f:(fun membership ->
+      let%bind ancestry = Delegated_policy_vector.check_members membership in
+      let%bind child = extension_actor actor_ref in
+      (* Preflight restoration requires genuine governance. Capture/bind must be
+         adjacent; no yielding request check may stale this captured State. *)
+      let%bind captured =
+        Agent_session.Session_actor.Causal_governance.capture child ~request
+      in
+      let%bind governance =
+        Agent_session.Session_actor.Causal_governance.bind_registered
+          child
+          captured
+          ~source_owner:t.runtime_source_owner
+          ~ancestry:(Some ancestry)
+      in
+      let authorize ?validation () =
+        let%bind _ = Delegated_policy_vector.check_members ?validation membership in
+        Agent_session.Session_actor.Causal_governance.check_current governance
+      in
+      let authorize_restoration member_id =
+        let read_ancestry () =
+          A.check_policy_restoration_ancestry authority ~promoting:member_id
+        in
+        let validation : Delegated_policy_vector.validation =
+          { authorize =
+              check ~check_execution:(fun () -> Result.map (read_ancestry ()) ~f:ignore)
+          ; read_ancestry
+          }
+        in
+        authorize ~validation ()
+      in
+      Delegated_policy_vector.with_resources
+        membership
+        ~actor:child
+        ~request
+        ~governance
+        ~authorize:(fun () -> authorize ())
+        ~authorize_restoration
+        ~f:(fun prepared ->
+          let%bind bound = Delegated_policy_vector.bind_current prepared in
+          Delegated_policy_vector.evaluate bound ~reference))
 ;;
 
-let prepare_runtime_at_paths
+let legacy_construction
+      ?construction_checkpoint
       t
-      paths
-      storage_paths
+      profile
+      actor_ref
+      state
+      pending_jobs
+      ~initialization_scope
+      ~initialization_jobs
+      ~run_preparation
+  =
+  let module A = Agent_session.Session_actor in
+  let module B = Agent_session.Runtime_builder in
+  let with_services
+        ~construction_checkpoint
+        actor
+        scope
+        (jobs : Agent_session.Runtime_model_services.t)
+        ~commit
+        f
+    =
+    let check_construction () =
+      Option.value_map construction_checkpoint ~default:(Ok ()) ~f:(fun check -> check ())
+    in
+    let check_current () =
+      let open Result.Let_syntax in
+      (* A preceding callback-owned ACK invalidates Store currentness. Refresh
+         the same constructor before its strict physical callback/effect gate. *)
+      let%bind () = check_construction () in
+      A.check_callback_current actor scope
+    in
+    let check_service () =
+      check_current ()
+      |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
+    in
+    let jobs : Agent_session.Runtime_model_services.t =
+      { spawn_model =
+          (fun ~recipe ~payload ->
+            let open Result.Let_syntax in
+            let%bind () = check_service () in
+            jobs.spawn_model ~recipe ~payload)
+      ; call_model =
+          (fun ~recipe ~payload ~execute ->
+            let open Result.Let_syntax in
+            let%bind () = check_service () in
+            jobs.call_model ~recipe ~payload ~execute)
+      }
+    in
+    let is_halted () =
+      match check_current () with
+      | Error _ -> true
+      | Ok () ->
+        (match A.state actor with
+         | Error _ -> true
+         | Ok current ->
+           current.halted
+           || Option.is_some current.failure
+           || Result.is_error (check_current ()))
+    in
+    let checkpoint () =
+      match A.Callback_scope.committed_checkpoint scope with
+      | Some checkpoint -> Ok checkpoint
+      | None ->
+        Error
+          (unavailable
+             Invalid_state
+             "legacy callback has not acknowledged its checkpoint")
+    in
+    let services : B.legacy_callback_services =
+      { jobs
+      ; schedules = A.callback_schedule_services actor ~scope
+      ; execute =
+          (fun ~invocation execute ->
+            let open Result.Let_syntax in
+            let%bind () = check_construction () in
+            A.callback_tool_executor
+              actor
+              ~scope
+              ~invocation
+              (fun ~dispatched ~capabilities ->
+                 let%bind () = check_construction () in
+                 execute ~dispatched ~capabilities))
+      ; executing = A.Callback_scope.executing scope
+      ; policy_caller = (fun () -> A.callback_policy_caller actor ~scope)
+      ; check_current
+      ; is_halted
+      ; checkpoint
+      }
+    in
+    f ~services ~commit
+  in
+  let claim ~manager ~callback f =
+    let open Result.Let_syntax in
+    let%bind () =
+      Option.value_map construction_checkpoint ~default:(Ok ()) ~f:(fun check -> check ())
+    in
+    match !actor_ref, !initialization_scope with
+    | Some actor, Some constructor ->
+      (* Capture this exact Init owner. Returning/closing it cannot retarget these
+         services to a later constructor or the ordinary raw Job writer. *)
+      let jobs =
+        (job_services
+           ?construction_checkpoint
+           t
+           state
+           actor_ref
+           pending_jobs
+           ~initialization_scope:(ref (Some constructor))
+           ~initialization_jobs
+           ~run_preparation)
+          .initialization
+      in
+      A.with_initialization_callback
+        actor
+        ~scope:constructor
+        ~manager
+        ~callback
+        (fun ~scope ~commit ->
+           with_services ~construction_checkpoint actor scope jobs ~commit f)
+    | None, _ | Some _, None ->
+      Error
+        (unavailable
+           Permission_denied
+           "legacy constructor callback requires its actual initialization owner")
+  in
+  (* Installed callbacks have no construction fallback or mutable preparation.
+     Their actual callback port owns admission; ordinary claimed Job execution
+     independently owns synchronous child lifetime and inference allocation. *)
+  let installed_jobs =
+    job_services
+      t
+      state
+      actor_ref
+      pending_jobs
+      ~initialization_scope:(ref None)
+      ~initialization_jobs:(ref [])
+      ~run_preparation:(Constructor_owner.Ordinary (ref None))
+  in
+  let installed_claim ?capture_cleanup ~operation_id ~manager ~callback f =
+    match !actor_ref with
+    | None ->
+      Error (unavailable Permission_denied "installed legacy callback requires its actor")
+    | Some actor ->
+      if not (Chat_response.Moderator_manager.callback_is_current manager callback)
+      then Error (unavailable Conflict "installed legacy callback has no current Manager")
+      else (
+        let claim =
+          match Chat_response.Moderator_manager.Callback.selection callback with
+          | Boundary _ -> A.with_legacy_callback actor ~operation_id
+          | Queue_head -> A.with_legacy_queued_callback actor ~operation_id
+        in
+        claim ?capture_cleanup ~callback (fun ~scope ~commit ->
+          let jobs = installed_jobs.for_execution (A.callback_model_jobs actor ~scope) in
+          with_services ~construction_checkpoint:None actor scope jobs ~commit f))
+  in
+  let history () =
+    let open Result.Let_syntax in
+    match !actor_ref with
+    | None ->
+      Error (unavailable Permission_denied "installed legacy history requires its actor")
+    | Some actor ->
+      let%bind current = A.state actor in
+      Agent_session.History_codec.all_of_protocol current.conversation.canonical_history
+  in
+  let startup =
+    match state.runtime_initialization, !initialization_scope with
+    | Ready, None -> B.Legacy_startup.Installed_resume
+    | Ready, Some _ | Pending _, (Some _ | None) -> Constructor
+  in
+  B.
+    { startup
+    ; claim
+    ; installed_claim
+    ; history
+    ; script_tools = native_script_tools t profile actor_ref ~state
+    }
+;;
+
+(* A registry reservation also protects ordinary reads. Claimed Jobs retain
+   their exact registered owner while such a read is in progress; the Actor's
+   execution scope still enforces lifecycle retirement and cancellation. New
+   admission additionally requires reservation exclusion below; an existing
+   execution instead retains its actual Actor fence and Owner source stage. *)
+let registered_owner_tuple t (entry : Session_registry.entry) ~session =
+  let module S = Agent_store.Session_store in
+  let module P = Agent_protocol in
+  let valid =
+    match entry.store_handle with
+    | None -> false
+    | Some handle ->
+      let id = S.Handle.session_id handle in
+      P.Session_ref.equal
+        session
+        (P.Session_ref.create ~server_id:(S.server_id t.store) ~session_id:id)
+      && S.owns_handle t.store handle
+      && Runtime_owner.belongs_to_actor entry.runtime entry.actor
+      && Option.exists (Session_registry.find t.registry id) ~f:(fun actual ->
+        phys_equal actual.actor entry.actor
+        && phys_equal actual.runtime entry.runtime
+        && Option.exists actual.store_handle ~f:(phys_equal handle))
+  in
+  valid
+;;
+
+let check_registered_owner t entry ~session =
+  if
+    registered_owner_tuple t entry ~session
+    && (not (Session_registry.is_closing t.registry))
+    && not
+         (Session_registry.has_pending_cleanup
+            t.registry
+            (Agent_protocol.Session_ref.session_id session))
+  then Ok ()
+  else
+    Error
+      (unavailable
+         Conflict
+         "recurrence entry is not this Factory's current registered owner")
+;;
+
+(* Genuine retained ACK/Set facts remain writable while shutdown preserves the
+   complete loaded graph. This never admits execution or an unregistered tuple. *)
+let check_registered_factual_owner t entry ~session =
+  if registered_owner_tuple t entry ~session
+  then Session_registry.check_retained_factual_owner t.registry entry
+  else
+    Error
+      (unavailable
+         Conflict
+         "factual entry is not this Factory's current registered owner")
+;;
+
+let descendant_host t ~handle ~actor_ref ~check_ancestry =
+  Descendant_accounting_host.create
+    { registry = t.registry
+    ; store = t.store
+    ; runtime_source_owner = t.runtime_source_owner
+    ; check_registered_owner = check_registered_owner t
+    ; check_registered_factual_owner = check_registered_factual_owner t
+    }
+    ~handle
+    ~actor_ref
+    ~check_ancestry
+;;
+
+let selected_runtime_source t source =
+  let module S = Agent_session.Runtime_builder.Source in
+  let open Result.Let_syntax in
+  let generated artifact =
+    let%map artifacts =
+      Agent_store.Prompt_artifact_store.open_existing
+        ~env:t.env
+        ~root:
+          (Agent_store.Data_root.prompt_artifacts_path
+             (Agent_store.Session_store.data_root t.store))
+      |> Result.map_error ~f:protocol_of_store
+    in
+    Generated_artifact
+      { artifact
+      ; materialized_tree =
+          Agent_store.Prompt_artifact_store.materialized_tree
+            artifacts
+            artifact.Agent_store.Prompt_artifact_store.Artifact.revision_id
+      }
+  in
+  match S.selection source with
+  | Authored revision -> Ok (Authored revision)
+  | Captured source -> Ok (Captured_delegation source)
+  | Authored_child selected ->
+    let revision = Agent_session.Prompt_child_source.revision selected.source in
+    Ok
+      (Generated_artifact
+         { artifact = Agent_session.Prompt_revision.artifact revision
+         ; materialized_tree = Agent_session.Prompt_revision.materialized_tree revision
+         })
+  | Generated definition ->
+    generated (Agent_session.Generated_definition.artifact definition)
+  | Generated_artifact source ->
+    generated (Agent_session.Generated_definition.Source.artifact source)
+;;
+
+(* Fixed per-entry checks independently re-resolve private facts for EACH Owner
+   admission. No first consumer's closure becomes another consumer's permission. *)
+module Native_admission_proof = struct
+  type t =
+    | Construction of Agent_session.Runtime_builder.Source.t
+    | Current of Native_current_source.t
+
+  let installed_source = function
+    | Construction _ -> None
+    | Current source -> Native_current_source.source source
+  ;;
+
+  let state t ~expected =
+    match t with
+    | Construction _ -> expected
+    | Current source -> Native_current_source.state source ~expected
+  ;;
+
+  let fingerprint t ~expected =
+    match t with
+    | Construction source -> Native_resource_authority.fingerprint ~source expected
+    | Current source -> Native_current_source.fingerprint source ~expected
+  ;;
+
+  let check t ~expected =
+    match t with
+    | Construction _ -> Ok ()
+    | Current source -> Native_current_source.check source ~expected
+  ;;
+end
+
+module Native_admission_observation = struct
+  module Validation = struct
+    type t =
+      | Direct of Agent_store.Delegation_store.record
+      | Ancestry of Agent_session.Delegation_authority.Resource_path.Observation.t
+  end
+
+  type t =
+    { validation : Validation.t
+    ; proof : Native_admission_proof.t
+    }
+
+  let current_source t =
+    match t.proof with
+    | Current source -> Ok source
+    | Construction _ ->
+      Error
+        (unavailable
+           Conflict
+           "native construction proof cannot be used for current resource pin")
+  ;;
+
+  let basis t ~expected =
+    let open Result.Let_syntax in
+    let%bind source = current_source t in
+    let%bind () = Native_current_source.check source ~expected in
+    match t.validation with
+    | Direct record ->
+      Native_resource_authority.Basis.capture
+        ?installed_source:(Native_current_source.source source)
+        ~record
+        expected
+    | Ancestry observed ->
+      let%bind basis =
+        Native_resource_authority.Basis.capture_resource_path
+          ?installed_source:(Native_current_source.source source)
+          observed
+      in
+      let%map () =
+        Native_resource_authority.Basis.check
+          ?installed_source:(Native_current_source.source source)
+          basis
+          ~expected
+      in
+      basis
+  ;;
+
+  let check_basis t basis ~expected =
+    let open Result.Let_syntax in
+    let%bind source = current_source t in
+    let%bind () = Native_current_source.check source ~expected in
+    Native_resource_authority.Basis.check
+      ?installed_source:(Native_current_source.source source)
+      basis
+      ~expected
+  ;;
+end
+
+let check_native_resource_admission ?source t handle actor admission expected =
+  let module A = Agent_session in
+  let module D = Agent_store.Delegation_store in
+  let module P = Agent_protocol in
+  let open Result.Let_syntax in
+  let%bind validation =
+    Runtime_owner.Native_resource_admission.observe admission ~expected
+  in
+  let%bind () =
+    if
+      Agent_store.Session_store.owns_handle t.store handle
+      && P.Id.Session.equal
+           (Agent_store.Session_store.Handle.session_id handle)
+           expected.A.Session_state.identity.session_id
+      && Option.exists
+           (A.Session_actor.runtime_source_owner_identity actor)
+           ~f:(A.Runtime_source_owner.matches t.runtime_source_owner)
+    then Ok ()
+    else
+      Error
+        (unavailable
+           Permission_denied
+           "native resource target is not this Factory's Store/Actor")
+  in
+  let%bind _ =
+    Agent_store.Session_store.Handle.metadata_checked handle
+    |> Result.map_error ~f:protocol_of_store
+  in
+  let reference = Runtime_owner.Native_resource_admission.reference admission in
+  let%bind record =
+    D.resolve (Agent_store.Session_store.delegations t.store) reference
+    |> Result.map_error ~f:protocol_of_store
+  in
+  let%bind () =
+    match record.stage, record.revocation with
+    | Linked, None
+      when P.Id.Session.equal record.key.parent_session_id expected.identity.session_id ->
+      Ok ()
+    | (Reserved | Artifact_installed | Child_installed | Linked), _ ->
+      Error
+        (unavailable
+           Permission_denied
+           "native resource private relationship is not current")
+  in
+  let%bind () = A.Delegation_authority.check_invocation_owner record expected in
+  let%bind proof =
+    match source with
+    | Some source ->
+      (* This actual selected construction Source is not current Cell evidence.
+         Keep origin/Path checks above and baseline Basis(None) below: no cold
+         Source-required admission can bypass them through a partial Cell. *)
+      Ok (Native_admission_proof.Construction source)
+    | None ->
+      native_current_source t expected
+      |> Result.map ~f:(fun source -> Native_admission_proof.Current source)
+  in
+  let%bind () =
+    A.Delegation_authority.check_invocation_owner
+      record
+      (Native_admission_proof.state proof ~expected)
+  in
+  let%bind fingerprint = Native_admission_proof.fingerprint proof ~expected in
+  let%bind () = authorize_independent t record in
+  let%bind () =
+    if String.equal fingerprint record.admission.authority_sha256
+    then Ok ()
+    else Error (unavailable Permission_denied "native resource parent authority changed")
+  in
+  let%bind () =
+    match validation with
+    | Runtime_owner.Native_resource_origin.Validation.Direct ->
+      Native_resource_authority.check_active record expected
+    | Ancestry observed ->
+      let%bind () =
+        if
+          D.equal_record
+            record
+            (A.Delegation_authority.Resource_path.Observation.record observed)
+        then Ok ()
+        else
+          Error
+            (unavailable Permission_denied "native path record changed during validation")
+      in
+      let%bind basis =
+        Native_resource_authority.Basis.capture_resource_path
+          ?installed_source:(Native_admission_proof.installed_source proof)
+          observed
+      in
+      Native_resource_authority.Basis.check
+        ?installed_source:(Native_admission_proof.installed_source proof)
+        basis
+        ~expected
+  in
+  (* The original Factory callback checks the actual child and exact stop epoch
+     again after all private Store/fingerprint waits. *)
+  let%bind current_validation =
+    Runtime_owner.Native_resource_admission.observe admission ~expected
+  in
+  let%bind current =
+    D.resolve (Agent_store.Session_store.delegations t.store) reference
+    |> Result.map_error ~f:protocol_of_store
+  in
+  let%bind () =
+    if D.equal_record record current
+    then Ok ()
+    else
+      Error
+        (unavailable
+           Permission_denied
+           "native resource private record changed during validation")
+  in
+  let%bind () = Native_admission_proof.check proof ~expected in
+  match validation, current_validation with
+  | Runtime_owner.Native_resource_origin.Validation.Direct, Direct ->
+    Ok Native_admission_observation.{ validation = Direct record; proof }
+  | Ancestry _, Ancestry observed ->
+    let%bind () =
+      if
+        D.equal_record
+          current
+          (A.Delegation_authority.Resource_path.Observation.record observed)
+      then Ok ()
+      else
+        Error
+          (unavailable Permission_denied "native path record changed after authorization")
+    in
+    let%bind basis =
+      Native_resource_authority.Basis.capture_resource_path
+        ?installed_source:(Native_admission_proof.installed_source proof)
+        observed
+    in
+    let%map () =
+      Native_resource_authority.Basis.check
+        ?installed_source:(Native_admission_proof.installed_source proof)
+        basis
+        ~expected
+    in
+    Native_admission_observation.{ validation = Ancestry observed; proof }
+  | Direct, Ancestry _ | Ancestry _, Direct ->
+    Error (unavailable Permission_denied "native admission changed validation route")
+;;
+
+module Native_parent = struct
+  type t =
+    { resources : Agent_session.Runtime_builder.resources
+    ; record : Agent_store.Delegation_store.record
+    ; preparation : Agent_session.Runtime_builder.Native_preparation.t
+    ; sources : Agent_session.Runtime_builder.ancestor_sources
+    ; current : unit -> (Chat_response.Tool_capability.t, Agent_protocol.Error.t) result
+    ; capabilities : Agent_session.Runtime_builder.ancestor_capabilities
+    }
+end
+
+let native_public (resources : Agent_session.Runtime_builder.resources) =
+  Lazy.force resources.native.capabilities
+  |> Result.map_error ~f:(fun error ->
+    unavailable Permission_denied error.Chat_response.Tool_capability.message)
+;;
+
+(* Capture the actual public binding registry under strict custody before
+   storing these views. During policy construction only the original binding
+   evidence can be compared. It never forces the native capability lazy value. *)
+let native_parent_views
+      t
+      (resources : Agent_session.Runtime_builder.resources)
+      ~(provider : Source_target.t)
+      ~source
+      ~custody
+      ~parent_id
+  =
+  let open Result.Let_syntax in
+  let module B = Agent_session.Runtime_builder in
+  let module Evidence = Agent_session.Delegation_authority.Binding_evidence in
+  let module Id = Agent_protocol.Id.Session in
+  let check_resources () = Runtime_owner.Native_resource_custody.check custody in
+  let%bind () = check_resources () in
+  let%bind public = native_public resources in
+  let%bind () = check_resources () in
+  let evidence = Evidence.of_registry public in
+  let check_provider () =
+    match Session_registry.find t.registry parent_id with
+    | Some current
+      when phys_equal current.actor provider.actor
+           && phys_equal current.runtime provider.runtime
+           && Option.equal phys_equal current.store_handle provider.store_handle
+           && Runtime_owner.belongs_to_actor provider.runtime provider.actor -> Ok ()
+    | Some _ | None ->
+      Error
+        (unavailable
+           Permission_denied
+           "delegation.resources_unavailable: Source provider changed")
+  in
+  let check_source () =
+    let%bind () = Runtime_owner.Native_resource_custody.check_source custody ~source in
+    check_provider ()
+  in
+  let lookup ~check ~local ~ancestor id =
+    let%bind () = check () in
+    let%bind bindings =
+      if Id.equal id parent_id
+      then Ok local
+      else (
+        match resources.ancestor_capabilities with
+        | Some bindings -> ancestor bindings id
+        | None ->
+          Error
+            (unavailable
+               Permission_denied
+               "delegation.resources_unavailable: ancestor bindings are not retained"))
+    in
+    let%map () = check () in
+    bindings
+  in
+  let for_execution id =
+    lookup
+      ~check:check_resources
+      ~local:public
+      ~ancestor:(fun views -> views.for_execution)
+      id
+  in
+  let for_policy_restoration ~promoting id =
+    let check () =
+      if Id.equal parent_id promoting
+      then check_source ()
+      else (
+        let%bind () = check_resources () in
+        check_provider ())
+    in
+    lookup
+      ~check
+      ~local:evidence
+      ~ancestor:(fun bindings -> bindings.for_policy_restoration ~promoting)
+      id
+  in
+  let with_source id ~f =
+    let%bind () = check_source () in
+    let result =
+      if Id.equal id parent_id
+      then f ~source
+      else (
+        match resources.ancestor_sources with
+        | Some sources -> sources.with_source id ~f
+        | None ->
+          Error
+            (unavailable
+               Permission_denied
+               "delegation.resources_unavailable: ancestor Sources are not retained"))
+    in
+    (* Preserve the callback's actual failure. Only success is postchecked. *)
+    match result with
+    | Error _ -> result
+    | Ok value ->
+      let%map () = check_source () in
+      value
+  in
+  let current () = for_execution parent_id in
+  Ok (current, B.{ for_execution; for_policy_restoration }, B.{ with_source })
+;;
+
+let with_native_parent_observed
+      t
+      (target : Source_target.t)
+      ~origin
+      ~consumer
+      ~lifetime
+      (state : Agent_session.Session_state.t)
+      f
+  =
+  let module R = Runtime_result_observation in
+  let module Origin = Runtime_owner.Native_resource_origin in
+  let open Result.Let_syntax in
+  R.bind
+    (R.raw (fun () ->
+       Runtime_owner.Native_consumer.check_owner consumer ~owner:target.runtime))
+    ~f:(fun () ->
+      match state.spec.delegation with
+      | None -> f None
+      | Some reference ->
+        R.bind
+          (R.raw (fun () ->
+             let%bind parent_origin =
+               native_parent_origin t ~origin ~target ~consumer ~reference
+             in
+             let%map parent, record = native_parent_record t state in
+             parent_origin, parent, record))
+          ~f:(fun (parent_origin, parent, record) ->
+            let report = Native_resource_lifetime.parent lifetime in
+            let outcome =
+              with_parent_native_origin_source_resources_observed
+                t
+                parent.runtime
+                ~origin:parent_origin
+                ~physical_target:target
+                ~consumer
+                ~capture_release:(Native_resource_lifetime.Parent.capture_release report)
+                ~f:(fun ~check ~custody ~source resources ->
+                  R.bind
+                    (R.raw (fun () ->
+                       let%bind () = check () in
+                       native_parent_views
+                         t
+                         resources
+                         ~provider:(Source_target.of_entry parent)
+                         ~source
+                         ~custody
+                         ~parent_id:record.key.parent_session_id))
+                    ~f:(fun (current, capabilities, sources) ->
+                      let preparation =
+                        match Origin.route parent_origin with
+                        | Direct _ ->
+                          Agent_session.Runtime_builder.Native_preparation
+                          .Original_execution
+                        | Ancestry prefix ->
+                          Resource_setup { prefix; check_resource = check }
+                      in
+                      f
+                        (Some
+                           Native_parent.
+                             { resources
+                             ; record
+                             ; preparation
+                             ; sources
+                             ; current
+                             ; capabilities
+                             })))
+            in
+            Native_resource_lifetime.Parent.record report ~owner:parent.runtime outcome;
+            Runtime_owner.Native_borrow_outcome.observation outcome))
+;;
+
+let native_delegation_authority t state parent selected =
+  let module D = Agent_store.Delegation_store in
+  let open Result.Let_syntax in
+  let record = parent.Native_parent.record in
+  let parent_stop_epoch =
+    Option.value
+      state.Agent_session.Session_state.parent_stop_epoch
+      ~default:(Option.value record.admission.parent_stop_epoch ~default:0L)
+  in
+  Ok
+    (Agent_session.Delegation_authority.create
+       ~policy_restoration_bindings:
+         parent.Native_parent.capabilities.for_policy_restoration
+       ~source_owner:t.runtime_source_owner
+       ~authored_capabilities:(Authored_resources.resolve t.authored_resources)
+       ~max_depth:t.limits.delegation_max_depth
+       ~moderation_current:(native_current_moderation t)
+       ~authorize_independent:(authorize_independent t)
+       ~parent_stop_epoch
+       ~reference:(D.reference record)
+       ~capabilities:selected
+       ~host:
+         { state = (fun id -> Result.map (t.native_metadata_target id) ~f:snd)
+         ; resolve =
+             (fun reference ->
+               D.resolve (Agent_store.Session_store.delegations t.store) reference
+               |> Result.map_error ~f:protocol_of_store)
+         ; capabilities = parent.Native_parent.capabilities.for_execution
+         }
+       ())
+;;
+
+(* Runs under the actual retained parent CPS. This prepares only constructor
+   resources; the separate Cell attachment owns Manager/history/worker setup. *)
+let prepare_native_family
+      t
+      handle
+      actor
       source
+      ~(parent : Native_parent.t option)
+      ~child
+      ~tracking
+      ~state
+      ~profile
+      ~check_source
+      ~native_routing
+  =
+  let module A = Agent_session in
+  let module B = A.Runtime_builder in
+  let open Result.Let_syntax in
+  let%bind retained = selected_runtime_source t source in
+  let%bind paths = runtime_paths t handle retained state in
+  let%bind inference_context = resolve_state_inference_context t state in
+  let actor_ref = ref (Some actor) in
+  let shell_state = ref state.A.Session_state.shell in
+  let initialization_scope = ref None in
+  let services =
+    extension_services
+      ~current_initialization:(fun () ->
+        Native_constructor_routing.initialization_scope native_routing)
+      t
+      profile
+      actor_ref
+      ~initialization_scope
+      ~state
+  in
+  let host ~startup ~manifest_authorizer =
+    B.Native_host.
+      { preparation =
+          Option.value_map
+            parent
+            ~default:B.Native_preparation.Original_execution
+            ~f:(fun parent -> parent.Native_parent.preparation)
+      ; check_source
+      ; startup
+      ; env = t.env
+      ; inference_context
+      ; inference_identity = Graph_tracking.identity tracking
+      ; bind_inference_identity =
+          (fun allocate -> Graph_tracking.bind_identity tracking ~allocate)
+      ; on_inference_attempt = Graph_tracking.on_attempt tracking
+      ; on_inference_completion = Graph_tracking.on_completion tracking
+      ; on_inference_observation = Graph_tracking.on_observation tracking
+      ; paths
+      ; storage_paths = paths
+      ; session_id = state.identity.session_id
+      ; permission_profile = profile
+      ; native_service_revision = services.native_service_revision
+      ; one_off_policy = Some services.one_off_policy
+      ; authoring_validation_host = services.authoring_validation_host
+      ; initial_agent_guidance = services.initial_agent_guidance
+      ; ancestor_capabilities =
+          Option.map parent ~f:(fun parent -> parent.Native_parent.capabilities)
+      ; ancestor_sources =
+          Option.map parent ~f:(fun parent -> parent.Native_parent.sources)
+      ; manifest_authorizer
+      ; approval_provider = shell_approval_provider t profile actor_ref
+      ; approval_store =
+          shell_approval_store
+            ~run_preparation:(Native_constructor_routing.constructor native_routing)
+            state
+            actor_ref
+            shell_state
+      }
+  in
+  let prepare ~source ~family ~host ~source_lease ~install =
+    let%bind input = B.Native_input.create ~source ~family in
+    let%bind prepared =
+      B.Prepared_native.prepare
+        input
+        ~construction:(Native_resource_lifetime.Child.construction child)
+        ~host
+    in
+    let%bind () =
+      Option.value_map source_lease ~default:(Ok ()) ~f:(fun source_lease ->
+        B.Prepared_native.attach_source_lease prepared ~source_lease
+        |> Result.map_error ~f:source_attachment_error)
+    in
+    let%bind () =
+      B.Prepared_native.with_resources prepared ~f:(fun resources ->
+        let%bind public = native_public resources in
+        install public)
+    in
+    let%map () = check_source () in
+    source, prepared
+  in
+  let root revision captured =
+    let root_invocation =
+      match captured with
+      | None -> state.spec.root_invocation
+      | Some (captured, _) ->
+        A.Recurrence_child_origin.root_invocation
+          (A.Captured_recurrence_source.origin captured)
+    in
+    A.Runtime_script_preparation.with_revision
+      t.script_preparation
+      revision
+      ~env:t.env
+      ~invocation:(A.Runtime_script_preparation.Invocation.of_root root_invocation)
+      ~checkpoint:Eio.Fiber.check
+      ~f:(fun startup ~compilation_limits:_ ~programs:_ ->
+        let source_lease =
+          original_source_lease
+            t
+            ~sw:(Native_resource_lifetime.Child.switch child)
+            ~revision
+        in
+        let%bind agent_source = source_binding t ~source_lease in
+        let%bind graph, native_registrations =
+          if t.qualify_chatml_extensions
+          then (
+            let%map prepared, registrations =
+              prepare_authored_graph
+                ~construction_checkpoint:check_source
+                t
+                ~startup
+                ~sw:(Native_resource_lifetime.Child.switch child)
+                ~revision
+                ~source_lease
+                ~paths
+                ~storage_paths:paths
+                ~state
+                ~profile
+                ~actor_ref
+                ~tracking
+                ~shell_state
+                ~native_service_revision:services.native_service_revision
+                ~one_off_policy:services.one_off_policy
+                ~authoring_validation_host:services.authoring_validation_host
+            in
+            Some prepared, registrations)
+          else Ok (None, [])
+        in
+        let family =
+          match captured with
+          | None ->
+            B.Native_input.Authored
+              { revision
+              ; root_invocation
+              ; agent_source
+              ; script_preparation = t.script_preparation
+              ; native_registrations
+              }
+          | Some (captured, authority) ->
+            Captured
+              { captured
+              ; authority
+              ; agent_source
+              ; script_preparation = t.script_preparation
+              ; native_registrations
+              }
+        in
+        prepare
+          ~source
+          ~family
+          ~host:
+            (host
+               ~startup:(Some startup)
+               ~manifest_authorizer:
+                 (manifest_authorizer
+                    ~run_preparation:
+                      (Native_constructor_routing.constructor native_routing)
+                    t
+                    profile
+                    revision
+                    state
+                    actor_ref
+                    shell_state))
+          ~source_lease:(Some source_lease)
+          ~install:(fun public ->
+            Option.value_map graph ~default:(Ok ()) ~f:(fun graph ->
+              Authored_resources.install
+                t.authored_resources
+                ~sw:(Native_resource_lifetime.Child.switch child)
+                ~public
+                graph)))
+  in
+  match B.Source.selection source with
+  | Authored revision -> root revision None
+  | (Captured _ | Generated _ | Generated_artifact _ | Authored_child _) as selection ->
+    let%bind parent =
+      Result.of_option
+        parent
+        ~error:
+          (unavailable Permission_denied "delegated native source has no retained parent")
+    in
+    let%bind current = parent.current () in
+    let%bind () = check_source () in
+    let record = parent.record in
+    let%bind artifact_store =
+      Agent_store.Prompt_artifact_store.open_existing
+        ~env:t.env
+        ~root:
+          (Agent_store.Data_root.prompt_artifacts_path
+             (Agent_store.Session_store.data_root t.store))
+      |> Result.map_error ~f:protocol_of_store
+    in
+    let%bind authored =
+      Agent_store.Delegation_store.Admission.authored_source record.admission
+      |> Result.map_error ~f:protocol_of_store
+    in
+    let%bind selected =
+      match authored with
+      | Some _ -> Authored_resources.resolve t.authored_resources record ~public:current
+      | None ->
+        Chat_response.Background_request.rebind_capabilities
+          ~pins:record.admission.capability_pins
+          ~capabilities:current
+    in
+    let%bind authority = native_delegation_authority t state parent selected in
+    (match selection with
+     | Authored _ ->
+       Error
+         (unavailable Invalid_state "delegated native branch lost its selected family")
+     | Captured captured ->
+       let origin = A.Captured_recurrence_source.origin captured in
+       let%bind () = A.Recurrence_child_origin.validate_source origin state in
+       (match A.Recurrence_child_origin.source_kind origin with
+        | Artifact ->
+          root
+            (A.Captured_recurrence_source.revision captured)
+            (Some (captured, authority))
+        | Authored_tool selector ->
+          let%bind prepared =
+            Authored_resources.find
+              t.authored_resources
+              ~public:current
+              ~name:selector.name
+          in
+          let revision = A.Captured_recurrence_source.revision captured in
+          let%bind () =
+            Recurrence_authored_source.check_artifact
+              prepared
+              ~selector
+              ~artifact:(A.Prompt_revision.artifact revision)
+          in
+          let%bind code =
+            prepare_authored_code
+              ~preparation:parent.preparation
+              ~construction_checkpoint:check_source
+              t
+              ~prepared
+              ~revision
+              ~authority
+              ~state
+              ~profile
+              ~sw:(Native_resource_lifetime.Child.switch child)
+              ~actor_ref
+              ~approval_provider:(shell_approval_provider t profile actor_ref)
+              ~storage_paths:paths
+              ~shell_state
+              ~shell_projection:(fun () ->
+                Native_constructor_routing.shell_projection native_routing)
+              ~run_preparation:(Native_constructor_routing.constructor native_routing)
+          in
+          prepare
+            ~source
+            ~family:
+              (B.Native_input.Authored_child { revision; prepared; code; authority })
+            ~host:
+              (host ~startup:None ~manifest_authorizer:(fun _ ->
+                 Shell_runtime.Manifest_authorizer.Reject
+                   "delegated native source cannot authorize new manifests"))
+            ~source_lease:None
+            ~install:(fun _ -> Ok ()))
+     | Authored_child child_source ->
+       let%bind origin =
+         Result.of_option
+           authored
+           ~error:(unavailable Permission_denied "authored child has no private source")
+       in
+       let%bind prepared =
+         Authored_resources.find t.authored_resources ~public:current ~name:origin.name
+       in
+       let revision = A.Prompt_child_source.revision child_source.source in
+       let%bind code =
+         prepare_authored_code
+           ~preparation:parent.preparation
+           ~construction_checkpoint:check_source
+           t
+           ~prepared
+           ~revision
+           ~authority
+           ~state
+           ~profile
+           ~sw:(Native_resource_lifetime.Child.switch child)
+           ~actor_ref
+           ~approval_provider:(shell_approval_provider t profile actor_ref)
+           ~storage_paths:paths
+           ~shell_state
+           ~shell_projection:(fun () ->
+             Native_constructor_routing.shell_projection native_routing)
+           ~run_preparation:(Native_constructor_routing.constructor native_routing)
+       in
+       prepare
+         ~source
+         ~family:(B.Native_input.Authored_child { revision; prepared; code; authority })
+         ~host:
+           (host ~startup:None ~manifest_authorizer:(fun _ ->
+              Shell_runtime.Manifest_authorizer.Reject
+                "delegated native source cannot authorize new manifests"))
+         ~source_lease:None
+         ~install:(fun _ -> Ok ())
+     | Generated _ | Generated_artifact _ ->
+       let%bind definition =
+         match selection with
+         | Generated definition -> Ok definition
+         | Generated_artifact _ ->
+           A.Generated_definition.restore
+             ?limits:
+               (Option.map
+                  t.authoring_validation_host
+                  ~f:Chat_response.Authoring_validation.compilation_limits)
+             ?source_limits:
+               (Option.map
+                  t.authoring_validation_host
+                  ~f:Chat_response.Authoring_validation.bundle_limits)
+             ?catalog:
+               (Option.bind
+                  t.authoring_validation_host
+                  ~f:Chat_response.Authoring_validation.delegated_catalog)
+             ~env:t.env
+             ~artifact_store
+             ~revision_id:(B.Source.artifact source).revision_id
+             ~manifest_sha256:record.admission.manifest_sha256
+             ~current_capabilities:(fun () -> current)
+             ~pins:record.admission.capability_pins
+             ()
+           |> Result.map_error ~f:(fun diagnostics ->
+             unavailable
+               Prompt_unavailable
+               (List.map diagnostics ~f:Chatmd_shell_spec.Diagnostic.to_string
+                |> String.concat ~sep:"\n"))
+         | Authored _ | Captured _ | Authored_child _ ->
+           Error
+             (unavailable
+                Invalid_state
+                "native Generated branch lost its selected family")
+       in
+       let%bind () =
+         match selection with
+         | Generated_artifact retained ->
+           A.Generated_definition.Source.check_definition retained ~definition
+         | Generated _ -> Ok ()
+         | Authored _ | Captured _ | Authored_child _ ->
+           Error
+             (unavailable
+                Invalid_state
+                "native Generated branch lost its selected family")
+       in
+       let%bind source =
+         B.Source.prepare_generated definition ~invocation:(B.Source.invocation source)
+       in
+       let%bind inherited_managed =
+         match parent.resources.managed with
+         | None -> Ok None
+         | Some managed ->
+           Chat_response.Managed_tool_registry.delegate_standalone managed ~selected
+           |> Result.map_error ~f:(fun error ->
+             unavailable Permission_denied error.Chat_response.Tool_capability.message)
+           |> Result.map ~f:(fun delegation ->
+             Some
+               B.
+                 { delegation
+                 ; current =
+                     (fun () -> Chat_response.Managed_tool_registry.capabilities managed)
+                 })
+       in
+       prepare
+         ~source
+         ~family:
+           (B.Native_input.Generated
+              { definition
+              ; artifact_store
+              ; parent_runtime = parent.resources.native
+              ; inherited_managed
+              ; authority
+              ; source_lease = parent.resources.source_lease
+              })
+         ~host:
+           (host ~startup:None ~manifest_authorizer:(fun _ ->
+              Shell_runtime.Manifest_authorizer.Reject
+                "generated native source cannot authorize new manifests"))
+         ~source_lease:None
+         ~install:(fun _ -> Ok ()))
+;;
+
+(* The same Prepared unit owns this original delegation context and its complete
+   retained ancestor CPS. The Product's actual admission is independently fresh;
+   no temporary ancestry is reconstructed and no lexical setup token escapes. *)
+let with_native_delegation_services
+      t
+      ~source_target
+      ~source
+      ~prepared
+      ~(state : Agent_session.Session_state.t)
+      ~profile:_
+      ~actor_ref
+      services
+      f
+  =
+  let module A = Agent_session in
+  let module B = A.Runtime_builder in
+  let module D = Agent_store.Delegation_store in
+  let open Result.Let_syntax in
+  let%bind () = B.Source.validate_target source state in
+  let%bind () =
+    if
+      Runtime_owner.belongs_to_actor
+        source_target.Source_target.runtime
+        source_target.actor
+      && Option.exists !actor_ref ~f:(phys_equal source_target.actor)
+    then Ok ()
+    else Error (unavailable Permission_denied "native Product source target changed")
+  in
+  B.Prepared_native.with_delegation prepared ~f:(function
+    | None ->
+      (match state.spec.delegation with
+       | None -> f services ~check_ancestry:None
+       | Some _ ->
+         Error (unavailable Permission_denied "native Product lost delegation context"))
+    | Some context ->
+      B.Prepared_native.with_resources prepared ~f:(fun resources ->
+        let authority = context.B.Prepared_native.Delegation.authority in
+        let reference = A.Delegation_authority.reference authority in
+        let%bind () =
+          if Option.equal D.Reference.equal state.spec.delegation (Some reference)
+          then Ok ()
+          else Error (unavailable Permission_denied "native Product delegation changed")
+        in
+        let%bind () = A.Delegation_authority.check_execution authority in
+        let prepare =
+          delegated_tool_preparation
+            ~ancestor_sources:resources.ancestor_sources
+            t
+            ~authority
+            ~actor_ref
+            ~reference
+            ~selected:context.selected
+            ~inherited_managed:context.inherited_managed
+        in
+        let services =
+          Option.map services ~f:(fun (services : B.extension_services) ->
+            { services with
+              script_tools =
+                (fun native ->
+                  A.Script_tool_calls.with_preparation
+                    (services.script_tools native)
+                    ~prepare)
+            })
+        in
+        f
+          services
+          ~check_ancestry:
+            (Some (fun () -> A.Delegation_authority.check_ancestry authority))))
+;;
+
+(* Actual selection, never a current-Owner lookup or a pre-key reservation.
+   Keep the Resource token alongside the earlier Source obligation. *)
+let capture_resource_consumer owner ~source ~target =
+  let open Result.Let_syntax in
+  let%bind consumer = Runtime_owner.Resource_consumer.capture owner ~target in
+  let%map () =
+    Option.value_map source ~default:(Ok ()) ~f:(fun source ->
+      Runtime_owner.Resource_consumer.bind_source consumer ~source)
+  in
+  consumer
+;;
+
+let prepare_native_resource
+      t
+      handle
+      _writer
+      actor
+      policy_resource
+      runtime_owner
+      ~native_routing
+      ~admission
+      ~stage
+  =
+  let module A = Agent_session in
+  let module Cell = Session_policy_resource in
+  let module Stage = Runtime_owner.Native_source_stage in
+  let module Failure = Constructor_inference_graph.Failure in
+  let module O = Runtime_result_observation in
+  let module CO = Agent_session.Close_observation in
+  let open Result.Let_syntax in
+  O.through_result (fun () ->
+    let%bind runtime =
+      Result.of_option
+        !runtime_owner
+        ~error:(unavailable Conflict "native source lost its actual Runtime Owner")
+    in
+    let%bind source_consumer =
+      Runtime_owner.Native_consumer.source ~owner:runtime (Stage.consumer stage)
+    in
+    let target = Source_target.{ actor; runtime; store_handle = Some handle } in
+    let lifetime = Native_resource_lifetime.create ~sw:t.sw in
+    let check_with_state read_state () =
+      let%bind () = Stage.check stage in
+      let%bind expected = read_state () in
+      let%bind () = Runtime_owner.Native_resource_admission.check admission ~expected in
+      Stage.check stage
+    in
+    let check = check_with_state (fun () -> A.Session_actor.state actor) in
+    let origin = Runtime_owner.Native_resource_admission.origin admission in
+    let with_parent ~consumer owner ~reference ~target f =
+      O.bind
+        (O.raw (fun () -> native_parent_origin t ~origin ~target ~consumer ~reference))
+        ~f:(fun parent_origin ->
+          let report = Native_resource_lifetime.parent lifetime in
+          let outcome =
+            with_parent_native_origin_source_resources_observed
+              t
+              owner
+              ~origin:parent_origin
+              ~physical_target:target
+              ~consumer
+              ~capture_release:(Native_resource_lifetime.Parent.capture_release report)
+              ~f:(fun ~check ~custody:_ ~source:_ resources ->
+                O.through_result (fun () ->
+                  let%bind public = parent_native_public resources ~check in
+                  Ok (f public)))
+          in
+          Native_resource_lifetime.Parent.record report ~owner outcome;
+          Runtime_owner.Native_borrow_outcome.observation outcome)
+    in
+    let selected ~consumer f =
+      with_selected_source_target_observed
+        ~parent_record:native_parent_record
+        ~parent_check:(fun t state -> native_parent_checked t state ~check)
+        t
+        target
+        ~with_parent:(with_parent ~consumer)
+        ~with_source:(fun source f -> f source)
+        ~check_selected:(fun _ -> check ())
+        f
+    in
+    let publish loan ~prepare_setup =
+      let caller_retains = ref true in
+      let primary =
+        Native_cleanup_observation.capture (fun () ->
+          let%bind _consumer =
+            capture_resource_consumer
+              runtime
+              ~source:(Some (Stage.consumer stage))
+              ~target:(Cell.Native_lease.cleanup_target loan)
+          in
+          let%bind setup = prepare_setup () in
+          let publication = Stage.publish stage ~setup ~loan in
+          (match Stage.Publication.custody publication with
+           | Caller_retains -> ()
+           | Owner_retains -> caller_retains := false);
+          Stage.Publication.resume publication)
+      in
+      let cleanup =
+        Native_cleanup_observation.capture_observed (fun () ->
+          if !caller_retains
+          then Eio.Cancel.protect (fun () -> Cell.Native_lease.close_reported loan)
+          else Native_cleanup_observation.return ())
+      in
+      Native_cleanup_observation.combine primary cleanup
+    in
+    let capture source =
+      let%bind initial = A.Session_actor.state actor in
+      let%bind profile = restore_state_profile t initial in
+      let%bind _record =
+        check_native_resource_admission ~source t handle actor admission initial
+      in
+      let%bind expected = A.Session_actor.state actor in
+      let%bind () = check () in
+      let%bind () =
+        if phys_equal initial expected
+        then Ok ()
+        else Error (unavailable Conflict "native source changed during authorization")
+      in
+      let%map key =
+        Cell.Native_source_key.capture ~actor ~handle ~source ~profile ~expected
+      in
+      expected, profile, key
+    in
+    let build_selected build ~key =
+      let prepare () =
+        O.through_result (fun () ->
+          let%bind () =
+            Cell.Native_build.scope
+              build
+              (Native_resource_lifetime.scope lifetime)
+              ~close:(fun () -> Native_resource_lifetime.close_observed lifetime)
+          in
+          Native_resource_lifetime.started lifetime;
+          let setup = ref None in
+          let prepared_source = ref None in
+          let construct ~retain =
+            (* The actual Scope driver is Running before this first operation.
+               A refused association therefore has its real no-entry/exit path;
+               no dependent borrow or Actor/source work has begun. *)
+            O.bind
+              (O.raw (fun () ->
+                 capture_resource_consumer
+                   runtime
+                   ~source:(Some (Stage.consumer stage))
+                   ~target:(Cell.Native_build.cleanup_target build)))
+              ~f:(fun resource_consumer ->
+                let consumer = Runtime_owner.Native_consumer.resource resource_consumer in
+                O.bind
+                  (O.raw (fun () -> A.Session_actor.state actor))
+                  ~f:(fun state ->
+                    with_native_parent_observed
+                      t
+                      target
+                      ~origin
+                      ~consumer
+                      ~lifetime
+                      state
+                      (fun parent ->
+                         selected ~consumer (fun source ->
+                           retain
+                             ~prepare:(fun () ->
+                               O.raw (fun () ->
+                                 let%bind expected, profile, current_key =
+                                   capture source
+                                 in
+                                 let%bind () =
+                                   if Cell.Native_source_key.equal key current_key
+                                   then Ok ()
+                                   else
+                                     Error
+                                       (unavailable
+                                          Conflict
+                                          "native source key changed before setup")
+                                 in
+                                 let%bind actual_setup =
+                                   Stage.prepare
+                                     stage
+                                     ~source_owner:t.runtime_source_owner
+                                     ~source
+                                     ~expected
+                                 in
+                                 setup := Some actual_setup;
+                                 let%bind graph_source = create_graph_source () in
+                                 let%bind upstream =
+                                   runtime_inference_ports t (ref (Some actor))
+                                 in
+                                 let%bind tracking =
+                                   Eio.Cancel.protect (fun () ->
+                                     Graph_tracking.create_for_native_setup
+                                       actor
+                                       ~setup:actual_setup
+                                       ~source:graph_source
+                                       ~upstream
+                                     |> Result.map ~f:(fun tracking ->
+                                       Native_resource_lifetime.capture_tracking
+                                         lifetime
+                                         tracking;
+                                       tracking))
+                                 in
+                                 let%bind () =
+                                   Cell.Native_build.tracking build tracking
+                                 in
+                                 let%bind child =
+                                   Native_resource_lifetime.Child.create
+                                     ~sw:t.sw
+                                     ~capture:(fun child ->
+                                       Native_resource_lifetime.capture_child
+                                         lifetime
+                                         child)
+                                 in
+                                 let%bind observation =
+                                   A.Session_actor.observe_resource_state actor
+                                 in
+                                 let check_state =
+                                   check_with_state (fun () ->
+                                     (* The mailbox read was a cooperative scheduling
+                                        point. Revalidate after giving concurrent
+                                        lifecycle and cancellation work the same chance. *)
+                                     Eio.Fiber.yield ();
+                                     A.Session_actor.Resource_observation.check_current
+                                       observation)
+                                 in
+                                 let check_source () =
+                                   let%bind () = check_state () in
+                                   A.Session_actor.Native_setup.check actual_setup
+                                 in
+                                 let%bind executable, prepared =
+                                   prepare_native_family
+                                     t
+                                     handle
+                                     actor
+                                     source
+                                     ~parent
+                                     ~child
+                                     ~tracking
+                                     ~state:expected
+                                     ~profile
+                                     ~check_source
+                                     ~native_routing
+                                 in
+                                 prepared_source := Some executable;
+                                 Ok prepared))
+                             ~close_attempt:(fun () ->
+                               Native_resource_lifetime.close_local_observed lifetime)))))
+          in
+          let prepared =
+            Runtime_native_scope.prepare_observed
+              (Native_resource_lifetime.scope lifetime)
+              ~f:construct
+          in
+          Ok
+            (O.bind prepared ~f:(fun prepared ->
+               O.through_result (fun () ->
+                 let%bind source =
+                   Result.of_option
+                     !prepared_source
+                     ~error:
+                       (unavailable
+                          Invalid_state
+                          "native preparation returned without its source")
+                 in
+                 let%bind setup =
+                   Result.of_option
+                     !setup
+                     ~error:
+                       (unavailable
+                          Invalid_state
+                          "native preparation returned without its actual setup")
+                 in
+                 let%bind expected, _profile, key = capture source in
+                 let%bind () = A.Session_actor.Native_setup.check setup in
+                 let%bind () = Cell.Native_build.prepared build prepared ~source in
+                 let%bind () = check () in
+                 let%bind loan = Cell.Native_build.publish build ~key in
+                 Ok (publish loan ~prepare_setup:(fun () -> Ok setup))))))
+      in
+      let observed = Native_cleanup_observation.capture_observed prepare in
+      (* Record the original failure as DATA, retaining the supplied producer
+       rather than resuming it through another opaque callback boundary. *)
+      (match CO.exit observed with
+       | Returned (Ok ()) -> ()
+       | Returned (Error error) -> Cell.Native_build.fail build (Failure.Protocol error)
+       | Raised (exn, trace) -> Cell.Native_build.fail build (Failure.Raised (exn, trace)));
+      observed
+    in
+    Ok
+      (selected ~consumer:source_consumer (fun source ->
+         O.through_result (fun () ->
+           let%bind expected, _profile, key = capture source in
+           let%bind native_selection =
+             Cell.select_native policy_resource ~key ~expected_native:None
+           in
+           Ok
+             (match native_selection with
+              | Reuse loan ->
+                publish loan ~prepare_setup:(fun () ->
+                  Stage.prepare
+                    stage
+                    ~source_owner:t.runtime_source_owner
+                    ~source
+                    ~expected)
+              | Build build -> build_selected build ~key)))))
+;;
+
+module Product_preparation = struct
+  type t =
+    | Cold of Session_policy_resource.Build.t
+    | Promoted of Session_policy_resource.Promotion.t
+
+  let build = function
+    | Cold build -> Some build
+    | Promoted _ -> None
+  ;;
+
+  let promotion = function
+    | Cold _ -> None
+    | Promoted promotion -> Some promotion
+  ;;
+
+  let fail = function
+    | Cold build -> Session_policy_resource.Build.fail build
+    | Promoted promotion -> Session_policy_resource.Promotion.fail promotion
+  ;;
+
+  let physical t runtime =
+    match t with
+    | Cold build ->
+      let abandon () =
+        (* Physical adoption has not transferred this returned runtime to the
+           Cell. Its own closer must join it before retaining the failed build;
+           the original registration failure remains the caller's result. *)
+        try
+          Eio.Cancel.protect (fun () ->
+            ignore
+              (Agent_session.Runtime_builder.close_reported runtime
+               : unit Agent_session.Close_observation.t))
+        with
+        | _ -> ()
+      in
+      (match Session_policy_resource.Build.physical build runtime with
+       | Ok () -> Ok ()
+       | Error _ as failure ->
+         abandon ();
+         failure
+       | exception exn ->
+         let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+         abandon ();
+         Exn.raise_with_original_backtrace exn backtrace)
+    | Promoted _ -> Ok ()
+  ;;
+
+  let restored_policy_access t ~source ~basis ~expected =
+    match t with
+    | Cold build ->
+      Session_policy_resource.Build.restored_policy_access build ~source ~basis ~expected
+    | Promoted promotion ->
+      Session_policy_resource.Promotion.restored_policy_access
+        promotion
+        ~source
+        ~basis
+        ~expected
+  ;;
+
+  let publish_restored t ~key ~access ~expected =
+    match t with
+    | Cold build ->
+      Session_policy_resource.Build.publish_restored build ~key ~access ~expected
+    | Promoted promotion ->
+      Session_policy_resource.Promotion.publish_restored promotion ~key ~access ~expected
+  ;;
+
+  let cleanup_target = function
+    | Cold build -> Session_policy_resource.Build.cleanup_target build
+    | Promoted promotion -> Session_policy_resource.Promotion.cleanup_target promotion
+  ;;
+end
+
+let native_promotion_source
+      promotion
+      ~selected
+      ~profile
+      ~(expected : Agent_session.Session_state.t)
+  =
+  let module B = Agent_session.Runtime_builder in
+  let module G = Agent_session.Generated_definition in
+  let open Result.Let_syntax in
+  let prepared = Session_policy_resource.Promotion.prepared promotion in
+  let%bind () = B.Source.validate_target selected expected in
+  let%bind source = B.Prepared_native.selected_source prepared in
+  let%bind () = B.Source.validate_target source expected in
+  let%bind () =
+    match B.Source.selection selected, B.Source.selection source with
+    | Generated_artifact retained, Generated definition ->
+      let%bind () = G.Source.check_definition retained ~definition in
+      if
+        Agent_session.Runtime_script_preparation.Invocation.equal
+          (B.Source.invocation selected)
+          (B.Source.invocation source)
+      then Ok ()
+      else
+        Error
+          (unavailable Conflict "native promotion generated source invocation changed")
+    | ( Generated_artifact _
+      , (Authored _ | Captured _ | Authored_child _ | Generated_artifact _) ) ->
+      Error
+        (unavailable
+           Conflict
+           "native promotion has no retained executable Generated source")
+    | (Authored _ | Captured _ | Authored_child _ | Generated _), _ ->
+      B.Prepared_native.check
+        prepared
+        ~source:selected
+        ~session_id:expected.identity.session_id
+        ~permission_profile_digest:profile.Agent_session.Permission_policy.revision_digest
+  in
+  (* Cell selection already checked this SAME unit's Actor/Handle/spec including
+     its private child locator. Metadata never supplies the executable value;
+     both target projections and exact artifact/invocation/pins must match. *)
+  let%map () =
+    B.Prepared_native.check
+      prepared
+      ~source
+      ~session_id:expected.identity.session_id
+      ~permission_profile_digest:profile.Agent_session.Permission_policy.revision_digest
+  in
+  source
+;;
+
+let prepare_runtime_from_native
+      ?policy_restoration
+      ~source_target
+      ~native_routing
+      ~promotion
+      ~source
+      ~construction_checkpoint
+      t
+      handle
       profile
       (state : Agent_session.Session_state.t)
       ~next_history_sequence
@@ -3639,241 +8441,853 @@ let prepare_runtime_at_paths
       ~initialization_jobs
       ~run_preparation
   =
+  let module A = Agent_session in
+  let module B = A.Runtime_builder in
+  let module Promotion = Session_policy_resource.Promotion in
   let open Result.Let_syntax in
+  let%bind () = construction_checkpoint () in
+  let%bind source =
+    native_promotion_source promotion ~selected:source ~profile ~expected:state
+  in
+  let prepared = Promotion.prepared promotion in
+  let%bind attachment = B.Product_attachment.create prepared in
+  (* The Cell owns partial Manager/executor cleanup before Builder can yield. *)
+  let%bind () = Promotion.attachment promotion attachment in
+  let%bind actor =
+    Result.of_option
+      !actor_ref
+      ~error:(unavailable Conflict "native promotion lost its actual Actor")
+  in
+  let shell_state = ref state.shell in
+  let%bind () =
+    match policy_restoration with
+    | Some _ -> Ok ()
+    | None -> Native_constructor_routing.bind_shell native_routing shell_state
+  in
+  let legacy_construction =
+    Some
+      (legacy_construction
+         ~construction_checkpoint
+         t
+         profile
+         actor_ref
+         state
+         pending_jobs
+         ~initialization_scope
+         ~initialization_jobs
+         ~run_preparation)
+  in
+  let services =
+    if t.qualify_chatml_extensions
+    then Some (extension_services t profile actor_ref ~initialization_scope ~state)
+    else None
+  in
+  with_native_delegation_services
+    t
+    ~source_target
+    ~source
+    ~prepared
+    ~state
+    ~profile
+    ~actor_ref
+    services
+    (fun services ~check_ancestry ->
+       let%bind () = construction_checkpoint () in
+       let host, causal_driver = descendant_host t ~handle ~actor_ref ~check_ancestry in
+       let%bind host_binding =
+         A.Session_actor.install_descendant_host
+           ?policy_restoration
+           ~causal_driver
+           actor
+           ~source_owner:t.runtime_source_owner
+           ~expected:state
+           ~check_ancestry
+           ~host
+       in
+       let captured = ref false in
+       Exn.protect
+         ~finally:(fun () ->
+           if not !captured
+           then A.Session_actor.Descendant_host.Binding.close host_binding)
+         ~f:(fun () ->
+           let%bind product, binding =
+             B.build_product_from_native
+               prepared
+               ~attachment
+               ~source
+               ~construction_checkpoint
+               ~legacy_construction
+               ~services
+               ~history_namespace:
+                 (Agent_protocol.Id.Session.to_string state.identity.session_id)
+               ~next_history_sequence
+               ~existing_history
+               ~existing_moderator_snapshot
+               ~moderator_reservation_size:t.limits.moderator_reservation_size
+               ~permission_profile:profile
+               ~review_permission:(review_permission t actor_ref profile)
+               ~schedule_services:
+                 (schedule_services
+                    t
+                    state
+                    actor_ref
+                    pending_schedule_operations
+                    ~run_preparation)
+               ~job_services:
+                 (job_services
+                    ~construction_checkpoint
+                    t
+                    state
+                    actor_ref
+                    pending_jobs
+                    ~initialization_scope
+                    ~initialization_jobs
+                    ~run_preparation)
+           in
+           let%bind () = Promotion.product promotion ~product ~binding in
+           let raw = B.Product.Binding.runtime binding in
+           let scope = !initialization_scope in
+           let close_reported () =
+             let retire () =
+               match scope, raw.moderator_manager with
+               | Some scope, Some moderator_manager ->
+                 (match
+                    A.Session_actor.retire_initialization_resource
+                      actor
+                      ~scope
+                      ~moderator_manager
+                  with
+                  | Ok () | Error { code = Server_shutting_down; _ } -> ()
+                  | Error error -> raise (Inference_graph_cleanup_failed error))
+               | None, _ | Some _, None -> ()
+             in
+             let retired_host =
+               Runtime_close_observation.capture (fun () ->
+                 A.Session_actor.Descendant_host.Binding.close host_binding)
+             in
+             Runtime_close_observation.continue retired_host ~f:(fun () ->
+               Eio.Cancel.protect (fun () ->
+                 let retired = Runtime_close_observation.capture retire in
+                 let closed = B.close_reported raw in
+                 Runtime_close_observation.combine retired closed))
+           in
+           let runtime = { raw with close = B.Close.reported close_reported } in
+           let%map () = Promotion.physical promotion runtime in
+           captured := true;
+           runtime, shell_state))
+;;
+
+(* Keep the actual installed child through construction instead of projecting
+   its revision and restoring the same source a second time for classification. *)
+module Authored_runtime_selection = struct
+  type t =
+    | Child of Agent_session.Prompt_child_source.t
+    | Captured of Agent_session.Captured_recurrence_source.t
+
+  let revision = function
+    | Child child -> Agent_session.Prompt_child_source.revision child
+    | Captured captured -> Agent_session.Captured_recurrence_source.revision captured
+  ;;
+
+  let input t ~record ~invocation =
+    let module Input = Agent_session.Runtime_source_preparation.Revision_input in
+    match t with
+    | Child child -> Input.authored_child child ~record ~invocation
+    | Captured captured -> Input.captured captured ~invocation
+  ;;
+end
+
+let retain_generated_source
+      definition
+      ~prepared_source
+      ~(state : Agent_session.Session_state.t)
+      ~(lifetime : Agent_store.Delegation_store.Admission.lifetime)
+  =
+  let open Result.Let_syntax in
+  let module Source = Agent_session.Runtime_builder.Source in
+  let module G = Agent_session.Generated_definition in
+  let invocation =
+    Agent_session.Runtime_script_preparation.Invocation.of_root state.spec.root_invocation
+  in
+  let%bind selected_source =
+    match prepared_source with
+    | Some selected ->
+      let%bind () = Source.validate_target selected state in
+      (match Source.selection selected with
+       | Generated retained when phys_equal retained definition -> Ok selected
+       | Generated retained ->
+         (* Independent already rehydrates against its own retained
+            registry. Keep that actual executable, never the old
+            live-parent bindings, after exact immutable comparison. *)
+         let%bind actual = Source.prepare_generated definition ~invocation in
+         let a = G.artifact retained in
+         let b = G.artifact definition in
+         let%bind () =
+           if
+             (match lifetime with
+              | Independent _ -> true
+              | Owned | Invocation_owned _ -> false)
+             && Agent_protocol.Id.Prompt_revision.equal a.revision_id b.revision_id
+             && String.equal a.manifest_sha256 b.manifest_sha256
+             && Agent_store.Prompt_artifact_store.Artifact.same_content a b
+             && List.equal
+                  (Tuple2.equal ~eq1:String.equal ~eq2:String.equal)
+                  (G.capability_pins retained)
+                  (G.capability_pins definition)
+             && Source.Moderator.equal
+                  (Source.moderator selected)
+                  (Source.moderator actual)
+           then Ok ()
+           else
+             Error
+               (unavailable
+                  Invalid_state
+                  "generated source differs from its actual retained construction")
+         in
+         Ok actual
+       | Generated_artifact retained ->
+         let%bind () = G.Source.check_definition retained ~definition in
+         Source.prepare_generated definition ~invocation
+       | Authored _ | Captured _ | Authored_child _ ->
+         Error
+           (unavailable
+              Invalid_state
+              "generated construction has a different selected source family"))
+    | None -> Source.prepare_generated definition ~invocation
+  in
+  let%bind () = Source.validate_target selected_source state in
+  Ok selected_source
+;;
+
+let prepare_runtime_at_paths
+      ?source_consumer
+      ?resource_consumer
+      ?policy_restoration
+      ?policy_build
+      ?prepared_source
+      ?construction_checkpoint
+      ~(source_target : Source_target.t)
+      ~native_routing
+      t
+      paths
+      storage_paths
+      source
+      profile
+      ~handle
+      (state : Agent_session.Session_state.t)
+      ~next_history_sequence
+      ~existing_history
+      ~existing_moderator_snapshot
+      ~actor_ref
+      ~pending_schedule_operations
+      ~pending_jobs
+      ~initialization_scope
+      ~initialization_jobs
+      ~run_preparation
+  =
+  let open Result.Let_syntax in
+  let%bind () =
+    let active =
+      Option.value_map state.instruction_selection ~default:false ~f:(fun selection ->
+        let status = Agent_session.Instruction_selection.summary selection in
+        status.project_selected || status.skills > 0)
+    in
+    if (not t.qualify_chatml_extensions) && active
+    then
+      Error
+        (unavailable
+           Configuration_invalid
+           "active instructions require the session-owned qualified runtime")
+    else Ok ()
+  in
   let%bind inference_context = resolve_state_inference_context t state in
-  let%bind tracking = create_graph_tracking ~run_preparation t actor_ref in
+  let%bind tracking =
+    create_graph_tracking ?policy_restoration ~run_preparation t actor_ref
+  in
+  let%bind () =
+    Option.value_map policy_build ~default:(Ok ()) ~f:(fun build ->
+      Session_policy_resource.Build.tracking build tracking)
+  in
+  let descendant_binding = ref None in
+  let shared_cleanup = ref None in
+  let register_delegated_cleanup driver resource =
+    let cleanup = Shared_tracking_cleanup.create ~tracking ~resource in
+    let adoption () =
+      let module Driver = Delegated_runtime.Cleanup.Adoption in
+      let module Partial = Session_policy_resource.Partial_close.Adoption in
+      match Delegated_runtime.Cleanup.adoption driver with
+      | Driver.Original_running -> Partial.Original_running
+      | Not_created -> Partial.Not_created
+      | Closed_runtime { runtime; observation } ->
+        Partial.Closed_runtime { runtime; observation }
+    in
+    let%map () =
+      Option.value_map policy_build ~default:(Ok ()) ~f:(fun build ->
+        Session_policy_resource.Build.partial_close
+          build
+          (Session_policy_resource.Partial_close.create
+             ~close:(Shared_tracking_cleanup.partial_closer cleanup)
+             ~adoption))
+    in
+    (* Publish the SAME owner only after actual partial registration. Both
+       preparation failure and the returned runtime forward this closer. *)
+    shared_cleanup := Some cleanup
+  in
+  let finish_failed_preparation () =
+    match !shared_cleanup with
+    | None -> finish_failed_graph tracking
+    | Some cleanup ->
+      (* The original construction error stays primary. Actual failed custody
+         remains on this same Cell-owned scope for its later explicit retry. *)
+      (try
+         Eio.Cancel.protect (fun () ->
+           ignore
+             (Agent_session.Runtime_builder.Close.run_reported
+                (Shared_tracking_cleanup.partial_closer cleanup)
+              : unit Agent_session.Close_observation.t))
+       with
+       | _ -> ())
+  in
+  let retire_descendant_binding () =
+    Option.iter
+      !descendant_binding
+      ~f:Agent_session.Session_actor.Descendant_host.Binding.close
+  in
+  let install_descendant_binding sw check_ancestry =
+    let module Actor = Agent_session.Session_actor in
+    let%bind actor =
+      Result.of_option
+        !actor_ref
+        ~error:(unavailable Conflict "runtime source requires its actual Actor")
+    in
+    let host, causal_driver = descendant_host t ~handle ~actor_ref ~check_ancestry in
+    let%map binding =
+      match source, state, check_ancestry, policy_restoration, run_preparation with
+      | ( Authored _
+        , { runtime_initialization = Ready
+          ; lifecycle = { desired = Stopped; observed = Stopped }
+          ; _
+          }
+        , None
+        , None
+        , Constructor_owner.Ordinary preparation )
+        when phys_equal actor source_target.actor && Option.is_none !preparation ->
+        Actor.install_ordinary_ready_descendant_host
+          ?initialization_scope:!initialization_scope
+          ~causal_driver
+          actor
+          ~source_owner:t.runtime_source_owner
+          ~expected:state
+          ~host
+      | _ ->
+        Actor.install_descendant_host
+          ?policy_restoration
+          ~causal_driver
+          actor
+          ~source_owner:t.runtime_source_owner
+          ~expected:state
+          ~check_ancestry
+          ~host
+    in
+    (* Install transfers exact ownership before any cancellable await. Never
+       read a later Actor slot from cleanup or retire a replacement source. *)
+    descendant_binding := Some binding;
+    Eio.Switch.on_release sw (fun () ->
+      Agent_session.Session_actor.Descendant_host.Binding.close binding);
+    binding
+  in
+  let legacy_construction =
+    Some
+      (legacy_construction
+         ?construction_checkpoint
+         t
+         profile
+         actor_ref
+         state
+         pending_jobs
+         ~initialization_scope
+         ~initialization_jobs
+         ~run_preparation)
+  in
   let prepare () =
     let shell_state = ref state.Agent_session.Session_state.shell in
+    let%bind () =
+      match policy_restoration with
+      | Some _ -> Ok ()
+      | None -> Native_constructor_routing.bind_shell native_routing shell_state
+    in
     let approval_provider = shell_approval_provider t profile actor_ref in
     let approval_store =
       shell_approval_store ~run_preparation state actor_ref shell_state
     in
     let construct sw build manifest_authorizer =
-      build
-        ~sw
-        ~env:t.env
-        ~inference_context
-        ~inference_identity:(Graph_tracking.identity tracking)
-        ~on_inference_attempt:(Graph_tracking.on_attempt tracking)
-        ~on_inference_completion:(Graph_tracking.on_completion tracking)
-        ~on_inference_observation:(Graph_tracking.on_observation tracking)
-        ~paths
-        ~storage_paths
-        ~session_id:state.Agent_session.Session_state.identity.session_id
-        ~history_namespace:(Agent_protocol.Id.Session.to_string state.identity.session_id)
-        ~next_history_sequence
-        ~existing_history
-        ~existing_moderator_snapshot
-        ~moderator_reservation_size:t.limits.moderator_reservation_size
-        ~manifest_authorizer
-        ~approval_provider
-        ~approval_store
-        ~permission_profile:profile
-        ~review_permission:(review_permission t actor_ref profile)
-        ~schedule_services:
-          (schedule_services
-             t
-             state
-             actor_ref
-             pending_schedule_operations
-             ~run_preparation)
-        ~job_services:
-          (job_services
-             t
-             state
-             actor_ref
-             pending_jobs
-             ~initialization_scope
-             ~initialization_jobs
-             ~run_preparation)
+      let%bind product, binding =
+        build
+          ~sw
+          ~env:t.env
+          ~inference_context
+          ~inference_identity:(Graph_tracking.identity tracking)
+          ~bind_inference_identity:(fun allocate ->
+            Graph_tracking.bind_identity tracking ~allocate)
+          ~on_inference_attempt:(Graph_tracking.on_attempt tracking)
+          ~on_inference_completion:(Graph_tracking.on_completion tracking)
+          ~on_inference_observation:(Graph_tracking.on_observation tracking)
+          ~paths
+          ~storage_paths
+          ~session_id:state.Agent_session.Session_state.identity.session_id
+          ~history_namespace:
+            (Agent_protocol.Id.Session.to_string state.identity.session_id)
+          ~next_history_sequence
+          ~existing_history
+          ~existing_moderator_snapshot
+          ~moderator_reservation_size:t.limits.moderator_reservation_size
+          ~manifest_authorizer
+          ~approval_provider
+          ~approval_store
+          ~permission_profile:profile
+          ~review_permission:(review_permission t actor_ref profile)
+          ~schedule_services:
+            (schedule_services
+               t
+               state
+               actor_ref
+               pending_schedule_operations
+               ~run_preparation)
+          ~job_services:
+            (job_services
+               ?construction_checkpoint
+               t
+               state
+               actor_ref
+               pending_jobs
+               ~initialization_scope
+               ~initialization_jobs
+               ~run_preparation)
+      in
+      let%map () =
+        Option.value_map policy_build ~default:(Ok ()) ~f:(fun build ->
+          Session_policy_resource.Build.product build ~product ~binding)
+      in
+      Agent_session.Runtime_builder.Product.Binding.runtime binding
     in
-    let%map runtime =
-      match source with
-      | Authored revision ->
-        let construct_root sw =
-          Agent_session.Runtime_script_preparation.with_revision
-            t.script_preparation
-            revision
-            ~env:t.env
-            ~invocation:
-              (Agent_session.Runtime_script_preparation.Invocation.of_root
-                 state.spec.root_invocation)
-            ~checkpoint:Eio.Fiber.check
-            ~f:(fun startup ~compilation_limits:_ ~programs:_ ->
-              let source_lease = original_source_lease t ~sw ~revision in
-              let%bind agent_source = source_binding t ~source_lease in
-              let built =
-                match t.qualify_chatml_extensions with
-                | false ->
-                  construct
-                    sw
-                    (Agent_session.Runtime_builder.build
+    let retain_source prepare =
+      let module Source = Agent_session.Runtime_builder.Source in
+      let%bind source =
+        match prepared_source with
+        | Some source -> Ok source
+        | None -> prepare ()
+      in
+      let%map () = Source.validate_target source state in
+      source
+    in
+    let build_root
+          sw
+          ~revision
+          ~captured
+          ~binding
+          ~ancestor_capabilities
+          ~ancestor_sources
+      =
+      let root_invocation =
+        match captured with
+        | None -> state.Agent_session.Session_state.spec.root_invocation
+        | Some (captured, _) ->
+          Agent_session.Recurrence_child_origin.root_invocation
+            (Agent_session.Captured_recurrence_source.origin captured)
+      in
+      let construction_checkpoint =
+        match captured with
+        | None -> construction_checkpoint
+        | Some (captured, authority) ->
+          Some
+            (fun () ->
+              let%bind () =
+                Option.value_map construction_checkpoint ~default:(Ok ()) ~f:(fun check ->
+                  check ())
+              in
+              let artifact = Agent_session.Prompt_revision.artifact revision in
+              let%bind () =
+                Agent_session.Delegation_authority.check_captured_artifact_preparation
+                  authority
+                  ~origin:(Agent_session.Captured_recurrence_source.origin captured)
+                  ~session_id:state.identity.session_id
+                  ~revision_id:artifact.revision_id
+                  ~manifest_sha256:artifact.manifest_sha256
+                  ~permission_profile:profile
+              in
+              Agent_session.Delegation_authority.check_execution authority)
+      in
+      let check_captured () =
+        match captured with
+        | None -> Ok ()
+        | Some _ ->
+          Option.value_map construction_checkpoint ~default:(Ok ()) ~f:(fun check ->
+            check ())
+      in
+      let%bind () = check_captured () in
+      let invocation =
+        Agent_session.Runtime_script_preparation.Invocation.of_root root_invocation
+      in
+      Agent_session.Runtime_script_preparation.with_revision_plan
+        t.script_preparation
+        revision
+        ~env:t.env
+        ~invocation
+        ~checkpoint:Eio.Fiber.check
+        ~f:(fun startup ~compilation_limits ~plan ~programs ->
+          let%bind () = check_captured () in
+          let%bind selected_source =
+            retain_source (fun () ->
+              let module Source = Agent_session.Runtime_builder.Source in
+              let%bind prepared =
+                Source.Prepared_revision.capture
+                  revision
+                  ~invocation
+                  ~startup
+                  ~compilation_limits
+                  ~plan
+                  ~programs
+                  ~checkpoint:(fun () ->
+                    Chat_response.Startup_compilation.checkpoint startup)
+              in
+              let%bind input =
+                match captured with
+                | None -> Ok (Source.Revision_input.authored revision ~invocation)
+                | Some (captured, _) ->
+                  Source.Revision_input.captured captured ~invocation
+              in
+              Source.Prepared_revision.bind prepared ~input)
+          in
+          let source_lease = original_source_lease t ~sw ~revision in
+          let%bind agent_source = source_binding t ~source_lease in
+          let built =
+            match t.qualify_chatml_extensions with
+            | false ->
+              construct
+                sw
+                (match captured with
+                 | None ->
+                   Agent_session.Runtime_builder.build_product
+                     ~selected_source:(Some selected_source)
+                     ~ancestor_capabilities
+                     ~ancestor_sources
+                     ~construction_checkpoint
+                     ~legacy_construction
+                     ~agent_source
+                     ~startup:(Some startup)
+                     ~root_invocation
+                     ~script_preparation:t.script_preparation
+                     ~revision
+                 | Some (captured, authority) ->
+                   Agent_session.Runtime_builder.build_product_captured_artifact
+                     ~selected_source:(Some selected_source)
+                     ~ancestor_capabilities
+                     ~ancestor_sources
+                     ~captured
+                     ~authority
+                     ~construction_checkpoint
+                     ~legacy_construction
+                     ~agent_source
+                     ~startup:(Some startup)
+                     ~script_preparation:t.script_preparation
+                     ~native_registrations:[]
+                     ~services:None)
+                (manifest_authorizer
+                   ~run_preparation
+                   t
+                   profile
+                   revision
+                   state
+                   actor_ref
+                   shell_state)
+            | true ->
+              let module B = Agent_session.Runtime_builder in
+              let services =
+                extension_services t profile actor_ref ~initialization_scope ~state
+              in
+              let%bind prepared, native_registrations =
+                prepare_authored_graph
+                  ?construction_checkpoint
+                  t
+                  ~startup
+                  ~sw
+                  ~revision
+                  ~source_lease
+                  ~paths
+                  ~storage_paths
+                  ~state
+                  ~profile
+                  ~actor_ref
+                  ~tracking
+                  ~shell_state
+                  ~native_service_revision:services.native_service_revision
+                  ~one_off_policy:services.one_off_policy
+                  ~authoring_validation_host:services.authoring_validation_host
+              in
+              let%bind runtime =
+                construct
+                  sw
+                  (match captured with
+                   | None ->
+                     B.build_product_with_extensions
+                       ~selected_source:(Some selected_source)
+                       ~ancestor_capabilities
+                       ~ancestor_sources
+                       ~construction_checkpoint
+                       ~legacy_construction
                        ~agent_source
                        ~startup:(Some startup)
-                       ~root_invocation:
-                         state.Agent_session.Session_state.spec.root_invocation
+                       ~root_invocation
                        ~script_preparation:t.script_preparation
-                       ~revision)
-                    (manifest_authorizer
-                       ~run_preparation
-                       t
-                       profile
-                       revision
-                       state
-                       actor_ref
-                       shell_state)
-                | true ->
-                  let module B = Agent_session.Runtime_builder in
-                  let services = extension_services t profile actor_ref ~state in
-                  let%bind prepared, native_registrations =
-                    prepare_authored_graph
-                      t
-                      ~startup
-                      ~sw
-                      ~revision
-                      ~source_lease
-                      ~paths
-                      ~storage_paths
-                      ~state
-                      ~profile
-                      ~actor_ref
-                      ~tracking
-                      ~shell_state
-                      ~native_service_revision:services.native_service_revision
-                      ~one_off_policy:services.one_off_policy
-                      ~authoring_validation_host:services.authoring_validation_host
-                  in
-                  let%bind runtime =
-                    construct
-                      sw
-                      (B.build_with_extensions
-                         ~agent_source
-                         ~startup:(Some startup)
-                         ~root_invocation:
-                           state.Agent_session.Session_state.spec.root_invocation
-                         ~script_preparation:t.script_preparation
-                         ~native_registrations
-                         ~revision
-                         ~services)
-                      (manifest_authorizer
-                         ~run_preparation
-                         t
-                         profile
-                         revision
-                         state
-                         actor_ref
-                         shell_state)
-                  in
-                  let installed =
-                    let%bind public =
-                      Lazy.force (Option.value_exn runtime.native_runtime).capabilities
-                      |> Result.map_error ~f:(fun error ->
-                        unavailable
-                          Permission_denied
-                          error.Chat_response.Tool_capability.message)
-                    in
-                    Authored_resources.install t.authored_resources ~sw ~public prepared
-                  in
-                  (match installed with
-                   | Ok () -> Ok runtime
-                   | Error error ->
-                     (try Eio.Cancel.protect runtime.close with
-                      | _ -> ());
-                     Error error)
+                       ~native_registrations
+                       ~revision
+                       ~services
+                   | Some (captured, authority) ->
+                     B.build_product_captured_artifact
+                       ~selected_source:(Some selected_source)
+                       ~ancestor_capabilities
+                       ~ancestor_sources
+                       ~captured
+                       ~authority
+                       ~construction_checkpoint
+                       ~legacy_construction
+                       ~agent_source
+                       ~startup:(Some startup)
+                       ~script_preparation:t.script_preparation
+                       ~native_registrations
+                       ~services:(Some services))
+                  (manifest_authorizer
+                     ~run_preparation
+                     t
+                     profile
+                     revision
+                     state
+                     actor_ref
+                     shell_state)
               in
-              Result.bind built ~f:(fun runtime ->
-                Agent_session.Runtime_builder.with_source_lease runtime ~source_lease
-                |> Result.map_error ~f:source_attachment_error))
-        in
-        prepare_extension_runtime_scope t construct_root
-      | Generated_artifact { artifact; _ } ->
-        let%bind parent, record = generated_parent t state in
-        let parent_stop_epoch =
-          Option.value
-            state.parent_stop_epoch
-            ~default:(Option.value record.admission.parent_stop_epoch ~default:0L)
-        in
-        let%bind artifact_store =
-          Agent_store.Prompt_artifact_store.create
-            ~env:t.env
-            ~root:
-              (Agent_store.Data_root.prompt_artifacts_path
-                 (Agent_store.Session_store.data_root t.store))
+              let installed =
+                let%bind public =
+                  Lazy.force (Option.value_exn runtime.native_runtime).capabilities
+                  |> Result.map_error ~f:(fun error ->
+                    unavailable
+                      Permission_denied
+                      error.Chat_response.Tool_capability.message)
+                in
+                Authored_resources.install t.authored_resources ~sw ~public prepared
+              in
+              (match installed with
+               | Ok () -> Ok runtime
+               | Error error ->
+                 Agent_session.Session_actor.Descendant_host.Binding.close binding;
+                 (try
+                    Eio.Cancel.protect (fun () ->
+                      Agent_session.Runtime_builder.close runtime)
+                  with
+                  | _ -> ());
+                 Error error)
+          in
+          Result.bind built ~f:(fun runtime ->
+            Agent_session.Runtime_builder.with_source_lease runtime ~source_lease
+            |> Result.map_error ~f:source_attachment_error))
+      |> Result.bind ~f:(fun (runtime : Agent_session.Runtime_builder.t) ->
+        match captured with
+        | None -> Ok runtime
+        | Some _ ->
+          let accepted = ref false in
+          Exn.protect
+            ~finally:(fun () ->
+              if not !accepted
+              then
+                Exn.protect
+                  ~f:(fun () ->
+                    Agent_session.Session_actor.Descendant_host.Binding.close binding)
+                  ~finally:(fun () ->
+                    Eio.Cancel.protect (fun () ->
+                      Agent_session.Runtime_builder.close runtime)))
+            ~f:(fun () ->
+              let%map () = check_captured () in
+              accepted := true;
+              runtime))
+    in
+    let prepare_delegated ~captured artifact =
+      let%bind consumer =
+        Result.of_option
+          resource_consumer
+          ~error:
+            (unavailable Invalid_state "delegated preparation has no resource consumer")
+        |> Result.map ~f:Runtime_owner.Native_consumer.resource
+      in
+      let%bind () =
+        Runtime_owner.Native_consumer.check_owner consumer ~owner:source_target.runtime
+      in
+      let%bind parent, record = generated_parent_native t state in
+      let parent_stop_epoch =
+        Option.value
+          state.parent_stop_epoch
+          ~default:(Option.value record.admission.parent_stop_epoch ~default:0L)
+      in
+      let%bind artifact_store =
+        Agent_store.Prompt_artifact_store.create
+          ~env:t.env
+          ~root:
+            (Agent_store.Data_root.prompt_artifacts_path
+               (Agent_store.Session_store.data_root t.store))
+        |> Result.map_error ~f:protocol_of_store
+      in
+      let reference = Agent_store.Delegation_store.reference record in
+      let on_revoked () =
+        match record.admission.lifetime with
+        | Independent _ | Invocation_owned _ ->
+          let%bind () =
+            match Session_registry.is_closing t.registry, !actor_ref with
+            | true, _ | _, None -> Ok ()
+            | false, Some actor ->
+              Agent_session.Session_actor.stop_delegated actor ~reference ~mode:Cancel
+              |> Result.map ~f:ignore
+          in
+          (match Session_registry.find t.registry reference.child_session_id with
+           | None -> Ok ()
+           | Some child -> Runtime_owner.prepare_dependency_close child.runtime)
+        | Owned ->
+          (match Agent_session.Session_actor.state parent.actor, !actor_ref with
+           | Ok current, Some actor
+             when Agent_protocol.Session.equal_desired_state
+                    current.lifecycle.desired
+                    Stopped
+                  || not (Int64.equal current.stop_epoch parent_stop_epoch) ->
+             Agent_session.Session_actor.stop_delegated_at_epoch
+               actor
+               ~reference
+               ~epoch:current.stop_epoch
+             |> Result.map ~f:ignore
+           | Error { code = Server_shutting_down; _ }, _ | Ok _, _ -> Ok ()
+           | Error error, _ -> Error error)
+      in
+      let build
+            ~sw
+            ~native
+            ~current
+            ~managed
+            ~managed_current
+            ~ancestor_capabilities
+            ~ancestor_sources
+            ~source_lease
+        =
+        let%bind authored =
+          Agent_store.Delegation_store.Admission.authored_source record.admission
           |> Result.map_error ~f:protocol_of_store
         in
-        let reference = Agent_store.Delegation_store.reference record in
-        let capabilities (runtime : Agent_session.Runtime_builder.t) =
-          match runtime.native_runtime with
-          | None ->
-            Error
-              (unavailable
-                 Invalid_state
-                 "delegation.runtime_unavailable: parent does not expose qualified \
-                  native resources")
-          | Some native ->
-            Lazy.force native.capabilities
-            |> Result.map_error ~f:(fun error ->
-              unavailable Permission_denied error.Chat_response.Tool_capability.message)
-        in
-        let on_revoked () =
-          match record.admission.lifetime with
-          | Independent _ | Invocation_owned _ ->
-            let%bind () =
-              match Session_registry.is_closing t.registry, !actor_ref with
-              | true, _ | _, None -> Ok ()
-              | false, Some actor ->
-                Agent_session.Session_actor.stop_delegated actor ~reference ~mode:Cancel
-                |> Result.map ~f:ignore
+        let%bind source, selected =
+          match authored with
+          | Some origin ->
+            let%bind prepared =
+              Authored_resources.find
+                t.authored_resources
+                ~public:current
+                ~name:origin.name
             in
-            (match Session_registry.find t.registry reference.child_session_id with
-             | None -> Ok ()
-             | Some child -> Runtime_owner.prepare_dependency_close child.runtime)
-          | Owned ->
-            (match Agent_session.Session_actor.state parent.actor, !actor_ref with
-             | Ok current, Some actor
-               when Agent_protocol.Session.equal_desired_state
-                      current.lifecycle.desired
-                      Stopped
-                    || not (Int64.equal current.stop_epoch parent_stop_epoch) ->
-               Agent_session.Session_actor.stop_delegated_at_epoch
-                 actor
-                 ~reference
-                 ~epoch:current.stop_epoch
-               |> Result.map ~f:ignore
-             | Error { code = Server_shutting_down; _ }, _ | Ok _, _ -> Ok ()
-             | Error error, _ -> Error error)
-        in
-        let build
-              ~sw
-              ~native
-              ~current
-              ~managed
-              ~managed_current
-              ~ancestor_capabilities
-              ~source_lease
-          =
-          let%bind source, selected =
-            match record.admission.authored_tool with
-            | Some origin ->
-              let%bind prepared =
-                Authored_resources.find
-                  t.authored_resources
-                  ~public:current
-                  ~name:origin.name
-              in
-              let%bind selected =
-                Authored_resources.resolve t.authored_resources record ~public:current
-              in
-              let%map revision =
-                restore_authored_code
+            let%bind selected =
+              Authored_resources.resolve t.authored_resources record ~public:current
+            in
+            let%map selection =
+              match
+                ( captured
+                , Option.map
+                    prepared_source
+                    ~f:Agent_session.Runtime_builder.Source.selection )
+              with
+              | Some expected, Some (Captured actual) when phys_equal expected actual ->
+                let%bind () =
+                  Agent_session.Recurrence_child_origin.validate_source
+                    (Agent_session.Captured_recurrence_source.origin actual)
+                    state
+                in
+                let%map () =
+                  Recurrence_authored_source.check_artifact
+                    prepared
+                    ~selector:origin
+                    ~artifact
+                in
+                Authored_runtime_selection.Captured actual
+              | Some _, (Some _ | None) ->
+                Error
+                  (unavailable
+                     Invalid_state
+                     "captured authored runtime needs its exact admitted source")
+              | None, Some (Authored_child selected) ->
+                Ok (Authored_runtime_selection.Child selected.source)
+              | ( None
+                , ( Some (Authored _ | Captured _ | Generated _ | Generated_artifact _)
+                  | None ) ) ->
+                restore_authored_child
                   t
                   ~artifacts:artifact_store
                   ~source:prepared.source
                   record
-              in
-              `Authored (prepared, revision), selected
-            | None ->
-              let%map definition =
+                |> Result.map ~f:(fun child -> Authored_runtime_selection.Child child)
+            in
+            `Authored (prepared, selection), selected
+          | None when Option.is_some captured ->
+            (match
+               ( captured
+               , Option.map
+                   prepared_source
+                   ~f:Agent_session.Runtime_builder.Source.selection )
+             with
+             | Some expected, Some (Captured actual) when phys_equal expected actual ->
+               let origin = Agent_session.Captured_recurrence_source.origin actual in
+               let%bind () =
+                 match Agent_session.Recurrence_child_origin.source_kind origin with
+                 | Artifact
+                   when Agent_session.Recurrence_child_origin.matches_record origin record
+                   -> Agent_session.Recurrence_child_origin.validate_source origin state
+                 | Artifact | Authored_tool _ ->
+                   Error
+                     (unavailable
+                        Permission_denied
+                        "captured Artifact differs from actual admission")
+               in
+               let%map selected =
+                 Chat_response.Background_request.rebind_capabilities
+                   ~pins:record.admission.capability_pins
+                   ~capabilities:current
+               in
+               `Artifact actual, selected
+             | (None | Some _), _ ->
+               Error
+                 (unavailable
+                    Invalid_state
+                    "captured Artifact needs its exact admitted source"))
+          | None ->
+            let%bind definition =
+              match
+                ( record.admission.lifetime
+                , Option.map
+                    prepared_source
+                    ~f:Agent_session.Runtime_builder.Source.selection )
+              with
+              | (Owned | Invocation_owned _), Some (Generated definition) -> Ok definition
+              | (Owned | Invocation_owned _), Some (Generated_artifact _) ->
+                Error
+                  (unavailable
+                     Invalid_state
+                     "Owned construction cannot use inert Independent source")
+              | ( Independent _
+                , ( Some
+                      ( Generated _
+                      | Generated_artifact _
+                      | Authored _
+                      | Captured _
+                      | Authored_child _ )
+                  | None ) )
+              | ( (Owned | Invocation_owned _)
+                , (Some (Authored _ | Captured _ | Authored_child _) | None) ) ->
+                (* Rebind the exact retained artifact and durable pins against
+                   the actual canonical parent capabilities. Independent source
+                   selection can retain metadata before that parent is borrowed;
+                   restore uses the admitted loan's current capability identities.
+                   Owned construction can reuse its exact prepared definition.
+                   Restore recompiles immutable bytes without initializers. *)
                 Agent_session.Generated_definition.restore
                   ?limits:
                     (Option.map
@@ -3899,264 +9313,509 @@ let prepare_runtime_at_paths
                     Prompt_unavailable
                     (List.map diagnostics ~f:Chatmd_shell_spec.Diagnostic.to_string
                      |> String.concat ~sep:"\n"))
-              in
-              ( `Generated definition
-              , Chat_response.Generated_admission.capabilities
-                  (Agent_session.Generated_definition.admission definition) )
-          in
-          let lookup id =
-            Session_registry.find t.registry id
-            |> Result.of_option
-                 ~error:
-                   (unavailable
-                      Permission_denied
-                      "delegation.parent_missing: ancestor is not loaded")
-          in
-          let authority =
-            Agent_session.Delegation_authority.create
-              ~authored_capabilities:(Authored_resources.resolve t.authored_resources)
-              ~max_depth:t.limits.delegation_max_depth
-              ~moderation:(parent_moderation_source t)
-              ~authorize_independent:(authorize_independent t)
-              ~parent_stop_epoch
-              ~reference
-              ~capabilities:selected
-              ~host:
-                { state =
-                    (fun id ->
-                      Result.bind (lookup id) ~f:(fun entry ->
-                        Agent_session.Session_actor.state entry.actor))
-                ; resolve =
-                    (fun reference ->
-                      Agent_store.Delegation_store.resolve
-                        (Agent_store.Session_store.delegations t.store)
-                        reference
-                      |> Result.map_error ~f:protocol_of_store)
-                ; capabilities = ancestor_capabilities
-                }
-              ()
-          in
-          let services = extension_services t profile actor_ref ~state in
-          let%bind inherited_managed =
-            match source, managed with
-            | `Authored _, _ | `Generated _, None -> Ok None
-            | `Generated _, Some managed ->
-              Chat_response.Managed_tool_registry.delegate_standalone managed ~selected
-              |> Result.map ~f:(fun delegation ->
-                Some
-                  Agent_session.Runtime_builder.{ delegation; current = managed_current })
-              |> Result.map_error ~f:(fun error ->
-                unavailable Permission_denied error.Chat_response.Tool_capability.message)
-          in
-          let prepare =
-            delegated_tool_preparation
-              t
-              ~authority
-              ~actor_ref
-              ~reference
-              ~selected
-              ~inherited_managed
-              ~lookup
-          in
-          let services =
-            { services with
-              script_tools =
-                (fun native ->
-                  Agent_session.Script_tool_calls.with_preparation
-                    (services.script_tools native)
-                    ~prepare)
-            }
-          in
-          let%bind build =
-            match source with
-            | `Generated definition ->
-              Ok
-                (Agent_session.Runtime_builder.build_generated
-                   ~services
-                   ~definition
-                   ~artifact_store
-                   ~parent_runtime:native
-                   ~inherited_managed
-                   ~authority)
-            | `Authored (prepared, revision) ->
-              let%bind history =
-                Result.of_option
-                  existing_history
-                  ~error:
+            in
+            let%map () =
+              match
+                Option.map
+                  prepared_source
+                  ~f:Agent_session.Runtime_builder.Source.selection
+              with
+              | Some (Generated_artifact source) ->
+                Agent_session.Generated_definition.Source.check_definition
+                  source
+                  ~definition
+              | Some (Generated _ | Authored _ | Captured _ | Authored_child _) | None ->
+                Ok ()
+            in
+            ( `Generated definition
+            , Chat_response.Generated_admission.capabilities
+                (Agent_session.Generated_definition.admission definition) )
+        in
+        let lookup id =
+          Session_registry.find t.registry id
+          |> Result.of_option
+               ~error:
+                 (unavailable
+                    Permission_denied
+                    "delegation.parent_missing: ancestor is not loaded")
+        in
+        let authority =
+          Agent_session.Delegation_authority.create
+            ~policy_restoration_bindings:
+              ancestor_capabilities.Agent_session.Runtime_builder.for_policy_restoration
+            ~source_owner:t.runtime_source_owner
+            ~authored_capabilities:(Authored_resources.resolve t.authored_resources)
+            ~max_depth:t.limits.delegation_max_depth
+            ~moderation_current:(native_current_moderation t)
+            ~authorize_independent:(authorize_independent t)
+            ~parent_stop_epoch
+            ~reference
+            ~capabilities:selected
+            ~host:
+              { state =
+                  (fun id ->
+                    Result.bind (lookup id) ~f:(fun entry ->
+                      Agent_session.Session_actor.state entry.actor))
+              ; resolve =
+                  (fun reference ->
+                    Agent_store.Delegation_store.resolve
+                      (Agent_store.Session_store.delegations t.store)
+                      reference
+                    |> Result.map_error ~f:protocol_of_store)
+              ; capabilities =
+                  ancestor_capabilities.Agent_session.Runtime_builder.for_execution
+              }
+            ()
+        in
+        let%bind binding =
+          install_descendant_binding
+            sw
+            (Some (fun () -> Agent_session.Delegation_authority.check_ancestry authority))
+        in
+        let handed_off = ref false in
+        Exn.protect
+          ~finally:(fun () ->
+            if not !handed_off
+            then Agent_session.Session_actor.Descendant_host.Binding.close binding)
+          ~f:(fun () ->
+            let services =
+              extension_services t profile actor_ref ~initialization_scope ~state
+            in
+            let%bind inherited_managed =
+              match source, managed with
+              | (`Authored _ | `Artifact _), _ | `Generated _, None -> Ok None
+              | `Generated _, Some managed ->
+                Chat_response.Managed_tool_registry.delegate_standalone managed ~selected
+                |> Result.map ~f:(fun delegation ->
+                  Some
+                    Agent_session.Runtime_builder.
+                      { delegation; current = managed_current })
+                |> Result.map_error ~f:(fun error ->
+                  unavailable
+                    Permission_denied
+                    error.Chat_response.Tool_capability.message)
+            in
+            let prepare =
+              delegated_tool_preparation
+                ~ancestor_sources:(Some ancestor_sources)
+                t
+                ~authority
+                ~actor_ref
+                ~reference
+                ~selected
+                ~inherited_managed
+            in
+            let services =
+              { services with
+                script_tools =
+                  (fun native ->
+                    Agent_session.Script_tool_calls.with_preparation
+                      (services.script_tools native)
+                      ~prepare)
+              }
+            in
+            let construct_delegated build =
+              construct sw build (fun _ ->
+                Shell_runtime.Manifest_authorizer.Reject
+                  "generated definitions cannot authorize new shell manifests")
+            in
+            let%bind runtime =
+              match source with
+              | `Artifact captured ->
+                build_root
+                  sw
+                  ~ancestor_capabilities:(Some ancestor_capabilities)
+                  ~ancestor_sources:(Some ancestor_sources)
+                  ~revision:(Agent_session.Captured_recurrence_source.revision captured)
+                  ~captured:(Some (captured, authority))
+                  ~binding
+              | `Generated definition ->
+                let%bind selected_source =
+                  retain_generated_source
+                    definition
+                    ~prepared_source
+                    ~state
+                    ~lifetime:record.admission.lifetime
+                in
+                construct_delegated
+                  (Agent_session.Runtime_builder.build_product_generated
+                     ~selected_source:(Some selected_source)
+                     ~ancestor_capabilities:(Some ancestor_capabilities)
+                     ~ancestor_sources:(Some ancestor_sources)
+                     ~construction_checkpoint
+                     ~services
+                     ~definition
+                     ~artifact_store
+                     ~parent_runtime:native
+                     ~inherited_managed
+                     ~authority)
+              | `Authored (prepared, selection) ->
+                let revision = Authored_runtime_selection.revision selection in
+                let reject_missing_history () =
+                  Error
                     (unavailable
                        Invalid_state
                        "authored child requires admitted stored history")
-              in
-              let%map code =
-                prepare_authored_code
-                  t
-                  ~prepared
-                  ~revision
-                  ~authority
-                  ~state
-                  ~profile
-                  ~sw
-                  ~actor_ref
-                  ~approval_provider
-                  ~storage_paths
-                  ~shell_state
-                  ~run_preparation
-              in
-              fun ~sw
-                ~env
-                ~inference_context
-                ~inference_identity
-                ~on_inference_attempt
-                ~on_inference_completion
-                ~on_inference_observation
-                ~paths
-                ~storage_paths
-                ~session_id
-                ~history_namespace
-                ~next_history_sequence
-                ~existing_history:_ ->
-                Agent_session.Runtime_builder.build_authored_child
-                  ~services
-                  ~revision
-                  ~prepared
-                  ~code
-                  ~authority
-                  ~history
-                  ~sw
-                  ~env
-                  ~inference_context
-                  ~inference_identity
-                  ~on_inference_attempt
-                  ~on_inference_completion
-                  ~on_inference_observation
-                  ~paths
-                  ~storage_paths
-                  ~session_id
-                  ~history_namespace
-                  ~next_history_sequence
-          in
-          let%bind runtime =
-            construct sw build (fun _ ->
-              Shell_runtime.Manifest_authorizer.Reject
-                "generated definitions cannot authorize new shell manifests")
-          in
-          let%map runtime =
-            Agent_session.Runtime_builder.with_source_lease
-              runtime
-              ~source_lease:(Agent_session.Prompt_source_lease.borrow source_lease)
-            |> Result.map_error ~f:source_attachment_error
-          in
-          { runtime with ancestor_capabilities = Some ancestor_capabilities }
+                in
+                let%bind () =
+                  match
+                    ( existing_history
+                    , captured
+                    , state.runtime_initialization
+                    , Constructor_owner.current run_preparation
+                    , !initialization_scope )
+                  with
+                  | Some _, _, _, _, _ -> Ok ()
+                  | ( None
+                    , Some _
+                    , Pending { fresh_history = true }
+                    , Some (Runtime_construction _)
+                    , Some _ ) -> Ok ()
+                  | ( None
+                    , None
+                    , Pending { fresh_history = true }
+                    , Some (Runtime_construction construction)
+                    , Some _ ) ->
+                    let module Construction =
+                      Agent_session.Session_actor.Runtime_construction
+                    in
+                    (match Construction.initialization construction with
+                     | Installed_resume -> reject_missing_history ()
+                     | Scoped ->
+                       (match
+                          Agent_session.Runtime_source_preparation.selection
+                            (Construction.source construction)
+                        with
+                        | Authored_child _ -> Ok ()
+                        | Authored _ | Captured _ | Generated _ | Generated_artifact _ ->
+                          reject_missing_history ()))
+                  | None, _, _, _, _ -> reject_missing_history ()
+                in
+                let%bind code =
+                  prepare_authored_code
+                    ~preparation:
+                      Agent_session.Runtime_builder.Native_preparation.Original_execution
+                    ?construction_checkpoint
+                    t
+                    ~prepared
+                    ~revision
+                    ~authority
+                    ~state
+                    ~profile
+                    ~sw
+                    ~actor_ref
+                    ~approval_provider
+                    ~storage_paths
+                    ~shell_state
+                    ~run_preparation
+                in
+                let%bind selected_source =
+                  retain_source (fun () ->
+                    let prepared_revision =
+                      match code with
+                      | Some code ->
+                        Agent_session.Authored_code_preparation.prepared_revision code
+                      | None -> prepared.prepared_revision
+                    in
+                    let%bind input =
+                      Authored_runtime_selection.input
+                        selection
+                        ~record
+                        ~invocation:
+                          (Agent_session.Runtime_script_preparation.Invocation.of_root
+                             state.spec.root_invocation)
+                    in
+                    Agent_session.Runtime_builder.Source.Prepared_revision.bind
+                      prepared_revision
+                      ~input)
+                in
+                construct_delegated
+                  (fun
+                      ~sw
+                       ~env
+                       ~inference_context
+                       ~inference_identity
+                       ~bind_inference_identity
+                       ~on_inference_attempt
+                       ~on_inference_completion
+                       ~on_inference_observation
+                       ~paths
+                       ~storage_paths
+                       ~session_id
+                       ~history_namespace
+                       ~next_history_sequence
+                       ~existing_history
+                     ->
+                     Agent_session.Runtime_builder.build_product_authored_child
+                       ~selected_source:(Some selected_source)
+                       ~ancestor_capabilities:(Some ancestor_capabilities)
+                       ~ancestor_sources:(Some ancestor_sources)
+                       ~construction_checkpoint
+                       ~services
+                       ~revision
+                       ~prepared
+                       ~code
+                       ~authority
+                       ~existing_history
+                       ~sw
+                       ~env
+                       ~inference_context
+                       ~inference_identity
+                       ~bind_inference_identity
+                       ~on_inference_attempt
+                       ~on_inference_completion
+                       ~on_inference_observation
+                       ~paths
+                       ~storage_paths
+                       ~session_id
+                       ~history_namespace
+                       ~next_history_sequence)
+            in
+            let%map runtime =
+              match source with
+              | `Artifact _ -> Ok runtime
+              | `Generated _ | `Authored _ ->
+                Agent_session.Runtime_builder.with_source_lease
+                  runtime
+                  ~source_lease:(Agent_session.Prompt_source_lease.borrow source_lease)
+                |> Result.map_error ~f:source_attachment_error
+            in
+            let original_close = runtime.close in
+            let close =
+              Agent_session.Runtime_builder.Close.reported (fun () ->
+                let retired =
+                  Runtime_close_observation.capture (fun () ->
+                    Agent_session.Session_actor.Descendant_host.Binding.close binding)
+                in
+                Runtime_close_observation.continue retired ~f:(fun () ->
+                  Agent_session.Runtime_builder.Close.run_reported original_close))
+            in
+            handed_off := true;
+            { runtime with close; ancestor_capabilities = Some ancestor_capabilities })
+      in
+      match record.admission.lifetime with
+      | Owned | Invocation_owned _ | Independent _ ->
+        let prepare_eligibility ?retained_sources ~check () =
+          match record.admission.lifetime with
+          | Owned | Invocation_owned _ -> Ok None
+          | Independent _ ->
+            let%bind eligibility =
+              prepare_independent_eligibility
+                ?retained_sources
+                ?construction_checkpoint
+                t
+                ~parent
+                ~check_request:check
+            in
+            let%map () = recheck_independent_eligibility t eligibility in
+            Some eligibility
         in
-        (match record.admission.lifetime with
-         | Owned | Invocation_owned _ ->
-           Delegated_runtime.prepare
-             ~sw:t.sw
-             ~parent:parent.runtime
-             ~on_revoked
-             ~build:(fun ~sw parent_runtime ->
-               let%bind current = capabilities parent_runtime in
-               let native = Option.value_exn parent_runtime.native_runtime in
-               let ancestor_capabilities id =
-                 match
-                   Agent_protocol.Id.Session.equal id record.key.parent_session_id
-                 with
-                 | true -> Ok current
-                 | false ->
-                   (match parent_runtime.ancestor_capabilities with
-                    | Some lookup -> lookup id
-                    | None ->
-                      Error
-                        (unavailable
-                           Permission_denied
-                           "delegation.resources_unavailable: ancestor binding lookup is \
-                            missing"))
+        let check_eligibility =
+          Option.value_map ~default:(Ok ()) ~f:check_independent_eligibility_current
+        in
+        let cleanup = Native_parent_cleanup.create ~owner:parent.runtime in
+        let driver = Delegated_runtime.Cleanup.create () in
+        let%bind () =
+          register_delegated_cleanup
+            driver
+            (Shared_tracking_cleanup.Resource.Owned { driver; parent = cleanup })
+        in
+        let with_resources f =
+          Runtime_result_observation.bind
+            (Runtime_result_observation.raw (fun () ->
+               let%bind source =
+                 Result.of_option
+                   source_consumer
+                   ~error:
+                     (unavailable
+                        Invalid_state
+                        "native resource origin requires its actual admitted Source")
                in
-               let managed =
-                 Option.bind
-                   parent_runtime.moderator_script_tools
-                   ~f:Agent_session.Script_tool_calls.managed_registry
+               let%bind source_guard =
+                 Runtime_owner.Native_consumer.source ~owner:source_target.runtime source
                in
-               let managed_current () =
-                 match parent_runtime.moderator_script_tools with
-                 | Some tools ->
-                   Agent_session.Script_tool_calls.current_capabilities tools
-                 | None -> current
+               let check () =
+                 Runtime_owner.Native_consumer.check_owner
+                   source_guard
+                   ~owner:source_target.runtime
                in
-               build
-                 ~sw
-                 ~native
-                 ~current
-                 ~managed
-                 ~managed_current
-                 ~ancestor_capabilities
-                 ~source_lease:parent_runtime.source_lease)
-         | Independent _ ->
-           let retained = ref None in
-           let with_resources f =
-             Independent_resources.with_chain
-               ~max_depth:t.limits.delegation_max_depth
-               ~host:(independent_resource_host t)
-               ~reference
-               ~f:(fun resources ->
-                 let%bind parent =
-                   Independent_resources.find resources record.key.parent_session_id
-                 in
-                 Exn.protect
-                   ~finally:(fun () -> retained := None)
-                   ~f:(fun () ->
-                     retained := Some resources;
-                     f parent))
-           in
-           Delegated_runtime.prepare_resources
-             ~with_resources
-             ~sw:t.sw
-             ~on_revoked
-             ~build:(fun ~sw parent_resources ->
-               let native = parent_resources.Agent_session.Runtime_builder.native in
-               let resource_capabilities native =
-                 Lazy.force native.Chat_response.Agent_runtime.capabilities
-                 |> Result.map_error ~f:(fun error ->
-                   unavailable
-                     Permission_denied
-                     error.Chat_response.Tool_capability.message)
-               in
-               let%bind current = resource_capabilities native in
-               let ancestor_capabilities id =
-                 let%bind resources =
-                   !retained
-                   |> Result.of_option
-                        ~error:
-                          (unavailable
-                             Permission_denied
-                             "delegation.resources_unavailable: independent scope closed")
-                 in
-                 let%bind resource = Independent_resources.find resources id in
-                 resource_capabilities resource.native
-               in
-               build
-                 ~sw
-                 ~native
-                 ~current
-                 ~managed:parent_resources.managed
-                 ~managed_current:(fun () -> current)
-                 ~ancestor_capabilities
-                 ~source_lease:parent_resources.source_lease))
+               let%bind _ = prepare_eligibility ~check () in
+               native_resource_origin
+                 t
+                 ~target:source_target
+                 ~consumer:source_guard
+                 ~reference))
+            ~f:(fun origin ->
+              Native_parent_cleanup.begin_original cleanup;
+              let outcome =
+                with_parent_native_origin_source_resources_observed
+                  t
+                  parent.runtime
+                  ~origin
+                  ~physical_target:source_target
+                  ~consumer
+                  ~capture_release:(Native_parent_cleanup.capture_release cleanup)
+                  ~f:(fun ~check ~custody ~source resources ->
+                    Runtime_result_observation.bind
+                      (Runtime_result_observation.raw (fun () ->
+                         let%bind () = check () in
+                         prepare_eligibility
+                           ?retained_sources:
+                             resources.Agent_session.Runtime_builder.ancestor_sources
+                           ~check
+                           ()))
+                      ~f:(fun eligibility ->
+                        let check () =
+                          let%bind () = check () in
+                          check_eligibility eligibility
+                        in
+                        f (resources, check, custody, source)))
+              in
+              Native_parent_cleanup.record cleanup outcome;
+              Runtime_owner.Native_borrow_outcome.observation outcome)
+        in
+        Delegated_runtime.prepare_resources_reported
+          ~cleanup:driver
+          ~with_resources
+          ~sw:t.sw
+          ~on_revoked
+          ~build:(fun ~sw (parent_resources, check, custody, source) ->
+            let%bind current_view, ancestor_capabilities, ancestor_sources =
+              native_parent_views
+                t
+                parent_resources
+                ~provider:(Source_target.of_entry parent)
+                ~source
+                ~custody
+                ~parent_id:record.key.parent_session_id
+            in
+            let%bind current = current_view () in
+            let%bind () = check () in
+            let native = parent_resources.Agent_session.Runtime_builder.native in
+            let managed = parent_resources.managed in
+            let managed_current () =
+              match managed with
+              | Some managed -> Chat_response.Managed_tool_registry.capabilities managed
+              | None -> current
+            in
+            build
+              ~sw
+              ~native
+              ~current
+              ~managed
+              ~managed_current
+              ~ancestor_capabilities
+              ~ancestor_sources
+              ~source_lease:parent_resources.source_lease)
+    in
+    let%map runtime =
+      match source with
+      | Captured_delegation captured ->
+        (match
+           Option.map prepared_source ~f:Agent_session.Runtime_builder.Source.selection
+         with
+         | Some (Captured actual) when phys_equal captured actual ->
+           (match
+              Agent_session.Recurrence_child_origin.source_kind
+                (Agent_session.Captured_recurrence_source.origin actual)
+            with
+            | Authored_tool _ ->
+              prepare_delegated
+                ~captured:(Some actual)
+                (Agent_session.Prompt_revision.artifact
+                   (Agent_session.Captured_recurrence_source.revision actual))
+            | Artifact ->
+              prepare_delegated
+                ~captured:(Some actual)
+                (Agent_session.Prompt_revision.artifact
+                   (Agent_session.Captured_recurrence_source.revision actual)))
+         | Some _ | None ->
+           Error
+             (unavailable
+                Invalid_state
+                "captured recurrence runtime awaits occurrence Run admission"))
+      | Authored revision ->
+        let construct_root sw =
+          let%bind binding = install_descendant_binding sw None in
+          let handed_off = ref false in
+          Exn.protect
+            ~finally:(fun () ->
+              if not !handed_off
+              then Agent_session.Session_actor.Descendant_host.Binding.close binding)
+            ~f:(fun () ->
+              let%map runtime =
+                build_root
+                  sw
+                  ~revision
+                  ~captured:None
+                  ~binding
+                  ~ancestor_capabilities:None
+                  ~ancestor_sources:None
+              in
+              let original_close = runtime.close in
+              let close =
+                Agent_session.Runtime_builder.Close.reported (fun () ->
+                  let retired =
+                    Runtime_close_observation.capture (fun () ->
+                      Agent_session.Session_actor.Descendant_host.Binding.close binding)
+                  in
+                  Runtime_close_observation.continue retired ~f:(fun () ->
+                    Agent_session.Runtime_builder.Close.run_reported original_close))
+              in
+              handed_off := true;
+              { runtime with close })
+        in
+        prepare_extension_runtime_scope t construct_root
+      | Generated_artifact { artifact; _ } -> prepare_delegated ~captured:None artifact
     in
     runtime, shell_state
   in
   match prepare () with
-  | Ok (runtime, shell_state) -> Ok (tracked_runtime tracking runtime, shell_state)
+  | Ok (runtime, shell_state) ->
+    let cleanup =
+      match !shared_cleanup with
+      | Some cleanup -> cleanup
+      | None ->
+        Shared_tracking_cleanup.create
+          ~tracking
+          ~resource:(Shared_tracking_cleanup.Resource.Ordinary runtime)
+    in
+    let runtime = tracked_runtime ~cleanup runtime in
+    let original_close = runtime.close in
+    let binding = !descendant_binding in
+    let close =
+      Agent_session.Runtime_builder.Close.reported (fun () ->
+        let retired =
+          Runtime_close_observation.capture (fun () ->
+            Option.iter
+              binding
+              ~f:Agent_session.Session_actor.Descendant_host.Binding.close)
+        in
+        Runtime_close_observation.continue retired ~f:(fun () ->
+          Agent_session.Runtime_builder.Close.run_reported original_close))
+    in
+    Ok ({ runtime with close }, shell_state)
   | Error _ as failure ->
-    finish_failed_graph tracking;
+    retire_descendant_binding ();
+    finish_failed_preparation ();
     failure
   | exception exn ->
     let backtrace = Stdlib.Printexc.get_raw_backtrace () in
-    finish_failed_graph tracking;
+    retire_descendant_binding ();
+    finish_failed_preparation ();
     Exn.raise_with_original_backtrace exn backtrace
 ;;
 
 let prepare_runtime
+      ?source_consumer
+      ?resource_consumer
+      ?policy_restoration
+      ?policy_build
+      ?native_promotion
+      ?prepared_source
+      ?construction_checkpoint
+      ~source_target
+      ~native_routing
       t
       handle
       revision
@@ -4173,24 +9832,66 @@ let prepare_runtime
       ~run_preparation
   =
   let open Result.Let_syntax in
-  let%bind paths = runtime_paths t handle revision state in
-  prepare_runtime_at_paths
-    t
-    paths
-    paths
-    revision
-    profile
-    state
-    ~next_history_sequence
-    ~existing_history
-    ~existing_moderator_snapshot
-    ~actor_ref
-    ~pending_schedule_operations
-    ~pending_jobs
-    ~initialization_scope
-    ~initialization_jobs
-    ~run_preparation
-  |> Result.map ~f:(fun (runtime, shell) -> runtime, !shell)
+  match native_promotion with
+  | Some promotion ->
+    let%bind source =
+      Result.of_option
+        prepared_source
+        ~error:
+          (unavailable
+             Invalid_state
+             "native promotion requires its actual selected source")
+    in
+    let check () =
+      Option.value_map construction_checkpoint ~default:(Ok ()) ~f:(fun f -> f ())
+    in
+    prepare_runtime_from_native
+      ?policy_restoration
+      ~source_target
+      ~native_routing
+      ~promotion
+      ~source
+      ~construction_checkpoint:check
+      t
+      handle
+      profile
+      state
+      ~next_history_sequence
+      ~existing_history
+      ~existing_moderator_snapshot
+      ~actor_ref
+      ~pending_schedule_operations
+      ~pending_jobs
+      ~initialization_scope
+      ~initialization_jobs
+      ~run_preparation
+  | None ->
+    let%bind paths = runtime_paths t handle revision state in
+    prepare_runtime_at_paths
+      ?source_consumer
+      ?resource_consumer
+      ~source_target
+      ~native_routing
+      ?policy_restoration
+      ?policy_build
+      ?prepared_source
+      ?construction_checkpoint
+      t
+      paths
+      paths
+      revision
+      profile
+      ~handle
+      state
+      ~next_history_sequence
+      ~existing_history
+      ~existing_moderator_snapshot
+      ~actor_ref
+      ~pending_schedule_operations
+      ~pending_jobs
+      ~initialization_scope
+      ~initialization_jobs
+      ~run_preparation
 ;;
 
 let persist_metadata t handle state =
@@ -4358,53 +10059,31 @@ let validate_recovery_state t handle = function
       (Agent_session.Session_persistence.Restored.state restored)
 ;;
 
-let validate_recovery_document t handle = function
+let validate_recovery_document t handle document =
+  let open Result.Let_syntax in
+  let%bind () =
+    Agent_session.Session_recovery_cpu.validate_native t.recovery_cpu document
+  in
+  match document with
   | None ->
     Error (Agent_store.Store_error.Corrupt "durable session has no valid snapshot")
   | Some document ->
-    let open Result.Let_syntax in
-    let state = Agent_session.Session_state_document.value document in
-    let%bind () =
-      Agent_session.Session_state.validate state
-      |> Result.map_error ~f:(fun error ->
-        Agent_store.Store_error.Corrupt error.Agent_protocol.Error.message)
-    in
-    validate_recovery_archives t handle state
+    validate_recovery_archives
+      t
+      handle
+      (Agent_session.Session_state_document.value document)
 ;;
 
 let restore_recovery_document t snapshot =
-  Agent_session.Session_persistence.restore_snapshot ~limits:t.document_limits snapshot
-  |> Result.map ~f:(fun restored ->
-    Some (Agent_session.Session_persistence.Restored.state_document restored))
+  Agent_session.Session_recovery_cpu.restore t.recovery_cpu snapshot
 ;;
 
 let apply_recovery_document t state transaction =
-  match state with
-  | None -> Error (Agent_store.Store_error.Corrupt "journal replay has no snapshot state")
-  | Some document ->
-    Agent_session.Session_persistence.apply_document
-      document
-      ~limits:t.document_limits
-      transaction
-    |> Result.map ~f:Option.some
+  Agent_session.Session_recovery_cpu.apply t.recovery_cpu state transaction
 ;;
 
 let equivalent_recovery_documents t left right =
-  let open Result.Let_syntax in
-  let encode = function
-    | None ->
-      Error (Agent_store.Store_error.Corrupt "journal replay has no snapshot state")
-    | Some document ->
-      Agent_session.Session_state_document.encode document ~limits:t.document_limits
-      |> Result.map ~f:(fun document ->
-        Document_schema.Document.json document |> Jsonaf.to_string)
-      |> Result.map_error ~f:(fun error -> Agent_store.Store_error.Document error)
-  in
-  let%bind left = encode left in
-  let%map right = encode right in
-  (* Compare the complete admitted document, including unknown field order and
-     numeric spellings. Known values/counters alone cannot prove preservation. *)
-  String.equal left right
+  Agent_session.Session_recovery_cpu.equivalent t.recovery_cpu left right
 ;;
 
 let restore_recovery_state t snapshot =
@@ -4425,6 +10104,7 @@ let apply_recovery_transaction t state transaction =
 
 let create_retention_preflight t handle journal =
   Agent_store.Recovery.Retention_preflight.create
+    ~restoration_budget:Agent_store.Recovery.Retention_preflight.Budget.default
     ~env:t.env
     ~journal
     ~snapshot_directory:(Agent_store.Session_store.Handle.snapshot_directory handle)
@@ -4462,8 +10142,18 @@ let require_seed_success t handle =
   Session_seed_recovery.require_success (seed_recovery t) handle
 ;;
 
-let prune_snapshot t handle journal persistence _installed =
+let require_maintenance_writer writer =
+  if Agent_store.Commit_writer.is_available writer
+  then Ok ()
+  else
+    Error
+      (Agent_store.Store_error.Corrupt
+         "cache maintenance requires an available commit writer")
+;;
+
+let prune_snapshot t handle journal writer persistence =
   let open Result.Let_syntax in
+  let%bind () = require_maintenance_writer writer in
   (* The first audited Created is the Pending seed's recovery authority. Neither
      cache maintenance nor closure may seal it away before durable Success. *)
   let%bind () =
@@ -4494,6 +10184,173 @@ let prune_snapshot t handle journal persistence _installed =
   Agent_store.Journal.seal_checkpoint journal
 ;;
 
+module Loaded_retention = struct
+  type factory = t
+
+  type t =
+    { factory : factory
+    ; recovery_owner : Session_recovery_owner.t
+    ; actor : Agent_session.Session_actor.t
+    ; runtime : Runtime_owner.t
+    ; handle : Agent_store.Session_store.Handle.t
+    ; journal : Agent_store.Journal.t
+    ; writer : Agent_store.Commit_writer.t
+    ; persistence : Agent_session.Session_persistence.t
+    ; preflight : Agent_store.Recovery.Retention_preflight.t
+    }
+
+  type basis =
+    { state : Agent_session.Session_state.t
+    ; restored : Agent_session.Session_persistence.Restored.t
+    ; transaction_hash : string option
+    }
+
+  let create factory ~recovery_owner ~actor ~runtime ~handle ~journal ~writer ~persistence
+    =
+    match Agent_session.Session_persistence.retention_preflight persistence with
+    | None ->
+      Error
+        (Agent_protocol.Error.create
+           Invalid_state
+           ~message:"loaded retention requires its persistence-owned preflight"
+           ~retryable:false
+           ())
+    | Some preflight ->
+      Ok
+        { factory
+        ; recovery_owner
+        ; actor
+        ; runtime
+        ; handle
+        ; journal
+        ; writer
+        ; persistence
+        ; preflight
+        }
+  ;;
+
+  let with_current t ~f =
+    (* These brief requests exclude live scopes and competing lifecycle work.
+       Neither reservation nor Actor mailbox is held during speculative replay. *)
+    Agent_session.Session_actor.with_quiescent_state t.actor ~f:(fun state ->
+      let result =
+        Session_registry.with_loaded_retention
+          t.factory.registry
+          ~actor:t.actor
+          ~runtime:t.runtime
+          ~handle:t.handle
+          (fun () ->
+             if
+               (not (Session_recovery_owner.is_closing t.recovery_owner))
+               && Session_recovery_owner.owns_actor t.recovery_owner t.actor
+               && Agent_store.Commit_writer.is_available t.writer
+             then f state
+             else Ok None)
+      in
+      (* Never wait on a lifecycle holder which may itself await this Actor. *)
+      match result with
+      | Error error when Agent_protocol.Error.equal_code error.code Conflict -> Ok None
+      | Error error -> Error error
+      | Ok None -> Ok None
+      | Ok (Some result) -> result)
+    |> Result.map ~f:Option.join
+  ;;
+
+  let check_metadata_and_seed t =
+    let open Result.Let_syntax in
+    let%bind _ =
+      Agent_store.Session_store.Handle.metadata_checked t.handle
+      |> Result.map_error ~f:protocol_of_store
+    in
+    require_seed_success t.factory t.handle
+    |> Result.map_error ~f:(fun failure ->
+      Agent_store.Store_error.Corrupt failure.message)
+    |> Result.map_error ~f:protocol_of_store
+  ;;
+
+  let capture t =
+    with_current t ~f:(fun state ->
+      let open Result.Let_syntax in
+      let%map () = check_metadata_and_seed t in
+      Some
+        { state
+        ; restored = Agent_session.Session_persistence.restored t.persistence
+        ; transaction_hash =
+            Agent_session.Session_persistence.transaction_hash t.persistence
+        })
+  ;;
+
+  let warm t = Agent_store.Recovery.Retention_preflight.check t.preflight
+
+  let finish t basis warmed =
+    with_current t ~f:(fun state ->
+      if
+        not
+          (phys_equal state basis.state
+           && phys_equal
+                (Agent_session.Session_persistence.restored t.persistence)
+                basis.restored
+           && Option.equal
+                String.equal
+                (Agent_session.Session_persistence.transaction_hash t.persistence)
+                basis.transaction_hash)
+      then Ok None
+      else
+        let open Result.Let_syntax in
+        let%bind () = check_metadata_and_seed t in
+        let%bind () = warmed |> Result.map_error ~f:protocol_of_store in
+        (* Warming is read-only and non-atomic. Only this fresh, excluded full
+           check and the original prune sequence authorize physical changes. *)
+        let%map () =
+          prune_snapshot t.factory t.handle t.journal t.writer t.persistence
+          |> Result.map_error ~f:protocol_of_store
+        in
+        Some Session_retention.Completed)
+    |> Result.map ~f:(Option.value ~default:Session_retention.Deferred)
+  ;;
+
+  let attempt t =
+    (* Join every admitted Actor request and CPU worker before this retained
+       resource owner's protected attempt can end, including on cancellation. *)
+    Eio.Cancel.protect (fun () ->
+      let open Result.Let_syntax in
+      let%bind basis = capture t in
+      match basis with
+      | None -> Ok Session_retention.Deferred
+      | Some basis -> finish t basis (warm t))
+  ;;
+end
+
+let bind_retention
+      t
+      retention
+      handle
+      journal
+      writer
+      persistence
+      actor
+      runtime
+      ~recovery_owner
+  =
+  let open Result.Let_syntax in
+  let%map loaded =
+    Loaded_retention.create
+      t
+      ~recovery_owner
+      ~actor
+      ~runtime
+      ~handle
+      ~journal
+      ~writer
+      ~persistence
+  in
+  Session_retention.bind_exn
+    retention
+    ~sw:t.sw
+    ~clock:(Eio.Stdenv.mono_clock t.env)
+    ~attempt:(fun () -> Loaded_retention.attempt loaded)
+;;
+
 let actor_services
       t
       handle
@@ -4502,6 +10359,7 @@ let actor_services
       durable_events
       capacity
       runtime_owner
+      ~retention
       ~creating_principal
   =
   let open Result.Let_syntax in
@@ -4511,6 +10369,7 @@ let actor_services
       ~max_upload_bytes:(Int64.of_int t.limits.job_result_max_bytes)
     |> Result.map_error ~f:protocol_of_store
   in
+  let%bind goal_descendant_profile = goal_descendant_profile t in
   let principal =
     Option.value_or_thunk creating_principal ~default:Agent_protocol.Id.Principal.create
   in
@@ -4549,10 +10408,8 @@ let actor_services
         state
     with
     | Error _ -> ()
-    | Ok installed ->
-      ignore
-        (prune_snapshot t handle journal persistence installed
-         : (unit, Agent_store.Store_error.t) result);
+    | Ok _ ->
+      Session_retention.request retention;
       last_snapshot_sequence := state.counters.event_sequence;
       last_snapshot_at := Eio.Time.now (Eio.Stdenv.clock t.env)
   in
@@ -4564,6 +10421,7 @@ let actor_services
     ; schedule_limits = t.limits.schedules
     ; notification_limits = t.limits.notifications
     ; ingress_limits = t.limits.ingress
+    ; goal_descendant_profile
     ; create_attachment_id = Agent_protocol.Id.Attachment.create
     ; create_reclaim_token =
         (fun () ->
@@ -4661,6 +10519,11 @@ let prepare_administration t entry ~previous state ~fresh_history =
   in
   let%bind () =
     match revision with
+    | Captured_delegation _ ->
+      Error
+        (unavailable
+           Invalid_state
+           "captured recurrence cannot be administratively initialized")
     | Generated_artifact _ -> Ok ()
     | Authored revision ->
       let%bind paths = runtime_paths t handle (Authored revision) state in
@@ -4709,6 +10572,11 @@ let prepare_administration t entry ~previous state ~fresh_history =
         unavailable
           Invalid_state
           (Sexp.to_string_hum (Inference_runtime.Preparation_error.sexp_of_t error)))
+    | Captured_delegation _ ->
+      Error
+        (unavailable
+           Invalid_state
+           "captured recurrence cannot be administratively initialized")
     | Generated_artifact _ -> Ok current
   in
   let%bind () =
@@ -4756,114 +10624,147 @@ let prepare_administration t entry ~previous state ~fresh_history =
   candidate
 ;;
 
-let checkpoint_entry t handle journal persistence actor =
-  Agent_session.Session_actor.checkpoint actor ~persist:(fun state ->
-    let open Result.Let_syntax in
-    let%bind installed =
-      Agent_session.Session_persistence.install_snapshot
-        persistence
-        ~env:t.env
-        ~handle
-        ~max_payload_length:t.limits.snapshot_payload_limit
-        ~transaction_hash:(Agent_session.Session_persistence.transaction_hash persistence)
-        state
-      |> Result.map_error ~f:protocol_of_store
-    in
-    prune_snapshot t handle journal persistence installed
-    |> Result.map_error ~f:protocol_of_store)
+let checkpoint_entry t handle journal writer persistence actor =
+  (* A released failed startup is disposal-only. Do not dispatch Checkpoint or
+     enter its callback, even if an unexpected backend availability change occurs.
+     The actual unavailable writer keeps its existing Store diagnostic. *)
+  if Agent_session.Session_actor.is_startup_disposal_only actor
+  then (
+    match require_maintenance_writer writer with
+    | Error error -> Error (protocol_of_store error)
+    | Ok () ->
+      Error
+        (unavailable
+           Conflict
+           "failed startup has released execution custody for disposal only"))
+  else
+    Agent_session.Session_actor.checkpoint actor ~persist:(fun state ->
+      let open Result.Let_syntax in
+      let%bind () =
+        require_maintenance_writer writer |> Result.map_error ~f:protocol_of_store
+      in
+      let%bind _ =
+        Agent_session.Session_persistence.install_snapshot
+          persistence
+          ~env:t.env
+          ~handle
+          ~max_payload_length:t.limits.snapshot_payload_limit
+          ~transaction_hash:
+            (Agent_session.Session_persistence.transaction_hash persistence)
+          state
+        |> Result.map_error ~f:protocol_of_store
+      in
+      prune_snapshot t handle journal writer persistence
+      |> Result.map_error ~f:protocol_of_store)
 ;;
 
-let close_actor_lock_after_failure t handle =
-  (* Only cleanup following an admitted failure uses this best-effort path.
-     Ordinary close continues to report its own release failure. *)
+let close_unretained_handle_after_failure t handle =
+  (* Outer failure cleanup cannot release a Handle retained by the actual failed
+     Entry or recovery owner. A failed custody check also preserves that Handle;
+     cleanup must never replace the caller's already selected primary failure. *)
   try
     Eio.Cancel.protect (fun () ->
-      ignore
-        (Agent_store.Session_store.close_session t.store handle
-         : (unit, Agent_store.Store_error.t) result))
+      if not (Session_registry.retains_cleanup_handle t.registry handle)
+      then
+        ignore
+          (Agent_store.Session_store.close_session t.store handle
+           : (unit, Agent_store.Store_error.t) result))
   with
   | _ -> ()
 ;;
 
-let close_entry t handle journal persistence runtime writer actor capacity =
-  let close_resources () =
-    Eio.Cancel.protect (fun () ->
-      Job_capacity.close_session
-        t.job_capacity
-        ~session_id:(Agent_store.Session_store.Handle.session_id handle);
-      Agent_session.Session_actor.shutdown actor;
-      Option.iter capacity ~f:Session_capacity.release;
-      Agent_store.Commit_writer.close writer)
-  in
-  let run () =
-    Runtime_owner.close_and_wait runtime;
-    ignore
-      (checkpoint_entry t handle journal persistence actor
-       : (unit, Agent_protocol.Error.t) result)
-  in
-  match run () with
-  | () ->
-    (match close_resources () with
-     | () ->
-       Eio.Cancel.protect (fun () ->
-         ignore
-           (Agent_store.Session_store.close_session t.store handle
-            : (unit, Agent_store.Store_error.t) result))
-     | exception exn ->
-       let backtrace = Stdlib.Printexc.get_raw_backtrace () in
-       close_actor_lock_after_failure t handle;
-       Exn.raise_with_original_backtrace exn backtrace)
-  | exception exn ->
-    let backtrace = Stdlib.Printexc.get_raw_backtrace () in
-    (try close_resources () with
-     | _ -> ());
-    close_actor_lock_after_failure t handle;
-    Exn.raise_with_original_backtrace exn backtrace
-;;
-
-let close_unregistered_entry t handle runtime writer actor capacity =
-  Exn.protect
-    ~f:(fun () -> Runtime_owner.close_and_wait runtime)
-    ~finally:(fun () ->
-      Eio.Cancel.protect (fun () ->
-        Exn.protect
-          ~f:(fun () ->
-            Job_capacity.close_session
-              t.job_capacity
-              ~session_id:(Agent_store.Session_store.Handle.session_id handle))
-          ~finally:(fun () ->
-            Exn.protect
-              ~f:(fun () -> Agent_session.Session_actor.shutdown actor)
-              ~finally:(fun () ->
-                Exn.protect
-                  ~f:(fun () -> Option.iter capacity ~f:Session_capacity.release)
-                  ~finally:(fun () -> Agent_store.Commit_writer.close writer)))))
-;;
-
-let close_unregistered_runtime t handle runtime writer actor capacity =
-  Agent_session.Session_actor.shutdown actor;
-  Option.iter capacity ~f:Session_capacity.release;
-  runtime.Agent_session.Runtime_builder.close ();
-  Job_capacity.close_session
-    t.job_capacity
-    ~session_id:(Agent_store.Session_store.Handle.session_id handle);
-  Agent_store.Commit_writer.close writer
-;;
-
-let build_runtime_for_actor ?run_preparation t handle actor =
+let refresh_runtime_construction construction =
+  let module A = Agent_session.Session_actor in
+  let module C = A.Runtime_construction in
   let open Result.Let_syntax in
-  let%bind () = Agent_session.Session_actor.check_runtime_admission actor in
+  let%bind () = C.refresh construction in
+  let%bind () = C.check_policy construction in
+  let%bind () = C.check_timing construction in
+  let%bind () = C.check_authority construction in
+  C.check_basis construction
+;;
+
+let ordinary_runtime_construction = function
+  | Runtime_owner.Construction_result.Built runtime -> Ok runtime
+  | Callback_completed _ ->
+    Error (unavailable Invalid_state "Goal control reached ordinary runtime construction")
+;;
+
+(* Record the original End control invocation before the constructor adapter
+   can preserve its primary and suppress a secondary cleanup result. This is
+   observation only: neither this helper nor recovery replays End. *)
+let end_initialization_with_cleanup boundary actor scope =
+  let outcome =
+    try Ok (Agent_session.Session_actor.end_initialization actor ~scope) with
+    | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())
+  in
+  Option.iter boundary ~f:(fun boundary ->
+    Initialization_capture_data.record_original_end boundary outcome);
+  match outcome with
+  | Ok result -> result
+  | Error (exn, trace) -> Exn.raise_with_original_backtrace exn trace
+;;
+
+let build_runtime_for_actor_cold
+      ~initialization_cleanup
+      ?source_consumer
+      ?resource_consumer
+      ?policy_build
+      ?native_promotion
+      ?run_preparation
+      ?original_actor
+      ?deferred
+      ~source_target
+      ~native_routing
+      t
+      handle
+      actor
+  =
+  let open Result.Let_syntax in
+  let check_deferred () =
+    Option.value_map deferred ~default:(Ok ()) ~f:(fun (_, construction) ->
+      refresh_runtime_construction construction)
+  in
+  let%bind () = check_deferred () in
+  let%bind () =
+    match deferred with
+    | None -> Agent_session.Session_actor.check_runtime_admission actor
+    | Some (_, construction) ->
+      Agent_session.Session_actor.check_runtime_construction_admission actor ~construction
+  in
   let%bind state = Agent_session.Session_actor.state actor in
-  let%bind revision = restore_state_source t state in
-  let%bind () = check_source_for_execution t state revision in
+  let%bind revision =
+    match deferred with
+    | None -> restore_state_source t state
+    | Some (source, _) ->
+      let%bind () = Agent_session.Runtime_builder.Source.validate_target source state in
+      selected_runtime_source t source
+  in
+  let%bind () =
+    match deferred with
+    | None -> check_source_for_execution t state revision
+    | Some _ -> check_deferred ()
+  in
+  let%bind blocked = legacy_checkpoint_activation_blocked state revision in
+  let%bind () =
+    match blocked with
+    | None -> Ok ()
+    | Some failure -> Error failure
+  in
   let%bind profile = restore_state_profile t state in
+  let%bind () = check_deferred () in
   let%bind reservation =
-    match run_preparation with
-    | None ->
+    match deferred, run_preparation with
+    | Some (_, construction), _ ->
+      Agent_session.Session_actor.reserve_runtime_history_block
+        actor
+        ~construction
+        ~count:t.limits.moderator_reservation_size
+    | None, None ->
       Agent_session.Session_actor.reserve_history_block
         actor
         ~count:t.limits.moderator_reservation_size
-    | Some preparation ->
+    | None, Some preparation ->
       Agent_session.Session_actor.reserve_run_history_block
         actor
         ~preparation
@@ -4874,7 +10775,9 @@ let build_runtime_for_actor ?run_preparation t handle actor =
     then Error (unavailable Invalid_state "history sequence space is exhausted")
     else Ok (Int64.to_int_exn reservation.first_sequence)
   in
+  let%bind () = check_deferred () in
   let%bind expected = Agent_session.Session_actor.state actor in
+  let%bind () = check_deferred () in
   let pending =
     match expected.runtime_initialization with
     | Ready -> None
@@ -4888,24 +10791,112 @@ let build_runtime_for_actor ?run_preparation t handle actor =
       |> Result.map ~f:Option.some
   in
   let%bind scope =
-    match pending with
-    | None -> Ok None
-    | Some _ ->
-      (match run_preparation with
-       | None -> Agent_session.Session_actor.begin_initialization actor ~expected
-       | Some preparation ->
-         Agent_session.Session_actor.begin_run_initialization actor ~preparation ~expected)
-      |> Result.map ~f:Option.some
+    let open Agent_session.Session_actor.Initialization_scope in
+    let purpose =
+      match pending with
+      | Some _ -> Purpose.Pending_initialization
+      | None -> Runtime_construction
+    in
+    let unresolved_run =
+      Option.exists expected.run_state ~f:(fun index ->
+        List.exists (Agent_session.Run_state.runs index) ~f:(fun run ->
+          match run.Agent_protocol.Run.lifecycle with
+          | Admitted | Active | Waiting _ -> true
+          | Terminal _ -> false))
+    in
+    match deferred with
+    | Some (_, construction) ->
+      (match
+         Agent_session.Session_actor.Runtime_construction.initialization construction
+       with
+       | Scoped ->
+         Agent_session.Session_actor.begin_runtime_initialization
+           actor
+           ~construction
+           ~purpose
+           ~expected
+         |> Result.map ~f:Option.some
+       | Installed_resume ->
+         (match pending with
+          | None -> Ok None
+          | Some _ ->
+            Error (unavailable Conflict "Pending child cannot use installed resume")))
+    | None ->
+      (match pending, original_actor, run_preparation with
+       | None, None, None -> Ok None
+       | None, _, _ when unresolved_run -> Ok None
+       | _ ->
+         (match run_preparation with
+          | None ->
+            (match original_actor with
+             | None ->
+               Agent_session.Session_actor.begin_initialization ~purpose actor ~expected
+             | Some original_actor ->
+               Agent_session.Session_actor.begin_initialization_authenticated
+                 ~purpose
+                 actor
+                 ~actor:original_actor
+                 ~expected)
+          | Some preparation ->
+            Agent_session.Session_actor.begin_run_initialization
+              ~purpose
+              actor
+              ~preparation
+              ~expected)
+         |> Result.map ~f:Option.some)
   in
   let initialization_scope = ref scope in
-  let constructor_preparation = ref run_preparation in
+  let initialization_boundary = ref None in
+  let constructor_preparation =
+    match deferred with
+    | None -> Constructor_owner.Ordinary (ref run_preparation)
+    | Some (_, construction) ->
+      (match
+         Agent_session.Session_actor.Runtime_construction.initialization construction
+       with
+       | Scoped -> Admitted (ref (Some construction))
+       | Installed_resume ->
+         Installed_resume
+           { construction = ref (Some construction)
+           ; preparation =
+               ref
+                 (Agent_session.Session_actor.Runtime_construction.initial_preparation
+                    construction)
+           })
+  in
   let initialization_jobs = ref [] in
   let actor_ref = ref (Some actor) in
   let schedules = ref [] in
   let jobs = ref [] in
   let initialize () =
+    let%bind () = check_deferred () in
+    let%bind prepared_source =
+      match native_promotion, deferred, revision with
+      | None, _, _ -> Ok (Option.map deferred ~f:fst)
+      | Some _, Some (source, _), _ -> Ok (Some source)
+      | Some _, None, Authored revision ->
+        Agent_session.Runtime_builder.Source.prepare
+          revision
+          ~script_preparation:t.script_preparation
+          ~invocation:
+            (Agent_session.Runtime_script_preparation.Invocation.of_root
+               expected.spec.root_invocation)
+          ~env:t.env
+          ~checkpoint:Eio.Fiber.check
+        |> Result.map ~f:Option.some
+      | Some _, None, (Captured_delegation _ | Generated_artifact _) ->
+        Error (unavailable Conflict "native promotion needs its admitted child source")
+    in
     let%bind runtime, shell =
       prepare_runtime
+        ?source_consumer
+        ?resource_consumer
+        ~source_target
+        ~native_routing
+        ?policy_build
+        ?native_promotion
+        ?prepared_source
+        ?construction_checkpoint:(Option.map deferred ~f:(fun _ -> check_deferred))
         t
         handle
         revision
@@ -4921,90 +10912,1214 @@ let build_runtime_for_actor ?run_preparation t handle actor =
         ~initialization_jobs
         ~run_preparation:constructor_preparation
     in
-    let finish () =
-      let%bind moderator = runtime.start_moderator () in
-      let%bind () = flush_pending_schedules ?run_preparation actor !schedules in
-      let%bind () = flush_pending_jobs ?run_preparation actor !jobs in
-      let%bind () =
-        match pending with
-        | None -> install_moderator_if_changed ?run_preparation actor moderator
-        | Some fresh_history ->
-          let candidate =
-            prepared_state expected runtime (ref shell) (ref []) (ref []) ~fresh_history
+    let runtime =
+      match native_promotion, scope, runtime.moderator_manager with
+      | Some _, _, _ -> runtime
+      | None, Some scope, Some manager ->
+        let original_close = runtime.close in
+        let close_reported () =
+          let exception Constructor_cleanup_failed of Agent_protocol.Error.t in
+          let cleanup () =
+            match
+              Agent_session.Session_actor.retire_initialization_resource
+                actor
+                ~scope
+                ~moderator_manager:manager
+            with
+            | Ok () | Error { code = Server_shutting_down; _ } -> ()
+            | Error failure -> raise (Constructor_cleanup_failed failure)
           in
-          let candidate = { candidate with moderator } in
-          (match scope with
-           | None ->
-             Error (unavailable Conflict "Pending initialization has no host scope")
-           | Some scope ->
-             Agent_session.Session_actor.complete_initialization actor ~scope ~candidate
-             |> Result.map ~f:ignore)
+          Eio.Cancel.protect (fun () ->
+            let retired = Runtime_close_observation.capture cleanup in
+            let closed =
+              Agent_session.Runtime_builder.Close.run_reported original_close
+            in
+            Runtime_close_observation.combine retired closed)
+        in
+        { runtime with
+          close = Agent_session.Runtime_builder.Close.reported close_reported
+        }
+      | None, None, _ | None, Some _, None -> runtime
+    in
+    let finish () =
+      (* A delegated runtime may already have a live driver. Keep physical
+         adoption inside the same abort guard as the remaining initialization. *)
+      let%bind () =
+        match native_promotion with
+        | Some _ -> Ok ()
+        | None ->
+          Option.value_map policy_build ~default:(Ok ()) ~f:(fun build ->
+            Session_policy_resource.Build.physical build runtime)
       in
-      Ok runtime
+      let%bind () = check_deferred () in
+      let%bind moderator = runtime.start_moderator () in
+      let%bind completion =
+        Option.value_map scope ~default:(Ok None) ~f:(fun scope ->
+          Agent_session.Session_actor.initialization_goal_completion actor ~scope)
+      in
+      match completion with
+      | Some completion ->
+        let%bind () =
+          match native_promotion with
+          | Some promotion -> Session_policy_resource.Promotion.closed promotion
+          | None ->
+            Eio.Cancel.protect (fun () -> Agent_session.Runtime_builder.close runtime);
+            Ok ()
+        in
+        Ok (Runtime_owner.Construction_result.Callback_completed completion)
+      | None ->
+        let%bind () = check_deferred () in
+        let current_constructor = Constructor_owner.current constructor_preparation in
+        let%bind () =
+          flush_pending_schedules ?run_preparation:current_constructor actor !schedules
+        in
+        let%bind () =
+          flush_pending_jobs ?run_preparation:current_constructor actor !jobs
+        in
+        let%bind () =
+          match pending with
+          | None ->
+            (match scope with
+             | Some scope ->
+               Agent_session.Session_actor.checkpoint_runtime_construction
+                 ?moderator_manager:runtime.moderator_manager
+                 actor
+                 ~scope
+                 moderator
+               |> Result.map ~f:ignore
+             | None ->
+               install_moderator_if_changed
+                 ?run_preparation:current_constructor
+                 ?moderator_manager:runtime.moderator_manager
+                 actor
+                 moderator)
+          | Some fresh_history ->
+            let candidate =
+              prepared_state expected runtime shell (ref []) (ref []) ~fresh_history
+            in
+            let candidate = { candidate with moderator } in
+            (match scope with
+             | None ->
+               Error (unavailable Conflict "Pending initialization has no host scope")
+             | Some scope ->
+               let complete () =
+                 let%bind _ =
+                   Agent_session.Session_actor.complete_initialization
+                     ?moderator_manager:runtime.moderator_manager
+                     actor
+                     ~scope
+                     ~candidate
+                 in
+                 match native_promotion, prepared_source with
+                 | None, _ -> Ok ()
+                 | Some promotion, Some source ->
+                   let%bind acknowledgement =
+                     Agent_session.Session_actor.Initialization_scope.source_handoff scope
+                   in
+                   let%bind current = Agent_session.Session_actor.state actor in
+                   let%bind native_key =
+                     Session_policy_resource.Native_source_key.capture
+                       ~actor
+                       ~handle
+                       ~source
+                       ~profile
+                       ~expected:current
+                   in
+                   let%bind key =
+                     Session_policy_resource.Key.capture
+                       ~actor
+                       ~handle
+                       ~source
+                       ~profile
+                       ~expected:current
+                   in
+                   Session_policy_resource.Promotion.advance_initialized
+                     promotion
+                     ~acknowledgement
+                     ~native_key
+                     ~key
+                     ~expected:current
+                 | Some _, None ->
+                   Error
+                     (unavailable
+                        Invalid_state
+                        "Init native handoff lost its actual source")
+               in
+               (match native_promotion with
+                | None -> complete ()
+                | Some _ -> Eio.Cancel.protect complete))
+        in
+        Ok (Runtime_owner.Construction_result.Built runtime)
     in
     match finish () with
     | Ok _ as result -> result
     | Error _ as failure ->
       (* The typed initializer failure remains authoritative if resource cleanup
          also fails. Cleanup has no useful replacement failure for this owner. *)
-      (try Eio.Cancel.protect runtime.close with
-       | _ -> ());
+      (match native_promotion with
+       | Some _ -> ()
+       | None ->
+         (try
+            Eio.Cancel.protect (fun () -> Agent_session.Runtime_builder.close runtime)
+          with
+          | _ -> ()));
       failure
     | exception exn ->
       let backtrace = Stdlib.Printexc.get_raw_backtrace () in
       (* Cleanup must not replace the initializer's original failure. *)
-      (try Eio.Cancel.protect runtime.close with
-       | _ -> ());
+      (match native_promotion with
+       | Some _ -> ()
+       | None ->
+         (try
+            Eio.Cancel.protect (fun () -> Agent_session.Runtime_builder.close runtime)
+          with
+          | _ -> ()));
       Exn.raise_with_original_backtrace exn backtrace
   in
   let record_failure failure =
-    Option.iter scope ~f:(fun scope ->
-      (* Best effort: cancellation and a failed writer must not replace the
+    Option.iter
+      (match pending with
+       | None -> None
+       | Some _ -> scope)
+      ~f:(fun scope ->
+        (* Best effort: cancellation and a failed writer must not replace the
          original initializer failure. No exception details enter storage. *)
-      try
-        Eio.Cancel.protect (fun () ->
-          ignore
-            (Agent_session.Session_actor.fail_initialization actor ~scope failure
-             : (Agent_protocol.Session.t, Agent_protocol.Error.t) result))
-      with
-      | _ -> ())
+        try
+          Eio.Cancel.protect (fun () ->
+            ignore
+              (Agent_session.Session_actor.fail_initialization actor ~scope failure
+               : (Agent_protocol.Session.t, Agent_protocol.Error.t) result))
+        with
+        | _ -> ())
   in
-  Exn.protect
-    ~f:(fun () ->
-      match initialize () with
-      | Ok _ as result -> result
+  let cleanup_error = ref None in
+  let cleanup_exception = ref None in
+  let record_cleanup f =
+    try
+      match f () with
+      | Ok () -> ()
       | Error failure ->
-        record_failure failure;
-        Error failure
-      | exception exn ->
-        let backtrace = Stdlib.Printexc.get_raw_backtrace () in
-        record_failure (unavailable Invalid_state "runtime initialization failed");
-        Exn.raise_with_original_backtrace exn backtrace)
-    ~finally:(fun () ->
-      constructor_preparation := None;
-      initialization_scope := None;
-      (* End before the runtime escapes. Residual exact synchronous attempts are
+        if Option.is_none !cleanup_error then cleanup_error := Some failure
+    with
+    | exn ->
+      if Option.is_none !cleanup_exception
+      then cleanup_exception := Some (exn, Stdlib.Printexc.get_raw_backtrace ())
+  in
+  let result =
+    Exn.protect
+      ~f:(fun () ->
+        Option.iter scope ~f:(fun scope ->
+          initialization_boundary
+          := Some
+               (Initialization_capture_data.initialization
+                  initialization_cleanup
+                  ~actor
+                  ~scope));
+        match
+          Native_constructor_routing.with_constructor
+            native_routing
+            ~owner:constructor_preparation
+            ~initialization:scope
+            ~f:initialize
+        with
+        | Ok _ as result -> result
+        | Error failure ->
+          record_failure failure;
+          Error failure
+        | exception exn ->
+          let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+          record_failure (unavailable Invalid_state "runtime initialization failed");
+          Exn.raise_with_original_backtrace exn backtrace)
+      ~finally:(fun () ->
+        let current_constructor = Constructor_owner.current constructor_preparation in
+        Constructor_owner.clear constructor_preparation;
+        initialization_scope := None;
+        (* End before the runtime escapes. Residual exact synchronous attempts are
          interrupted on failed preparation/cancellation; queued async work is
          preserved. Cleanup never replaces the original constructor outcome. *)
-      Eio.Cancel.protect (fun () ->
-        Option.iter scope ~f:(fun scope ->
-          (try
-             ignore
-               (Agent_session.Session_actor.end_initialization actor ~scope
-                : (unit, Agent_protocol.Error.t) result)
-           with
-           | _ -> ());
-          List.iter !initialization_jobs ~f:(fun job ->
-            try
-              ignore
-                (interrupt_constructor_job
+        Eio.Cancel.protect (fun () ->
+          Option.iter scope ~f:(fun scope ->
+            record_cleanup (fun () ->
+              end_initialization_with_cleanup !initialization_boundary actor scope);
+            List.iter !initialization_jobs ~f:(fun job ->
+              try
+                ignore
+                  (interrupt_constructor_job
+                     actor
+                     ~run_preparation:current_constructor
+                     job
+                     ~reason:"runtime initialization scope ended"
+                   : (Agent_protocol.Job.t, Agent_protocol.Error.t) result)
+              with
+              | _ -> ()))))
+  in
+  match result with
+  | Ok (Runtime_owner.Construction_result.Callback_completed _ as completed) ->
+    (match !cleanup_exception, !cleanup_error with
+     | Some (exn, backtrace), _ -> Exn.raise_with_original_backtrace exn backtrace
+     | None, Some failure -> Error failure
+     | None, None -> Ok completed)
+  | Ok (Built _) | Error _ -> result
+;;
+
+let policy_resource_key_and_profile ?deferred t handle actor expected =
+  let open Result.Let_syntax in
+  let%bind profile = restore_state_profile t expected in
+  let%map key =
+    match deferred with
+    | Some (source, _) ->
+      Session_policy_resource.Key.capture ~actor ~handle ~source ~profile ~expected
+    | None ->
+      let%bind source = restore_state_source t expected in
+      (match source with
+       | Authored revision ->
+         (* Historical checkpoints must reach their migration diagnostic before a
+            current resource key validates the source identity. The cold builder
+            still rechecks the same gate before constructing runtime resources. *)
+         let%bind blocked = legacy_checkpoint_activation_blocked expected source in
+         let%bind () =
+           match blocked with
+           | None -> Ok ()
+           | Some failure -> Error failure
+         in
+         Session_policy_resource.Key.capture_authored
+           ~actor
+           ~handle
+           ~revision
+           ~profile
+           ~expected
+       | Captured_delegation _ | Generated_artifact _ ->
+         Error
+           (unavailable
+              Conflict
+              "child policy construction requires its actual source stage"))
+  in
+  key, profile
+;;
+
+let policy_resource_key ?deferred t handle actor expected =
+  policy_resource_key_and_profile ?deferred t handle actor expected |> Result.map ~f:fst
+;;
+
+module Policy_attachment_close = struct
+  include Runtime_close_observation
+
+  let release lease =
+    match Session_policy_resource.Lease.close_reported lease with
+    | exception exn ->
+      (* Only an actual escape BEFORE a Cell observation has no producer report.
+         Keep this independent boundary, including in retire's old fallback. *)
+      raised exn (Stdlib.Printexc.get_raw_backtrace ())
+    | observed ->
+      let exit =
+        match Observation.exit observed with
+        | Returned (Ok ()) -> Observation.Returned ()
+        | Raised (exn, backtrace) -> Raised (exn, backtrace)
+        | Returned (Error error) ->
+          (* Preserve this legacy projection, without making its wrapper another
+             diagnostic for the SAME actual Cell producer failure. *)
+          (try raise (Inference_graph_cleanup_failed error) with
+           | exn -> Raised (exn, Stdlib.Printexc.get_raw_backtrace ()))
+      in
+      Observation.create
+        exit
+        ~diagnostics:(Observation.diagnostics observed)
+        ?primary:(Observation.primary observed)
+        ()
+  ;;
+end
+
+let release_policy_lease lease =
+  Agent_session.Close_observation.resume (Policy_attachment_close.release lease)
+;;
+
+let bind_retained_policy_resource
+      ~initialization_cleanup
+      t
+      handle
+      actor
+      ~source
+      ~construction
+      ~expected
+      lease
+  =
+  let module A = Agent_session.Session_actor in
+  let module B = Agent_session.Runtime_builder in
+  let module C = A.Runtime_construction in
+  let open Result.Let_syntax in
+  let actor_ref = ref (Some actor) in
+  let scope = ref None in
+  let initialization_boundary = ref None in
+  let resource_scope = ref None in
+  let pending_jobs = ref [] in
+  let initialization_jobs = ref [] in
+  let preparation =
+    match C.initialization construction with
+    | Scoped -> Constructor_owner.Admitted (ref (Some construction))
+    | Installed_resume ->
+      Installed_resume
+        { construction = ref (Some construction)
+        ; preparation = ref (C.initial_preparation construction)
+        }
+  in
+  let descendant_binding = ref None in
+  let handed_off = ref false in
+  let local_attachment = ref None in
+  let close_binding () =
+    match !local_attachment with
+    | Some attachment -> B.close (B.Attachment.runtime attachment)
+    | None ->
+      Option.iter !descendant_binding ~f:A.Descendant_host.Binding.close;
+      Eio.Cancel.protect (fun () -> release_policy_lease lease)
+  in
+  let cleanup_scope () =
+    let current_constructor = Constructor_owner.current preparation in
+    Constructor_owner.clear preparation;
+    let owned = !scope in
+    scope := None;
+    Eio.Cancel.protect (fun () ->
+      Option.iter owned ~f:(fun scope ->
+        Exn.protect
+          ~f:(fun () ->
+            ignore
+              (end_initialization_with_cleanup !initialization_boundary actor scope
+               : (unit, Agent_protocol.Error.t) result))
+          ~finally:(fun () ->
+            List.iter !initialization_jobs ~f:(fun job ->
+              try
+                ignore
+                  (interrupt_constructor_job
+                     actor
+                     ~run_preparation:current_constructor
+                     job
+                     ~reason:"runtime initialization scope ended"
+                   : (Agent_protocol.Job.t, Agent_protocol.Error.t) result)
+              with
+              | _ -> ()))))
+  in
+  Exn.protect
+    ~finally:(fun () ->
+      (* Preserve the original preparation outcome; an unsuccessful closer stays
+         discoverable in the SAME resource Cell and Owner cleanup port. *)
+      if not !handed_off
+      then (
+        try close_binding () with
+        | _ -> ()))
+    ~f:(fun () ->
+      let%bind () = refresh_runtime_construction construction in
+      let%bind () = B.Source.validate_target source expected in
+      let physical = Session_policy_resource.Lease.runtime lease in
+      let%bind () =
+        Option.value_map physical.check_execution ~default:(Ok ()) ~f:(fun check ->
+          check ())
+      in
+      let%bind history =
+        Agent_session.History_codec.all_of_protocol
+          expected.conversation.canonical_history
+      in
+      let%bind binding =
+        B.Product.bind
+          (Session_policy_resource.Lease.product lease)
+          ~source
+          ~expected
+          ~history
+          ~moderator_checkpoint:expected.moderator
+      in
+      let raw = B.Product.Binding.runtime binding in
+      let%bind profile = restore_state_profile t expected in
+      let run () =
+        let%bind () = refresh_runtime_construction construction in
+        let check_ancestry = physical.check_ancestry in
+        let host, causal_driver = descendant_host t ~handle ~actor_ref ~check_ancestry in
+        let%bind actual =
+          A.install_descendant_host
+            ~causal_driver
+            actor
+            ~source_owner:t.runtime_source_owner
+            ~expected
+            ~check_ancestry
+            ~host
+        in
+        descendant_binding := Some actual;
+        let%bind raw =
+          B.with_source_lease
+            raw
+            ~source_lease:(Agent_session.Prompt_source_lease.borrow physical.source_lease)
+          |> Result.map_error ~f:source_attachment_error
+        in
+        let close_reported () =
+          let retire () =
+            match !resource_scope, raw.moderator_manager with
+            | Some scope, Some moderator_manager ->
+              (match A.retire_initialization_resource actor ~scope ~moderator_manager with
+               | Ok () | Error { code = Server_shutting_down; _ } -> ()
+               | Error error -> raise (Inference_graph_cleanup_failed error))
+            | None, _ | Some _, None -> ()
+          in
+          let descendant =
+            Policy_attachment_close.capture (fun () ->
+              A.Descendant_host.Binding.close actual)
+          in
+          if Policy_attachment_close.failed descendant
+          then descendant
+          else
+            Eio.Cancel.protect (fun () ->
+              let retired = Policy_attachment_close.capture retire in
+              (* The existing exception fallback attempts this SAME lease even
+               when retire failed; retain its secondary before raw projection. *)
+              let released = Policy_attachment_close.release lease in
+              Policy_attachment_close.combine retired released)
+        in
+        let close () = Agent_session.Close_observation.resume (close_reported ()) in
+        let%bind initial_attachment =
+          B.Product.Binding.attach_reported binding ~runtime:raw ~close:close_reported
+        in
+        local_attachment := Some initial_attachment;
+        let%bind () =
+          match C.initialization construction with
+          | Installed_resume -> Ok ()
+          | Scoped ->
+            (match B.Attachment.runtime_resume initial_attachment with
+             | Error error -> Error error
+             | Ok (Continue_live | Pending _) -> Ok ()
+             | Ok (Pending_legacy pending) ->
+               let%bind actual_scope =
+                 A.begin_runtime_initialization
                    actor
-                   ~run_preparation
-                   job
-                   ~reason:"runtime initialization scope ended"
-                 : (Agent_protocol.Job.t, Agent_protocol.Error.t) result)
-            with
-            | _ -> ()))))
+                   ~construction
+                   ~purpose:Runtime_construction
+                   ~expected
+               in
+               scope := Some actual_scope;
+               resource_scope := Some actual_scope;
+               initialization_boundary
+               := Some
+                    (Initialization_capture_data.initialization
+                       initialization_cleanup
+                       ~actor
+                       ~scope:actual_scope);
+               let host =
+                 legacy_construction
+                   ~construction_checkpoint:(fun () ->
+                     refresh_runtime_construction construction)
+                   t
+                   profile
+                   actor_ref
+                   expected
+                   pending_jobs
+                   ~initialization_scope:scope
+                   ~initialization_jobs
+                   ~run_preparation:preparation
+               in
+               let module Graph = Session_policy_resource.Constructor_graph in
+               let module Failure = Constructor_inference_graph.Failure in
+               let graph = ref None in
+               let inference =
+                 lazy
+                   (let%bind reserved = Graph.reserve lease in
+                    graph := Some reserved;
+                    (* Graph creation protects the actual Actor publication/reply.
+                       Install its result without another effect or fallible
+                       source check, including when cancellation is pending. *)
+                    match
+                      Failure.capture (fun () ->
+                        create_graph_tracking ~run_preparation:preparation t actor_ref)
+                    with
+                    | Ok tracking ->
+                      Graph.allocated reserved tracking;
+                      Ok (Graph.inference reserved)
+                    | Error failure ->
+                      Graph.abandon_unallocated reserved;
+                      Failure.resume (Error failure))
+               in
+               let primary =
+                 Failure.capture (fun () ->
+                   B.Pending_legacy_resume.run_scoped pending ~host ~inference)
+               in
+               let cleanup =
+                 Eio.Cancel.protect (fun () ->
+                   Failure.capture (fun () ->
+                     Option.value_map !graph ~default:(Ok ()) ~f:(fun graph ->
+                       Graph.callback_exited graph;
+                       Graph.finish graph)))
+               in
+               let%bind _ =
+                 match primary, cleanup with
+                 | Error failure, _ -> Failure.resume (Error failure)
+                 | Ok _, Error failure -> Failure.resume (Error failure)
+                 | Ok resume, Ok () -> Ok resume
+               in
+               let%bind current = A.state actor in
+               A.checkpoint_runtime_construction
+                 ?moderator_manager:raw.moderator_manager
+                 actor
+                 ~scope:actual_scope
+                 current.moderator
+               |> Result.map ~f:ignore)
+        in
+        let%bind completion =
+          Option.value_map !scope ~default:(Ok None) ~f:(fun scope ->
+            A.initialization_goal_completion actor ~scope)
+        in
+        match completion with
+        | Some completion ->
+          close ();
+          Ok (Runtime_owner.Construction_result.Callback_completed completion)
+        | None ->
+          let%bind () = refresh_runtime_construction construction in
+          let%bind () =
+            Option.value_map raw.check_execution ~default:(Ok ()) ~f:(fun check ->
+              check ())
+          in
+          let%bind current = A.state actor in
+          let%bind key =
+            policy_resource_key ~deferred:(source, construction) t handle actor current
+          in
+          let%bind () = Session_policy_resource.Lease.check_key lease ~key in
+          let runtime = { raw with moderator_snapshot = (fun () -> current.moderator) } in
+          let%map attachment =
+            B.Product.Binding.attach_reported binding ~runtime ~close:close_reported
+          in
+          Runtime_owner.Construction_result.Built attachment
+      in
+      let primary =
+        try Ok (run ()) with
+        | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())
+      in
+      let cleanup =
+        try
+          cleanup_scope ();
+          Ok ()
+        with
+        | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())
+      in
+      match primary, cleanup with
+      | Error (exn, backtrace), _ -> Exn.raise_with_original_backtrace exn backtrace
+      | Ok (Error _ as failure), _ -> failure
+      | Ok (Ok _), Error (exn, backtrace) ->
+        Exn.raise_with_original_backtrace exn backtrace
+      | Ok (Ok _ as result), Ok () ->
+        handed_off := true;
+        result)
+;;
+
+let restore_policy_resource
+      t
+      handle
+      writer
+      actor
+      policy_resource
+      runtime_owner
+      ~native_routing
+      ~stage
+      ~request:_
+      ~governance
+      ~authorize
+  =
+  let module A = Agent_session in
+  let module B = A.Runtime_builder in
+  let module Scope = Runtime_owner.Policy_restoration_source in
+  let open Result.Let_syntax in
+  let check () =
+    let%bind () = Scope.check stage in
+    let%bind () = A.Session_actor.Causal_governance.check_current governance in
+    let%bind () = authorize () in
+    if Agent_store.Commit_writer.is_available writer
+    then Ok ()
+    else
+      Error
+        (unavailable
+           Persistence_error
+           "policy restoration requires an available commit writer")
+  in
+  let%bind () = check () in
+  let%bind runtime =
+    Result.of_option
+      !runtime_owner
+      ~error:(unavailable Conflict "policy restoration lost its actual runtime Owner")
+  in
+  let%bind consumer =
+    Runtime_owner.Native_consumer.source ~owner:runtime (Scope.consumer stage)
+  in
+  let target : Source_target.t = { actor; runtime; store_handle = Some handle } in
+  with_selected_source_target
+    t
+    target
+    ~with_parent:(fun owner ~reference:_ ~target:_ f ->
+      Runtime_owner.with_loaded_source_capabilities_reported
+        ~consumer
+        owner
+        ~source_owner:t.runtime_source_owner
+        f
+      |> Runtime_owner.Scope_outcome.resume)
+    ~with_source:(fun source f -> f source)
+    ~check_selected:(fun source ->
+      let%bind () = check () in
+      let%bind current = A.Session_actor.state actor in
+      let%bind () = check () in
+      B.Source.validate_target source current)
+    (fun source ->
+       let%bind () = check () in
+       let%bind state = A.Session_actor.state actor in
+       let%bind () = check () in
+       let%bind () = B.Source.validate_target source state in
+       let%bind basis = A.Policy_restore_basis.of_state state in
+       let%bind restoration =
+         Scope.prepare stage ~source_owner:t.runtime_source_owner ~source ~basis
+       in
+       let check_construction () =
+         let%bind () = check () in
+         A.Session_actor.Policy_restoration.check restoration
+       in
+       let restore () =
+         let%bind () = check_construction () in
+         let%bind reservation =
+           A.Session_actor.reserve_policy_restoration_history_block
+             actor
+             ~restoration
+             ~count:t.limits.moderator_reservation_size
+         in
+         let%bind next_history_sequence =
+           if Int64.(reservation.first_sequence > of_int Int.max_value)
+           then Error (unavailable Invalid_state "history sequence space is exhausted")
+           else Ok (Int64.to_int_exn reservation.first_sequence)
+         in
+         let%bind expected = A.Session_actor.state actor in
+         let%bind () = check_construction () in
+         let%bind () = A.Policy_restore_basis.check_construction basis ~state:expected in
+         let%bind profile = restore_state_profile t expected in
+         let%bind () = check_construction () in
+         let%bind revision = selected_runtime_source t source in
+         let%bind () = check_construction () in
+         let%bind key =
+           Session_policy_resource.Key.capture ~actor ~handle ~source ~profile ~expected
+         in
+         let%bind selected =
+           Session_policy_resource.select_for_product
+             policy_resource
+             ~key
+             ~profile
+             ~expected
+             ~expected_product:None
+         in
+         let construct construction =
+           let build = Product_preparation.build construction in
+           let promotion = Product_preparation.promotion construction in
+           let fail = Product_preparation.fail construction in
+           let caller_loan = ref None in
+           let prepare () =
+             let%bind resource_consumer =
+               capture_resource_consumer
+                 runtime
+                 ~source:(Some (Scope.consumer stage))
+                 ~target:(Product_preparation.cleanup_target construction)
+             in
+             let%bind existing_history =
+               A.History_codec.all_of_protocol expected.conversation.canonical_history
+             in
+             let%bind runtime, _shell =
+               prepare_runtime
+                 ~source_consumer:(Scope.consumer stage)
+                 ~resource_consumer
+                 ~source_target:target
+                 ~native_routing
+                 ~policy_restoration:restoration
+                 ?policy_build:build
+                 ?native_promotion:promotion
+                 ~prepared_source:source
+                 ~construction_checkpoint:check_construction
+                 t
+                 handle
+                 revision
+                 profile
+                 expected
+                 ~next_history_sequence
+                 ~existing_history:(Some existing_history)
+                 ~existing_moderator_snapshot:expected.moderator
+                 ~actor_ref:(ref (Some actor))
+                 ~pending_schedule_operations:(ref [])
+                 ~pending_jobs:(ref [])
+                 ~initialization_scope:(ref None)
+                 ~initialization_jobs:(ref [])
+                 ~run_preparation:(Constructor_owner.Ordinary (ref None))
+             in
+             (* The Actor document retains the full envelope, including unknown
+               queue provenance. Builder validates its known Manager projection. *)
+             let runtime =
+               { runtime with moderator_snapshot = (fun () -> expected.moderator) }
+             in
+             let%bind () = Product_preparation.physical construction runtime in
+             let%bind () = check_construction () in
+             let%bind current = A.Session_actor.state actor in
+             let%bind () = check_construction () in
+             let%bind () =
+               A.Policy_restore_basis.check_construction basis ~state:current
+             in
+             let%bind current_profile = restore_state_profile t current in
+             let%bind () = check_construction () in
+             let%bind current_key =
+               Session_policy_resource.Key.capture
+                 ~actor
+                 ~handle
+                 ~source
+                 ~profile:current_profile
+                 ~expected:current
+             in
+             let%bind access =
+               Product_preparation.restored_policy_access
+                 construction
+                 ~source
+                 ~basis
+                 ~expected:current
+             in
+             let%bind () = check_construction () in
+             let%bind loan =
+               Product_preparation.publish_restored
+                 construction
+                 ~key:current_key
+                 ~access
+                 ~expected:current
+             in
+             caller_loan := Some loan;
+             let publication = Scope.publish stage ~restoration ~loan ~access in
+             (match Scope.Publication.custody publication with
+              | Caller_retains -> ()
+              | Owner_retains -> caller_loan := None);
+             Scope.Publication.resume publication
+           in
+           (* Same primary/cleanup precedence as the existing retained binding
+              and Owner Scope_outcome: capture both independently before resume. *)
+           let capture f =
+             match f () with
+             | result -> Ok result
+             | exception exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())
+           in
+           let primary = capture prepare in
+           (match primary with
+            | Ok (Ok ()) -> ()
+            | Ok (Error error) -> fail (Protocol error)
+            | Error (exn, backtrace) -> fail (Raised (exn, backtrace)));
+           let cleanup =
+             capture (fun () ->
+               Eio.Cancel.protect (fun () ->
+                 match !caller_loan with
+                 | None -> Ok ()
+                 | Some loan ->
+                   caller_loan := None;
+                   Session_policy_resource.Lease.close loan))
+           in
+           match primary, cleanup with
+           | Error (exn, backtrace), _ -> Exn.raise_with_original_backtrace exn backtrace
+           | Ok (Error _ as failure), _ -> failure
+           | Ok (Ok ()), Error (exn, backtrace) ->
+             Exn.raise_with_original_backtrace exn backtrace
+           | Ok (Ok ()), Ok (Error error) -> Error error
+           | Ok (Ok ()), Ok (Ok ()) -> Ok ()
+         in
+         match selected with
+         | Reuse loan ->
+           Eio.Cancel.protect (fun () -> release_policy_lease loan);
+           Error
+             (unavailable Conflict "policy restoration cannot replace a selected Product")
+         | Build build -> construct (Product_preparation.Cold build)
+         | Promote promotion -> construct (Product_preparation.Promoted promotion)
+       in
+       (* The actual Owner source stage captured this lexical token before
+          returning it. Its independent finalizers end Constructing, preserve
+          Published and join pending Cell custody with the original primary. *)
+       restore ())
+;;
+
+let policy_resource_access
+      t
+      handle
+      writer
+      actor
+      policy_resource
+      runtime_owner
+      ~native_routing
+  =
+  Runtime_owner.Policy_resource_access.create
+    ~pin:(fun ~expected_product ->
+      let open Result.Let_syntax in
+      let%bind selected =
+        Session_policy_resource.pin_retained
+          policy_resource
+          ~expected_product:(Some expected_product)
+      in
+      match selected with
+      | Retained loan -> Ok loan
+      | No_retained_product ->
+        Error (unavailable Conflict "selected parent policy Product disappeared"))
+    ~prepare_access:(fun loan ~expected ->
+      let open Result.Let_syntax in
+      let%bind profile = restore_state_profile t expected in
+      Session_policy_resource.Lease.policy_access loan ~actor ~handle ~profile ~expected)
+  |> Runtime_owner.Policy_resource_access.with_restoration
+       ~restore:
+         (restore_policy_resource
+            t
+            handle
+            writer
+            actor
+            policy_resource
+            runtime_owner
+            ~native_routing)
+       ~check_restored:(fun loan ~access ~expected ->
+         let open Result.Let_syntax in
+         let%bind profile = restore_state_profile t expected in
+         Session_policy_resource.Lease.check_restored_policy_access
+           loan
+           ~access
+           ~actor
+           ~handle
+           ~profile
+           ~expected)
+;;
+
+let prepare_ordinary_warm
+      t
+      handle
+      actor
+      policy_resource
+      ~expected_product
+      ~original_actor
+      ~run_preparation
+  =
+  let module A = Agent_session.Session_actor in
+  let module B = Agent_session.Runtime_builder in
+  let open Result.Let_syntax in
+  (* No yielding source/Actor/Manager operation precedes this exact Cell pin.
+     The Owner's actual resource-bearing stage already holds the old binding. *)
+  let%bind selected =
+    Session_policy_resource.pin_retained policy_resource ~expected_product
+  in
+  match selected with
+  | No_retained_product -> Ok Runtime_owner.Ordinary_warm.No_retained_product
+  | Retained lease ->
+    let attached = ref None in
+    let host = ref None in
+    let handed_off = ref false in
+    let close_reported () =
+      let descendant =
+        Policy_attachment_close.capture (fun () ->
+          Option.iter !host ~f:A.Descendant_host.Binding.close)
+      in
+      if Policy_attachment_close.failed descendant
+      then descendant
+      else Eio.Cancel.protect (fun () -> Policy_attachment_close.release lease)
+    in
+    let close () = Agent_session.Close_observation.resume (close_reported ()) in
+    let original_actor =
+      Option.first_some
+        original_actor
+        (Option.bind run_preparation ~f:Agent_session.Run_preparation.original_actor)
+    in
+    let check_original () =
+      match original_actor with
+      | Some original when not (Operator_authorization.is_current original) ->
+        Error
+          (unavailable Permission_denied "ordinary warm original authentication expired")
+      | Some _ | None -> Ok ()
+    in
+    Exn.protect
+      ~finally:(fun () ->
+        if not !handed_off
+        then (
+          (* Preserve primary failure; failed release stays in the same Cell. *)
+          try
+            match !attached with
+            | None -> close ()
+            | Some attachment -> B.close (B.Attachment.runtime attachment)
+          with
+          | _ -> ()))
+      ~f:(fun () ->
+        let%bind () = check_original () in
+        let%bind () = A.check_runtime_admission actor in
+        let%bind expected = A.state actor in
+        let%bind basis = A.Ordinary_attachment_basis.capture expected in
+        let%bind definition_id =
+          Result.of_option
+            expected.spec.prompt_definition_id
+            ~error:
+              (unavailable
+                 Prompt_unavailable
+                 "ordinary warm root has no catalog identity")
+        in
+        let%bind revision =
+          Agent_session.Prompt_catalog.restore_verified_revision
+            t.prompts
+            ~definition_id
+            ~revision_id:expected.spec.prompt_revision_id
+          |> Result.map_error ~f:(fun diagnostics ->
+            unavailable
+              Prompt_unavailable
+              (List.map diagnostics ~f:(fun diagnostic ->
+                 diagnostic.Agent_session.Prompt_revision_builder.Diagnostic.message)
+               |> String.concat ~sep:"\n"))
+        in
+        let%bind () = check_original () in
+        let%bind profile = restore_state_profile t expected in
+        let%bind key =
+          Session_policy_resource.Key.capture_authored
+            ~actor
+            ~handle
+            ~revision
+            ~profile
+            ~expected
+        in
+        let%bind () = Session_policy_resource.Lease.check_key lease ~key in
+        let physical = Session_policy_resource.Lease.runtime lease in
+        (* Metadata/history may progress during verified source reads. Preserve
+           the original Stop/source basis, but bind the actual latest checkpoint
+           and physical State required by the finite descendant-host install. *)
+        let%bind selected = A.state actor in
+        let%bind () = A.Ordinary_attachment_basis.check basis selected in
+        let%bind selected_profile = restore_state_profile t selected in
+        let%bind selected_key =
+          Session_policy_resource.Key.capture_authored
+            ~actor
+            ~handle
+            ~revision
+            ~profile:selected_profile
+            ~expected:selected
+        in
+        let%bind () = Session_policy_resource.Lease.check_key lease ~key:selected_key in
+        let%bind history =
+          Agent_session.History_codec.all_of_protocol
+            selected.conversation.canonical_history
+        in
+        let%bind binding =
+          B.Product.bind_authored
+            (Session_policy_resource.Lease.product lease)
+            ~revision
+            ~expected:selected
+            ~history
+            ~moderator_checkpoint:selected.moderator
+        in
+        let actor_ref = ref (Some actor) in
+        let physical_host, causal_driver =
+          descendant_host t ~handle ~actor_ref ~check_ancestry:None
+        in
+        let%bind actual =
+          A.install_descendant_host
+            ~causal_driver
+            actor
+            ~source_owner:t.runtime_source_owner
+            ~expected:selected
+            ~check_ancestry:None
+            ~host:physical_host
+        in
+        host := Some actual;
+        let%bind raw =
+          B.with_source_lease
+            (B.Product.Binding.runtime binding)
+            ~source_lease:(Agent_session.Prompt_source_lease.borrow physical.source_lease)
+          |> Result.map_error ~f:source_attachment_error
+        in
+        let%bind attachment =
+          B.Product.Binding.attach_reported binding ~runtime:raw ~close:close_reported
+        in
+        attached := Some attachment;
+        let%bind () = check_original () in
+        let%bind () = A.check_runtime_admission actor in
+        let%bind current = A.state actor in
+        let%bind () = A.Ordinary_attachment_basis.check basis current in
+        let%bind current_profile = restore_state_profile t current in
+        let%bind current_key =
+          Session_policy_resource.Key.capture_authored
+            ~actor
+            ~handle
+            ~revision
+            ~profile:current_profile
+            ~expected:current
+        in
+        let%bind () = Session_policy_resource.Lease.check_key lease ~key:current_key in
+        handed_off := true;
+        Ok (Runtime_owner.Ordinary_warm.Attached { attachment; expected = basis }))
+;;
+
+let build_runtime_for_actor
+      ~initialization_cleanup
+      ?source_consumer
+      ?run_preparation
+      ?original_actor
+      ?deferred
+      ?expected_product
+      ~policy_resource
+      ~(source_target : Source_target.t)
+      ~native_routing
+      t
+      handle
+      actor
+  =
+  let module B = Agent_session.Runtime_builder in
+  let open Result.Let_syntax in
+  let%bind () =
+    match deferred with
+    | None -> Agent_session.Session_actor.check_runtime_admission actor
+    | Some (_, construction) -> refresh_runtime_construction construction
+  in
+  let%bind expected = Agent_session.Session_actor.state actor in
+  let%bind key, profile =
+    policy_resource_key_and_profile ?deferred t handle actor expected
+  in
+  let%bind selected =
+    Session_policy_resource.select_for_product
+      policy_resource
+      ~key
+      ~profile
+      ~expected
+      ~expected_product
+  in
+  match selected with
+  | Reuse lease ->
+    let associated =
+      try
+        capture_resource_consumer
+          source_target.runtime
+          ~source:source_consumer
+          ~target:(Session_policy_resource.Lease.cleanup_target lease)
+      with
+      | exn ->
+        let trace = Stdlib.Printexc.get_raw_backtrace () in
+        (try Eio.Cancel.protect (fun () -> release_policy_lease lease) with
+         | _ -> ());
+        Exn.raise_with_original_backtrace exn trace
+    in
+    (match associated with
+     | Error error ->
+       (try Eio.Cancel.protect (fun () -> release_policy_lease lease) with
+        | _ -> ());
+       Error error
+     | Ok _ ->
+       (match deferred with
+        | None ->
+          (* OCH-598 owns the separate ordinary-root warm adapter. A retained
+          product is never converted into a cold compile or Legacy runtime. *)
+          (try Eio.Cancel.protect (fun () -> release_policy_lease lease) with
+           | _ -> ());
+          Error
+            (unavailable
+               Conflict
+               "ordinary retained policy requires its selected warm adapter")
+        | Some (source, construction) ->
+          bind_retained_policy_resource
+            ~initialization_cleanup
+            t
+            handle
+            actor
+            ~source
+            ~construction
+            ~expected
+            lease))
+  | Promote promotion ->
+    let fail failure = Session_policy_resource.Promotion.fail promotion failure in
+    let prepare () =
+      let%bind resource_consumer =
+        capture_resource_consumer
+          source_target.runtime
+          ~source:source_consumer
+          ~target:(Session_policy_resource.Promotion.cleanup_target promotion)
+      in
+      let%bind result =
+        build_runtime_for_actor_cold
+          ~initialization_cleanup
+          ?source_consumer
+          ~resource_consumer
+          ~source_target
+          ~native_routing
+          ~native_promotion:promotion
+          ?run_preparation
+          ?original_actor
+          ?deferred
+          t
+          handle
+          actor
+      in
+      match result with
+      | Callback_completed completion ->
+        Ok (Runtime_owner.Construction_result.Callback_completed completion)
+      | Built runtime ->
+        let%bind current = Agent_session.Session_actor.state actor in
+        let%bind key = policy_resource_key ?deferred t handle actor current in
+        let%bind binding = Session_policy_resource.Promotion.binding promotion in
+        let%bind lease =
+          Session_policy_resource.Promotion.publish_ordinary promotion ~key
+        in
+        (match
+           B.Product.Binding.attach_reported binding ~runtime ~close:(fun () ->
+             Policy_attachment_close.release lease)
+         with
+         | Ok attachment -> Ok (Runtime_owner.Construction_result.Built attachment)
+         | Error error ->
+           (try Eio.Cancel.protect (fun () -> release_policy_lease lease) with
+            | _ -> ());
+           Error error)
+    in
+    (match Constructor_inference_graph.Failure.capture prepare with
+     | Ok result -> Ok result
+     | Error failure ->
+       fail failure;
+       Constructor_inference_graph.Failure.resume (Error failure))
+  | Build build ->
+    let fail error = Session_policy_resource.Build.fail build error in
+    let prepare () =
+      let%bind resource_consumer =
+        capture_resource_consumer
+          source_target.runtime
+          ~source:source_consumer
+          ~target:(Session_policy_resource.Build.cleanup_target build)
+      in
+      match
+        build_runtime_for_actor_cold
+          ~initialization_cleanup
+          ?source_consumer
+          ~resource_consumer
+          ~source_target
+          ~native_routing
+          ~policy_build:build
+          ?run_preparation
+          ?original_actor
+          ?deferred
+          t
+          handle
+          actor
+      with
+      | Error error ->
+        fail (Protocol error);
+        Error error
+      | Ok (Callback_completed completion) ->
+        let%map () = Session_policy_resource.Build.closed build in
+        Runtime_owner.Construction_result.Callback_completed completion
+      | Ok (Built runtime) ->
+        let prepared =
+          let%bind current = Agent_session.Session_actor.state actor in
+          let%bind key = policy_resource_key ?deferred t handle actor current in
+          let%bind binding = Session_policy_resource.Build.binding build in
+          let%bind lease = Session_policy_resource.Build.publish build ~key in
+          match
+            B.Product.Binding.attach_reported binding ~runtime ~close:(fun () ->
+              Policy_attachment_close.release lease)
+          with
+          | Ok attachment -> Ok (Runtime_owner.Construction_result.Built attachment)
+          | Error error ->
+            (try Eio.Cancel.protect (fun () -> release_policy_lease lease) with
+             | _ -> ());
+            Error error
+        in
+        Result.iter_error prepared ~f:(fun error -> fail (Protocol error));
+        prepared
+    in
+    (try
+       let result = prepare () in
+       Result.iter_error result ~f:(fun error -> fail (Protocol error));
+       result
+     with
+     | exn ->
+       let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+       fail (Raised (exn, backtrace));
+       Exn.raise_with_original_backtrace exn backtrace)
 ;;
 
 let collect_results t handle journal persistence durable_events services runtime actor () =
@@ -5026,15 +12141,18 @@ let collect_results t handle journal persistence durable_events services runtime
       ~max_events:t.limits.event_replay_capacity
 ;;
 
-let retire_owned_children t actor ~closing =
+let retire_owned_children t actor ~closing:_ =
   let module A = Agent_session.Session_actor in
   let module D = Agent_store.Delegation_store in
   let module P = Agent_protocol in
   let open Result.Let_syntax in
   let%bind parent = A.state actor in
-  match closing, parent.lifecycle.desired with
-  | false, Running -> Ok ()
-  | true, Running | _, Stopped ->
+  match parent.lifecycle.desired with
+  | Running ->
+    (* Physical retirement follows actual registered consumers. Historical
+       delegation rows do not imply an outstanding resource dependency. *)
+    Ok ()
+  | Stopped ->
     let ledger = Agent_store.Session_store.delegations t.store in
     let%bind records =
       D.with_records
@@ -5067,23 +12185,15 @@ let retire_owned_children t actor ~closing =
          match Session_registry.find t.registry record.admission.child_session_id with
          | None -> Ok ()
          | Some child ->
-           (match parent.lifecycle.desired with
-            | Running ->
-              (try
-                 Runtime_owner.close_and_wait child.runtime;
-                 Ok ()
-               with
-               | Runtime_owner.Cleanup_failed error -> Error error)
-            | Stopped ->
-              Delegation_lifecycle.stop_owned
-                ~parent_stop_epoch:parent.stop_epoch
-                ~clock:(Eio.Stdenv.clock t.env)
-                ~delegations:ledger
-                ~reference:(D.reference record)
-                ~actor:child.actor
-                ~runtime:child.runtime
-                ()
-              |> Result.map ~f:ignore))
+           Delegation_lifecycle.stop_owned
+             ~parent_stop_epoch:parent.stop_epoch
+             ~clock:(Eio.Stdenv.clock t.env)
+             ~delegations:ledger
+             ~reference:(D.reference record)
+             ~actor:child.actor
+             ~runtime:child.runtime
+             ()
+           |> Result.map ~f:ignore)
       (children parent.identity.session_id)
     |> Result.all_unit
 ;;
@@ -5092,7 +12202,25 @@ let install_compaction_inference t actor owner =
   let module A = Agent_session.Session_actor in
   let port : A.Compaction_inference.t =
     { with_execution =
-        (fun ~operation ~selection f ->
+        (fun ~operation ~selection ~borrow_agent_actor f ->
+          let guidance =
+            Agent_session.Instruction_service.agent_guidance
+              (instruction_service t (ref (Some actor)))
+              ~borrow_actor:borrow_agent_actor
+          in
+          let run inference =
+            Result.join
+              (guidance.with_guidance (fun prepared ->
+                 let inference =
+                   Inference_client.Execution.with_submission_guard
+                     inference
+                     prepared.guard
+                 in
+                 f
+                   inference
+                   ~guidance:prepared.guidance
+                   ~reserved_input_tokens:prepared.reserved_input_tokens))
+          in
           let open Result.Let_syntax in
           let%bind target =
             match Inference.Selection.view selection with
@@ -5130,7 +12258,7 @@ let install_compaction_inference t actor owner =
             match installed with
             | Some inference ->
               let%bind () = check_target (Inference_client.Execution.context inference) in
-              f inference
+              run inference
             | None ->
               let%bind context =
                 t.inference_policy.resolve_inference_context target
@@ -5153,7 +12281,7 @@ let install_compaction_inference t actor owner =
                     ~on_completion:(Graph_tracking.on_completion tracking)
                     ~on_observation:(Graph_tracking.on_observation tracking)
                 in
-                f inference)))
+                run inference)))
     }
   in
   A.set_compaction_inference actor (Some port)
@@ -5190,212 +12318,201 @@ let configuration_policy t : Agent_session.Configuration_policy.t =
   }
 ;;
 
-let create_loaded_entry
-      t
-      handle
-      journal
-      (state : Agent_session.Session_state.t)
-      runtime
-      writer
-      persistence
-      initial_events
-      capacity
-      actor_ref
-      pending_schedule_operations
-      pending_jobs
-  =
+let install_recurrence_controller t handle writer actor =
   let open Result.Let_syntax in
-  let%bind profile = permission_profile_revision t state.spec.permission_profile_digest in
-  let documents = Agent_session.Session_persistence.take_replay_documents persistence in
-  let initial_events =
-    match documents with
-    | [] -> initial_events
-    | _ -> List.map documents ~f:Agent_session.Durable_event_document.value
+  let%bind controller =
+    Agent_session.Recurrence_controller.create
+      t.store
+      ~handle
+      ~writer
+      ~entry_projection:index_entry
   in
-  let%bind durable_events =
-    Agent_session.Durable_event_log.create
-      ~documents
-      ~capacity:t.limits.event_replay_capacity
-      initial_events
-  in
-  let runtime_owner = ref None in
-  let%bind services =
-    actor_services
-      t
-      handle
-      journal
-      persistence
-      durable_events
-      capacity
-      runtime_owner
-      ~creating_principal:state.identity.creating_principal
-  in
-  let actor =
-    Agent_session.Session_actor.create_with_owner_lease_duration
-      ~schedule_permission_timeouts:false
-      ~sw:t.sw
-      ~clock:(Eio.Stdenv.clock t.env)
-      ~mailbox_capacity:t.limits.mailbox_capacity
-      ~owner_lease_duration_ms:t.limits.owner_lease_duration_ms
-      ~max_attachments:t.limits.max_attachments_per_session
-      ~subscriber_capacity:t.limits.subscriber_queue_capacity
-      ~compaction_env:(Some t.env)
-      ~initial_state:state
-      ~persistence:(Agent_session.Session_persistence.actor_persistence persistence)
-      ~operation_worker:(Some runtime.Agent_session.Runtime_builder.worker)
-      ~services
-  in
-  actor_ref := Some actor;
-  match
-    let open Result.Let_syntax in
-    let%bind () = Agent_session.Session_actor.reconcile_run_recovery actor in
-    let%bind () =
-      Agent_session.Session_actor.set_organization_admission
-        actor
-        (organization_admission t)
-    in
-    let%bind () =
-      Agent_session.Session_actor.set_configuration_policy actor (configuration_policy t)
-    in
-    let%bind () =
-      Agent_session.Session_actor.set_runtime_worker
-        actor
-        ~worker:(Some runtime.Agent_session.Runtime_builder.worker)
-        ~inference:(Some (Agent_session.Runtime_builder.inference_execution runtime))
-    in
-    let%bind () = flush_pending_schedules actor !pending_schedule_operations in
-    let%bind () = flush_pending_jobs actor !pending_jobs in
-    let%bind () =
-      match runtime.automatic_turn_policy with
-      | None -> Ok ()
-      | Some policy ->
-        Agent_session.Session_actor.enable_automatic_turn_budget actor policy
-    in
-    let%bind moderator_snapshot = runtime.start_moderator () in
-    install_moderator_if_changed actor moderator_snapshot
-  with
-  | Error _ as failure ->
-    actor_ref := None;
-    close_unregistered_runtime t handle runtime writer actor capacity;
-    failure
-  | Ok () ->
-    let runtime =
-      Runtime_owner.create_with_run_unload
-        ~before_unload:(retire_owned_children t actor)
-        ~actor
-        ~initial:(Some runtime)
-        ~build:(fun run_preparation ->
-          build_runtime_for_actor ?run_preparation t handle actor)
-    in
-    runtime_owner := Some runtime;
-    let finish () =
-      let%bind () = install_compaction_inference t actor runtime in
-      let%bind history_ids = history_source t actor state.identity.session_id in
-      let entry =
-        Session_registry.
-          { actor
-          ; history_ids
-          ; runtime
-          ; durable_events
-          ; capacity
-          ; store_handle = Some handle
-          ; expire_permissions = expire_permissions t actor profile
-          ; collect_results =
-              collect_results
-                t
-                handle
-                journal
-                persistence
-                durable_events
-                services
-                runtime
-                actor
-          ; close =
-              (fun () ->
-                close_entry t handle journal persistence runtime writer actor capacity)
-          }
-      in
-      match state.lifecycle.observed with
-      | Agent_protocol.Session.Stopped ->
-        let%map () = Runtime_owner.unload runtime in
-        entry
-      | Queued_for_slot
-      | Starting
-      | Recovering
-      | Idle
-      | Running_turn _
-      | Compacting _
-      | Waiting_for_permission _
-      | Stopping
-      | Failed _ -> Ok entry
-    in
-    let close_failed () =
-      actor_ref := None;
-      runtime_owner := None;
-      try
-        Eio.Cancel.protect (fun () ->
-          close_unregistered_entry t handle runtime writer actor capacity)
-      with
-      | _ -> ()
-    in
-    (match finish () with
-     | Ok _ as result -> result
-     | Error _ as failure ->
-       close_failed ();
-       failure
-     | exception exn ->
-       let backtrace = Stdlib.Printexc.get_raw_backtrace () in
-       close_failed ();
-       Exn.raise_with_original_backtrace exn backtrace)
+  let%bind () = Agent_session.Session_actor.set_recurrence_controller actor controller in
+  match t.recurrence_planning_host with
+  | None -> Ok ()
+  | Some host -> Agent_session.Session_actor.set_recurrence_planning_host actor host
 ;;
 
-let close_recovered_entry t owner handle journal persistence actor =
-  Session_recovery_owner.with_entry_close owner (fun () ->
-    let maintain_checkpoint () =
-      let first_close = not (Session_recovery_owner.is_closing owner) in
-      Session_recovery_owner.prepare_close owner;
-      if first_close
-      then (
-        match Agent_store.Session_store.Handle.metadata_checked handle with
-        | Error _ -> None (* Unavailable projection cannot admit cache maintenance. *)
-        | Ok _ ->
-          (match require_seed_success t handle with
-           | Error _ ->
-             None (* Retain genuine Pending proof; still close all resources. *)
-           | Ok () ->
-             (match checkpoint_entry t handle journal persistence actor with
-              | Ok () -> None
-              | Error failure ->
-                Session_recovery_owner.record_checkpoint_failure owner failure;
-                Some failure)))
-      else None
-    in
-    match maintain_checkpoint () with
-    | checkpoint_failure ->
-      (match Session_recovery_owner.close owner with
-       | Error failure ->
-         raise
-           (Session_registry.Cleanup_failed
-              (Session_registry.Cleanup_failure.rejected failure))
-       | Ok () ->
-         Option.iter checkpoint_failure ~f:(fun failure ->
-           raise
-             (Session_registry.Cleanup_failed
-                (Session_registry.Cleanup_failure.rejected failure))))
-    | exception exn ->
+module Entry_checkpoint = struct
+  type t =
+    | Expected of Disposal_report_data.Diagnostic.t
+    | Raised of Disposal_report_data.Diagnostic.t
+
+  let diagnostic = function
+    | Expected diagnostic | Raised diagnostic -> diagnostic
+  ;;
+end
+
+let recovered_entry_closer t owner handle journal writer persistence actor =
+  let module Report = Disposal_report_data in
+  let checkpoint = ref None in
+  let retained_exception f =
+    try f () with
+    | exn ->
       let backtrace = Stdlib.Printexc.get_raw_backtrace () in
-      (* The actual owner bracket joins/releases resources even when the gate or
-         checkpoint throws, retaining secondary cleanup diagnostics alongside the
-         original exception and backtrace. It never recursively closes the entry. *)
-      let (_ : (Session_registry.entry, Agent_protocol.Error.t) Result.t) =
-        Session_registry.with_recovery_owner t.registry owner (fun () ->
-          Exn.raise_with_original_backtrace exn backtrace)
+      let diagnostic =
+        Report.Diagnostic.create [ Report.Failure.Raised (exn, backtrace) ]
       in
-      assert false)
+      Report.create ~primary:diagnostic ~disposition:Retained [ diagnostic ]
+  in
+  let retain_if_unfinished report =
+    (match Report.disposition report with
+     | Disposed -> ()
+     | Retained ->
+       (* Direct Factory close can fail before its caller publishes an Entry.
+          Keep this SAME actual owner/report in the existing Registry custody;
+          returning data must never orphan live Handle/Actor/writer resources. *)
+       Session_registry.retain_recovery_owner_reported t.registry owner report);
+    report
+  in
+  Session_registry.Entry_close.reported (fun () ->
+    Session_recovery_owner.with_entry_close owner (fun () ->
+      let first_close = not (Session_recovery_owner.is_closing owner) in
+      let prepared =
+        retained_exception (fun () -> Session_recovery_owner.prepare_close_reported owner)
+      in
+      match Report.disposition prepared with
+      | Retained -> retain_if_unfinished prepared
+      | Disposed ->
+        if first_close
+        then (
+          let maintenance =
+            try
+              match Agent_store.Session_store.Handle.metadata_checked handle with
+              | Error _ -> None
+              | Ok _ ->
+                (match require_seed_success t handle with
+                 | Error _ -> None
+                 | Ok () ->
+                   (match checkpoint_entry t handle journal writer persistence actor with
+                    | Ok () -> None
+                    | Error failure ->
+                      Session_recovery_owner.record_checkpoint_failure owner failure;
+                      Some
+                        (Entry_checkpoint.Expected
+                           (Report.Diagnostic.create [ Report.Failure.Protocol failure ]))))
+            with
+            | exn ->
+              let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+              Some
+                (Entry_checkpoint.Raised
+                   (Report.Diagnostic.create [ Report.Failure.Raised (exn, backtrace) ]))
+          in
+          checkpoint := maintenance);
+        (* A failed cache operation is diagnostic, never successful repair. Its
+           exact raw primary survives while actual resource disposal still runs. *)
+        let closed =
+          retained_exception (fun () -> Session_recovery_owner.close_reported owner)
+        in
+        let checkpoint_diagnostics =
+          Option.to_list (Option.map !checkpoint ~f:Entry_checkpoint.diagnostic)
+        in
+        let diagnostics =
+          Report.diagnostics prepared @ checkpoint_diagnostics @ Report.diagnostics closed
+        in
+        let primary =
+          match !checkpoint with
+          | Some (Entry_checkpoint.Raised diagnostic) -> Some diagnostic
+          | Some (Expected diagnostic) ->
+            Option.first_some (Report.primary closed) (Some diagnostic)
+          | None -> Report.primary closed
+        in
+        Report.create ?primary ~disposition:(Report.disposition closed) diagnostics
+        |> retain_if_unfinished))
+;;
+
+let native_resource_access
+      t
+      handle
+      writer
+      actor
+      policy_resource
+      runtime_owner
+      ~native_routing
+  =
+  let module A = Agent_session in
+  let open Result.Let_syntax in
+  let capture_current admission =
+    let%bind initial = A.Session_actor.state actor in
+    let%bind profile = restore_state_profile t initial in
+    let%bind observation =
+      check_native_resource_admission t handle actor admission initial
+    in
+    (* The actual checked record and ORIGINAL immutable State bind this read
+       window. Factual progress grants no authority: compare the complete native
+       authority read set, then pin/check the actual Cell without another yield. *)
+    let%bind basis = Native_admission_observation.basis observation ~expected:initial in
+    let%bind expected = A.Session_actor.state actor in
+    let%bind () = Native_admission_observation.check_basis observation basis ~expected in
+    if
+      String.equal
+        profile.A.Permission_policy.revision_digest
+        expected.spec.permission_profile_digest
+    then Ok (expected, profile)
+    else Error (unavailable Conflict "native resource permission profile changed")
+  in
+  Runtime_owner.Native_resource_access.create_observed
+    ~prepare:
+      (prepare_native_resource
+         t
+         handle
+         writer
+         actor
+         policy_resource
+         runtime_owner
+         ~native_routing)
+    ~pin:(fun ~admission ~expected_native ->
+      let%bind expected, profile = capture_current admission in
+      (* All yielding checks precede this pure final capture/pin. A returned loan
+         is captured by the actual Owner before cancellation can resume. *)
+      Session_policy_resource.pin_native
+        policy_resource
+        ~expected_native
+        ~actor
+        ~handle
+        ~profile
+        ~expected)
+    ~check:(fun loan ~admission ~expected:_ ->
+      let%bind expected, profile = capture_current admission in
+      Session_policy_resource.Native_lease.check_current
+        loan
+        ~actor
+        ~handle
+        ~profile
+        ~expected)
+    ~check_custody:(fun loan query ->
+      let%bind initial = A.Session_actor.state actor in
+      let%bind profile = restore_state_profile t initial in
+      let%bind expected = A.Session_actor.state actor in
+      let%bind () =
+        if
+          String.equal
+            profile.A.Permission_policy.revision_digest
+            expected.spec.permission_profile_digest
+        then Ok ()
+        else Error (unavailable Conflict "native custody permission profile changed")
+      in
+      match query with
+      | Resources ->
+        Session_policy_resource.Native_lease.check_current
+          loan
+          ~actor
+          ~handle
+          ~profile
+          ~expected
+      | Retained_source source ->
+        Session_policy_resource.Native_lease.check_retained_source
+          loan
+          ~source
+          ~actor
+          ~handle
+          ~profile
+          ~expected)
 ;;
 
 let create_unloaded_entry
       ?recovery_owner
+      ?(recovery_purpose = Ordinary_recovery)
       t
       handle
       journal
@@ -5422,6 +12539,7 @@ let create_unloaded_entry
         ~capacity:t.limits.event_replay_capacity
         initial_events
     in
+    let retention = Session_retention.create () in
     let runtime_owner = ref None in
     let%bind services =
       actor_services
@@ -5432,10 +12550,37 @@ let create_unloaded_entry
         durable_events
         capacity
         runtime_owner
+        ~retention
         ~creating_principal:state.identity.creating_principal
     in
+    let actual_actor = ref None in
+    let ordinary_execution_admission () =
+      match recovery_purpose with
+      | Ordinary_recovery -> Ok ()
+      | Metadata_target_recovery ->
+        (match
+           ( !actual_actor
+           , !runtime_owner
+           , Session_registry.find t.registry state.identity.session_id )
+         with
+         | Some actor, Some runtime, Some actual
+           when phys_equal actor actual.actor
+                && phys_equal runtime actual.runtime
+                && Session_registry.execution_selected t.registry actual -> Ok ()
+         | _ ->
+           Error
+             (unavailable Conflict "target has not been selected for ordinary execution"))
+    in
+    let actor_persistence, canonical_persistence =
+      Agent_session.Session_persistence.actor_persistence_with_startup_disposal
+        persistence
+    in
     let actor =
-      Agent_session.Session_actor.create_with_owner_lease_duration
+      Agent_session.Session_actor.create_with_bound_runtime_source_owner
+        ~canonical_persistence
+        ~runtime_source_owner:
+          (Agent_session.Runtime_source_owner.identity t.runtime_source_owner)
+        ~ordinary_execution_admission
         ~schedule_permission_timeouts:false
         ~sw:t.sw
         ~clock:(Eio.Stdenv.clock t.env)
@@ -5445,11 +12590,14 @@ let create_unloaded_entry
         ~subscriber_capacity:t.limits.subscriber_queue_capacity
         ~compaction_env:(Some t.env)
         ~initial_state:state
-        ~persistence:(Agent_session.Session_persistence.actor_persistence persistence)
+        ~persistence:actor_persistence
         ~operation_worker:None
         ~services
     in
+    actual_actor := Some actor;
     Session_recovery_owner.adopt_actor_exn owner actor;
+    Session_recovery_owner.adopt_retention_exn owner retention;
+    let%bind () = install_recurrence_controller t handle writer actor in
     let%bind () = Agent_session.Session_actor.reconcile_run_recovery actor in
     let%bind () =
       Agent_session.Session_actor.set_organization_admission
@@ -5459,16 +12607,102 @@ let create_unloaded_entry
     let%bind () =
       Agent_session.Session_actor.set_configuration_policy actor (configuration_policy t)
     in
+    let policy_resource = Session_policy_resource.create () in
+    let native_routing = Native_constructor_routing.create () in
+    let source_target () =
+      let open Result.Let_syntax in
+      let%map runtime =
+        Result.of_option
+          !runtime_owner
+          ~error:(unavailable Conflict "runtime construction lost its actual Owner")
+      in
+      Source_target.{ actor; runtime; store_handle = Some handle }
+    in
     let runtime =
-      Runtime_owner.create_with_run_unload
+      Runtime_owner.create_with_deferred_run_unload
+        ~native_resource_access:
+          (Some
+             (native_resource_access
+                t
+                handle
+                writer
+                actor
+                policy_resource
+                runtime_owner
+                ~native_routing))
+        ~source_owner:t.runtime_source_owner
         ~before_unload:(retire_owned_children t actor)
+        ~policy_resource_access:
+          (Some
+             (policy_resource_access
+                t
+                handle
+                writer
+                actor
+                policy_resource
+                runtime_owner
+                ~native_routing))
+        ~policy_resource_cleanup:
+          (Runtime_owner.Policy_resource_cleanup.of_cell policy_resource)
         ~actor
         ~initial:None
-        ~build:(fun run_preparation ->
-          build_runtime_for_actor ?run_preparation t handle actor)
+        ~build:(fun ~initialization_cleanup ~original_actor run_preparation ->
+          let open Result.Let_syntax in
+          let%bind source_target = source_target () in
+          build_runtime_for_actor
+            ~initialization_cleanup
+            ~source_target
+            ~native_routing
+            ?run_preparation
+            ?original_actor
+            ~policy_resource
+            t
+            handle
+            actor
+          |> Result.bind ~f:ordinary_runtime_construction)
+        ~ordinary_warm:
+          (if Option.is_none state.spec.delegation
+           then Some (prepare_ordinary_warm t handle actor policy_resource)
+           else None)
+        ~build_deferred:
+          (fun
+            ~initialization_cleanup
+            ~source_consumer
+            ~source
+            ~expected_product
+            ~construction ->
+          let open Result.Let_syntax in
+          let%bind source_target = source_target () in
+          build_runtime_for_actor
+            ~initialization_cleanup
+            ~source_consumer
+            ~source_target
+            ~native_routing
+            ?expected_product
+            ~deferred:(source, construction)
+            ~policy_resource
+            t
+            handle
+            actor)
+        ~delegated_load:
+          (Option.map
+             (delegated_runtime_driver t handle actor runtime_owner state)
+             ~f:Runtime_owner.Delegated_loader.observed)
     in
     runtime_owner := Some runtime;
     Session_recovery_owner.adopt_runtime_exn owner runtime;
+    let%bind () =
+      bind_retention
+        t
+        retention
+        handle
+        journal
+        writer
+        persistence
+        actor
+        runtime
+        ~recovery_owner:owner
+    in
     let%bind () = install_compaction_inference t actor runtime in
     match history_source t actor state.identity.session_id with
     | Error _ as failure ->
@@ -5494,8 +12728,7 @@ let create_unloaded_entry
                 services
                 runtime
                 actor
-          ; close =
-              (fun () -> close_recovered_entry t owner handle journal persistence actor)
+          ; close = recovered_entry_closer t owner handle journal writer persistence actor
           }
   in
   match recovery_owner with
@@ -5514,19 +12747,28 @@ let create_unloaded_entry
 ;;
 
 let cleanup_failed_session t handle =
-  close_actor_lock_after_failure t handle;
-  ignore
-    (Agent_store.Session_index.remove
-       (Agent_store.Session_store.session_index t.store)
-       (Agent_store.Session_store.Handle.session_id handle)
-     : (unit, Agent_store.Store_error.t) result);
-  Eio.Path.rmtree
-    ~missing_ok:true
-    Eio.Path.(Eio.Stdenv.fs t.env / Agent_store.Session_store.Handle.directory handle)
+  (* This fence covers index/data removal as well as lock release. A successful
+     best-effort close is not permission to delete another retained owner's data. *)
+  if not (Session_registry.retains_cleanup_handle t.registry handle)
+  then (
+    (try
+       ignore
+         (Agent_store.Session_store.close_session t.store handle
+          : (unit, Agent_store.Store_error.t) result)
+     with
+     | _ -> ());
+    ignore
+      (Agent_store.Session_index.remove
+         (Agent_store.Session_store.session_index t.store)
+         (Agent_store.Session_store.Handle.session_id handle)
+       : (unit, Agent_store.Store_error.t) result);
+    Eio.Path.rmtree
+      ~missing_ok:true
+      Eio.Path.(Eio.Stdenv.fs t.env / Agent_store.Session_store.Handle.directory handle))
 ;;
 
 let close_runtime_writer runtime writer =
-  runtime.Agent_session.Runtime_builder.close ();
+  Agent_session.Runtime_builder.close runtime;
   Agent_store.Commit_writer.close writer
 ;;
 
@@ -5580,11 +12822,12 @@ let persist_initial_snapshot
       t
       handle
       journal
+      writer
       persistence
       state
   =
   let open Result.Let_syntax in
-  let%bind installed =
+  let%bind _ =
     Agent_session.Session_persistence.install_snapshot
       persistence
       ~env:t.env
@@ -5597,7 +12840,7 @@ let persist_initial_snapshot
   if not retain_initial_proof
   then
     ignore
-      (prune_snapshot t handle journal persistence installed
+      (prune_snapshot t handle journal writer persistence
        : (unit, Agent_store.Store_error.t) result);
   persist_metadata t handle state |> Result.map_error ~f:protocol_of_store
 ;;
@@ -5655,7 +12898,14 @@ let finish_unloaded_creation ?(retain_initial_proof = false) t handle state ~com
     | Ok creation ->
       let state = creation.Agent_session.Session_transition.state in
       (match
-         persist_initial_snapshot ~retain_initial_proof t handle journal persistence state
+         persist_initial_snapshot
+           ~retain_initial_proof
+           t
+           handle
+           journal
+           writer
+           persistence
+           state
        with
        | Error _ as failure -> failure
        | Ok () ->
@@ -5686,7 +12936,8 @@ let finish_unloaded_creation ?(retain_initial_proof = false) t handle state ~com
     Exn.raise_with_original_backtrace exn backtrace
 ;;
 
-let finish_creation t handle _revision _profile provisional ~command_audit =
+let finish_creation ?original_actor t handle _revision _profile provisional ~command_audit
+  =
   let open Result.Let_syntax in
   let provisional =
     { provisional with
@@ -5696,7 +12947,11 @@ let finish_creation t handle _revision _profile provisional ~command_audit =
   in
   let%bind entry = finish_unloaded_creation t handle provisional ~command_audit in
   let initialize_entry () =
-    let%bind () = Runtime_owner.ensure_loaded entry.runtime in
+    let%bind () =
+      match original_actor with
+      | None -> Runtime_owner.ensure_loaded entry.runtime
+      | Some actor -> Runtime_owner.ensure_loaded_authenticated entry.runtime ~actor
+    in
     let%bind state = Agent_session.Session_actor.state entry.actor in
     let%map () =
       match state.lifecycle.desired with
@@ -5710,21 +12965,11 @@ let finish_creation t handle _revision _profile provisional ~command_audit =
     in
     entry
   in
-  let close_unregistered () =
-    (* The selected Created state remains durable; only borrowed live resources
-       are retired. Cleanup must not replace the initialization failure. *)
-    try Eio.Cancel.protect entry.close with
-    | _ -> ()
-  in
-  match initialize_entry () with
-  | Ok _ as result -> result
-  | Error _ as failure ->
-    close_unregistered ();
-    failure
-  | exception exn ->
-    let backtrace = Stdlib.Printexc.get_raw_backtrace () in
-    close_unregistered ();
-    Exn.raise_with_original_backtrace exn backtrace
+  Session_registry.close_provisional
+    t.registry
+    ~session_id:(Agent_store.Session_store.Handle.session_id handle)
+    entry
+    initialize_entry
 ;;
 
 let with_catalog_admission t ~f =
@@ -5745,6 +12990,7 @@ let with_catalog_admission t ~f =
 ;;
 
 let create_session_admitted
+      ?original_actor
       t
       ~command_audit
       ~principal
@@ -5816,26 +13062,35 @@ let create_session_admitted
               "session initializer did not return workspace state"))
       ~f:Result.return
   in
-  match finish_creation t handle revision profile provisional ~command_audit with
+  match
+    finish_creation ?original_actor t handle revision profile provisional ~command_audit
+  with
   | Ok entry -> Ok entry
   | Error _ as failure ->
-    close_actor_lock_after_failure t handle;
+    close_unretained_handle_after_failure t handle;
     failure
   | exception exn ->
     let backtrace = Stdlib.Printexc.get_raw_backtrace () in
-    (try
-       Eio.Cancel.protect (fun () ->
-         ignore
-           (Agent_store.Session_store.close_session t.store handle
-            : (unit, Agent_store.Store_error.t) result))
-     with
-     | _ -> ());
+    close_unretained_handle_after_failure t handle;
     Exn.raise_with_original_backtrace exn backtrace
 ;;
 
 let create_session t ~command_audit ~principal request =
   with_catalog_admission t ~f:(fun () ->
     create_session_admitted t ~command_audit ~principal request)
+;;
+
+let create_session_authenticated t ~command_audit ~actor request =
+  if not (Operator_authorization.is_current actor)
+  then Error (unavailable Permission_denied "session creation authentication expired")
+  else
+    with_catalog_admission t ~f:(fun () ->
+      create_session_admitted
+        ~original_actor:actor
+        t
+        ~command_audit
+        ~principal:(Operator_authorization.principal actor)
+        request)
 ;;
 
 let validate_import_request request legacy source_path =
@@ -5936,10 +13191,8 @@ let import_legacy_admitted t ~principal ~source_id ~source_path ~legacy request 
   match result with
   | Ok _ as success -> success
   | Error _ as failure ->
-    if not (Session_registry.retains_cleanup_handle t.registry handle)
-    then (
-      try Eio.Cancel.protect (fun () -> cleanup_failed_session t handle) with
-      | _ -> ());
+    (try Eio.Cancel.protect (fun () -> cleanup_failed_session t handle) with
+     | _ -> ());
     failure
 ;;
 
@@ -5976,11 +13229,6 @@ let with_uninstalled_recovery_entry
     let backtrace = Stdlib.Printexc.get_raw_backtrace () in
     cleanup (Session_registry.Cleanup_failure.raised exn backtrace);
     Exn.raise_with_original_backtrace exn backtrace
-;;
-
-let close_recovery_handle t handle =
-  if not (Session_registry.retains_cleanup_handle t.registry handle)
-  then close_actor_lock_after_failure t handle
 ;;
 
 let corrupt message = protocol_of_store (Agent_store.Store_error.Corrupt message)
@@ -6188,6 +13436,7 @@ let recovery_attachment_deltas (state : Agent_session.Session_state.t) ~now =
 ;;
 
 let recovery_transition
+      ~recurrence_delta
       ~parent_stop
       ~inference_target
       ~pending_retention
@@ -6265,7 +13514,8 @@ let recovery_transition
     state
     ~delta:
       (Batch
-         (operation_delta
+         (Option.to_list recurrence_delta
+          @ operation_delta
           @ [ Agent_session.Session_delta.History_block_reserved reserved_history_through
             ; Lifecycle_changed lifecycle
             ]
@@ -6325,6 +13575,7 @@ let create_recovery_writer t journal recovery session_id =
 ;;
 
 let commit_recovery_boundary
+      ~recurrence_recovery
       ~parent_stop
       ~inference_target
       t
@@ -6338,6 +13589,7 @@ let commit_recovery_boundary
   let pending_retention = Agent_session.Pending_disposition.Retention.default in
   let%bind transition =
     recovery_transition
+      ~recurrence_delta:(Agent_session.Recurrence_recovery.delta recurrence_recovery)
       ~parent_stop
       ~inference_target
       ~pending_retention
@@ -6347,6 +13599,7 @@ let commit_recovery_boundary
       ~observed
       ~invocations
   in
+  let%bind () = Agent_session.Recurrence_recovery.check recurrence_recovery in
   let%map () =
     Agent_session.Session_persistence.commit
       persistence
@@ -6399,6 +13652,27 @@ let prepare_recovery_capacity t state =
      | Queue_required _ | Rejected _ -> Ok (Queued_for_slot, Some capacity))
 ;;
 
+let prepare_metadata_target_capacity t ~owner (state : Agent_session.Session_state.t) =
+  let open Result.Let_syntax in
+  let%bind capacity = capacity_for_state t state in
+  match state.lifecycle.desired, capacity with
+  | Stopped, _ ->
+    Option.iter capacity ~f:(Session_recovery_owner.adopt_capacity_exn owner);
+    Ok (Agent_protocol.Session.Stopped, capacity)
+  | Running, None -> Ok (Agent_protocol.Session.Idle, None)
+  | Running, Some capacity ->
+    (match Session_capacity.try_acquire capacity ~queue_if_limited:false with
+     | Acquired | Already_acquired ->
+       Session_recovery_owner.adopt_capacity_exn owner capacity;
+       (* Release only construction credit; this owner retains its actual
+          session/workspace acquisition. No runtime or Start ticket is created. *)
+       Session_capacity.runtime_ready capacity;
+       Ok (Agent_protocol.Session.Idle, Some capacity)
+     | Rejected failure -> Error failure
+     | Queue_required _ ->
+       Error (unavailable Resource_limit "recurrence target capacity is unavailable"))
+;;
+
 let commit_moderator_snapshot t persistence state moderator =
   let open Result.Let_syntax in
   let%bind transition =
@@ -6418,9 +13692,9 @@ let commit_moderator_snapshot t persistence state moderator =
   transition.state
 ;;
 
-let persist_recovered_state t handle journal persistence state =
+let persist_recovered_state t handle journal writer persistence state =
   let open Result.Let_syntax in
-  let%bind installed =
+  let%bind _ =
     Agent_session.Session_persistence.install_snapshot
       persistence
       ~env:t.env
@@ -6431,12 +13705,18 @@ let persist_recovered_state t handle journal persistence state =
     |> Result.map_error ~f:protocol_of_store
   in
   ignore
-    (prune_snapshot t handle journal persistence installed
+    (prune_snapshot t handle journal writer persistence
      : (unit, Agent_store.Store_error.t) result);
   persist_metadata t handle state |> Result.map_error ~f:protocol_of_store
 ;;
 
-let recover_open_handle ?(prepare_parent_policy = fun () -> Ok Loaded_only) t handle =
+let recover_open_handle_with_selection
+      ?original_actor
+      ?(prepare_parent_policy = fun () -> Ok Loaded_only)
+      ?(selection = Explicit_recovery Ordinary_recovery)
+      t
+      handle
+  =
   let open Result.Let_syntax in
   let%bind owner =
     Session_recovery_owner.create
@@ -6445,14 +13725,16 @@ let recover_open_handle ?(prepare_parent_policy = fun () -> Ok Loaded_only) t ha
       ~job_capacity:t.job_capacity
       ~capacity:None
   in
-  Session_registry.with_recovery_owner t.registry owner (fun () ->
+  Session_registry.with_recovered_owner t.registry owner (fun () ->
     let%bind () = require_seed_success t handle in
     let%bind parent_policy = prepare_parent_policy () in
-    let%bind lifecycle =
+    let%bind lifecycle_observation =
       Agent_store.Session_store.read_lifecycle t.store handle
       |> Result.map_error ~f:protocol_of_store
     in
-    let lifecycle = Agent_store.Session_store.Lifecycle.Observation.value lifecycle in
+    let lifecycle =
+      Agent_store.Session_store.Lifecycle.Observation.value lifecycle_observation
+    in
     let%bind () =
       if
         Agent_store.Session_archive_record.Status.equal
@@ -6473,25 +13755,12 @@ let recover_open_handle ?(prepare_parent_policy = fun () -> Ok Loaded_only) t ha
         ~store:t.idempotency_store
         ~server_id:(Agent_store.Session_store.server_id t.store)
     in
-    let%bind () =
-      List.fold_result
-        (Agent_store.Session_archive_record.receipts lifecycle)
-        ~init:()
-        ~f:(fun () receipt ->
-          if receipt.Agent_store.Session_archive_record.Receipt.completion_acknowledged
-          then Ok ()
-          else
-            Agent_store.Session_store.complete_lifecycle_outcome
-              t.store
-              handle
-              ~key:receipt.key
-              ~request_digest:receipt.request_digest
-              ~complete:
-                (Session_lifecycle_receipts.complete
-                   receipts
-                   ~key:receipt.key
-                   ~request_digest:receipt.request_digest)
-            |> Result.map_error ~f:protocol_of_store)
+    let%bind lifecycle_observation =
+      Agent_session.Recurrence_recovery.reconcile_lifecycle_receipts
+        lifecycle_observation
+        ~store:t.store
+        ~handle
+        ~complete:(Session_lifecycle_receipts.complete receipts)
     in
     let%bind journal, recovery = open_recovery t handle in
     let%bind () = reconcile_command_audits t recovery in
@@ -6500,6 +13769,24 @@ let recover_open_handle ?(prepare_parent_policy = fun () -> Ok Loaded_only) t ha
     in
     let%bind parent_stop = parent_stop_recovery t ~policy:parent_policy state in
     let stopping = Option.exists parent_stop ~f:(fun parent -> parent.stop) in
+    let%bind revision = recovered_revision t state in
+    let%bind purpose =
+      match selection, revision with
+      | Registered_recovery, Captured_delegation _ -> Ok Metadata_target_recovery
+      | Registered_recovery, (Authored _ | Generated_artifact _) -> Ok Ordinary_recovery
+      | Ordinary_entry_recovery, Captured_delegation _ ->
+        Error
+          (unavailable
+             Invalid_state
+             "captured recurrence recovery requires retained execution selection")
+      | Ordinary_entry_recovery, (Authored _ | Generated_artifact _) ->
+        Ok Ordinary_recovery
+      | ( Explicit_recovery purpose
+        , (Authored _ | Generated_artifact _ | Captured_delegation _) ) -> Ok purpose
+    in
+    let%bind legacy_activation_blocked =
+      legacy_checkpoint_activation_blocked state revision
+    in
     let%bind inference_target =
       match
         ( Inference.Selection.view state.spec.inference_target
@@ -6507,7 +13794,10 @@ let recover_open_handle ?(prepare_parent_policy = fun () -> Ok Loaded_only) t ha
         , stopping
         , t.inference_policy.migrate_inference_target )
       with
-      | Unresolved, Running, false, Some migrate ->
+      | Unresolved, Running, false, Some migrate
+        when match purpose with
+             | Ordinary_recovery -> true
+             | Metadata_target_recovery -> false ->
         let%bind target =
           migrate state.spec
           |> Result.map_error ~f:(fun error ->
@@ -6526,34 +13816,49 @@ let recover_open_handle ?(prepare_parent_policy = fun () -> Ok Loaded_only) t ha
               (Sexp.to_string_hum (Inference.Request.Error.sexp_of_t error)))
         in
         Some target
+      | Unresolved, Running, false, Some _
       | Captured _, _, _, _
       | Unresolved, Stopped, _, _
       | Unresolved, Running, true, _
       | Unresolved, Running, false, None -> Ok None
     in
+    let migration_blocked () =
+      match Inference.Selection.view state.spec.inference_target, inference_target with
+      | Unresolved, None
+        when Agent_protocol.Session.equal_desired_state state.lifecycle.desired Running ->
+        Some
+          (unavailable
+             Migration_required
+             "execution requires explicit inference migration")
+      | Captured _, _ | Unresolved, _ -> None
+    in
     let activation_blocked =
-      match state.runtime_initialization with
-      | Pending _ ->
+      match legacy_activation_blocked, purpose, state.runtime_initialization with
+      | Some failure, _, _ -> Some failure
+      | None, Ordinary_recovery, Pending _ ->
         Some
           (unavailable
              Invalid_state
              "selected runtime initialization requires explicit activation")
-      | Ready ->
-        (match Inference.Selection.view state.spec.inference_target, inference_target with
-         | Unresolved, None
-           when Agent_protocol.Session.equal_desired_state state.lifecycle.desired Running
-           ->
-           Some
-             (unavailable
-                Migration_required
-                "execution requires explicit inference migration")
-         | Captured _, _ | Unresolved, _ -> None)
+      | None, Ordinary_recovery, Ready
+      | None, Metadata_target_recovery, (Pending _ | Ready) -> migration_blocked ()
     in
-    let%bind revision = recovered_revision t state in
+    let dormant_capture =
+      match revision with
+      | Authored _ | Generated_artifact _ -> false
+      | Captured_delegation source ->
+        Agent_session.Recurrence_child_origin.validate_initial_state
+          (Agent_session.Captured_recurrence_source.origin source)
+          state
+        |> Result.is_ok
+    in
     let%bind () =
       match state.lifecycle.desired with
       | Stopped -> Ok ()
-      | Running when not stopping -> check_source_for_execution t state revision
+      | Running when not stopping ->
+        (match purpose with
+         | Ordinary_recovery -> check_source_for_execution t state revision
+         | Metadata_target_recovery -> Ok ())
       | Running -> Ok ()
     in
     let%bind profile = recovered_profile t state in
@@ -6567,23 +13872,32 @@ let recover_open_handle ?(prepare_parent_policy = fun () -> Ok Loaded_only) t ha
         ~reason:"daemon restarted before the invocation recorded an outcome"
     in
     let%bind _first_sequence, reserved_history_through =
-      recovery_reservation t (Int64.of_int invocations.next_sequence)
+      if dormant_capture
+      then Ok (0, 0L)
+      else recovery_reservation t (Int64.of_int invocations.next_sequence)
     in
     let%bind recovered_event_documents = recovered_events t recovery in
     let durable_events =
       List.map recovered_event_documents ~f:Agent_session.Durable_event_document.value
     in
     let%bind observed, capacity =
-      match stopping, activation_blocked with
-      | false, Some failure -> Ok (Agent_protocol.Session.Failed failure, None)
-      | true, _ | false, None ->
-        prepare_recovery_capacity
-          t
-          (if stopping
-           then { state with lifecycle = { desired = Stopped; observed = Stopped } }
-           else state)
+      match dormant_capture, stopping, activation_blocked with
+      | true, false, Some _ -> Ok (Agent_protocol.Session.Stopped, None)
+      | false, false, Some failure -> Ok (Agent_protocol.Session.Failed failure, None)
+      | (true | false), true, _ | (true | false), false, None ->
+        let state =
+          if stopping
+          then { state with lifecycle = { desired = Stopped; observed = Stopped } }
+          else state
+        in
+        (match purpose with
+         | Ordinary_recovery -> prepare_recovery_capacity t state
+         | Metadata_target_recovery -> prepare_metadata_target_capacity t ~owner state)
     in
-    Option.iter capacity ~f:(Session_recovery_owner.adopt_capacity_exn owner);
+    (match purpose with
+     | Ordinary_recovery ->
+       Option.iter capacity ~f:(Session_recovery_owner.adopt_capacity_exn owner)
+     | Metadata_target_recovery -> ());
     let%bind writer =
       create_recovery_writer t journal recovery state.identity.session_id
     in
@@ -6624,8 +13938,16 @@ let recover_open_handle ?(prepare_parent_policy = fun () -> Ok Loaded_only) t ha
     Agent_session.Session_persistence.restore_replay_documents
       persistence
       recovered_event_documents;
+    let%bind recurrence_recovery =
+      Agent_session.Recurrence_recovery.prepare
+        state
+        ~store:t.store
+        ~handle
+        ~observation:lifecycle_observation
+    in
     match
       commit_recovery_boundary
+        ~recurrence_recovery
         ~parent_stop
         ~inference_target
         t
@@ -6639,12 +13961,13 @@ let recover_open_handle ?(prepare_parent_policy = fun () -> Ok Loaded_only) t ha
     | Ok recovery_transition ->
       let state = recovery_transition.Agent_session.Session_transition.state in
       let durable_events = durable_events @ recovery_transition.events in
-      (match persist_recovered_state t handle journal persistence state with
+      (match persist_recovered_state t handle journal writer persistence state with
        | Error failure -> Error failure
        | Ok () ->
          let%bind entry =
            create_unloaded_entry
              ~recovery_owner:owner
+             ~recovery_purpose:purpose
              t
              handle
              journal
@@ -6669,21 +13992,46 @@ let recover_open_handle ?(prepare_parent_policy = fun () -> Ok Loaded_only) t ha
              in
              Runtime_owner.unload_and_wait entry.runtime
            | None | Some { stop = false; _ } ->
-             (match state.lifecycle.observed, activation_blocked with
-              | Stopped, _ | _, Some _ -> Ok ()
-              | ( ( Queued_for_slot
-                  | Starting
-                  | Recovering
-                  | Idle
-                  | Running_turn _
-                  | Compacting _
-                  | Waiting_for_permission _
-                  | Stopping
-                  | Failed _ )
-                , None ) -> Runtime_owner.ensure_loaded entry.runtime)
+             (match purpose with
+              | Metadata_target_recovery -> Ok ()
+              | Ordinary_recovery ->
+                (match state.lifecycle.observed, activation_blocked with
+                 | Stopped, _ | _, Some _ -> Ok ()
+                 | ( ( Queued_for_slot
+                     | Starting
+                     | Recovering
+                     | Idle
+                     | Running_turn _
+                     | Compacting _
+                     | Waiting_for_permission _
+                     | Stopping
+                     | Failed _ )
+                   , None ) ->
+                   (match original_actor with
+                    | None -> Runtime_owner.ensure_loaded entry.runtime
+                    | Some actor ->
+                      Runtime_owner.ensure_loaded_authenticated entry.runtime ~actor)))
          in
          let%map () = restored () in
-         entry))
+         (match purpose with
+          | Ordinary_recovery -> Session_registry.Recovered.ordinary entry
+          | Metadata_target_recovery -> Session_registry.Recovered.metadata entry)))
+;;
+
+let recover_open_handle
+      ?original_actor
+      ?prepare_parent_policy
+      ?(purpose = Ordinary_recovery)
+      t
+      handle
+  =
+  recover_open_handle_with_selection
+    ?original_actor
+    ?prepare_parent_policy
+    ~selection:(Explicit_recovery purpose)
+    t
+    handle
+  |> Result.map ~f:Session_registry.Recovered.entry
 ;;
 
 type archive_validation =
@@ -6835,7 +14183,7 @@ let fold_indexed_retained_states t indexed ~authorize ~checkpoint ~admit_archive
         result)))
 ;;
 
-let read_session t index_entry =
+let with_read_handle t index_entry f =
   let open Result.Let_syntax in
   let session_id = index_entry.Agent_store.Session_index.Entry.session.id in
   Eio.Switch.run (fun sw ->
@@ -6850,13 +14198,317 @@ let read_session t index_entry =
       |> Result.map_error ~f:protocol_of_store
     in
     Session_registry.with_recovery_handle t.registry ~store:t.store handle (fun () ->
-      read_owned_session t handle))
+      f handle))
+;;
+
+let read_session t index_entry = with_read_handle t index_entry (read_owned_session t)
+
+let read_recurrence_snapshot t ~actor ~authorize ~request indexed =
+  let open Result.Let_syntax in
+  with_read_handle t indexed (fun handle ->
+    let%bind state = read_owned_session t handle in
+    let%map snapshot =
+      Agent_session.Recurrence_query.read_indexed
+        state
+        ~store:t.store
+        ~handle
+        ~indexed
+        ~actor
+        ~authorize
+        ~request
+    in
+    state, snapshot)
 ;;
 
 let owns_handle t handle = Agent_store.Session_store.owns_handle t.store handle
 
-let recover_owned_session t handle =
+let check_registered_entry t (entry : Session_registry.entry) ~session =
+  let open Result.Let_syntax in
+  let%bind () = check_registered_owner t entry ~session in
+  if
+    Option.exists entry.store_handle ~f:(fun handle ->
+      not
+        (Session_registry.lifecycle_reserved
+           t.registry
+           (Agent_store.Session_store.Handle.session_id handle)))
+  then Ok ()
+  else
+    Error
+      (unavailable
+         Conflict
+         "recurrence entry is not this Factory's current registered owner")
+;;
+
+let qualify_metadata_target t entry =
+  let module S = Agent_store.Session_store in
+  let open Result.Let_syntax in
+  let qualify () =
+    let%bind () =
+      Recovery_work.jobs
+        entry
+        ~max_count:t.limits.job_result_recovery_max_count
+        ~max_total_bytes:t.limits.job_result_recovery_max_bytes
+    in
+    let%bind () = Recovery_work.schedules entry ~startup_time:(now t) in
+    let%bind handle =
+      Result.of_option
+        entry.Session_registry.store_handle
+        ~error:(unavailable Internal_error "recovered target has no owned Handle")
+    in
+    let%bind indexed =
+      Agent_store.Session_index.find_checked
+        (S.session_index t.store)
+        (S.Handle.session_id handle)
+      |> Result.map_error ~f:protocol_of_store
+      |> Result.bind ~f:(fun value ->
+        Result.of_option value ~error:(unavailable Session_not_found "target disappeared"))
+    in
+    let%map current =
+      S.current_lifecycle t.store handle ~current_entry:indexed
+      |> Result.map_error ~f:protocol_of_store
+    in
+    entry, current
+  in
+  match qualify () with
+  | Ok _ as success -> success
+  | Error error as failure ->
+    Session_registry.rollback_recovered
+      t.registry
+      ~primary:(Session_registry.Cleanup_failure.rejected error)
+      [ entry ];
+    failure
+  | exception exn ->
+    let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+    Session_registry.rollback_recovered
+      t.registry
+      ~primary:(Session_registry.Cleanup_failure.raised exn backtrace)
+      [ entry ];
+    Exn.raise_with_original_backtrace exn backtrace
+;;
+
+type metadata_target_purpose =
+  | Recurrence_metadata
+  | Native_metadata of Agent_session.Runtime_source_owner.Identity.t
+
+let acquire_metadata_target t ~purpose ~session ~check_state =
+  let module A = Agent_session in
+  let module P = Agent_protocol in
+  let module S = Agent_store.Session_store in
+  let module R = Session_registry in
+  let open Result.Let_syntax in
+  let%bind () =
+    if P.Id.Server.equal (P.Session_ref.server_id session) (S.server_id t.store)
+    then Ok ()
+    else Error (unavailable Invalid_request "recurrence target belongs to another host")
+  in
+  let check_loaded entry =
+    let check_owner () =
+      match purpose with
+      | Recurrence_metadata -> check_registered_entry t entry ~session
+      | Native_metadata source_owner ->
+        if
+          R.blocks_native_metadata_read t.registry entry
+          || not
+               (Option.exists
+                  (A.Session_actor.runtime_source_owner_identity entry.R.actor)
+                  ~f:(A.Runtime_source_owner.Identity.equal source_owner))
+        then Error (unavailable Conflict "native metadata owner is unavailable")
+        else check_registered_owner t entry ~session
+    in
+    let%bind () = check_owner () in
+    let%bind state = A.Session_actor.state entry.R.actor in
+    let%bind () = check_state state in
+    let%map () = check_owner () in
+    entry, state
+  in
+  match purpose, R.find t.registry (P.Session_ref.session_id session) with
+  | Native_metadata _, Some entry -> check_loaded entry
+  | Recurrence_metadata, Some entry ->
+    let%bind _ = check_loaded entry in
+    check_loaded entry
+  | (Recurrence_metadata | Native_metadata _), None ->
+    let%bind entry =
+      R.with_lifecycle t.registry (P.Session_ref.session_id session) (fun reservation ->
+        match R.Lifecycle_reservation.target reservation with
+        | Absent -> Error (unavailable Session_not_found "recurrence target is absent")
+        | Loaded entry ->
+          let%bind state = Agent_session.Session_actor.state entry.actor in
+          let%map () = check_state state in
+          entry
+        | Indexed indexed ->
+          let%bind handle =
+            S.open_session
+              t.store
+              ~sw:t.sw
+              ~actor_lock_nonce:(P.Id.Transaction.create () |> P.Id.Transaction.to_string)
+              indexed.session.id
+            |> Result.map_error ~f:protocol_of_store
+          in
+          let recovered = ref None in
+          R.acquire_indexed_target
+            t.registry
+            reservation
+            ~store:t.store
+            ~handle
+            ~authorize:(fun _summary ->
+              let%bind state =
+                match !recovered with
+                | None -> read_owned_session t handle
+                | Some entry -> Agent_session.Session_actor.state entry.R.actor
+              in
+              check_state state)
+            ~recover:(fun () ->
+              let%bind entry =
+                recover_open_handle
+                  ~purpose:Metadata_target_recovery
+                  ~prepare_parent_policy:(fun () ->
+                    Recovery_parent.create
+                      ~store:t.store
+                      ~registry:t.registry
+                      ~max_depth:t.limits.delegation_max_depth
+                      ~read_owned:(read_owned_session t)
+                      ~authorize_independent:(authorize_independent t)
+                    |> Result.map ~f:(fun retained -> Retained_unselected retained))
+                  t
+                  handle
+              in
+              let%map entry, current = qualify_metadata_target t entry in
+              recovered := Some entry;
+              entry, current))
+    in
+    check_loaded entry
+;;
+
+(* The checked Actor state is observation data for the path walker. Resource
+   admission still checks the original authority. *)
+let acquire_native_metadata_target t session_id =
+  let module A = Agent_session in
+  let module P = Agent_protocol in
+  let source_owner = A.Runtime_source_owner.identity t.runtime_source_owner in
+  acquire_metadata_target
+    t
+    ~purpose:(Native_metadata source_owner)
+    ~session:
+      (P.Session_ref.create
+         ~server_id:(Agent_store.Session_store.server_id t.store)
+         ~session_id)
+    ~check_state:(fun state ->
+      if
+        P.Id.Session.equal
+          state.Agent_session.Session_state.identity.session_id
+          session_id
+      then Ok ()
+      else Error (unavailable Permission_denied "native metadata target changed identity"))
+;;
+
+let preview_recurrence_authored_target
+      t
+      (entry : Session_registry.entry)
+      ~actor
+      ~authorize
+      ~name
+      ~mode
+  =
+  let module A = Agent_session in
+  let module P = Agent_protocol in
+  let module S = Agent_store.Session_store in
+  let open Result.Let_syntax in
+  let%bind handle =
+    Result.of_option
+      entry.store_handle
+      ~error:
+        (unavailable Invalid_state "authored preview requires an owned session Handle")
+  in
+  let session =
+    P.Session_ref.create
+      ~server_id:(S.server_id t.store)
+      ~session_id:(S.Handle.session_id handle)
+  in
+  let check_read () =
+    let%bind () = check_registered_entry t entry ~session in
+    if
+      Operator_authorization.is_current actor
+      && P.Principal.has_scope
+           (Operator_authorization.principal actor)
+           View_session_transcript
+    then Ok ()
+    else
+      Error
+        (unavailable Permission_denied "authored preview original read authority expired")
+  in
+  let read () =
+    let%bind () = check_read () in
+    let%bind state = A.Session_actor.state entry.actor in
+    let%bind () = authorize state in
+    let%map () = check_read () in
+    state
+  in
+  let%bind _ = read () in
+  Runtime_owner.with_loaded_source_capabilities_reported
+    entry.runtime
+    ~source_owner:t.runtime_source_owner
+    (fun public ->
+       let%bind before = read () in
+       let module Guard = struct
+         exception Denied of P.Error.t
+       end
+       in
+       let checkpoint () =
+         Eio.Fiber.check ();
+         match check_read () with
+         | Ok () -> ()
+         | Error error -> raise (Guard.Denied error)
+       in
+       let captured =
+         try
+           Recurrence_authored_source.capture
+             t.authored_resources
+             ~state:before
+             ~public
+             ~name
+             ~mode
+             ~checkpoint
+         with
+         | Guard.Denied error -> Error error
+       in
+       let%bind target = captured in
+       let%bind current = read () in
+       let spec state =
+         A.Session_state_document.project_spec
+           state.A.Session_state.spec
+           ~workspace:A.Workspace_instance.to_jsonaf
+       in
+       let%bind () =
+         if
+           P.Id.Session.equal before.identity.session_id current.identity.session_id
+           && Int.equal before.identity.generation current.identity.generation
+           && Int64.equal before.stop_epoch current.stop_epoch
+           && Document_schema.Json.equal (spec before) (spec current)
+         then Ok ()
+         else
+           Error
+             (unavailable Conflict "authored preview source or parent selectors changed")
+       in
+       let%bind prepared = Authored_resources.find t.authored_resources ~public ~name in
+       let%bind () =
+         match A.Recurrence_target.view target with
+         | Fresh_child { artifact; source_kind = Authored_tool selector; _ } ->
+           Recurrence_authored_source.check_artifact
+             prepared
+             ~selector
+             ~artifact:(Agent_store.Captured_prompt_artifact.value artifact)
+         | Fresh_child { source_kind = Artifact; _ } | Existing_session _ ->
+           Error
+             (unavailable Invalid_state "authored preview returned another source family")
+       in
+       let%map () = check_read () in
+       target)
+  |> Runtime_owner.Scope_outcome.resume
+;;
+
+let recover_owned_session t handle ~actor =
   recover_open_handle
+    ~original_actor:actor
     ~prepare_parent_policy:(fun () ->
       Recovery_parent.create
         ~store:t.store
@@ -6869,7 +14521,7 @@ let recover_owned_session t handle =
     handle
 ;;
 
-let recover_index_entry t index_entry =
+let recover_index_entry_with_selection t ~selection index_entry =
   let session_id = index_entry.Agent_store.Session_index.Entry.session.id in
   let handle_result =
     Agent_store.Session_store.open_session
@@ -6883,10 +14535,17 @@ let recover_index_entry t index_entry =
   in
   match handle_result with
   | Error _ as failure -> failure
-  | Ok handle -> recover_open_handle t handle
+  | Ok handle -> recover_open_handle_with_selection ~selection t handle
 ;;
 
-let recover_session = recover_index_entry
+let recover_registered_session t index_entry =
+  recover_index_entry_with_selection t ~selection:Registered_recovery index_entry
+;;
+
+let recover_session t index_entry =
+  recover_index_entry_with_selection t ~selection:Ordinary_entry_recovery index_entry
+  |> Result.map ~f:Session_registry.Recovered.entry
+;;
 
 let checkpoint_recovered_index t entry =
   match entry.Session_registry.store_handle with
@@ -7065,10 +14724,13 @@ let recover_sessions t =
       let pending = ref None in
       let step () =
         let open Result.Let_syntax in
-        let%bind entry = recover_index_entry t index_entry in
+        let%bind recovered_entry = recover_registered_session t index_entry in
+        let entry = Session_registry.Recovered.entry recovered_entry in
         pending := Some entry;
         let id = index_entry.session.id in
-        let%map () = Session_registry.add t.registry ~session_id:id entry in
+        let%map () =
+          Session_registry.add_recovered t.registry ~session_id:id recovered_entry
+        in
         (id, entry) :: recovered
       in
       let owned () =
@@ -7255,8 +14917,23 @@ let load_independent_ancestors t reference =
              "delegation.not_linked: start ancestry is unlinked or revoked")
     in
     let%bind () = authorize_independent t record in
-    let%bind parent = Session_registry.load t.registry record.key.parent_session_id in
-    let%bind current = Agent_session.Session_actor.state parent.actor in
+    let parent_id = record.key.parent_session_id in
+    let%bind current =
+      match Session_registry.find t.registry parent_id with
+      | Some parent ->
+        (* Snapshot retention permits committed metadata reads on its exact
+           tuple. The Actor call may yield, so check that tuple on both sides. *)
+        let check () =
+          Session_registry.check_native_metadata_publication t.registry parent
+        in
+        let%bind () = check () in
+        let%bind state = Agent_session.Session_actor.state parent.actor in
+        let%map () = check () in
+        state
+      | None ->
+        let%bind parent = Session_registry.load t.registry parent_id in
+        Agent_session.Session_actor.state parent.actor
+    in
     match current.spec.delegation with
     | None -> Ok ()
     | Some ancestor -> load_ancestors (reference.child_session_id :: visited) ancestor
@@ -7281,14 +14958,33 @@ let prepare_session_start t entry =
       | None -> Ok ()
       | Some reference ->
         let%bind () = load_independent_ancestors t reference in
-        let%bind parent, record = generated_parent ~check_stop_epoch:false t state in
+        let%bind parent, record = generated_parent_record t state in
         (match record.admission.lifetime with
          | Independent _ ->
-           Independent_resources.check_parent
-             ~max_depth:t.limits.delegation_max_depth
-             ~host:(independent_resource_host t)
-             ~parent_id:record.key.parent_session_id
+           let%bind eligibility =
+             prepare_independent_eligibility t ~parent ~check_request:(fun () -> Ok ())
+           in
+           let fingerprint =
+             Independent_eligibility.fingerprint_state eligibility ~owner:parent.runtime
+           in
+           let%bind _ =
+             generated_parent_with_fingerprint
+               ~check_stop_epoch:false
+               ~fingerprint
+               t
+               state
+           in
+           recheck_independent_eligibility t eligibility
          | Owned | Invocation_owned _ ->
+           let%bind () =
+             check_loaded_generated_parent
+               ~check_stop_epoch:false
+               ~fingerprint:(parent_authority_fingerprint t)
+               t
+               state
+               ~parent
+               ~record
+           in
            let%bind current = Agent_session.Session_actor.state parent.actor in
            (match
               Option.equal Int64.equal state.parent_stop_epoch (Some current.stop_epoch)
@@ -7341,7 +15037,7 @@ let resume_generated_initial_start t entry =
   | true, Some reference ->
     (* A temporarily queued or compacting ancestor must not turn a durable start
        request into a permanent failure. Terminal loss of authority is different. *)
-    let rec ready depth ~require_execution reference =
+    let rec ready ?eligibility depth ~require_execution reference =
       let%bind () =
         match depth < t.limits.delegation_max_depth with
         | true -> Ok ()
@@ -7361,6 +15057,10 @@ let resume_generated_initial_start t entry =
       | (Reserved | Artifact_installed | Child_installed), None -> Ok false
       | Linked, None ->
         let%bind () = authorize_independent t record in
+        let%bind () =
+          Option.value_map eligibility ~default:(Ok ()) ~f:(fun eligibility ->
+            Independent_eligibility.check_record eligibility record)
+        in
         let require_execution =
           match record.admission.lifetime with
           | Owned | Invocation_owned _ -> require_execution
@@ -7372,27 +15072,61 @@ let resume_generated_initial_start t entry =
                ~error:
                  (unavailable Permission_denied "initial start parent is unavailable")
         in
-        let%bind current = A.state parent.actor in
-        let%bind () =
-          Agent_session.Delegation_authority.check_invocation_owner record current
-        in
-        let%bind () =
-          match
+        let check_parent_state (current : Agent_session.Session_state.t) =
+          let%bind () =
+            Agent_session.Delegation_authority.check_invocation_owner record current
+          in
+          if
             require_execution
             && depth = 0
             && not
                  (Int64.equal
                     current.stop_epoch
                     (Option.value record.admission.parent_stop_epoch ~default:0L))
-          with
-          | false -> Ok ()
-          | true ->
+          then
             Error
               (unavailable
                  Permission_denied
                  "initial start parent stopped after admission")
+          else Ok ()
         in
-        let%bind fingerprint = parent_authority_fingerprint t current in
+        let%bind current = A.state parent.actor in
+        let%bind () = check_parent_state current in
+        let%bind eligibility, current =
+          match eligibility, record.admission.lifetime with
+          | None, Independent _ ->
+            let%bind prepared =
+              prepare_independent_eligibility t ~parent ~check_request:(fun () ->
+                let%bind current = A.state parent.actor in
+                check_parent_state current)
+            in
+            let%bind () = recheck_independent_eligibility t prepared in
+            let%bind current = A.state parent.actor in
+            let%map () = check_parent_state current in
+            Some prepared, current
+          | Some _, _ | None, (Owned | Invocation_owned _) -> Ok (eligibility, current)
+        in
+        let%bind fingerprint =
+          match eligibility with
+          | None -> parent_authority_fingerprint t current
+          | Some eligibility ->
+            Independent_eligibility.fingerprint_state
+              eligibility
+              ~owner:parent.runtime
+              current
+        in
+        let ready_parent () =
+          match current.spec.delegation with
+          | Some ancestor -> ready ?eligibility (depth + 1) ~require_execution ancestor
+          | None ->
+            let%map () =
+              Option.value_map
+                eligibility
+                ~default:(Ok ())
+                ~f:check_independent_eligibility_current
+            in
+            true
+        in
         (match
            ( require_execution
            , ( current.lifecycle.desired
@@ -7400,16 +15134,10 @@ let resume_generated_initial_start t entry =
              , current.failure
              , String.equal fingerprint record.admission.authority_sha256 ) )
          with
-         | false, (_, _, _, true) ->
-           (match current.spec.delegation with
-            | None -> Ok true
-            | Some ancestor -> ready (depth + 1) ~require_execution ancestor)
+         | false, (_, _, _, true) -> ready_parent ()
          | true, (Running, false, None, true) ->
            (match current.lifecycle.observed with
-            | Idle | Running_turn _ | Waiting_for_permission _ ->
-              (match current.spec.delegation with
-               | None -> Ok true
-               | Some ancestor -> ready (depth + 1) ~require_execution ancestor)
+            | Idle | Running_turn _ | Waiting_for_permission _ -> ready_parent ()
             | Stopped
             | Queued_for_slot
             | Starting
@@ -7522,6 +15250,8 @@ let resume_selected_initial_starts t =
       in
       match Session_registry.find t.registry record.key.parent_session_id with
       | None -> Ok false
+      | Some parent when not (Session_registry.execution_selected t.registry parent) ->
+        Ok false
       | Some parent ->
         let%bind state = A.state parent.actor in
         (match state.spec.delegation with
@@ -7538,7 +15268,7 @@ let resume_selected_initial_starts t =
       if selected then resume_generated_initial_start t entry else Ok ()
   in
   with_generated_creation_lock ~protect:false t (fun () ->
-    List.iter (Session_registry.entries t.registry) ~f:(fun entry ->
+    List.iter (Session_registry.execution_entries t.registry) ~f:(fun entry ->
       ignore (resume entry : (unit, Agent_protocol.Error.t) Result.t)))
 ;;
 
@@ -7560,10 +15290,234 @@ type child_creation_source =
       -> (History_entry.t list * int, Agent_protocol.Error.t) result
   }
 
+let register_child_origin_frontier t parent ~bound ~record ~native_callback ~check_parent =
+  let module A = Agent_session.Session_actor in
+  let open Result.Let_syntax in
+  let reference = Agent_store.Delegation_store.reference record in
+  match bound, record.Agent_store.Delegation_store.admission.goal_origin with
+  | None, None ->
+    (* Historical lower omission remains Unknown. Retain the original ordinary
+       creation/recovery path; never synthesize a new origin or positive slot. *)
+    Ok None
+  | Some _, None -> Error (unavailable Conflict "new child birth has no frozen origin")
+  | (None | Some _), Some _ ->
+    let%bind reservation =
+      match bound with
+      | Some bound ->
+        A.observe_child_origin_reservation
+          parent.Session_registry.actor
+          ~source_owner:t.runtime_source_owner
+          ~bound
+          ~reference
+      | None ->
+        A.observe_retained_child_origin_reservation
+          parent.actor
+          ~source_owner:t.runtime_source_owner
+          ~reference
+    in
+    let%map () =
+      A.register_child_origin_reservation
+        parent.actor
+        ~reservation
+        ~native_callback
+        ~check_parent
+    in
+    Some reservation
+;;
+
+let import_child_origin_snapshot
+      t
+      parent
+      child
+      ~reservation
+      ~native_callback
+      ~check_parent
+      ~before_init
+  =
+  let module A = Agent_session.Session_actor in
+  let open Result.Let_syntax in
+  match reservation with
+  | None -> Ok ()
+  | Some reservation ->
+    let%bind () =
+      if
+        Option.exists
+          parent.Session_registry.store_handle
+          ~f:(Agent_store.Session_store.owns_handle t.store)
+        && Option.exists
+             child.Session_registry.store_handle
+             ~f:(Agent_store.Session_store.owns_handle t.store)
+        && Runtime_owner.belongs_to_actor parent.runtime parent.actor
+        && Runtime_owner.belongs_to_actor child.runtime child.actor
+      then Ok ()
+      else Error (unavailable Conflict "child snapshot lost actual Factory allocation")
+    in
+    let%bind () =
+      if not before_init
+      then Ok ()
+      else (
+        let%bind state = A.state child.Session_registry.actor in
+        if
+          Agent_protocol.Session.equal_desired_state state.lifecycle.desired Stopped
+          && not (Runtime_owner.is_loaded child.runtime)
+        then Ok ()
+        else
+          Error
+            (unavailable
+               Conflict
+               "new child accounting must be observed before runtime activation"))
+    in
+    let%bind observation = A.observe_child_origin_usage child.actor ~reservation in
+    let%map _ =
+      A.import_child_origin_usage
+        parent.Session_registry.actor
+        ~reservation
+        ~observation
+        ~native_callback
+        ~check_parent
+    in
+    ()
+;;
+
+(* Private creation-only bridge. [child] is the actual allocation retained by
+   with_uninstalled_recovery_entry; no caller-supplied public entry reaches here.
+   Parent/child authority remains the existing creation policy and native borrow.
+   The new ACK records only an Unobserved immutable immediate-child association. *)
+let register_installed_child ?native_callback t parent child ~reference ~check_parent =
+  let module S = Agent_store.Session_store in
+  let module P = Agent_protocol in
+  let module A = Agent_session.Session_actor in
+  let open Result.Let_syntax in
+  let%bind () =
+    match parent.Session_registry.store_handle, child.Session_registry.store_handle with
+    | Some parent_handle, Some child_handle
+      when S.owns_handle t.store parent_handle
+           && S.owns_handle t.store child_handle
+           && P.Id.Session.equal
+                (S.Handle.session_id parent_handle)
+                reference.Agent_store.Delegation_store.Reference.key.parent_session_id
+           && P.Id.Session.equal
+                (S.Handle.session_id child_handle)
+                reference.child_session_id
+           && Runtime_owner.belongs_to_actor parent.runtime parent.actor
+           && Runtime_owner.belongs_to_actor child.runtime child.actor ->
+      check_registered_owner
+        t
+        parent
+        ~session:
+          (P.Session_ref.create
+             ~server_id:(S.server_id t.store)
+             ~session_id:(S.Handle.session_id parent_handle))
+    | (Some _ | None), (Some _ | None) ->
+      Error (unavailable Conflict "installed child lost its actual Factory allocation")
+  in
+  let%bind record =
+    Agent_store.Delegation_store.resolve (S.delegations t.store) reference
+    |> Result.map_error ~f:protocol_of_store
+  in
+  match record.admission.goal_origin with
+  | Some _ ->
+    (* The pre-initializer parent frontier already owns this exact slot. Refresh
+       original permission through the retained external observation, then finite
+       no-op consume; do not re-enter the legacy post-install Store handlers. *)
+    register_child_origin_frontier
+      t
+      parent
+      ~bound:None
+      ~record
+      ~native_callback
+      ~check_parent
+    |> Result.map ~f:ignore
+  | None ->
+    let%bind proof =
+      A.observe_child_installation
+        child.actor
+        ~source_owner:t.runtime_source_owner
+        ~reference
+    in
+    A.register_child_installation
+      ?native_callback
+      parent.actor
+      ~source_owner:t.runtime_source_owner
+      ~child:proof
+      ~check_parent
+      ~max_children:t.limits.delegation_recovery_max_count
+      ~max_encoded_bytes:t.limits.delegation_recovery_max_bytes
+;;
+
+(* Called only under the actual parent's existing runtime lease. The callback
+   is installed from that runtime's original Delegation_authority, not from DATA. *)
+let prepare_native_child_origin t parent runtime borrowed ~capabilities =
+  let module A = Agent_session.Session_actor in
+  let module N = Agent_session.Native_tool_invocation in
+  let module C = Chat_response.Tool_capability in
+  let open Result.Let_syntax in
+  let context = (N.borrowed_invocation borrowed).context in
+  let%bind binding =
+    C.find capabilities ~name:context.tool_name
+    |> Result.map_error ~f:(fun error -> unavailable Permission_denied error.C.message)
+  in
+  let%bind admission = N.Admission.capture borrowed ~binding in
+  let%bind state = A.state parent.Session_registry.actor in
+  let%bind ancestry =
+    match state.spec.delegation, runtime.Agent_session.Runtime_builder.check_ancestry with
+    | None, _ -> Ok None
+    | Some _, Some check -> Result.map (check ()) ~f:Option.some
+    | Some _, None ->
+      Error
+        (unavailable
+           Permission_denied
+           "delegated child creation has no retained ancestry owner")
+  in
+  A.prepare_native_child_origin
+    parent.actor
+    ~source_owner:t.runtime_source_owner
+    ~admission
+    ~binding
+    ~ancestry
+;;
+
+let validate_child_goal_origin (state : Agent_session.Session_state.t) record =
+  let module G = Agent_session.Goal_descendants in
+  let open Result.Let_syntax in
+  let%bind () =
+    if
+      Agent_store.Delegation_store.equal_stage
+        record.Agent_store.Delegation_store.stage
+        Linked
+      || Agent_protocol.Session.equal_desired_state state.lifecycle.desired Stopped
+    then Ok ()
+    else Error (corrupt "unlinked child cannot recover into an active runtime")
+  in
+  match
+    record.Agent_store.Delegation_store.admission.goal_origin, state.goal_descendants
+  with
+  | None, None -> Ok ()
+  | None, Some accounting when Option.is_none (G.origin accounting) -> Ok ()
+  | Some expected, Some accounting
+    when Option.exists
+           (G.origin accounting)
+           ~f:(Agent_store.Delegation_goal_origin.equal expected) -> Ok ()
+  | None, Some _ | Some _, (None | Some _) ->
+    Error (corrupt "child descendant accounting differs from its frozen lower origin")
+;;
+
+let check_child_pre_link_runtime record (entry : Session_registry.entry) =
+  if
+    Agent_store.Delegation_store.equal_stage
+      record.Agent_store.Delegation_store.stage
+      Linked
+    || not (Runtime_owner.is_loaded entry.runtime)
+  then Ok ()
+  else Error (corrupt "unlinked child already has a loaded runtime")
+;;
+
 let create_delegated_session
       ?(start_immediately = false)
       ?(lifetime = Owned)
       ?invocation_owner
+      ?native_callback
+      ?origin_preparation
       t
       ~parent_session_id
       ~idempotency_key
@@ -7578,10 +15532,38 @@ let create_delegated_session
   let module S = Agent_store.Session_store in
   let open Result.Let_syntax in
   let run () =
-    let%bind () =
-      if Session_registry.lifecycle_reserved t.registry parent_session_id
-      then Error (unavailable Conflict "parent lifecycle is reserved")
-      else Ok ()
+    let%bind borrowed_parent =
+      if not (Session_registry.lifecycle_reserved t.registry parent_session_id)
+      then Ok None
+      else (
+        let conflict = unavailable Conflict "parent lifecycle is reserved" in
+        match native_callback, Session_registry.find t.registry parent_session_id with
+        | Some borrowed, Some parent
+          when t.qualify_chatml_extensions
+               && not (Session_registry.blocks_owned_execution t.registry parent) ->
+          let module Native = Agent_session.Native_tool_invocation in
+          let context = (Native.borrowed_invocation borrowed).context in
+          if P.Id.Session.equal context.session_id parent_session_id
+          then (
+            let session =
+              P.Session_ref.create
+                ~server_id:(S.server_id t.store)
+                ~session_id:parent_session_id
+            in
+            let proof =
+              let%bind () = check_registered_owner t parent ~session in
+              let%bind selected = Native.borrowed_capabilities borrowed in
+              let%bind binding =
+                C.find selected ~name:context.tool_name
+                |> Result.map_error ~f:(fun _ -> conflict)
+              in
+              let%bind () = Native.require_native_admission borrowed ~binding in
+              let%map () = Native.check_borrowed_effect_current borrowed in
+              Some parent
+            in
+            Result.map_error proof ~f:(fun _ -> conflict))
+          else Error conflict
+        | (Some _ | None), (Some _ | None) -> Error conflict)
     in
     let%bind admitted_lifetime = requested_lifetime t lifetime in
     let%bind admitted_lifetime =
@@ -7597,25 +15579,46 @@ let create_delegated_session
     in
     let%bind parent =
       match
-        t.qualify_chatml_extensions, Session_registry.find t.registry parent_session_id
+        ( t.qualify_chatml_extensions
+        , Option.first_some
+            borrowed_parent
+            (Session_registry.find t.registry parent_session_id) )
       with
       | true, Some parent -> Ok parent
       | _ ->
         Error (unavailable Invalid_state "generated creation requires a qualified parent")
     in
-    Runtime_owner.with_background_runtime parent.runtime (fun runtime ->
+    let with_resources f =
+      match invocation_owner, native_callback with
+      | None, None -> Runtime_owner.with_background_runtime parent.runtime f
+      | None, Some borrowed ->
+        let invocation =
+          Agent_session.Native_tool_invocation.borrowed_invocation borrowed
+        in
+        Runtime_owner.with_execution_runtime
+          parent.runtime
+          ~owner:(Agent_protocol.Job.Invocation invocation.context.id)
+          f
+      | Some invocation_id, _ ->
+        Runtime_owner.with_execution_runtime
+          parent.runtime
+          ~owner:(Agent_protocol.Job.Invocation invocation_id)
+          f
+    in
+    with_resources (fun runtime ->
       let%bind before = A.state parent.actor in
-      let%bind moderator = parent_moderation_source t parent_session_id in
+      let%bind moderator =
+        parent_moderation_source_for_state before ~read:(fun () ->
+          Agent_session.Runtime_builder.moderation_source runtime)
+      in
       let%bind authority_sha256 =
         Agent_session.Delegation_authority.fingerprint ?moderator before
       in
-      let check_parent current =
+      let check_immediate_parent ~fingerprint (current : State.t) =
         (* Publication calls this from the actor checkpoint. The runtime lease
            retains the captured immutable policy source; never reacquire its owner
            here, since the idle scheduler may hold it while waiting for this actor. *)
-        let%bind fingerprint =
-          Agent_session.Delegation_authority.fingerprint ?moderator current
-        in
+        let%bind fingerprint = fingerprint current in
         let%bind () =
           match invocation_owner with
           | None -> Ok ()
@@ -7637,15 +15640,69 @@ let create_delegated_session
           Error
             (unavailable Permission_denied "parent no longer permits generated creation")
       in
-      let%bind () = check_parent before in
-      let%bind () =
+      let strict_fingerprint =
+        Agent_session.Delegation_authority.fingerprint ?moderator
+      in
+      let%bind () = check_immediate_parent ~fingerprint:strict_fingerprint before in
+      let check_native () =
+        Option.value_map
+          native_callback
+          ~default:(Ok ())
+          ~f:Agent_session.Native_tool_invocation.check_borrowed_effect_current
+      in
+      let check_request () =
+        let%bind () = check_native () in
+        let%bind current = A.state parent.actor in
+        let%bind () = check_immediate_parent ~fingerprint:strict_fingerprint current in
+        check_native ()
+      in
+      let check_ancestry eligibility =
+        let%bind () = recheck_independent_eligibility t eligibility in
+        check_native ()
+      in
+      let%bind eligibility =
         match lifetime with
-        | Owned -> Ok ()
+        | Owned -> Ok None
         | Independent ->
-          Independent_resources.check_parent
-            ~max_depth:t.limits.delegation_max_depth
-            ~host:(independent_resource_host t)
-            ~parent_id:parent_session_id
+          let%bind eligibility =
+            prepare_independent_eligibility
+              ?retained_sources:runtime.retained_ancestor_sources
+              t
+              ~parent
+              ~check_request
+          in
+          let%map () = check_ancestry eligibility in
+          Some eligibility
+      in
+      let check_publication () =
+        let%bind () = check_native () in
+        Option.value_map
+          eligibility
+          ~default:(Ok ())
+          ~f:Independent_eligibility.check_reservations
+      in
+      let check_parent_facts current =
+        match eligibility with
+        | None -> check_immediate_parent ~fingerprint:strict_fingerprint current
+        | Some eligibility ->
+          let%bind () = Independent_eligibility.check_current eligibility in
+          check_immediate_parent
+            ~fingerprint:
+              (Independent_eligibility.fingerprint_state
+                 eligibility
+                 ~owner:parent.runtime)
+            current
+      in
+      let check_parent current =
+        let%bind () = check_publication () in
+        check_parent_facts current
+      in
+      let recheck_eligibility () =
+        match eligibility with
+        | None -> check_native ()
+        | Some eligibility ->
+          let%bind () = check_request () in
+          check_ancestry eligibility
       in
       let%bind principal_id =
         Result.of_option
@@ -7680,6 +15737,40 @@ let create_delegated_session
         | Some { revocation = Some _; _ } ->
           Error (unavailable Permission_denied "generated admission was revoked")
         | None | Some { revocation = None; _ } -> Ok ()
+      in
+      let%bind bound, child_session_id, transaction_id, goal_origin =
+        match existing with
+        | Some record ->
+          Ok
+            ( None
+            , record.admission.child_session_id
+            , record.admission.transaction_id
+            , record.admission.goal_origin )
+        | None ->
+          let%bind preparation =
+            match origin_preparation, native_callback with
+            | Some preparation, _ -> Ok preparation
+            | None, Some borrowed ->
+              prepare_native_child_origin t parent runtime borrowed ~capabilities
+            | None, None ->
+              A.prepare_unrelated_child_origin
+                parent.actor
+                ~source_owner:t.runtime_source_owner
+          in
+          let child_session_id = P.Id.Session.create () in
+          let transaction_id = P.Id.Transaction.create () in
+          let%map bound =
+            A.bind_child_origin
+              parent.actor
+              ~preparation
+              ~key
+              ~child_session_id
+              ~transaction_id
+          in
+          ( Some bound
+          , child_session_id
+          , transaction_id
+          , Some (A.Child_origin.Bound.origin bound) )
       in
       let%bind source = prepare_source ~runtime ~capabilities ~existing in
       let artifact = source.artifact in
@@ -7716,13 +15807,15 @@ let create_delegated_session
           ()
       in
       let candidate : D.Admission.t =
-        { child_session_id = P.Id.Session.create ()
+        { child_session_id
         ; revision_id = artifact.revision_id
-        ; transaction_id = P.Id.Transaction.create ()
+        ; transaction_id
         ; manifest_sha256 = artifact.manifest_sha256
         ; parent_revision_id = before.spec.prompt_revision_id
         ; parent_stop_epoch = Some before.stop_epoch
         ; authored_tool = source.authored_tool
+        ; goal_origin
+        ; captured_recurrence = None
         ; authority_sha256
         ; capability_pins = source.capability_pins
         ; lifetime = admitted_lifetime
@@ -7731,6 +15824,7 @@ let create_delegated_session
         }
       in
       Eio.Fiber.check ();
+      let%bind () = recheck_eligibility () in
       Eio.Cancel.protect (fun () ->
         let%bind reservation =
           D.reserve
@@ -7763,7 +15857,7 @@ let create_delegated_session
              | true -> Ok ()
              | false ->
                let%bind _ =
-                 D.revoke ledger record Parent_stopped
+                 D.revoke_unfinished ledger record Parent_stopped
                  |> Result.map_error ~f:protocol_of_store
                in
                Error
@@ -7781,24 +15875,38 @@ let create_delegated_session
           | _ ->
             Error (unavailable Permission_denied "reserved parent authority has changed")
         in
+        (* Lower reserve is now durable; parent frontier must ACK before source
+           installation, child physical initialization, recovery or publication. *)
+        let%bind birth_reservation =
+          register_child_origin_frontier
+            t
+            parent
+            ~bound
+            ~record
+            ~native_callback
+            ~check_parent
+        in
         let%bind artifacts =
           Agent_store.Prompt_artifact_store.create
             ~env:t.env
             ~root:(Agent_store.Data_root.prompt_artifacts_path (S.data_root t.store))
           |> Result.map_error ~f:protocol_of_store
         in
+        let%bind () = recheck_eligibility () in
         let%bind record = source.install ~artifacts ~record in
         let reference = D.reference record in
         let child_id = record.admission.child_session_id in
         let verify (state : State.t) =
           match state.State.spec.delegation with
           | Some actual when D.Reference.equal reference actual ->
+            let%bind () = validate_child_goal_origin state record in
             validate_delegated_target state record
           | _ -> Error (corrupt "generated child does not match its creation reservation")
         in
         let%bind entry, fresh =
           match Session_registry.find t.registry child_id with
           | Some entry ->
+            let%bind () = check_child_pre_link_runtime record entry in
             let%map () = A.state entry.actor |> Result.bind ~f:verify in
             entry, false
           | None ->
@@ -7869,6 +15977,12 @@ let create_delegated_session
                       }
                   }
                 in
+                let%bind initial =
+                  initialize_child_accounting
+                    t
+                    ~goal_origin:record.admission.goal_origin
+                    initial
+                in
                 let%bind () = State.validate initial in
                 S.create_session_initialized
                   t.store
@@ -7899,7 +16013,7 @@ let create_delegated_session
              with
              | Ok _ as success -> success
              | Error _ as failure ->
-               close_recovery_handle t handle;
+               close_unretained_handle_after_failure t handle;
                failure)
         in
         let publication () =
@@ -7909,12 +16023,25 @@ let create_delegated_session
               ~path:(Agent_store.Data_root.sessions_path (S.data_root t.store))
             |> Result.map_error ~f:protocol_of_store
           in
+          let%bind () = recheck_eligibility () in
           let%bind record =
             D.advance ledger record Child_installed
             |> Result.map_error ~f:protocol_of_store
           in
+          let%bind () =
+            register_installed_child
+              ?native_callback
+              t
+              parent
+              entry
+              ~reference
+              ~check_parent
+          in
+          let%bind () = recheck_eligibility () in
           A.checkpoint parent.actor ~persist:(fun current ->
-            match check_parent current with
+            (* A transient reservation is not a permanent authority change. *)
+            let%bind () = check_publication () in
+            match check_parent_facts current with
             | Ok () ->
               D.advance ledger record Linked
               |> Result.map ~f:ignore
@@ -7928,7 +16055,8 @@ let create_delegated_session
                 | Running -> Authority_changed
               in
               let%bind _ =
-                D.revoke ledger record reason |> Result.map_error ~f:protocol_of_store
+                D.revoke_unfinished ledger record reason
+                |> Result.map_error ~f:protocol_of_store
               in
               Error error)
         in
@@ -7938,6 +16066,16 @@ let create_delegated_session
           ~session_id:child_id
           ~fresh
           (fun ~installed ->
+             let%bind () =
+               import_child_origin_snapshot
+                 t
+                 parent
+                 entry
+                 ~reservation:birth_reservation
+                 ~native_callback
+                 ~check_parent
+                 ~before_init:(not (D.equal_stage record.stage Linked))
+             in
              let%bind () = publication () in
              let%bind () =
                match fresh with
@@ -7953,7 +16091,616 @@ let create_delegated_session
   with_generated_creation_lock ~protect:false t run
 ;;
 
-let create_generated_session
+module Recurrence_child = struct
+  type t =
+    { session : Agent_protocol.Session_ref.t
+    ; reference : Agent_store.Delegation_store.Reference.t
+    }
+
+  let session t = t.session
+  let reference t = t.reference
+end
+
+module Recurrence_effect_guard = struct
+  (* Existing owner checkpoints return unit. This private bridge preserves a
+     typed denial without classifying arbitrary callback/cancellation failures. *)
+  exception Denied of Agent_protocol.Error.t
+
+  let run check f =
+    let checkpoint () =
+      Eio.Fiber.check ();
+      match check () with
+      | Ok () -> ()
+      | Error error -> raise (Denied error)
+    in
+    try
+      checkpoint ();
+      f checkpoint
+    with
+    | Denied error -> Error error
+  ;;
+end
+
+let create_recurrence_child t ~parent ~permit =
+  let module P = Agent_protocol in
+  let module A = Agent_session in
+  let module Actor = A.Session_actor in
+  let module Checked = Actor.Recurrence_creation.Checked in
+  let module R = A.Recurrence_child_reservation in
+  let module D = Agent_store.Delegation_store in
+  let module S = Agent_store.Session_store in
+  let module Artifact = Agent_store.Prompt_artifact_store in
+  let module Parent = A.Recurrence_target.Parent in
+  let open Result.Let_syntax in
+  let row = Actor.Recurrence_creation.reservation permit in
+  let parent_session =
+    R.occurrence row
+    |> A.Recurrence_identity.Occurrence.definition
+    |> A.Recurrence_identity.Definition.controller
+  in
+  let parent_id = P.Session_ref.session_id parent_session in
+  let run () =
+    with_catalog_admission t ~f:(fun () ->
+      let%bind () = check_registered_entry t parent ~session:parent_session in
+      let refresh () =
+        let%bind checked = Actor.check_recurrence_creation parent.actor permit in
+        let%bind state = Actor.state parent.actor in
+        let definition = Checked.definition checked in
+        let%bind () =
+          match A.Recurrence_target.view (A.Recurrence_definition.target definition) with
+          | Existing_session _ ->
+            Error
+              (unavailable
+                 Invalid_request
+                 "recurrence child requires captured fresh target")
+          | Fresh_child
+              { artifact = _; definition; parent = captured; mode = _; source_kind = _ }
+            ->
+            let%bind profile =
+              permission_profile t (Parent.permission_profile captured)
+            in
+            let workspace = Parent.workspace captured in
+            let workspace_allowed =
+              Option.exists workspace.definition_id ~f:(fun id ->
+                Option.is_some (Catalogs.find_workspace t.catalogs id)
+                && A.Prompt_definition.allows_workspace definition id)
+            in
+            if
+              t.qualify_chatml_extensions
+              && definition.enabled
+              && P.Principal.has_scope (Checked.principal checked) Create_sessions
+              && (not (Session_registry.lifecycle_reserved t.registry parent_id))
+              && workspace_allowed
+              && Recurrence_parent_configuration.matches captured state.spec
+              && String.equal profile.revision_digest (Parent.permission_profile_digest captured)
+            then Ok ()
+            else
+              Error
+                (unavailable
+                   Permission_denied
+                   "captured recurrence selectors no longer match current \
+                    host/controller policy")
+        in
+        let%map () = Checked.check_current checked in
+        checked, state
+      in
+      let%bind checked, before = refresh () in
+      let definition = Checked.definition checked in
+      let%bind artifact, captured_definition, captured_parent, source_kind =
+        match A.Recurrence_target.view (A.Recurrence_definition.target definition) with
+        | Fresh_child { artifact; definition; parent; mode = _; source_kind } ->
+          Ok
+            ( Agent_store.Captured_prompt_artifact.value artifact
+            , definition
+            , parent
+            , source_kind )
+        | Existing_session _ ->
+          Error (unavailable Invalid_request "recurrence target is not a fresh child")
+      in
+      Runtime_owner.with_loaded_runtime parent.runtime (fun runtime ->
+        let%bind native =
+          Result.of_option
+            runtime.A.Runtime_builder.native_runtime
+            ~error:
+              (unavailable
+                 Invalid_state
+                 "recurrence parent native bindings are unavailable")
+        in
+        let%bind capabilities =
+          Lazy.force native.capabilities
+          |> Result.map_error ~f:(fun error ->
+            unavailable Permission_denied error.Chat_response.Tool_capability.message)
+        in
+        let%bind selected =
+          match source_kind with
+          | Artifact -> Ok capabilities
+          | Authored_tool selector ->
+            let%bind prepared =
+              Authored_resources.find
+                t.authored_resources
+                ~public:capabilities
+                ~name:selector.name
+            in
+            let%bind () =
+              Recurrence_authored_source.check_artifact prepared ~selector ~artifact
+            in
+            Recurrence_authored_source.capabilities prepared
+        in
+        let%bind _ =
+          Chat_response.Background_request.rebind_capabilities
+            ~pins:(Parent.capability_pins captured_parent)
+            ~capabilities:selected
+        in
+        let source_fingerprint = Chat_response.Tool_capability.fingerprint selected in
+        let refresh () =
+          let%bind checked, state = refresh () in
+          let%bind current =
+            match source_kind with
+            | Artifact -> Ok capabilities
+            | Authored_tool selector ->
+              let%bind prepared =
+                Authored_resources.find
+                  t.authored_resources
+                  ~public:capabilities
+                  ~name:selector.name
+              in
+              let%bind () =
+                if
+                  String.equal
+                    selector.source_sha256
+                    (A.Authored_agent_source.fingerprint prepared.source)
+                then Ok ()
+                else
+                  Error
+                    (unavailable
+                       Permission_denied
+                       "captured authored source changed before child publication")
+              in
+              Recurrence_authored_source.capabilities prepared
+          in
+          let%bind () =
+            if
+              String.equal
+                source_fingerprint
+                (Chat_response.Tool_capability.fingerprint current)
+            then Ok ()
+            else
+              Error
+                (unavailable
+                   Permission_denied
+                   "captured child resource selection changed")
+          in
+          let%bind _ =
+            Chat_response.Background_request.rebind_capabilities
+              ~pins:(Parent.capability_pins captured_parent)
+              ~capabilities:current
+          in
+          let%map () = Checked.check_current checked in
+          checked, state
+        in
+        let%bind moderator =
+          match before.moderator, before.lifecycle.desired with
+          | None, _ -> Ok None
+          | Some _, Stopped ->
+            Error
+              (unavailable
+                 Permission_denied
+                 "stopped parent moderation cannot be activated for a child")
+          | Some _, Running ->
+            let module M = Chat_response.Moderator_manager in
+            (match runtime.moderator_manager with
+             | Some manager when Option.is_some (M.extension_definition manager) ->
+               Ok (M.invocation_observer manager)
+             | None | Some _ ->
+               Error
+                 (unavailable
+                    Permission_denied
+                    "loaded parent moderation source is unavailable"))
+        in
+        let%bind authority_sha256 =
+          A.Delegation_authority.fingerprint ?moderator before
+        in
+        let%bind () =
+          A.Workspace_resolver.verify_available
+            ~env:t.env
+            (Parent.workspace captured_parent)
+          |> Result.map_error ~f:protocol_of_store
+        in
+        let%bind artifacts =
+          Artifact.open_existing
+            ~env:t.env
+            ~root:(Agent_store.Data_root.prompt_artifacts_path (S.data_root t.store))
+          |> Result.map_error ~f:protocol_of_store
+        in
+        let%bind config =
+          A.Prompt_revision_builder.captured_config
+            ?content_limits:t.content_limits
+            ~logical_tree:(Artifact.materialized_tree artifacts artifact.revision_id)
+            artifact
+          |> Result.map_error ~f:(fun diagnostics ->
+            unavailable
+              Prompt_unavailable
+              (List.map
+                 diagnostics
+                 ~f:(fun (diagnostic : A.Prompt_revision_builder.Diagnostic.t) ->
+                   diagnostic.message)
+               |> String.concat ~sep:"\n"))
+        in
+        let%bind parent_target =
+          match Inference.Selection.view (Parent.inference_selection captured_parent) with
+          | Captured target -> Ok target
+          | Unresolved ->
+            Error
+              (unavailable
+                 Migration_required
+                 "captured recurrence inference target is unresolved")
+        in
+        let%bind target =
+          Chat_response.Inference_config.apply_overrides
+            parent_target
+            config
+            ~limits:t.document_limits
+          |> Result.map_error ~f:(fun error ->
+            unavailable
+              Invalid_request
+              (Sexp.to_string_hum (Inference_runtime.Preparation_error.sexp_of_t error)))
+        in
+        let%bind inference_target =
+          Inference.Selection.captured target ~limits:t.document_limits
+          |> Result.map_error ~f:(fun error ->
+            unavailable
+              Invalid_request
+              (Sexp.to_string_hum (Inference.Request.Error.sexp_of_t error)))
+        in
+        let%bind protocol =
+          P.Session.Spec.create
+            ~execution_host:Daemon
+            ~prompt:(Generated artifact.revision_id)
+            ~workspace:before.spec.protocol.workspace
+            ~liveness:Detached
+            ~persistence:Durable
+            ~permission_profile:(Parent.permission_profile captured_parent)
+            ~start_immediately:false
+            ~display_name:captured_definition.config_name
+            ~labels:[]
+            ()
+        in
+        let initial_spec : A.Session_state.Spec.t =
+          { protocol
+          ; prompt_definition_id = None
+          ; root_invocation =
+              A.Recurrence_child_origin.root_invocation_for_source
+                ~source_kind
+                captured_definition
+          ; prompt_revision_id = artifact.revision_id
+          ; configuration_revision = 0L
+          ; inference_target
+          ; delegation = None
+          ; workspace_instance = Parent.workspace captured_parent
+          ; permission_profile = Parent.permission_profile captured_parent
+          ; permission_profile_digest = Parent.permission_profile_digest captured_parent
+          ; runtime_policy = Parent.runtime_policy captured_parent
+          ; quota_key = None
+          }
+        in
+        let%bind captured_recurrence =
+          A.Recurrence_child_origin.create definition ~reservation:row ~initial_spec
+        in
+        let%bind key = R.delegation_key row in
+        let ledger = S.delegations t.store in
+        let%bind existing = D.find ledger key |> Result.map_error ~f:protocol_of_store in
+        let%bind bound, goal_origin =
+          match existing with
+          | Some record ->
+            let%bind origin = A.Recurrence_child_origin.of_record record in
+            let%map () =
+              A.Recurrence_child_origin.validate_definition origin definition
+            in
+            None, record.admission.goal_origin
+          | None ->
+            let%bind ancestry =
+              match
+                A.Recurrence_definition.goal_binding definition, before.spec.delegation
+              with
+              | Unbound, _ | Controller_goal _, None -> Ok None
+              | Controller_goal _, Some _ ->
+                (match runtime.check_ancestry with
+                 | Some check -> Result.map (check ()) ~f:Option.some
+                 | None ->
+                   Error
+                     (unavailable
+                        Permission_denied
+                        "Goal-bound recurrence creation requires actual ancestry"))
+            in
+            let%map bound =
+              Actor.bind_recurrence_child_origin
+                parent.actor
+                ~source_owner:t.runtime_source_owner
+                ~permit
+                ~ancestry
+            in
+            Some bound, Some (Actor.Child_origin.Bound.origin bound)
+        in
+        let admission : D.Admission.t =
+          { child_session_id = R.child_session_id row
+          ; revision_id = R.artifact_revision_id row
+          ; transaction_id = R.transaction_id row
+          ; manifest_sha256 = R.manifest_sha256 row
+          ; parent_revision_id = before.spec.prompt_revision_id
+          ; parent_stop_epoch = Some before.stop_epoch
+          ; authority_sha256
+          ; authored_tool = None
+          ; goal_origin
+          ; captured_recurrence = Some captured_recurrence
+          ; capability_pins = Parent.capability_pins captured_parent
+          ; lifetime = Owned
+          ; created_at = now t
+          ; inference_target = Some target
+          }
+        in
+        let%bind checked, _ = refresh () in
+        let%bind () = Checked.check_current checked in
+        let reserve ?before_write () =
+          D.reserve
+            ?before_write
+            ledger
+            ~key
+            ~request_sha256:(R.request_sha256 row)
+            ~admission
+            ~max_records:t.limits.delegation_recovery_max_count
+            ~max_bytes:t.limits.delegation_recovery_max_bytes
+          |> Result.map_error ~f:protocol_of_store
+        in
+        let%bind reservation =
+          match A.Recurrence_definition.goal_binding definition with
+          | Unbound -> reserve ()
+          | Controller_goal _ ->
+            Recurrence_effect_guard.run
+              (fun () -> Checked.check_current checked)
+              (fun before_write -> reserve ~before_write ())
+        in
+        let%bind record =
+          match reservation with
+          | (New record | Replay record) when Option.is_none record.revocation ->
+            Ok record
+          | New _ | Replay _ ->
+            Error
+              (unavailable Permission_denied "recurrence child delegation was revoked")
+          | Conflict _ ->
+            Error
+              (unavailable
+                 Conflict
+                 "recurrence child reservation has different captured inputs")
+        in
+        let%bind origin = A.Recurrence_child_origin.of_record record in
+        let%bind () = A.Recurrence_child_origin.validate_definition origin definition in
+        let%bind checked, observed = refresh () in
+        let check_parent state =
+          if phys_equal state observed
+          then Checked.check_current checked
+          else Error (unavailable Conflict "recurrence child parent snapshot changed")
+        in
+        let%bind birth_reservation =
+          register_child_origin_frontier
+            t
+            parent
+            ~bound
+            ~record
+            ~native_callback:None
+            ~check_parent
+        in
+        let reference = D.reference record in
+        (* Capacity only: this does not publish a link or prove child existence. *)
+        let%bind _ = A.Recurrence_child_association.create ~reservation:row ~reference in
+        let initial =
+          A.Session_state.create
+            ~identity:
+              { session_id = record.admission.child_session_id
+              ; display_name = protocol.display_name
+              ; creating_principal = Some (R.principal_id row)
+              ; created_at = record.admission.created_at
+              ; updated_at = record.admission.created_at
+              ; labels = []
+              ; generation = 0
+              ; metadata_revision = 0L
+              ; organization = P.Session_organization.Values.empty
+              }
+            ~spec:{ initial_spec with delegation = Some reference }
+            ~initial_history:[]
+        in
+        let initial =
+          { initial with
+            lifecycle = { desired = Stopped; observed = Stopped }
+          ; runtime_initialization = Pending { fresh_history = true }
+          ; pending_initial_start = false
+          ; parent_stop_epoch = record.admission.parent_stop_epoch
+          }
+        in
+        let%bind initial =
+          initialize_child_accounting t ~goal_origin:record.admission.goal_origin initial
+        in
+        let%bind () = A.Session_state.validate initial in
+        let%bind () = A.Recurrence_child_origin.validate_initial_state origin initial in
+        let%bind checked, _ = refresh () in
+        let%bind installed_artifact =
+          Recurrence_effect_guard.run
+            (fun () -> Checked.check_current checked)
+            (fun checkpoint ->
+               Artifact.install_or_reuse
+                 artifacts
+                 ~transaction_id:record.admission.transaction_id
+                 artifact
+                 ~checkpoint
+               |> Result.map_error ~f:protocol_of_store)
+        in
+        let%bind () =
+          if
+            String.equal
+              installed_artifact.manifest_sha256
+              record.admission.manifest_sha256
+          then Ok ()
+          else
+            Error
+              (unavailable
+                 Conflict
+                 "installed recurrence artifact is a different exact publication")
+        in
+        let%bind _ =
+          A.Captured_recurrence_source.restore
+            ~artifact_store:artifacts
+            ~content_limits:t.content_limits
+            ~record
+            ~state:initial
+            ~checkpoint:Eio.Fiber.check
+        in
+        let%bind checked, _ = refresh () in
+        let%bind () = Checked.check_current checked in
+        let%bind record =
+          D.advance ledger record Artifact_installed
+          |> Result.map_error ~f:protocol_of_store
+        in
+        let child_id = record.admission.child_session_id in
+        let verify state =
+          let%bind () = A.Session_state.validate state in
+          let%bind () = validate_child_goal_origin state record in
+          A.Recurrence_child_origin.validate_initial_state origin state
+        in
+        let%bind entry, fresh =
+          match Session_registry.find t.registry child_id with
+          | Some entry ->
+            let%bind () = check_child_pre_link_runtime record entry in
+            let%map () = Actor.state entry.actor |> Result.bind ~f:verify in
+            entry, false
+          | None ->
+            let actor_lock_nonce =
+              P.Id.Transaction.create () |> P.Id.Transaction.to_string
+            in
+            let%bind handle =
+              match S.open_session t.store ~sw:t.sw ~actor_lock_nonce child_id with
+              | Ok handle -> Ok handle
+              | Error (Missing _)
+                when D.equal_stage record.stage Child_installed
+                     || D.equal_stage record.stage Linked ->
+                Error
+                  (unavailable
+                     Session_not_found
+                     "retained recurrence child is no longer available")
+              | Error (Missing _) ->
+                let%bind checked, _ = refresh () in
+                Recurrence_effect_guard.run
+                  (fun () -> Checked.check_current checked)
+                  (fun checkpoint ->
+                     S.create_session_initialized
+                       ~before_publish:checkpoint
+                       t.store
+                       ~sw:t.sw
+                       ~transaction_id:record.admission.transaction_id
+                       ~actor_lock_nonce
+                       ~initialize:(fun ~staging_directory ->
+                         checkpoint ();
+                         let%bind.Result projection =
+                           initialize_generated_layout t initial ~staging_directory
+                         in
+                         checkpoint ();
+                         Ok projection)
+                     |> Result.map_error ~f:protocol_of_store)
+              | Error error -> Error (protocol_of_store error)
+            in
+            let recover () =
+              let%bind archived =
+                S.is_archived t.store handle |> Result.map_error ~f:protocol_of_store
+              in
+              let%bind () =
+                if archived
+                then Error (unavailable Session_not_found "recurrence child is archived")
+                else Ok ()
+              in
+              let%bind state = initial_recovery_state t handle in
+              let%bind () = verify state in
+              let%map entry = recover_open_handle t handle in
+              entry, true
+            in
+            (match recover () with
+             | Ok _ as result -> result
+             | Error _ as result ->
+               close_unretained_handle_after_failure t handle;
+               result
+             | exception exn ->
+               let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+               close_unretained_handle_after_failure t handle;
+               Exn.raise_with_original_backtrace exn backtrace)
+        in
+        with_uninstalled_recovery_entry
+          t
+          entry
+          ~session_id:child_id
+          ~fresh
+          (fun ~installed ->
+             let%bind checked, observed = refresh () in
+             let check_import_parent state =
+               if phys_equal state observed
+               then Checked.check_current checked
+               else
+                 Error (unavailable Conflict "recurrence child snapshot parent changed")
+             in
+             let%bind () =
+               import_child_origin_snapshot
+                 t
+                 parent
+                 entry
+                 ~reservation:birth_reservation
+                 ~native_callback:None
+                 ~check_parent:check_import_parent
+                 ~before_init:(not (D.equal_stage record.stage Linked))
+             in
+             let%bind checked, _ = refresh () in
+             let%bind () = Checked.check_current checked in
+             let%bind record =
+               D.advance ledger record Child_installed
+               |> Result.map_error ~f:protocol_of_store
+             in
+             let%bind proof =
+               Actor.verify_recurrence_child entry.actor ~reservation:row
+             in
+             let%bind _ =
+               Actor.link_recurrence_child
+                 parent.actor
+                 ~permit
+                 ~child:proof
+                 ~max_children:t.limits.delegation_recovery_max_count
+                 ~max_encoded_bytes:t.limits.delegation_recovery_max_bytes
+             in
+             let%bind checked, _ = refresh () in
+             let%bind () = Actor.Recurrence_child_link.check_current proof in
+             let%bind () = Checked.check_current checked in
+             let%bind _ =
+               D.advance ledger record Linked |> Result.map_error ~f:protocol_of_store
+             in
+             let%bind checked, _ = refresh () in
+             let%bind () = Actor.Recurrence_child_link.check_current proof in
+             let%bind () = Checked.check_current checked in
+             let%bind () =
+               if fresh
+               then Session_registry.add t.registry ~session_id:child_id entry
+               else Ok ()
+             in
+             let%map () = installed () in
+             let child : Recurrence_child.t =
+               { session =
+                   P.Session_ref.create
+                     ~server_id:(S.server_id t.store)
+                     ~session_id:child_id
+               ; reference
+               }
+             in
+             child)))
+  in
+  with_generated_creation_lock ~protect:false t run
+;;
+
+let create_generated_session_internal
+      ?native_callback
+      ?origin_preparation
       ?(start_immediately = false)
       ?(lifetime = Owned)
       t
@@ -8031,6 +16778,8 @@ let create_generated_session
   create_delegated_session
     ~start_immediately
     ~lifetime
+    ?native_callback
+    ?origin_preparation
     t
     ~parent_session_id
     ~idempotency_key
@@ -8038,7 +16787,27 @@ let create_generated_session
     ~prepare_source
 ;;
 
+let create_generated_session
+      ?start_immediately
+      ?lifetime
+      t
+      ~parent_session_id
+      ~idempotency_key
+      ~display_name
+      definition
+  =
+  create_generated_session_internal
+    ?start_immediately
+    ?lifetime
+    t
+    ~parent_session_id
+    ~idempotency_key
+    ~display_name
+    definition
+;;
+
 let create_authored_session
+      ?native_callback
       ?invocation_owner
       t
       ~parent_session_id
@@ -8224,6 +16993,7 @@ let create_authored_session
     ~start_immediately:true
     ~lifetime:Owned
     ?invocation_owner
+    ?native_callback
     t
     ~parent_session_id
     ~idempotency_key
@@ -8251,7 +17021,7 @@ let reconcile_generated_creations t =
     |> Result.map_error ~f:protocol_of_store
   in
   let revoke record reason =
-    D.revoke ledger record reason
+    D.revoke_unfinished ledger record reason
     |> Result.map ~f:ignore
     |> Result.map_error ~f:protocol_of_store
   in
@@ -8281,7 +17051,7 @@ let reconcile_generated_creations t =
         (fun id ->
           match P.Id.Session.equal id parent_id, runtime.ancestor_capabilities with
           | true, _ -> Ok current
-          | false, Some lookup -> lookup id
+          | false, Some bindings -> bindings.for_execution id
           | false, None ->
             Error
               (unavailable
@@ -8290,298 +17060,487 @@ let reconcile_generated_creations t =
                   retained"))
     }
   in
-  List.fold_result records ~init:() ~f:(fun () record ->
-    let%bind () =
-      D.discard_uninstalled_staging ledger record |> Result.map_error ~f:protocol_of_store
+  let with_recovery_parent
+        (parent : Session_registry.entry)
+        ~(before : State.t)
+        (record : D.record)
+        f
+    =
+    let independent =
+      match record.admission.lifetime with
+      | Independent _ -> true
+      | Owned | Invocation_owned _ -> false
     in
-    match record.D.stage, record.revocation with
-    | Linked, _ | _, Some _ -> Ok ()
-    | (Reserved | Artifact_installed | Child_installed), None ->
-      (match authorize_independent t record with
-       | Error _ -> revoke record Authority_changed
-       | Ok () ->
-         (match Session_registry.load t.registry record.key.parent_session_id with
-          | Error { code = Session_not_found; _ } -> revoke record Parent_deleted
-          | Error _ as failure -> failure
-          | Ok parent ->
-            let%bind before = A.state parent.actor in
-            if Result.is_error (Authority.check_invocation_owner record before)
-            then revoke record Admission_failed
-            else (
-              match
-                ( before.lifecycle.desired
-                , before.lifecycle.observed
-                , before.halted
-                , before.failure )
-              with
-              | _
-                when not
-                       (Int64.equal
-                          before.stop_epoch
-                          (Option.value record.admission.parent_stop_epoch ~default:0L))
-                -> revoke record Parent_stopped
-              | Stopped, _, _, _ -> revoke record Parent_stopped
-              | Running, _, true, _ | Running, _, _, Some _ ->
-                revoke record Authority_changed
-              | ( Running
-                , ( Stopped
-                  | Queued_for_slot
-                  | Starting
-                  | Recovering
-                  | Compacting _
-                  | Stopping
-                  | Failed _ )
-                , false
-                , None ) -> Ok ()
-              | Running, (Idle | Running_turn _ | Waiting_for_permission _), false, None
-                ->
-                let%bind moderator =
-                  parent_moderation_source t before.identity.session_id
-                in
-                let%bind fingerprint = Authority.fingerprint ?moderator before in
-                if not (String.equal fingerprint record.admission.authority_sha256)
-                then revoke record Authority_changed
-                else
-                  Runtime_owner.with_background_runtime parent.runtime (fun runtime ->
-                    let%bind current = native_capabilities runtime in
-                    let%bind artifacts =
-                      Artifacts.create
-                        ~env:t.env
-                        ~root:
-                          (Agent_store.Data_root.prompt_artifacts_path
-                             (S.data_root t.store))
-                      |> Result.map_error ~f:protocol_of_store
-                    in
-                    match
-                      ( Artifacts.exists artifacts record.admission.revision_id
-                      , record.stage )
-                    with
-                    | false, Reserved -> Ok ()
-                    | false, _ ->
-                      Error (corrupt "unfinished delegation lost its installed artifact")
-                    | true, _ ->
-                      let diagnostics errors =
-                        unavailable
-                          Prompt_unavailable
-                          (List.map errors ~f:Chatmd_shell_spec.Diagnostic.to_string
-                           |> String.concat ~sep:"\n")
-                      in
-                      (match
-                         match record.admission.authored_tool with
-                         | Some _ ->
-                           Authored_resources.resolve
-                             t.authored_resources
-                             record
-                             ~public:current
-                         | None ->
-                           Chat_response.Background_request.rebind_capabilities
-                             ~pins:record.admission.capability_pins
-                             ~capabilities:current
-                       with
-                       | Error _ -> revoke record Authority_changed
-                       | Ok selected ->
-                         let%bind _ =
-                           match record.admission.authored_tool with
-                           | Some _ ->
-                             restore_authored_selection
-                               t
-                               ~artifacts
-                               ~public:current
-                               record
-                           | None ->
-                             G.load_artifact
-                               ~artifact_store:artifacts
-                               ~revision_id:record.admission.revision_id
-                               ~manifest_sha256:record.admission.manifest_sha256
-                             |> Result.map_error ~f:diagnostics
-                         in
-                         let%bind record =
-                           D.advance ledger record Artifact_installed
-                           |> Result.map_error ~f:protocol_of_store
-                         in
-                         let%bind () =
-                           D.discard_uninstalled_staging ledger record
-                           |> Result.map_error ~f:protocol_of_store
-                         in
-                         let reference = D.reference record in
-                         let child_id = record.admission.child_session_id in
-                         let verify (state : State.t) =
-                           match state.spec.delegation, state.lifecycle.desired with
-                           | Some actual, Stopped when D.Reference.equal reference actual
-                             -> validate_delegated_target state record
-                           | _ ->
-                             Error
-                               (corrupt
-                                  "unfinished generated child has an invalid identity or \
-                                   running state")
-                         in
-                         let%bind child =
-                           match Session_registry.find t.registry child_id with
-                           | Some entry -> Ok (Some (entry, false))
-                           | None ->
-                             (match
-                                S.open_session
-                                  t.store
-                                  ~sw:t.sw
-                                  ~actor_lock_nonce:
-                                    (P.Id.Transaction.create ()
-                                     |> P.Id.Transaction.to_string)
-                                  child_id
-                              with
-                              | Error (Missing _) -> Ok None
-                              | Error error -> Error (protocol_of_store error)
-                              | Ok handle ->
-                                let result =
-                                  let%bind archived =
-                                    S.is_archived t.store handle
-                                    |> Result.map_error ~f:protocol_of_store
-                                  in
-                                  match archived with
-                                  | true -> Ok None
-                                  | false ->
-                                    let%bind initial = initial_recovery_state t handle in
-                                    let%bind () = verify initial in
-                                    let%map entry = recover_open_handle t handle in
-                                    Some (entry, true)
-                                in
-                                (match result with
-                                 | Ok (Some _) -> result
-                                 | Ok None | Error _ ->
-                                   close_recovery_handle t handle;
-                                   result))
-                         in
-                         (match child with
-                          | None ->
-                            (match record.stage with
-                             | Child_installed -> revoke record Admission_failed
-                             | Reserved | Artifact_installed -> Ok ()
-                             | Linked -> assert false)
-                          | Some (child, fresh) ->
-                            with_uninstalled_recovery_entry
-                              t
-                              child
-                              ~session_id:child_id
-                              ~fresh
-                              (fun ~installed ->
-                                 let%bind state = A.state child.actor in
-                                 let%bind () = verify state in
-                                 let%bind () =
-                                   match record.admission.authored_tool with
-                                   | Some _ ->
-                                     restore_authored_selection
-                                       t
-                                       ~artifacts
-                                       ~public:current
-                                       record
-                                     |> Result.map ~f:ignore
-                                   | None ->
-                                     G.restore
-                                       ?limits:
-                                         (Option.map
-                                            t.authoring_validation_host
-                                            ~f:
-                                              Chat_response.Authoring_validation
-                                              .compilation_limits)
-                                       ?source_limits:
-                                         (Option.map
-                                            t.authoring_validation_host
-                                            ~f:
-                                              Chat_response.Authoring_validation
-                                              .bundle_limits)
-                                       ?catalog:
-                                         (Option.bind
-                                            t.authoring_validation_host
-                                            ~f:
-                                              Chat_response.Authoring_validation
-                                              .delegated_catalog)
-                                       ~env:t.env
-                                       ~artifact_store:artifacts
-                                       ~revision_id:record.admission.revision_id
-                                       ~manifest_sha256:record.admission.manifest_sha256
-                                       ~current_capabilities:(fun () -> current)
-                                       ~pins:record.admission.capability_pins
-                                       ()
-                                     |> Result.map_error ~f:diagnostics
-                                     |> Result.map ~f:ignore
-                                 in
-                                 let authority =
-                                   Authority.create
-                                     ~authored_capabilities:
-                                       (Authored_resources.resolve t.authored_resources)
-                                     ~max_depth:t.limits.delegation_max_depth
-                                     ~moderation:(parent_moderation_source t)
-                                     ~authorize_independent:(authorize_independent t)
-                                     ~host:
-                                       (host
-                                          ~parent_id:record.key.parent_session_id
-                                          ~runtime
-                                          ~current)
-                                     ~reference
-                                     ~capabilities:selected
-                                     ()
-                                 in
-                                 let%bind profile =
-                                   permission_profile_revision
-                                     t
-                                     state.spec.permission_profile_digest
-                                 in
-                                 let%bind () =
-                                   Authority.check_preparation
-                                     authority
-                                     ~session_id:child_id
-                                     ~revision_id:state.spec.prompt_revision_id
-                                     ~manifest_sha256:record.admission.manifest_sha256
-                                     ~permission_profile:profile
-                                 in
-                                 let%bind () =
-                                   Agent_store.Durable_file.sync_directory
-                                     ~env:t.env
-                                     ~path:
-                                       (Agent_store.Data_root.sessions_path
-                                          (S.data_root t.store))
-                                   |> Result.map_error ~f:protocol_of_store
-                                 in
-                                 let%bind record =
-                                   D.advance ledger record Child_installed
-                                   |> Result.map_error ~f:protocol_of_store
-                                 in
-                                 let%bind () =
-                                   A.checkpoint parent.actor ~persist:(fun latest ->
-                                     let%bind latest_fingerprint =
-                                       Authority.fingerprint ?moderator latest
+    let%bind moderator =
+      if independent
+      then Ok None
+      else parent_moderation_source t before.identity.session_id
+    in
+    let strict_fingerprint = Authority.fingerprint ?moderator in
+    let eligible fingerprint =
+      String.equal fingerprint record.admission.authority_sha256
+    in
+    let%bind strict_current =
+      if independent then Ok true else Result.map (strict_fingerprint before) ~f:eligible
+    in
+    if not strict_current
+    then revoke record Authority_changed
+    else
+      Runtime_owner.with_background_runtime parent.runtime (fun runtime ->
+        let check_request () =
+          let%bind current = A.state parent.actor in
+          let%bind () = Authority.check_invocation_owner record current in
+          match current.lifecycle.desired, current.halted, current.failure with
+          | Running, false, None when Int64.equal current.stop_epoch before.stop_epoch ->
+            Ok ()
+          | (Running | Stopped), _, _ ->
+            Error (unavailable Permission_denied "recovery parent authority changed")
+        in
+        let%bind eligibility =
+          if independent
+          then (
+            let%map eligibility =
+              prepare_independent_eligibility
+                ?retained_sources:runtime.retained_ancestor_sources
+                t
+                ~parent
+                ~check_request
+            in
+            Some eligibility)
+          else Ok None
+        in
+        let fingerprint_from_current state =
+          match eligibility with
+          | None -> strict_fingerprint state
+          | Some eligibility ->
+            let%bind () = check_independent_eligibility_current eligibility in
+            Independent_eligibility.fingerprint_state
+              eligibility
+              ~owner:parent.runtime
+              state
+        in
+        let recheck_eligibility () =
+          match eligibility with
+          | None -> Ok ()
+          | Some eligibility ->
+            let%bind () = check_request () in
+            recheck_independent_eligibility t eligibility
+        in
+        let%bind fingerprint =
+          match eligibility with
+          | None -> strict_fingerprint before
+          | Some _ ->
+            let%bind current = A.state parent.actor in
+            fingerprint_from_current current
+        in
+        if eligible fingerprint
+        then (
+          let%bind () = recheck_eligibility () in
+          f ~fingerprint ~fingerprint_from_current ~recheck_eligibility runtime)
+        else revoke record Authority_changed)
+  in
+  List.fold_result records ~init:() ~f:(fun () record ->
+    match record.D.admission.captured_recurrence with
+    | Some _ ->
+      (* Captured occurrence custody remains protected until a freshly authorized
+         controller permit reconciles the reciprocal association. Legacy generated
+         recovery must not initialize the parent or manufacture that link. *)
+      Ok ()
+    | None ->
+      let%bind () =
+        D.discard_uninstalled_staging ledger record
+        |> Result.map_error ~f:protocol_of_store
+      in
+      (match record.D.stage, record.revocation with
+       | Linked, _ | _, Some _ -> Ok ()
+       | (Reserved | Artifact_installed | Child_installed), None ->
+         (match authorize_independent t record with
+          | Error _ -> revoke record Authority_changed
+          | Ok () ->
+            (match Session_registry.load t.registry record.key.parent_session_id with
+             | Error { code = Session_not_found; _ } -> revoke record Parent_deleted
+             | Error _ as failure -> failure
+             | Ok parent ->
+               let%bind before = A.state parent.actor in
+               if Result.is_error (Authority.check_invocation_owner record before)
+               then revoke record Admission_failed
+               else (
+                 match
+                   ( before.lifecycle.desired
+                   , before.lifecycle.observed
+                   , before.halted
+                   , before.failure )
+                 with
+                 | _
+                   when not
+                          (Int64.equal
+                             before.stop_epoch
+                             (Option.value record.admission.parent_stop_epoch ~default:0L))
+                   -> revoke record Parent_stopped
+                 | Stopped, _, _, _ -> revoke record Parent_stopped
+                 | Running, _, true, _ | Running, _, _, Some _ ->
+                   revoke record Authority_changed
+                 | ( Running
+                   , ( Stopped
+                     | Queued_for_slot
+                     | Starting
+                     | Recovering
+                     | Compacting _
+                     | Stopping
+                     | Failed _ )
+                   , false
+                   , None ) -> Ok ()
+                 | ( Running
+                   , (Idle | Running_turn _ | Waiting_for_permission _)
+                   , false
+                   , None ) ->
+                   with_recovery_parent
+                     parent
+                     ~before
+                     record
+                     (fun
+                         ~fingerprint
+                          ~fingerprint_from_current
+                          ~recheck_eligibility
+                          runtime
+                        ->
+                        let%bind current = native_capabilities runtime in
+                        let%bind artifacts =
+                          Artifacts.create
+                            ~env:t.env
+                            ~root:
+                              (Agent_store.Data_root.prompt_artifacts_path
+                                 (S.data_root t.store))
+                          |> Result.map_error ~f:protocol_of_store
+                        in
+                        match
+                          ( Artifacts.exists artifacts record.admission.revision_id
+                          , record.stage )
+                        with
+                        | false, Reserved -> Ok ()
+                        | false, _ ->
+                          Error
+                            (corrupt "unfinished delegation lost its installed artifact")
+                        | true, _ ->
+                          let diagnostics errors =
+                            unavailable
+                              Prompt_unavailable
+                              (List.map errors ~f:Chatmd_shell_spec.Diagnostic.to_string
+                               |> String.concat ~sep:"\n")
+                          in
+                          (match
+                             match record.admission.authored_tool with
+                             | Some _ ->
+                               Authored_resources.resolve
+                                 t.authored_resources
+                                 record
+                                 ~public:current
+                             | None ->
+                               Chat_response.Background_request.rebind_capabilities
+                                 ~pins:record.admission.capability_pins
+                                 ~capabilities:current
+                           with
+                           | Error _ -> revoke record Authority_changed
+                           | Ok selected ->
+                             let%bind _ =
+                               match record.admission.authored_tool with
+                               | Some _ ->
+                                 restore_authored_selection
+                                   t
+                                   ~artifacts
+                                   ~public:current
+                                   record
+                               | None ->
+                                 G.load_artifact
+                                   ~artifact_store:artifacts
+                                   ~revision_id:record.admission.revision_id
+                                   ~manifest_sha256:record.admission.manifest_sha256
+                                 |> Result.map_error ~f:diagnostics
+                             in
+                             let%bind () = recheck_eligibility () in
+                             let%bind record =
+                               D.advance ledger record Artifact_installed
+                               |> Result.map_error ~f:protocol_of_store
+                             in
+                             let%bind () =
+                               D.discard_uninstalled_staging ledger record
+                               |> Result.map_error ~f:protocol_of_store
+                             in
+                             let reference = D.reference record in
+                             let check_parent state =
+                               let%bind fingerprint = fingerprint_from_current state in
+                               let%bind () =
+                                 Authority.check_invocation_owner record state
+                               in
+                               if
+                                 String.equal
+                                   fingerprint
+                                   record.admission.authority_sha256
+                                 && Int64.equal state.stop_epoch before.stop_epoch
+                                 && (not state.halted)
+                                 && Option.is_none state.failure
+                               then Ok ()
+                               else
+                                 Error
+                                   (unavailable
+                                      Permission_denied
+                                      "recovery parent authority changed")
+                             in
+                             let%bind birth_reservation =
+                               register_child_origin_frontier
+                                 t
+                                 parent
+                                 ~bound:None
+                                 ~record
+                                 ~native_callback:None
+                                 ~check_parent
+                             in
+                             let child_id = record.admission.child_session_id in
+                             let verify (state : State.t) =
+                               match state.spec.delegation, state.lifecycle.desired with
+                               | Some actual, Stopped
+                                 when D.Reference.equal reference actual ->
+                                 let%bind () = validate_child_goal_origin state record in
+                                 validate_delegated_target state record
+                               | _ ->
+                                 Error
+                                   (corrupt
+                                      "unfinished generated child has an invalid \
+                                       identity or running state")
+                             in
+                             let%bind child =
+                               match Session_registry.find t.registry child_id with
+                               | Some entry ->
+                                 let%map () = check_child_pre_link_runtime record entry in
+                                 Some (entry, false)
+                               | None ->
+                                 (match
+                                    S.open_session
+                                      t.store
+                                      ~sw:t.sw
+                                      ~actor_lock_nonce:
+                                        (P.Id.Transaction.create ()
+                                         |> P.Id.Transaction.to_string)
+                                      child_id
+                                  with
+                                  | Error (Missing _) -> Ok None
+                                  | Error error -> Error (protocol_of_store error)
+                                  | Ok handle ->
+                                    let result =
+                                      let%bind archived =
+                                        S.is_archived t.store handle
+                                        |> Result.map_error ~f:protocol_of_store
+                                      in
+                                      match archived with
+                                      | true -> Ok None
+                                      | false ->
+                                        let%bind initial =
+                                          initial_recovery_state t handle
+                                        in
+                                        let%bind () = verify initial in
+                                        let%map entry = recover_open_handle t handle in
+                                        Some (entry, true)
+                                    in
+                                    (match result with
+                                     | Ok (Some _) -> result
+                                     | Ok None | Error _ ->
+                                       close_unretained_handle_after_failure t handle;
+                                       result))
+                             in
+                             (match child with
+                              | None ->
+                                (match record.stage with
+                                 | Child_installed -> revoke record Admission_failed
+                                 | Reserved | Artifact_installed -> Ok ()
+                                 | Linked -> assert false)
+                              | Some (child, fresh) ->
+                                with_uninstalled_recovery_entry
+                                  t
+                                  child
+                                  ~session_id:child_id
+                                  ~fresh
+                                  (fun ~installed ->
+                                     let%bind state = A.state child.actor in
+                                     let%bind () = verify state in
+                                     let%bind () =
+                                       import_child_origin_snapshot
+                                         t
+                                         parent
+                                         child
+                                         ~reservation:birth_reservation
+                                         ~native_callback:None
+                                         ~check_parent
+                                         ~before_init:
+                                           (not (D.equal_stage record.stage Linked))
                                      in
-                                     match
-                                       ( latest.lifecycle.desired
-                                       , latest.halted
-                                       , latest.failure )
-                                     with
-                                     | Running, false, None
-                                       when String.equal fingerprint latest_fingerprint
-                                            && Int64.equal
-                                                 latest.stop_epoch
-                                                 before.stop_epoch ->
-                                       D.advance ledger record Linked
-                                       |> Result.map ~f:ignore
+                                     let%bind () =
+                                       match record.admission.authored_tool with
+                                       | Some _ ->
+                                         restore_authored_selection
+                                           t
+                                           ~artifacts
+                                           ~public:current
+                                           record
+                                         |> Result.map ~f:ignore
+                                       | None ->
+                                         G.restore
+                                           ?limits:
+                                             (Option.map
+                                                t.authoring_validation_host
+                                                ~f:
+                                                  Chat_response.Authoring_validation
+                                                  .compilation_limits)
+                                           ?source_limits:
+                                             (Option.map
+                                                t.authoring_validation_host
+                                                ~f:
+                                                  Chat_response.Authoring_validation
+                                                  .bundle_limits)
+                                           ?catalog:
+                                             (Option.bind
+                                                t.authoring_validation_host
+                                                ~f:
+                                                  Chat_response.Authoring_validation
+                                                  .delegated_catalog)
+                                           ~env:t.env
+                                           ~artifact_store:artifacts
+                                           ~revision_id:record.admission.revision_id
+                                           ~manifest_sha256:
+                                             record.admission.manifest_sha256
+                                           ~current_capabilities:(fun () -> current)
+                                           ~pins:record.admission.capability_pins
+                                           ()
+                                         |> Result.map_error ~f:diagnostics
+                                         |> Result.map ~f:ignore
+                                     in
+                                     let authority =
+                                       Authority.create
+                                         ~source_owner:t.runtime_source_owner
+                                         ~authored_capabilities:
+                                           (Authored_resources.resolve
+                                              t.authored_resources)
+                                         ~max_depth:t.limits.delegation_max_depth
+                                         ~moderation_current:(fun edge ~expected ->
+                                           if
+                                             P.Id.Session.equal
+                                               expected.identity.session_id
+                                               record.key.parent_session_id
+                                           then (
+                                             let%bind () =
+                                               Authority.check_invocation_owner
+                                                 edge
+                                                 expected
+                                             in
+                                             parent_moderation_source_for_state
+                                               expected
+                                               ~read:(fun () ->
+                                                 Agent_session.Runtime_builder
+                                                 .moderation_source
+                                                   runtime))
+                                           else native_current_moderation t edge ~expected)
+                                         ~authorize_independent:(authorize_independent t)
+                                         ~host:
+                                           (host
+                                              ~parent_id:record.key.parent_session_id
+                                              ~runtime
+                                              ~current)
+                                         ~reference
+                                         ~capabilities:selected
+                                         ()
+                                     in
+                                     let%bind profile =
+                                       permission_profile_revision
+                                         t
+                                         state.spec.permission_profile_digest
+                                     in
+                                     let%bind () =
+                                       Authority.check_preparation
+                                         authority
+                                         ~session_id:child_id
+                                         ~revision_id:state.spec.prompt_revision_id
+                                         ~manifest_sha256:record.admission.manifest_sha256
+                                         ~permission_profile:profile
+                                     in
+                                     let%bind () =
+                                       Agent_store.Durable_file.sync_directory
+                                         ~env:t.env
+                                         ~path:
+                                           (Agent_store.Data_root.sessions_path
+                                              (S.data_root t.store))
                                        |> Result.map_error ~f:protocol_of_store
-                                     | Stopped, _, _ -> revoke record Parent_stopped
-                                     | _
-                                       when not
-                                              (Int64.equal
-                                                 latest.stop_epoch
-                                                 before.stop_epoch) ->
-                                       revoke record Parent_stopped
-                                     | _ -> revoke record Authority_changed)
-                                 in
-                                 let%bind () =
-                                   match fresh with
-                                   | false -> Ok ()
-                                   | true ->
-                                     Session_registry.add
-                                       t.registry
-                                       ~session_id:child_id
-                                       child
-                                 in
-                                 installed ()))))))))
+                                     in
+                                     let%bind () = recheck_eligibility () in
+                                     let%bind record =
+                                       D.advance ledger record Child_installed
+                                       |> Result.map_error ~f:protocol_of_store
+                                     in
+                                     let check_parent latest =
+                                       let%bind latest_fingerprint =
+                                         fingerprint_from_current latest
+                                       in
+                                       match
+                                         ( latest.State.lifecycle.desired
+                                         , latest.halted
+                                         , latest.failure )
+                                       with
+                                       | Running, false, None
+                                         when String.equal fingerprint latest_fingerprint
+                                              && Int64.equal
+                                                   latest.stop_epoch
+                                                   before.stop_epoch -> Ok ()
+                                       | (Running | Stopped), _, _ ->
+                                         Error
+                                           (unavailable
+                                              Permission_denied
+                                              "recovered child parent authority changed")
+                                     in
+                                     let%bind () =
+                                       register_installed_child
+                                         t
+                                         parent
+                                         child
+                                         ~reference
+                                         ~check_parent
+                                     in
+                                     let%bind () =
+                                       A.checkpoint parent.actor ~persist:(fun latest ->
+                                         let%bind latest_fingerprint =
+                                           fingerprint_from_current latest
+                                         in
+                                         match
+                                           ( latest.lifecycle.desired
+                                           , latest.halted
+                                           , latest.failure )
+                                         with
+                                         | Running, false, None
+                                           when String.equal
+                                                  fingerprint
+                                                  latest_fingerprint
+                                                && Int64.equal
+                                                     latest.stop_epoch
+                                                     before.stop_epoch ->
+                                           D.advance ledger record Linked
+                                           |> Result.map ~f:ignore
+                                           |> Result.map_error ~f:protocol_of_store
+                                         | Stopped, _, _ -> revoke record Parent_stopped
+                                         | _
+                                           when not
+                                                  (Int64.equal
+                                                     latest.stop_epoch
+                                                     before.stop_epoch) ->
+                                           revoke record Parent_stopped
+                                         | _ -> revoke record Authority_changed)
+                                     in
+                                     let%bind () =
+                                       match fresh with
+                                       | false -> Ok ()
+                                       | true ->
+                                         Session_registry.add
+                                           t.registry
+                                           ~session_id:child_id
+                                           child
+                                     in
+                                     installed ())))))))))
 ;;
 
 let managed_child_access t borrowed child_id =
@@ -8782,8 +17741,9 @@ let managed_send t borrowed child_id ~key ~message =
         | false ->
           Error (unavailable Conflict "child generation changed during send") |> protocol
       in
-      A.submit_managed_message
+      A.submit_managed_message_native
         child.actor
+        ~borrowed
         ~reference
         ~key
         ~request_sha256
@@ -9107,6 +18067,7 @@ let authored_one_off t prepared borrowed ~input =
     ~f:(fun () ->
       let%bind child =
         create_authored_session
+          ~native_callback:borrowed
           ~invocation_owner:context.id
           t
           ~parent_session_id:context.session_id
@@ -9196,6 +18157,7 @@ let authored_call_services t prepared borrowed =
           let context = (N.borrowed_invocation borrowed).context in
           let%bind child =
             create_authored_session
+              ~native_callback:borrowed
               t
               ~parent_session_id:context.session_id
               ~idempotency_key:key
@@ -9254,6 +18216,67 @@ let authored_call_services t prepared borrowed =
   host, t.managed_sessions
 ;;
 
+let import_child_usage t ~parent ~child ~actor ~authorize_parent ~authorize_child =
+  let module P = Agent_protocol in
+  let module S = Agent_store.Session_store in
+  let module A = Agent_session.Session_actor in
+  let open Result.Let_syntax in
+  let association entry =
+    match entry.Session_registry.store_handle with
+    | None -> Error (unavailable Conflict "child usage requires an actual Store owner")
+    | Some handle ->
+      check_registered_owner
+        t
+        entry
+        ~session:
+          (P.Session_ref.create
+             ~server_id:(S.server_id t.store)
+             ~session_id:(S.Handle.session_id handle))
+  in
+  let%bind () = association parent in
+  let%bind () = association child in
+  let%bind parent_state = A.state parent.actor in
+  let%bind () =
+    Agent_session.Recurrence_command_admission.check_read
+      actor
+      ~authorize:authorize_parent
+      parent_state
+  in
+  let%bind child_state = A.state child.actor in
+  let%bind reference =
+    Result.of_option
+      child_state.spec.delegation
+      ~error:(unavailable Conflict "child usage requires its actual delegation reference")
+  in
+  let%bind () =
+    if P.Id.Session.equal reference.key.parent_session_id parent_state.identity.session_id
+    then Ok ()
+    else Error (unavailable Permission_denied "child usage belongs to another parent")
+  in
+  let%bind observation =
+    A.observe_child_usage
+      child.actor
+      ~source_owner:t.runtime_source_owner
+      ~actor
+      ~authorize:(fun state ->
+        let%bind () = association child in
+        authorize_child state)
+      ~reference
+  in
+  let%bind () = association parent in
+  let%bind () = association child in
+  A.import_child_usage
+    parent.actor
+    ~source_owner:t.runtime_source_owner
+    ~actor
+    ~authorize:(fun state ->
+      let%bind () = association parent in
+      authorize_parent state)
+    ~observation
+    ~max_children:t.limits.delegation_recovery_max_count
+    ~max_encoded_bytes:t.limits.delegation_recovery_max_bytes
+;;
+
 let create_from_native t borrowed (request : Agent_session.Generated_session_request.t) =
   let module Q = Agent_session.Generated_session_request in
   let module N = Agent_session.Native_tool_invocation in
@@ -9308,6 +18331,42 @@ let create_from_native t borrowed (request : Agent_session.Generated_session_req
         })
   in
   let%bind selected = C.select ceiling ~names:request.tools |> capability in
+  let%bind origin_preparation =
+    let%bind principal_id =
+      Result.of_option
+        state.identity.creating_principal
+        ~error:
+          (failure
+             (unavailable
+                Permission_denied
+                "generated creation needs a durable principal"))
+    in
+    let key : Agent_store.Delegation_store.Key.t =
+      { parent_session_id = context.session_id
+      ; parent_generation = context.generation
+      ; principal_id
+      ; idempotency_key = request.idempotency_key
+      }
+    in
+    let%bind existing =
+      Agent_store.Delegation_store.find
+        (Agent_store.Session_store.delegations t.store)
+        key
+      |> Result.map_error ~f:(fun error -> failure (protocol_of_store error))
+    in
+    match existing with
+    | Some { revocation = Some _; _ } ->
+      Error (failure (unavailable Permission_denied "generated admission was revoked"))
+    | Some { revocation = None; _ } -> Ok None
+    | None ->
+      Runtime_owner.with_execution_runtime
+        parent.runtime
+        ~owner:(P.Job.Invocation context.id)
+        (fun runtime ->
+           prepare_native_child_origin t parent runtime borrowed ~capabilities:ceiling)
+      |> Result.map ~f:Option.some
+      |> protocol
+  in
   let%bind definition =
     G.prepare
       ?limits:
@@ -9353,7 +18412,9 @@ let create_from_native t borrowed (request : Agent_session.Generated_session_req
     | Independent -> Independent
   in
   let%bind child =
-    create_generated_session
+    create_generated_session_internal
+      ~native_callback:borrowed
+      ?origin_preparation
       t
       ~lifetime
       ~start_immediately:request.start_immediately
@@ -9374,6 +18435,463 @@ let create_from_native t borrowed (request : Agent_session.Generated_session_req
              (Chat_response.Generated_admission.capabilities (G.admission definition)))
           ~f:(fun reference -> reference.name)
     }
+;;
+
+let check_recurrence_original actor =
+  let principal = Operator_authorization.principal actor in
+  if
+    Operator_authorization.is_current actor
+    && Agent_protocol.Principal.has_scope principal Send_messages
+    && Agent_protocol.Principal.has_scope principal View_session_transcript
+  then Ok ()
+  else
+    Error (unavailable Permission_denied "recurrence target original authority expired")
+;;
+
+let check_recurrence_target_state ~session ~actor ~authorize state =
+  let open Result.Let_syntax in
+  let%bind () = check_recurrence_original actor in
+  let%bind () =
+    if
+      Agent_protocol.Id.Session.equal
+        (Agent_protocol.Session_ref.session_id session)
+        state.Agent_session.Session_state.identity.session_id
+    then Ok ()
+    else Error (unavailable Conflict "recurrence target state belongs to another session")
+  in
+  let%bind () = authorize state in
+  check_recurrence_original actor
+;;
+
+let acquire_recurrence_target t ~session ~actor ~authorize =
+  let open Result.Let_syntax in
+  let%bind () = check_recurrence_original actor in
+  acquire_metadata_target
+    t
+    ~purpose:Recurrence_metadata
+    ~session
+    ~check_state:(check_recurrence_target_state ~session ~actor ~authorize)
+  |> Result.map ~f:fst
+;;
+
+module Recurrence_source_preview = struct
+  type t =
+    { source : Agent_protocol.Run_source.t
+    ; expected_revision : int64
+    }
+
+  let source t = t.source
+  let expected_revision t = t.expected_revision
+end
+
+let preview_recurrence_source_with_parent t entry ~actor ~authorize ~with_parent =
+  let module A = Agent_session in
+  let module S = A.Runtime_builder.Source in
+  let module P = Agent_protocol in
+  let open Result.Let_syntax in
+  let%bind handle =
+    Result.of_option
+      entry.Session_registry.store_handle
+      ~error:(unavailable Invalid_state "recurrence source requires an owned Handle")
+  in
+  let session =
+    P.Session_ref.create
+      ~server_id:(Agent_store.Session_store.server_id t.store)
+      ~session_id:(Agent_store.Session_store.Handle.session_id handle)
+  in
+  let check state =
+    let%bind () = check_registered_entry t entry ~session in
+    check_recurrence_target_state ~session ~actor ~authorize state
+  in
+  let%bind before = A.Session_actor.state entry.actor in
+  let%bind () = check before in
+  let%bind selected =
+    with_selected_source
+      t
+      entry
+      ~with_parent
+      ~with_source:(fun source f -> f source)
+      ~check_selected:(fun source -> S.validate_target source before)
+      (fun source ->
+         let%map () = S.validate_target source before in
+         source)
+  in
+  (* All source/parent resource scopes have joined before any proposal escapes. *)
+  let%bind after = A.Session_actor.state entry.actor in
+  let%bind () = check after in
+  let%bind () = S.validate_target selected after in
+  let%bind () =
+    if
+      Int64.equal before.counters.revision after.counters.revision
+      && Int.equal before.identity.generation after.identity.generation
+    then Ok ()
+    else Error (unavailable Conflict "recurrence target changed during source preview")
+  in
+  let%bind observer =
+    match S.moderator selected with
+    | Legacy observer | Extension observer -> Ok observer
+    | No_moderator ->
+      Error (unavailable Invalid_state "recurrence source has no moderator")
+  in
+  let%bind index = A.Run_admission.prepare_source_index after ~observer in
+  let%map source =
+    A.Run_source_installation.captured
+      (A.Run_state.installation index)
+      ~generation:after.identity.generation
+  in
+  { Recurrence_source_preview.source; expected_revision = after.counters.revision }
+;;
+
+let preview_recurrence_source t entry ~actor ~authorize =
+  preview_recurrence_source_with_parent
+    t
+    entry
+    ~actor
+    ~authorize
+    ~with_parent:(fun owner ~reference:_ ~target:_ f ->
+      Runtime_owner.with_loaded_source_capabilities_reported
+        owner
+        ~source_owner:t.runtime_source_owner
+        f
+      |> Runtime_owner.Scope_outcome.resume)
+;;
+
+(* Native services invoke this closure only inside the same actual registered
+   invoking session's native dispatch. *)
+exception Recurrence_capture_rejected of Agent_protocol.Error.t
+
+let recurrence_service t (profile : Agent_session.Permission_policy.t) actor_ref =
+  let module A = Agent_session in
+  let module Actor = A.Session_actor in
+  let module Admission = A.Recurrence_native_admission in
+  let module Query = A.Recurrence_query in
+  let module P = Agent_protocol in
+  let open Result.Let_syntax in
+  let session id =
+    P.Session_ref.create
+      ~server_id:(Agent_store.Session_store.server_id t.store)
+      ~session_id:id
+  in
+  let state () = Result.bind (extension_actor actor_ref) ~f:Actor.state in
+  let pure admission (state : A.Session_state.t) =
+    let%bind () =
+      Admission.check_now admission state ~effect_kind:(Admission.effect_kind admission)
+    in
+    if
+      String.equal
+        profile.A.Permission_policy.revision_digest
+        state.A.Session_state.spec.permission_profile_digest
+    then Ok ()
+    else Error (unavailable Permission_denied "recurrence native profile changed")
+  in
+  let registered admission =
+    let%bind actor = extension_actor actor_ref in
+    let%bind state = Actor.state actor in
+    let%bind () = pure admission state in
+    let%bind entry =
+      Session_registry.find t.registry state.identity.session_id
+      |> Result.of_option
+           ~error:
+             (unavailable Session_not_found "invoking recurrence controller is absent")
+    in
+    let%bind () =
+      if phys_equal entry.actor actor
+      then Ok ()
+      else
+        Error (unavailable Permission_denied "recurrence native controller was replaced")
+    in
+    let%map () =
+      check_registered_owner t entry ~session:(session state.identity.session_id)
+    in
+    entry, state
+  in
+  let recheck admission services entry =
+    let%bind () =
+      A.Script_tool_calls.check_current_metadata_admission
+        services
+        (Admission.invocation admission)
+        (Admission.binding admission)
+    in
+    let%bind actual, current = registered admission in
+    if
+      phys_equal actual.actor entry.Session_registry.actor
+      && phys_equal actual.runtime entry.runtime
+    then Ok current
+    else Error (unavailable Permission_denied "recurrence invoking owner changed")
+  in
+  let begin_call admission =
+    let%bind services =
+      A.Script_tool_calls.current_native_services ()
+      |> Result.map_error ~f:P.Error.invalid_request
+    in
+    let%bind entry, _ = registered admission in
+    let%map current = recheck admission services entry in
+    services, entry, current
+  in
+  let target_visible admission controller_state summary =
+    let%bind () = pure admission controller_state in
+    let principal = Operator_authorization.principal (Admission.actor admission) in
+    if
+      P.Principal.has_scope principal View_session_transcript
+      && Authorization.session_visible_to principal summary
+    then Ok ()
+    else
+      Error (unavailable Permission_denied "recurrence target is not currently visible")
+  in
+  A.Recurrence_service.create
+    ~state
+    ~query:(fun ~admission ~request ->
+      let%bind services, entry, controller_state = begin_call admission in
+      let read () =
+        Actor.query_recurrences
+          entry.actor
+          ~actor:(Admission.actor admission)
+          ~authorize:(pure admission)
+          ~request
+      in
+      let%bind observed = read () in
+      let read_target target =
+        let%bind () =
+          if
+            P.Id.Server.equal
+              (P.Session_ref.server_id target)
+              (Agent_store.Session_store.server_id t.store)
+          then Ok ()
+          else
+            Error
+              (unavailable Invalid_request "recurrence target belongs to another host")
+        in
+        Session_registry.read_state
+          t.registry
+          ~authorize:(target_visible admission controller_state)
+          (P.Session_ref.session_id target)
+      in
+      let%bind json = Query.render observed ~read_target in
+      (* All Actor/registration IO precedes the final yielding host guard. *)
+      let%bind actual, current = registered admission in
+      let%bind () =
+        if phys_equal actual.actor entry.actor && phys_equal actual.runtime entry.runtime
+        then Ok ()
+        else Error (unavailable Permission_denied "recurrence invoking owner changed")
+      in
+      let%bind final = read () in
+      let%bind () =
+        A.Script_tool_calls.check_current_metadata_admission
+          services
+          (Admission.invocation admission)
+          (Admission.binding admission)
+      in
+      (* Pure checks only from here through disclosure. Target data remains
+         a separately authorized historical snapshot, not an atomic live view. *)
+      let%bind () = pure admission current in
+      let%bind () = Query.check_current final in
+      if Query.Basis.equal (Query.basis observed) (Query.basis final)
+      then Ok json
+      else Error (unavailable Conflict "recurrence controller changed during target read"))
+    ~capture_target:(fun ~admission ~target ->
+      let%bind services, entry, before = begin_call admission in
+      let checkpoint () =
+        Eio.Fiber.check ();
+        match recheck admission services entry with
+        | Ok _ -> ()
+        | Error error -> raise (Recurrence_capture_rejected error)
+      in
+      let%bind captured =
+        match target with
+        | A.Recurrence_native_request.Target.Authored_child { name; mode } ->
+          let%bind () =
+            if
+              P.Principal.has_scope
+                (Operator_authorization.principal (Admission.actor admission))
+                View_session_transcript
+            then Ok ()
+            else
+              Error
+                (unavailable
+                   Permission_denied
+                   "recurrence source capture requires transcript-read authority")
+          in
+          let%bind public = Admission.capabilities admission in
+          (try
+             Recurrence_authored_source.capture
+               t.authored_resources
+               ~state:before
+               ~public
+               ~name
+               ~mode
+               ~checkpoint
+           with
+           | Recurrence_capture_rejected error -> Error error)
+        | Existing_session { session = target_session; input } ->
+          let original = Admission.actor admission in
+          let authorize target_state =
+            target_visible admission before (A.Session_state.summary target_state)
+          in
+          let%bind target_entry =
+            acquire_recurrence_target t ~session:target_session ~actor:original ~authorize
+          in
+          let%bind preview =
+            preview_recurrence_source_with_parent
+              t
+              target_entry
+              ~actor:original
+              ~authorize
+              ~with_parent:(fun owner ~reference:_ ~target:_ f ->
+                if phys_equal owner entry.runtime
+                then (
+                  let%bind _ = recheck admission services entry in
+                  let%bind capabilities = Admission.capabilities admission in
+                  let%bind source = f capabilities in
+                  let%map _ = recheck admission services entry in
+                  source)
+                else
+                  Runtime_owner.with_loaded_source_capabilities_reported
+                    owner
+                    ~source_owner:t.runtime_source_owner
+                    f
+                  |> Runtime_owner.Scope_outcome.resume)
+          in
+          let%bind current = Actor.state target_entry.actor in
+          let%bind () = check_registered_entry t target_entry ~session:target_session in
+          let%bind () = authorize current in
+          if
+            Int64.equal
+              current.counters.revision
+              preview.Recurrence_source_preview.expected_revision
+          then
+            A.Recurrence_target.create_existing
+              ~session:target_session
+              ~source:preview.source
+              ~configuration_revision:current.spec.configuration_revision
+              ~input
+          else Error (unavailable Conflict "recurrence target changed after preview")
+      in
+      let%bind after = recheck admission services entry in
+      if Int64.equal before.counters.revision after.counters.revision
+      then Ok captured
+      else Error (unavailable Conflict "recurrence controller changed during capture"))
+    ~apply:(fun ~admission ~request ->
+      let%bind services, entry, _state = begin_call admission in
+      (* Original Run authorization can yield before the final refresh. Check
+         the same registered tuple again, then leave the inherited host check
+         last before enqueue. The Actor authorizer itself remains non-yielding. *)
+      let refresh () =
+        let%bind actual, _ = registered admission in
+        let%bind () =
+          if
+            phys_equal actual.actor entry.actor
+            && phys_equal actual.runtime entry.runtime
+            && Option.equal phys_equal actual.store_handle entry.store_handle
+          then Ok ()
+          else Error (unavailable Permission_denied "recurrence invoking owner changed")
+        in
+        A.Script_tool_calls.check_current_metadata_admission
+          services
+          (Admission.invocation admission)
+          (Admission.binding admission)
+      in
+      let authorize current =
+        let%bind () = pure admission current in
+        if
+          current.halted
+          || Option.is_some current.failure
+          || P.Session.equal_desired_state current.lifecycle.desired Stopped
+          || Option.exists current.active_operation ~f:(fun operation ->
+            match operation.P.Operation.state with
+            | Cancelling | Cancelled | Failed _ | Interrupted _ -> true
+            | Starting | Running | Completed -> false)
+        then Error (unavailable Permission_denied "recurrence native owner has stopped")
+        else Ok ()
+      in
+      (* This is already-admitted metadata work. The Actor repeats exact local
+         original/binding/generation/profile/stop checks at its writer boundary.
+         Cross-Actor inherited policy was checked immediately before submission;
+         it is not an atomic global policy transaction across writer IO. Stored
+         recurrence metadata grants no future launch/target authority. Return a
+         real ACK directly rather than concealing it with post-ACK rejection. *)
+      Actor.recurrence_native_command entry.actor ~admission ~authorize ~refresh ~request)
+;;
+
+let goal_metadata_service t (profile : Agent_session.Permission_policy.t) actor_ref =
+  let module A = Agent_session in
+  let module Actor = A.Session_actor in
+  let module Admission = A.Goal_native_admission in
+  let module P = Agent_protocol in
+  let open Result.Let_syntax in
+  let authorize
+        (invocation : P.Invocation.t)
+        principal_id
+        actor
+        (state : A.Session_state.t)
+    =
+    if
+      Operator_authorization.is_current actor
+      && P.Id.Principal.equal (Operator_authorization.principal actor).id principal_id
+      && P.Id.Session.equal invocation.context.session_id state.identity.session_id
+      && Int.equal invocation.context.generation state.identity.generation
+      && String.equal
+           profile.A.Permission_policy.revision_digest
+           state.spec.permission_profile_digest
+      && (not state.halted)
+      && Option.is_none state.failure
+      && not
+           (Option.exists state.active_operation ~f:(fun operation ->
+              match operation.P.Operation.state with
+              | Cancelling | Cancelled | Failed _ | Interrupted _ -> true
+              | Starting | Running | Completed -> false))
+    then Ok ()
+    else
+      Error
+        (unavailable Permission_denied "Goal metadata invoking owner changed or stopped")
+  in
+  let with_actor effect_kind admission f =
+    let%bind actor = extension_actor actor_ref in
+    let%bind current = Actor.state actor in
+    let%bind () = Admission.check_now admission current ~effect_kind in
+    let invocation = Admission.invocation admission in
+    let original = Admission.actor admission in
+    (* The native token ends before Invocation completion. Later checks use the
+       exact transferred command custody supplied by the Actor, not that token. *)
+    let authorize = authorize invocation (Operator_authorization.principal original).id in
+    let%bind () = authorize original current in
+    f actor authorize
+  in
+  A.Goal_native_metadata_service.create
+    ~get:(fun ~admission ~goal_id ->
+      with_actor Get admission (fun actor authorize ->
+        let%bind current = Actor.native_goal_state actor ~admission ~authorize in
+        let session =
+          P.Session_ref.create
+            ~server_id:(Agent_store.Session_store.server_id t.store)
+            ~session_id:current.identity.session_id
+        in
+        let%bind view = A.Goal_native_metadata_view.capture current ~session ~goal_id in
+        A.Goal_native_metadata_view.to_json view))
+    ~create_goal:(fun ~admission ~request ->
+      with_actor Create admission (fun actor authorize ->
+        Actor.stage_native_goal_create actor ~admission ~authorize ~request))
+    ~start:(fun ~admission ~request ->
+      with_actor Start admission (fun actor authorize ->
+        Actor.stage_native_goal_start actor ~admission ~authorize ~request))
+    ~resume:(fun ~admission ~request ->
+      with_actor Resume admission (fun actor authorize ->
+        Actor.stage_native_goal_resume actor ~admission ~authorize ~request))
+    ~control:(fun ~admission ~request ->
+      let effect_kind =
+        match P.Goal_native_control_request.mutation request with
+        | Hold _ -> Admission.Effect.Hold
+        | Abandon _ -> Abandon
+      in
+      with_actor effect_kind admission (fun actor authorize ->
+        Actor.stage_native_goal_control actor ~admission ~authorize ~request))
+    ~edit:(fun ~admission ~request ->
+      let effect_kind =
+        match P.Goal_edit.mutation request with
+        | Revise_objective _ -> Admission.Effect.Objective
+        | Record_progress _ -> Progress
+      in
+      with_actor effect_kind admission (fun actor authorize ->
+        Actor.stage_native_goal_edit actor ~admission ~authorize ~edit:request))
 ;;
 
 let create
@@ -9400,6 +18918,7 @@ let create
       ~script_preparation
       ~content_limits
       ~child_sources
+      ~recurrence_planning_host
       ~durability
       ~limits
   =
@@ -9409,7 +18928,7 @@ let create
     | true ->
       Agent_session.Authoring_runtime.configure_host
         ?host:authoring_validation_host
-        ~policy:Chat_response.One_off_request.default_policy
+        ~policy:execution_request_policy
         ()
       |> Result.ok_or_failwith
       |> Option.some
@@ -9421,14 +18940,32 @@ let create
       ~default:Chatmd_source_bundle.default_limits
       ~f:Chat_response.Authoring_validation.bundle_limits
   in
+  let document_limits =
+    Agent_session.Persistence_codec.limits ~max_bytes:limits.snapshot_payload_limit
+    |> Result.map_error ~f:(fun e ->
+      Sexp.to_string_hum (Document_schema.Error.sexp_of_t e))
+    |> Result.ok_or_failwith
+  in
+  let recovery_cpu =
+    Agent_session.Session_recovery_cpu.create
+      ~domain_mgr:(Eio.Stdenv.domain_mgr env)
+      ~limits:document_limits
+  in
   let rec t =
     { sw
     ; env
     ; store
     ; registry
+    ; runtime_source_owner = Agent_session.Runtime_source_owner.create ()
     ; authored_resources = Authored_resources.create ()
+    ; native_metadata_target =
+        (fun session_id -> acquire_native_metadata_target t session_id)
     ; authored_services =
         (fun prepared borrowed -> authored_call_services t prepared borrowed)
+    ; recurrence_service =
+        (fun profile actor_ref -> recurrence_service t profile actor_ref)
+    ; goal_metadata_service =
+        (fun profile actor_ref -> goal_metadata_service t profile actor_ref)
     ; generated_creation_mutex = Eio.Mutex.create ()
     ; idempotency_store
     ; blob_store
@@ -9444,16 +18981,15 @@ let create
     ; independent_lifetime_policy
     ; chatml_runtime_policy
     ; authoring_validation_host
+    ; instruction_sources = None
     ; script_preparation
     ; content_limits
     ; child_sources
+    ; recurrence_planning_host
     ; durability
     ; limits
-    ; document_limits =
-        Agent_session.Persistence_codec.limits ~max_bytes:limits.snapshot_payload_limit
-        |> Result.map_error ~f:(fun e ->
-          Sexp.to_string_hum (Document_schema.Error.sexp_of_t e))
-        |> Result.ok_or_failwith
+    ; document_limits
+    ; recovery_cpu
     ; journal_document_limits =
         Agent_session.Persistence_codec.limits ~max_bytes:limits.max_journal_payload
         |> Result.map_error ~f:(fun e ->
@@ -9615,11 +19151,11 @@ let seed_from_recipe
   with
   | Ok _ as success -> success
   | Error _ as failure ->
-    close_actor_lock_after_failure t handle;
+    close_unretained_handle_after_failure t handle;
     failure
   | exception exn ->
     let backtrace = Backtrace.Exn.most_recent () in
-    close_actor_lock_after_failure t handle;
+    close_unretained_handle_after_failure t handle;
     Exn.raise_with_original_backtrace exn backtrace
 ;;
 
@@ -9825,4 +19361,575 @@ let seed_session t ~principal ~request ~command_audit ~checkpoint =
 
 let reconcile_seed_creations t ~limits ~checkpoint =
   Session_seed_recovery.reconcile (seed_recovery t) ~limits ~checkpoint
+;;
+
+let check_execution_selected_owner t entry ~session =
+  let open Result.Let_syntax in
+  let%bind () = check_registered_owner t entry ~session in
+  if Session_registry.execution_selected t.registry entry
+  then Ok ()
+  else Error (unavailable Conflict "recurrence entry is not selected for execution")
+;;
+
+let check_execution_selected_entry t entry ~session =
+  let open Result.Let_syntax in
+  let%bind () = check_registered_entry t entry ~session in
+  if Session_registry.execution_selected t.registry entry
+  then Ok ()
+  else Error (unavailable Conflict "recurrence entry is not selected for execution")
+;;
+
+let read_recurrence_state t ~session ~actor ~authorize =
+  let module P = Agent_protocol in
+  let open Result.Let_syntax in
+  let check summary =
+    let%bind () = check_recurrence_original actor in
+    let%bind () =
+      if
+        P.Id.Server.equal
+          (P.Session_ref.server_id session)
+          (Agent_store.Session_store.server_id t.store)
+        && P.Id.Session.equal (P.Session_ref.session_id session) summary.P.Session.id
+      then Ok ()
+      else
+        Error (unavailable Invalid_request "recurrence read belongs to another session")
+    in
+    let%bind () = authorize summary in
+    check_recurrence_original actor
+  in
+  let%bind () = check_recurrence_original actor in
+  let%bind () =
+    if
+      P.Id.Server.equal
+        (P.Session_ref.server_id session)
+        (Agent_store.Session_store.server_id t.store)
+    then Ok ()
+    else Error (unavailable Invalid_request "recurrence read belongs to another host")
+  in
+  let%bind state =
+    Session_registry.read_state
+      t.registry
+      ~authorize:check
+      (P.Session_ref.session_id session)
+  in
+  let%map () = check (Agent_session.Session_state.summary state) in
+  state
+;;
+
+let acquire_recurrence_child ?(fresh_goal = false) t ~parent ~actor ~authorize ~occurrence
+  =
+  let module A = Agent_session in
+  let module P = Agent_protocol in
+  let module D = Agent_store.Delegation_store in
+  let module R = A.Recurrence_child_reservation in
+  let open Result.Let_syntax in
+  let parent_session =
+    A.Recurrence_identity.Occurrence.definition occurrence
+    |> A.Recurrence_identity.Definition.controller
+  in
+  let facts () =
+    let%bind () = check_recurrence_original actor in
+    let%bind () = check_registered_entry t parent ~session:parent_session in
+    let%bind state = A.Session_actor.state parent.Session_registry.actor in
+    let entries =
+      Option.value_map
+        state.recurrence_catalog
+        ~default:[]
+        ~f:A.Recurrence_catalog.entries
+    in
+    let%bind entry =
+      List.find entries ~f:(fun entry ->
+        P.Id.Recurrence.equal
+          (A.Recurrence_entry.id entry)
+          (A.Recurrence_identity.Occurrence.definition occurrence
+           |> A.Recurrence_identity.Definition.recurrence_id))
+      |> Result.of_option
+           ~error:(unavailable Conflict "captured occurrence is not retained")
+    in
+    let%bind definition =
+      List.find (A.Recurrence_entry.definitions entry) ~f:(fun definition ->
+        A.Recurrence_identity.Definition.equal
+          (A.Recurrence_definition.key definition)
+          (A.Recurrence_identity.Occurrence.definition occurrence))
+      |> Result.of_option
+           ~error:(unavailable Conflict "captured definition is not retained")
+    in
+    let%bind () = authorize state definition in
+    let%bind () =
+      match fresh_goal, A.Recurrence_definition.goal_binding definition with
+      | false, _ | true, Unbound -> Ok ()
+      | true, Controller_goal binding ->
+        A.Recurrence_goal_capture.check_current
+          binding
+          state
+          ~owner:parent_session
+          ~source:(A.Recurrence_definition.source definition)
+          ~now:(now t)
+    in
+    let%bind frontier = A.Recurrence_entry.frontier entry in
+    let%bind reservation =
+      List.find (A.Recurrence_frontier.protected_children frontier) ~f:(fun row ->
+        A.Recurrence_identity.Occurrence.equal occurrence (R.occurrence row))
+      |> Result.of_option
+           ~error:(unavailable Conflict "captured reservation is not retained")
+    in
+    let%bind association =
+      List.find (A.Recurrence_frontier.child_associations frontier) ~f:(fun row ->
+        A.Recurrence_identity.Occurrence.equal
+          occurrence
+          (A.Recurrence_child_association.occurrence row))
+      |> Result.of_option ~error:(unavailable Conflict "captured child is not linked")
+    in
+    let%bind () = A.Recurrence_child_association.validate association ~reservation in
+    let reference = A.Recurrence_child_association.reference association in
+    let%bind record =
+      D.resolve (Agent_store.Session_store.delegations t.store) reference
+      |> Result.map_error ~f:protocol_of_store
+    in
+    let%bind () =
+      if D.equal_stage record.stage Linked
+      then Ok ()
+      else Error (unavailable Conflict "captured child has no actual linked publication")
+    in
+    let%bind origin = A.Recurrence_child_origin.of_record record in
+    let%bind () = A.Recurrence_child_origin.validate_definition origin definition in
+    let%bind () =
+      if R.equal reservation (A.Recurrence_child_origin.reservation origin)
+      then Ok ()
+      else Error (unavailable Conflict "captured record has another reservation")
+    in
+    let%bind () = check_recurrence_original actor in
+    let%map () = check_registered_entry t parent ~session:parent_session in
+    reference, record, origin, state, definition
+  in
+  let%bind reference, _, origin, parent_state, definition = facts () in
+  let session =
+    P.Session_ref.create
+      ~server_id:(Agent_store.Session_store.server_id t.store)
+      ~session_id:reference.child_session_id
+  in
+  let verify state =
+    let%bind () = check_recurrence_original actor in
+    let%bind () = authorize parent_state definition in
+    A.Recurrence_child_origin.validate_source origin state
+  in
+  let%bind entry = acquire_recurrence_target t ~session ~actor ~authorize:verify in
+  let%bind state = A.Session_actor.state entry.Session_registry.actor in
+  let%bind current, record, origin, _, _ = facts () in
+  let%bind () =
+    if D.Reference.equal reference current
+    then Ok ()
+    else Error (unavailable Conflict "captured child association changed")
+  in
+  let%bind () = A.Recurrence_child_origin.validate_source origin state in
+  let%bind artifact_store =
+    Agent_store.Prompt_artifact_store.open_existing
+      ~env:t.env
+      ~root:
+        (Agent_store.Data_root.prompt_artifacts_path
+           (Agent_store.Session_store.data_root t.store))
+    |> Result.map_error ~f:protocol_of_store
+  in
+  let%bind _ =
+    A.Captured_recurrence_source.restore
+      ~artifact_store
+      ~content_limits:t.content_limits
+      ~record
+      ~state
+      ~checkpoint:Eio.Fiber.check
+  in
+  let%bind final_reference, final_record, _, _, _ = facts () in
+  let%bind () =
+    if D.Reference.equal reference final_reference && D.equal_record record final_record
+    then Ok ()
+    else Error (unavailable Conflict "captured record changed during recovery")
+  in
+  let%map () = check_registered_entry t entry ~session in
+  { Recurrence_child.session; reference }, entry
+;;
+
+let select_existing_goal_source t entry ~parent_cleanup ~prepare ~check_selected f =
+  let module Scope = Runtime_owner.Scope_outcome in
+  with_selected_source
+    t
+    entry
+    ~with_parent:(fun owner ~reference:_ ~target:_ f ->
+      parent_cleanup := Deferred_parent_cleanup.Awaiting_report;
+      let outcome =
+        Runtime_owner.with_loaded_source_capabilities_reported
+          owner
+          ~source_owner:t.runtime_source_owner
+          f
+      in
+      parent_cleanup := Reported (Scope.cleanup outcome);
+      Scope.resume outcome)
+    ~with_source:(fun source f -> Result.bind (prepare source) ~f)
+    ~check_selected
+    f
+;;
+
+let finish_existing_goal_source ~outcome ~parent_cleanup ~preparation ~end_preparation =
+  let module Scope = Runtime_owner.Scope_outcome in
+  let cleanup =
+    match parent_cleanup with
+    | Deferred_parent_cleanup.Not_acquired -> Scope.cleanup outcome
+    | Reported parent -> Scope.Cleanup.combine parent (Scope.cleanup outcome)
+    | Awaiting_report ->
+      Scope.Cleanup.combine
+        (Scope.Cleanup.failed
+           (Protocol
+              (unavailable
+                 Internal_error
+                 "Goal parent source cleanup report is unavailable")))
+        (Scope.cleanup outcome)
+  in
+  match preparation with
+  | None -> cleanup
+  | Some preparation ->
+    (* Actual target/parent reporters have returned before factual Actor close.
+       Missing or failed cleanup is never promoted to joined by this close. *)
+    let closed =
+      Eio.Cancel.protect (fun () ->
+        try Ok (end_preparation preparation) with
+        | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ()))
+    in
+    (match closed with
+     | Ok (Ok ()) -> cleanup
+     | Ok (Error failure) ->
+       Scope.Cleanup.combine cleanup (Scope.Cleanup.failed (Protocol failure))
+     | Error (exn, backtrace) ->
+       Scope.Cleanup.combine cleanup (Scope.Cleanup.failed (Raised (exn, backtrace))))
+;;
+
+let resume_existing_goal_source outcome cleanup =
+  let module Scope = Runtime_owner.Scope_outcome in
+  match Scope.resume outcome with
+  | Error _ as failure -> failure
+  | Ok _ as result ->
+    (match Scope.Cleanup.status cleanup with
+     | Never_acquired | Joined -> result
+     | Failed (Protocol failure, _) -> Error failure
+     | Failed (Raised (exn, backtrace), _) ->
+       Exn.raise_with_original_backtrace exn backtrace)
+;;
+
+module Goal_resume_source = struct
+  module Decision = Runtime_owner.Goal_resume_source.Decision
+
+  type 'a t =
+    { outcome : 'a Decision.t Runtime_owner.Scope_outcome.t
+    ; receipt : Agent_session.Goal_command_receipt.t option
+    ; cleanup : Runtime_owner.Scope_outcome.Cleanup.t
+    }
+
+  let receipt t = t.receipt
+  let cleanup t = t.cleanup
+  let result t = resume_existing_goal_source t.outcome t.cleanup
+end
+
+module Goal_resume_issuer = struct
+  type t =
+    | Operator of
+        { actor : Operator_authorization.t
+        ; authorize :
+            Agent_session.Session_state.t -> (unit, Agent_protocol.Error.t) result
+        ; request : Agent_session.Goal_resume_request.t
+        }
+    | Native of Agent_session.Session_actor.Goal_native_resume.Selection.t
+end
+
+let with_goal_resume_issued_source_reported
+      t
+      (entry : Session_registry.entry)
+      ~issuer
+      ~session
+      f
+  =
+  let module Actor = Agent_session.Session_actor in
+  let module Scope = Runtime_owner.Scope_outcome in
+  let module Source = Runtime_owner.Goal_resume_source in
+  let open Result.Let_syntax in
+  let%bind () = check_registered_entry t entry ~session in
+  let%bind () =
+    if Runtime_owner.belongs_to_actor entry.runtime entry.actor
+    then Ok ()
+    else Error (unavailable Invalid_state "source runtime belongs to another Actor")
+  in
+  let parent_cleanup = ref Deferred_parent_cleanup.Not_acquired in
+  let report =
+    let with_source =
+      match issuer with
+      | Goal_resume_issuer.Operator { actor; authorize; request } ->
+        Runtime_owner.with_goal_resume_source_reported
+          entry.runtime
+          ~source_owner:t.runtime_source_owner
+          ~actor
+          ~authorize
+          ~session
+          ~request
+      | Native selection ->
+        Runtime_owner.with_native_goal_resume_source_reported
+          entry.runtime
+          ~source_owner:t.runtime_source_owner
+          ~selection
+    in
+    with_source (fun stage ->
+      select_existing_goal_source
+        t
+        entry
+        ~parent_cleanup
+        ~prepare:(fun source -> Source.prepare stage ~source)
+        ~check_selected:Runtime_owner.Prepared_goal_continuation.check_basis
+        f)
+  in
+  let outcome = Source.Report.outcome report in
+  let cleanup =
+    finish_existing_goal_source
+      ~outcome
+      ~parent_cleanup:!parent_cleanup
+      ~preparation:(Source.Report.preparation report)
+      ~end_preparation:(fun preparation ->
+        Actor.end_goal_continuation_preparation entry.actor ~preparation)
+  in
+  let receipt =
+    match Source.Report.preparation report with
+    | Some preparation -> Actor.Goal_continuation.Preparation.receipt preparation
+    | None ->
+      (match Scope.primary outcome with
+       | Returned (Ok (Source.Decision.Retained receipt)) -> Some receipt
+       | Returned (Ok (Fresh _) | Error _) | Raised _ -> None)
+  in
+  Ok { Goal_resume_source.outcome; receipt; cleanup }
+;;
+
+let with_goal_resume_source_reported t entry ~actor ~authorize ~session ~request f =
+  with_goal_resume_issued_source_reported
+    t
+    entry
+    ~session
+    ~issuer:(Goal_resume_issuer.Operator { actor; authorize; request })
+    f
+;;
+
+let with_native_goal_start_source t ~entry ~selection f =
+  let open Result.Let_syntax in
+  let session =
+    Agent_session.Session_actor.Goal_native_start.Selection.session selection
+  in
+  let%bind () = check_registered_entry t entry ~session in
+  with_deferred_run_source
+    t
+    entry
+    ~observation:(Deferred_observation.Native_goal_start selection)
+    ~with_source_stage:
+      (Runtime_owner.with_native_goal_start_source_reported
+         entry.Session_registry.runtime
+         ~source_owner:t.runtime_source_owner
+         ~selection)
+    (fun source -> f (Runtime_owner.Deferred_source.preparation source))
+;;
+
+let with_native_goal_resume_source_reported t entry ~selection f =
+  let session =
+    Agent_session.Session_actor.Goal_native_resume.Selection.session selection
+  in
+  with_goal_resume_issued_source_reported
+    t
+    entry
+    ~session
+    ~issuer:(Goal_resume_issuer.Native selection)
+    f
+;;
+
+let with_goal_execution_source t (entry : Session_registry.entry) ~with_stage f =
+  let module Actor = Agent_session.Session_actor in
+  let module Source = Runtime_owner.Goal_execution_source in
+  let open Result.Let_syntax in
+  let%bind state = Actor.state entry.actor in
+  let session =
+    Agent_protocol.Session_ref.create
+      ~server_id:(Agent_store.Session_store.server_id t.store)
+      ~session_id:state.identity.session_id
+  in
+  let%bind () = check_registered_owner t entry ~session in
+  let%bind () =
+    if Runtime_owner.belongs_to_actor entry.runtime entry.actor
+    then Ok ()
+    else Error (unavailable Invalid_state "source runtime belongs to another Actor")
+  in
+  let parent_cleanup = ref Deferred_parent_cleanup.Not_acquired in
+  let report =
+    with_stage (fun stage ->
+      select_existing_goal_source
+        t
+        entry
+        ~parent_cleanup
+        ~prepare:(fun source -> Source.prepare stage ~source)
+        ~check_selected:Runtime_owner.Prepared_goal_execution.check_basis
+        (fun prepared ->
+           let%bind execution =
+             Actor.prepare_goal_execution_runtime
+               entry.actor
+               ~binding:(Runtime_owner.Prepared_goal_execution.binding prepared)
+           in
+           f prepared execution))
+  in
+  let outcome = Source.Report.outcome report in
+  let cleanup =
+    finish_existing_goal_source
+      ~outcome
+      ~parent_cleanup:!parent_cleanup
+      ~preparation:(Source.Report.preparation report)
+      ~end_preparation:(fun preparation ->
+        Actor.end_goal_execution_runtime_preparation entry.actor ~preparation)
+  in
+  resume_existing_goal_source outcome cleanup
+;;
+
+let with_goal_job_runtime t (entry : Session_registry.entry) ~owner f =
+  let module Actor = Agent_session.Session_actor in
+  let open Result.Let_syntax in
+  let%bind state = Actor.state entry.actor in
+  let session =
+    Agent_protocol.Session_ref.create
+      ~server_id:(Agent_store.Session_store.server_id t.store)
+      ~session_id:state.identity.session_id
+  in
+  let%bind () = check_registered_owner t entry ~session in
+  let%bind () =
+    match Actor.Job_runtime_owner.attribution owner with
+    | Goal -> Actor.check_job_runtime_owner entry.actor ~owner
+    | Ordinary ->
+      Error
+        (unavailable Invalid_request "ordinary Job requires its ordinary runtime path")
+  in
+  let%bind reused = Runtime_owner.with_loaded_goal_job_runtime entry.runtime ~owner f in
+  match reused with
+  | Reused result -> Ok (Runtime_owner.Construction_result.Built result)
+  | No_runtime ->
+    let%bind decision =
+      with_goal_execution_source
+        t
+        entry
+        ~with_stage:
+          (Runtime_owner.with_goal_job_source_reported
+             entry.runtime
+             ~source_owner:t.runtime_source_owner
+             ~owner)
+        (fun prepared execution ->
+           Runtime_owner.with_goal_job_runtime entry.runtime ~prepared ~execution f)
+    in
+    (match decision with
+     | Fresh result -> Ok result
+     | No_work | Suspended_goal _ ->
+       Error
+         (unavailable
+            Invalid_state
+            "claimed Job source did not retain its actual execution"))
+;;
+
+let execute_background_job t (entry : Session_registry.entry) job =
+  let module Actor = Agent_session.Session_actor in
+  let open Result.Let_syntax in
+  let%bind state = Actor.state entry.actor in
+  let session =
+    Agent_protocol.Session_ref.create
+      ~server_id:(Agent_store.Session_store.server_id t.store)
+      ~session_id:state.identity.session_id
+  in
+  let%bind () = check_registered_owner t entry ~session in
+  let%bind request =
+    Runtime_owner.Background_job.prepare ~policy:execution_request_policy job
+  in
+  if
+    Agent_protocol.Timestamp.compare
+      (Runtime_owner.Background_job.deadline request)
+      (now t)
+    <= 0
+  then Ok (Runtime_owner.Completed Agent_protocol.Completion.Expired)
+  else
+    Actor.with_job_execution
+      entry.actor
+      ~job_id:job.Agent_protocol.Job.id
+      ~generation:job.generation
+      ~attempt:job.attempt
+      ~deadline:(Some (Runtime_owner.Background_job.deadline request))
+      (fun execution ->
+         match Actor.Job_runtime_owner.attribution execution.runtime_owner with
+         | Ordinary ->
+           Runtime_owner.execute_background_job_in_scope entry.runtime ~execution ~request
+         | Goal ->
+           let%bind result =
+             with_goal_job_runtime t entry ~owner:execution.runtime_owner (fun runtime ->
+               Runtime_owner.execute_background_job_runtime
+                 entry.runtime
+                 ~runtime
+                 ~execution
+                 ~request)
+           in
+           (match result with
+            | Runtime_owner.Construction_result.Built outcome -> Ok outcome
+            | Callback_completed _ ->
+              Error
+                (unavailable
+                   Invalid_state
+                   "Goal callback completed construction before Job execution")))
+;;
+
+module Goal_wake_result = struct
+  type t =
+    | No_work
+    | Suspended_goal of Agent_session.Goal_execution_selection.Suspension.t
+    | Handed_off of Agent_session.Session_actor.Goal_execution_runtime.Wake_result.t
+    | Controlled of Agent_session.Session_actor.Goal_callback_control.t
+end
+
+let deliver_goal_wake t (entry : Session_registry.entry) ~wake =
+  let open Result.Let_syntax in
+  let%map decision =
+    with_goal_execution_source
+      t
+      entry
+      ~with_stage:
+        (Runtime_owner.with_goal_wake_source_reported
+           entry.runtime
+           ~source_owner:t.runtime_source_owner
+           ~wake)
+      (fun prepared execution ->
+         Runtime_owner.run_goal_wake_runtime
+           entry.runtime
+           ~prepared
+           ~execution
+           ~notification_policy:execution_request_policy
+           ~max_notifications:t.limits.notifications.max_per_source)
+  in
+  match decision with
+  | No_work -> Goal_wake_result.No_work
+  | Suspended_goal suspension -> Suspended_goal suspension
+  | Fresh
+      (Agent_session.Session_actor.Goal_execution_runtime.Wake_result.Controlled control)
+    -> Controlled control
+  | Fresh ((Queued _ | Started _ | Waiting _ | Settled _) as result) -> Handed_off result
+;;
+
+let drain_idle_moderator t (entry : Session_registry.entry) =
+  let module Actor = Agent_session.Session_actor in
+  let open Result.Let_syntax in
+  let%bind state = Actor.state entry.actor in
+  let session =
+    Agent_protocol.Session_ref.create
+      ~server_id:(Agent_store.Session_store.server_id t.store)
+      ~session_id:state.identity.session_id
+  in
+  let%bind () = check_registered_entry t entry ~session in
+  let%bind () = Actor.reconcile_goal_wake_authority entry.actor ~request:Idle in
+  let%bind selection = Actor.select_goal_runtime_wake entry.actor ~request:Idle in
+  match selection with
+  | Ordinary -> Runtime_owner.drain_idle_moderator entry.runtime
+  | No_work | Suspended_goal _ -> Ok false
+  | Wake wake ->
+    let%map result = deliver_goal_wake t entry ~wake in
+    (match result with
+     | No_work | Suspended_goal _ -> false
+     | Handed_off _ | Controlled _ -> true)
 ;;

@@ -64,6 +64,32 @@ session context and current binding/permission checks. Retaining a session ID or
 receiving an earlier approval does not grant unrestricted access to unrelated
 sessions or future changed capabilities.
 
+## Parent policy and the original caller
+
+When a child call reaches its parent's moderator, the policy callback retains the
+actual child's original authorization. A concurrent parent operation cannot
+replace that authorization. Native calls made by the policy callback and its
+acknowledged queued or observation continuations keep the same original checks.
+An explicitly admitted call with no principal remains distinct from historical
+missing custody; missing, expired or revoked custody cannot grant new effects.
+
+A stopped parent can evaluate the exact `Pre_tool_call` policy event only when
+its completed moderator resources are already retained and still match the
+current source and permissions. This does not start its worker or request an
+automatic follow-up turn. Missing retained resources fail rather than cold-loading
+a replacement policy runtime.
+Native tools remain available only inside that acknowledged policy callback's
+actual live scope, with the same original authorization and current permission
+checks. Completion, cancellation, source replacement, a new Stop epoch, or a true
+halt or failure ends that scope. Retaining a tool callback does not keep its
+permission alive after the policy callback ends.
+
+A supported follow-up request committed by that stopped policy remains pending;
+it does not start work automatically. An unrelated metadata update can preserve
+its original caller only within the same source, generation and Stop epoch. A
+later explicit start can consume that original-backed request once. A new Stop,
+source replacement or expired original cannot turn it into fresh authority.
+
 ## Put the distinction to work
 
 For a documentation team:

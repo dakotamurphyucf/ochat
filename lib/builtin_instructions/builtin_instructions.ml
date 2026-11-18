@@ -43,18 +43,27 @@ module Enumeration_error = struct
   [@@deriving equal, sexp_of]
 end
 
-let chatml =
-  let contents =
-    List.Assoc.find_exn Bundled_instructions.documents "chatml" ~equal:String.equal
-  in
-  { Asset.id = Id.of_string "chatml" |> Or_error.ok_exn
-  ; title = "ChatML starter"
-  ; contents
-  ; sha256 = Digestif.SHA256.(digest_string contents |> to_hex)
-  }
+let installed =
+  List.map
+    [ "chatml", "ChatML starter"
+    ; "goals", "Persistent goals"
+    ; "recurrence", "Recurring work"
+    ; "skills", "Admitted skills"
+    ; "project-instructions", "Project guidance"
+    ; "context-recovery", "Context recovery policy"
+    ; "packages", "Reusable capability packages"
+    ; "lifecycle", "Composed lifecycle decisions"
+    ]
+    ~f:(fun (id, title) ->
+      let contents =
+        List.Assoc.find_exn Bundled_instructions.documents id ~equal:String.equal
+      in
+      { Asset.id = Id.of_string id |> Or_error.ok_exn
+      ; title
+      ; contents
+      ; sha256 = Digestif.SHA256.(digest_string contents |> to_hex)
+      })
 ;;
-
-let installed = [ chatml ]
 
 let installed_ids ~max_items ~checkpoint =
   checkpoint ();

@@ -357,6 +357,7 @@ let%expect_test
             source
             ~body:(Full (History_appended [ value; value ]))
             ~extension_status:None
+            ~instruction_status:None
             ~replacement_snapshot:None)
        : bool)];
   [%expect

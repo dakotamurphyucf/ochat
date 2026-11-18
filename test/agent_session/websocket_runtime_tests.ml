@@ -188,6 +188,8 @@ let%expect_test
       and selection = ref None in
       let runtime =
         B.build
+          ~construction_checkpoint:None
+          ~legacy_construction:None
           ~agent_source:None
           ~startup:None
           ~root_invocation:Ui
@@ -196,6 +198,7 @@ let%expect_test
           ~env
           ~inference_context:context
           ~inference_identity:identity
+          ~bind_inference_identity:(fun _ -> identity)
           ~on_inference_attempt:(fun value -> attempt := Some value)
           ~on_inference_completion:ignore
           ~on_inference_observation:(fun observation ->
@@ -226,10 +229,14 @@ let%expect_test
             ; cancel = (fun ~id:_ -> failwith "unexpected timer")
             }
           ~job_services:
-            { spawn_model = (fun ~recipe:_ ~payload:_ -> failwith "unexpected job")
-            ; call_model =
-                (fun ~recipe:_ ~payload:_ ~execute:_ -> failwith "unexpected job")
-            }
+            (let initialization : Agent_session.Runtime_model_services.t =
+               { spawn_model = (fun ~recipe:_ ~payload:_ -> failwith "unexpected job")
+               ; call_model =
+                   (fun ~recipe:_ ~payload:_ ~execute:_ -> failwith "unexpected job")
+               }
+             in
+             Agent_session.Runtime_model_services.
+               { initialization; for_execution = (fun _ -> initialization) })
         |> protocol_ok
       in
       let execution = B.inference_execution runtime in
@@ -290,7 +297,7 @@ let%expect_test
            , (O.Transport_selection.fallback actual
               : O.Transport_selection.fallback_reason option)]
        | _ -> assert false);
-      runtime.close ();
+      B.close runtime;
       print_s [%sexp (!opened : int), (!closed : int)];
       match Inference_client.Execution.run execution ~sw ~request ~on_event:ignore with
       | Error error -> print_s [%sexp (error : Inference_client.Error.t)]

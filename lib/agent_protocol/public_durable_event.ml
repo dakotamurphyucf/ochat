@@ -73,6 +73,7 @@ type t =
   ; timestamp : Timestamp.t
   ; kind : D.kind
   ; body : body
+  ; instruction_status : Instruction_status.t option
   ; extension_status : Extension_status.t list option
   ; replacement_snapshot : Public_snapshot.t option
   }
@@ -158,6 +159,10 @@ let to_json t =
     | `Object fields ->
       `Object
         (fields
+         @ Projection_codec.optional
+             "instruction_status"
+             t.instruction_status
+             Instruction_status.to_json
          @ Projection_codec.optional "extension_status" t.extension_status (fun values ->
            `Array (List.map values ~f:Extension_status.to_json))
          @ Projection_codec.optional
@@ -276,7 +281,13 @@ let validate_extension_status body = function
             "extension status requires a visible session update"))
 ;;
 
-let of_internal_envelope (event : D.t) ~body ~extension_status ~replacement_snapshot =
+let of_internal_envelope
+      (event : D.t)
+      ~body
+      ~instruction_status
+      ~extension_status
+      ~replacement_snapshot
+  =
   let open Result.Let_syntax in
   let valid_kind =
     match body with
@@ -285,7 +296,10 @@ let of_internal_envelope (event : D.t) ~body ~extension_status ~replacement_snap
   in
   let hidden_extras =
     match body with
-    | Hidden -> Option.is_some extension_status || Option.is_some replacement_snapshot
+    | Hidden ->
+      Option.is_some instruction_status
+      || Option.is_some extension_status
+      || Option.is_some replacement_snapshot
     | Full _ | Filtered _ -> false
   in
   let invalid_replacement =
@@ -296,14 +310,27 @@ let of_internal_envelope (event : D.t) ~body ~extension_status ~replacement_snap
          && Int64.equal fields.revision event.revision
          && Int64.equal fields.latest_event_sequence event.sequence))
   in
+  let contradictory_instruction_status =
+    match instruction_status, replacement_snapshot with
+    | Some status, Some snapshot ->
+      not
+        (Option.equal
+           Instruction_status.equal
+           (Some status)
+           (Public_snapshot.fields snapshot).instruction_status)
+    | None, _ | Some _, None -> false
+  in
   if
     Int64.(event.sequence < zero || event.revision < zero)
     || (not valid_kind)
     || hidden_extras
     || invalid_replacement
+    || contradictory_instruction_status
   then Error (Protocol_error.invalid_request "invalid public durable event envelope")
   else if
-    (Option.is_some extension_status || Option.is_some replacement_snapshot)
+    (Option.is_some instruction_status
+     || Option.is_some extension_status
+     || Option.is_some replacement_snapshot)
     && not (D.equal_kind event.kind D.Session_updated)
   then Error (Protocol_error.invalid_request "replacement extras require session.updated")
   else (
@@ -311,6 +338,22 @@ let of_internal_envelope (event : D.t) ~body ~extension_status ~replacement_snap
       match body with
       | Hidden -> Ok ()
       | Full payload | Filtered payload -> validate_owner event.session_id payload
+    in
+    let%bind () =
+      match instruction_status, body with
+      | None, _ -> Ok ()
+      | Some _, (Full payload | Filtered payload) ->
+        let%bind session = Session.of_json (payload_to_json payload) in
+        if
+          Int64.equal session.revision event.revision
+          && Int64.equal session.latest_event_sequence event.sequence
+        then Ok ()
+        else
+          Error
+            (Protocol_error.invalid_request
+               "instruction status disagrees with session event anchor")
+      | Some _, Hidden ->
+        Error (Protocol_error.invalid_request "hidden instruction status")
     in
     let%bind () = validate_extension_status body extension_status in
     let t =
@@ -320,6 +363,7 @@ let of_internal_envelope (event : D.t) ~body ~extension_status ~replacement_snap
       ; timestamp = event.timestamp
       ; kind = event.kind
       ; body
+      ; instruction_status
       ; extension_status
       ; replacement_snapshot
       }
@@ -353,6 +397,9 @@ let of_json json =
        | `Object _ -> event.payload
        | _ -> `Object [])
   in
+  let%bind instruction_status =
+    J.optional_as fields "instruction_status" Instruction_status.of_json
+  in
   let%bind extension_status =
     J.optional_as fields "extension_status" Extension_status.list_of_json
   in
@@ -372,7 +419,12 @@ let of_json json =
       let%map p = payload_of_json ~kind:event.kind event.payload in
       Filtered p
   in
-  of_internal_envelope event ~body ~extension_status ~replacement_snapshot
+  of_internal_envelope
+    event
+    ~body
+    ~instruction_status
+    ~extension_status
+    ~replacement_snapshot
 ;;
 
 let to_notification t =

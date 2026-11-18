@@ -285,3 +285,35 @@ pinned sources, leases and quota admission are re-evaluated by the host.
 
 See [operations](operations.md) before restoring state, resetting, rebuilding or
 deleting a session. Export is not a full backup.
+
+### Snapshot retention during active sessions
+
+Durable journal acknowledgements and snapshot installation remain synchronous.
+After a snapshot succeeds, the session coalesces a request to prune older cached
+snapshots and covered journal segments. Pruning runs only while the same loaded
+session is quiescent: no foreground operation, executing Job or invocation,
+moderator borrow, staged launch, or active call may retain ownership. An installed
+but idle runtime does not require unloading for this maintenance. Busy sessions
+retry later; this worker operates independently of optional global maintenance.
+
+The worker captures the current checkpoint basis in the Actor mailbox, then
+warms fallback replay and archive validation outside the mailbox. Before
+pruning or sealing, it reacquires the same loaded owner and checks that the
+checkpoint basis is unchanged. This final check and the physical maintenance
+run in the quiescent Actor under a reservation that excludes lifecycle changes.
+An unavailable commit writer blocks pruning and close-time snapshot creation
+because journal counters may lag an uncertain physical write. Closing still
+releases its owned resources and reports the blocked checkpoint.
+
+Native delegation can observe committed state from the same registered Actor
+during this maintenance. It checks the actual Actor, runtime owner and Store
+Handle around the mailbox read. Lifecycle transitions and pending cleanup
+still block that observation. The observation supplies data for the ancestry
+check, which continues to validate the original resource authority.
+
+Expected maintenance errors retain pending work for a later retry; an unexpected
+worker exception stops the worker and is reported when its owner joins it. One
+pending request does not impose a disk-space ceiling: continuously busy or invalid
+retained data can prevent reclamation.
+Closing the session joins maintenance and performs its ordinary synchronous
+checkpoint before releasing its Actor, writer or Store Handle.

@@ -6,6 +6,7 @@ module R = Chatml_host_runtime
 
 type handlers =
   { stage : P.Run_action.t -> (int, string) result
+  ; stage_goal_finish : P.Goal_achievement.Intent.t -> (int, string) result
   ; rollback : int -> unit
   }
 
@@ -20,6 +21,11 @@ let dynamic_handlers current =
         match current () with
         | None -> Error "run callback scope is not installed"
         | Some transaction -> transaction.handlers.stage action)
+  ; stage_goal_finish =
+      (fun intent ->
+        match current () with
+        | None -> Error "goal finish requires an owning Run callback scope"
+        | Some transaction -> transaction.handlers.stage_goal_finish intent)
   ; rollback =
       (fun receipt ->
         match current () with
@@ -30,7 +36,7 @@ let dynamic_handlers current =
 
 let receipt (operation : L.eff) =
   match operation.op with
-  | "Run.continue" | "Run.wait" | "Run.finish" ->
+  | "Run.continue" | "Run.wait" | "Run.finish" | "Goal.finish" ->
     let expected_arity = if String.equal operation.op "Run.continue" then 1 else 2 in
     if List.length operation.args <> expected_arity
     then Error "invalid recorded run action arity"
@@ -66,7 +72,7 @@ let install ?control ~handlers (config : R.runtime_config) =
     let%bind json = V.export_json ?control value in
     Result.map_error (decoder json) ~f:(fun error -> error.P.Error.message)
   in
-  let operation name action : R.op_def =
+  let operation name ~stage action : R.op_def =
     { name
     ; kind =
         Local_transactional_with_result
@@ -81,28 +87,31 @@ let install ?control ~handlers (config : R.runtime_config) =
     ; perform =
         (fun _ args ->
           let%bind action = action args in
-          let%bind ticket = handlers.stage action in
+          let%bind ticket = stage action in
           if ticket < 0
           then Error "host returned an invalid run action receipt"
           else Ok (L.VVariant ("Run_receipt", [ L.VInt ticket; L.VUnit ])))
     }
   in
   let operations =
-    [ operation "Run.continue" (function
+    [ operation "Run.continue" ~stage:handlers.stage (function
         | [] -> Ok P.Run_action.Continue
         | _ -> Error "Run.continue: expected no arguments")
-    ; operation "Run.wait" (function
+    ; operation "Run.wait" ~stage:handlers.stage (function
         | [ value ] ->
           Result.map (decode P.Run_wake.of_json value) ~f:(fun wake ->
             P.Run_action.Wait wake)
         | _ -> Error "Run.wait: expected an exact authorized wake")
-    ; operation "Run.finish" (function
+    ; operation "Run.finish" ~stage:handlers.stage (function
         | [ value ] ->
           let%bind action = decode P.Run_action.of_json value in
           (match action with
            | Finish _ -> Ok action
            | Continue | Wait _ -> Error "Run.finish: expected a finish decision")
         | _ -> Error "Run.finish: expected a finish decision")
+    ; operation "Goal.finish" ~stage:handlers.stage_goal_finish (function
+        | [ value ] -> decode P.Goal_achievement.Intent.of_json value
+        | _ -> Error "Goal.finish: expected a scoped achievement intent")
     ]
   in
   { config with

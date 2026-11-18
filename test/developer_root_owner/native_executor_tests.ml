@@ -19,7 +19,7 @@ module Selected = Developer_run_store_test_suite.Developer_run_selected_tests
 let ok = T.ok
 let command_capture root = O.Source.command_capture (O.source root) |> Option.value_exn
 
-let registry ?unrelated ~custom calls =
+let registry ?unrelated ?(on_invocation = fun _ -> ()) ~custom calls =
   let module Definition = struct
     type input = string
 
@@ -31,9 +31,10 @@ let registry ?unrelated ~custom calls =
   end
   in
   let implementation =
-    Ochat_function.create_function
+    Ochat_function.create_streaming_function
       (module Definition)
-      (fun input ->
+      (fun ~invocation input ->
+         on_invocation invocation;
          Int.incr calls;
          assert (String.equal input "{}");
          Openai.Responses.Tool_output.Output.Text "private result")
@@ -1493,8 +1494,7 @@ let%test_unit "shared scheduler overlaps two physically admitted jobs of one roo
              ~registry:(Agent_server.Session_registry.create ())
              ~developer_registry:(Some owners)
              ~capacity
-             ~model_job_inference:(fun _ _ ->
-               Error (P.Error.invalid_request "unused conversation inference"))
+             ~conversation_host:Developer_only
          in
          Exn.protect
            ~finally:(fun () ->
@@ -1586,8 +1586,7 @@ let%test_unit "developer scheduler retirement joins an entered protected handler
              ~registry:(Agent_server.Session_registry.create ())
              ~developer_registry:(Some owners)
              ~capacity
-             ~model_job_inference:(fun _ _ ->
-               Error (P.Error.invalid_request "unused conversation inference"))
+             ~conversation_host:Developer_only
          in
          Exn.protect
            ~finally:(fun () ->
@@ -1992,8 +1991,7 @@ let%test_unit "malformed saved Async_tool enters one physical Failed attempt" =
              ~registry:(Agent_server.Session_registry.create ())
              ~developer_registry:(Some owners)
              ~capacity
-             ~model_job_inference:(fun _ _ ->
-               Error (P.Error.invalid_request "unused conversation inference"))
+             ~conversation_host:Developer_only
          in
          Exn.protect
            ~finally:(fun () -> Agent_server.Job_scheduler.close_and_wait scheduler |> ok)
@@ -3101,9 +3099,20 @@ let run ctx input = Task.pure(`Complete(input))
 let%test_unit "selected native Function and Custom share durable dispatch policy" =
   List.iter [ false; true ] ~f:(fun custom ->
     let calls = ref 0 in
+    let retained_check = ref None in
     with_executor
       ~run_name:(if custom then "dvr_selected_custom" else "dvr_selected_function")
-      ~make_selected:(fun _env -> registry ~custom calls)
+      ~make_selected:(fun _env ->
+        registry
+          ~custom
+          ~on_invocation:(fun invocation ->
+            let current =
+              Ochat_function.Invocation.effect_check invocation |> Option.value_exn
+            in
+            Ochat_function.Invocation.Effect_check.refresh current;
+            Ochat_function.Invocation.Effect_check.check current;
+            retained_check := Some current)
+          calls)
       (fun ~env:_ ~root ~executor ~handle ~owner ~selected ->
          let reference = List.hd_exn (C.references selected) in
          let admitted = invocation owner selected reference ~custom in
@@ -3117,6 +3126,10 @@ let%test_unit "selected native Function and Custom share durable dispatch policy
            |> ok
          in
          assert (Int.equal !calls 1);
+         let current = Option.value_exn !retained_check in
+         (match Ochat_function.Invocation.Effect_check.check current with
+          | () -> failwith "selected admitted check survived actual invocation exit"
+          | exception Chat_response.Ctx.Effect_rejected _ -> ());
          assert (
            I.equal_status (H.status terminal) (Resolved (Complete (`String "disclosed"))));
          let observed = R.observe handle |> ok in

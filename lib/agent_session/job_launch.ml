@@ -12,15 +12,28 @@ let same_owner ~session_id ~generation actual_id actual_generation =
   | false -> invalid "job launch ancestry crosses session or generation"
 ;;
 
+let unique_named rows ~f ~message =
+  let%bind.Result found =
+    List.fold_result rows ~init:None ~f:(fun found row ->
+      if not (f row)
+      then Ok found
+      else (
+        match found with
+        | None -> Ok (Some row)
+        | Some _ -> invalid "job launch ancestry identity is duplicated"))
+  in
+  Result.of_option found ~error:(P.Error.invalid_request message)
+;;
+
 let ancestor ~session_id ~generation ~invocations ~events owner =
   let open Result.Let_syntax in
   let event id =
     let%bind event =
-      List.find events ~f:(fun event ->
-        P.Id.Moderator_execution.equal event.P.Moderator_execution.context.id id)
-      |> Result.of_option
-           ~error:
-             (P.Error.invalid_request "job launch references an unknown moderator event")
+      unique_named
+        events
+        ~f:(fun event ->
+          P.Id.Moderator_execution.equal event.P.Moderator_execution.context.id id)
+        ~message:"job launch references an unknown moderator event"
     in
     let%map () =
       same_owner ~session_id ~generation event.context.session_id event.context.generation
@@ -34,11 +47,11 @@ let ancestor ~session_id ~generation ~invocations ~events owner =
     | false ->
       let seen = Set.add seen key in
       let%bind parent =
-        List.find invocations ~f:(fun invocation ->
-          P.Id.Invocation.equal invocation.P.Invocation.context.id id)
-        |> Result.of_option
-             ~error:
-               (P.Error.invalid_request "job launch references an unknown invocation")
+        unique_named
+          invocations
+          ~f:(fun invocation ->
+            P.Id.Invocation.equal invocation.P.Invocation.context.id id)
+          ~message:"job launch references an unknown invocation"
       in
       let c = parent.context in
       let%bind () = same_owner ~session_id ~generation c.session_id c.generation in
@@ -59,9 +72,10 @@ let parent ~session_id ~generation ~jobs = function
   | Some (id, expected_attempt) ->
     let open Result.Let_syntax in
     let%bind job =
-      List.find jobs ~f:(fun job -> P.Id.Job.equal job.J.id id)
-      |> Result.of_option
-           ~error:(P.Error.invalid_request "job launch references an unknown parent job")
+      unique_named
+        jobs
+        ~f:(fun job -> P.Id.Job.equal job.J.id id)
+        ~message:"job launch references an unknown parent job"
     in
     let%bind () = same_owner ~session_id ~generation job.session_id job.generation in
     let%map () =
@@ -97,7 +111,64 @@ let derive ~session_id ~generation ~invocations ~events ~jobs ~owner =
       invalid "job launch cannot borrow an obsolete event attempt"
     | Some (job, _) -> Ok (Some (job.id, job.attempt))
   in
-  J.{ owner; parent_job; nested_depth; moderator_source = None }
+  J.
+    { owner = Birth_parent.callback owner
+    ; parent_job
+    ; nested_depth
+    ; moderator_source = None
+    }
+;;
+
+(* The chain is immutable factual ancestry. Historical attempts stay bounded by
+   each actual row; this check does not admit or revive a running producer. *)
+let validate_parent_chain ~session_id ~generation ~jobs ~child_id parent_job =
+  let open Result.Let_syntax in
+  let rec walk seen = function
+    | None -> Ok ()
+    | Some (id, attempt) ->
+      let key = P.Id.Job.to_string id in
+      if Set.mem seen key
+      then invalid "job launch ancestry contains a Job cycle"
+      else (
+        let%bind found = parent ~session_id ~generation ~jobs (Some (id, Some attempt)) in
+        match found with
+        | None -> assert false
+        | Some (row, _) ->
+          walk
+            (Set.add seen key)
+            (Option.bind row.J.launch ~f:(fun launch -> launch.parent_job)))
+  in
+  walk (String.Set.singleton (P.Id.Job.to_string child_id)) parent_job
+;;
+
+let derive_from_job ~session_id ~generation ~jobs ~job_id ~attempt =
+  let open Result.Let_syntax in
+  let%bind owner = J.Birth_parent.job_attempt job_id ~attempt in
+  let%bind found = parent ~session_id ~generation ~jobs (Some (job_id, Some attempt)) in
+  match found with
+  | None -> assert false
+  | Some (row, _) ->
+    let%bind () =
+      if Int.equal row.attempt attempt
+      then Ok ()
+      else invalid "job birth cannot borrow an obsolete parent attempt"
+    in
+    let%bind () =
+      validate_parent_chain
+        ~session_id
+        ~generation
+        ~jobs
+        ~child_id:job_id
+        (Option.bind row.launch ~f:(fun launch -> launch.parent_job))
+    in
+    let%map nested_depth = depth found in
+    J.
+      { owner
+      ; parent_job = Some (job_id, attempt)
+      ; nested_depth
+      ; moderator_source =
+          Option.bind row.launch ~f:(fun launch -> launch.moderator_source)
+      }
 ;;
 
 let validate ~invocations ~events ~jobs (job : J.t) =
@@ -108,33 +179,67 @@ let validate ~invocations ~events ~jobs (job : J.t) =
     | Some launch ->
       let%bind _ = J.of_json (J.to_json job) in
       let%bind () =
+        match J.Birth_parent.view launch.owner with
+        | Callback _ -> Ok ()
+        | Job_attempt { id; _ } ->
+          let%bind parent =
+            parent
+              ~session_id:job.session_id
+              ~generation:job.generation
+              ~jobs
+              (Some (id, None))
+          in
+          let expected =
+            Option.bind parent ~f:(fun (row, _) ->
+              Option.bind row.launch ~f:(fun launch -> launch.moderator_source))
+          in
+          if Option.equal P.Invocation.equal_observer launch.moderator_source expected
+          then Ok ()
+          else invalid "direct Job source differs from its immediate producer"
+      in
+      let%bind () =
         match launch.moderator_source with
         | None -> Ok ()
         | Some source ->
           let retained =
-            match launch.owner with
-            | Invocation id ->
+            match J.Birth_parent.view launch.owner with
+            | Callback (Invocation id) ->
               List.find invocations ~f:(fun invocation ->
                 P.Id.Invocation.equal invocation.P.Invocation.context.id id)
               |> Option.bind ~f:(fun invocation -> invocation.observation)
               |> Option.map ~f:(fun observation -> observation.P.Invocation.observer)
-            | Moderator_event id ->
+            | Callback (Moderator_event id) ->
               List.find events ~f:(fun event ->
                 P.Id.Moderator_execution.equal event.P.Moderator_execution.context.id id)
               |> Option.map ~f:(fun event -> event.context.source)
+            | Job_attempt { id; _ } ->
+              List.find jobs ~f:(fun parent -> P.Id.Job.equal parent.J.id id)
+              |> Option.bind ~f:(fun parent -> parent.launch)
+              |> Option.bind ~f:(fun parent -> parent.moderator_source)
           in
           (match retained with
            | Some actual when not (P.Invocation.equal_observer source actual) ->
              invalid "job moderator source differs from its creating observer/event"
            | _ -> Ok ())
       in
-      let%bind ancestor =
-        ancestor
+      let%bind () =
+        validate_parent_chain
           ~session_id:job.session_id
           ~generation:job.generation
-          ~invocations
-          ~events
-          launch.owner
+          ~jobs
+          ~child_id:job.id
+          launch.parent_job
+      in
+      let%bind ancestor =
+        match J.Birth_parent.view launch.owner with
+        | Callback owner ->
+          ancestor
+            ~session_id:job.session_id
+            ~generation:job.generation
+            ~invocations
+            ~events
+            owner
+        | Job_attempt { id; attempt } -> Ok (Some (id, Some attempt))
       in
       let%bind parent =
         parent ~session_id:job.session_id ~generation:job.generation ~jobs ancestor

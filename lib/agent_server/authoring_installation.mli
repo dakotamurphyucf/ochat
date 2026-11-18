@@ -241,6 +241,11 @@ val developer_roots
   -> checkpoint:(unit -> unit)
   -> (Authoring_source_host.Root.t list, P.Error.t) result
 
+(** Same retained source owner and explicitly configured read grants. Read-only
+    grant configurations need no executable project selection. No source access
+    is inferred from this port's presence; each Use checks the original actor. *)
+val instruction_source_port : t -> Agent_session.Instruction_source_port.t option
+
 (** The sole typed command route. Capabilities is admitted through the same
     joined Service request lifetime and lists only installed methods callable
     under this connection's current selected feature epoch. Bundle-only has

@@ -1,6 +1,6 @@
 open! Core
 
-let current_version = 10
+let current_version = 14
 
 module P = Agent_protocol
 module X = Persistence_codec
@@ -630,20 +630,171 @@ let run_state_fields field value =
   | Nullable, None -> [ "run_state", `Null ]
 ;;
 
+(* One projection owns its exact immutable fields and deferred component
+   exports. Force at the original field positions, then reuse only for this
+   encoding's host-capacity check. Nothing is attached to the retained State. *)
+module Encoding = struct
+  type 'spec t =
+    { fields : 'spec S.fields
+    ; children : (Child_contributions.Export.t option, P.Error.t) result Lazy.t
+    ; descendants : (Goal_descendants.Export.t option, P.Error.t) result Lazy.t
+    ; policy_usage :
+        (Policy_canonical_usage_carrier.Export.t option, P.Error.t) result Lazy.t
+    }
+
+  let create (fields : 'spec S.fields) =
+    { fields
+    ; children =
+        lazy
+          (match fields.child_contributions with
+           | None -> Ok None
+           | Some children ->
+             Result.map (Child_contributions.Export.prepare children) ~f:Option.some)
+    ; descendants =
+        lazy
+          (match fields.goal_descendants with
+           | None -> Ok None
+           | Some descendants ->
+             Result.map (Goal_descendants.Export.prepare descendants) ~f:Option.some)
+    ; policy_usage =
+        lazy
+          (match fields.policy_canonical_usage with
+           | None -> Ok None
+           | Some usage ->
+             Result.map
+               (Policy_canonical_usage_carrier.Export.prepare usage)
+               ~f:Option.some)
+    }
+  ;;
+
+  let fields t = t.fields
+  let children t = Lazy.force t.children
+  let descendants t = Lazy.force t.descendants
+  let policy_usage t = Lazy.force t.policy_usage
+end
+
 let project_fields_with_presence
       ?(raw_pending = false)
-      (t : 'spec S.fields)
+      (encoding : 'spec Encoding.t)
       ~spec
       ~limits
       ~presence
   =
+  let t = Encoding.fields encoding in
   let run_state_field =
     if Session_state_presence.run_state_is_absent presence then Missing else Nullable
   in
   let open Result.Let_syntax in
   let%bind conversation = conversation_to_jsonaf ~raw_pending ~limits t.conversation in
-  let%map ledger =
+  let%bind ledger =
     Inference_ledger.to_document t.inference_ledger |> Result.map_error ~f:ledger_error
+  in
+  let%bind goal_catalog_fields =
+    match t.goal_catalog with
+    | None ->
+      Ok
+        (if Session_state_presence.goal_catalog_is_absent presence
+         then []
+         else [ "goal_catalog", `Null ])
+    | Some catalog ->
+      Goal_catalog.to_jsonaf catalog
+      |> Result.map ~f:(fun json -> [ "goal_catalog", json ])
+  in
+  let%bind goal_accounts_fields =
+    match t.goal_accounts with
+    | None ->
+      Ok
+        (if Session_state_presence.goal_accounts_is_absent presence
+         then []
+         else [ "goal_accounts", `Null ])
+    | Some accounts ->
+      Goal_accounts.to_jsonaf accounts
+      |> Result.map ~f:(fun raw -> [ "goal_accounts", raw ])
+  in
+  let%bind delegated_usage_fields =
+    match t.delegated_usage with
+    | None ->
+      Ok
+        (if Session_state_presence.delegated_usage_is_absent presence
+         then []
+         else [ "delegated_usage", `Null ])
+    | Some own ->
+      let%map document = Delegated_usage.to_document own in
+      [ "delegated_usage", D.Document.json document ]
+  in
+  let%bind child_contributions_fields =
+    let%bind exported = Encoding.children encoding in
+    match exported with
+    | None ->
+      Ok
+        (if Session_state_presence.child_contributions_is_absent presence
+         then []
+         else [ "child_contributions", `Null ])
+    | Some exported ->
+      Ok
+        [ ( "child_contributions"
+          , D.Document.json (Child_contributions.Export.document exported) )
+        ]
+  in
+  let%bind goal_descendants_fields =
+    let%bind exported = Encoding.descendants encoding in
+    match exported with
+    | None ->
+      Ok
+        (if Session_state_presence.goal_descendants_is_absent presence
+         then []
+         else [ "goal_descendants", `Null ])
+    | Some exported ->
+      Ok
+        [ "goal_descendants", D.Document.json (Goal_descendants.Export.document exported)
+        ]
+  in
+  let%bind policy_canonical_usage_fields =
+    let%bind exported = Encoding.policy_usage encoding in
+    match exported with
+    | None ->
+      Ok
+        (if Session_state_presence.policy_canonical_usage_is_absent presence
+         then []
+         else [ "policy_canonical_usage", `Null ])
+    | Some exported ->
+      Ok
+        [ ( "policy_canonical_usage"
+          , D.Document.json (Policy_canonical_usage_carrier.Export.document exported) )
+        ]
+  in
+  let%bind goal_policy_contributions_fields =
+    match t.goal_policy_contributions with
+    | None ->
+      Ok
+        (if Session_state_presence.goal_policy_contributions_is_absent presence
+         then []
+         else [ "goal_policy_contributions", `Null ])
+    | Some descendants ->
+      let%map document = Goal_policy_contributions.to_document descendants in
+      [ "goal_policy_contributions", D.Document.json document ]
+  in
+  let%bind instruction_selection_fields =
+    match t.instruction_selection with
+    | None ->
+      Ok
+        (if Session_state_presence.instruction_selection_is_absent presence
+         then []
+         else [ "instruction_selection", `Null ])
+    | Some selection ->
+      Instruction_selection.to_jsonaf selection
+      |> Result.map ~f:(fun raw -> [ "instruction_selection", raw ])
+  in
+  let%map recurrence_catalog_fields =
+    match t.recurrence_catalog with
+    | None ->
+      Ok
+        (if Session_state_presence.recurrence_catalog_is_absent presence
+         then []
+         else [ "recurrence_catalog", `Null ])
+    | Some catalog ->
+      Recurrence_catalog.to_jsonaf catalog
+      |> Result.map ~f:(fun json -> [ "recurrence_catalog", json ])
   in
   `Object
     ([ "identity", identity_to_jsonaf t.identity
@@ -669,6 +820,15 @@ let project_fields_with_presence
      ; "managed_stops", (X.list_json Managed_stop.to_jsonaf) t.managed_stops
      ]
      @ run_state_fields run_state_field t.run_state
+     @ goal_catalog_fields
+     @ goal_accounts_fields
+     @ delegated_usage_fields
+     @ child_contributions_fields
+     @ goal_descendants_fields
+     @ policy_canonical_usage_fields
+     @ goal_policy_contributions_fields
+     @ instruction_selection_fields
+     @ recurrence_catalog_fields
      @ [ ( "moderator_executions"
          , (X.list_json P.Moderator_execution.to_json) t.moderator_executions )
        ; "subscriptions", (X.list_json P.Subscription.Storage.to_json) t.subscriptions
@@ -697,14 +857,23 @@ let project_fields_with_presence
        ])
 ;;
 
+let encoding_to_jsonaf ?raw_pending encoding ~limits ~presence =
+  project_fields_with_presence
+    ?raw_pending
+    encoding
+    ~spec:spec_to_jsonaf
+    ~limits
+    ~presence
+;;
+
 let state_to_jsonaf ?raw_pending t ~limits ~presence =
-  project_fields_with_presence ?raw_pending t ~spec:spec_to_jsonaf ~limits ~presence
+  encoding_to_jsonaf ?raw_pending (Encoding.create t) ~limits ~presence
 ;;
 
 let project_fields t ~spec ~limits =
   project_fields_with_presence
     ~raw_pending:true
-    t
+    (Encoding.create t)
     ~spec
     ~limits
     ~presence:Session_state_presence.authored
@@ -786,6 +955,75 @@ let state_fields_of_jsonaf ?capture ~limits json =
     J.optional_as fields "run_state" (X.nullable Run_state.of_jsonaf)
     |> Result.map ~f:Option.join
   in
+  let%bind goal_catalog =
+    J.optional_as fields "goal_catalog" (X.nullable Goal_catalog.of_jsonaf)
+    |> Result.map ~f:Option.join
+  in
+  let%bind goal_accounts =
+    J.optional_as fields "goal_accounts" (X.nullable Goal_accounts.of_jsonaf)
+    |> Result.map ~f:Option.join
+  in
+  let%bind delegated_usage =
+    J.optional_as
+      fields
+      "delegated_usage"
+      (X.nullable (fun raw ->
+         let%bind document =
+           D.Document.inspect raw ~limits:Delegated_usage.limits
+           |> Result.map_error ~f:(fun error ->
+             P.Error.invalid_request (Sexp.to_string_hum (D.Error.sexp_of_t error)))
+         in
+         Delegated_usage.of_document document))
+    |> Result.map ~f:Option.join
+  in
+  let%bind child_contributions =
+    J.optional_as fields "child_contributions" (X.nullable Child_contributions.of_jsonaf)
+    |> Result.map ~f:Option.join
+  in
+  let%bind goal_descendants =
+    J.optional_as
+      fields
+      "goal_descendants"
+      (X.nullable (fun raw ->
+         let%bind document =
+           D.Document.inspect raw ~limits:Goal_descendants.limits
+           |> Result.map_error ~f:(fun error ->
+             P.Error.invalid_request (Sexp.to_string_hum (D.Error.sexp_of_t error)))
+         in
+         Goal_descendants.of_document document))
+    |> Result.map ~f:Option.join
+  in
+  let%bind policy_canonical_usage =
+    J.optional_as
+      fields
+      "policy_canonical_usage"
+      (X.nullable
+         (match capture with
+          | None -> Decode_evidence.policy_canonical_usage_of_jsonaf
+          | Some capture -> Decode_evidence.Capture.policy_canonical_usage capture))
+    |> Result.map ~f:Option.join
+  in
+  let%bind goal_policy_contributions =
+    J.optional_as
+      fields
+      "goal_policy_contributions"
+      (X.nullable
+         (match capture with
+          | None -> Decode_evidence.goal_policy_contributions_of_jsonaf
+          | Some capture -> Decode_evidence.Capture.goal_policy_contributions capture))
+    |> Result.map ~f:Option.join
+  in
+  let%bind instruction_selection =
+    J.optional_as
+      fields
+      "instruction_selection"
+      (X.nullable Instruction_selection.of_jsonaf)
+    |> Result.map ~f:Option.join
+  in
+  let%bind recurrence_catalog =
+    J.optional_as fields "recurrence_catalog" (X.nullable Recurrence_catalog.of_jsonaf)
+    |> Result.map ~f:Option.join
+  in
   let%bind moderator_executions =
     X.required
       fields
@@ -836,6 +1074,15 @@ let state_fields_of_jsonaf ?capture ~limits json =
     ; managed_stops
     ; moderator_executions
     ; run_state
+    ; goal_catalog
+    ; goal_accounts
+    ; delegated_usage
+    ; child_contributions
+    ; goal_descendants
+    ; policy_canonical_usage
+    ; goal_policy_contributions
+    ; instruction_selection
+    ; recurrence_catalog
     ; subscriptions
     ; deliveries
     ; ingress_registrations
@@ -881,6 +1128,15 @@ let state_shape =
     ; ( "managed_submissions"
       , X.array_shape_exn ~identity_field:"history_id" Managed_submission.shape )
     ; "run_state", X.nullable_shape Run_state.shape
+    ; "goal_catalog", X.nullable_shape Goal_catalog.shape
+    ; "goal_accounts", D.Shape.value
+    ; "delegated_usage", D.Shape.value
+    ; "child_contributions", D.Shape.value
+    ; "goal_descendants", D.Shape.value
+    ; "policy_canonical_usage", D.Shape.value
+    ; "goal_policy_contributions", D.Shape.value
+    ; "instruction_selection", X.nullable_shape Instruction_selection.shape
+    ; "recurrence_catalog", X.nullable_shape Recurrence_catalog.shape
     ; "managed_stops", X.array_shape_exn ~identity_field:"id" Managed_stop.shape
     ; ( "moderator_executions"
       , X.array_shape_exn ~identity_field:"id" Shapes.moderator_execution )
@@ -889,7 +1145,9 @@ let state_shape =
     ; ( "ingress_registrations"
       , X.array_shape_exn ~identity_field:"id" External_ingress.shape )
     ; "attachments", X.array_shape_exn ~identity_field:"id" attachment_shape
-    ; "moderator", X.nullable_shape Moderator_checkpoint.shape
+      (* The checkpoint owns raw extension custody and validates every update
+       through Queue_provenance_validation, including carrier encode/adopt. *)
+    ; "moderator", X.nullable_shape D.Shape.value
     ; "shell", Session.Shell_state.shape
     ; "halted", Document_schema.Shape.value
     ; "halt_reason", X.nullable_shape Document_schema.Shape.value
@@ -903,14 +1161,43 @@ module Original = struct
     { template : D.Document.t
     ; limits : D.Limits.t
     ; inference_ledger : Inference_ledger.t
+    ; delegated_basis : Inference_ledger.t * Delegated_usage.t option
+    ; descendants : Goal_descendants_ordered.Projection.t
+    ; jobs : P.Job.t list
+    ; invocations : P.Invocation.t list
+    ; moderator_executions : P.Moderator_execution.t list
+    ; queue_provenance : Queue_provenance_validation.t
+      (* The latest exactly validated Goal leaf. The original template remains
+       unchanged so transaction prefixes retain its complete extension custody. *)
+    ; goal_catalog : Goal_catalog.t option
     ; presence : Session_state_presence.t
     ; decode_evidence : Decode_evidence.t option
     }
 end
 
+(* Each transaction retains its actual validation mode. An absence wrapper
+   keeps the same private identity through history/pending transfer without
+   constructing or traversing optional policy Context on ordinary work. *)
+type policy_cursor =
+  | Capturing of Policy_canonical_usage.Ordered.t
+  | Absent_only of { baseline : S.t }
+
+module Goal_policy_cursor = struct
+  type t =
+    | Capturing of Goal_policy_ordered.t
+    | Absent_only of { baseline : S.t }
+end
+
 type t =
   { carrier : S.t D.Extension_carrier.t
+  ; lifecycle_basis : (Run_state.t option * int * P.Moderator_execution.t list) option
+    (* Latest successful full admission DATA basis; raw template custody remains
+       unchanged. This is neither a runtime acknowledgement nor permission. *)
   ; original : Original.t option
+  ; ordered_goal_accounts : Goal_accounts.Ordered_bootstrap.t option
+  ; ordered_goal_descendants : Goal_descendants_ordered.t option
+  ; ordered_policy_usage : policy_cursor option
+  ; ordered_goal_policy : Goal_policy_cursor.t option
   }
 
 let value t = D.Extension_carrier.value t.carrier
@@ -920,10 +1207,17 @@ let with_value t value =
 ;;
 
 let authored value =
-  { carrier = D.Extension_carrier.of_authored_value value; original = None }
+  { carrier = D.Extension_carrier.of_authored_value value
+  ; lifecycle_basis = None
+  ; original = None
+  ; ordered_goal_accounts = None
+  ; ordered_goal_descendants = None
+  ; ordered_policy_usage = None
+  ; ordered_goal_policy = None
+  }
 ;;
 
-let validate_run_capacity (state : S.t) document =
+let validate_run_capacity_only (state : S.t) document =
   match state.run_state with
   | None -> Ok ()
   | Some index ->
@@ -941,6 +1235,263 @@ let validate_run_capacity (state : S.t) document =
             { path = [ "run_state" ]; reason = "admitted run index is missing" }))
 ;;
 
+let validate_raw_queue_capacity document =
+  let raw_moderator =
+    match D.Json.field (D.Document.payload document) ~name:"moderator" with
+    | Value raw -> Some raw
+    | Absent | Null -> None
+  in
+  let open Result.Let_syntax in
+  let%bind () =
+    Moderator_checkpoint.validate_encoded_capacity raw_moderator |> X.document_result
+  in
+  match D.Json.field (D.Document.payload document) ~name:"moderator_executions" with
+  | Value (`Array receipts) ->
+    List.fold_result receipts ~init:() ~f:(fun () receipt ->
+      Queue_provenance_validation.validate_encoded_event receipt |> X.document_result)
+  | Value _ | Absent | Null -> Ok ()
+;;
+
+module Capacity_basis = struct
+  type t =
+    | Native of S.t
+    | Encoded of S.Spec.t Encoding.t
+
+  let state = function
+    | Native state -> state
+    | Encoded encoding -> Encoding.fields encoding
+  ;;
+end
+
+let validate_run_capacity basis document ~limits =
+  let state = Capacity_basis.state basis in
+  let open Result.Let_syntax in
+  let%bind () = validate_raw_queue_capacity document in
+  let%bind () =
+    match D.Json.field (D.Document.payload document) ~name:"ingress_registrations" with
+    | Value (`Array registrations) ->
+      List.fold_result registrations ~init:() ~f:(fun () registration ->
+        External_ingress.validate_encoded_provenance registration |> X.document_result)
+    | Value _ | Absent | Null -> Ok ()
+  in
+  let%bind () = validate_run_capacity_only state document in
+  let%bind limits =
+    let%bind growth =
+      Native_goal_action_capacity.growth ~invocations:state.invocations document ~limits
+    in
+    Capacity_growth.remaining_limits growth limits |> X.document_result
+  in
+  let%bind limits =
+    match state.instruction_selection with
+    | None -> Ok limits
+    | Some selection ->
+      let%bind () =
+        Instruction_selection.validate_host_capacity
+          selection
+          (D.Document.json document)
+          ~limits
+        |> X.document_result
+      in
+      Instruction_selection.remaining_host_limits selection limits
+  in
+  let%bind limits =
+    match state.goal_accounts with
+    | None -> Ok limits
+    | Some accounts ->
+      let%bind growth = Goal_accounts.reserved_growth accounts |> X.document_result in
+      Capacity_growth.remaining_limits growth limits |> X.document_result
+  in
+  let%bind limits =
+    let%bind growth =
+      match state.delegated_usage with
+      | None -> Ok Capacity_growth.zero
+      | Some own -> Delegated_usage.reserved_growth own |> X.document_result
+    in
+    Capacity_growth.remaining_limits growth limits |> X.document_result
+  in
+  let%bind limits =
+    match basis with
+    | Capacity_basis.Native _ ->
+      let%bind growth =
+        match state.child_contributions with
+        | None -> Ok Capacity_growth.zero
+        | Some children ->
+          let%bind depth =
+            Child_contributions.required_depth children |> X.document_result
+          in
+          (* The component document is nested at payload/child_contributions. *)
+          let%bind () =
+            Capacity_depth.validate depth ~ancestors:2 ~limits |> X.document_result
+          in
+          Child_contributions.reserved_growth children |> X.document_result
+      in
+      Capacity_growth.remaining_limits growth limits |> X.document_result
+    | Encoded encoding ->
+      let%bind exported = Encoding.children encoding |> X.document_result in
+      (match exported with
+       | None ->
+         Capacity_growth.remaining_limits Capacity_growth.zero limits |> X.document_result
+       | Some exported ->
+         let%bind () =
+           Capacity_depth.validate
+             (Child_contributions.Export.required_depth exported)
+             ~ancestors:2
+             ~limits
+           |> X.document_result
+         in
+         Capacity_growth.remaining_limits
+           (Child_contributions.Export.reserved_growth exported)
+           limits
+         |> X.document_result)
+  in
+  let%bind limits =
+    match basis with
+    | Capacity_basis.Native _ ->
+      let%bind growth =
+        match state.goal_descendants with
+        | None -> Ok Capacity_growth.zero
+        | Some descendants ->
+          let%bind depth =
+            Goal_descendants.required_depth descendants |> X.document_result
+          in
+          (* The component document is nested at payload/goal_descendants. *)
+          let%bind () =
+            Capacity_depth.validate depth ~ancestors:2 ~limits |> X.document_result
+          in
+          Goal_descendants.reserved_growth descendants |> X.document_result
+      in
+      Capacity_growth.remaining_limits growth limits |> X.document_result
+    | Encoded encoding ->
+      let%bind exported = Encoding.descendants encoding |> X.document_result in
+      (match exported with
+       | None ->
+         Capacity_growth.remaining_limits Capacity_growth.zero limits |> X.document_result
+       | Some exported ->
+         let%bind () =
+           Capacity_depth.validate
+             (Goal_descendants.Export.required_depth exported)
+             ~ancestors:2
+             ~limits
+           |> X.document_result
+         in
+         Capacity_growth.remaining_limits
+           (Goal_descendants.Export.reserved_growth exported)
+           limits
+         |> X.document_result)
+  in
+  let%bind limits =
+    let%bind growth =
+      let module Capacity = Policy_canonical_usage_carrier.Capacity_documents in
+      let%bind documents =
+        match basis with
+        | Native state ->
+          (match state.policy_canonical_usage with
+           | None -> Ok None
+           | Some usage ->
+             Capacity.prepare usage |> Result.map ~f:Option.some |> X.document_result)
+        | Encoded encoding ->
+          let%map exported = Encoding.policy_usage encoding |> X.document_result in
+          Option.map exported ~f:Policy_canonical_usage_carrier.Export.capacity
+      in
+      match documents with
+      | None -> Ok Capacity_growth.zero
+      | Some documents ->
+        let%bind depth = Capacity.required_depth documents |> X.document_result in
+        (* The component document is nested at payload/policy_canonical_usage. *)
+        let%bind () =
+          Capacity_depth.validate depth ~ancestors:2 ~limits |> X.document_result
+        in
+        let%bind () =
+          match
+            D.Json.field (D.Document.payload document) ~name:"policy_canonical_usage"
+          with
+          | Value raw -> Capacity.validate documents raw |> X.document_result
+          | Absent | Null ->
+            Error
+              (D.Error.Invalid_field
+                 { path = [ "policy_canonical_usage" ]
+                 ; reason = "positive policy carrier raw child absent"
+                 })
+        in
+        Capacity.reserved_growth documents |> X.document_result
+    in
+    Capacity_growth.remaining_limits growth limits |> X.document_result
+  in
+  let%bind limits =
+    let%bind growth =
+      match state.goal_policy_contributions with
+      | None -> Ok Capacity_growth.zero
+      | Some descendants ->
+        let module Capacity = Goal_policy_contributions_carrier.Prepared_capacity in
+        let%bind prepared = Capacity.prepare descendants |> X.document_result in
+        let depth = Capacity.required_depth prepared in
+        (* The component document is nested at payload/goal_policy_contributions. *)
+        let%bind () =
+          Capacity_depth.validate depth ~ancestors:2 ~limits |> X.document_result
+        in
+        let%bind () =
+          match
+            D.Json.field (D.Document.payload document) ~name:"goal_policy_contributions"
+          with
+          | Value raw -> Capacity.validate prepared raw |> X.document_result
+          | Absent | Null ->
+            Error
+              (D.Error.Invalid_field
+                 { path = [ "goal_policy_contributions" ]
+                 ; reason = "positive policy carrier raw child absent"
+                 })
+        in
+        Ok (Capacity.reserved_growth prepared)
+    in
+    Capacity_growth.remaining_limits growth limits |> X.document_result
+  in
+  let%bind terminal =
+    Run_terminal_document.capture state ~shape:state_shape ~document ~limits
+  in
+  let%bind growth =
+    match state.goal_catalog with
+    | None -> Ok (Run_terminal_document.growth terminal)
+    | Some catalog ->
+      (match D.Json.field (D.Document.payload document) ~name:"goal_catalog" with
+       | Value raw ->
+         let%bind () =
+           Goal_catalog.validate_encoded_capacity catalog raw |> X.document_result
+         in
+         let%bind goal = Goal_catalog.reserved_growth catalog |> X.document_result in
+         Capacity_growth.add (Run_terminal_document.growth terminal) goal
+         |> X.document_result
+       | Absent | Null ->
+         Error
+           (D.Error.Invalid_field
+              { path = [ "goal_catalog" ]; reason = "admitted goal catalog is missing" }))
+  in
+  let%bind () =
+    match state.recurrence_catalog with
+    | None -> Ok ()
+    | Some catalog ->
+      (match D.Json.field (D.Document.payload document) ~name:"recurrence_catalog" with
+       | Value raw ->
+         Recurrence_catalog.validate_encoded_capacity catalog raw |> X.document_result
+       | Absent | Null ->
+         Error
+           (D.Error.Invalid_field
+              { path = [ "recurrence_catalog" ]
+              ; reason = "admitted recurrence catalog is missing"
+              }))
+  in
+  let%bind recurrence =
+    Recurrence_control_capacity.capture state ~shape:state_shape ~document ~limits
+  in
+  let%bind growth =
+    Capacity_growth.add growth (Recurrence_control_capacity.growth recurrence)
+    |> X.document_result
+  in
+  let%bind remaining =
+    Capacity_growth.remaining_limits growth limits |> X.document_result
+  in
+  D.Json.validate ~limits:remaining (D.Document.json document)
+;;
+
 let decoded ?evidence carrier ~limits =
   let template =
     match D.Extension_carrier.template carrier with
@@ -955,14 +1506,26 @@ let decoded ?evidence carrier ~limits =
       ~limits
   in
   let carrier = D.Extension_carrier.with_value carrier state in
-  let%bind () = validate_run_capacity state template in
+  let%bind () = validate_run_capacity (Capacity_basis.Native state) template ~limits in
   let%map presence = Session_state_presence.of_document template ~limits in
   { carrier
+  ; lifecycle_basis = None
+  ; ordered_goal_accounts = None
+  ; ordered_goal_descendants = None
+  ; ordered_policy_usage = None
+  ; ordered_goal_policy = None
   ; original =
       Some
         { template
         ; limits
         ; inference_ledger = (D.Extension_carrier.value carrier).S.inference_ledger
+        ; delegated_basis = state.inference_ledger, state.delegated_usage
+        ; descendants = Session_descendant_projection.of_state state
+        ; jobs = state.jobs
+        ; invocations = state.invocations
+        ; moderator_executions = state.moderator_executions
+        ; queue_provenance = S.queue_provenance state
+        ; goal_catalog = state.goal_catalog
         ; presence
         ; decode_evidence = evidence
         }
@@ -970,6 +1533,15 @@ let decoded ?evidence carrier ~limits =
 ;;
 
 let shape = state_shape
+
+let terminal_capacity t ~document ~limits =
+  Run_terminal_document.capture (value t) ~shape ~document ~limits
+;;
+
+let recurrence_capacity t ~document ~limits =
+  Recurrence_control_capacity.capture (value t) ~shape:state_shape ~document ~limits
+;;
+
 let unresolved_json = `Object [ "state", `String "unresolved" ]
 
 let legacy_model_job_target json =
@@ -1323,11 +1895,59 @@ let upgrade document ~limits =
                  name, if String.equal name "spec" then spec else value)))
       | _ -> F.invalid "payload" "must be an object")
   in
+  let%bind native_goal_action_step =
+    D.Conversion.Step.of_function
+      ~kind:"session.state"
+      ~from_version:10
+      ~f:(fun payload ->
+        let module F = Agent_store.Document_fields in
+        let%bind invocations = F.required payload "invocations" F.array in
+        let%bind invocations =
+          List.map invocations ~f:P.Native_goal_action_conversion.invocation_record
+          |> Result.all
+        in
+        match payload with
+        | `Object fields ->
+          Ok
+            (`Object
+                (List.map fields ~f:(fun (name, value) ->
+                   ( name
+                   , if String.equal name "invocations" then `Array invocations else value
+                   ))))
+        | _ -> F.invalid "payload" "must be an object")
+  in
+  let%bind goal_descendants_step =
+    D.Conversion.Step.of_function ~kind:"session.state" ~from_version:11 ~f:Result.return
+  in
+  let%bind policy_step =
+    D.Conversion.Step.of_function
+      ~kind:"session.state"
+      ~from_version:12
+      ~f:(fun payload ->
+        match D.Json.field payload ~name:"policy_canonical_usage" with
+        | Absent | Null -> Ok payload
+        | Value _ ->
+          Agent_store.Document_fields.invalid
+            "policy_canonical_usage"
+            "requires session.state version13")
+  in
+  let%bind goal_policy_step =
+    D.Conversion.Step.of_function
+      ~kind:"session.state"
+      ~from_version:13
+      ~f:(fun payload ->
+        match D.Json.field payload ~name:"goal_policy_contributions" with
+        | Absent | Null -> Ok payload
+        | Value _ ->
+          Agent_store.Document_fields.invalid
+            "goal_policy_contributions"
+            "requires session.state version14")
+  in
   let%bind conversion =
     D.Conversion.create
       ~limits
-      ~targets:[ "session.state", 10 ]
-      ~max_steps:9
+      ~targets:[ "session.state", 14 ]
+      ~max_steps:13
       ~max_operations:100_000
       ~steps:
         [ step
@@ -1339,6 +1959,10 @@ let upgrade document ~limits =
         ; run_step
         ; pending_input_step
         ; root_invocation_step
+        ; native_goal_action_step
+        ; goal_descendants_step
+        ; policy_step
+        ; goal_policy_step
         ]
   in
   D.Conversion.upgrade conversion document
@@ -1351,13 +1975,32 @@ let codec ~capture ~limits ~presence =
       ~kind:"session.state"
       ~version:current_version
       ~shape
-      ~supported_semantics:[]
+      ~supported_semantics:Session_storage_semantics.supported
       ~validate:(fun state -> X.document_result (S.validate state))
       ~decode:(fun json -> X.document_result (state_of_jsonaf ?capture ~limits json))
       ~encode:(fun state -> X.document_result (state_to_jsonaf state ~limits ~presence))
   with
   | Ok codec -> codec
   | Error error -> raise_s [%sexp "invalid session state codec", (error : D.Error.t)]
+;;
+
+let encoding_codec ~limits ~presence =
+  match
+    D.Domain_codec.create_validated
+      ~limits
+      ~kind:"session.state"
+      ~version:current_version
+      ~shape
+      ~supported_semantics:Session_storage_semantics.supported
+      ~validate:(fun encoding ->
+        S.validate (Encoding.fields encoding) |> X.document_result)
+      ~decode:(fun json ->
+        state_of_jsonaf ~limits json |> X.document_result |> Result.map ~f:Encoding.create)
+      ~encode:(fun encoding ->
+        encoding_to_jsonaf encoding ~limits ~presence |> X.document_result)
+  with
+  | Ok codec -> codec
+  | Error error -> raise_s [%sexp "invalid session encoding codec", (error : D.Error.t)]
 ;;
 
 let codec_for (t : t) ~limits =
@@ -1373,9 +2016,14 @@ let previous_decode_evidence t =
   Option.bind t.original ~f:(fun original -> original.decode_evidence)
 ;;
 
+let require_storage_semantics = Session_storage_semantics.require_state
+let check_storage_semantics = Session_storage_semantics.check_state
+
 let decode_with_evidence ?previous ~limits document =
   let open Result.Let_syntax in
   let%bind document = upgrade document ~limits in
+  let%bind () = check_storage_semantics document in
+  let%bind () = validate_raw_queue_capacity document in
   let capture = Decode_evidence.Capture.create ?previous ~limits () in
   let%bind carrier =
     D.Domain_codec.decode
@@ -1387,8 +2035,134 @@ let decode_with_evidence ?previous ~limits document =
 
 let decode ~limits document = decode_with_evidence ~limits document
 
+let validate_inference_origin_update previous incoming =
+  let open Result.Let_syntax in
+  let%bind () =
+    Job_inference_provenance.validate_transition
+      ~previous:previous.S.jobs
+      ~incoming:incoming.S.jobs
+    |> X.document_result
+  in
+  Invocation_inference_provenance.validate_transition
+    ~previous:previous.S.invocations
+    ~incoming:incoming.S.invocations
+  |> X.document_result
+;;
+
+let validate_inference_origin_carrier t =
+  match t.original with
+  | None -> Ok ()
+  | Some original ->
+    let open Result.Let_syntax in
+    let%bind () =
+      Job_inference_provenance.validate_transition
+        ~previous:original.jobs
+        ~incoming:(value t).S.jobs
+      |> X.document_result
+    in
+    Invocation_inference_provenance.validate_transition
+      ~previous:original.invocations
+      ~incoming:(value t).S.invocations
+    |> X.document_result
+;;
+
+let validate_queue_carrier t =
+  match t.original with
+  | None -> Ok ()
+  | Some original ->
+    Queue_provenance_validation.validate_transition
+      ~previous:original.queue_provenance
+      (S.queue_provenance (value t))
+    |> X.document_result
+;;
+
+let validate_queue_update previous incoming =
+  Queue_provenance_validation.validate_transition
+    ~previous:(S.queue_provenance previous)
+    (S.queue_provenance incoming)
+  |> X.document_result
+;;
+
+let validate_lifecycle_update (previous : S.t) (incoming : S.t) =
+  S.validate_moderator_lifecycle_update
+    ~previous_runs:previous.run_state
+    ~previous_generation:previous.identity.generation
+    ~previous_executions:previous.moderator_executions
+    incoming
+  |> X.document_result
+;;
+
+let validate_run_update previous incoming =
+  match previous, incoming with
+  | None, None -> Ok ()
+  | None, Some incoming ->
+    Run_state.validate_transition ~previous:Run_state.empty incoming |> X.document_result
+  | Some previous, Some incoming ->
+    Run_state.validate_transition ~previous incoming |> X.document_result
+  | Some _, None ->
+    Error
+      (D.Error.Invalid_field
+         { path = [ "run_state" ]; reason = "durable Run evidence cannot be discarded" })
+;;
+
+let validate_run_carrier (t : t) =
+  match t.original with
+  | None -> Ok ()
+  | Some original ->
+    let open Result.Let_syntax in
+    let%bind () = D.Document.validate original.template ~limits:original.limits in
+    (match t.lifecycle_basis with
+     | Some (previous_runs, previous_generation, previous_executions) ->
+       let%bind () = validate_run_update previous_runs (value t).run_state in
+       S.validate_moderator_lifecycle_update
+         ~previous_runs
+         ~previous_generation
+         ~previous_executions
+         (value t)
+       |> X.document_result
+     | None ->
+       let%bind previous =
+         match D.Json.field (D.Document.payload original.template) ~name:"run_state" with
+         | Absent | Null -> Ok None
+         | Value raw ->
+           Run_state.of_jsonaf raw |> X.document_result |> Result.map ~f:Option.some
+       in
+       let%bind () = validate_run_update previous (value t).run_state in
+       if
+         Option.is_none (Option.bind previous ~f:Run_state.moderator_lifecycle)
+         && Option.is_none
+              (Option.bind (value t).run_state ~f:Run_state.moderator_lifecycle)
+       then Ok ()
+       else (
+         (* The original decoder consumed the shape's known projection. Retain
+            those validated receipts; raw children also carry future fields. *)
+         let previous_executions = original.moderator_executions in
+         let previous_generation =
+           Option.value_map
+             (Option.bind previous ~f:Run_state.moderator_lifecycle)
+             ~default:(value t).identity.generation
+             ~f:(fun pointer -> (Moderator_lifecycle.source pointer).generation)
+         in
+         S.validate_moderator_lifecycle_update
+           ~previous_runs:previous
+           ~previous_generation
+           ~previous_executions
+           (value t)
+         |> X.document_result))
+;;
+
 let decode_after previous ~limits document =
-  decode_with_evidence ?previous:(previous_decode_evidence previous) ~limits document
+  let open Result.Let_syntax in
+  let%bind incoming =
+    decode_with_evidence ?previous:(previous_decode_evidence previous) ~limits document
+  in
+  let%bind () = validate_inference_origin_update (value previous) (value incoming) in
+  let%bind () = validate_queue_update (value previous) (value incoming) in
+  let%bind () =
+    validate_run_update (value previous).run_state (value incoming).run_state
+  in
+  let%map () = validate_lifecycle_update (value previous) (value incoming) in
+  incoming
 ;;
 
 let validate_ledger_carrier (t : t) ~limits =
@@ -1401,31 +2175,456 @@ let validate_ledger_carrier (t : t) ~limits =
       if D.Limits.equal original.limits limits
       then Ok original.inference_ledger
       else (
-        let%bind raw =
-          Agent_store.Document_fields.required
-            (D.Document.payload original.template)
-            "inference_ledger"
-            Result.return
+        let%bind accepted =
+          Inference_ledger.to_document original.inference_ledger
+          |> Result.map_error ~f:ledger_error
+          |> X.document_result
         in
-        ledger_of_jsonaf ~limits raw |> X.document_result)
+        ledger_of_jsonaf ~limits (D.Document.json accepted) |> X.document_result)
     in
     Inference_ledger.validate_update previous ~incoming:(value t).inference_ledger
     |> Result.map_error ~f:ledger_error
     |> X.document_result
 ;;
 
+let validate_goal_update previous incoming =
+  match previous, incoming with
+  | None, None -> Ok ()
+  | None, Some incoming ->
+    Goal_catalog.validate_transition Goal_catalog.empty ~incoming |> X.document_result
+  | Some previous, Some incoming ->
+    Goal_catalog.validate_transition previous ~incoming |> X.document_result
+  | Some _, None ->
+    Error
+      (D.Error.Invalid_field
+         { path = [ "goal_catalog" ]; reason = "durable goals cannot be discarded" })
+;;
+
+let validate_goal_carrier t =
+  match t.original with
+  | None -> Ok ()
+  | Some original -> validate_goal_update original.goal_catalog (value t).goal_catalog
+;;
+
+let validate_instruction_update previous incoming =
+  match previous, incoming with
+  | None, None -> Ok ()
+  | None, Some incoming ->
+    Instruction_selection.validate_update Instruction_selection.empty ~incoming
+    |> X.document_result
+  | Some previous, Some incoming ->
+    Instruction_selection.validate_update previous ~incoming |> X.document_result
+  | Some _, None ->
+    Error
+      (D.Error.Invalid_field
+         { path = [ "instruction_selection" ]
+         ; reason = "durable instruction evidence cannot be discarded"
+         })
+;;
+
+let validate_instruction_carrier t =
+  match t.original with
+  | None -> Ok ()
+  | Some original ->
+    let open Result.Let_syntax in
+    let%bind previous =
+      match
+        D.Json.field (D.Document.payload original.template) ~name:"instruction_selection"
+      with
+      | Absent | Null -> Ok None
+      | Value raw ->
+        Instruction_selection.of_jsonaf raw
+        |> X.document_result
+        |> Result.map ~f:Option.some
+    in
+    validate_instruction_update previous (value t).instruction_selection
+;;
+
+let validate_recurrence_update previous incoming =
+  match previous, incoming with
+  | None, None -> Ok ()
+  | None, Some incoming ->
+    Recurrence_catalog.validate_transition Recurrence_catalog.empty ~incoming
+    |> X.document_result
+  | Some previous, Some incoming ->
+    Recurrence_catalog.validate_transition previous ~incoming |> X.document_result
+  | Some _, None ->
+    Error
+      (D.Error.Invalid_field
+         { path = [ "recurrence_catalog" ]
+         ; reason = "durable recurrences cannot be discarded"
+         })
+;;
+
+let validate_recurrence_carrier t =
+  match t.original with
+  | None -> Ok ()
+  | Some original ->
+    let open Result.Let_syntax in
+    let%bind previous =
+      match
+        D.Json.field (D.Document.payload original.template) ~name:"recurrence_catalog"
+      with
+      | Absent | Null -> Ok None
+      | Value raw ->
+        Recurrence_catalog.of_jsonaf raw |> X.document_result |> Result.map ~f:Option.some
+    in
+    validate_recurrence_update previous (value t).recurrence_catalog
+;;
+
+let validate_accounts_preservation previous incoming =
+  let open Result.Let_syntax in
+  match previous, incoming with
+  | Some old, Some candidate ->
+    let%bind merged = Goal_accounts.adopt old ~incoming:candidate |> X.document_result in
+    let%bind merged = Goal_accounts.to_jsonaf merged |> X.document_result in
+    let%bind actual = Goal_accounts.to_jsonaf candidate |> X.document_result in
+    if D.Json.equal merged actual
+    then Ok ()
+    else Error (D.Error.Extension_conflict [ "goal_accounts" ])
+  | None, None | None, Some _ -> Ok ()
+  | Some _, None ->
+    Error
+      (D.Error.Invalid_field
+         { path = [ "goal_accounts" ]; reason = "accounting cannot be discarded" })
+;;
+
+let validate_accounts_update (previous : S.t) (incoming : S.t) =
+  let open Result.Let_syntax in
+  let%bind () =
+    Goal_accounts.validate_transition
+      ~previous:previous.goal_accounts
+      ~incoming:incoming.goal_accounts
+      ~before:previous.inference_ledger
+      ~after:incoming.inference_ledger
+      ~previous_catalog:previous.goal_catalog
+      ~catalog:incoming.goal_catalog
+    |> X.document_result
+  in
+  validate_accounts_preservation previous.goal_accounts incoming.goal_accounts
+;;
+
+let validate_accounts_carrier t ~limits =
+  match t.ordered_goal_accounts with
+  | Some ordered ->
+    let open Result.Let_syntax in
+    let current = value t in
+    let%bind () =
+      Goal_accounts.Ordered_bootstrap.check
+        ordered
+        ~incoming:current.goal_accounts
+        ~after:current.inference_ledger
+        ~catalog:current.goal_catalog
+      |> X.document_result
+    in
+    (match t.original with
+     | None -> Ok ()
+     | Some original ->
+       let%bind previous =
+         match
+           D.Json.field (D.Document.payload original.template) ~name:"goal_accounts"
+         with
+         | Absent | Null -> Ok None
+         | Value raw ->
+           Goal_accounts.of_jsonaf raw |> X.document_result |> Result.map ~f:Option.some
+       in
+       validate_accounts_preservation previous current.goal_accounts)
+  | None ->
+    (match t.original with
+     | None -> Ok ()
+     | Some original ->
+       let open Result.Let_syntax in
+       let payload = D.Document.payload original.template in
+       let%bind goal_accounts =
+         match D.Json.field payload ~name:"goal_accounts" with
+         | Absent | Null -> Ok None
+         | Value raw ->
+           Goal_accounts.of_jsonaf raw |> X.document_result |> Result.map ~f:Option.some
+       in
+       (match goal_accounts, (value t).goal_accounts with
+        | None, None -> Ok ()
+        | _ ->
+          let%bind goal_catalog =
+            match D.Json.field payload ~name:"goal_catalog" with
+            | Absent | Null -> Ok None
+            | Value raw ->
+              Goal_catalog.of_jsonaf raw |> X.document_result |> Result.map ~f:Option.some
+          in
+          let%bind inference_ledger =
+            match D.Json.field payload ~name:"inference_ledger" with
+            | Value raw -> ledger_of_jsonaf ~limits raw |> X.document_result
+            | Absent | Null ->
+              Error
+                (D.Error.Invalid_field
+                   { path = [ "inference_ledger" ]
+                   ; reason = "missing original canonical ledger"
+                   })
+          in
+          validate_accounts_update
+            { (value t) with goal_accounts; goal_catalog; inference_ledger }
+            (value t)))
+;;
+
+let validate_delegated_update ~before ~previous ~after ~incoming =
+  match previous, incoming with
+  | None, None -> Ok ()
+  | Some previous, Some incoming ->
+    Delegated_usage.validate_transition previous ~incoming ~before ~after
+    |> X.document_result
+  | None, Some _ ->
+    Error
+      (D.Error.Invalid_field
+         { path = [ "delegated_usage" ]
+         ; reason = "historical partition cannot bootstrap exact zero"
+         })
+  | Some _, None ->
+    Error
+      (D.Error.Invalid_field
+         { path = [ "delegated_usage" ]; reason = "delegated usage cannot be discarded" })
+;;
+
+let validate_delegated_carrier t =
+  match t.original with
+  | None -> Ok ()
+  | Some original ->
+    let before, previous = original.delegated_basis in
+    validate_delegated_update
+      ~before
+      ~previous
+      ~after:(value t).inference_ledger
+      ~incoming:(value t).delegated_usage
+;;
+
+let validate_children_update previous incoming =
+  let open Result.Let_syntax in
+  match previous, incoming with
+  | None, None -> Ok ()
+  | None, Some incoming ->
+    (match Child_contributions.inventory incoming with
+     | Historical_children_unknown -> Ok ()
+     | Complete_inventory ->
+       Error
+         (D.Error.Invalid_field
+            { path = [ "child_contributions" ]
+            ; reason = "historical inventory cannot become complete"
+            }))
+  | Some _, None ->
+    Error
+      (D.Error.Invalid_field
+         { path = [ "child_contributions" ]
+         ; reason = "child contribution slots cannot be discarded"
+         })
+  | Some previous, Some incoming ->
+    let%bind merged = Child_contributions.adopt previous ~incoming |> X.document_result in
+    let%bind merged = Child_contributions.to_jsonaf merged |> X.document_result in
+    let%bind actual = Child_contributions.to_jsonaf incoming |> X.document_result in
+    if D.Json.equal merged actual
+    then Ok ()
+    else Error (D.Error.Extension_conflict [ "child_contributions" ])
+;;
+
+let validate_children_carrier t =
+  let open Result.Let_syntax in
+  match t.original with
+  | None -> Ok ()
+  | Some original ->
+    let%bind previous =
+      match
+        D.Json.field (D.Document.payload original.template) ~name:"child_contributions"
+      with
+      | Absent | Null -> Ok None
+      | Value raw ->
+        Child_contributions.of_jsonaf raw
+        |> X.document_result
+        |> Result.map ~f:Option.some
+    in
+    validate_children_update previous (value t).child_contributions
+;;
+
+let validate_descendants_carrier t =
+  let incoming = Session_descendant_projection.of_state (value t) in
+  match t.ordered_goal_descendants, t.original with
+  | Some ordered, _ ->
+    Goal_descendants_ordered.check ordered ~incoming |> X.document_result
+  | None, Some original ->
+    Goal_descendants_ordered.validate_checkpoint ~before:original.descendants ~incoming
+    |> X.document_result
+  | None, None -> Ok ()
+;;
+
+let policy_optional_equal previous incoming =
+  let open Result.Let_syntax in
+  match previous, incoming with
+  | None, None -> Ok ()
+  | Some previous, Some incoming ->
+    let%bind merged =
+      Policy_canonical_usage.adopt previous ~incoming |> X.document_result
+    in
+    let%bind merged = Policy_canonical_usage.to_document merged |> X.document_result in
+    let%bind incoming =
+      Policy_canonical_usage.to_document incoming |> X.document_result
+    in
+    if D.Json.equal (D.Document.json merged) (D.Document.json incoming)
+    then Ok ()
+    else Error (D.Error.Extension_conflict [ "policy_canonical_usage" ])
+  | None, Some _ ->
+    Error
+      (D.Error.Invalid_field
+         { path = [ "policy_canonical_usage" ]
+         ; reason = "policy initialization requires an actual ordered seed birth"
+         })
+  | Some _, None ->
+    Error
+      (D.Error.Invalid_field
+         { path = [ "policy_canonical_usage" ]
+         ; reason = "policy accounting cannot be discarded"
+         })
+;;
+
+let validate_policy_absence (baseline : S.t) (current : S.t) =
+  if
+    Option.is_none baseline.policy_canonical_usage
+    && Option.is_none current.policy_canonical_usage
+  then Ok ()
+  else
+    Error
+      (D.Error.Invalid_field
+         { path = [ "policy_canonical_usage" ]
+         ; reason = "absence-only transaction cannot initialize policy accounting"
+         })
+;;
+
+let validate_policy_carrier t =
+  let open Result.Let_syntax in
+  let state = value t in
+  match t.ordered_policy_usage, t.original with
+  | Some (Absent_only { baseline }), _ -> validate_policy_absence baseline state
+  | Some (Capturing cursor), _ ->
+    let%bind context = S.policy_context state |> X.document_result in
+    Policy_canonical_usage.Ordered.check
+      cursor
+      ~incoming:state.policy_canonical_usage
+      ~context
+      ~ledger:state.inference_ledger
+    |> X.document_result
+  | None, Some original ->
+    let%bind previous =
+      match
+        D.Json.field (D.Document.payload original.template) ~name:"policy_canonical_usage"
+      with
+      | Absent | Null -> Ok None
+      | Value raw ->
+        let%bind doc = D.Document.inspect raw ~limits:Policy_canonical_usage.limits in
+        Policy_canonical_usage.of_document doc
+        |> X.document_result
+        |> Result.map ~f:Option.some
+    in
+    policy_optional_equal previous state.policy_canonical_usage
+  | None, None -> Ok ()
+;;
+
+let goal_policy_optional_equal previous incoming =
+  let open Result.Let_syntax in
+  match previous, incoming with
+  | None, None -> Ok ()
+  | Some previous, Some incoming ->
+    let%bind merged =
+      Goal_policy_contributions.adopt previous ~incoming |> X.document_result
+    in
+    let%bind merged = Goal_policy_contributions.to_document merged |> X.document_result in
+    let%bind incoming =
+      Goal_policy_contributions.to_document incoming |> X.document_result
+    in
+    if D.Json.equal (D.Document.json merged) (D.Document.json incoming)
+    then Ok ()
+    else Error (D.Error.Extension_conflict [ "goal_policy_contributions" ])
+  | None, Some _ | Some _, None ->
+    Error
+      (D.Error.Invalid_field
+         { path = [ "goal_policy_contributions" ]
+         ; reason =
+             "Goal book initialization/mutation requires actual ordered creation or \
+              Update"
+         })
+;;
+
+let validate_goal_policy_absence (baseline : S.t) (current : S.t) =
+  if
+    Option.is_none baseline.goal_policy_contributions
+    && Option.is_none baseline.policy_canonical_usage
+    && Option.is_none current.goal_policy_contributions
+    && Option.is_none current.policy_canonical_usage
+  then Ok ()
+  else
+    Error
+      (D.Error.Invalid_field
+         { path = [ "goal_policy_contributions" ]
+         ; reason = "absence-only Goal policy transaction cannot become positive"
+         })
+;;
+
+let validate_goal_policy_carrier t =
+  let open Result.Let_syntax in
+  let state = value t in
+  match t.ordered_goal_policy, t.original with
+  | Some (Goal_policy_cursor.Absent_only { baseline }), _ ->
+    validate_goal_policy_absence baseline state
+  | Some (Capturing cursor), _ ->
+    let%bind projection =
+      Session_goal_policy_projection.of_state state |> X.document_result
+    in
+    Goal_policy_ordered.check cursor projection |> X.document_result
+  | None, Some original ->
+    let%bind previous =
+      match
+        D.Json.field
+          (D.Document.payload original.template)
+          ~name:"goal_policy_contributions"
+      with
+      | Absent | Null -> Ok None
+      | Value raw ->
+        let%bind doc = D.Document.inspect raw ~limits:Goal_policy_contributions.limits in
+        Goal_policy_contributions.of_document doc
+        |> X.document_result
+        |> Result.map ~f:Option.some
+    in
+    goal_policy_optional_equal previous state.goal_policy_contributions
+  | None, None -> Ok ()
+;;
+
+let validate_encoding_carriers t ~limits =
+  let open Result.Let_syntax in
+  let%bind () = validate_run_carrier t in
+  let%bind () = validate_queue_carrier t in
+  let%bind () = validate_inference_origin_carrier t in
+  let%bind () = validate_goal_carrier t in
+  let%bind () = validate_instruction_carrier t in
+  let%bind () = validate_recurrence_carrier t in
+  let%bind () = validate_accounts_carrier t ~limits in
+  let%bind () = validate_delegated_carrier t in
+  let%bind () = validate_children_carrier t in
+  let%bind () = validate_descendants_carrier t in
+  let%bind () = validate_policy_carrier t in
+  let%bind () = validate_goal_policy_carrier t in
+  validate_ledger_carrier t ~limits
+;;
+
 let encode t ~limits =
   let open Result.Let_syntax in
-  let%bind () = validate_ledger_carrier t ~limits in
+  let%bind () = validate_encoding_carriers t ~limits in
+  let encoding = Encoding.create (value t) in
   let%bind document =
     match t.original with
-    | Some _ -> D.Domain_codec.encode (codec_for t ~limits) t.carrier
+    | Some original ->
+      D.Domain_codec.encode
+        (encoding_codec ~limits ~presence:original.presence)
+        (D.Extension_carrier.with_value t.carrier encoding)
     | None ->
       let%bind.Result () = S.validate (value t) |> X.document_result in
       let%bind.Result payload =
-        state_to_jsonaf
+        encoding_to_jsonaf
           ~raw_pending:true
-          (value t)
+          encoding
           ~limits
           ~presence:Session_state_presence.authored
         |> X.document_result
@@ -1433,15 +2632,95 @@ let encode t ~limits =
       let%bind.Result document =
         D.Document.create ~limits ~kind:"session.state" ~version:current_version ~payload
       in
+      let%bind.Result document = require_storage_semantics document ~limits in
       let%bind.Result admitted = decode ~limits document in
-      D.Domain_codec.encode (codec_for admitted ~limits) admitted.carrier
+      let admitted_encoding = Encoding.create (value admitted) in
+      let presence =
+        match admitted.original with
+        | None -> Session_state_presence.authored
+        | Some original -> original.presence
+      in
+      D.Domain_codec.encode
+        (encoding_codec ~limits ~presence)
+        (D.Extension_carrier.with_value admitted.carrier admitted_encoding)
   in
-  let%map () = validate_run_capacity (value t) document in
+  let%bind document = require_storage_semantics document ~limits in
+  (* Authored re-admission can rehydrate native fields. The final capacity
+     contract still belongs to the original supplied fields, not that decode. *)
+  let%map () = validate_run_capacity (Capacity_basis.Encoded encoding) document ~limits in
   document
 ;;
 
 let adopt previous ~limits incoming =
   let open Result.Let_syntax in
+  let%bind () = validate_run_carrier previous in
+  let%bind () = validate_run_carrier incoming in
+  let%bind () =
+    validate_run_update (value previous).run_state (value incoming).run_state
+  in
+  let%bind () = validate_lifecycle_update (value previous) (value incoming) in
+  let%bind () = validate_queue_carrier previous in
+  let%bind () = validate_queue_carrier incoming in
+  let%bind () = validate_queue_update (value previous) (value incoming) in
+  let%bind () = validate_inference_origin_carrier previous in
+  let%bind () = validate_inference_origin_carrier incoming in
+  let%bind () = validate_inference_origin_update (value previous) (value incoming) in
+  let%bind () = validate_recurrence_carrier previous in
+  let%bind () = validate_recurrence_carrier incoming in
+  let%bind () =
+    validate_recurrence_update
+      (value previous).recurrence_catalog
+      (value incoming).recurrence_catalog
+  in
+  let%bind () = validate_accounts_carrier previous ~limits in
+  let%bind () = validate_accounts_carrier incoming ~limits in
+  let%bind () = validate_accounts_update (value previous) (value incoming) in
+  let%bind () =
+    validate_delegated_update
+      ~before:(value previous).inference_ledger
+      ~previous:(value previous).delegated_usage
+      ~after:(value incoming).inference_ledger
+      ~incoming:(value incoming).delegated_usage
+  in
+  let%bind () =
+    validate_children_update
+      (value previous).child_contributions
+      (value incoming).child_contributions
+  in
+  let%bind () = validate_descendants_carrier previous in
+  let%bind () = validate_descendants_carrier incoming in
+  let%bind () = validate_policy_carrier previous in
+  let%bind () = validate_policy_carrier incoming in
+  let%bind () = validate_goal_policy_carrier previous in
+  let%bind () = validate_goal_policy_carrier incoming in
+  let%bind () =
+    goal_policy_optional_equal
+      (value previous).goal_policy_contributions
+      (value incoming).goal_policy_contributions
+  in
+  let%bind () =
+    policy_optional_equal
+      (value previous).policy_canonical_usage
+      (value incoming).policy_canonical_usage
+  in
+  let%bind () =
+    Goal_descendants_ordered.validate_checkpoint
+      ~before:(Session_descendant_projection.of_state (value previous))
+      ~incoming:(Session_descendant_projection.of_state (value incoming))
+    |> X.document_result
+  in
+  let%bind () = validate_goal_carrier previous in
+  let%bind () = validate_goal_carrier incoming in
+  let%bind () = validate_instruction_carrier previous in
+  let%bind () = validate_instruction_carrier incoming in
+  let%bind () =
+    validate_instruction_update
+      (value previous).instruction_selection
+      (value incoming).instruction_selection
+  in
+  let%bind () =
+    validate_goal_update (value previous).goal_catalog (value incoming).goal_catalog
+  in
   let%bind () = validate_ledger_carrier previous ~limits in
   let%bind () = validate_ledger_carrier incoming ~limits in
   let%bind () =
@@ -1528,7 +2807,14 @@ let retire_canonical_entries t ~retained_ids ~initial_count ~limits =
       ~document
       ~limits
   in
-  { carrier = D.Extension_carrier.with_value carrier state; original = t.original }
+  { carrier = D.Extension_carrier.with_value carrier state
+  ; lifecycle_basis = t.lifecycle_basis
+  ; original = t.original
+  ; ordered_goal_accounts = t.ordered_goal_accounts
+  ; ordered_goal_descendants = t.ordered_goal_descendants
+  ; ordered_policy_usage = t.ordered_policy_usage
+  ; ordered_goal_policy = t.ordered_goal_policy
+  }
 ;;
 
 let retire_canonical_suffix t ~retained_ids ~limits =
@@ -1724,7 +3010,13 @@ let transfer_pending_internal
     then Ok ()
     else Error (invalid "pending custody transfer differs from pure candidate")
   in
-  Ok incoming
+  Ok
+    { incoming with
+      ordered_goal_accounts = t.ordered_goal_accounts
+    ; ordered_goal_descendants = t.ordered_goal_descendants
+    ; ordered_policy_usage = t.ordered_policy_usage
+    ; ordered_goal_policy = t.ordered_goal_policy
+    }
 ;;
 
 let transfer_pending t ~plan ~archive ~expiry_archive ~limits =
@@ -1738,16 +3030,323 @@ let transfer_pending t ~plan ~archive ~expiry_archive ~limits =
     ~decode_incoming:decode
 ;;
 
-module Admitted = struct
+let prefix_codec ~capture ~limits ~presence =
+  match
+    D.Domain_codec.create
+      ~limits
+      ~kind:"session.state"
+      ~version:current_version
+      ~shape
+      ~supported_semantics:Session_storage_semantics.supported
+      ~decode:(fun json ->
+        state_fields_of_jsonaf ?capture ~limits json |> X.document_result)
+      ~encode:(fun state -> state_to_jsonaf state ~limits ~presence |> X.document_result)
+  with
+  | Ok codec -> codec
+  | Error error ->
+    raise_s [%sexp "invalid private transaction codec", (error : D.Error.t)]
+;;
+
+let prefix_encoding_codec ~capture ~limits ~presence =
+  match
+    D.Domain_codec.create
+      ~limits
+      ~kind:"session.state"
+      ~version:current_version
+      ~shape
+      ~supported_semantics:Session_storage_semantics.supported
+      ~decode:(fun json ->
+        state_fields_of_jsonaf ?capture ~limits json
+        |> X.document_result
+        |> Result.map ~f:Encoding.create)
+      ~encode:(fun encoding ->
+        encoding_to_jsonaf encoding ~limits ~presence |> X.document_result)
+  with
+  | Ok codec -> codec
+  | Error error ->
+    raise_s [%sexp "invalid private transaction encoding codec", (error : D.Error.t)]
+;;
+
+let prefix_presence t =
+  match t.original with
+  | None -> Session_state_presence.authored
+  | Some original -> original.presence
+;;
+
+let encode_prefix_fields_with_evidence t ~limits =
+  let open Result.Let_syntax in
+  let capture =
+    Decode_evidence.Capture.create ?previous:(previous_decode_evidence t) ~limits ()
+  in
+  let encoding = Encoding.create (value t) in
+  let%bind document =
+    match t.original with
+    | Some _ ->
+      D.Domain_codec.encode
+        (prefix_encoding_codec
+           ~capture:(Some capture)
+           ~limits
+           ~presence:(prefix_presence t))
+        (D.Extension_carrier.with_value t.carrier encoding)
+    | None ->
+      let%bind payload =
+        encoding_to_jsonaf
+          ~raw_pending:true
+          encoding
+          ~limits
+          ~presence:Session_state_presence.authored
+        |> X.document_result
+      in
+      let%bind document =
+        D.Document.create ~limits ~kind:"session.state" ~version:current_version ~payload
+      in
+      let%bind carrier =
+        D.Domain_codec.decode
+          (prefix_codec
+             ~capture:(Some capture)
+             ~limits
+             ~presence:Session_state_presence.authored)
+          document
+      in
+      let admitted_encoding = Encoding.create (D.Extension_carrier.value carrier) in
+      D.Domain_codec.encode
+        (prefix_encoding_codec
+           ~capture:(Some capture)
+           ~limits
+           ~presence:Session_state_presence.authored)
+        (D.Extension_carrier.with_value carrier admitted_encoding)
+  in
+  let%bind document = require_storage_semantics document ~limits in
+  let%map () = validate_run_capacity (Capacity_basis.Encoded encoding) document ~limits in
+  document, Decode_evidence.Capture.finish capture
+;;
+
+let encode_prefix_fields t ~limits =
+  Result.map (encode_prefix_fields_with_evidence t ~limits) ~f:fst
+;;
+
+(* Existing pending-transfer prefix semantics. Ordered durable replay below
+   adds its complete native/carrier checks without weakening this helper. *)
+let encode_prefix t ~limits =
+  let open Result.Let_syntax in
+  let%bind () = validate_run_carrier t in
+  let%bind () = validate_inference_origin_carrier t in
+  let%bind () = validate_instruction_carrier t in
+  let%bind () = validate_ledger_carrier t ~limits in
+  encode_prefix_fields t ~limits
+;;
+
+let encode_ordered_prefix_with_evidence t ~limits =
+  let open Result.Let_syntax in
+  let%bind () = validate_encoding_carriers t ~limits in
+  (* A metadata value cannot select this context. Only the retained ordered
+     cursor, after checking its actual components, supplies publication revision. *)
+  let%bind policy_revision =
+    match t.ordered_goal_policy with
+    | Some (Goal_policy_cursor.Capturing cursor) ->
+      Goal_policy_ordered.publication_revision cursor |> X.document_result
+    | Some (Absent_only _) -> Ok (value t).counters.revision
+    | None ->
+      Error
+        (D.Error.Invalid_field
+           { path = [ "goal_policy_contributions" ]
+           ; reason = "ordered prefix requires its actual Goal policy cursor"
+           })
+  in
+  let%bind native = S.Native_validation.create (value t) |> X.document_result in
+  let%bind () =
+    S.Native_validation.validate_remaining native ~policy_revision |> X.document_result
+  in
+  encode_prefix_fields_with_evidence t ~limits
+;;
+
+let encode_ordered_prefix t ~limits =
+  Result.map (encode_ordered_prefix_with_evidence t ~limits) ~f:fst
+;;
+
+let decode_prefix ?previous ~limits document =
+  let open Result.Let_syntax in
+  let%bind () = check_storage_semantics document in
+  let%bind () = validate_raw_queue_capacity document in
+  let capture = Decode_evidence.Capture.create ?previous ~limits () in
+  let%bind carrier =
+    D.Domain_codec.decode
+      (prefix_codec
+         ~capture:(Some capture)
+         ~limits
+         ~presence:Session_state_presence.authored)
+      document
+  in
+  let%bind state =
+    Pending_carrier_admission.rehydrate_transaction_prefix
+      (D.Extension_carrier.value carrier)
+      ~document
+      ~limits
+  in
+  let%bind () = validate_run_capacity (Capacity_basis.Native state) document ~limits in
+  let%map presence = Session_state_presence.of_document document ~limits in
+  { carrier = D.Extension_carrier.with_value carrier state
+  ; lifecycle_basis = None
+  ; ordered_goal_accounts = None
+  ; ordered_goal_descendants = None
+  ; ordered_policy_usage = None
+  ; ordered_goal_policy = None
+  ; original =
+      Some
+        { template = document
+        ; limits
+        ; inference_ledger = state.S.inference_ledger
+        ; delegated_basis = state.inference_ledger, state.delegated_usage
+        ; descendants = Session_descendant_projection.of_state state
+        ; jobs = state.jobs
+        ; invocations = state.invocations
+        ; moderator_executions = state.moderator_executions
+        ; queue_provenance = S.queue_provenance state
+        ; goal_catalog = state.goal_catalog
+        ; presence
+        ; decode_evidence = Some (Decode_evidence.Capture.finish capture)
+        }
+  }
+;;
+
+module Encoded = struct
   type nonrec state_document = t
 
   type t =
     { state_document : state_document
     ; document : D.Document.t
+    ; decode_evidence : Decode_evidence.t option
     }
 
   let state_document t = t.state_document
   let document t = t.document
+
+  let validate_publication t ~revision =
+    let open Result.Let_syntax in
+    let%bind () =
+      match t.state_document.ordered_policy_usage with
+      | None -> Ok ()
+      | Some (Absent_only { baseline }) ->
+        validate_policy_absence baseline (value t.state_document)
+      | Some (Capturing ordered) ->
+        Policy_canonical_usage.Ordered.validate_publication ordered ~revision
+        |> X.document_result
+    in
+    match t.state_document.ordered_goal_descendants with
+    | None -> Ok ()
+    | Some ordered ->
+      Goal_descendants_ordered.validate_publication ordered ~revision |> X.document_result
+  ;;
+
+  type merge_mode =
+    | Full
+    | Ordered_prefix
+
+  let encode_for_merge_with_evidence mode state ~limits =
+    match mode with
+    | Full -> Result.map (encode state ~limits) ~f:(fun document -> document, None)
+    | Ordered_prefix ->
+      Result.map
+        (encode_ordered_prefix_with_evidence state ~limits)
+        ~f:(fun (document, evidence) -> document, Some evidence)
+  ;;
+
+  let encode_for_merge mode state ~limits =
+    match mode with
+    | Full -> encode state ~limits
+    | Ordered_prefix -> encode_ordered_prefix state ~limits
+  ;;
+
+  let merge_created t ~captured ~limits ~mode =
+    let open Result.Let_syntax in
+    let%bind _ = encode captured ~limits in
+    let previous = t.state_document in
+    let%bind _ = encode_for_merge mode previous ~limits in
+    (* Created contributes compatible preserved paths. Its captured native State
+       was fully validated above; the receiver retains the exact ordered value. *)
+    let incoming = with_value captured (value previous) in
+    let merge_codec =
+      match mode with
+      | Full -> codec_for previous ~limits
+      | Ordered_prefix ->
+        prefix_codec ~capture:None ~limits ~presence:(prefix_presence previous)
+    in
+    let%bind carrier =
+      D.Domain_codec.adopt
+        merge_codec
+        ~previous:previous.carrier
+        ~incoming:incoming.carrier
+    in
+    let carrier = D.Extension_carrier.with_value carrier (value previous) in
+    let%bind state_document =
+      match previous.original with
+      | Some _ -> Ok { previous with carrier }
+      | None ->
+        (* Capture the actual merged template without finalizing an unstamped
+           prefix. Retain the receiver's exact native custody and all cursors. *)
+        let%map captured =
+          match mode with
+          | Full -> decoded ~limits carrier
+          | Ordered_prefix ->
+            let%bind document = D.Domain_codec.encode merge_codec carrier in
+            decode_prefix ~limits document
+        in
+        { (with_value captured (value previous)) with
+          ordered_goal_accounts = previous.ordered_goal_accounts
+        ; ordered_goal_descendants = previous.ordered_goal_descendants
+        ; ordered_policy_usage = previous.ordered_policy_usage
+        ; ordered_goal_policy = previous.ordered_goal_policy
+        }
+    in
+    let%map document, decode_evidence =
+      encode_for_merge_with_evidence mode state_document ~limits
+    in
+    { state_document; document; decode_evidence }
+  ;;
+end
+
+module Admitted = struct
+  type nonrec state_document = t
+  type t = Admitted of Encoded.t
+
+  let state_document (Admitted encoded) = Encoded.state_document encoded
+  let document (Admitted encoded) = Encoded.document encoded
+
+  let merge_created (Admitted encoded) ~captured ~limits =
+    let%map.Result encoded =
+      Encoded.merge_created encoded ~captured ~limits ~mode:Encoded.Full
+    in
+    Admitted encoded
+  ;;
+end
+
+module Prefix = struct
+  type nonrec state_document = t
+  type t = Prefix of Encoded.t
+
+  let document (Prefix encoded) = Encoded.document encoded
+
+  let merge_created (Prefix encoded) ~captured ~limits =
+    let%map.Result encoded =
+      Encoded.merge_created encoded ~captured ~limits ~mode:Encoded.Ordered_prefix
+    in
+    Prefix encoded
+  ;;
+
+  let validate_publication (Prefix encoded) ~revision =
+    Encoded.validate_publication encoded ~revision
+  ;;
+
+  let materialize (Prefix encoded as prefix) ~limits document =
+    let open Result.Let_syntax in
+    let%bind state_document =
+      decode_with_evidence ?previous:encoded.decode_evidence ~limits document
+    in
+    let%map () =
+      validate_publication prefix ~revision:(value state_document).counters.revision
+    in
+    state_document
+  ;;
 end
 
 module Transaction = struct
@@ -1757,113 +3356,379 @@ module Transaction = struct
   let value t = value t.staged
   let with_value t state = { staged = with_value t.staged state }
 
-  let prefix_codec ~capture ~limits ~presence =
-    match
-      D.Domain_codec.create
-        ~limits
-        ~kind:"session.state"
-        ~version:current_version
-        ~shape
-        ~supported_semantics:[]
-        ~decode:(fun json ->
-          state_fields_of_jsonaf ?capture ~limits json |> X.document_result)
-        ~encode:(fun state ->
-          state_to_jsonaf state ~limits ~presence |> X.document_result)
-    with
-    | Ok codec -> codec
-    | Error error ->
-      raise_s [%sexp "invalid private transaction codec", (error : D.Error.t)]
+  let advance_descendants t step =
+    match t.staged.ordered_goal_descendants with
+    | None ->
+      Error
+        (D.Error.Invalid_field
+           { path = [ "goal_descendants" ]
+           ; reason = "ordered descendant basis is absent"
+           })
+    | Some ordered ->
+      let%map.Result ordered =
+        Goal_descendants_ordered.advance ordered step |> X.document_result
+      in
+      { staged = { t.staged with ordered_goal_descendants = Some ordered } }
   ;;
 
-  let presence t =
-    match t.original with
-    | None -> Session_state_presence.authored
-    | Some original -> original.presence
+  let advance_policy_usage t step =
+    match t.staged.ordered_policy_usage with
+    | None ->
+      Error
+        (D.Error.Invalid_field
+           { path = [ "policy_canonical_usage" ]
+           ; reason = "ordered policy basis is absent"
+           })
+    | Some (Absent_only _) ->
+      Error
+        (D.Error.Invalid_field
+           { path = [ "policy_canonical_usage" ]
+           ; reason = "absence-only transaction cannot advance a policy cursor"
+           })
+    | Some (Capturing cursor) ->
+      let%map.Result cursor =
+        Policy_canonical_usage.Ordered.advance cursor step |> X.document_result
+      in
+      { staged = { t.staged with ordered_policy_usage = Some (Capturing cursor) } }
   ;;
 
-  let encode_prefix t ~limits =
-    let open Result.Let_syntax in
-    let capture =
-      Decode_evidence.Capture.create ?previous:(previous_decode_evidence t) ~limits ()
+  let advance_goal_policy t step =
+    match t.staged.ordered_goal_policy with
+    | None ->
+      Error
+        (D.Error.Invalid_field
+           { path = [ "goal_policy_contributions" ]
+           ; reason = "ordered Goal policy basis absent"
+           })
+    | Some (Goal_policy_cursor.Absent_only { baseline }) ->
+      let%map.Result () = validate_goal_policy_absence baseline (value t) in
+      t
+    | Some (Capturing cursor) ->
+      let%map.Result cursor =
+        Goal_policy_ordered.advance cursor step |> X.document_result
+      in
+      { staged = { t.staged with ordered_goal_policy = Some (Capturing cursor) } }
+  ;;
+
+  let observe_goal_policy_catalog t =
+    advance_goal_policy t (Catalog (value t).goal_catalog)
+  ;;
+
+  let observe_goal_policy_accounts t =
+    advance_goal_policy t (Accounts (value t).goal_accounts)
+  ;;
+
+  let observe_goal_policy_children t =
+    advance_goal_policy t (Children (value t).child_contributions)
+  ;;
+
+  let observe_goal_policy_descendants t update =
+    advance_goal_policy t (Descendants update)
+  ;;
+
+  let observe_goal_policy_update t update = advance_goal_policy t (Update update)
+
+  let observe_goal_policy_metadata t update =
+    advance_goal_policy t (Canonical_policy update)
+  ;;
+
+  let observe_goal_policy_canonical t ~before ~policy =
+    advance_goal_policy
+      t
+      (Canonical { before; after = (value t).inference_ledger; policy })
+  ;;
+
+  let observe_goal_policy_replacement t =
+    match t.staged.ordered_goal_policy with
+    | Some (Goal_policy_cursor.Capturing _) ->
+      let%bind.Result projection =
+        Session_goal_policy_projection.of_state (value t) |> X.document_result
+      in
+      advance_goal_policy t (Replacement projection)
+    | None | Some (Absent_only _) ->
+      (* The absence branch must not construct a full projection. *)
+      (match t.staged.ordered_goal_policy with
+       | Some (Absent_only { baseline }) ->
+         let%map.Result () = validate_goal_policy_absence baseline (value t) in
+         t
+       | None | Some (Capturing _) ->
+         Error
+           (D.Error.Invalid_field
+              { path = []; reason = "ordered Goal policy basis absent" }))
+  ;;
+
+  module Descendant_observation = struct
+    type t =
+      | Ordinary_children of Child_contributions.t
+      | Active_operation of P.Operation.t option
+      | Invocation of P.Invocation.t
+      | Moderator_execution of P.Moderator_execution.t
+  end
+
+  let observe_descendants t (observation : Descendant_observation.t) =
+    let step : Goal_descendants_ordered.step =
+      match observation with
+      | Ordinary_children children -> Ordinary_children children
+      | Active_operation operation -> Active_operation operation
+      | Invocation invocation -> Invocation invocation
+      | Moderator_execution execution -> Moderator_execution execution
     in
-    let%bind () = validate_ledger_carrier t ~limits in
-    let%bind document =
-      match t.original with
-      | Some _ ->
-        D.Domain_codec.encode
-          (prefix_codec ~capture:(Some capture) ~limits ~presence:(presence t))
-          t.carrier
-      | None ->
-        let%bind payload =
-          state_to_jsonaf
-            ~raw_pending:true
-            (value { staged = t })
-            ~limits
-            ~presence:Session_state_presence.authored
+    advance_descendants t step
+  ;;
+
+  let update_goal_descendants t update =
+    let open Result.Let_syntax in
+    let creation =
+      match Goal_descendants.Update.reason update with
+      | Register_new_root { goal_id; _ } ->
+        Option.bind t.staged.ordered_goal_accounts ~f:(fun cursor ->
+          Goal_accounts.Ordered_bootstrap.creation cursor ~goal_id)
+      | Register_first_unrelated_child _
+      | Register_child _
+      | Register_branch _
+      | Register_retained_branch _
+      | Reserve _
+      | Record_included _
+      | Import _
+      | Close_before_writer _ -> None
+    in
+    let%map t = advance_descendants t (Update { update; creation }) in
+    let current = value t in
+    let child_contributions =
+      match Goal_descendants.Update.children update with
+      | Preserve -> current.child_contributions
+      | Replace children -> Some children
+    in
+    with_value
+      t
+      { current with
+        goal_descendants = Some (Goal_descendants.Update.accounting update)
+      ; child_contributions
+      }
+  ;;
+
+  let continue_after_history t ~admitted ~(next : S.t) ~limits =
+    let open Result.Let_syntax in
+    let invalid reason = Error (D.Error.Invalid_field { path = []; reason }) in
+    let%bind () =
+      match t.staged.ordered_goal_accounts, admitted.ordered_goal_accounts with
+      | Some expected, Some actual when phys_equal expected actual -> Ok ()
+      | Some _, Some _ | Some _, None | None, Some _ | None, None ->
+        invalid "history continuation lost its actual transaction accounting custody"
+    in
+    let%bind () =
+      match t.staged.ordered_goal_descendants, admitted.ordered_goal_descendants with
+      | Some expected, Some actual when phys_equal expected actual -> Ok ()
+      | Some _, Some _ | Some _, None | None, Some _ | None, None ->
+        invalid "history continuation lost its actual descendant accounting custody"
+    in
+    let%bind () =
+      match t.staged.ordered_policy_usage, admitted.ordered_policy_usage with
+      | Some expected, Some actual when phys_equal expected actual -> Ok ()
+      | Some _, Some _ | Some _, None | None, Some _ | None, None ->
+        invalid "history continuation lost its actual policy accounting cursor"
+    in
+    let%bind () =
+      match t.staged.ordered_goal_policy, admitted.ordered_goal_policy with
+      | Some expected, Some actual when phys_equal expected actual -> Ok ()
+      | Some _, Some _ | Some _, None | None, Some _ | None, None ->
+        invalid "history continuation lost its actual Goal policy cursor"
+    in
+    (* Identity here is the SAME issued private validation cursor, not a
+       substitute for semantic state comparison or an execution permission. *)
+    let incoming = value { staged = admitted } in
+    let current = value t in
+    let%bind exact_next = equal_values incoming ~limits next in
+    let%bind unchanged_accounting =
+      equal_values
+        current
+        ~limits
+        { current with
+          goal_catalog = incoming.goal_catalog
+        ; goal_accounts = incoming.goal_accounts
+        ; inference_ledger = incoming.inference_ledger
+        ; goal_descendants = incoming.goal_descendants
+        ; child_contributions = incoming.child_contributions
+        ; policy_canonical_usage = incoming.policy_canonical_usage
+        ; goal_policy_contributions = incoming.goal_policy_contributions
+        }
+    in
+    let%bind () =
+      if exact_next && unchanged_accounting
+      then Ok ()
+      else
+        invalid
+          "history continuation changed its exact candidate or accounting projection"
+    in
+    let%map _ = encode admitted ~limits in
+    { staged = admitted }
+  ;;
+
+  let update_canonical_usage t ~ledger ~delegated_usage =
+    let open Result.Let_syntax in
+    let current = value t in
+    let%bind () =
+      Inference_ledger.validate_update current.inference_ledger ~incoming:ledger
+      |> Result.map_error ~f:ledger_error
+      |> X.document_result
+    in
+    let%bind () =
+      validate_delegated_update
+        ~before:current.inference_ledger
+        ~previous:current.delegated_usage
+        ~after:ledger
+        ~incoming:delegated_usage
+    in
+    let%bind t = advance_descendants t (Canonical ledger) in
+    let staged =
+      (with_value t { current with inference_ledger = ledger; delegated_usage }).staged
+    in
+    let original =
+      Option.map staged.original ~f:(fun original ->
+        { original with
+          inference_ledger = ledger
+        ; delegated_basis = ledger, delegated_usage
+        })
+    in
+    Ok { staged = { staged with original } }
+  ;;
+
+  let advance_goal_accounting t step =
+    match t.staged.ordered_goal_accounts with
+    | Some ordered ->
+      Goal_accounts.Ordered_bootstrap.advance ordered step
+      |> X.document_result
+      |> Result.map ~f:Option.some
+    | None ->
+      Error
+        (D.Error.Invalid_field
+           { path = [ "goal_accounts" ]; reason = "ordered accounting basis is absent" })
+  ;;
+
+  let update_goal_catalog t incoming =
+    let open Result.Let_syntax in
+    let%bind () = validate_goal_carrier t.staged in
+    let%bind () = validate_goal_update (value t).goal_catalog (Some incoming) in
+    let%bind ordered_goal_accounts = advance_goal_accounting t (Catalog incoming) in
+    let%bind t = advance_descendants t (Catalog incoming) in
+    let staged = with_value t { (value t) with goal_catalog = Some incoming } in
+    let original =
+      Option.map staged.staged.original ~f:(fun original ->
+        { original with goal_catalog = Some incoming })
+    in
+    Ok { staged = { staged.staged with original; ordered_goal_accounts } }
+  ;;
+
+  let update_goal_accounts t incoming =
+    let open Result.Let_syntax in
+    let current = value t in
+    let%bind accounts =
+      Goal_accounts.adopt
+        (Option.value current.goal_accounts ~default:Goal_accounts.empty)
+        ~incoming
+      |> X.document_result
+    in
+    let%bind ordered_goal_accounts = advance_goal_accounting t (Accounts accounts) in
+    let%bind t = advance_descendants t (Accounts accounts) in
+    let staged = with_value t { current with goal_accounts = Some accounts } in
+    Ok { staged = { staged.staged with ordered_goal_accounts } }
+  ;;
+
+  let replace_goal_accounting t (incoming : S.t) =
+    let open Result.Let_syntax in
+    let%bind ordered_goal_accounts =
+      advance_goal_accounting
+        t
+        (Replacement
+           { catalog = incoming.goal_catalog; accounts = incoming.goal_accounts })
+    in
+    let%bind t =
+      advance_descendants
+        t
+        (Replacement (Session_descendant_projection.of_state incoming))
+    in
+    Ok { staged = { t.staged with ordered_goal_accounts } }
+  ;;
+
+  type policy_mode =
+    | Capture
+    | Require_absence
+
+  let begin_internal document ~limits ~policy_mode ~goal_policy_mode =
+    let open Result.Let_syntax in
+    (* A public with_value cannot turn an unvalidated account into a baseline. *)
+    let%bind () = validate_accounts_carrier document ~limits in
+    let%bind () = validate_descendants_carrier document in
+    let%bind () = validate_policy_carrier document in
+    let%bind () = validate_goal_policy_carrier document in
+    let%bind () = S.validate (value { staged = document }) |> X.document_result in
+    let%bind _ = encode_prefix document ~limits in
+    let current = value { staged = document } in
+    let ordered_goal_accounts =
+      Some
+        (Goal_accounts.Ordered_bootstrap.begin_
+           ~previous:current.goal_accounts
+           ~before:current.inference_ledger
+           ~catalog:current.goal_catalog)
+    in
+    let%bind ordered_goal_descendants =
+      Session_descendant_projection.begin_ current |> X.document_result
+    in
+    let%bind ordered_policy_usage =
+      match policy_mode, current.policy_canonical_usage with
+      | Capture, _ ->
+        let%bind context = S.policy_context current |> X.document_result in
+        let%map cursor =
+          Policy_canonical_usage.Ordered.begin_
+            ~previous:current.policy_canonical_usage
+            ~context
+            ~ledger:current.inference_ledger
           |> X.document_result
         in
-        let%bind document =
-          D.Document.create
-            ~limits
-            ~kind:"session.state"
-            ~version:current_version
-            ~payload
+        Capturing cursor
+      | Require_absence, None -> Ok (Absent_only { baseline = current })
+      | Require_absence, Some _ ->
+        Error
+          (D.Error.Invalid_field
+             { path = [ "policy_canonical_usage" ]
+             ; reason = "absence-only policy transaction has positive baseline"
+             })
+    in
+    let%map ordered_goal_policy =
+      match goal_policy_mode with
+      | Capture ->
+        let%map cursor =
+          Session_goal_policy_projection.begin_ current |> X.document_result
         in
-        let%bind carrier =
-          D.Domain_codec.decode
-            (prefix_codec
-               ~capture:(Some capture)
-               ~limits
-               ~presence:Session_state_presence.authored)
-            document
-        in
-        D.Domain_codec.encode
-          (prefix_codec
-             ~capture:(Some capture)
-             ~limits
-             ~presence:Session_state_presence.authored)
-          carrier
+        Goal_policy_cursor.Capturing cursor
+      | Require_absence ->
+        let%map () = validate_goal_policy_absence current current in
+        Goal_policy_cursor.Absent_only { baseline = current }
     in
-    let%map () = validate_run_capacity (value { staged = t }) document in
-    document
-  ;;
-
-  let decode_prefix ?previous ~limits document =
-    let open Result.Let_syntax in
-    let capture = Decode_evidence.Capture.create ?previous ~limits () in
-    let%bind carrier =
-      D.Domain_codec.decode
-        (prefix_codec
-           ~capture:(Some capture)
-           ~limits
-           ~presence:Session_state_presence.authored)
-        document
-    in
-    let%bind state =
-      Pending_carrier_admission.rehydrate_transaction_prefix
-        (D.Extension_carrier.value carrier)
-        ~document
-        ~limits
-    in
-    let%bind () = validate_run_capacity state document in
-    let%map presence = Session_state_presence.of_document document ~limits in
-    { carrier = D.Extension_carrier.with_value carrier state
-    ; original =
-        Some
-          { template = document
-          ; limits
-          ; inference_ledger = state.S.inference_ledger
-          ; presence
-          ; decode_evidence = Some (Decode_evidence.Capture.finish capture)
-          }
+    { staged =
+        { document with
+          ordered_goal_accounts
+        ; ordered_goal_descendants = Some ordered_goal_descendants
+        ; ordered_policy_usage = Some ordered_policy_usage
+        ; ordered_goal_policy = Some ordered_goal_policy
+        }
     }
   ;;
 
   let begin_ document ~limits =
-    let open Result.Let_syntax in
-    let%bind () = S.validate (value { staged = document }) |> X.document_result in
-    let%map _ = encode_prefix document ~limits in
-    { staged = document }
+    begin_internal document ~limits ~policy_mode:Capture ~goal_policy_mode:Capture
+  ;;
+
+  let begin_absent_policy document ~limits =
+    begin_internal document ~limits ~policy_mode:Require_absence ~goal_policy_mode:Capture
+  ;;
+
+  let begin_absent_accounting document ~limits =
+    begin_internal
+      document
+      ~limits
+      ~policy_mode:Require_absence
+      ~goal_policy_mode:Require_absence
   ;;
 
   let checkpoint t ~limits =
@@ -1890,7 +3755,7 @@ module Transaction = struct
     { staged }
   ;;
 
-  let finish_encoded t ~(next : S.t) ~limits =
+  let checked_candidate t ~(next : S.t) ~limits =
     let open Result.Let_syntax in
     let expected = value t in
     let normalized =
@@ -1915,9 +3780,37 @@ module Transaction = struct
              ; reason = "candidate differs from ordered admitted durable mutation"
              })
     in
-    let candidate = (with_value t next).staged in
-    let%map document = encode candidate ~limits in
-    { Admitted.state_document = candidate; document }
+    Ok (with_value t next).staged
+  ;;
+
+  let checkpoint_encoded t ~next ~limits =
+    let open Result.Let_syntax in
+    let%bind candidate = checked_candidate t ~next ~limits in
+    let%map document, decode_evidence =
+      encode_ordered_prefix_with_evidence candidate ~limits
+    in
+    Prefix.Prefix
+      { Encoded.state_document = candidate
+      ; document
+      ; decode_evidence = Some decode_evidence
+      }
+  ;;
+
+  let finish_encoded t ~(next : S.t) ~limits =
+    let open Result.Let_syntax in
+    let%bind candidate = checked_candidate t ~next ~limits in
+    let%bind document = encode candidate ~limits in
+    let encoded =
+      { Encoded.state_document = candidate; document; decode_evidence = None }
+    in
+    let%map () = Encoded.validate_publication encoded ~revision:next.counters.revision in
+    let state_document =
+      { candidate with
+        lifecycle_basis =
+          Some (next.run_state, next.identity.generation, next.moderator_executions)
+      }
+    in
+    Admitted.Admitted { encoded with state_document }
   ;;
 
   let finish t ~next ~limits =

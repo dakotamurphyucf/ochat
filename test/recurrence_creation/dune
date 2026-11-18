@@ -1,0 +1,10 @@
+(copy_files ../agent_session/fixtures.ml)
+(copy_files ../recurrence_runtime/support.ml)
+(copy_files ../recurrence_due/due_support.ml)
+
+(library
+ (name recurrence_creation_tests)
+ (libraries agent_server_test_support inference_fixture core eio eio_main mirage-crypto-rng.unix expect_test_helpers_core ochat.agent_session ochat.agent_protocol ochat.document_schema ochat.recurrence_rules ochat.agent_server ochat.agent_store)
+ (inline_tests)
+ (preprocessor_deps ../recurrence_zone_data/fixtures/Etc_UTC.tzif)
+ (preprocess (pps ppx_jane ppx_expect ppx_blob)))

@@ -78,12 +78,13 @@ let pointers state =
     | _ -> None)
 ;;
 
-let wait_idle_with_timeout ~timeout env entry =
+let wait_idle_with_timeout ?(complete = fun () -> true) ~timeout env entry =
   Background_shell_tests.wait ~timeout env (fun () ->
     let state = A.state entry.Agent_server.Session_registry.actor |> protocol_ok in
     Option.iter state.failure ~f:(fun error -> raise_s [%sexp (error : P.Error.t)]);
     Option.is_none state.active_operation
-    && List.is_empty state.conversation.deferred_user_entries)
+    && List.is_empty state.conversation.deferred_user_entries
+    && complete ())
 ;;
 
 let wait_idle env entry = wait_idle_with_timeout ~timeout:5. env entry
@@ -366,7 +367,16 @@ let exercise ?(scope = Retrieval_scope.Full_package) with_session =
       |> ignore;
       (* Fresh retrieval, validation and execution form a full foreground
            turn, with the same completion bound as the initial turn. *)
-      wait_idle_with_timeout ~timeout:foreground_timeout env entry)
+      wait_idle_with_timeout ~timeout:foreground_timeout env entry ~complete:(fun () ->
+        List.iter
+          (operation_failures entry ~after_sequence:compacted.counters.event_sequence)
+          ~f:(fun failure ->
+            raise_s
+              [%sexp
+                "post-compaction authoring turn failed"
+              , (!stage : stage)
+              , (failure : Jsonaf.t)]);
+        equal_stage !stage Finished))
     ~settle:(fun env entry -> wait_idle env entry)
     (fun (state : State.t) ->
        assert (equal_stage !stage Finished);

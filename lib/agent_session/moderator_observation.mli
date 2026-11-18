@@ -24,7 +24,10 @@ type result =
     recursive moderator hooks. Normal runtime and idle draining are not installed
     by this function. *)
 val drain
-  :  ?max_observations:int
+  :  ?model_recipes:
+       (Model_job_admission.t
+        -> Chat_response.Moderation.Capabilities.model_recipe String.Map.t)
+  -> ?max_observations:int
   -> ?on_tool_call:
        (name:string
         -> args:Jsonaf.t
@@ -50,13 +53,17 @@ val drain
     [with_idle_moderator_observation] operation with its observer bound. Passing
     it explicitly keeps the drain independent of runtime construction. *)
 val drain_idle
-  :  ?max_observations:int
+  :  ?model_recipes:
+       (Model_job_admission.t
+        -> Chat_response.Moderation.Capabilities.model_recipe String.Map.t)
+  -> ?max_observations:int
   -> ?on_tool_call:
        (name:string
         -> args:Jsonaf.t
         -> (Chat_response.Moderation.Capabilities.tool_call_result, string) Result.t)
   -> claim:
        ((observing:Agent_protocol.Invocation.t
+         -> capabilities:Invocation_capabilities.t
          -> commit:
               (resolved:Agent_protocol.Invocation.t
                -> snapshot:Session.Moderator_state.Identity_snapshot.t
@@ -80,11 +87,15 @@ val drain_idle
     with [drain_idle]. Native child observations join later eligible work; this
     neither re-enters the handler nor bypasses shared policy or publication rules. *)
 val drain_idle_with_tools
-  :  ?max_observations:int
+  :  ?model_recipes:
+       (Model_job_admission.t
+        -> Chat_response.Moderation.Capabilities.model_recipe String.Map.t)
+  -> ?max_observations:int
   -> script_tools:Script_tool_calls.t
   -> definition:Chat_response.Extension_compiler.definition
   -> claim:
        ((observing:Agent_protocol.Invocation.t
+         -> capabilities:Invocation_capabilities.t
          -> execute:Native_tool_invocation.executor
          -> commit:
               (resolved:Agent_protocol.Invocation.t
@@ -107,7 +118,10 @@ val drain_idle_with_tools
     schedule the returned requests independently. [definition] must be the exact
     definition installed in [manager]. *)
 val drain_foreground_with_tools
-  :  ?max_observations:int
+  :  ?model_recipes:
+       (Model_job_admission.t
+        -> Chat_response.Moderation.Capabilities.model_recipe String.Map.t)
+  -> ?max_observations:int
   -> script_tools:Script_tool_calls.t
   -> definition:Chat_response.Extension_compiler.definition
   -> capabilities:Operation_worker.Capabilities.t

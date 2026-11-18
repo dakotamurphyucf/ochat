@@ -27,8 +27,14 @@ let with_event ?(snapshot = Setup.before) ?(deadline = Some deadline) actor pare
        services.claim_event
          ~event
          ~snapshot:(fun () -> Ok snapshot)
-         (fun ~executing ~retirement_reason:_ ~event:_ ~execute:_ ~commit ->
-            f (J.Moderator_event executing.context.id) commit))
+         (fun ~executing
+           ~policy_caller:_
+           ~model_jobs:_
+           ~allocate_inference:_
+           ~retirement_reason:_
+           ~event:_
+           ~execute:_
+           ~commit -> f (J.Moderator_event executing.context.id) commit))
 ;;
 
 let save commit =
@@ -86,7 +92,7 @@ let%expect_test
        P.Id.Schedule.of_json);
   reject "missing ownership" (S.of_json (remove envelope "ownership"));
   reject "missing version" (S.of_json (remove envelope "schema_version"));
-  reject "unknown version" (S.of_json (replace envelope "schema_version" (`Number "4")));
+  reject "unknown version" (S.of_json (replace envelope "schema_version" (`Number "99")));
   reject "legacy authority upgrade" (S.validate_transition ~previous:(Some legacy) owned);
   reject "ownership removed" (S.validate_transition ~previous:(Some owned) legacy);
   reject

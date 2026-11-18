@@ -22,6 +22,15 @@ val summarise
   -> env:Eio_unix.Stdenv.base option
   -> (string, exn) Result.t
 
+(** Explicit request-only fixed User guidance. Caller owns the live source-use
+    bracket and selected execution submission guard throughout this operation. *)
+val summarise_with_guidance
+  :  guidance:Inference.Request.Guidance.t option
+  -> inference:Inference_client.Execution.t
+  -> relevant_items:History_entry.t list
+  -> env:Eio_unix.Stdenv.base option
+  -> (string, exn) Result.t
+
 module For_testing : sig
   val render_transcript : History_entry.t list -> string
 

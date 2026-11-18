@@ -1,0 +1,9 @@
+type state = {seen:bool}
+let initial = {seen = false}
+let step = fun state ->
+  if state.seen then
+    {state = state;
+     decision = {id = "review"; obligation = `Finished; action = `No_action}}
+  else
+    {state = {seen = true};
+     decision = {id = "review"; obligation = `Active; action = `Continue}}

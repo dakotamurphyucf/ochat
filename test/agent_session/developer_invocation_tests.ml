@@ -374,7 +374,7 @@ let%test_unit "yielding current check cannot retain a completed parent claim" =
     assert (Int.equal !child_callbacks 0))
 ;;
 
-let two_native_registry on_call =
+let two_native_registry ?(on_invocation = fun _ -> ()) on_call =
   let make name =
     let module Definition = struct
       type input = string
@@ -386,9 +386,10 @@ let two_native_registry on_call =
       let input_of_string input = input
     end
     in
-    Ochat_function.create_function
+    Ochat_function.create_streaming_function
       (module Definition)
-      (fun _ ->
+      (fun ~invocation _ ->
+         on_invocation invocation;
          on_call name;
          Openai.Responses.Tool_output.Output.Text "output")
   in
@@ -406,11 +407,20 @@ let%test_unit "narrowed owned child resolves only its live parent selection" =
   Eio_main.run (fun _env ->
     let module N = Agent_session.Native_tool_invocation in
     let calls = ref [] in
+    let retained_checks = ref [] in
     let on_call = ref (fun _ -> ()) in
     let initial =
-      two_native_registry (fun name ->
-        calls := name :: !calls;
-        !on_call name)
+      two_native_registry
+        ~on_invocation:(fun invocation ->
+          let current =
+            Ochat_function.Invocation.effect_check invocation |> Option.value_exn
+          in
+          Ochat_function.Invocation.Effect_check.refresh current;
+          Ochat_function.Invocation.Effect_check.check current;
+          retained_checks := current :: !retained_checks)
+        (fun name ->
+           calls := name :: !calls;
+           !on_call name)
     in
     let current_registry = ref initial in
     let owner = test_owner () in
@@ -511,7 +521,12 @@ let%test_unit "narrowed owned child resolves only its live parent selection" =
     (match H.status resolved with
      | Resolved (Complete _) -> ()
      | _ -> failwith "root failed");
-    assert (List.equal String.equal (List.rev !calls) [ "read_file"; "read_file" ]))
+    assert (List.equal String.equal (List.rev !calls) [ "read_file"; "read_file" ]);
+    [%test_eq: int] 2 (List.length !retained_checks);
+    List.iter !retained_checks ~f:(fun current ->
+      match Ochat_function.Invocation.Effect_check.check current with
+      | () -> failwith "owned admitted check survived actual invocation exit"
+      | exception Chat_response.Ctx.Effect_rejected _ -> ()))
 ;;
 
 let%test_unit "developer custom native uses the shared string-input policy" =

@@ -22,6 +22,7 @@ ochat_history/
 raw-openai-streaming-response.txt
 cache.bin
 src/
+!docs-src/examples/libraries/*/src/
 .chatmd/
 dependency-docs/
 notes.txt

@@ -47,9 +47,9 @@ let%expect_test
          let job = List.find_exn state.jobs ~f:(fun job -> P.Id.Job.equal job.id id) in
          [%test_eq: int] 1 job.attempt;
          assert (
-           P.Job.equal_launch_owner
+           P.Job.Birth_parent.equal
              (Option.value_exn job.launch).owner
-             (Invocation invocation.context.id));
+             (P.Job.Birth_parent.callback (Invocation invocation.context.id)));
          let value =
            match P.Job.terminal_completion job |> protocol_ok with
            | Some (Succeeded value) -> value

@@ -171,8 +171,17 @@ User-authored roots additionally support resource-bearing message helpers:
 </user>
 ```
 
-`doc` loads document text; `local` selects a local file, otherwise the source is
-remote. `strip` and `markdown` request HTML transformations, with `strip` taking
+For ordinary dynamic `doc` sources, `local` selects a local file; otherwise the
+source is remote. An explicit local `capture` freezes text at preparation instead
+of loading it during message rendering. `builtin:ID` selects reviewed embedded
+instructions and is always captured, without a file or HTTP fallback. See the
+[builtin instruction catalog](builtin-instructions.md) for the exact installed IDs
+and composed example. Saved revisions retain their selected bytes through install
+updates; only fresh explicit preparation selects a new edition. Importing goals,
+recurrence, skills or other guidance does not provide or activate those controls.
+Context recovery is policy text only, with no context-management functionality.
+
+`strip` and `markdown` request HTML transformations, with `strip` taking
 precedence. A local `img` becomes image content; an inline `agent` runs its
 definition with the nested content as input and substitutes an answer. These
 helpers can cause file/network/model work during materialization. Their presence

@@ -43,6 +43,9 @@
   session_index_recovery_document
   session_projection_update
   session_index
+  captured_source_kind
+  delegation_captured_origin
+  delegation_goal_origin
   delegation_record
   delegation_document
   delegation_store
@@ -76,6 +79,7 @@
   job_result_store
   transaction
   commit_writer
+  recovery_restoration_cache
   recovery
   history_revision_conversion
   idempotency_capacity
@@ -83,6 +87,7 @@
   idempotency_outcome_store
   idempotency_outcome_projection
   idempotency_outcome_cleanup
+  idempotency_removal
   idempotency_store
   audit_event_document
   audit_evidence_document
@@ -93,8 +98,10 @@
   prompt_manifest_document
   prompt_artifact_staging
   prompt_artifact_store
+  captured_prompt_artifact
   migration)
  (private_modules
+  recovery_restoration_cache
   journal_initial_creation
   prompt_artifact_staging
   authoring_upload_document
@@ -113,7 +120,8 @@
   developer_result_intent
   developer_result_inventory
   result_publication_lock
-  result_publication_phase)
+  result_publication_phase
+  idempotency_removal)
  (libraries ochat.inference
   ochat.transcript
   ochat.history_entry
@@ -122,6 +130,7 @@
   cstruct
   bin_prot
   digestif
+  base64
   ochat.document_schema
   ochat.chatml_source
   chatml_prompt_binding

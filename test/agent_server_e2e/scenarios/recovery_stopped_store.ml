@@ -30,15 +30,65 @@ let assert_session_corrupt env fixture session_id =
     | Ok _ -> F.fail "complete authoritative corruption was accepted on restart")
 ;;
 
-let require_complete_recovery_suffix contents ~offset =
+let rec await_exit env daemon =
+  match Daemon_process.result daemon with
+  | Some result -> result
+  | None ->
+    Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
+    await_exit env daemon
+;;
+
+let assert_startup_rejected env fixture ~code ?message_contains () =
+  Eio.Switch.run (fun sw ->
+    let daemon = F.start ~sw env fixture in
+    Exn.protect
+      ~finally:(fun () -> F.stop env daemon)
+      ~f:(fun () ->
+        let result =
+          Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
+            await_exit env daemon)
+        in
+        F.require
+          (Process_manager.equal_exit result.exit (Exited 1))
+          "invalid store did not reject startup with exit 1";
+        let error =
+          Sexp.of_string result.stderr.contents |> Agent_protocol.Error.t_of_sexp
+        in
+        if not (Agent_protocol.Error.equal_code error.code code && not error.retryable)
+        then
+          raise_s
+            [%sexp
+              "current document returned the wrong typed startup error"
+            , { expected_code = (code : Agent_protocol.Error.code)
+              ; actual_code = (error.code : Agent_protocol.Error.code)
+              ; retryable = (error.retryable : bool)
+              }];
+        Option.iter message_contains ~f:(fun substring ->
+          F.require (String.is_substring error.message ~substring) error.message)))
+;;
+
+let journal_directory fixture session_id =
+  Filename.concat (F.session_directory fixture session_id) "journal"
+;;
+
+let initial_journal directory =
+  let module Id = Agent_store.Journal_segment.Id in
+  Filename.concat directory (Id.filename Id.first)
+;;
+
+let decode_frame contents ~offset =
   let max_payload_length =
     Agent_server.Daemon.default_options.factory_limits.max_journal_payload
   in
+  Agent_store.Frame.decode ~max_payload_length ~contents ~offset
+;;
+
+let require_complete_recovery_suffix contents ~offset =
   let rec scan offset count =
     if Int.equal offset (String.length contents)
     then F.require (count > 0) "recovery appended no complete journal frame"
     else (
-      match Agent_store.Frame.decode ~max_payload_length ~contents ~offset with
+      match decode_frame contents ~offset with
       | Ok (Complete { next_offset; _ }) ->
         F.require (next_offset > offset) "recovery frame did not advance";
         scan next_offset (count + 1)
@@ -55,20 +105,17 @@ let require_complete_recovery_suffix contents ~offset =
 let test_journal_tail env environment =
   let fixture = F.fixture env environment "recovery-real-journal-tail" in
   let expected = F.seed env fixture in
-  let journal = F.current_journal env fixture expected.session.id in
+  let directory = journal_directory fixture expected.session.id in
+  let current = String.strip (F.read env (Filename.concat directory "CURRENT")) in
+  let journal = Filename.concat directory current in
+  let initial = initial_journal directory in
+  F.require (not (String.equal journal initial)) "current journal is the creation segment";
   let committed = F.read env journal in
-  let directory = Filename.dirname journal in
-  let complete =
-    Eio.Path.read_dir (F.path env directory)
-    |> List.filter ~f:(String.is_suffix ~suffix:".log")
-    |> List.find_map_exn ~f:(fun name ->
-      let contents = F.read env (Filename.concat directory name) in
-      Option.some_if (String.length contents > 23) contents)
-  in
-  let tail = String.prefix complete 23 in
-  F.require
-    (String.length complete > String.length tail)
-    "journal tail fixture lacks a complete frame";
+  let complete = F.read env initial in
+  let tail = String.prefix complete (Agent_store.Frame.header_length + 3) in
+  (match decode_frame complete ~offset:0, decode_frame tail ~offset:0 with
+   | Ok (Complete _), Ok (Incomplete_tail { offset = 0 }) -> ()
+   | _ -> F.fail "journal tail fixture is not a truncated complete frame");
   F.write env journal (committed ^ tail);
   F.with_daemon env fixture (fun client ->
     F.assert_snapshot expected (F.get client expected.session.id);
@@ -121,18 +168,19 @@ let test_journal_tail env environment =
 let test_journal_corruption env environment =
   let fixture = F.fixture env environment "recovery-real-journal-corrupt" in
   let expected = F.seed env fixture in
-  let directory = F.current_journal env fixture expected.session.id |> Filename.dirname in
-  let journal =
-    Eio.Path.read_dir (F.path env directory)
-    |> List.filter ~f:(String.is_suffix ~suffix:".log")
-    |> List.find_map_exn ~f:(fun name ->
-      let path = Filename.concat directory name in
-      Option.some_if (String.length (F.read env path) > 20) path)
-  in
+  let journal = initial_journal (journal_directory fixture expected.session.id) in
   let committed = F.read env journal in
-  let damaged = flip committed 20 in
+  let damaged = flip committed Agent_store.Frame.header_length in
+  (match decode_frame committed ~offset:0, decode_frame damaged ~offset:0 with
+   | Ok (Complete _), Error Checksum_mismatch -> ()
+   | _ -> F.fail "corruption fixture lacks a complete frame with a damaged checksum");
   F.write env journal damaged;
-  assert_session_corrupt env fixture expected.session.id;
+  assert_startup_rejected
+    env
+    fixture
+    ~code:Persistence_error
+    ~message_contains:"initial journal frame is invalid: Checksum_mismatch"
+    ();
   F.require
     (String.equal (F.read env journal) damaged)
     "failed recovery rewrote authoritative corruption";
@@ -203,41 +251,6 @@ let test_index_missing env environment =
   assert_restart env fixture expected
 ;;
 
-let rec await_exit env daemon =
-  match Daemon_process.result daemon with
-  | Some result -> result
-  | None ->
-    Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
-    await_exit env daemon
-;;
-
-let assert_startup_rejected env fixture ~code =
-  Eio.Switch.run (fun sw ->
-    let daemon = F.start ~sw env fixture in
-    Exn.protect
-      ~finally:(fun () -> F.stop env daemon)
-      ~f:(fun () ->
-        let result =
-          Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
-            await_exit env daemon)
-        in
-        F.require
-          (Process_manager.equal_exit result.exit (Exited 1))
-          "invalid store did not reject startup with exit 1";
-        let error =
-          Sexp.of_string result.stderr.contents |> Agent_protocol.Error.t_of_sexp
-        in
-        if not (Agent_protocol.Error.equal_code error.code code && not error.retryable)
-        then
-          raise_s
-            [%sexp
-              "current document returned the wrong typed startup error"
-            , { expected_code = (code : Agent_protocol.Error.code)
-              ; actual_code = (error.code : Agent_protocol.Error.code)
-              ; retryable = (error.retryable : bool)
-              }]))
-;;
-
 let test_index_corruption env environment =
   let fixture = F.fixture env environment "recovery-real-index-corrupt" in
   let expected = F.seed env fixture in
@@ -256,7 +269,7 @@ let test_index_corruption env environment =
   in
   F.require (not (String.equal damaged saved)) "index corruption fixture changed no bytes";
   F.write env index damaged;
-  assert_startup_rejected env fixture ~code:Persistence_error;
+  assert_startup_rejected env fixture ~code:Persistence_error ();
   F.require
     (String.equal (F.read env index) damaged)
     "invalid index was silently overwritten";
@@ -366,7 +379,7 @@ let migration_version env fixture schema version status =
          [%sexp
            "unexpected future migration rejection", (error : Agent_store.Store_error.t)]);
     assert_readonly env fixture before;
-    assert_startup_rejected env fixture ~code:Persistence_error;
+    assert_startup_rejected env fixture ~code:Persistence_error ();
     assert_readonly env fixture before
 ;;
 

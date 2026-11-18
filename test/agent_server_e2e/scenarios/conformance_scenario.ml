@@ -4063,6 +4063,62 @@ let test_provider_installed env environment =
                then fail "cross-transport installed provider semantics differ"))))
 ;;
 
+let test_goal_operator env environment =
+  let fixture = fixture env environment "conformance-goal-operator" in
+  Config_fixture.grant_public_scopes fixture [ View_session_transcript; Send_messages ];
+  (* The offline authored callback invokes only its explicitly selected goal_get. *)
+  let fs = Eio.Stdenv.fs env in
+  let configuration =
+    Config_fixture.configuration fixture ()
+    |> String.substr_replace_first ~pattern:"(tool_default deny)" ~with_:"(tool_default allow)"
+  in
+  Eio.Path.save
+    ~create:(`Or_truncate 0o600)
+    Eio.Path.(fs / Config_fixture.config_path fixture)
+    configuration;
+  Eio.Path.save
+    ~create:(`Or_truncate 0o600)
+    Eio.Path.(Eio.Stdenv.fs env / Config_fixture.prompt_path fixture)
+    Goal_operator_conformance.prompt;
+  Eio.Switch.run (fun sw ->
+    with_daemon ~sw env fixture (fun _daemon _health ->
+      let bootstrap = unix_client ~sw env fixture in
+      let spec =
+        Exn.protect ~finally:bootstrap.close ~f:(fun () ->
+          ignore (initialize bootstrap : Agent_protocol.Initialize.Response.t);
+          session_spec bootstrap)
+      in
+      Goal_operator_conformance.check ~sw ~env fixture ~spec))
+;;
+
+let test_recurrence_operator env environment =
+  let fixture = fixture env environment "conformance-recurrence-operator" in
+  Recurrence_operator_conformance.configure ~env fixture;
+  Eio.Switch.run (fun sw ->
+    with_daemon ~sw env fixture (fun _daemon _health ->
+      let bootstrap = unix_client ~sw env fixture in
+      let spec =
+        Exn.protect ~finally:bootstrap.close ~f:(fun () ->
+          ignore (initialize bootstrap : Agent_protocol.Initialize.Response.t);
+          session_spec bootstrap)
+      in
+      Recurrence_operator_conformance.check ~sw ~env fixture ~spec))
+;;
+
+let test_instruction_operator env environment =
+  let fixture = fixture env environment "conformance-instructions" in
+  Instruction_operator_conformance.configure ~env fixture;
+  Eio.Switch.run (fun sw ->
+    with_daemon ~sw env fixture (fun _daemon _health ->
+      let bootstrap = unix_client ~sw env fixture in
+      let spec =
+        Exn.protect ~finally:bootstrap.close ~f:(fun () ->
+          ignore (initialize bootstrap : Agent_protocol.Initialize.Response.t);
+          session_spec bootstrap)
+      in
+      Instruction_operator_conformance.check ~sw ~env fixture ~spec))
+;;
+
 let test_run_admission env environment =
   let fixture = fixture env environment "conformance-run-admission" in
   Eio.Path.save
@@ -4163,6 +4219,9 @@ let cases =
   ; "conformance.event-order", test_event_order
   ; "conformance.visibility", test_visibility
   ; "conformance.run-admission", test_run_admission
+  ; "conformance.goal-operator", test_goal_operator
+  ; "conformance.recurrence-operator", test_recurrence_operator
+  ; "conformance.instruction-operator", test_instruction_operator
   ; "conformance.pending-inputs", test_pending_inputs
   ; "conformance.history-editing", History_editing.run
   ; "conformance.conversation-search", Conversation_search.run
@@ -4222,6 +4281,21 @@ let method_coverage =
   ; "session.renew_owner", "conformance.error-codes"
   ; "session.start", "conformance.session-lifecycle"
   ; "session.run.start", "conformance.run-admission"
+  ; "session.goals", "conformance.goal-operator"
+  ; "session.goal", "conformance.goal-operator"
+  ; "session.goal.command", "conformance.goal-operator"
+  ; "session.goal.start", "conformance.goal-operator"
+  ; "session.goal.resume", "conformance.goal-operator"
+  ; "session.recurrences", "conformance.recurrence-operator"
+  ; "session.recurrence", "conformance.recurrence-operator"
+  ; "session.recurrence.status", "conformance.recurrence-operator"
+  ; "session.recurrence.history", "conformance.recurrence-operator"
+  ; "session.recurrence.command", "conformance.recurrence-operator"
+  ; "session.instructions_get", "conformance.instruction-operator"
+  ; "session.instructions_refresh", "conformance.instruction-operator"
+  ; "session.instructions_capture", "conformance.instruction-operator"
+  ; "session.instructions_activate", "conformance.instruction-operator"
+  ; "session.instructions_remove", "conformance.instruction-operator"
   ; "session.run", "conformance.run-admission"
   ; "session.runs", "conformance.run-admission"
   ; "session.stop", "conformance.session-lifecycle"

@@ -29,6 +29,11 @@ val create_authenticated
 
 val actor : t -> Operator_authorization.t
 
+(** Explicit constructor provenance, independent of currentness. A principal-only
+    context has None; authenticated context retains Some even after expiry.
+    Request overrides still require [request_actor] validation before use. *)
+val original_actor : t -> Operator_authorization.t option
+
 val request_actor
   :  t
   -> Operator_authorization.t option
@@ -100,6 +105,8 @@ val register_reserved_attachment : t -> Agent_protocol.Session.Attachment.t -> u
 val remove_attachment : t -> Agent_protocol.Id.Attachment.t -> unit
 val remove_session_attachments : t -> Agent_protocol.Id.Session.t -> unit
 
+(** A nonyielding observation of the current connection registration. Session
+    ownership and writer expiry remain independent Actor checks. *)
 val owns_attachment
   :  t
   -> session_id:Agent_protocol.Id.Session.t

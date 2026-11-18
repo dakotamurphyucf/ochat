@@ -9,8 +9,10 @@ content.
 `<doc src="./guide.md" local capture />` selects frozen local content;
 `<doc src="builtin:chatml" />` selects the reviewed embedded ChatML starter. Unmarked
 documents retain their dynamic behavior. The starter's examples are compiled in the
-catalog test. Other builtin identifiers, including `skills`, currently reject until
-reviewed instruction assets exist. No capability or tool grant follows from an import.
+catalog test. The [builtin instruction catalog](../guide/builtin-instructions.md)
+also supplies goals, recurrence, admitted skills, project guidance, recovery policy,
+packages and lifecycle guidance. Unknown IDs reject without fallback. Recovery is
+policy text only; no capability, activation or tool grant follows from an import.
 
 The pure content owner receives observed local bytes or an authentic embedded asset,
 uses bounded conversion, and stores final rendered bytes in a separate SHA256 pool.

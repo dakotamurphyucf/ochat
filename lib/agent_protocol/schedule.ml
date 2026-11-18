@@ -38,6 +38,7 @@ type t =
   ; delivery_count : int
   ; last_delivery_at : Timestamp.t option
   ; ownership : ownership option [@sexp.option]
+  ; inference_provenance : Schedule_provenance.t option [@sexp.option]
   ; delivery_cancellation : string option [@sexp.option]
   }
 [@@deriving sexp]
@@ -220,6 +221,24 @@ let validate t =
         (Protocol_error.invalid_request
            "only an enqueued owned timer can cancel delivery")
   in
+  let%bind () =
+    match t.inference_provenance with
+    | None -> Ok ()
+    | Some provenance ->
+      let%bind () = Schedule_provenance.validate provenance in
+      let%bind _ = Id.Schedule.of_string (Id.Schedule.to_string t.id) in
+      let%bind _ = Id.Session.of_string (Id.Session.to_string t.session_id) in
+      let source = Schedule_provenance.source provenance in
+      if
+        t.generation >= 0
+        && Int.equal t.generation source.generation
+        && t.delivery_count >= 0
+        && Timestamp.compare t.next_due_at t.created_at >= 0
+        && Option.for_all t.ownership ~f:(fun ownership ->
+          Invocation.equal_observer ownership.source source.observer)
+      then Ok ()
+      else Error (Protocol_error.invalid_request "invalid Schedule creator provenance")
+  in
   match t.ownership with
   | None -> Ok ()
   | Some ownership ->
@@ -272,9 +291,19 @@ let to_json t =
     ]
     |> List.filter_opt
   in
-  match t.ownership with
-  | None -> `Object fields
-  | Some ownership ->
+  match t.inference_provenance, t.ownership with
+  | Some provenance, ownership ->
+    `Object
+      [ "schema_version", `Number "4"
+      ; "schedule", `Object fields
+      ; "ownership", Option.value_map ownership ~default:`Null ~f:ownership_to_json
+      ; ( "delivery_cancellation"
+        , Option.value_map t.delivery_cancellation ~default:`Null ~f:(fun s -> `String s)
+        )
+      ; "inference_provenance", Schedule_provenance.to_json provenance
+      ]
+  | None, None -> `Object fields
+  | None, Some ownership ->
     `Object
       ([ ( "schema_version"
          , `Number
@@ -305,24 +334,25 @@ let decode_identity fields =
 let of_json json =
   let open Result.Let_syntax in
   let%bind fields = Json_codec.fields json in
-  let%bind fields, ownership, delivery_cancellation =
+  let%bind fields, ownership, delivery_cancellation, inference_provenance =
     match Json_codec.optional fields "schema_version" with
     | None ->
       (match
          Option.is_some (Json_codec.optional fields "ownership")
          || Option.is_some (Json_codec.optional fields "schedule")
          || Option.is_some (Json_codec.optional fields "delivery_cancellation")
+         || Option.is_some (Json_codec.optional fields "inference_provenance")
        with
        | true ->
          Error
            (Protocol_error.invalid_request
               "owned schedule requires its versioned envelope")
-       | false -> Ok (fields, None, None))
+       | false -> Ok (fields, None, None, None))
     | Some encoded ->
       let%bind version = Json_codec.bounded_int ~min:1 ~max:Int.max_value encoded in
       let%bind () =
         match version with
-        | 2 | 3 -> Ok ()
+        | 2 | 3 | 4 -> Ok ()
         | _ ->
           Error
             (Protocol_error.create
@@ -338,6 +368,7 @@ let of_json json =
            @
            match version with
            | 3 -> [ "delivery_cancellation" ]
+           | 4 -> [ "delivery_cancellation"; "inference_provenance" ]
            | _ -> [])
       in
       let%bind delivery_cancellation =
@@ -345,9 +376,24 @@ let of_json json =
         | 3 ->
           Json_codec.required_as fields "delivery_cancellation" Json_codec.string
           |> Result.map ~f:Option.some
+        | 4 ->
+          Json_codec.required_as fields "delivery_cancellation" (function
+            | `Null -> Ok None
+            | value -> Result.map (Json_codec.string value) ~f:Option.some)
         | _ -> Ok None
       in
-      let%bind ownership = Json_codec.required_as fields "ownership" ownership_of_json in
+      let%bind ownership =
+        Json_codec.required_as fields "ownership" (function
+          | `Null when Int.equal version 4 -> Ok None
+          | value -> Result.map (ownership_of_json value) ~f:Option.some)
+      in
+      let%bind inference_provenance =
+        match version with
+        | 4 ->
+          Json_codec.required_as fields "inference_provenance" Schedule_provenance.of_json
+          |> Result.map ~f:Option.some
+        | _ -> Ok None
+      in
       let%bind fields = Json_codec.required_as fields "schedule" Json_codec.fields in
       let%map () =
         Extension_codec.closed
@@ -364,7 +410,7 @@ let of_json json =
           ; "last_delivery_at"
           ]
       in
-      fields, Some ownership, delivery_cancellation
+      fields, ownership, delivery_cancellation, inference_provenance
   in
   let%bind id, session_id, generation = decode_identity fields in
   let%bind payload = Json_codec.required fields "payload" in
@@ -393,6 +439,7 @@ let of_json json =
     ; delivery_count
     ; last_delivery_at
     ; ownership
+    ; inference_provenance
     ; delivery_cancellation
     }
   in
@@ -406,6 +453,21 @@ let validate_transition ~previous next =
   in
   let open Result.Let_syntax in
   let%bind () = validate next in
+  let%bind () =
+    match previous with
+    | Some previous
+      when not
+             (Option.equal
+                Schedule_provenance.equal
+                previous.inference_provenance
+                next.inference_provenance) ->
+      conflict "Schedule inference provenance is immutable"
+    | Some _ -> Ok ()
+    | None ->
+      (match next.inference_provenance, next.status, next.delivery_count with
+       | None, _, _ | Some _, Scheduled, 0 -> Ok ()
+       | Some _, _, _ -> conflict "provenance-bearing Schedule must start scheduled")
+  in
   match previous with
   | None ->
     (match next.ownership, next.status with
@@ -659,6 +721,7 @@ module Storage = struct
       ; "last_delivery_at", option Timestamp.to_json t.last_delivery_at
       ; "ownership", option ownership_to_json t.ownership
       ; "delivery_cancellation", option (fun s -> `String s) t.delivery_cancellation
+      ; "inference_provenance", option Schedule_provenance.to_json t.inference_provenance
       ]
   ;;
 
@@ -681,6 +744,11 @@ module Storage = struct
     let%bind delivery_cancellation =
       get "delivery_cancellation" (nullable Json_codec.string)
     in
+    let%bind inference_provenance =
+      match Json_codec.optional fields "inference_provenance" with
+      | None | Some `Null -> Ok None
+      | Some value -> Result.map (Schedule_provenance.of_json value) ~f:Option.some
+    in
     let t =
       { id
       ; session_id
@@ -693,6 +761,7 @@ module Storage = struct
       ; delivery_count
       ; last_delivery_at
       ; ownership
+      ; inference_provenance
       ; delivery_cancellation
       }
     in

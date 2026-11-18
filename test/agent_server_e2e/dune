@@ -156,6 +156,7 @@
   mirage-crypto-rng.unix
   ochat.agent_client
   ochat.agent_protocol
+  ochat.recurrence_rules
   ochat.agent_server
   ochat.agent_transport_client
   ochat.chatml_repl_terminal

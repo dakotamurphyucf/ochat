@@ -16,6 +16,11 @@ val create
   -> unit
   -> t
 
+(** Pure domain-owned negative availability snapshot. Normal publication or
+    canonical preparation in flight remains available; sticky live publication
+    failure denies retained use. No mutex, IO or marker reconciliation. *)
+val is_available : t -> bool
+
 val pending
   :  env:Eio_unix.Stdenv.base
   -> marker_path:string

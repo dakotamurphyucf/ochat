@@ -650,6 +650,116 @@
       "source": "docs-src/examples/libraries/checked-json/src/checked_json.chatmli",
       "disposition": "example-download",
       "reason": "Reviewed checked-JSON example companion; only the exact destinations and complete file sets declared by docs-src/examples/catalog.json may be copied."
+    },
+    {
+      "source": "docs-src/examples/learning/goal-recurrence/agent.chatmd",
+      "disposition": "example-download",
+      "reason": "Exact recurring-review source member approved for the catalog\u2019s complete archive and source reader."
+    },
+    {
+      "source": "docs-src/examples/learning/goal-recurrence/worker.chatmd",
+      "disposition": "example-download",
+      "reason": "Exact recurring-review source member approved for the catalog\u2019s complete archive and source reader."
+    },
+    {
+      "source": "docs-src/examples/learning/goal-recurrence/moderator.chatml",
+      "disposition": "example-download",
+      "reason": "Exact recurring-review source member approved for the catalog\u2019s complete archive and source reader."
+    },
+    {
+      "source": "docs-src/examples/learning/goal-recurrence/chatml.project.json",
+      "disposition": "example-download",
+      "reason": "Exact recurring-review source member approved for the catalog\u2019s complete archive and source reader."
+    },
+    {
+      "source": "docs-src/examples/learning/goal-recurrence/guidance/AGENTS.md",
+      "disposition": "example-download",
+      "reason": "Exact recurring-review source member approved for the catalog\u2019s complete archive and source reader."
+    },
+    {
+      "source": "docs-src/examples/learning/goal-recurrence/guidance/release-review/SKILL.md",
+      "disposition": "example-download",
+      "reason": "Exact recurring-review source member approved for the catalog\u2019s complete archive and source reader."
+    },
+    {
+      "source": "docs-src/examples/learning/goal-recurrence/README.md",
+      "disposition": "example-download",
+      "reason": "Exact recurring-review source member approved for the catalog\u2019s complete archive and source reader."
+    },
+    {
+      "source": "docs-src/examples/libraries/goal-requests/chatml.project.json",
+      "disposition": "example-download",
+      "reason": "Exact recurring-review source member approved for the catalog\u2019s complete archive and source reader."
+    },
+    {
+      "source": "docs-src/examples/libraries/goal-requests/src/goal_requests.chatml",
+      "disposition": "example-download",
+      "reason": "Exact recurring-review source member approved for the catalog\u2019s complete archive and source reader."
+    },
+    {
+      "source": "docs-src/examples/libraries/goal-requests/src/goal_requests.chatmli",
+      "disposition": "example-download",
+      "reason": "Exact recurring-review source member approved for the catalog\u2019s complete archive and source reader."
+    },
+    {
+      "source": "docs-src/examples/libraries/recurrence-requests/chatml.project.json",
+      "disposition": "example-download",
+      "reason": "Exact recurring-review source member approved for the catalog\u2019s complete archive and source reader."
+    },
+    {
+      "source": "docs-src/examples/libraries/recurrence-requests/src/recurrence_requests.chatml",
+      "disposition": "example-download",
+      "reason": "Exact recurring-review source member approved for the catalog\u2019s complete archive and source reader."
+    },
+    {
+      "source": "docs-src/examples/libraries/recurrence-requests/src/recurrence_requests.chatmli",
+      "disposition": "example-download",
+      "reason": "Exact recurring-review source member approved for the catalog\u2019s complete archive and source reader."
+    },
+    {
+      "source": "docs-src/examples/libraries/instruction-requests/chatml.project.json",
+      "disposition": "example-download",
+      "reason": "Exact recurring-review source member approved for the catalog\u2019s complete archive and source reader."
+    },
+    {
+      "source": "docs-src/examples/libraries/instruction-requests/src/instruction_requests.chatml",
+      "disposition": "example-download",
+      "reason": "Exact recurring-review source member approved for the catalog\u2019s complete archive and source reader."
+    },
+    {
+      "source": "docs-src/examples/libraries/instruction-requests/src/instruction_requests.chatmli",
+      "disposition": "example-download",
+      "reason": "Exact recurring-review source member approved for the catalog\u2019s complete archive and source reader."
+    },
+    {
+      "source": "docs-src/examples/libraries/lifecycle/chatml.project.json",
+      "disposition": "example-download",
+      "reason": "Exact recurring-review source member approved for the catalog\u2019s complete archive and source reader."
+    },
+    {
+      "source": "docs-src/examples/libraries/lifecycle/src/lifecycle.chatml",
+      "disposition": "example-download",
+      "reason": "Exact recurring-review source member approved for the catalog\u2019s complete archive and source reader."
+    },
+    {
+      "source": "docs-src/examples/libraries/lifecycle/src/lifecycle.chatmli",
+      "disposition": "example-download",
+      "reason": "Exact recurring-review source member approved for the catalog\u2019s complete archive and source reader."
+    },
+    {
+      "source": "docs-src/examples/libraries/lifecycle-run/chatml.project.json",
+      "disposition": "example-download",
+      "reason": "Exact recurring-review source member approved for the catalog\u2019s complete archive and source reader."
+    },
+    {
+      "source": "docs-src/examples/libraries/lifecycle-run/src/lifecycle_run.chatml",
+      "disposition": "example-download",
+      "reason": "Exact recurring-review source member approved for the catalog\u2019s complete archive and source reader."
+    },
+    {
+      "source": "docs-src/examples/libraries/lifecycle-run/src/lifecycle_run.chatmli",
+      "disposition": "example-download",
+      "reason": "Exact recurring-review source member approved for the catalog\u2019s complete archive and source reader."
     }
   ],
   "directories": [

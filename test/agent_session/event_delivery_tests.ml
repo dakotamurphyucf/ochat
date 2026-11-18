@@ -8,8 +8,24 @@ let%expect_test "external event delivery commits receipts before changing the li
   let module S = Session.Moderator_state.Identity_snapshot in
   with_actor_workspace (fun env workspace_instance ->
     Eio.Switch.run (fun sw ->
-      let manager, _ = handoff_manager env in
+      let source =
+        {|type state = { count : int }
+          type event = [ `Session_start | `Session_resume | `Turn_start | `Turn_end ]
+          let initial_state = { count = 0 }
+          let on_event : context -> state -> event -> state task = fun ctx st ev ->
+            Task.pure(st)|}
+      in
+      let manager =
+        prepared_legacy_callback_managers env ~id:"external-delivery" ~source ()
+      in
+      (* This retained invocation supplies only the creator identity in timer
+         DATA. No Manager, callback admission or runtime is installed in Actor. *)
+      let creator = invocation_fixture () in
       let snapshot () = M.identity_snapshot manager |> Result.ok_or_failwith in
+      let captured = snapshot () in
+      let source : Agent_protocol.Invocation.observer =
+        { script_id = captured.script_id; source_sha256 = captured.script_source_hash }
+      in
       let initial =
         actor_state ~workspace_instance ~liveness:Detached ~start_immediately:false
       in
@@ -24,8 +40,10 @@ let%expect_test "external event delivery commits receipts before changing the li
         ; status = Delivering
         ; delivery_count = 0
         ; last_delivery_at = None
+        ; inference_provenance = None
         ; delivery_cancellation = None
-        ; ownership = None
+        ; ownership =
+            Some { source; creator = Invocation creator.context.id; subscription = None }
         }
       in
       let first = schedule ()
@@ -36,7 +54,9 @@ let%expect_test "external event delivery commits receipts before changing the li
         ; session_id
         ; generation = 0
         ; kind = Model_call
-        ; payload = `Null
+        ; payload =
+            `Object
+              [ "recipe", `String Chat_response.Model_executor.agent_prompt_v1_name ]
         ; status = Succeeded
         ; retry_policy = Never
         ; attempt = 1
@@ -47,6 +67,7 @@ let%expect_test "external event delivery commits receipts before changing the li
         ; result = Some `Null
         ; delivery = Pending
         ; launch = None
+        ; inference_origin = None
         ; progress = None
         }
       in
@@ -55,6 +76,7 @@ let%expect_test "external event delivery commits receipts before changing the li
           moderator = Some (B.encode_moderator_snapshot (snapshot ()))
         ; schedules = [ first; second; third ]
         ; jobs = [ job ]
+        ; invocations = [ creator ]
         ; model_job_targets = [ model_job_binding initial job ]
         }
       in
@@ -74,12 +96,12 @@ let%expect_test "external event delivery commits receipts before changing the li
           ~persistence:
             { archive_reference
             ; commit =
-                (fun ~command_audit ~previous next ->
+                (fun ?observation ~command_audit ~previous next ->
                   match !reject with
                   | true ->
                     reject := false;
                     Error (handoff_error "delivery save rejected")
-                  | false -> persistence.commit ~command_audit ~previous next)
+                  | false -> persistence.commit ?observation ~command_audit ~previous next)
             }
           ~services:
             { now = (fun () -> timestamp)
@@ -90,6 +112,7 @@ let%expect_test "external event delivery commits receipts before changing the li
             ; schedule_limits = Agent_session.Staged_schedules.default_limits
             ; notification_limits = Agent_session.Staged_notifications.default_limits
             ; ingress_limits = Agent_session.Staged_ingress.default_limits
+            ; goal_descendant_profile
             ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
             ; state_committed = (fun _ _ -> ())
             }
@@ -99,17 +122,25 @@ let%expect_test "external event delivery commits receipts before changing the li
         ~f:(fun () ->
           let same = Option.equal Jsonaf.exactly_equal in
           let current_matches () =
-            same
-              (Some (B.encode_moderator_snapshot (snapshot ())))
-              (A.state actor |> protocol_ok).moderator
+            let state = A.state actor |> protocol_ok in
+            let current =
+              Agent_session.Moderator_checkpoint.decode state.moderator |> protocol_ok
+            in
+            let matches =
+              Option.exists current ~f:(fun current ->
+                Sexp.equal (S.sexp_of_t current) (S.sexp_of_t (snapshot ())))
+            in
+            assert_moderator_checkpoint state ~snapshot:(snapshot ()) |> ignore;
+            matches
           in
-          let append ?(before_commit = fun () -> ()) label save =
+          (* These are complete claimed owned-timer / Model completion DATA
+             frames, not execution admissions or arbitrary Runtime.emit values. *)
+          let schedule_event schedule =
+            Chat_response.Schedule_delivery.capture schedule |> Result.ok_or_failwith
+          in
+          let job_event = B.model_job_event job |> protocol_ok in
+          let append ?(before_commit = fun () -> ()) event save =
             A.with_moderator_checkpoint actor (fun () ->
-              let event =
-                Chat_response.Moderator_invocation.internal_event
-                  (Chatml.Chatml_lang.VVariant ("String", [ VString label ]))
-                |> Result.ok_or_failwith
-              in
               M.enqueue_internal_event_entries
                 manager
                 ~event
@@ -143,27 +174,27 @@ let%expect_test "external event delivery commits receipts before changing the li
           assert (
             Result.is_error
               (append
-                 "stale-timer"
+                 (schedule_event first)
                  (save_schedule { first with payload = `String "different payload" })));
           assert (
             Result.is_error
               (append
-                 "stale-job"
+                 job_event
                  (save_job
                     { job with attempt = 0; result = Some (`String "previous attempt") })));
           assert (Sexp.equal (S.sexp_of_t unchanged) (S.sexp_of_t (snapshot ())));
           assert (current_matches ());
           List.iter
-            [ "schedule", save_schedule first; "job", save_job job ]
-            ~f:(fun (label, save) ->
+            [ schedule_event first, save_schedule first; job_event, save_job job ]
+            ~f:(fun (event, save) ->
               let before = snapshot () in
               reject := true;
-              assert (Result.is_error (append label save));
+              assert (Result.is_error (append event save));
               assert (Sexp.equal (S.sexp_of_t before) (S.sexp_of_t (snapshot ())));
               assert (current_matches ());
-              append label save |> protocol_ok |> ignore;
+              append event save |> protocol_ok |> ignore;
               let delivered = snapshot () in
-              assert (Result.is_error (append label save));
+              assert (Result.is_error (append event save));
               assert (Sexp.equal (S.sexp_of_t delivered) (S.sexp_of_t (snapshot ())));
               assert (current_matches ()));
           let entered, entered_u = Eio.Promise.create () in
@@ -174,17 +205,22 @@ let%expect_test "external event delivery commits receipts before changing the li
           let second_prepared = ref false in
           Eio.Fiber.fork ~sw (fun () ->
             let result =
-              append "concurrent-first" (save_schedule second) ~before_commit:(fun () ->
-                Eio.Promise.resolve entered_u ();
-                Eio.Promise.await release)
+              append
+                (schedule_event second)
+                (save_schedule second)
+                ~before_commit:(fun () ->
+                  Eio.Promise.resolve entered_u ();
+                  Eio.Promise.await release)
             in
             Eio.Promise.resolve first_done_u result);
           Eio.Promise.await entered;
           Eio.Fiber.fork ~sw (fun () ->
             Eio.Promise.resolve queued_u ();
             let result =
-              append "concurrent-second" (save_schedule third) ~before_commit:(fun () ->
-                second_prepared := true)
+              append
+                (schedule_event third)
+                (save_schedule third)
+                ~before_commit:(fun () -> second_prepared := true)
             in
             Eio.Promise.resolve second_done_u result);
           Eio.Promise.await queued;
@@ -196,6 +232,21 @@ let%expect_test "external event delivery commits receipts before changing the li
           Eio.Promise.await first_done |> protocol_ok |> ignore;
           Eio.Promise.await second_done |> protocol_ok |> ignore;
           let final = A.state actor |> protocol_ok in
+          let metadata =
+            assert_moderator_checkpoint final ~snapshot:(snapshot ()) |> Option.value_exn
+          in
+          assert_moderator_queue_frontier (Some metadata) ~required:true ~head:0L ~next:4L;
+          let produced =
+            List.nth_exn (Agent_session.Moderator_queue.entries metadata) 1
+          in
+          assert (
+            Option.equal
+              Agent_session.Queue_producer.equal
+              (Agent_session.Moderator_queue.Entry.producer produced)
+              (Some
+                 (Job_completion
+                    { id = job.id; generation = job.generation; attempt = job.attempt })));
+          assert (Option.is_none (Agent_session.Moderator_queue.Entry.origin produced));
           print_s
             [%sexp
               { queue_length = (List.length (snapshot ()).queued_internal_events : int)
@@ -272,6 +323,7 @@ let%expect_test "two session event owners reject a wait cycle and release both b
                   ; notification_limits =
                       Agent_session.Staged_notifications.default_limits
                   ; ingress_limits = Agent_session.Staged_ingress.default_limits
+                  ; goal_descendant_profile
                   ; subscription_limits =
                       Agent_session.Staged_subscriptions.default_limits
                   ; state_committed = (fun _ _ -> ())
@@ -298,7 +350,14 @@ let%expect_test "two session event owners reject a wait cycle and release both b
                     ~operation_id:None
                     ~event:Session_start
                     ~snapshot:(fun () -> Ok snapshot)
-                    (fun ~executing:_ ~retirement_reason:_ ~event:_ ~execute:_ ~commit ->
+                    (fun ~executing:_
+                      ~policy_caller:_
+                      ~model_jobs:_
+                      ~allocate_inference:_
+                      ~retirement_reason:_
+                      ~event:_
+                      ~execute:_
+                      ~commit ->
                        Eio.Promise.resolve (snd held.(index)) ();
                        Eio.Promise.await (fst proceed.(index));
                        let remote, _ = actors.((index + 1) mod 2) in
@@ -524,11 +583,21 @@ let%expect_test "queued events retain actor ownership through checkpoint install
             | _ -> results := [ safe_run () ]);
            let saved = A.state actor |> protocol_ok in
            let live = M.identity_snapshot manager |> Result.ok_or_failwith in
-           assert (
-             Option.equal
-               Jsonaf.exactly_equal
-               saved.moderator
-               (Some (Agent_session.Runtime_builder.encode_moderator_snapshot live)));
+           let metadata = assert_moderator_checkpoint saved ~snapshot:live in
+           let completed =
+             match mode with
+             | `Commit | `Concurrent -> true
+             | `Claim_rejected
+             | `Commit_rejected
+             | `Terminal_rejected
+             | `Stop_cancel
+             | `Bad_tail -> false
+           in
+           assert_moderator_queue_frontier
+             metadata
+             ~required:completed
+             ~head:(if completed then 1L else 0L)
+             ~next:(if completed then 3L else 2L);
            assert (
              List.length saved.conversation.canonical_history
              = List.length initial.conversation.canonical_history);
@@ -589,11 +658,20 @@ let%expect_test "queued events retain actor ownership through checkpoint install
               assert (Sexp.equal (S.sexp_of_t before) (S.sexp_of_t live));
               assert (Result.is_error (run ()));
               let changed = { before with revision = before.revision + 1 } in
-              A.change_moderator
-                actor
-                (Some (Agent_session.Runtime_builder.encode_moderator_snapshot changed))
-              |> protocol_ok
-              |> ignore;
+              let checkpoint =
+                Agent_session.Moderator_checkpoint.of_jsonaf
+                  (Option.value_exn saved.moderator)
+                |> protocol_ok
+              in
+              let checkpoint =
+                Agent_session.Moderator_checkpoint.update
+                  checkpoint
+                  ~snapshot:changed
+                  ~queue:Keep
+                |> protocol_ok
+                |> Agent_session.Moderator_checkpoint.to_jsonaf
+              in
+              A.change_moderator actor (Some checkpoint) |> protocol_ok |> ignore;
               assert (
                 Result.is_error
                   (A.with_idle_queued_moderator_event
@@ -971,7 +1049,16 @@ let%expect_test "event-owned native calls retain lineage and expire with their c
            A.with_idle_queued_moderator_event_tools
              actor
              ~snapshot:before
-             (fun ~executing ~retirement_reason:_ ~event:_ ~execute ~commit ->
+             (fun
+                 ~executing
+                  ~policy_caller:_
+                  ~model_jobs:_
+                  ~allocate_inference:_
+                  ~retirement_reason:_
+                  ~event:_
+                  ~execute
+                  ~commit
+                ->
                 let native_callback = !on_call in
                 (on_call
                  := fun () ->
@@ -1012,7 +1099,8 @@ let%expect_test "event-owned native calls retain lineage and expire with their c
                 in
                 assert (
                   Result.is_error
-                    (execute ~invocation:bad (fun ~dispatched:_ -> assert false)));
+                    (execute ~invocation:bad (fun ~dispatched:_ ~capabilities:_ ->
+                       assert false)));
                 M.handle_next_event_entries_transactional
                   manager
                   ~session_id:"fixture"
@@ -1063,7 +1151,8 @@ let%expect_test "event-owned native calls retain lineage and expire with their c
          let execute, child = Option.value_exn !escaped in
          assert (
            Result.is_error
-             (execute ~invocation:(child ()) (fun ~dispatched:_ -> assert false)));
+             (execute ~invocation:(child ()) (fun ~dispatched:_ ~capabilities:_ ->
+                assert false)));
          let state = A.state actor |> protocol_ok in
          let native = List.hd_exn state.invocations in
          assert (
@@ -1175,26 +1264,32 @@ let%expect_test
                     (fun ~name:_ ~args:_ -> failwith "unscoped Tool.call fallback used")
                 }
           in
-          M.handle_event_entries_transactional
-            manager
-            ~session_id:"fixture"
-            ~now_ms:0
-            ~history:[]
-            ~available_tools:[]
-            ~session_meta:`Null
-            ~event:Session_start
-            ~authorize:(fun () -> Ok ())
-            ~on_tool_call:(fun ~name:_ ~args:_ -> assert false)
-            ~prepare_event:(fun ~outcome:_ ~snapshot:_ -> Ok (M.memory_commit ignore))
-          |> Result.ok_or_failwith
-          |> ignore;
-          let before = M.identity_snapshot manager |> Result.ok_or_failwith in
+          let empty = M.identity_snapshot manager |> Result.ok_or_failwith in
+          assert (List.is_empty empty.queued_internal_events);
           let snapshot =
-            Some (Agent_session.Runtime_builder.encode_moderator_snapshot before)
+            Some (Agent_session.Runtime_builder.encode_moderator_snapshot empty)
           in
           prepared := Some manager;
           Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input caps ->
             caps.commit_moderator snapshot |> protocol_ok;
+            let startup =
+              Agent_session.Moderator_event.run_ordinary
+                ~event:Session_start
+                ~claim:(caps.with_moderator_event ~event:Session_start)
+                ~manager
+                ~history:(fun () -> input.history)
+                ~available_tools:[]
+                ~session_meta:`Null
+                ~now:Agent_protocol.Timestamp.now
+                ()
+              |> protocol_ok
+            in
+            assert (Option.is_some startup);
+            let snapshot =
+              Some
+                (Agent_session.Runtime_builder.encode_moderator_snapshot
+                   (M.identity_snapshot manager |> Result.ok_or_failwith))
+            in
             Completed
               { final_history = input.history
               ; moderator_snapshot = snapshot
@@ -1203,6 +1298,34 @@ let%expect_test
         (fun _env actor writer backend ->
            let initial = await_idle actor in
            let manager = Option.value_exn !prepared in
+           let startup =
+             match
+               List.filter initial.moderator_executions ~f:(fun event ->
+                 Agent_protocol.Moderator_execution.equal_phase
+                   event.context.phase
+                   Session_start)
+             with
+             | [ startup ] -> startup
+             | _ -> failwith "fixture requires one actual Session_start receipt"
+           in
+           (match startup.status with
+            | Completed _ -> ()
+            | Running | Failed _ | Interrupted _ ->
+              failwith "actual fixture Session_start failed");
+           let metadata =
+             assert_moderator_checkpoint
+               initial
+               ~snapshot:(M.identity_snapshot manager |> Result.ok_or_failwith)
+             |> Option.value_exn
+           in
+           let entries = Agent_session.Moderator_queue.entries metadata in
+           [%test_eq: int] 2 (List.length entries);
+           List.iter entries ~f:(fun entry ->
+             match Agent_session.Moderator_queue.Entry.producer entry with
+             | Some (Event actual) ->
+               assert (
+                 Agent_protocol.Id.Moderator_execution.equal actual startup.context.id)
+             | _ -> failwith "fixture emit lost its actual Session_start producer");
            (on_native
             := fun () ->
                  assert (Option.is_none (A.state actor |> protocol_ok).active_operation);
@@ -1245,13 +1368,30 @@ let%expect_test
              A.with_current_idle_queued_moderator_event_tools
                actor
                ~snapshot
-               (fun ~executing ~retirement_reason ~event ~execute ~commit ->
+               (fun
+                   ~executing
+                    ~policy_caller
+                    ~model_jobs
+                    ~allocate_inference
+                    ~retirement_reason
+                    ~event
+                    ~execute
+                    ~commit
+                  ->
                   let event =
                     match mode with
                     | `Mismatched_head -> Session.Snapshot.String "wrong head"
                     | _ -> event
                   in
-                  f ~executing ~retirement_reason ~event ~execute ~commit)
+                  f
+                    ~executing
+                    ~policy_caller
+                    ~model_jobs
+                    ~allocate_inference
+                    ~retirement_reason
+                    ~event
+                    ~execute
+                    ~commit)
            in
            let history () =
              (A.state actor |> protocol_ok).conversation.canonical_history
@@ -1375,4 +1515,5368 @@ let%expect_test
     ((mode Mismatched_head) (handled 0) (native 0) (authorized 0) (wakeups 0)
      (observed 0) (pending 0) (state 0))
     |}]
+;;
+
+let%expect_test "legacy exact Manager claim installs source facts without a Run" =
+  let module A = Agent_session.Session_actor in
+  let module M = Chat_response.Moderator_manager in
+  let module B = Agent_session.Runtime_builder in
+  let source =
+    {|type state = { count : int }
+      type event = [ `Session_start | `Session_resume | `Turn_start | `Turn_end | `Queued ]
+      let initial_state = { count = 0 }
+      let on_event : context -> state -> event -> state task = fun ctx st ev ->
+        match ev with
+        | `Session_start ->
+          Task.bind(Runtime.emit(`Queued), fun ignored_first ->
+          Task.bind(Runtime.emit(`Queued), fun ignored_second -> Task.pure(st)))
+        | `Session_resume -> Task.pure(st)
+        | `Turn_start -> Task.pure(st)
+        | `Turn_end -> Task.pure(st)
+        | `Queued -> Task.pure({ count = st.count + 1 })|}
+  in
+  let managers = ref None in
+  let worker_ref = ref None in
+  let reject = ref false in
+  let reject_claim = ref false in
+  let rejected_claims = ref 0 in
+  let during_worker =
+    ref
+      (fun
+          (_ : Agent_session.Operation_worker.Input.t)
+           (_ : Agent_session.Operation_worker.Capabilities.t)
+         -> ())
+  in
+  with_handoff_actor
+    ~reject:(fun next ->
+      let reject_running =
+        !reject_claim
+        && List.exists
+             next.Agent_session.Session_transition.state.moderator_executions
+             ~f:(fun receipt ->
+               match receipt.Agent_protocol.Moderator_execution.status with
+               | Running -> true
+               | Completed _ | Failed _ | Interrupted _ -> false)
+      in
+      if reject_running then incr rejected_claims;
+      reject_running
+      || (!reject
+          && List.count
+               next.Agent_session.Session_transition.state.moderator_executions
+               ~f:(fun receipt ->
+                 match receipt.Agent_protocol.Moderator_execution.status with
+                 | Completed _ -> true
+                 | Running | Failed _ | Interrupted _ -> false)
+             > 1))
+    ~make_worker:(fun env actor_ready ->
+      let make_manager =
+        prepared_legacy_callback_managers env ~id:"legacy-callback" ~source
+      in
+      let manager = make_manager () in
+      managers := Some (manager, make_manager);
+      M.handle_event_entries
+        manager
+        ~session_id:"fixture"
+        ~now_ms:0
+        ~history:[]
+        ~available_tools:[]
+        ~session_meta:`Null
+        ~event:Session_start
+      |> Result.ok_or_failwith
+      |> ignore;
+      let worker =
+        Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input caps ->
+          let snapshot = M.identity_snapshot manager |> Result.ok_or_failwith in
+          !during_worker input caps;
+          let state = A.state (Eio.Promise.await actor_ready) |> protocol_ok in
+          let moderator_snapshot =
+            match state.moderator with
+            | Some _ as saved -> saved
+            | None -> Some (B.encode_moderator_snapshot snapshot)
+          in
+          caps.commit_moderator moderator_snapshot |> protocol_ok;
+          Completed
+            { final_history = input.history; moderator_snapshot; runtime_requests = [] })
+      in
+      worker_ref := Some worker;
+      worker)
+    (fun _env actor writer backend ->
+       let manager, make_manager = Option.value_exn !managers in
+       let initial = await_idle actor in
+       assert (Option.is_none initial.run_state);
+       let worker = Option.value_exn !worker_ref in
+       A.set_runtime_worker
+         ~moderator_manager:manager
+         actor
+         ~worker:(Some worker)
+         ~inference:
+           (Some
+              (Inference_ports.create ~config:Chat_response.Config.default ()
+               |> Inference_ports.execution))
+       |> protocol_ok;
+       let last_scope = ref None in
+       let admission_entered = ref false in
+       let inspection_completed = ref false in
+       let invoke
+             ?(selection = M.Callback.Selection.Queue_head)
+             ?inspect
+             ?(operation_id = None)
+             selected_manager
+         =
+         admission_entered := false;
+         inspection_completed := false;
+         M.handle_legacy_callback_entries
+           selected_manager
+           ~selection
+           ~session_id:"fixture"
+           ~now_ms:0
+           ~history:[]
+           ~available_tools:[]
+           ~session_meta:`Null
+           ~with_admission:(fun callback ~snapshot:_ run ->
+             let outcome = ref None in
+             let result =
+               (match selection with
+                | Queue_head ->
+                  A.with_legacy_queued_callback actor ~callback ~operation_id
+                | Boundary _ -> A.with_legacy_callback actor ~callback ~operation_id)
+                 (fun ~scope ~commit ->
+                    admission_entered := true;
+                    last_scope := Some scope;
+                    A.check_callback_current actor scope |> protocol_ok;
+                    if M.Callback.consumes_head callback
+                    then (
+                      let current = A.state actor |> protocol_ok in
+                      let metadata =
+                        Agent_session.Moderator_checkpoint.queue current.moderator
+                        |> protocol_ok
+                        |> Option.value_exn
+                      in
+                      let head =
+                        List.hd_exn (Agent_session.Moderator_queue.entries metadata)
+                      in
+                      let receipt = A.Callback_scope.executing scope in
+                      let module C = Agent_protocol.Moderator_execution.Queue_occurrence
+                      in
+                      let capture = Option.value_exn receipt.queue_occurrence in
+                      assert (
+                        C.Producer.equal
+                          (C.producer capture)
+                          (Captured (Agent_session.Moderator_queue.Entry.producer head))));
+                    (match inspect with
+                     | Some inspect -> inspect scope
+                     | None ->
+                       assert (Option.is_none (A.Callback_scope.origin scope));
+                       assert (Result.is_error (A.callback_agent_actor actor ~scope));
+                       assert (
+                         Option.is_none
+                           (A.run_actions actor (A.Callback_scope.executing scope)
+                            |> protocol_ok));
+                       List.iter
+                         [ true, false; false, true ]
+                         ~f:(fun (request_turn, request_compaction) ->
+                           assert (
+                             Result.is_error
+                               (commit
+                                  ~notifications:[]
+                                  ~snapshot:(M.Callback.snapshot callback)
+                                  ~requests:
+                                    { request_turn
+                                    ; request_compaction
+                                    ; end_session = None
+                                    }))));
+                    inspection_completed := true;
+                    let binding : M.callback_binding =
+                      { services =
+                          { model_recipes = Map.empty (module String)
+                          ; tool_call =
+                              (fun ~name:_ ~args:_ ->
+                                Error "unused callback Tool service")
+                          ; after_ms = (fun ~delay_ms:_ ~payload:_ -> Error "unused")
+                          ; cancel = (fun ~id:_ -> Error "unused")
+                          }
+                      ; authorize =
+                          (fun () ->
+                            A.check_callback_current actor scope
+                            |> Result.map_error ~f:(fun error ->
+                              error.Agent_protocol.Error.message))
+                      ; prepare =
+                          (fun ~outcome:_ ~snapshot ->
+                            Ok
+                              { M.persist =
+                                  (fun () ->
+                                    commit
+                                      ~notifications:[]
+                                      ~snapshot
+                                      ~requests:
+                                        { request_turn = false
+                                        ; request_compaction = false
+                                        ; end_session = None
+                                        }
+                                    |> Result.map_error ~f:(fun error ->
+                                      error.Agent_protocol.Error.message))
+                              ; install = ignore
+                              })
+                      }
+                    in
+                    run binding
+                    |> Result.map_error ~f:handoff_error
+                    |> Result.map ~f:(fun value -> outcome := Some value))
+             in
+             match result with
+             | Ok true -> Ok (Option.value_exn !outcome)
+             | Ok false -> Error "legacy physical actor unavailable"
+             | Error error -> Error error.Agent_protocol.Error.message)
+       in
+       let other = make_manager () in
+       M.enqueue_internal_event other (Chatml.Chatml_lang.VVariant ("Queued", []))
+       |> Result.ok_or_failwith;
+       assert (Result.is_error (invoke other));
+       assert (not !admission_entered);
+       assert (not !inspection_completed);
+       let before = M.identity_snapshot manager |> Result.ok_or_failwith in
+       assert (
+         Result.is_error
+           (A.with_idle_queued_moderator_event
+              actor
+              ~snapshot:before
+              (fun ~event:_ ~commit:_ -> assert false)));
+       let newer =
+         { before with
+           Session.Moderator_state.Identity_snapshot.current_state =
+             Session.Snapshot.Record [ "count", Session.Snapshot.Int 7 ]
+         }
+       in
+       A.change_moderator actor (Some (B.encode_moderator_snapshot newer))
+       |> protocol_ok
+       |> ignore;
+       let changed = A.state actor |> protocol_ok in
+       assert (Result.is_error (invoke manager));
+       assert (not !admission_entered);
+       assert (not !inspection_completed);
+       let unchanged = A.state actor |> protocol_ok in
+       assert (Int64.equal changed.counters.revision unchanged.counters.revision);
+       assert (Option.equal Jsonaf.exactly_equal changed.moderator unchanged.moderator);
+       assert (Option.is_none unchanged.run_state);
+       A.change_moderator actor (Some (B.encode_moderator_snapshot before))
+       |> protocol_ok
+       |> ignore;
+       invoke manager |> Result.ok_or_failwith |> ignore;
+       let state = A.state actor |> protocol_ok in
+       let index = Option.value_exn state.run_state in
+       assert (List.is_empty (Agent_session.Run_state.runs index));
+       assert (Int64.equal (Agent_session.Run_state.installation index).epoch 1L);
+       let metadata =
+         Agent_session.Moderator_checkpoint.queue state.moderator
+         |> protocol_ok
+         |> Option.value_exn
+       in
+       assert (Int64.equal (Agent_session.Moderator_queue.head_ordinal metadata) 1L);
+       assert (List.length (Agent_session.Moderator_queue.entries metadata) = 1);
+       assert (
+         Result.is_error (A.check_callback_current actor (Option.value_exn !last_scope)));
+       reject := true;
+       let before_failure = M.identity_snapshot manager |> Result.ok_or_failwith in
+       assert (Result.is_error (invoke manager));
+       assert !admission_entered;
+       assert !inspection_completed;
+       let after_failure = M.identity_snapshot manager |> Result.ok_or_failwith in
+       assert (
+         Sexp.equal
+           (Session.Moderator_state.Identity_snapshot.sexp_of_t before_failure)
+           (Session.Moderator_state.Identity_snapshot.sexp_of_t after_failure));
+       assert (Result.is_error (invoke manager));
+       assert (not !admission_entered);
+       assert (not !inspection_completed);
+       let state = A.state actor |> protocol_ok in
+       assert (
+         List.exists state.moderator_executions ~f:(fun receipt ->
+           match receipt.Agent_protocol.Moderator_execution.status with
+           | Failed _ -> true
+           | Running | Completed _ | Interrupted _ -> false));
+       reject := false;
+       let unavailable scope =
+         match A.callback_agent_actor actor ~scope with
+         | Error { code = Permission_denied; _ } -> ()
+         | Error _ | Ok _ -> assert false
+       in
+       let resume inspect =
+         invoke ~selection:(Boundary Session_resume) ~inspect manager
+       in
+       (* A genuine principal-only Start after this source is installed has one
+          pending event, not historical authority. Its None is consumed once. *)
+       A.stop actor ~attachment_id:writer.id ~mode:Graceful |> protocol_ok |> ignore;
+       A.start actor ~attachment_id:writer.id |> protocol_ok |> ignore;
+       resume (fun scope ->
+         assert (Option.is_none (A.callback_agent_actor actor ~scope |> protocol_ok)))
+       |> Result.ok_or_failwith
+       |> ignore;
+       resume unavailable |> Result.ok_or_failwith |> ignore;
+       let authentication live =
+         let principal =
+           Agent_protocol.Principal.create
+             ~id:principal_id
+             ~authentication_kind:"local"
+             ~scopes:(Agent_protocol.Scope.Set.of_list [ Send_messages ])
+             ~attributes:[]
+           |> protocol_ok
+         in
+         Operator_authorization.guarded ~principal ~is_current:(fun () -> Atomic.get live)
+       in
+       let live = Atomic.make true in
+       let original = authentication live in
+       A.stop actor ~attachment_id:writer.id ~mode:Graceful |> protocol_ok |> ignore;
+       A.start ~actor:original actor ~attachment_id:writer.id |> protocol_ok |> ignore;
+       (* A rejected physical claim must neither consume Start's pending loan
+          nor install a callback scope/receipt. Retry is the same real event. *)
+       let before_claim = A.state actor |> protocol_ok in
+       let inspected = ref false in
+       reject_claim := true;
+       assert (Result.is_error (resume (fun _ -> inspected := true)));
+       reject_claim := false;
+       assert (!rejected_claims = 1);
+       assert (not !inspected);
+       assert (not !admission_entered);
+       assert (not !inspection_completed);
+       assert_same_session_snapshot before_claim (A.state actor |> protocol_ok);
+       let escaped = ref None in
+       resume (fun scope ->
+         let proof =
+           A.callback_agent_actor actor ~scope |> protocol_ok |> Option.value_exn
+         in
+         assert (Operator_authorization.is_current proof);
+         assert (
+           Agent_protocol.Id.Principal.equal
+             (Operator_authorization.principal proof).id
+             (Operator_authorization.principal original).id);
+         escaped := Some (scope, proof))
+       |> Result.ok_or_failwith
+       |> ignore;
+       let scope, proof = Option.value_exn !escaped in
+       assert (Operator_authorization.is_current original);
+       assert (not (Operator_authorization.is_current proof));
+       assert (Result.is_error (A.check_callback_current actor scope));
+       resume unavailable |> Result.ok_or_failwith |> ignore;
+       let operation_receipts = ref [] in
+       let run_operation ~sequence ~original ~expect_error ~after inspect =
+         let inspected = ref false in
+         let worker_oracle_completed = ref false in
+         let before_events = (A.state actor |> protocol_ok).counters.event_sequence in
+         (during_worker
+          := fun input caps ->
+               let module F = Agent_session.Callback_cleanup in
+               let receipt = caps.callback_cleanup () |> protocol_ok in
+               let original_operation = F.Operation.operation receipt |> protocol_ok in
+               assert (
+                 Agent_protocol.Id.Operation.equal
+                   original_operation.id
+                   input.operation.id);
+               operation_receipts := !operation_receipts @ [ input.operation.id, receipt ];
+               let result =
+                 invoke
+                   ~selection:(Boundary Turn_start)
+                   ~operation_id:(Some input.operation.id)
+                   ~inspect:(fun scope ->
+                     inspect scope;
+                     inspected := true)
+                   manager
+               in
+               assert !inspected;
+               assert !inspection_completed;
+               if expect_error
+               then assert (Result.is_error result)
+               else result |> Result.ok_or_failwith |> ignore;
+               after input;
+               worker_oracle_completed := true);
+         let id =
+           History_entry.Id.create ~namespace:"legacy_boundary" ~sequence
+           |> Result.ok_or_failwith
+         in
+         let entry =
+           Agent_session.History_codec.user_text ~id "boundary"
+           |> Agent_session.History_codec.to_protocol
+         in
+         let admitted =
+           A.submit_message_authenticated
+             actor
+             ~actor:original
+             ~attachment_id:writer.id
+             entry
+           |> protocol_ok
+         in
+         let operation_id = Option.value_exn admitted.operation_id in
+         await_idle actor |> ignore;
+         let module F = Agent_session.Callback_cleanup in
+         List.iter !operation_receipts ~f:(fun (expected_id, receipt) ->
+           let original_operation = F.Operation.operation receipt |> protocol_ok in
+           assert (Agent_protocol.Id.Operation.equal expected_id original_operation.id);
+           match F.Operation.terminal receipt |> protocol_ok with
+           | Some (Ok (Ok ())) -> ()
+           | None | Some (Ok (Error _)) | Some (Error _) ->
+             failwith "original operation terminal receipt was lost or replaced");
+         (* These assertions run outside BOTH Manager and worker exception-to-
+            result boundaries. Neither can convert an unfinished oracle to pass. *)
+         assert !inspected;
+         assert !worker_oracle_completed;
+         let events =
+           Agent_session.Memory_backend.events_after backend before_events |> protocol_ok
+         in
+         assert (
+           List.exists events ~f:(fun event ->
+             match
+               Agent_protocol.Event.Durable.Payload.of_json
+                 ~kind:event.Agent_protocol.Event.Durable.kind
+                 event.payload
+               |> protocol_ok
+             with
+             | Operation_completed { id; state = Completed; _ } ->
+               Agent_protocol.Id.Operation.equal id operation_id
+             | _ -> false))
+       in
+       run_operation ~sequence:1 ~original ~expect_error:true ~after:ignore (fun scope ->
+         let proof =
+           A.callback_agent_actor actor ~scope |> protocol_ok |> Option.value_exn
+         in
+         Atomic.set live false;
+         (* The real operation is still active. Expiry, not an invented source
+            or another caller's proof, denies the current callback. *)
+         assert (Option.is_some (A.state actor |> protocol_ok).active_operation);
+         assert (not (Operator_authorization.is_current proof));
+         assert (Result.is_error (A.check_callback_current actor scope)));
+       let next_original = authentication (Atomic.make true) in
+       let cleared_loan = ref None in
+       run_operation
+         ~sequence:2
+         ~original:next_original
+         ~expect_error:false
+         ~after:(fun input ->
+           let scope, proof = Option.value_exn !cleared_loan in
+           assert (Option.is_some (A.state actor |> protocol_ok).active_operation);
+           (* Return already expired the loan. This clear must prevent a NEW
+              callback, not be credited as the cause of the old loan's expiry. *)
+           assert (not (Operator_authorization.is_current proof));
+           assert (Result.is_error (A.check_callback_current actor scope));
+           A.set_operation_worker actor (Some worker) |> protocol_ok;
+           let before = A.state actor |> protocol_ok in
+           assert (
+             Result.is_error
+               (invoke
+                  ~selection:(Boundary Turn_end)
+                  ~operation_id:(Some input.operation.id)
+                  ~inspect:ignore
+                  manager));
+           assert (not !admission_entered);
+           assert (not !inspection_completed);
+           assert_same_session_snapshot before (A.state actor |> protocol_ok))
+         (fun scope ->
+            let proof =
+              A.callback_agent_actor actor ~scope |> protocol_ok |> Option.value_exn
+            in
+            (* Replacement is serialized against the live borrow. An unexpected
+            error must not swallow any assertion in this inspection. *)
+            assert (Result.is_error (A.set_operation_worker actor (Some worker)));
+            assert (Option.is_some (A.state actor |> protocol_ok).active_operation);
+            assert (Operator_authorization.is_current next_original);
+            assert (Operator_authorization.is_current proof);
+            A.check_callback_current actor scope |> protocol_ok;
+            cleared_loan := Some (scope, proof));
+       (match !operation_receipts with
+        | [ (first_id, first); (second_id, second) ] ->
+          assert (not (phys_equal first second));
+          assert (not (Agent_protocol.Id.Operation.equal first_id second_id))
+        | _ -> failwith "two actual workers did not retain distinct original receipts");
+       print_endline
+         "exact legacy source; fresh None differs from unavailable; one-event proof; \
+          failed ACK preserves pending; original expiry and serialized Manager clear; \
+          failed checkpoint blocks replay");
+  [%expect
+    {| exact legacy source; fresh None differs from unavailable; one-event proof; failed ACK preserves pending; original expiry and serialized Manager clear; failed checkpoint blocks replay |}]
+;;
+
+module Legacy_emit = struct
+  module A = Agent_session.Session_actor
+  module M = Chat_response.Moderator_manager
+  module B = Agent_session.Runtime_builder
+
+  let source =
+    {|type state = int
+      type event = [ `Session_start | `Session_resume | `First | `Second ]
+      let initial_state = 0
+      let on_event : context -> state -> event -> state task = fun ctx st ev ->
+        match ev with
+        | `Session_start -> Task.pure(st)
+        | `Session_resume -> Task.bind(Runtime.emit(`First), fun ignored -> Task.pure(st))
+        | `First -> Task.bind(Runtime.emit(`Second), fun ignored -> Task.pure(st + 1))
+        | `Second -> Task.pure(st + 1)|}
+  ;;
+
+  let authentication live =
+    let principal =
+      Agent_protocol.Principal.create
+        ~id:principal_id
+        ~authentication_kind:"local"
+        ~scopes:(Agent_protocol.Scope.Set.of_list [ Send_messages ])
+        ~attributes:[]
+      |> protocol_ok
+    in
+    Operator_authorization.guarded ~principal ~is_current:(fun () -> Atomic.get live)
+  ;;
+
+  (* Actual Prepared Manager + Actor callbacks; services intentionally provide
+     no Model/provider port. Each inspection needs an oracle outside the engine. *)
+  let invoke
+        ?claim
+        ?tools
+        ?(on_tool_result = fun _ -> ())
+        ?(requests =
+          { Agent_protocol.Invocation.request_turn = false
+          ; request_compaction = false
+          ; end_session = None
+          })
+        ~actor
+        ~manager
+        ~selection
+        ~operation_id
+        ~inspect
+        ()
+    =
+    let open Result.Let_syntax in
+    let claim =
+      Option.value claim ~default:(A.with_legacy_callback actor ~operation_id)
+    in
+    let outcome = ref None in
+    M.handle_legacy_callback_entries
+      manager
+      ~selection
+      ~session_id:"fixture"
+      ~now_ms:0
+      ~history:[]
+      ~available_tools:[]
+      ~session_meta:`Null
+      ~with_admission:(fun callback ~snapshot:_ run ->
+        let%bind committed =
+          claim ~callback (fun ~scope ~commit ->
+            inspect scope;
+            let schedules = A.callback_schedule_services actor ~scope in
+            let with_tools f =
+              match tools with
+              | None -> f (fun ~name:_ ~args:_ -> Error "unused callback Tool service")
+              | Some (tools, selected) ->
+                Agent_session.Script_tool_calls.with_legacy_event
+                  tools
+                  ~selected
+                  ~execute:(A.callback_tool_executor actor ~scope)
+                  ~executing:(A.Callback_scope.executing scope)
+                  f
+            in
+            with_tools (fun tool_call ->
+              let binding : M.callback_binding =
+                { services =
+                    { model_recipes = Map.empty (module String)
+                    ; tool_call =
+                        (fun ~name ~args ->
+                          let result = tool_call ~name ~args in
+                          on_tool_result result;
+                          result)
+                    ; after_ms =
+                        (fun ~delay_ms ~payload ->
+                          let%bind payload =
+                            Chatml.Chatml_value_codec.Snapshot.of_value payload
+                          in
+                          schedules.after_ms
+                            ~delay_ms
+                            ~payload:
+                              (Chatml.Chatml_value_codec.Snapshot.to_jsonaf payload))
+                    ; cancel = schedules.cancel
+                    }
+                ; authorize =
+                    (fun () ->
+                      A.check_callback_current actor scope
+                      |> Result.map_error ~f:(fun error ->
+                        error.Agent_protocol.Error.message))
+                ; prepare =
+                    (fun ~outcome:_ ~snapshot ->
+                      Ok
+                        { M.persist =
+                            (fun () ->
+                              commit ~snapshot ~requests ~notifications:[]
+                              |> Result.map_error ~f:(fun error ->
+                                error.Agent_protocol.Error.message))
+                        ; install = ignore
+                        })
+                }
+              in
+              run binding
+              |> Result.map_error ~f:handoff_error
+              |> Result.map ~f:(fun value -> outcome := Some value)))
+          |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
+        in
+        if committed
+        then Ok (Option.value_exn !outcome)
+        else Error "legacy callback physical owner unavailable")
+  ;;
+
+  let worker manager actor_ready during =
+    Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input caps ->
+      during input caps;
+      let state = A.state (Eio.Promise.await actor_ready) |> protocol_ok in
+      let moderator_snapshot =
+        match state.moderator with
+        | Some _ as saved -> saved
+        | None ->
+          Some
+            (B.encode_moderator_snapshot
+               (M.identity_snapshot manager |> Result.ok_or_failwith))
+      in
+      caps.commit_moderator moderator_snapshot |> protocol_ok;
+      Completed
+        { final_history = input.history; moderator_snapshot; runtime_requests = [] })
+  ;;
+
+  let install actor manager worker =
+    A.set_runtime_worker
+      ~moderator_manager:manager
+      actor
+      ~worker:(Some worker)
+      ~inference:
+        (Some
+           (Inference_ports.create ~config:Chat_response.Config.default ()
+            |> Inference_ports.execution))
+    |> protocol_ok
+  ;;
+
+  let queue state =
+    Agent_session.Moderator_checkpoint.queue state.Agent_session.Session_state.moderator
+    |> protocol_ok
+    |> Option.value_exn
+  ;;
+end
+
+let%expect_test "acknowledged legacy emits carry live custody across exact queue claims" =
+  let module L = Legacy_emit in
+  let module A = L.A in
+  let module M = L.M in
+  List.iter [ `Fresh_none; `Original; `Rejected_checkpoint ] ~f:(fun mode ->
+    let manager_ref = ref None in
+    let worker_ref = ref None in
+    let during =
+      ref
+        (fun
+            (_ : Agent_session.Operation_worker.Input.t)
+             (_ : Agent_session.Operation_worker.Capabilities.t)
+           -> ())
+    in
+    let reject_claim = ref false in
+    let reject_checkpoint = ref false in
+    let claim_rejections = ref 0 in
+    let checkpoint_rejections = ref 0 in
+    with_handoff_actor
+      ~reject:(fun next ->
+        let receipts = next.Agent_session.Session_transition.state.moderator_executions in
+        if
+          !reject_claim
+          && List.exists receipts ~f:(fun receipt ->
+            match receipt.Agent_protocol.Moderator_execution.status with
+            | Running -> true
+            | Completed _ | Failed _ | Interrupted _ -> false)
+        then (
+          incr claim_rejections;
+          true)
+        else if
+          !reject_checkpoint
+          && List.count receipts ~f:(fun receipt ->
+               match receipt.Agent_protocol.Moderator_execution.status with
+               | Completed _ -> true
+               | Running | Failed _ | Interrupted _ -> false)
+             = 2
+        then (
+          incr checkpoint_rejections;
+          true)
+        else false)
+      ~make_worker:(fun env actor_ready ->
+        let manager =
+          prepared_legacy_callback_managers env ~id:"legacy-emit" ~source:L.source ()
+        in
+        manager_ref := Some manager;
+        let worker =
+          L.worker manager actor_ready (fun input caps -> !during input caps)
+        in
+        worker_ref := Some worker;
+        worker)
+      (fun _env actor writer backend ->
+         await_idle actor |> ignore;
+         let manager = Option.value_exn !manager_ref in
+         L.install actor manager (Option.value_exn !worker_ref);
+         let original_live = Atomic.make true in
+         let original = L.authentication original_live in
+         A.stop actor ~attachment_id:writer.id ~mode:Graceful |> protocol_ok |> ignore;
+         A.start
+           ?actor:
+             (match mode with
+              | `Fresh_none -> None
+              | `Original | `Rejected_checkpoint -> Some original)
+           actor
+           ~attachment_id:writer.id
+         |> protocol_ok
+         |> ignore;
+         let inspected = ref false in
+         let check scope =
+           let borrowed = A.callback_agent_actor actor ~scope |> protocol_ok in
+           (match mode, borrowed with
+            | `Fresh_none, None -> ()
+            | (`Original | `Rejected_checkpoint), Some proof ->
+              assert (Operator_authorization.is_current proof)
+            | `Fresh_none, Some _ | (`Original | `Rejected_checkpoint), None ->
+              assert false);
+           inspected := true
+         in
+         L.invoke
+           ~actor
+           ~manager
+           ~selection:(Boundary Session_resume)
+           ~operation_id:None
+           ~inspect:check
+           ()
+         |> Result.ok_or_failwith
+         |> ignore;
+         assert !inspected;
+         let emitted = A.state actor |> protocol_ok in
+         let first =
+           List.hd_exn (Agent_session.Moderator_queue.entries (L.queue emitted))
+         in
+         let producer =
+           match Agent_session.Moderator_queue.Entry.producer first with
+           | Some (Event id) -> id
+           | Some _ | None -> assert false
+         in
+         assert (
+           List.exists emitted.moderator_executions ~f:(fun receipt ->
+             Agent_protocol.Id.Moderator_execution.equal receipt.context.id producer
+             &&
+             match receipt.status with
+             | Completed _ -> true
+             | Running | Failed _ | Interrupted _ -> false));
+         (* Reject before the Running ACK. This must preserve the live row, not
+           consume it and leave the successful retry without its original loan. *)
+         inspected := false;
+         reject_claim := true;
+         assert (
+           Result.is_error
+             (L.invoke
+                ~actor
+                ~manager
+                ~selection:Queue_head
+                ~operation_id:None
+                ~inspect:check
+                ()));
+         reject_claim := false;
+         assert (!claim_rejections = 1 && not !inspected);
+         assert_same_session_snapshot emitted (A.state actor |> protocol_ok);
+         let worker_oracle = ref false in
+         (during
+          := fun input caps ->
+               inspected := false;
+               (reject_checkpoint
+                := match mode with
+                   | `Rejected_checkpoint -> true
+                   | `Fresh_none | `Original -> false);
+               let result =
+                 L.invoke
+                   ~actor
+                   ~manager
+                   ~selection:Queue_head
+                   ~operation_id:(Some input.operation.id)
+                   ~inspect:check
+                   ()
+               in
+               assert !inspected;
+               (match mode with
+                | `Rejected_checkpoint ->
+                  assert (Result.is_error result);
+                  assert (!checkpoint_rejections = 1);
+                  let state = A.state actor |> protocol_ok in
+                  assert (
+                    Int64.equal
+                      (Agent_session.Moderator_queue.head_ordinal (L.queue state))
+                      (Agent_session.Moderator_queue.Entry.ordinal first));
+                  assert (
+                    List.length (Agent_session.Moderator_queue.entries (L.queue state))
+                    = 1);
+                  let entered = ref false in
+                  assert (
+                    Result.is_error
+                      (L.invoke
+                         ~actor
+                         ~manager
+                         ~selection:Queue_head
+                         ~operation_id:(Some input.operation.id)
+                         ~inspect:(fun _ -> entered := true)
+                         ()));
+                  assert (not !entered)
+                | `Fresh_none | `Original ->
+                  result |> Result.ok_or_failwith |> ignore;
+                  let state = A.state actor |> protocol_ok in
+                  let second =
+                    List.hd_exn (Agent_session.Moderator_queue.entries (L.queue state))
+                  in
+                  assert (
+                    Int64.(
+                      Agent_session.Moderator_queue.Entry.ordinal second
+                      > Agent_session.Moderator_queue.Entry.ordinal first));
+                  assert (
+                    Option.equal
+                      Agent_protocol.Inference_origin.equal
+                      (Agent_session.Moderator_queue.Entry.origin first)
+                      (Agent_session.Moderator_queue.Entry.origin second));
+                  (match mode with
+                   | `Fresh_none ->
+                     let module C = Agent_session.Moderator_checkpoint in
+                     let observer =
+                       C.observer state.moderator |> protocol_ok |> Option.value_exn
+                     in
+                     caps.manage_moderator_follow_up ~observer |> protocol_ok;
+                     let unchanged () =
+                       assert_same_session_snapshot state (A.state actor |> protocol_ok);
+                       assert_same_session_snapshot
+                         state
+                         (Agent_session.Memory_backend.state backend);
+                       assert (
+                         List.is_empty
+                           (Agent_session.Memory_backend.events_after
+                              backend
+                              state.counters.event_sequence
+                            |> protocol_ok))
+                     in
+                     let snapshot =
+                       M.identity_snapshot manager |> Result.ok_or_failwith
+                     in
+                     (* A registered worker confirms the Event ACK; it cannot
+                        replace that complete carrier with its bare projection. *)
+                     caps.commit_moderator state.moderator |> protocol_ok;
+                     unchanged ();
+                     caps.commit_moderator (Some (C.encode snapshot)) |> protocol_ok;
+                     unchanged ();
+                     let fields =
+                       match Option.value_exn state.moderator with
+                       | `Object fields -> fields
+                       | _ -> failwith "acknowledged checkpoint must be an object"
+                     in
+                     let changed_queue =
+                       `Object
+                         (List.map fields ~f:(fun (name, value) ->
+                            ( name
+                            , if String.equal name "queue_provenance"
+                              then `Null
+                              else value )))
+                     in
+                     let changed_extension =
+                       assert (
+                         not (List.Assoc.mem fields "future_worker" ~equal:String.equal));
+                       `Object (fields @ [ "future_worker", `String "unacknowledged" ])
+                     in
+                     List.iter
+                       [ C.encode
+                           { snapshot with current_state = Session.Snapshot.Int 99 }
+                       ; changed_queue
+                       ; changed_extension
+                       ]
+                       ~f:(fun incoming ->
+                         (match caps.commit_moderator (Some incoming) with
+                          | Error { code = Conflict; message; _ } ->
+                            [%test_eq: string]
+                              "foreground moderator checkpoint differs from its Event ACK"
+                              message
+                          | Error error ->
+                            raise_s
+                              [%sexp
+                                "unexpected worker checkpoint rejection"
+                              , (error : Agent_protocol.Error.t)]
+                          | Ok () -> failwith "worker changed its Event checkpoint ACK");
+                         unchanged ())
+                   | `Original -> ()
+                   | `Rejected_checkpoint -> assert false);
+                  let completed = ref false in
+                  let result =
+                    L.invoke
+                      ~actor
+                      ~manager
+                      ~selection:Queue_head
+                      ~operation_id:(Some input.operation.id)
+                      ~inspect:(fun scope ->
+                        check scope;
+                        (match mode with
+                         | `Original ->
+                           Atomic.set original_live false;
+                           assert (Result.is_error (A.callback_agent_actor actor ~scope));
+                           assert (Result.is_error (A.check_callback_current actor scope))
+                         | `Fresh_none | `Rejected_checkpoint -> ());
+                        completed := true)
+                      ()
+                  in
+                  assert !completed;
+                  (match mode with
+                   | `Original -> assert (Result.is_error result)
+                   | `Fresh_none ->
+                     result |> Result.ok_or_failwith |> ignore;
+                     assert (
+                       List.is_empty
+                         (Agent_session.Moderator_queue.entries
+                            (L.queue (A.state actor |> protocol_ok))))
+                   | `Rejected_checkpoint -> assert false));
+               worker_oracle := true);
+         let drainer_original = L.authentication (Atomic.make true) in
+         let before_events = (A.state actor |> protocol_ok).counters.event_sequence in
+         let id =
+           History_entry.Id.create ~namespace:"legacy_emit" ~sequence:1
+           |> Result.ok_or_failwith
+         in
+         let entry =
+           Agent_session.History_codec.user_text ~id "drain"
+           |> Agent_session.History_codec.to_protocol
+         in
+         let admitted =
+           A.submit_message_authenticated
+             actor
+             ~actor:drainer_original
+             ~attachment_id:writer.id
+             entry
+           |> protocol_ok
+         in
+         let operation_id = Option.value_exn admitted.operation_id in
+         await_idle actor |> ignore;
+         assert !worker_oracle;
+         assert (
+           List.exists
+             (Agent_session.Memory_backend.events_after backend before_events
+              |> protocol_ok)
+             ~f:(fun event ->
+               match
+                 Agent_protocol.Event.Durable.Payload.of_json
+                   ~kind:event.Agent_protocol.Event.Durable.kind
+                   event.payload
+                 |> protocol_ok
+               with
+               | Operation_completed { id; state = Completed; _ } ->
+                 Agent_protocol.Id.Operation.equal id operation_id
+               | _ -> false));
+         assert (Operator_authorization.is_current drainer_original);
+         assert (
+           Bool.equal
+             (Operator_authorization.is_current original)
+             (match mode with
+              | `Original -> false
+              | `Fresh_none | `Rejected_checkpoint -> true))));
+  print_endline
+    "exact child chain; original or fresh None custody; claim rejection preserves loan; \
+     failed checkpoint blocks replay";
+  [%expect
+    {| exact child chain; original or fresh None custody; claim rejection preserves loan; failed checkpoint blocks replay |}]
+;;
+
+let%expect_test "legacy publication cut restores facts without continuation custody" =
+  let module L = Legacy_emit in
+  let module A = L.A in
+  let module M = L.M in
+  let module O = Owner_termination_tests in
+  let armed = ref false in
+  let saved = ref None in
+  let proof = ref None in
+  let retained_scope = ref None in
+  let inspected = ref false in
+  let original = L.authentication (Atomic.make true) in
+  let failure = Failure "legacy checkpoint publication cut" in
+  O.with_owner_env
+    ~state_committed:(fun state _ ->
+      if
+        !armed
+        && List.exists
+             state.Agent_session.Session_state.moderator_executions
+             ~f:Agent_session.Observation_follow_up.pending_event
+      then (
+        saved := Some state;
+        armed := false;
+        O.fail_publication failure))
+    (fun env _callers actor backend _cancel exited ->
+       (* The shared owner fixture begins Pending. Complete actual initialization
+         before installing the Prepared Manager; no runtime state is fabricated. *)
+       let manager =
+         prepared_legacy_callback_managers
+           env
+           ~id:"legacy-publication-cut"
+           ~source:L.source
+           ()
+       in
+       let snapshot = M.identity_snapshot manager |> Result.ok_or_failwith in
+       let expected = A.state actor |> protocol_ok in
+       let initialization =
+         A.begin_initialization_authenticated actor ~actor:original ~expected
+         |> protocol_ok
+       in
+       A.complete_initialization
+         actor
+         ~scope:initialization
+         ~candidate:
+           { expected with moderator = Some (L.B.encode_moderator_snapshot snapshot) }
+       |> protocol_ok
+       |> ignore;
+       A.end_initialization actor ~scope:initialization |> protocol_ok;
+       let worker =
+         Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input _ ->
+           Completed
+             { final_history = input.history
+             ; moderator_snapshot = Some (L.B.encode_moderator_snapshot snapshot)
+             ; runtime_requests = []
+             })
+       in
+       L.install actor manager worker;
+       let writer, _ = A.attach actor ~mode:Read_write ~subscribe:false |> protocol_ok in
+       A.start actor ~attachment_id:writer.id |> protocol_ok |> ignore;
+       A.stop actor ~attachment_id:writer.id ~mode:Graceful |> protocol_ok |> ignore;
+       A.start ~actor:original actor ~attachment_id:writer.id |> protocol_ok |> ignore;
+       armed := true;
+       let result =
+         O.capture (fun () ->
+           L.invoke
+             ~actor
+             ~manager
+             ~selection:(Boundary Session_resume)
+             ~operation_id:None
+             ~requests:
+               { request_turn = true; request_compaction = false; end_session = None }
+             ~inspect:(fun scope ->
+               let borrowed =
+                 A.callback_agent_actor actor ~scope |> protocol_ok |> Option.value_exn
+               in
+               assert (Operator_authorization.is_current borrowed);
+               proof := Some borrowed;
+               retained_scope := Some scope;
+               inspected := true)
+             ())
+       in
+       (* Outside both Manager and worker exception conversion. The Eio timeout
+          bounds cancellable waits; the external process-group watchdog bounds a
+          regression in protected cleanup or owner joining. *)
+       assert !inspected;
+       (match result with
+        | Ok (Error _) | Error _ -> ()
+        | Ok (Ok _) -> failwith "publication cut returned successful callback");
+       (match Eio.Promise.await_exn exited with
+        | Error (actual, _) -> assert (phys_equal actual failure)
+        | Ok () -> failwith "publication cut did not terminate its owner");
+       (match A.check_callback_current actor (Option.value_exn !retained_scope) with
+        | Error { code = Conflict; _ } -> ()
+        | Error error ->
+          raise_s
+            [%sexp "unexpected expired callback result", (error : Agent_protocol.Error.t)]
+        | Ok () -> failwith "closed owner retained a live callback");
+       O.unavailable (A.state actor);
+       assert (Operator_authorization.is_current original);
+       assert (not (Operator_authorization.is_current (Option.value_exn !proof)));
+       let stored = Option.value_exn !saved in
+       assert_same_session_snapshot stored (Agent_session.Memory_backend.state backend);
+       let entries = Agent_session.Moderator_queue.entries (L.queue stored) in
+       assert (List.length entries = 1);
+       let producer =
+         match Agent_session.Moderator_queue.Entry.producer (List.hd_exn entries) with
+         | Some (Event id) -> id
+         | Some _ | None -> assert false
+       in
+       assert (
+         List.exists stored.moderator_executions ~f:(fun receipt ->
+           Agent_protocol.Id.Moderator_execution.equal receipt.context.id producer
+           && Agent_session.Observation_follow_up.pending_event receipt
+           &&
+           match receipt.status with
+           | Completed _ -> true
+           | Running | Failed _ | Interrupted _ -> false)));
+  let stored = Option.value_exn !saved in
+  (* Restore the exact saved checkpoint into a new Manager and a fresh actor.
+     These durable facts do not reconstruct the dead owner's admission cells. *)
+  with_actor_workspace (fun env _ ->
+    Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
+      Eio.Switch.run (fun sw ->
+        let snapshot =
+          Agent_session.Moderator_checkpoint.decode stored.moderator
+          |> protocol_ok
+          |> Option.value_exn
+        in
+        let manager =
+          prepared_legacy_callback_managers
+            env
+            ~id:"legacy-publication-cut"
+            ~source:L.source
+            ~snapshot
+            ()
+        in
+        let backend =
+          Agent_session.Memory_backend.create ~event_capacity:128 ~initial_state:stored
+        in
+        let actor =
+          A.create
+            ~sw
+            ~clock:(Eio.Stdenv.clock env)
+            ~mailbox_capacity:8
+            ~compaction_env:None
+            ~initial_state:stored
+            ~operation_worker:None
+            ~persistence:(Agent_session.Memory_backend.persistence backend)
+            ~services:
+              { now = (fun () -> timestamp)
+              ; monotonic_now = (fun () -> Mtime.min_stamp)
+              ; create_attachment_id = Agent_protocol.Id.Attachment.create
+              ; create_reclaim_token = (fun () -> "legacy-cut-reopen")
+              ; job_results = None
+              ; schedule_limits = Agent_session.Staged_schedules.default_limits
+              ; notification_limits = Agent_session.Staged_notifications.default_limits
+              ; ingress_limits = Agent_session.Staged_ingress.default_limits
+              ; goal_descendant_profile
+              ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
+              ; state_committed = (fun _ _ -> ())
+              }
+        in
+        Exn.protect
+          ~finally:(fun () -> A.shutdown actor)
+          ~f:(fun () ->
+            let worker =
+              Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input _ ->
+                Completed
+                  { final_history = input.history
+                  ; moderator_snapshot = stored.moderator
+                  ; runtime_requests = []
+                  })
+            in
+            L.install actor manager worker;
+            (* Restoration/installation did not execute the saved queue or intent. *)
+            assert_same_session_snapshot stored (A.state actor |> protocol_ok);
+            let unavailable_checked = ref false in
+            let attempted =
+              L.invoke
+                ~actor
+                ~manager
+                ~selection:Queue_head
+                ~operation_id:None
+                ~requests:
+                  { request_turn = true; request_compaction = false; end_session = None }
+                ~inspect:(fun scope ->
+                  (match A.callback_agent_actor actor ~scope with
+                   | Error { code = Permission_denied; _ } -> ()
+                   | Error _ | Ok _ -> assert false);
+                  assert (
+                    Option.is_none
+                      (A.run_actions actor (A.Callback_scope.executing scope)
+                       |> protocol_ok));
+                  unavailable_checked := true)
+                ()
+            in
+            assert !unavailable_checked;
+            assert (Result.is_error attempted);
+            let after = A.state actor |> protocol_ok in
+            assert (Option.is_none after.active_operation);
+            [%test_eq: int64]
+              (Agent_session.Moderator_queue.head_ordinal (L.queue after))
+              (Agent_session.Moderator_queue.head_ordinal (L.queue stored));
+            assert (
+              List.equal
+                Agent_session.Moderator_queue.Entry.equal
+                (Agent_session.Moderator_queue.entries (L.queue after))
+                (Agent_session.Moderator_queue.entries (L.queue stored)));
+            assert (
+              List.count after.moderator_executions ~f:(fun receipt ->
+                match receipt.Agent_protocol.Moderator_execution.status with
+                | Completed _ -> true
+                | Running | Failed _ | Interrupted _ -> false)
+              = List.length stored.moderator_executions)))));
+  print_endline
+    "ACKed Event, queue and intent survive; closed owner releases cleanup; reopen lends \
+     no custody";
+  [%expect
+    {|
+    +queued moderator cleanup failed: session command mailbox is closed
+    ACKed Event, queue and intent survive; closed owner releases cleanup; reopen lends no custody
+    |}]
+;;
+
+let%expect_test
+    "callback Schedule admission is immediate and preserves legacy cancellation"
+  =
+  let module L = Legacy_emit in
+  let module A = L.A in
+  let module P = Agent_protocol in
+  List.iter [ false; true ] ~f:(fun authenticated ->
+    let manager_ref = ref None in
+    let worker_ref = ref None in
+    let reject_schedule = ref false in
+    let rejected_writes = ref 0 in
+    with_handoff_actor
+      ~reject:(fun next ->
+        if
+          !reject_schedule
+          && List.length next.Agent_session.Session_transition.state.schedules > 1
+        then (
+          incr rejected_writes;
+          true)
+        else false)
+      ~make_worker:(fun env actor_ready ->
+        let manager =
+          prepared_legacy_callback_managers
+            env
+            ~id:"callback-schedule"
+            ~source:L.source
+            ()
+        in
+        manager_ref := Some manager;
+        let worker = L.worker manager actor_ready (fun _ _ -> ()) in
+        worker_ref := Some worker;
+        worker)
+      (fun _env actor writer _backend ->
+         await_idle actor |> ignore;
+         let manager = Option.value_exn !manager_ref in
+         L.install actor manager (Option.value_exn !worker_ref);
+         let original = L.authentication (Atomic.make true) in
+         A.stop actor ~attachment_id:writer.id ~mode:Graceful |> protocol_ok |> ignore;
+         A.start
+           ?actor:(Option.some_if authenticated original)
+           actor
+           ~attachment_id:writer.id
+         |> protocol_ok
+         |> ignore;
+         (* An actual legacy target without positive source/custody remains
+           cancellable. Its stored DTO does not grant the caller authority. *)
+         let historical : P.Schedule.t =
+           { id = P.Id.Schedule.create ()
+           ; session_id
+           ; generation = 0
+           ; payload = `Null
+           ; created_at = timestamp
+           ; next_due_at = timestamp
+           ; misfire = Deliver_once_immediately
+           ; status = Scheduled
+           ; delivery_count = 0
+           ; last_delivery_at = None
+           ; inference_provenance = None
+           ; delivery_cancellation = None
+           ; ownership = None
+           }
+         in
+         A.add_schedule actor historical |> protocol_ok |> ignore;
+         let escaped = ref None in
+         let admitted = ref None in
+         let inspected = ref false in
+         let payload = `Object [ "legacy", `String "raw" ] in
+         L.invoke
+           ~actor
+           ~manager
+           ~selection:(Boundary Session_resume)
+           ~operation_id:None
+           ~inspect:(fun scope ->
+             (match A.callback_agent_actor actor ~scope |> protocol_ok with
+              | Some proof ->
+                assert authenticated;
+                assert (Operator_authorization.is_current proof)
+              | None -> assert (not authenticated));
+             let services = A.callback_schedule_services actor ~scope in
+             let before = A.state actor |> protocol_ok in
+             reject_schedule := true;
+             assert (Result.is_error (services.after_ms ~delay_ms:0 ~payload));
+             reject_schedule := false;
+             assert (!rejected_writes = 1);
+             assert_same_session_snapshot before (A.state actor |> protocol_ok);
+             let id =
+               services.after_ms ~delay_ms:0 ~payload
+               |> Result.ok_or_failwith
+               |> P.Id.Schedule.of_string
+               |> protocol_ok
+             in
+             let immediate = A.state actor |> protocol_ok in
+             let schedule =
+               List.find_exn immediate.schedules ~f:(fun schedule ->
+                 P.Id.Schedule.equal schedule.id id)
+             in
+             let provenance = Option.value_exn schedule.inference_provenance in
+             assert (
+               P.Run_source.equal
+                 (P.Schedule_provenance.source provenance)
+                 (A.Callback_scope.source scope));
+             assert (
+               Option.equal
+                 P.Inference_origin.equal
+                 (P.Schedule_provenance.origin provenance)
+                 (A.Callback_scope.origin scope));
+             assert (Jsonaf.exactly_equal schedule.payload payload);
+             assert (Option.is_none schedule.ownership);
+             assert (P.Timestamp.equal schedule.created_at schedule.next_due_at);
+             assert (
+               Option.equal Jsonaf.exactly_equal immediate.moderator before.moderator);
+             let receipt = A.Callback_scope.executing scope in
+             assert (
+               List.exists immediate.moderator_executions ~f:(fun current ->
+                 P.Id.Moderator_execution.equal current.context.id receipt.context.id
+                 &&
+                 match current.status with
+                 | Running -> true
+                 | Completed _ | Failed _ | Interrupted _ -> false));
+             services.cancel ~id:(P.Id.Schedule.to_string historical.id)
+             |> Result.ok_or_failwith;
+             let cancelled =
+               List.find_exn (A.state actor |> protocol_ok).schedules ~f:(fun schedule ->
+                 P.Id.Schedule.equal schedule.id historical.id)
+             in
+             (match cancelled.status with
+              | Cancelled -> ()
+              | Scheduled | Delivering | Delivered | Failed _ -> assert false);
+             assert (Option.is_none cancelled.inference_provenance);
+             admitted := Some id;
+             escaped := Some services;
+             inspected := true)
+           ()
+         |> Result.ok_or_failwith
+         |> ignore;
+         (* Both oracles are outside the Manager's exception-to-error boundary. *)
+         assert !inspected;
+         let services = Option.value_exn !escaped in
+         let before_escaped = A.state actor |> protocol_ok in
+         assert (Result.is_error (services.after_ms ~delay_ms:0 ~payload));
+         assert (
+           Result.is_error
+             (services.cancel ~id:(P.Id.Schedule.to_string (Option.value_exn !admitted))));
+         assert_same_session_snapshot before_escaped (A.state actor |> protocol_ok);
+         (* The exact pending lifecycle admission was consumed by the first
+           callback. A second pure Boundary has unavailable custody, not None. *)
+         let unavailable_checked = ref false in
+         L.invoke
+           ~actor
+           ~manager
+           ~selection:(Boundary Session_resume)
+           ~operation_id:None
+           ~inspect:(fun scope ->
+             (match A.callback_agent_actor actor ~scope with
+              | Error { code = Permission_denied; _ } -> ()
+              | Error _ | Ok _ -> assert false);
+             let unavailable = A.callback_schedule_services actor ~scope in
+             let before = A.state actor |> protocol_ok in
+             assert (Result.is_error (unavailable.after_ms ~delay_ms:0 ~payload));
+             assert (
+               Result.is_error
+                 (unavailable.cancel
+                    ~id:(P.Id.Schedule.to_string (Option.value_exn !admitted))));
+             assert_same_session_snapshot before (A.state actor |> protocol_ok);
+             unavailable_checked := true)
+           ()
+         |> Result.ok_or_failwith
+         |> ignore;
+         assert !unavailable_checked));
+  print_endline
+    "immediate ACK and original provenance; failed save leaves no timer; historical \
+     cancel; escaped/unavailable reject";
+  [%expect
+    {| immediate ACK and original provenance; failed save leaves no timer; historical cancel; escaped/unavailable reject |}]
+;;
+
+module Legacy_checkpoint_extensions = struct
+  let outer =
+    `Object [ "lexeme", `Number "1.2500e+2"; "nested", `Array [ `True; `String "outer" ] ]
+  ;;
+
+  let identity = `String "identity-retained"
+  let queue = `Object [ "marker", `String "queue-retained" ]
+
+  let field json name =
+    match json with
+    | `Object fields -> List.Assoc.find_exn fields name ~equal:String.equal
+    | _ -> failwith "checkpoint extension fixture requires an object"
+  ;;
+
+  let add json name value =
+    match json with
+    | `Object fields ->
+      assert (not (List.Assoc.mem fields name ~equal:String.equal));
+      `Object (fields @ [ name, value ])
+    | _ -> failwith "checkpoint extension fixture requires an object"
+  ;;
+
+  let map_field json ~name ~f =
+    let previous = field json name in
+    match json with
+    | `Object fields ->
+      `Object
+        (List.map fields ~f:(fun (key, value) ->
+           key, if String.equal key name then f previous else value))
+    | _ -> assert false
+  ;;
+
+  let annotate raw =
+    add raw "future_checkpoint" outer
+    |> map_field ~name:"identity_snapshot" ~f:(fun raw ->
+      add raw "future_identity" identity)
+    |> map_field ~name:"queue_provenance" ~f:(fun raw -> add raw "future_queue" queue)
+  ;;
+
+  let assert_preserved raw =
+    let raw = Option.value_exn raw in
+    assert (Jsonaf.exactly_equal (field raw "future_checkpoint") outer);
+    assert (
+      Jsonaf.exactly_equal
+        (field (field raw "identity_snapshot") "future_identity")
+        identity);
+    assert (
+      Jsonaf.exactly_equal (field (field raw "queue_provenance") "future_queue") queue)
+  ;;
+
+  let assert_pair (actor, memory) =
+    assert_preserved actor;
+    assert_preserved memory
+  ;;
+end
+
+module Legacy_schedule = struct
+  module L = Legacy_emit
+  module M = L.M
+  module P = Agent_protocol
+
+  let source =
+    {|type state = int
+      type event = [ `Session_start | `Session_resume | `Turn_start | `Turn_end | `Tick ]
+      let initial_state = 0
+      let on_event : context -> state -> event -> state task = fun ctx st ev ->
+        match ev with
+        | `Tick -> Task.pure(st + 1)
+        | _ -> Task.pure(st)|}
+  ;;
+
+  let payload = Session.Snapshot.to_jsonaf (Session.Snapshot.Variant ("Tick", []))
+
+  (* Exercise Runtime_owner's real delivery/lease path and the actual Manager
+     enqueue transaction. This adapter has no provider or model implementation. *)
+  let runtime manager worker =
+    let base = Runtime_lease_tests.runtime ~close:(fun () -> ()) () in
+    { base with
+      worker
+    ; moderator_manager = Some manager
+    ; moderator_snapshot =
+        (fun () ->
+          M.identity_snapshot manager
+          |> Result.ok_or_failwith
+          |> L.B.encode_moderator_snapshot
+          |> Option.some)
+    ; enqueue_internal_event =
+        (fun ?prepare payload ->
+          let open Result.Let_syntax in
+          let failure message = P.Error.invalid_request message in
+          let%bind snapshot =
+            Session.Snapshot.of_jsonaf payload |> Result.map_error ~f:failure
+          in
+          let%bind event =
+            Session.Snapshot.to_value snapshot |> Result.map_error ~f:failure
+          in
+          M.enqueue_internal_event_entries
+            manager
+            ~event
+            ~prepare:(fun ~before ~snapshot ->
+              match prepare with
+              | None -> Error "delivery omitted actor preparation"
+              | Some prepare ->
+                prepare ~before ~snapshot
+                |> Result.map_error ~f:(fun error -> error.P.Error.message))
+          |> Result.map_error ~f:failure
+          |> Result.map ~f:(fun snapshot -> Some (L.B.encode_moderator_snapshot snapshot)))
+    }
+  ;;
+end
+
+let%expect_test
+    "actual legacy Schedule delivery preserves facts and exact continuation custody"
+  =
+  let module F = Legacy_schedule in
+  let module L = Legacy_emit in
+  let module A = L.A in
+  let module M = L.M in
+  let module P = Agent_protocol in
+  let module Q = Agent_session.Moderator_queue in
+  let module Owner = Agent_server.Runtime_owner in
+  List.iter [ `Fresh_none; `Original; `Expired; `Historical ] ~f:(fun mode ->
+    let manager_ref = ref None in
+    let make_manager_ref = ref None in
+    let worker_ref = ref None in
+    let reject_delivery = ref false in
+    let rejected = ref 0 in
+    with_handoff_actor
+      ~reject:(fun next ->
+        if
+          !reject_delivery
+          && List.exists
+               next.Agent_session.Session_transition.state.schedules
+               ~f:(fun schedule ->
+                 match schedule.Agent_protocol.Schedule.status with
+                 | Delivered -> true
+                 | Scheduled | Delivering | Cancelled | Failed _ -> false)
+        then (
+          incr rejected;
+          true)
+        else false)
+      ~make_worker:(fun env actor_ready ->
+        let make =
+          prepared_legacy_callback_managers env ~id:"legacy-delivery" ~source:F.source
+        in
+        let manager = make () in
+        make_manager_ref := Some make;
+        manager_ref := Some manager;
+        let worker = L.worker manager actor_ready (fun _ _ -> ()) in
+        worker_ref := Some worker;
+        worker)
+      (fun _env actor writer backend ->
+         await_idle actor |> ignore;
+         let manager = Option.value_exn !manager_ref in
+         let worker = Option.value_exn !worker_ref in
+         L.install actor manager worker;
+         let original_live = Atomic.make true in
+         let original = L.authentication original_live in
+         A.stop actor ~attachment_id:writer.id ~mode:Graceful |> protocol_ok |> ignore;
+         A.start
+           ?actor:
+             (match mode with
+              | `Fresh_none -> None
+              | `Original | `Expired | `Historical -> Some original)
+           actor
+           ~attachment_id:writer.id
+         |> protocol_ok
+         |> ignore;
+         let id = ref None in
+         let inspected = ref false in
+         L.invoke
+           ~actor
+           ~manager
+           ~selection:(Boundary Session_resume)
+           ~operation_id:None
+           ~inspect:(fun scope ->
+             (match mode with
+              | `Historical -> ()
+              | `Fresh_none | `Original | `Expired ->
+                let services = A.callback_schedule_services actor ~scope in
+                id
+                := Some
+                     (services.after_ms ~delay_ms:0 ~payload:F.payload
+                      |> Result.ok_or_failwith
+                      |> P.Id.Schedule.of_string
+                      |> protocol_ok));
+             inspected := true)
+           ()
+         |> Result.ok_or_failwith
+         |> ignore;
+         assert !inspected;
+         (match mode with
+          | `Historical ->
+            let timer : P.Schedule.t =
+              { id = P.Id.Schedule.create ()
+              ; session_id
+              ; generation = 0
+              ; payload = F.payload
+              ; created_at = timestamp
+              ; next_due_at = timestamp
+              ; misfire = Deliver_once_immediately
+              ; status = Scheduled
+              ; delivery_count = 0
+              ; last_delivery_at = None
+              ; ownership = None
+              ; inference_provenance = None
+              ; delivery_cancellation = None
+              }
+            in
+            A.add_schedule actor timer |> protocol_ok |> ignore;
+            id := Some timer.id
+          | `Fresh_none | `Original | `Expired -> ());
+         let id = Option.value_exn !id in
+         let claimed =
+           A.claim_schedule actor ~schedule_id:id ~generation:0
+           |> protocol_ok
+           |> Option.value_exn
+         in
+         let checkpoints () =
+           ( (A.state actor |> protocol_ok).moderator
+           , (Agent_session.Memory_backend.state backend).moderator )
+         in
+         (match mode with
+          | `Original ->
+            let raw =
+              (A.state actor |> protocol_ok).moderator
+              |> Option.value_exn
+              |> Legacy_checkpoint_extensions.annotate
+            in
+            A.change_moderator actor (Some raw) |> protocol_ok |> ignore
+          | `Fresh_none | `Expired | `Historical -> ());
+         let before = A.state actor |> protocol_ok in
+         assert (List.is_empty (Q.entries (L.queue before)));
+         let previous = M.identity_snapshot manager |> Result.ok_or_failwith in
+         let after =
+           { previous with
+             Session.Moderator_state.Identity_snapshot.queued_internal_events =
+               [ Session.Snapshot.Variant ("Tick", []) ]
+           }
+         in
+         (* Omitting the real resource cannot downgrade either positive creator
+           provenance or an already metadata-bearing historical queue. *)
+         assert (
+           Result.is_error
+             (A.complete_schedule
+                ~expected_schedule:claimed
+                actor
+                ~schedule_id:id
+                ~generation:0
+                ~moderator_snapshot:(Some (L.B.encode_moderator_snapshot after))));
+         assert_same_session_snapshot before (A.state actor |> protocol_ok);
+         let other = (Option.value_exn !make_manager_ref) () in
+         assert (
+           Result.is_error
+             (A.complete_schedule
+                ~moderator_manager:other
+                ~expected:previous
+                ~expected_schedule:claimed
+                actor
+                ~schedule_id:id
+                ~generation:0
+                ~moderator_snapshot:(Some (L.B.encode_moderator_snapshot after))));
+         assert_same_session_snapshot before (A.state actor |> protocol_ok);
+         (match mode with
+          | `Expired -> Atomic.set original_live false
+          | `Fresh_none | `Original | `Historical -> ());
+         let owner =
+           Owner.create
+             ~actor
+             ~initial:(Some (F.runtime manager worker))
+             ~build:(fun () -> failwith "unexpected delivery rebuild")
+         in
+         Exn.protect
+           ~finally:(fun () -> Owner.close_and_wait owner)
+           ~f:(fun () ->
+             reject_delivery := true;
+             assert (Result.is_error (Owner.deliver_schedule owner claimed));
+             reject_delivery := false;
+             assert (!rejected = 1);
+             assert_same_session_snapshot before (A.state actor |> protocol_ok);
+             assert (
+               Sexp.equal
+                 (Session.Moderator_state.Identity_snapshot.sexp_of_t previous)
+                 (Session.Moderator_state.Identity_snapshot.sexp_of_t
+                    (M.identity_snapshot manager |> Result.ok_or_failwith)));
+             Owner.deliver_schedule owner claimed |> protocol_ok;
+             let delivered = A.state actor |> protocol_ok in
+             (match mode with
+              | `Original -> Legacy_checkpoint_extensions.assert_pair (checkpoints ())
+              | `Fresh_none | `Expired | `Historical -> ());
+             let timer =
+               List.find_exn delivered.schedules ~f:(fun schedule ->
+                 P.Id.Schedule.equal schedule.id id)
+             in
+             (match timer.status with
+              | Delivered -> ()
+              | Scheduled | Delivering | Cancelled | Failed _ -> assert false);
+             assert (timer.delivery_count = 1);
+             let entry = List.hd_exn (Q.entries (L.queue delivered)) in
+             (match mode, Q.Entry.producer entry with
+              | `Historical, None -> ()
+              | (`Fresh_none | `Original | `Expired), Some (Schedule_delivery occurrence)
+                ->
+                assert (P.Id.Schedule.equal occurrence.id id);
+                assert (Int.equal occurrence.generation claimed.generation);
+                assert (occurrence.delivery_count = 1);
+                let provenance = Option.value_exn timer.inference_provenance in
+                assert (
+                  P.Run_source.equal
+                    (Q.source (L.queue delivered))
+                    (P.Schedule_provenance.source provenance));
+                assert (
+                  Option.equal
+                    P.Inference_origin.equal
+                    (Q.Entry.origin entry)
+                    (P.Schedule_provenance.origin provenance))
+              | _ -> assert false);
+             let entered = ref false in
+             let claimed_checkpoint = ref None in
+             let result =
+               L.invoke
+                 ~actor
+                 ~manager
+                 ~selection:Queue_head
+                 ~operation_id:None
+                 ~requests:
+                   { request_turn =
+                       (match mode with
+                        | `Historical -> true
+                        | `Fresh_none | `Original | `Expired -> false)
+                   ; request_compaction = false
+                   ; end_session = None
+                   }
+                 ~inspect:(fun scope ->
+                   (match mode with
+                    | `Original -> claimed_checkpoint := Some (checkpoints ())
+                    | `Fresh_none | `Expired | `Historical -> ());
+                   (match mode, A.callback_agent_actor actor ~scope with
+                    | `Fresh_none, Ok None -> ()
+                    | `Original, Ok (Some proof) ->
+                      assert (Operator_authorization.is_current proof)
+                    | `Historical, Error { code = Permission_denied; _ } -> ()
+                    | _ -> assert false);
+                   entered := true)
+                 ()
+             in
+             match mode with
+             | `Expired ->
+               assert (not !entered);
+               assert (Result.is_error result);
+               assert_same_session_snapshot delivered (A.state actor |> protocol_ok)
+             | `Historical ->
+               assert !entered;
+               assert (Result.is_error result);
+               assert (
+                 Int64.equal
+                   (Q.head_ordinal (L.queue delivered))
+                   (Q.head_ordinal (L.queue (A.state actor |> protocol_ok))))
+             | `Fresh_none | `Original ->
+               result |> Result.ok_or_failwith |> ignore;
+               assert !entered;
+               (match mode with
+                | `Original ->
+                  Legacy_checkpoint_extensions.assert_pair
+                    (Option.value_exn !claimed_checkpoint);
+                  Legacy_checkpoint_extensions.assert_pair (checkpoints ())
+                | `Fresh_none -> ()
+                | `Expired | `Historical -> assert false);
+               assert (List.is_empty (Q.entries (L.queue (A.state actor |> protocol_ok)))))));
+  print_endline
+    "real Manager delivery ACK; current or unavailable/expired custody; rejected save \
+     preserves retry; resource omission rejects";
+  [%expect
+    {| real Manager delivery ACK; current or unavailable/expired custody; rejected save preserves retry; resource omission rejects |}]
+;;
+
+let%expect_test
+    "authenticated Actor Run attribution survives immediate legacy Schedule creation"
+  =
+  let module A = Agent_session in
+  let module L = Legacy_emit in
+  let module P = Agent_protocol in
+  let rec idle actor remaining =
+    if remaining = 0
+    then failwith "actual Run worker did not settle within bounded actor polls";
+    let state = A.Session_actor.state actor |> protocol_ok in
+    match state.active_operation, state.lifecycle.observed with
+    | None, Idle -> state
+    | _ ->
+      Eio.Fiber.yield ();
+      idle actor (remaining - 1)
+  in
+  let actor_ready, set_actor = Eio.Promise.create () in
+  let during = ref (fun (_ : A.Operation_worker.Input.t) -> ()) in
+  let worker_ref = ref None in
+  let timer_id = ref None in
+  let callback_run = ref None in
+  let worker_oracle_completed = ref false in
+  Run_admission_tests.with_startup_actor
+    ~make_manager:(fun env ->
+      prepared_legacy_callback_managers
+        env
+        ~id:"legacy-run-schedule"
+        ~source:Legacy_schedule.source
+        ())
+    ~make_worker:(fun manager ->
+      let worker = L.worker manager actor_ready (fun input _ -> !during input) in
+      worker_ref := Some worker;
+      worker)
+    (fun actor _ _ _ _ manager _ reference attachment ->
+       Eio.Promise.resolve set_actor actor;
+       L.install actor manager (Option.value_exn !worker_ref);
+       let original = L.authentication (Atomic.make true) in
+       A.Session_actor.start ~actor:original actor ~attachment_id:attachment.id
+       |> protocol_ok
+       |> ignore;
+       idle actor 256 |> ignore;
+       let before = A.Session_actor.state actor |> protocol_ok in
+       let observer =
+         A.Moderator_checkpoint.observer before.moderator
+         |> protocol_ok
+         |> Option.value_exn
+       in
+       let scope =
+         A.Run_admission.Scope.create_authenticated
+           ~actor:original
+           ~observer
+           ~startup_pending:(fun () -> false)
+           ~authorize:(fun _ -> Ok ())
+         |> protocol_ok
+       in
+       (* This is the authenticated Actor host seam. The daemon Run_start_service
+         currently requires compiled v1 orchestration and is not exercised. *)
+       (during
+        := fun input ->
+             L.invoke
+               ~actor
+               ~manager
+               ~selection:(Boundary Turn_start)
+               ~operation_id:(Some input.operation.id)
+               ~inspect:(fun scope ->
+                 let proof =
+                   A.Session_actor.callback_agent_actor actor ~scope
+                   |> protocol_ok
+                   |> Option.value_exn
+                 in
+                 assert (Operator_authorization.is_current proof);
+                 callback_run := A.Session_actor.Callback_scope.origin scope;
+                 let services = A.Session_actor.callback_schedule_services actor ~scope in
+                 timer_id
+                 := Some
+                      (services.after_ms ~delay_ms:0 ~payload:Legacy_schedule.payload
+                       |> Result.ok_or_failwith
+                       |> P.Id.Schedule.of_string
+                       |> protocol_ok))
+               ()
+             |> Result.ok_or_failwith
+             |> ignore;
+             worker_oracle_completed := true);
+       let request =
+         P.Run_start.create
+           ~session_id
+           ~attachment_id:attachment.id
+           ~generation:before.identity.generation
+           ~expected_revision:before.counters.revision
+           ~mode:Single_turn
+           ~input:
+             (User_submission { kind = Plain_text; text = "hello"; attachments = [] })
+           ~key:(P.Idempotency_key.of_string "legacy-schedule-run" |> protocol_ok)
+         |> protocol_ok
+       in
+       let receipt =
+         A.Session_actor.admit_run
+           actor
+           ~scope
+           ~request
+           ~session:reference
+           ~request_sha256:
+             (P.Run_start.to_json request
+              |> Jsonaf.to_string
+              |> Digestif.SHA256.digest_string
+              |> Digestif.SHA256.to_hex)
+           ~entry:(Some actor_entry)
+         |> protocol_ok
+       in
+       let after = idle actor 256 in
+       (* Both assertions execute outside Manager and worker exception conversion. *)
+       assert !worker_oracle_completed;
+       assert (
+         Option.equal P.Inference_origin.equal !callback_run (Some (Run receipt.run_id)));
+       let run =
+         A.Run_state.find (Option.value_exn after.run_state) receipt.run_id
+         |> Option.value_exn
+       in
+       (match run.lifecycle with
+        | Terminal (Completed _) -> ()
+        | Admitted | Active | Waiting _
+        | Terminal (Failed _ | Cancelled | Limited | Interrupted) -> assert false);
+       let timer =
+         List.find_exn after.schedules ~f:(fun (timer : P.Schedule.t) ->
+           P.Id.Schedule.equal timer.id (Option.value_exn !timer_id))
+       in
+       let provenance = Option.value_exn timer.inference_provenance in
+       assert (P.Run_source.equal (P.Schedule_provenance.source provenance) receipt.source);
+       assert (
+         Option.equal
+           P.Inference_origin.equal
+           (P.Schedule_provenance.origin provenance)
+           (Some (Run receipt.run_id)));
+       let work =
+         run.owned_work
+         @ run.relinquished_work
+         @ List.map run.terminal_work ~f:(fun terminal ->
+           terminal.P.Run_work.Terminal.work)
+       in
+       assert (
+         not
+           (List.exists work ~f:(fun work ->
+              match work.P.Run_work.key with
+              | Retained (Schedule _) -> true
+              | Operation _
+              | Retained
+                  ( Job _
+                  | Invocation _
+                  | Subscription _
+                  | Delivery _
+                  | Moderator_execution _ ) -> false))));
+  print_endline
+    "authenticated Actor admission; real completed operation; original Run attribution \
+     without Schedule work";
+  [%expect
+    {| authenticated Actor admission; real completed operation; original Run attribution without Schedule work |}]
+;;
+
+let%expect_test "already stopped Job loans retire only after the actual Stop ACK" =
+  let module L = Legacy_emit in
+  let module M = L.M in
+  let module P = Agent_protocol in
+  List.iter [ false; true ] ~f:(fun retry_stop ->
+    with_actor_workspace (fun env workspace_instance ->
+      let manager =
+        prepared_legacy_callback_managers
+          env
+          ~id:"stopped-job"
+          ~source:
+            {|let initial_state = 0
+              let on_event = fun ctx state event -> match event with
+                | `Pre_tool_call(call) -> Task.pure(state)
+                | _ -> Task.pure(state)|}
+          ()
+      in
+      let snapshot =
+        M.identity_snapshot manager
+        |> Result.ok_or_failwith
+        |> L.B.encode_moderator_snapshot
+      in
+      let reject = ref false in
+      Job_fixtures.with_actor
+        ~environment:(env, workspace_instance)
+        ~start:false
+        ~prepare_state:(fun state -> { state with moderator = Some snapshot })
+        ~reject_save:(fun _ -> !reject)
+        (fun _env _sw actor writer backend ->
+           let worker =
+             Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input _ ->
+               Completed
+                 { final_history = input.history
+                 ; moderator_snapshot = Some snapshot
+                 ; runtime_requests = []
+                 })
+           in
+           L.install actor manager worker;
+           let original = L.authentication (Atomic.make true) in
+           let expected = L.A.state actor |> protocol_ok in
+           let request =
+             P.Run_start.create
+               ~session_id
+               ~attachment_id:writer.id
+               ~generation:expected.identity.generation
+               ~expected_revision:expected.counters.revision
+               ~mode:Workflow
+               ~input:Authored_start
+               ~key:(P.Idempotency_key.of_string "stopped-constructor-job" |> protocol_ok)
+             |> protocol_ok
+           in
+           let request_sha256 =
+             P.Run_start.to_json request
+             |> Jsonaf.to_string
+             |> Digestif.SHA256.digest_string
+             |> Digestif.SHA256.to_hex
+           in
+           let preparation =
+             L.A.begin_run_preparation_authenticated
+               actor
+               ~actor:original
+               ~authorize:(fun _ -> Ok ())
+               ~request
+               ~request_sha256
+             |> protocol_ok
+             |> function
+             | Agent_session.Run_preparation.Decision.Prepare preparation -> preparation
+             | Retained _ -> failwith "fresh constructor unexpectedly replayed"
+           in
+           let job : P.Job.t =
+             { id = P.Id.Job.create ()
+             ; session_id
+             ; generation = expected.identity.generation
+             ; kind = Model_call
+             ; payload = `Null
+             ; status = Queued
+             ; retry_policy = Never
+             ; attempt = 0
+             ; created_at = timestamp
+             ; started_at = None
+             ; next_run_at = None
+             ; completed_at = None
+             ; result = None
+             ; delivery = Pending
+             ; launch = None
+             ; inference_origin = None
+             ; progress = None
+             }
+           in
+           let job = L.A.add_run_constructor_job actor ~preparation job |> protocol_ok in
+           L.A.end_run_preparation actor preparation |> protocol_ok;
+           let before = Agent_session.Memory_backend.state backend in
+           reject := true;
+           (match L.A.stop actor ~attachment_id:writer.id ~mode:Graceful with
+            | Error failure ->
+              [%test_eq: P.Error.code] Internal_error failure.code;
+              [%test_eq: string] "injected job transition failure" failure.message
+            | Ok _ ->
+              failwith "already-stopped Stop skipped its required loan retirement ACK");
+           reject := false;
+           [%test_eq: int64]
+             before.counters.revision
+             (Agent_session.Memory_backend.state backend).counters.revision;
+           if retry_stop
+           then (
+             L.A.stop actor ~attachment_id:writer.id ~mode:Graceful
+             |> protocol_ok
+             |> ignore;
+             assert (
+               Int64.(
+                 before.counters.revision
+                 < (Agent_session.Memory_backend.state backend).counters.revision)));
+           L.A.start actor ~attachment_id:writer.id |> protocol_ok |> ignore;
+           let job =
+             L.A.claim_job actor ~job_id:job.id ~generation:job.generation
+             |> protocol_ok
+             |> Option.value_exn
+           in
+           let observed = ref None in
+           let completion = ref None in
+           let call : Chat_response.Moderation.Tool_call.t =
+             { id = "stopped-job-tool"
+             ; name = "read_file"
+             ; args = `Null
+             ; kind = Function
+             ; payload_text = "null"
+             ; meta = `Null
+             }
+           in
+           let result =
+             L.A.with_job_execution
+               actor
+               ~job_id:job.id
+               ~generation:job.generation
+               ~attempt:job.attempt
+               ~deadline:(Some Job_fixtures.deadline)
+               (fun services ->
+                  L.invoke
+                    ~claim:(fun ?capture_cleanup ~callback f ->
+                      services.claim_legacy_callback
+                        ~capture_cleanup:(fun acquired ->
+                          assert (Option.is_none !completion);
+                          completion := Some acquired;
+                          Option.iter capture_cleanup ~f:(fun capture -> capture acquired))
+                        ~callback
+                        f)
+                    ~actor
+                    ~manager
+                    ~selection:(Boundary (Pre_tool_call call))
+                    ~operation_id:None
+                    ~inspect:(fun scope ->
+                      let borrowed = L.A.callback_agent_actor actor ~scope in
+                      observed
+                      := Some
+                           ( borrowed
+                           , match borrowed with
+                             | Ok (Some proof) -> Operator_authorization.is_current proof
+                             | Ok None | Error _ -> false ))
+                    ()
+                  |> Result.map_error ~f:handoff_error)
+             |> protocol_ok
+           in
+           ignore result;
+           let module F = Agent_session.Callback_cleanup in
+           let module C = F.Completion_snapshot in
+           let completed =
+             F.Completion.snapshot (Option.value_exn !completion) |> protocol_ok
+           in
+           (match C.producer_exit completed with
+            | Returned (Ok ()) -> ()
+            | Not_returned | Returned (Error _) ->
+              failwith "actual Job producer did not complete successfully");
+           (match C.finish_call completed, C.release completed with
+            | Completed (Ok ()), Completed (Ok ()) -> ()
+            | _ -> failwith "actual Job callback cleanup did not complete successfully");
+           assert (Option.is_none (C.capture_failure completed));
+           assert (List.is_empty (C.failures completed));
+           (match retry_stop, Option.value_exn !observed with
+            | false, (Ok (Some proof), true) ->
+              assert (not (Operator_authorization.is_current proof))
+            | true, (Error failure, false) ->
+              [%test_eq: P.Error.code] Permission_denied failure.code
+            | _, (Error failure, _) -> raise_s [%sexp (failure : P.Error.t)]
+            | _, (Ok _, _) ->
+              failwith "Stop loan retirement changed genuine/unavailable classification");
+           assert (Operator_authorization.is_current original))));
+  print_endline
+    "failed Stop preserves genuine Job admission; acknowledged already-stopped Stop \
+     leaves later callback unavailable";
+  [%expect
+    {| failed Stop preserves genuine Job admission; acknowledged already-stopped Stop leaves later callback unavailable |}]
+;;
+
+let%expect_test "constructor handoff preserves exact checkpoints and intended resources" =
+  let module L = Legacy_emit in
+  let module S = Agent_session in
+  let module P = Agent_protocol in
+  with_actor_workspace (fun env workspace_instance ->
+    let make_manager () =
+      prepared_legacy_callback_managers
+        env
+        ~id:"constructor-resource"
+        ~source:
+          {|let initial_state = 0
+            let on_event = fun ctx state event -> match event with
+              | `Pre_tool_call(call) -> Task.pure(state)
+              | _ -> Task.pure(state)|}
+        ()
+    in
+    let manager = make_manager () in
+    let snapshot = L.M.identity_snapshot manager |> Result.ok_or_failwith in
+    let bare = S.Moderator_checkpoint.encode snapshot in
+    let reject = ref false in
+    Job_fixtures.with_actor
+      ~environment:(env, workspace_instance)
+      ~start:false
+      ~prepare_state:(fun state ->
+        { state with runtime_initialization = Pending { fresh_history = true } })
+      ~reject_save:(fun _ -> !reject)
+      (fun _env _sw actor writer backend ->
+         let original = L.authentication (Atomic.make true) in
+         let expected = L.A.state actor |> protocol_ok in
+         let scope =
+           L.A.begin_initialization_authenticated actor ~actor:original ~expected
+           |> protocol_ok
+         in
+         let no_source_handoff () =
+           match L.A.Initialization_scope.source_handoff scope with
+           | Error failure -> [%test_eq: P.Error.code] Conflict failure.code
+           | Ok _ -> failwith "unacknowledged constructor issued a source handoff"
+         in
+         no_source_handoff ();
+         let job delivery : P.Job.t =
+           { id = P.Id.Job.create ()
+           ; session_id
+           ; generation = expected.identity.generation
+           ; kind = Model_call
+           ; payload = `Null
+           ; status = Queued
+           ; retry_policy = Never
+           ; attempt = 0
+           ; created_at = timestamp
+           ; started_at = None
+           ; next_run_at = None
+           ; completed_at = None
+           ; result = None
+           ; delivery
+           ; launch = None
+           ; inference_origin = None
+           ; progress = None
+           }
+         in
+         let pending =
+           L.A.add_initialization_model_job actor ~scope (job Pending) |> protocol_ok
+         in
+         let synchronous =
+           L.A.start_initialization_model_job actor ~scope (job Not_required)
+           |> protocol_ok
+         in
+         L.A.complete_initialization_model_job
+           actor
+           ~scope
+           ~job_id:synchronous.id
+           ~generation:synchronous.generation
+           ~attempt:synchronous.attempt
+           (S.Runtime_builder.Model_succeeded `Null)
+         |> protocol_ok
+         |> ignore;
+         let candidate = { expected with moderator = Some bare } in
+         let before = S.Memory_backend.state backend in
+         reject := true;
+         (match
+            L.A.complete_initialization ~moderator_manager:manager actor ~scope ~candidate
+          with
+          | Error failure ->
+            [%test_eq: P.Error.code] Internal_error failure.code;
+            [%test_eq: string] "injected job transition failure" failure.message
+          | Ok _ -> failwith "constructor handoff escaped the rejected ACK");
+         reject := false;
+         let rejected = S.Memory_backend.state backend in
+         [%test_eq: int64] before.counters.revision rejected.counters.revision;
+         assert (Option.is_none rejected.moderator);
+         assert (Option.is_none rejected.run_state);
+         no_source_handoff ();
+         assert (Operator_authorization.is_current original);
+         L.A.complete_initialization ~moderator_manager:manager actor ~scope ~candidate
+         |> protocol_ok
+         |> ignore;
+         let handoff = L.A.Initialization_scope.source_handoff scope |> protocol_ok in
+         assert (
+           Option.is_none (L.A.Initialization_scope.Source_handoff.before_source handoff));
+         L.A.Initialization_scope.Source_handoff.check
+           handoff
+           ~actor
+           ~moderator_manager:(Some manager)
+           ~expected:(S.Memory_backend.state backend)
+         |> protocol_ok;
+         L.A.end_initialization actor ~scope |> protocol_ok;
+         let initialized = L.A.state actor |> protocol_ok in
+         let index = Option.value_exn initialized.run_state in
+         assert (List.is_empty (S.Run_state.runs index));
+         let source =
+           S.Run_source_installation.captured
+             (S.Run_state.installation index)
+             ~generation:initialized.identity.generation
+           |> protocol_ok
+         in
+         assert (
+           Option.equal
+             P.Run_source.equal
+             (L.A.Initialization_scope.Source_handoff.after_source handoff)
+             (Some source));
+         let ended_handoff =
+           L.A.Initialization_scope.source_handoff scope |> protocol_ok
+         in
+         assert (phys_equal handoff ended_handoff);
+         L.A.Initialization_scope.Source_handoff.check
+           ended_handoff
+           ~actor
+           ~moderator_manager:(Some manager)
+           ~expected:initialized
+         |> protocol_ok;
+         let replacement = make_manager () in
+         (match
+            L.A.Initialization_scope.Source_handoff.check
+              ended_handoff
+              ~actor
+              ~moderator_manager:(Some replacement)
+              ~expected:initialized
+          with
+          | Error failure -> [%test_eq: P.Error.code] Conflict failure.code
+          | Ok () -> failwith "foreign Manager matched an initialization source handoff");
+         let queue = S.Moderator_queue.bootstrap ~source ~queue:[] |> protocol_ok in
+         let full =
+           S.Moderator_checkpoint.encode_with_queue snapshot ~queue
+           |> protocol_ok
+           |> function
+           | `Object fields ->
+             `Object
+               (List.map fields ~f:(fun (name, value) ->
+                  if String.equal name "queue_provenance"
+                  then
+                    ( name
+                    , match value with
+                      | `Object queue_fields ->
+                        `Object (queue_fields @ [ "future_queue", `String "retained" ])
+                      | _ -> assert false )
+                  else name, value)
+                @ [ "future_checkpoint", `String "retained" ])
+           | _ -> assert false
+         in
+         (* This is an actual same-source host checkpoint. It adds only structural
+            empty-queue facts, not a producer, original proof or Run. *)
+         L.A.change_moderator ~actor:original actor (Some full) |> protocol_ok |> ignore;
+         let expected = L.A.state actor |> protocol_ok in
+         let request =
+           P.Run_start.create
+             ~session_id
+             ~attachment_id:writer.id
+             ~generation:expected.identity.generation
+             ~expected_revision:expected.counters.revision
+             ~mode:Workflow
+             ~input:Authored_start
+             ~key:(P.Idempotency_key.of_string "resource-handoff" |> protocol_ok)
+           |> protocol_ok
+         in
+         let request_sha256 =
+           P.Run_start.to_json request
+           |> Jsonaf.to_string
+           |> Digestif.SHA256.digest_string
+           |> Digestif.SHA256.to_hex
+         in
+         let preparation =
+           L.A.begin_run_preparation_authenticated
+             actor
+             ~actor:original
+             ~authorize:(fun _ -> Ok ())
+             ~request
+             ~request_sha256
+           |> protocol_ok
+           |> function
+           | S.Run_preparation.Decision.Prepare preparation -> preparation
+           | Retained _ -> failwith "fresh owner unexpectedly retained"
+         in
+         let ready =
+           L.A.add_run_constructor_job actor ~preparation (job Pending) |> protocol_ok
+         in
+         let checkpoint () =
+           L.A.checkpoint_run_moderator
+             ~moderator_manager:manager
+             actor
+             ~preparation
+             (Some bare)
+         in
+         let before = S.Memory_backend.state backend in
+         reject := true;
+         (match checkpoint () with
+          | Error failure -> [%test_eq: P.Error.code] Internal_error failure.code
+          | Ok _ -> failwith "Ready handoff escaped the rejected ACK");
+         reject := false;
+         [%test_eq: int64]
+           before.counters.revision
+           (S.Memory_backend.state backend).counters.revision;
+         checkpoint () |> protocol_ok |> ignore;
+         let handed_off = L.A.state actor |> protocol_ok in
+         assert (Option.equal Jsonaf.exactly_equal handed_off.moderator (Some full));
+         checkpoint () |> protocol_ok |> ignore;
+         [%test_eq: int64]
+           handed_off.counters.revision
+           (L.A.state actor |> protocol_ok).counters.revision;
+         L.A.end_run_preparation actor preparation |> protocol_ok;
+         let worker =
+           S.Operation_worker.create ~run:(fun ~sw:_ ~input _ ->
+             Completed
+               { final_history = input.history
+               ; moderator_snapshot = Some full
+               ; runtime_requests = []
+               })
+         in
+         L.install actor manager worker;
+         (* The setter's intermediate absent Manager must not retire rows just
+            acknowledged for this exact intended final resource. *)
+         L.install actor manager worker;
+         assert (
+           Option.equal
+             Jsonaf.exactly_equal
+             (L.A.state actor |> protocol_ok).moderator
+             (Some full));
+         L.A.start actor ~attachment_id:writer.id |> protocol_ok |> ignore;
+         let claim (job : P.Job.t) =
+           L.A.claim_job actor ~job_id:job.id ~generation:job.generation
+           |> protocol_ok
+           |> Option.value_exn
+         in
+         let pending = claim pending in
+         let ready = claim ready in
+         let inspect manager (job : P.Job.t) =
+           let observed = ref None in
+           let call : Chat_response.Moderation.Tool_call.t =
+             { id = "constructor-resource-tool"
+             ; name = "read_file"
+             ; args = `Null
+             ; kind = Function
+             ; payload_text = "null"
+             ; meta = `Null
+             }
+           in
+           L.A.with_job_execution
+             actor
+             ~job_id:job.id
+             ~generation:job.generation
+             ~attempt:job.attempt
+             ~deadline:(Some Job_fixtures.deadline)
+             (fun services ->
+                L.invoke
+                  ~claim:services.claim_legacy_callback
+                  ~actor
+                  ~manager
+                  ~selection:(Boundary (Pre_tool_call call))
+                  ~operation_id:None
+                  ~inspect:(fun scope ->
+                    let borrowed = L.A.callback_agent_actor actor ~scope in
+                    observed
+                    := Some
+                         ( borrowed
+                         , match borrowed with
+                           | Ok (Some proof) -> Operator_authorization.is_current proof
+                           | Ok None | Error _ -> false ))
+                  ()
+                |> Result.map_error ~f:handoff_error)
+           |> protocol_ok
+           |> ignore;
+           Option.value_exn !observed
+         in
+         List.iter [ pending; ready ] ~f:(fun job ->
+           (match inspect manager job with
+            | Ok (Some proof), true ->
+              assert (not (Operator_authorization.is_current proof))
+            | Error failure, _ -> raise_s [%sexp (failure : P.Error.t)]
+            | Ok _, _ -> failwith "acknowledged constructor lost its exact live original");
+           assert (
+             Option.equal
+               Jsonaf.exactly_equal
+               (L.A.state actor |> protocol_ok).moderator
+               (Some full));
+           assert (
+             Option.equal
+               Jsonaf.exactly_equal
+               (S.Memory_backend.state backend).moderator
+               (Some full)));
+         L.install actor replacement worker;
+         (match inspect replacement ready with
+          | Error failure, false ->
+            [%test_eq: P.Error.code] Permission_denied failure.code
+          | Error failure, true -> raise_s [%sexp (failure : P.Error.t)]
+          | Ok _, _ -> failwith "replacement resource revived the old Job loan");
+         assert (Operator_authorization.is_current original)));
+  print_endline
+    "Pending and Ready ACK handoffs; exact checkpoint custody; intended resource \
+     retained, replacement unavailable";
+  [%expect
+    {| Pending and Ready ACK handoffs; exact checkpoint custody; intended resource retained, replacement unavailable |}]
+;;
+
+let%expect_test "actual Model completion delivery retains exact terminal custody" =
+  let module L = Legacy_emit in
+  let module A = L.A in
+  let module S = Agent_session in
+  let module P = Agent_protocol in
+  let module Owner = Agent_server.Runtime_owner in
+  List.iter [ `Original; `Fresh_none; `Expired; `Historical ] ~f:(fun mode ->
+    with_actor_workspace (fun env workspace_instance ->
+      let manager =
+        prepared_legacy_callback_managers
+          env
+          ~id:"model-delivery"
+          ~source:
+            {|let initial_state = 0
+              let on_event = fun ctx state event -> Task.pure(state)|}
+          ()
+      in
+      let snapshot = L.M.identity_snapshot manager |> Result.ok_or_failwith in
+      let bare = L.B.encode_moderator_snapshot snapshot in
+      let reject_delivery = ref false in
+      let rejected = ref 0 in
+      Job_fixtures.with_actor
+        ~environment:(env, workspace_instance)
+        ~start:false
+        ~prepare_state:(fun state ->
+          { state with runtime_initialization = Pending { fresh_history = true } })
+        ~reject_save:(fun next ->
+          if
+            !reject_delivery
+            && List.exists next.S.Session_transition.state.jobs ~f:(fun job ->
+              match job.P.Job.delivery with
+              | Delivered _ -> true
+              | Not_required | Pending | Discarded _ -> false)
+          then (
+            Int.incr rejected;
+            true)
+          else false)
+        (fun _env _sw actor writer backend ->
+           let original_live = Atomic.make true in
+           let original = L.authentication original_live in
+           let expected = A.state actor |> protocol_ok in
+           let initialization =
+             (match mode with
+              | `Fresh_none -> A.begin_initialization actor ~expected
+              | `Original | `Expired | `Historical ->
+                A.begin_initialization_authenticated actor ~actor:original ~expected)
+             |> protocol_ok
+           in
+           let job : P.Job.t =
+             { id = P.Id.Job.create ()
+             ; session_id
+             ; generation = expected.identity.generation
+             ; kind = Model_call
+             ; payload = `Object [ "recipe", `String "owner"; "payload", `Null ]
+             ; status = Queued
+             ; retry_policy = Never
+             ; attempt = 0
+             ; created_at = timestamp
+             ; started_at = None
+             ; next_run_at = None
+             ; completed_at = None
+             ; result = None
+             ; delivery = Pending
+             ; launch = None
+             ; inference_origin = None
+             ; progress = None
+             }
+           in
+           let job =
+             match mode with
+             | `Historical -> job
+             | `Original | `Fresh_none | `Expired ->
+               A.add_initialization_model_job actor ~scope:initialization job
+               |> protocol_ok
+           in
+           A.complete_initialization
+             ~moderator_manager:manager
+             actor
+             ~scope:initialization
+             ~candidate:{ expected with moderator = Some bare }
+           |> protocol_ok
+           |> ignore;
+           A.end_initialization actor ~scope:initialization |> protocol_ok;
+           let cancelled =
+             match mode with
+             | `Original ->
+               let terminal = A.cancel_job_internal actor ~job_id:job.id |> protocol_ok in
+               let before = A.state actor |> protocol_ok in
+               (match
+                  A.deliver_job
+                    actor
+                    ~job_id:job.id
+                    ~generation:job.generation
+                    ~moderator_snapshot:(Some bare)
+                with
+                | Error failure -> [%test_eq: P.Error.code] Conflict failure.code
+                | Ok _ -> failwith "missing resource discarded a positive terminal loan");
+               assert_same_session_snapshot before (A.state actor |> protocol_ok);
+               assert_same_session_snapshot before (S.Memory_backend.state backend);
+               Some terminal
+             | `Fresh_none | `Expired | `Historical -> None
+           in
+           let worker =
+             S.Operation_worker.create ~run:(fun ~sw:_ ~input _ ->
+               Completed
+                 { final_history = input.history
+                 ; moderator_snapshot = Some bare
+                 ; runtime_requests = []
+                 })
+           in
+           L.install actor manager worker;
+           A.start actor ~attachment_id:writer.id |> protocol_ok |> ignore;
+           let terminal =
+             match mode, cancelled with
+             | `Original, Some terminal -> terminal
+             | (`Fresh_none | `Expired), None ->
+               let claimed =
+                 A.claim_job actor ~job_id:job.id ~generation:job.generation
+                 |> protocol_ok
+                 |> Option.value_exn
+               in
+               A.complete_job
+                 actor
+                 ~job_id:job.id
+                 ~generation:job.generation
+                 ~attempt:claimed.attempt
+                 (L.B.Model_succeeded (`String "done"))
+               |> protocol_ok
+             | `Historical, None ->
+               (* Imported terminal data has no live admission. This deliberately
+                 exercises the historical data route, not execution permission. *)
+               A.add_job
+                 actor
+                 { job with
+                   status = Succeeded
+                 ; attempt = 1
+                 ; started_at = Some timestamp
+                 ; completed_at = Some timestamp
+                 ; result = Some (`String "done")
+                 }
+               |> protocol_ok
+             | `Original, None | (`Fresh_none | `Expired | `Historical), Some _ ->
+               assert false
+           in
+           let state = A.state actor |> protocol_ok in
+           let index = Option.value_exn state.run_state in
+           let source =
+             S.Run_source_installation.captured
+               (S.Run_state.installation index)
+               ~generation:state.identity.generation
+             |> protocol_ok
+           in
+           let metadata = S.Moderator_queue.bootstrap ~source ~queue:[] |> protocol_ok in
+           let full =
+             S.Moderator_checkpoint.encode_with_queue snapshot ~queue:metadata
+             |> protocol_ok
+           in
+           let full =
+             match mode with
+             | `Original -> Legacy_checkpoint_extensions.annotate full
+             | `Fresh_none | `Expired | `Historical -> full
+           in
+           A.change_moderator actor (Some full) |> protocol_ok |> ignore;
+           let checkpoints () =
+             ( (A.state actor |> protocol_ok).moderator
+             , (S.Memory_backend.state backend).moderator )
+           in
+           let before = A.state actor |> protocol_ok in
+           (match
+              A.deliver_job
+                ~expected:snapshot
+                ~expected_job:terminal
+                actor
+                ~job_id:terminal.id
+                ~generation:terminal.generation
+                ~moderator_snapshot:(Some bare)
+            with
+            | Error failure -> [%test_eq: P.Error.code] Conflict failure.code
+            | Ok _ -> failwith "metadata delivery omitted the actual Manager");
+           assert_same_session_snapshot before (A.state actor |> protocol_ok);
+           (match mode with
+            | `Expired -> Atomic.set original_live false
+            | `Original | `Fresh_none | `Historical -> ());
+           let runtime = Legacy_schedule.runtime manager worker in
+           let runtime =
+             { runtime with
+               enqueue_model_job_completion =
+                 (fun ?prepare job ->
+                   let open Result.Let_syntax in
+                   let%bind value = L.B.model_job_event job in
+                   let%bind payload =
+                     Session.Snapshot.of_value value
+                     |> Result.map_error ~f:P.Error.invalid_request
+                   in
+                   runtime.enqueue_internal_event
+                     ?prepare
+                     (Session.Snapshot.to_jsonaf payload))
+             }
+           in
+           let owner =
+             Owner.create ~actor ~initial:(Some runtime) ~build:(fun () ->
+               failwith "unexpected Model delivery rebuild")
+           in
+           Exn.protect
+             ~finally:(fun () -> Owner.close_and_wait owner)
+             ~f:(fun () ->
+               reject_delivery := true;
+               assert (Result.is_error (Owner.deliver_model_job_completion owner terminal));
+               reject_delivery := false;
+               [%test_eq: int] 1 !rejected;
+               assert_same_session_snapshot before (A.state actor |> protocol_ok);
+               assert_same_session_snapshot before (S.Memory_backend.state backend);
+               assert (
+                 Sexp.equal
+                   (Session.Moderator_state.Identity_snapshot.sexp_of_t snapshot)
+                   (Session.Moderator_state.Identity_snapshot.sexp_of_t
+                      (L.M.identity_snapshot manager |> Result.ok_or_failwith)));
+               Owner.deliver_model_job_completion owner terminal |> protocol_ok;
+               let delivered = A.state actor |> protocol_ok in
+               (match mode with
+                | `Original -> Legacy_checkpoint_extensions.assert_pair (checkpoints ())
+                | `Fresh_none | `Expired | `Historical -> ());
+               let saved =
+                 List.find_exn delivered.jobs ~f:(fun current ->
+                   P.Id.Job.equal current.id terminal.id)
+               in
+               (match saved.delivery with
+                | Delivered _ -> ()
+                | Not_required | Pending | Discarded _ -> assert false);
+               assert (
+                 Option.equal
+                   P.Inference_origin.equal
+                   saved.inference_origin
+                   terminal.inference_origin);
+               let entries = S.Moderator_queue.entries (L.queue delivered) in
+               let entry = List.hd_exn entries in
+               [%test_eq: int] 1 (List.length entries);
+               (match mode, S.Moderator_queue.Entry.producer entry with
+                | `Historical, None ->
+                  assert (Option.is_none (S.Moderator_queue.Entry.origin entry))
+                | (`Original | `Fresh_none | `Expired), Some (Job_completion producer) ->
+                  assert (P.Id.Job.equal producer.id terminal.id);
+                  [%test_eq: int] terminal.attempt producer.attempt
+                | _ -> failwith "Model delivery changed original producer evidence");
+               let observed = ref None in
+               let claimed_checkpoint = ref None in
+               let result =
+                 L.invoke
+                   ~actor
+                   ~manager
+                   ~selection:Queue_head
+                   ~operation_id:None
+                   ~inspect:(fun scope ->
+                     (match mode with
+                      | `Original -> claimed_checkpoint := Some (checkpoints ())
+                      | `Fresh_none | `Expired | `Historical -> ());
+                     let borrowed = A.callback_agent_actor actor ~scope in
+                     observed
+                     := Some
+                          ( borrowed
+                          , match borrowed with
+                            | Ok (Some proof) -> Operator_authorization.is_current proof
+                            | Ok None | Error _ -> false ))
+                   ()
+               in
+               (match mode, !observed with
+                | `Expired, None ->
+                  assert (Result.is_error result);
+                  assert_same_session_snapshot delivered (A.state actor |> protocol_ok)
+                | `Original, Some (Ok (Some proof), true) ->
+                  result |> Result.ok_or_failwith |> ignore;
+                  Legacy_checkpoint_extensions.assert_pair
+                    (Option.value_exn !claimed_checkpoint);
+                  Legacy_checkpoint_extensions.assert_pair (checkpoints ());
+                  assert (not (Operator_authorization.is_current proof))
+                | `Fresh_none, Some (Ok None, false) ->
+                  result |> Result.ok_or_failwith |> ignore
+                | `Historical, Some (Error failure, false) ->
+                  [%test_eq: P.Error.code] Permission_denied failure.code;
+                  result |> Result.ok_or_failwith |> ignore
+                | _, Some (Error failure, _) -> raise_s [%sexp (failure : P.Error.t)]
+                | _ ->
+                  failwith
+                    "terminal Model continuation changed live/expired/unavailable custody");
+               match mode with
+               | `Original | `Fresh_none | `Historical ->
+                 assert (Operator_authorization.is_current original)
+               | `Expired -> assert (not (Operator_authorization.is_current original))))));
+  print_endline
+    "actual Model payload and ACK retry; fresh None, current original, explicit expired \
+     and historical unavailable";
+  [%expect
+    {| actual Model payload and ACK retry; fresh None, current original, explicit expired and historical unavailable |}]
+;;
+
+let%expect_test "Prepared Async dependency delivery retains the parent's original" =
+  let module L = Legacy_emit in
+  let module A = L.A in
+  let module S = Agent_session in
+  let module P = Agent_protocol in
+  let module I = P.Invocation in
+  let module Owner = Agent_server.Runtime_owner in
+  with_actor_workspace (fun env workspace_instance ->
+    let manager =
+      prepared_legacy_callback_managers
+        env
+        ~id:"async-dependency"
+        ~source:
+          {|let initial_state = 0
+                  let on_event = fun ctx state event -> Task.pure(state)|}
+        ()
+    in
+    let snapshot = L.M.identity_snapshot manager |> Result.ok_or_failwith in
+    let bare = L.B.encode_moderator_snapshot snapshot in
+    Job_fixtures.with_actor
+      ~environment:(env, workspace_instance)
+      ~start:false
+      ~prepare_state:(fun state ->
+        { state with runtime_initialization = Pending { fresh_history = true } })
+      (fun _env _sw actor writer backend ->
+         let original = L.authentication (Atomic.make true) in
+         let expected = A.state actor |> protocol_ok in
+         let initialization =
+           A.begin_initialization_authenticated actor ~actor:original ~expected
+           |> protocol_ok
+         in
+         let anchor : P.Job.t =
+           { id = P.Id.Job.create ()
+           ; session_id
+           ; generation = expected.identity.generation
+           ; kind = Model_call
+           ; payload = `Object [ "recipe", `String "owner" ]
+           ; status = Queued
+           ; retry_policy = Never
+           ; attempt = 0
+           ; created_at = timestamp
+           ; started_at = None
+           ; next_run_at = None
+           ; completed_at = None
+           ; result = None
+           ; delivery = Not_required
+           ; launch = None
+           ; inference_origin = None
+           ; progress = None
+           }
+         in
+         let anchor =
+           A.add_initialization_model_job actor ~scope:initialization anchor
+           |> protocol_ok
+         in
+         A.complete_initialization
+           ~moderator_manager:manager
+           actor
+           ~scope:initialization
+           ~candidate:{ expected with moderator = Some bare }
+         |> protocol_ok
+         |> ignore;
+         A.end_initialization actor ~scope:initialization |> protocol_ok;
+         let worker =
+           S.Operation_worker.create ~run:(fun ~sw:_ ~input _ ->
+             Completed
+               { final_history = input.history
+               ; moderator_snapshot = Some bare
+               ; runtime_requests = []
+               })
+         in
+         L.install actor manager worker;
+         A.start actor ~attachment_id:writer.id |> protocol_ok |> ignore;
+         let claim (job : P.Job.t) =
+           A.claim_job actor ~job_id:job.id ~generation:job.generation
+           |> protocol_ok
+           |> Option.value_exn
+         in
+         let anchor = claim anchor in
+         let observer : I.observer =
+           { script_id = snapshot.script_id; source_sha256 = snapshot.script_source_hash }
+         in
+         let registry = native_registry (ref 0) ~raises:false in
+         let request =
+           Background_execution_tests.capture_tool
+             registry
+             Chat_response.One_off_request.default_policy
+         in
+         let published = ref [] in
+         let stage_child (parent : P.Job.t) =
+           let child = ref None in
+           let pending_invocation = ref None in
+           let root = Job_fixtures.root parent in
+           let resolved =
+             A.with_job_execution
+               actor
+               ~job_id:parent.id
+               ~generation:parent.generation
+               ~attempt:parent.attempt
+               ~deadline:(Some Job_fixtures.deadline)
+               (fun services ->
+                  services.execute
+                    ~invocation:root
+                    (fun ~dispatched:root ~capabilities:_ ->
+                       let nested =
+                         I.create
+                           ~observer
+                           { root.context with
+                             id = P.Id.Invocation.create ()
+                           ; parent_job = None
+                           ; parent_invocation = Some root.context.id
+                           ; tool_name = "counter"
+                           }
+                         |> protocol_ok
+                       in
+                       let open Result.Let_syntax in
+                       let%map () =
+                         services.moderator_execute
+                           ~invocation:nested
+                           (fun ~dispatched ~capabilities:_ ~commit ->
+                              let owner = P.Job.Invocation dispatched.context.id in
+                              let next =
+                                A.prepare_background_job_launch actor ~owner request
+                                |> protocol_ok
+                              in
+                              A.stage_background_job
+                                actor
+                                ~job:next
+                                ~capacity:
+                                  { publish =
+                                      (fun () -> published := next.id :: !published)
+                                  ; abort =
+                                      (fun () ->
+                                        failwith
+                                          "selected dependency unexpectedly aborted")
+                                  }
+                              |> protocol_ok;
+                              child := Some next;
+                              pending_invocation := Some dispatched.context.id;
+                              A.select_background_jobs actor ~owner ~ids:[ next.id ]
+                              |> protocol_ok;
+                              let resolved =
+                                I.resolve
+                                  dispatched
+                                  ~session_id
+                                  ~generation:parent.generation
+                                  (Pending (Job next.id, `Null))
+                                |> protocol_ok
+                              in
+                              commit ~resolved ~snapshot)
+                       in
+                       I.Complete `Null))
+             |> protocol_ok
+           in
+           (match resolved.status with
+            | Resolved (Complete `Null) -> ()
+            | _ ->
+              failwith "actual parent callback did not acknowledge its nested selection");
+           let child = Option.value_exn !child in
+           let saved =
+             List.find_exn (S.Memory_backend.state backend).jobs ~f:(fun job ->
+               P.Id.Job.equal job.id child.id)
+           in
+           let launch = Option.value_exn saved.launch in
+           assert (Option.equal I.equal_observer launch.moderator_source (Some observer));
+           assert (
+             Option.equal
+               (fun (id, attempt) (expected_id, expected_attempt) ->
+                  P.Id.Job.equal id expected_id && Int.equal attempt expected_attempt)
+               launch.parent_job
+               (Some (parent.id, parent.attempt)));
+           saved, Option.value_exn !pending_invocation
+         in
+         let parent, _ = stage_child anchor in
+         let parent = claim parent in
+         let child, invocation_id = stage_child parent in
+         let dependency : P.Job.dependency =
+           { invocation_id
+           ; work = Job child.id
+           ; deadline = Job_fixtures.deadline
+           ; completion_schema = None
+           ; max_output_bytes = 1_000_000
+           ; max_output_depth = 128
+           }
+         in
+         let waiting =
+           A.defer_background_job
+             actor
+             ~job_id:parent.id
+             ~generation:parent.generation
+             ~attempt:parent.attempt
+             dependency
+           |> protocol_ok
+         in
+         (match waiting.status with
+          | Waiting_completion actual -> assert (P.Job.equal_dependency dependency actual)
+          | _ -> failwith "actual dependency did not enter Waiting_completion");
+         let child = claim child in
+         A.complete_background_job
+           actor
+           ~job_id:child.id
+           ~generation:child.generation
+           ~attempt:child.attempt
+           (Succeeded `Null)
+         |> protocol_ok
+         |> ignore;
+         let terminal =
+           A.refresh_background_job
+             actor
+             ~job_id:parent.id
+             ~generation:parent.generation
+             ~attempt:parent.attempt
+           |> protocol_ok
+         in
+         (match terminal.status with
+          | Succeeded -> ()
+          | _ -> failwith "actual child completion did not settle the waiting parent");
+         [%test_eq: int] 2 (List.length !published);
+         assert (List.mem !published parent.id ~equal:P.Id.Job.equal);
+         assert (List.mem !published child.id ~equal:P.Id.Job.equal);
+         let state = A.state actor |> protocol_ok in
+         let index = Option.value_exn state.run_state in
+         let source =
+           S.Run_source_installation.captured
+             (S.Run_state.installation index)
+             ~generation:state.identity.generation
+           |> protocol_ok
+         in
+         let metadata = S.Moderator_queue.bootstrap ~source ~queue:[] |> protocol_ok in
+         A.change_moderator
+           actor
+           (Some
+              (S.Moderator_checkpoint.encode_with_queue snapshot ~queue:metadata
+               |> protocol_ok))
+         |> protocol_ok
+         |> ignore;
+         let frame =
+           S.Background_job_event.frame
+             ~state:(A.state actor |> protocol_ok)
+             ~observer
+             terminal
+           |> protocol_ok
+         in
+         let payload =
+           Chat_response.Background_delivery.capture frame
+           |> Session.Snapshot.of_value
+           |> Result.ok_or_failwith
+         in
+         let owner =
+           Owner.create
+             ~actor
+             ~initial:(Some (Legacy_schedule.runtime manager worker))
+             ~build:(fun () -> failwith "unexpected Async dependency rebuild")
+         in
+         Exn.protect
+           ~finally:(fun () -> Owner.close_and_wait owner)
+           ~f:(fun () ->
+             Owner.deliver_background_job_completion owner terminal |> protocol_ok;
+             let delivered = A.state actor |> protocol_ok in
+             let actual_snapshot =
+               S.Moderator_checkpoint.decode delivered.moderator
+               |> protocol_ok
+               |> Option.value_exn
+             in
+             assert (
+               List.equal
+                 (fun left right ->
+                    Sexp.equal
+                      (Session.Snapshot.sexp_of_t left)
+                      (Session.Snapshot.sexp_of_t right))
+                 actual_snapshot.queued_internal_events
+                 [ payload ]);
+             let entry = List.hd_exn (S.Moderator_queue.entries (L.queue delivered)) in
+             (match S.Moderator_queue.Entry.producer entry with
+              | Some (Job_completion actual) ->
+                assert (P.Id.Job.equal actual.id parent.id);
+                [%test_eq: int] parent.attempt actual.attempt
+              | Some _ | None ->
+                failwith "dependency delivery lost its actual parent producer");
+             assert (
+               Option.equal
+                 P.Inference_origin.equal
+                 (S.Moderator_queue.Entry.origin entry)
+                 terminal.inference_origin);
+             let borrowed = ref None in
+             L.invoke
+               ~actor
+               ~manager
+               ~selection:Queue_head
+               ~operation_id:None
+               ~inspect:(fun scope ->
+                 let proof = A.callback_agent_actor actor ~scope in
+                 borrowed
+                 := Some
+                      ( proof
+                      , match proof with
+                        | Ok (Some proof) -> Operator_authorization.is_current proof
+                        | Ok None | Error _ -> false ))
+               ()
+             |> Result.ok_or_failwith
+             |> ignore;
+             (* This oracle is outside every engine/callback exception converter.
+             The child has finished: the proof must come from the parent row
+             retained through Waiting_completion and terminal delivery. *)
+             (match Option.value_exn !borrowed with
+              | Ok (Some proof), true ->
+                assert (
+                  P.Id.Principal.equal
+                    (Operator_authorization.principal proof).id
+                    (Operator_authorization.principal original).id);
+                assert (not (Operator_authorization.is_current proof))
+              | Error failure, _ -> raise_s [%sexp (failure : P.Error.t)]
+              | Ok _, _ ->
+                failwith "deferred parent's original loan did not reach the queue");
+             assert (Operator_authorization.is_current original))));
+  print_endline
+    "actual staged parent and child; dependency resolution; real Async frame; parent \
+     original current inside queue borrow";
+  [%expect
+    {| actual staged parent and child; dependency resolution; real Async frame; parent original current inside queue borrow |}]
+;;
+
+let%expect_test "constructor callbacks hand off their exact emitted and timer custody" =
+  let module L = Legacy_emit in
+  let module A = L.A in
+  let module M = L.M in
+  let module S = Agent_session in
+  let module P = Agent_protocol in
+  let module Q = S.Moderator_queue in
+  let module Owner = Agent_server.Runtime_owner in
+  List.iter [ `Pending; `Ready ] ~f:(fun mode ->
+    with_actor_workspace (fun env workspace_instance ->
+      let manager =
+        prepared_legacy_callback_managers
+          env
+          ~id:"constructor-callback"
+          ~source:
+            {|type state = int
+              type event = [ `Session_start | `Session_resume | `Fresh | `Tick ]
+              let initial_state = 0
+              let on_event : context -> state -> event -> state task = fun ctx st ev ->
+                match ev with
+                | `Session_start ->
+                  Task.bind(Schedule.after_ms(0, `Tick), fun timer ->
+                    Task.bind(Runtime.emit(`Fresh), fun ignored -> Task.pure(st + 1)))
+                | `Session_resume ->
+                  Task.bind(Schedule.after_ms(0, `Tick), fun timer ->
+                    Task.bind(Runtime.emit(`Fresh), fun ignored -> Task.pure(st + 1)))
+                | `Fresh -> Task.pure(st + 1)
+                | `Tick -> Task.pure(st + 1)|}
+          ()
+      in
+      Job_fixtures.with_actor
+        ~environment:(env, workspace_instance)
+        ~start:false
+        ~prepare_state:(fun state ->
+          match mode with
+          | `Pending ->
+            { state with runtime_initialization = Pending { fresh_history = true } }
+          | `Ready -> state)
+        (fun _env _sw actor writer backend ->
+           let original = L.authentication (Atomic.make true) in
+           let expected = A.state actor |> protocol_ok in
+           let scope =
+             A.begin_initialization_authenticated
+               ~purpose:
+                 (match mode with
+                  | `Pending -> Pending_initialization
+                  | `Ready -> Runtime_construction)
+               actor
+               ~actor:original
+               ~expected
+             |> protocol_ok
+           in
+           let borrow selection ?claim () =
+             let observed = ref None in
+             L.invoke
+               ?claim
+               ~actor
+               ~manager
+               ~selection
+               ~operation_id:None
+               ~inspect:(fun scope ->
+                 let proof = A.callback_agent_actor actor ~scope in
+                 observed
+                 := Some
+                      ( scope
+                      , proof
+                      , match proof with
+                        | Ok (Some proof) -> Operator_authorization.is_current proof
+                        | Ok None | Error _ -> false ))
+               ()
+             |> Result.ok_or_failwith
+             |> ignore;
+             (* Inspect results outside the Manager's exception conversion. *)
+             let callback, proof, current = Option.value_exn !observed in
+             (match proof, current with
+              | Ok (Some proof), true ->
+                assert (not (Operator_authorization.is_current proof))
+              | Error failure, _ -> raise_s [%sexp (failure : P.Error.t)]
+              | Ok _, _ -> failwith "constructor original was not current inside callback");
+             assert (Result.is_error (A.check_callback_current actor callback));
+             assert (Operator_authorization.is_current original)
+           in
+           borrow
+             (Boundary
+                (match mode with
+                 | `Pending -> Session_start
+                 | `Ready -> Session_resume))
+             ~claim:(A.with_initialization_callback actor ~scope ~manager)
+             ();
+           let emitted = A.state actor |> protocol_ok in
+           assert_same_session_snapshot emitted (S.Memory_backend.state backend);
+           assert (List.is_empty (S.Run_state.runs (Option.value_exn emitted.run_state)));
+           let receipt = List.hd_exn emitted.moderator_executions in
+           (match receipt.P.Moderator_execution.status with
+            | Completed _ -> ()
+            | Running | Failed _ | Interrupted _ -> assert false);
+           let queue = L.queue emitted in
+           let entry = List.hd_exn (Q.entries queue) in
+           (match Q.Entry.producer entry with
+            | Some (Event id) ->
+              assert (P.Id.Moderator_execution.equal id receipt.context.id)
+            | None
+            | Some
+                ( Invocation _
+                | Invocation_at_source _
+                | Job_completion _
+                | Schedule_delivery _
+                | Source_setup _
+                | Ingress_delivery _ ) -> assert false);
+           assert (
+             Option.equal P.Inference_origin.equal (Q.Entry.origin entry) (Some Unbound));
+           let timer = List.hd_exn emitted.schedules in
+           let provenance = Option.value_exn timer.inference_provenance in
+           assert (
+             P.Run_source.equal (Q.source queue) (P.Schedule_provenance.source provenance));
+           assert (
+             Option.equal
+               P.Inference_origin.equal
+               (P.Schedule_provenance.origin provenance)
+               (Some Unbound));
+           let snapshot = M.identity_snapshot manager |> Result.ok_or_failwith in
+           let bare = Some (L.B.encode_moderator_snapshot snapshot) in
+           (match mode with
+            | `Pending ->
+              A.complete_initialization
+                ~moderator_manager:manager
+                actor
+                ~scope
+                ~candidate:{ expected with moderator = bare }
+            | `Ready ->
+              A.checkpoint_runtime_construction
+                ~moderator_manager:manager
+                actor
+                ~scope
+                bare)
+           |> protocol_ok
+           |> ignore;
+           A.end_initialization actor ~scope |> protocol_ok;
+           let handed_off = A.state actor |> protocol_ok in
+           assert_same_session_snapshot handed_off (S.Memory_backend.state backend);
+           let entered = ref false in
+           assert (
+             Result.is_error
+               (L.invoke
+                  ~actor
+                  ~manager
+                  ~selection:Queue_head
+                  ~operation_id:None
+                  ~inspect:(fun _ -> entered := true)
+                  ()));
+           assert (not !entered);
+           assert_same_session_snapshot handed_off (A.state actor |> protocol_ok);
+           let worker_called = ref false in
+           let worker =
+             S.Operation_worker.create ~run:(fun ~sw:_ ~input _ ->
+               worker_called := true;
+               Completed
+                 { final_history = input.history
+                 ; moderator_snapshot = handed_off.moderator
+                 ; runtime_requests = []
+                 })
+           in
+           L.install actor manager worker;
+           L.install actor manager worker;
+           let before_start = (A.state actor |> protocol_ok).counters.event_sequence in
+           let start_live = Atomic.make true in
+           A.start ~actor:(L.authentication start_live) actor ~attachment_id:writer.id
+           |> protocol_ok
+           |> ignore;
+           let started = await_idle actor in
+           let lifecycle =
+             S.Memory_backend.events_after backend before_start
+             |> protocol_ok
+             |> List.filter_map ~f:(fun event ->
+               match
+                 P.Event.Durable.Payload.of_json
+                   ~kind:event.P.Event.Durable.kind
+                   event.payload
+                 |> protocol_ok
+               with
+               | Session_state_changed change -> Some change
+               | _ -> None)
+           in
+           (match lifecycle with
+            | [ { desired_state = Running; observed_state = Starting }
+              ; { desired_state = Running; observed_state = Idle }
+              ] -> ()
+            | changes ->
+              raise_s
+                [%sexp
+                  "Start did not acknowledge its exact lifecycle checkpoints"
+                , (changes : P.Event.Durable.Payload.lifecycle_change list)]);
+           assert (Option.is_none started.active_operation);
+           assert (Option.is_none started.failure);
+           assert (not !worker_called);
+           assert_same_session_snapshot started (S.Memory_backend.state backend);
+           (* A later Start is an independent admission, not the constructor's
+              original authority. Revoking it must not replace the child loans. *)
+           Atomic.set start_live false;
+           borrow Queue_head ();
+           assert (List.is_empty (Q.entries (L.queue (A.state actor |> protocol_ok))));
+           let claimed =
+             A.claim_schedule actor ~schedule_id:timer.id ~generation:timer.generation
+             |> protocol_ok
+             |> Option.value_exn
+           in
+           let owner =
+             Owner.create
+               ~actor
+               ~initial:(Some (Legacy_schedule.runtime manager worker))
+               ~build:(fun () -> failwith "unexpected constructor delivery rebuild")
+           in
+           Exn.protect
+             ~finally:(fun () -> Owner.close_and_wait owner)
+             ~f:(fun () ->
+               Owner.deliver_schedule owner claimed |> protocol_ok;
+               borrow Queue_head ();
+               let settled = A.state actor |> protocol_ok in
+               assert_same_session_snapshot settled (S.Memory_backend.state backend);
+               assert (List.is_empty (Q.entries (L.queue settled)));
+               let timer =
+                 List.find_exn settled.schedules ~f:(fun saved ->
+                   P.Id.Schedule.equal saved.id timer.id)
+               in
+               (match timer.status with
+                | Delivered -> ()
+                | Scheduled | Delivering | Cancelled | Failed _ -> assert false);
+               assert (Operator_authorization.is_current original)))));
+  print_endline
+    "Pending and Ready constructor receipts; exact queue and timer handoff; original \
+     live inside child callbacks after parent end and intended resource installation";
+  [%expect
+    {| Pending and Ready constructor receipts; exact queue and timer handoff; original live inside child callbacks after parent end and intended resource installation |}]
+;;
+
+let%expect_test "constructor claim failures preserve their exact previous basis" =
+  let module L = Legacy_emit in
+  let module A = L.A in
+  let module S = Agent_session in
+  let module P = Agent_protocol in
+  List.iter [ `Rejected_ack; `Expired; `Changed_basis ] ~f:(fun mode ->
+    with_actor_workspace (fun env workspace_instance ->
+      let manager =
+        prepared_legacy_callback_managers
+          env
+          ~id:"constructor-claim-failure"
+          ~source:
+            {|type event = [ `Session_start | `Fresh ]
+              let initial_state = 0
+              let on_event = fun ctx state event -> match event with
+                | `Session_start ->
+                  Task.bind(Runtime.emit(`Fresh), fun ignored -> Task.pure(state + 1))
+                | `Fresh -> Task.pure(state + 1)|}
+          ()
+      in
+      let reject = ref false in
+      let rejections = ref 0 in
+      Job_fixtures.with_actor
+        ~environment:(env, workspace_instance)
+        ~start:false
+        ~prepare_state:(fun state ->
+          { state with runtime_initialization = Pending { fresh_history = true } })
+        ~reject_save:(fun _ ->
+          if !reject
+          then (
+            incr rejections;
+            true)
+          else false)
+        (fun _env _sw actor _writer backend ->
+           let live = Atomic.make true in
+           let original = L.authentication live in
+           let expected = A.state actor |> protocol_ok in
+           let scope =
+             A.begin_initialization_authenticated actor ~actor:original ~expected
+             |> protocol_ok
+           in
+           let snapshot = L.M.identity_snapshot manager |> Result.ok_or_failwith in
+           (match mode with
+            | `Rejected_ack -> reject := true
+            | `Expired -> Atomic.set live false
+            | `Changed_basis ->
+              (* A genuine independent host write is not this scope's own ACK. *)
+              A.change_moderator
+                ~actor:original
+                actor
+                (Some (L.B.encode_moderator_snapshot snapshot))
+              |> protocol_ok
+              |> ignore);
+           let before = A.state actor |> protocol_ok in
+           let entered = ref false in
+           let claim_error = ref None in
+           let claim ?capture_cleanup ~callback run =
+             let result =
+               A.with_initialization_callback
+                 actor
+                 ~scope
+                 ~manager
+                 ?capture_cleanup
+                 ~callback
+                 run
+             in
+             Result.iter_error result ~f:(fun failure -> claim_error := Some failure);
+             result
+           in
+           assert (
+             Result.is_error
+               (L.invoke
+                  ~claim
+                  ~actor
+                  ~manager
+                  ~selection:(Boundary Session_start)
+                  ~operation_id:None
+                  ~inspect:(fun _ -> entered := true)
+                  ()));
+           let failure = Option.value_exn !claim_error in
+           (match mode with
+            | `Rejected_ack ->
+              [%test_eq: P.Error.code] Internal_error failure.code;
+              [%test_eq: string] "injected job transition failure" failure.message;
+              [%test_eq: int] 1 !rejections
+            | `Expired -> [%test_eq: P.Error.code] Permission_denied failure.code
+            | `Changed_basis ->
+              [%test_eq: P.Error.code] Conflict failure.code;
+              [%test_eq: string]
+                "initialization basis changed while resources were prepared"
+                failure.message);
+           assert (not !entered);
+           assert_same_session_snapshot before (A.state actor |> protocol_ok);
+           assert_same_session_snapshot before (S.Memory_backend.state backend);
+           assert (
+             Sexp.equal
+               (Session.Moderator_state.Identity_snapshot.sexp_of_t snapshot)
+               (Session.Moderator_state.Identity_snapshot.sexp_of_t
+                  (L.M.identity_snapshot manager |> Result.ok_or_failwith)));
+           assert (List.is_empty before.schedules);
+           assert (List.is_empty before.moderator_executions);
+           (match mode with
+            | `Expired | `Changed_basis -> ()
+            | `Rejected_ack ->
+              reject := false;
+              let observed = ref None in
+              L.invoke
+                ~claim:(A.with_initialization_callback actor ~scope ~manager)
+                ~actor
+                ~manager
+                ~selection:(Boundary Session_start)
+                ~operation_id:None
+                ~inspect:(fun callback ->
+                  let proof = A.callback_agent_actor actor ~scope:callback in
+                  observed
+                  := Some
+                       ( proof
+                       , match proof with
+                         | Ok (Some proof) -> Operator_authorization.is_current proof
+                         | Ok None | Error _ -> false ))
+                ()
+              |> Result.ok_or_failwith
+              |> ignore;
+              (match Option.value_exn !observed with
+               | Ok (Some proof), true ->
+                 assert (not (Operator_authorization.is_current proof))
+               | Error failure, _ -> raise_s [%sexp (failure : P.Error.t)]
+               | Ok _, _ -> failwith "rejected claim consumed the constructor admission");
+              let saved = A.state actor |> protocol_ok in
+              [%test_eq: int] 1 (List.length saved.moderator_executions);
+              [%test_eq: int] 1 (List.length (S.Moderator_queue.entries (L.queue saved)));
+              assert_same_session_snapshot saved (S.Memory_backend.state backend));
+           A.end_initialization actor ~scope |> protocol_ok)));
+  print_endline
+    "rejected claim ACK is retryable; expired original and unrelated basis reject before \
+     effects; exact Actor, Memory and Manager state retained";
+  [%expect
+    {| rejected claim ACK is retryable; expired original and unrelated basis reject before effects; exact Actor, Memory and Manager state retained |}]
+;;
+
+let%expect_test
+    "failed constructor checkpoint preserves facts without adopting old custody"
+  =
+  let module L = Legacy_emit in
+  let module A = L.A in
+  let module S = Agent_session in
+  let module P = Agent_protocol in
+  let module Q = S.Moderator_queue in
+  let module Owner = Agent_server.Runtime_owner in
+  with_actor_workspace (fun env workspace_instance ->
+    let make_manager () =
+      prepared_legacy_callback_managers
+        env
+        ~id:"constructor-failed-checkpoint"
+        ~source:
+          {|type event = [ `Session_start | `Prefix | `Fresh | `Tick ]
+            let initial_state = 0
+            let on_event = fun ctx state event -> match event with
+              | `Session_start ->
+                Task.bind(Schedule.after_ms(0, `Tick), fun timer ->
+                  Task.bind(Runtime.emit(`Fresh), fun ignored -> Task.pure(state + 1)))
+              | `Prefix -> Task.pure(state + 1)
+              | `Fresh -> Task.pure(state + 1)
+              | `Tick -> Task.pure(state + 1)|}
+        ()
+    in
+    let manager = make_manager () in
+    (* This pre-existing value has no live producer admission. A later genuine
+       constructor may assign structural ordinals, never its original proof. *)
+    Session.Snapshot.to_value (Session.Snapshot.Variant ("Prefix", []))
+    |> Result.ok_or_failwith
+    |> L.M.enqueue_internal_event manager
+    |> Result.ok_or_failwith;
+    let previous = L.M.identity_snapshot manager |> Result.ok_or_failwith in
+    let armed = ref false in
+    let rejected = ref 0 in
+    Job_fixtures.with_actor
+      ~environment:(env, workspace_instance)
+      ~start:false
+      ~prepare_state:(fun state ->
+        { state with runtime_initialization = Pending { fresh_history = true } })
+      ~reject_save:(fun transition ->
+        if
+          !armed
+          && List.exists
+               transition.S.Session_transition.state.moderator_executions
+               ~f:(fun receipt ->
+                 match receipt.P.Moderator_execution.status with
+                 | Completed _ -> true
+                 | Running | Failed _ | Interrupted _ -> false)
+        then (
+          incr rejected;
+          true)
+        else false)
+      (fun _env _sw actor writer backend ->
+         let original = L.authentication (Atomic.make true) in
+         A.change_moderator
+           ~actor:original
+           actor
+           (Some (L.B.encode_moderator_snapshot previous))
+         |> protocol_ok
+         |> ignore;
+         let expected = A.state actor |> protocol_ok in
+         let scope =
+           A.begin_initialization_authenticated actor ~actor:original ~expected
+           |> protocol_ok
+         in
+         let observed = ref None in
+         let checkpoint_error = ref None in
+         let claim ?capture_cleanup ~callback run =
+           A.with_initialization_callback
+             actor
+             ~scope
+             ~manager
+             ?capture_cleanup
+             ~callback
+             (fun ~scope ~commit ->
+                run ~scope ~commit:(fun ~snapshot ~requests ~notifications ->
+                  let result = commit ~snapshot ~requests ~notifications in
+                  Result.iter_error result ~f:(fun failure ->
+                    checkpoint_error := Some failure);
+                  result))
+         in
+         armed := true;
+         let result =
+           L.invoke
+             ~claim
+             ~actor
+             ~manager
+             ~selection:(Boundary Session_start)
+             ~operation_id:None
+             ~inspect:(fun callback ->
+               let proof = A.callback_agent_actor actor ~scope:callback in
+               observed
+               := Some
+                    ( proof
+                    , match proof with
+                      | Ok (Some proof) -> Operator_authorization.is_current proof
+                      | Ok None | Error _ -> false ))
+             ()
+         in
+         armed := false;
+         assert (Result.is_error result);
+         let failure = Option.value_exn !checkpoint_error in
+         [%test_eq: P.Error.code] Internal_error failure.code;
+         [%test_eq: string] "injected job transition failure" failure.message;
+         [%test_eq: int] 1 !rejected;
+         (match Option.value_exn !observed with
+          | Ok (Some proof), true ->
+            assert (not (Operator_authorization.is_current proof))
+          | Error failure, _ -> raise_s [%sexp (failure : P.Error.t)]
+          | Ok _, _ -> failwith "constructor failed before the intended checkpoint cut");
+         let failed = A.state actor |> protocol_ok in
+         assert_same_session_snapshot failed (S.Memory_backend.state backend);
+         let receipt = List.hd_exn failed.moderator_executions in
+         (match receipt.status with
+          | Failed failure ->
+            [%test_eq: string] "event.handler_failed" failure.code;
+            [%test_eq: string]
+              "queued moderator handler exited without committing its checkpoint"
+              failure.message
+          | Running | Completed _ | Interrupted _ ->
+            raise_s
+              [%sexp
+                "failed constructor did not settle", (receipt : P.Moderator_execution.t)]);
+         let snapshot = L.M.identity_snapshot manager |> Result.ok_or_failwith in
+         assert (
+           Sexp.equal
+             (Session.Moderator_state.Identity_snapshot.sexp_of_t previous)
+             (Session.Moderator_state.Identity_snapshot.sexp_of_t snapshot));
+         let prefix = List.hd_exn (Q.entries (L.queue failed)) in
+         [%test_eq: int] 1 (List.length (Q.entries (L.queue failed)));
+         assert (Option.is_none (Q.Entry.producer prefix));
+         assert (Option.is_none (Q.Entry.origin prefix));
+         let timer = List.hd_exn failed.schedules in
+         [%test_eq: int] 1 (List.length failed.schedules);
+         (match timer.status with
+          | Scheduled -> ()
+          | Delivering | Delivered | Cancelled | Failed _ -> assert false);
+         assert (Option.is_some timer.inference_provenance);
+         let parent_proof =
+           A.initialization_agent_actor actor ~scope |> protocol_ok |> Option.value_exn
+         in
+         assert (Operator_authorization.is_current parent_proof);
+         (match
+            A.retire_initialization_resource
+              actor
+              ~scope
+              ~moderator_manager:(make_manager ())
+          with
+          | Error failure ->
+            [%test_eq: P.Error.code] Conflict failure.code;
+            [%test_eq: string]
+              "constructor cleanup names a different Manager"
+              failure.message
+          | Ok () -> failwith "foreign resource cleanup was accepted");
+         assert_same_session_snapshot failed (A.state actor |> protocol_ok);
+         A.retire_initialization_resource actor ~scope ~moderator_manager:manager
+         |> protocol_ok;
+         assert (Operator_authorization.is_current parent_proof);
+         A.end_initialization actor ~scope |> protocol_ok;
+         assert (not (Operator_authorization.is_current parent_proof));
+         (* Negative cleanup is exact and remains idempotent after owner end;
+            durable receipt, prefix and timer facts are not rolled back. *)
+         A.retire_initialization_resource actor ~scope ~moderator_manager:manager
+         |> protocol_ok;
+         assert_same_session_snapshot failed (A.state actor |> protocol_ok);
+         assert_same_session_snapshot failed (S.Memory_backend.state backend);
+         let later_original = L.authentication (Atomic.make true) in
+         let later_expected = A.state actor |> protocol_ok in
+         let later =
+           A.begin_initialization_authenticated
+             actor
+             ~actor:later_original
+             ~expected:later_expected
+           |> protocol_ok
+         in
+         A.complete_initialization
+           ~moderator_manager:manager
+           actor
+           ~scope:later
+           ~candidate:
+             { later_expected with
+               moderator = Some (L.B.encode_moderator_snapshot snapshot)
+             }
+         |> protocol_ok
+         |> ignore;
+         A.end_initialization actor ~scope:later |> protocol_ok;
+         let handed_off = A.state actor |> protocol_ok in
+         let worker =
+           S.Operation_worker.create ~run:(fun ~sw:_ ~input _ ->
+             Completed
+               { final_history = input.history
+               ; moderator_snapshot = handed_off.moderator
+               ; runtime_requests = []
+               })
+         in
+         L.install actor manager worker;
+         A.start ~actor:later_original actor ~attachment_id:writer.id
+         |> protocol_ok
+         |> ignore;
+         await_idle actor |> ignore;
+         let consume_unavailable () =
+           let observed = ref None in
+           L.invoke
+             ~actor
+             ~manager
+             ~selection:Queue_head
+             ~operation_id:None
+             ~inspect:(fun callback ->
+               observed := Some (A.callback_agent_actor actor ~scope:callback))
+             ()
+           |> Result.ok_or_failwith
+           |> ignore;
+           match Option.value_exn !observed with
+           | Error failure -> [%test_eq: P.Error.code] Permission_denied failure.code
+           | Ok _ ->
+             failwith "later constructor resurrected historical or retired custody"
+         in
+         consume_unavailable ();
+         assert (List.is_empty (Q.entries (L.queue (A.state actor |> protocol_ok))));
+         let claimed =
+           A.claim_schedule actor ~schedule_id:timer.id ~generation:timer.generation
+           |> protocol_ok
+           |> Option.value_exn
+         in
+         let owner =
+           Owner.create
+             ~actor
+             ~initial:(Some (Legacy_schedule.runtime manager worker))
+             ~build:(fun () -> failwith "unexpected failed-constructor delivery rebuild")
+         in
+         Exn.protect
+           ~finally:(fun () -> Owner.close_and_wait owner)
+           ~f:(fun () ->
+             Owner.deliver_schedule owner claimed |> protocol_ok;
+             let delivered = A.state actor |> protocol_ok in
+             let entry = List.hd_exn (Q.entries (L.queue delivered)) in
+             (match Q.Entry.producer entry with
+              | Some (Schedule_delivery actual) ->
+                assert (P.Id.Schedule.equal actual.id timer.id)
+              | None
+              | Some
+                  ( Event _
+                  | Invocation _
+                  | Invocation_at_source _
+                  | Job_completion _
+                  | Source_setup _
+                  | Ingress_delivery _ ) -> assert false);
+             consume_unavailable ();
+             let settled = A.state actor |> protocol_ok in
+             assert_same_session_snapshot settled (S.Memory_backend.state backend);
+             assert (List.is_empty (Q.entries (L.queue settled)));
+             assert (Operator_authorization.is_current original);
+             assert (Operator_authorization.is_current later_original))));
+  print_endline
+    "post-effect checkpoint rejected; truthful Failed receipt and timer survive; \
+     restored prefix and exact retired resource stay unavailable after later \
+     construction";
+  [%expect
+    {| post-effect checkpoint rejected; truthful Failed receipt and timer survive; restored prefix and exact retired resource stay unavailable after later construction |}]
+;;
+
+let%expect_test "legacy constructor Tool calls settle only their exact Event-owned rows" =
+  let module L = Legacy_emit in
+  let module A = L.A in
+  let module S = Agent_session in
+  let module P = Agent_protocol in
+  let module I = P.Invocation in
+  let module N = S.Native_tool_invocation in
+  let module C = Chat_response.Tool_capability in
+  let module T = Chat_response.Moderation.Capabilities in
+  List.iter
+    [ `Success; `Claim_reject; `Result_reject; `Expire_after_effect ]
+    ~f:(fun mode ->
+      with_actor_workspace (fun env workspace_instance ->
+        let live = Atomic.make true in
+        let original = L.authentication live in
+        let calls = ref 0 in
+        let native_borrows = ref [] in
+        let registry =
+          native_registry calls ~raises:false ~on_call:(fun () ->
+            let borrowed = N.borrow () |> protocol_ok in
+            let proof = N.borrowed_agent_actor borrowed in
+            let current =
+              match proof with
+              | Ok (Some proof) -> Operator_authorization.is_current proof
+              | Ok None | Error _ -> false
+            in
+            native_borrows
+            := (N.borrowed_invocation borrowed, proof, current) :: !native_borrows;
+            match mode with
+            | `Expire_after_effect -> Atomic.set live false
+            | `Success | `Claim_reject | `Result_reject -> ())
+        in
+        let manager =
+          prepared_legacy_callback_managers
+            ~capability_registry:registry
+            env
+            ~id:"constructor-native-calls"
+            ~source:
+              {|type event = [ `Session_start ]
+                let initial_state = 0
+                let on_event = fun ctx state event ->
+                  let call = fun st ->
+                    Task.bind(Tool.call("read_file", `Object([])), fun result ->
+                      match result with
+                      | `Ok(value) -> Task.pure(st + 1)
+                      | `Error(code) -> Task.fail(code))
+                  in Task.bind(call(state), fun first -> call(first))|}
+            ()
+        in
+        let unrelated =
+          let dispatched = I.dispatch (invocation_fixture ()) |> protocol_ok in
+          I.resolve
+            dispatched
+            ~session_id
+            ~generation:0
+            (Complete (`String "retained unrelated result"))
+          |> protocol_ok
+        in
+        let rejected = ref 0 in
+        Job_fixtures.with_actor
+          ~environment:(env, workspace_instance)
+          ~start:false
+          ~prepare_state:(fun state ->
+            { state with
+              runtime_initialization = Pending { fresh_history = true }
+            ; invocations = [ unrelated ]
+            })
+          ~reject_save:(fun transition ->
+            let selected =
+              List.exists
+                transition.S.Session_transition.state.invocations
+                ~f:(fun invocation ->
+                  match mode, invocation.P.Invocation.status with
+                  | `Claim_reject, Dispatching | `Result_reject, Resolved (Complete _) ->
+                    Option.is_some invocation.parent_event
+                  | _ -> false)
+            in
+            if selected && Int.equal !rejected 0
+            then (
+              incr rejected;
+              true)
+            else false)
+          (fun _env _sw actor _writer backend ->
+             let expected = A.state actor |> protocol_ok in
+             let constructor =
+               A.begin_initialization_authenticated actor ~actor:original ~expected
+               |> protocol_ok
+             in
+             let tools =
+               S.Script_tool_calls.create
+                 ~registry:(fun () -> registry)
+                 ~moderator_names:String.Set.empty
+                 ~now:P.Timestamp.now
+                 ~is_halted:(fun () -> false)
+                 ~requires_active_moderator:(fun _ -> false)
+                 ~authorize:(fun _ _ -> Ok ())
+                 ~prepare_output:(fun _ -> Ok (`String "disclosed"))
+                 ~defer_observation:(fun _ -> Ok ())
+             in
+             let callback = ref None in
+             let foreign_result = ref None in
+             let foreign_executed = ref false in
+             let results = ref [] in
+             let result =
+               L.invoke
+                 ~tools:(tools, registry)
+                 ~on_tool_result:(fun result ->
+                   let label =
+                     match result with
+                     | Ok (T.Tool_ok _) -> "ok"
+                     | Ok (Tool_error code) -> code
+                     | Error message -> "host error: " ^ message
+                   in
+                   results := label :: !results)
+                 ~claim:(A.with_initialization_callback actor ~scope:constructor ~manager)
+                 ~actor
+                 ~manager
+                 ~selection:(Boundary Session_start)
+                 ~operation_id:None
+                 ~inspect:(fun scope ->
+                   let executing = A.Callback_scope.executing scope in
+                   let reference = List.hd_exn (C.references registry) in
+                   let child ~parent =
+                     I.create
+                       ~parent_event:parent
+                       ~observer:executing.context.source
+                       { (invocation_fixture ()).context with
+                         id = P.Id.Invocation.create ()
+                       ; origin = Moderator
+                       ; session_id = executing.context.session_id
+                       ; generation = executing.context.generation
+                       ; input = `Object []
+                       ; parent_invocation = None
+                       ; parent_job = None
+                       ; implementation_revision = reference.implementation_revision
+                       ; capability_fingerprint = C.fingerprint registry
+                       }
+                     |> protocol_ok
+                   in
+                   let execute = A.callback_tool_executor actor ~scope in
+                   callback := Some (scope, execute, child ~parent:executing.context.id);
+                   foreign_result
+                   := Some
+                        (execute
+                           ~invocation:
+                             (child ~parent:(P.Id.Moderator_execution.create ()))
+                           (fun ~dispatched:_ ~capabilities:_ ->
+                              foreign_executed := true;
+                              Ok (Complete `Null))))
+                 ()
+             in
+             (* All result and proof assertions are outside Manager and native
+               exception conversion. No worker completion is inferred from Idle. *)
+             let scope, execute, escaped_child = Option.value_exn !callback in
+             assert (not !foreign_executed);
+             (match Option.value_exn !foreign_result with
+              | Error failure -> [%test_eq: P.Error.code] Conflict failure.code
+              | Ok _ -> failwith "foreign Event acquired constructor Tool ownership");
+             let settled = A.state actor |> protocol_ok in
+             assert_same_session_snapshot settled (S.Memory_backend.state backend);
+             assert (Option.is_none settled.active_operation);
+             assert (List.is_empty (S.Run_state.runs (Option.value_exn settled.run_state)));
+             let event = List.hd_exn settled.moderator_executions in
+             let native, retained =
+               List.partition_tf settled.invocations ~f:(fun invocation ->
+                 Option.equal
+                   P.Id.Moderator_execution.equal
+                   invocation.I.parent_event
+                   (Some event.context.id))
+             in
+             assert (List.equal I.equal retained [ unrelated ]);
+             (match mode with
+              | `Success ->
+                result |> Result.ok_or_failwith |> ignore;
+                [%test_eq: int] 2 !calls;
+                [%test_eq: string list] [ "ok"; "ok" ] (List.rev !results);
+                [%test_eq: int] 0 !rejected;
+                [%test_eq: int] 2 (List.length native);
+                (match event.status with
+                 | Completed _ -> ()
+                 | Running | Failed _ | Interrupted _ -> assert false);
+                List.iter native ~f:(fun invocation ->
+                  match invocation.I.status with
+                  | Resolved (Complete (`String "disclosed")) -> ()
+                  | _ -> raise_s [%sexp (invocation : I.t)])
+              | `Claim_reject ->
+                assert (Result.is_error result);
+                [%test_eq: int] 0 !calls;
+                [%test_eq: int] 1 !rejected;
+                [%test_eq: string list] [ "invocation.admission_failed" ] !results;
+                assert (List.is_empty native)
+              | `Result_reject ->
+                assert (Result.is_error result);
+                [%test_eq: int] 1 !calls;
+                [%test_eq: int] 1 !rejected;
+                [%test_eq: string list] [ "invocation.admission_failed" ] !results;
+                (match (List.hd_exn native).I.status with
+                 | Resolved (Cancelled "event exited before recording its native outcome")
+                   -> ()
+                 | _ -> raise_s [%sexp (native : I.t list)])
+              | `Expire_after_effect ->
+                assert (Result.is_error result);
+                [%test_eq: int] 1 !calls;
+                [%test_eq: int] 0 !rejected;
+                [%test_eq: string list]
+                  [ "ok"; "invocation.admission_failed" ]
+                  (List.rev !results);
+                (match (List.hd_exn native).I.status with
+                 | Resolved (Complete (`String "disclosed")) -> ()
+                 | _ -> raise_s [%sexp (native : I.t list)]));
+             (match mode, event.status with
+              | `Success, Completed _ -> ()
+              | (`Claim_reject | `Result_reject | `Expire_after_effect), Failed failure ->
+                [%test_eq: string] "event.handler_failed" failure.code
+              | _ -> raise_s [%sexp (event : P.Moderator_execution.t)]);
+             List.iter native ~f:(fun invocation ->
+               assert (
+                 Option.equal
+                   P.Id.Moderator_execution.equal
+                   invocation.I.parent_event
+                   (Some event.context.id));
+               assert (Option.is_none invocation.context.parent_invocation));
+             [%test_eq: int] !calls (List.length !native_borrows);
+             List.iter !native_borrows ~f:(fun (dispatched, proof, was_current) ->
+               assert (
+                 Option.equal
+                   P.Id.Moderator_execution.equal
+                   dispatched.I.parent_event
+                   (Some event.context.id));
+               match proof, was_current with
+               | Ok (Some proof), true ->
+                 assert (
+                   P.Id.Principal.equal
+                     (Operator_authorization.principal proof).id
+                     (Operator_authorization.principal original).id);
+                 assert (not (Operator_authorization.is_current proof))
+               | Error failure, _ -> raise_s [%sexp (failure : P.Error.t)]
+               | Ok _, _ -> failwith "native effect did not receive its current original");
+             assert (Result.is_error (A.check_callback_current actor scope));
+             let escaped_ran = ref false in
+             assert (
+               Result.is_error
+                 (execute ~invocation:escaped_child (fun ~dispatched:_ ~capabilities:_ ->
+                    escaped_ran := true;
+                    Ok (Complete `Null))));
+             assert (not !escaped_ran);
+             assert_same_session_snapshot settled (A.state actor |> protocol_ok);
+             assert_same_session_snapshot settled (S.Memory_backend.state backend);
+             (match mode with
+              | `Expire_after_effect ->
+                assert (not (Operator_authorization.is_current original))
+              | `Success | `Claim_reject | `Result_reject ->
+                assert (Operator_authorization.is_current original));
+             A.end_initialization actor ~scope:constructor |> protocol_ok)));
+  print_endline
+    "same Event two-call ACKs; foreign and escaped closures deny; claim rejection has no \
+     effect; result rejection settles honestly; expired original retains completed \
+     outcome";
+  [%expect
+    {| same Event two-call ACKs; foreign and escaped closures deny; claim rejection has no effect; result rejection settles honestly; expired original retains completed outcome |}]
+;;
+
+let%expect_test
+    "constructor permission ACKs preserve exact owners and negative settlement"
+  =
+  let module L = Legacy_emit in
+  let module A = L.A in
+  let module S = Agent_session in
+  let module P = Agent_protocol in
+  let module C = Chat_response.Tool_capability in
+  let module Capacity = Agent_server.Job_capacity in
+  List.iter
+    [ `Ack_retry
+    ; `Revoked_preparation
+    ; `Stopped
+    ; `Unrelated P.Session.Cancel
+    ; `Unrelated P.Session.Graceful
+    ]
+    ~f:(fun mode ->
+      with_actor_workspace (fun env workspace_instance ->
+        let live = Atomic.make true in
+        let original = L.authentication live in
+        let effects = ref 0 in
+        let effect_proof = ref None in
+        let registry =
+          native_registry effects ~raises:false ~on_call:(fun () ->
+            let borrowed = S.Native_tool_invocation.borrow () |> protocol_ok in
+            let proof =
+              S.Native_tool_invocation.borrowed_agent_actor borrowed
+              |> protocol_ok
+              |> Option.value_exn
+            in
+            effect_proof := Some (proof, Operator_authorization.is_current proof))
+        in
+        let manager =
+          prepared_legacy_callback_managers
+            ~capability_registry:registry
+            env
+            ~id:"constructor-permission"
+            ~source:
+              {|type event = [ `Session_resume ]
+            let initial_state = 0
+            let on_event ctx state event =
+              Task.bind(Tool.call("read_file", `Object([])), fun result ->
+                match result with
+                | `Ok(value) -> Task.pure(state + 1)
+                | `Error(message) -> Task.fail(message))|}
+            ()
+        in
+        let reject_open = ref false in
+        let reject_resolution = ref false in
+        let reject_stop = ref false in
+        let stop_rejections = ref 0 in
+        let open_rejections = ref 0 in
+        let resolution_rejections = ref 0 in
+        Job_fixtures.with_actor
+          ~environment:(env, workspace_instance)
+          ~start:
+            (match mode with
+             | `Stopped -> false
+             | `Ack_retry | `Unrelated _ | `Revoked_preparation -> true)
+          ~reject_save:(fun transition ->
+            let permissions = transition.S.Session_transition.state.permissions in
+            if
+              !reject_open
+              && List.exists permissions ~f:(fun permission ->
+                P.Permission.equal_state permission.state Pending)
+            then (
+              reject_open := false;
+              incr open_rejections;
+              true)
+            else if
+              !reject_resolution
+              && List.exists permissions ~f:(fun permission ->
+                P.Permission.equal_state permission.state Approved)
+            then (
+              reject_resolution := false;
+              incr resolution_rejections;
+              true)
+            else if
+              !reject_stop
+              && P.Session.equal_desired_state transition.state.lifecycle.desired Stopped
+            then (
+              reject_stop := false;
+              incr stop_rejections;
+              true)
+            else false)
+          (fun _env _sw actor writer backend ->
+             let capacity =
+               Capacity.create
+                 ~limits:
+                   { daemon_total = 1
+                   ; per_principal = 1
+                   ; per_prompt = 1
+                   ; per_workspace = 1
+                   ; per_session = 1
+                   ; per_kind = 1
+                   ; max_nested_depth = 1
+                   }
+             in
+             let staged = ref None in
+             let published = ref 0 in
+             let capacity_aborted = ref false in
+             let retained_staging () =
+               let _job, _owner, quota = Option.value_exn !staged in
+               assert (Option.is_none (Capacity.try_acquire capacity quota |> protocol_ok));
+               assert (not !capacity_aborted);
+               [%test_eq: int] !published 0;
+               assert (List.is_empty (A.state actor |> protocol_ok).jobs)
+             in
+             let expected = A.state actor |> protocol_ok in
+             let preparation =
+               match mode with
+               | `Revoked_preparation ->
+                 let request =
+                   P.Run_start.create
+                     ~session_id
+                     ~attachment_id:writer.id
+                     ~generation:expected.identity.generation
+                     ~expected_revision:expected.counters.revision
+                     ~mode:Single_turn
+                     ~input:
+                       (User_submission
+                          { kind = Plain_text
+                          ; text = "prepare constructor permission"
+                          ; attachments = []
+                          })
+                     ~key:
+                       (P.Idempotency_key.of_string "constructor-permission-expiry"
+                        |> protocol_ok)
+                   |> protocol_ok
+                 in
+                 let request_sha256 =
+                   P.Run_start.to_json request
+                   |> Jsonaf.to_string
+                   |> Digestif.SHA256.digest_string
+                   |> Digestif.SHA256.to_hex
+                 in
+                 (match
+                    A.begin_run_preparation_authenticated
+                      actor
+                      ~actor:original
+                      ~authorize:(fun _ -> Ok ())
+                      ~request
+                      ~request_sha256
+                    |> protocol_ok
+                  with
+                  | S.Run_preparation.Decision.Prepare preparation -> Some preparation
+                  | Retained _ -> failwith "fresh permission preparation replayed")
+               | `Ack_retry | `Unrelated _ | `Stopped -> None
+             in
+             let constructor =
+               match preparation with
+               | Some preparation ->
+                 A.begin_run_initialization
+                   ~purpose:Runtime_construction
+                   actor
+                   ~preparation
+                   ~expected
+                 |> protocol_ok
+               | None ->
+                 A.begin_initialization_authenticated
+                   ~purpose:Runtime_construction
+                   actor
+                   ~actor:original
+                   ~expected
+                 |> protocol_ok
+             in
+             Fun.protect
+               ~finally:(fun () ->
+                 Eio.Cancel.protect (fun () ->
+                   A.end_initialization actor ~scope:constructor |> protocol_ok;
+                   Option.iter preparation ~f:(fun preparation ->
+                     A.end_run_preparation actor preparation |> protocol_ok)))
+               (fun () ->
+                  Eio.Switch.run (fun sw ->
+                    let callback = ref None in
+                    let authorization_returned = ref false in
+                    let authorization_denied = ref false in
+                    let open_checked = ref false in
+                    let resolution_checked = ref false in
+                    let unchanged before =
+                      assert_same_session_snapshot before (A.state actor |> protocol_ok);
+                      assert_same_session_snapshot before (S.Memory_backend.state backend);
+                      assert (
+                        List.is_empty
+                          (S.Memory_backend.events_after
+                             backend
+                             before.counters.event_sequence
+                           |> protocol_ok))
+                    in
+                    let injected_error = function
+                      | Error { P.Error.code = Internal_error; message; _ } ->
+                        [%test_eq: string] message "injected job transition failure"
+                      | Error error ->
+                        raise_s
+                          [%sexp "unexpected permission save error", (error : P.Error.t)]
+                      | Ok _ -> failwith "rejected permission save succeeded"
+                    in
+                    let tools =
+                      S.Script_tool_calls.create
+                        ~registry:(fun () -> registry)
+                        ~moderator_names:String.Set.empty
+                        ~now:P.Timestamp.now
+                        ~is_halted:(fun () -> false)
+                        ~requires_active_moderator:(fun _ -> false)
+                        ~authorize:(fun invocation binding ->
+                          (match mode with
+                           | `Unrelated P.Session.Graceful ->
+                             let owner =
+                               P.Job.Invocation invocation.P.Invocation.context.id
+                             in
+                             let request =
+                               Background_execution_tests.capture_tool
+                                 registry
+                                 Chat_response.One_off_request.default_policy
+                             in
+                             let job =
+                               A.prepare_background_job_launch actor ~owner request
+                               |> protocol_ok
+                             in
+                             let quota = Background_admission_tests.key actor job in
+                             let reservation =
+                               Background_admission_tests.reserve capacity quota job
+                             in
+                             A.stage_background_job
+                               actor
+                               ~job
+                               ~capacity:
+                                 { publish =
+                                     (fun () ->
+                                       Int.incr published;
+                                       Capacity.publish reservation)
+                                 ; abort =
+                                     (fun () ->
+                                       capacity_aborted := true;
+                                       Capacity.abort reservation)
+                                 }
+                             |> protocol_ok;
+                             staged := Some (job, owner, quota)
+                           | `Ack_retry | `Revoked_preparation | `Stopped
+                           | `Unrelated P.Session.Cancel -> ());
+                          let permission =
+                            { (Job_fixtures.permission invocation) with
+                              session_id = invocation.context.session_id
+                            ; generation = invocation.context.generation
+                            ; call_id = P.Id.Invocation.to_string invocation.context.id
+                            ; runtime_identity = Some (C.permission_fingerprint binding)
+                            ; choices = [ Approve_session; Deny ]
+                            }
+                          in
+                          let request () =
+                            A.request_permission
+                              actor
+                              ~permission
+                              ~timeout_seconds:None
+                              ~fallback:Deny
+                          in
+                          (match mode with
+                           | `Ack_retry ->
+                             let before = A.state actor |> protocol_ok in
+                             reject_open := true;
+                             request () |> injected_error;
+                             unchanged before;
+                             A.check_callback_current actor (Option.value_exn !callback)
+                             |> protocol_ok;
+                             [%test_eq: int] !effects 0;
+                             open_checked := true
+                           | `Unrelated _ | `Revoked_preparation | `Stopped -> ());
+                          let result = request () in
+                          let result =
+                            match mode, result with
+                            | `Stopped, Error { code = Conflict; message; _ } ->
+                              [%test_eq: string]
+                                message
+                                "permission requires a live invocation owner";
+                              authorization_denied := true;
+                              Error
+                                (P.Error.create
+                                   Permission_denied
+                                   ~message:"stopped constructor denied"
+                                   ~retryable:false
+                                   ())
+                            | `Stopped, Error error ->
+                              raise_s
+                                [%sexp "unexpected stopped Ask", (error : P.Error.t)]
+                            | `Stopped, Ok _ ->
+                              failwith "Stopped constructor opened a permission"
+                            | ( (`Ack_retry | `Unrelated _ | `Revoked_preparation)
+                              , Ok resolution ) ->
+                              (match resolution.P.Permission.choice with
+                               | Approve_session -> Ok ()
+                               | Deny ->
+                                 authorization_denied := true;
+                                 Error
+                                   (P.Error.create
+                                      Permission_denied
+                                      ~message:"actual constructor permission denied"
+                                      ~retryable:false
+                                      ())
+                               | Approve_once | Approve_prefix | Durable_exact ->
+                                 failwith "unexpected constructor approval choice")
+                            | ( (`Ack_retry | `Unrelated _ | `Revoked_preparation)
+                              , Error error ) -> Error error
+                          in
+                          authorization_returned := true;
+                          result)
+                        ~prepare_output:(fun _ -> Ok (`String "approved native result"))
+                        ~defer_observation:(fun _ -> Ok ())
+                    in
+                    let stopped_callback = ref false in
+                    let stop_requested = ref false in
+                    let run () =
+                      try
+                        L.invoke
+                          ~tools:(tools, registry)
+                          ~claim:
+                            (A.with_initialization_callback
+                               actor
+                               ~scope:constructor
+                               ~manager)
+                          ~actor
+                          ~manager
+                          ~selection:(Boundary Session_resume)
+                          ~operation_id:None
+                          ~inspect:(fun scope ->
+                            let proof =
+                              A.callback_agent_actor actor ~scope
+                              |> protocol_ok
+                              |> Option.value_exn
+                            in
+                            assert (Operator_authorization.is_current proof);
+                            callback := Some scope)
+                          ()
+                      with
+                      | Eio.Cancel.Cancelled _ when !stop_requested ->
+                        stopped_callback := true;
+                        Error "constructor cancelled by its actual Stop"
+                    in
+                    let loading = Eio.Fiber.fork_promise ~sw run in
+                    let metadata = ref None in
+                    (match mode with
+                     | `Stopped -> ()
+                     | `Ack_retry | `Unrelated _ | `Revoked_preparation ->
+                       let rec await_permission () =
+                         let state = A.state actor |> protocol_ok in
+                         match
+                           List.filter state.permissions ~f:(fun permission ->
+                             P.Permission.equal_state permission.state Pending)
+                         with
+                         | [ permission ] -> permission
+                         | [] ->
+                           (match Eio.Promise.peek loading with
+                            | None ->
+                              Eio.Fiber.yield ();
+                              await_permission ()
+                            | Some _ ->
+                              (match Eio.Promise.await_exn loading with
+                               | Ok _ ->
+                                 failwith
+                                   "constructor returned without its permission wait"
+                               | Error message ->
+                                 failwith
+                                   ("constructor exited before its permission wait: "
+                                    ^ message)))
+                         | permissions ->
+                           raise_s [%sexp (permissions : P.Permission.t list)]
+                       in
+                       let permission = await_permission () in
+                       let respond choice =
+                         A.respond_permission
+                           actor
+                           ~attachment_id:writer.id
+                           ~principal_id:(Some principal_id)
+                           ~permission_id:permission.id
+                           ~permission_generation:permission.generation
+                           ~choice
+                           ~reason:None
+                       in
+                       (match mode with
+                        | `Ack_retry ->
+                          let before = A.state actor |> protocol_ok in
+                          reject_resolution := true;
+                          respond Approve_session |> injected_error;
+                          unchanged before;
+                          A.check_callback_current actor (Option.value_exn !callback)
+                          |> protocol_ok;
+                          [%test_eq: int] !effects 0;
+                          resolution_checked := true;
+                          respond Approve_session |> protocol_ok |> ignore
+                        | `Revoked_preparation ->
+                          assert (Option.is_some preparation);
+                          Atomic.set live false;
+                          assert (not (Operator_authorization.is_current original));
+                          let denied = respond Deny |> protocol_ok in
+                          assert (P.Permission.equal_state denied.state Denied)
+                        | `Unrelated stop_mode ->
+                          (match stop_mode with
+                           | Graceful ->
+                             let job, owner, _quota = Option.value_exn !staged in
+                             assert (
+                               A.has_staged_background_job actor ~owner ~id:job.P.Job.id
+                               |> protocol_ok);
+                             retained_staging ()
+                           | Cancel -> ());
+                          let before = A.state actor |> protocol_ok in
+                          let patch =
+                            P.Session_metadata.Patch.create
+                              ~name:(Set "independent owner edit")
+                              ~set_labels:[]
+                              ~remove_labels:[]
+                            |> protocol_ok
+                          in
+                          A.update_metadata
+                            actor
+                            ~attachment_id:writer.id
+                            ~expected_metadata_revision:before.identity.metadata_revision
+                            ~patch
+                            ()
+                          |> protocol_ok
+                          |> ignore;
+                          let edited = A.state actor |> protocol_ok in
+                          metadata := Some edited.identity;
+                          (match respond Approve_session with
+                           | Error { code = Conflict; message; _ } ->
+                             [%test_eq: string]
+                               message
+                               "initialization basis changed while resources were \
+                                prepared"
+                           | Error error -> raise_s [%sexp (error : P.Error.t)]
+                           | Ok _ ->
+                             failwith
+                               "permission ACK adopted unrelated constructor metadata");
+                          unchanged edited;
+                          (match stop_mode with
+                           | Graceful -> retained_staging ()
+                           | Cancel -> ());
+                          reject_stop := true;
+                          A.stop actor ~attachment_id:writer.id ~mode:stop_mode
+                          |> injected_error;
+                          unchanged edited;
+                          [%test_eq: int] !stop_rejections 1;
+                          (match stop_mode with
+                           | Graceful -> retained_staging ()
+                           | Cancel -> ());
+                          assert (Option.is_none (Eio.Promise.peek loading));
+                          [%test_eq: int] !effects 0;
+                          stop_requested := true;
+                          A.stop actor ~attachment_id:writer.id ~mode:stop_mode
+                          |> protocol_ok
+                          |> ignore
+                        | `Stopped -> assert false));
+                    let result = Eio.Promise.await_exn loading in
+                    (match mode with
+                     | `Unrelated P.Session.Graceful ->
+                       let _job, _owner, quota = Option.value_exn !staged in
+                       assert !capacity_aborted;
+                       [%test_eq: int] !published 0;
+                       assert (List.is_empty (A.state actor |> protocol_ok).jobs);
+                       let lease =
+                         Capacity.try_acquire capacity quota
+                         |> protocol_ok
+                         |> Option.value_exn
+                       in
+                       Capacity.release lease
+                     | `Ack_retry | `Revoked_preparation | `Stopped
+                     | `Unrelated P.Session.Cancel -> ());
+                    (match mode with
+                     | `Unrelated _ ->
+                       assert (!authorization_returned || !stopped_callback)
+                     | `Ack_retry | `Revoked_preparation | `Stopped ->
+                       assert !authorization_returned);
+                    let settled = A.state actor |> protocol_ok in
+                    assert_same_session_snapshot settled (S.Memory_backend.state backend);
+                    assert (Option.is_none settled.active_operation);
+                    let native =
+                      match settled.invocations with
+                      | [ native ] -> native
+                      | native -> raise_s [%sexp (native : P.Invocation.t list)]
+                    in
+                    (match mode with
+                     | `Ack_retry ->
+                       result |> Result.ok_or_failwith |> ignore;
+                       assert (!open_checked && !resolution_checked);
+                       [%test_eq: int] !open_rejections 1;
+                       [%test_eq: int] !resolution_rejections 1;
+                       [%test_eq: int] !effects 1;
+                       let proof, was_current = Option.value_exn !effect_proof in
+                       assert was_current;
+                       assert (not (Operator_authorization.is_current proof));
+                       (match native.status with
+                        | Resolved (Complete (`String "approved native result")) -> ()
+                        | _ -> raise_s [%sexp (native : P.Invocation.t)]);
+                       (match (List.hd_exn settled.moderator_executions).status with
+                        | Completed _ -> ()
+                        | _ -> failwith "permission retries failed constructor completion");
+                       [%test_eq: int] (List.length settled.grants) 1
+                     | `Revoked_preparation ->
+                       assert (Result.is_error result);
+                       assert !authorization_denied;
+                       [%test_eq: int] !effects 0;
+                       assert (List.is_empty settled.grants);
+                       assert (
+                         P.Permission.equal_state
+                           (List.hd_exn settled.permissions).state
+                           Denied);
+                       (match native.status with
+                        | Resolved (Fail failure) ->
+                          [%test_eq: string] failure.code "invocation.permission_denied"
+                        | _ ->
+                          raise_s
+                            [%sexp
+                              "expired Run preparation did not settle native denial"
+                            , (native : P.Invocation.t)]);
+                       (match (List.hd_exn settled.moderator_executions).status with
+                        | Failed _ | Interrupted _ -> ()
+                        | Running | Completed _ ->
+                          failwith "expired constructor did not retain truthful failure")
+                     | `Stopped ->
+                       assert (Result.is_error result);
+                       assert !authorization_denied;
+                       [%test_eq: int] !effects 0;
+                       assert (List.is_empty settled.permissions);
+                       assert (List.is_empty settled.grants);
+                       (match native.status with
+                        | Resolved (Fail failure) ->
+                          [%test_eq: string] failure.code "invocation.permission_denied"
+                        | _ -> raise_s [%sexp (native : P.Invocation.t)])
+                     | `Unrelated _ ->
+                       assert (Result.is_error result);
+                       [%test_eq: int] !effects 0;
+                       [%test_eq: int] !stop_rejections 1;
+                       assert (List.is_empty settled.grants);
+                       (match (List.hd_exn settled.moderator_executions).status with
+                        | Interrupted _ -> ()
+                        | _ -> failwith "Stop did not retain interrupted constructor");
+                       (match native.status with
+                        | Resolved (Fail _ | Cancelled _) -> ()
+                        | Admitted | Dispatching | Published _
+                        | Resolved (Complete _ | Pending _) ->
+                          raise_s
+                            [%sexp
+                              "cancelled stale constructor left a native row active"
+                            , (native : P.Invocation.t)]);
+                       [%test_eq: string option]
+                         settled.identity.display_name
+                         (Option.value_exn !metadata).display_name;
+                       [%test_eq: int64]
+                         settled.identity.metadata_revision
+                         (Option.value_exn !metadata).metadata_revision;
+                       assert (
+                         P.Permission.equal_state
+                           (List.hd_exn settled.permissions).state
+                           Cancelled));
+                    assert (
+                      Bool.equal
+                        (Operator_authorization.is_current original)
+                        (match mode with
+                         | `Revoked_preparation -> false
+                         | `Ack_retry | `Unrelated _ | `Stopped -> true)))))));
+  print_endline
+    "permission ACK retries preserve owner; unrelated basis and Stopped Ask reject; \
+     expired Run preparation settles Deny without native effect; both Stops ACK \
+     interruption";
+  [%expect
+    {| permission ACK retries preserve owner; unrelated basis and Stopped Ask reject; expired Run preparation settles Deny without native effect; both Stops ACK interruption |}]
+;;
+
+let%expect_test "legacy callback adapters preserve typed failures and exceptional control"
+  =
+  let module A = Agent_session.Session_actor in
+  let module S = Agent_session in
+  let module P = Agent_protocol in
+  let module R = S.Legacy_callback_runtime in
+  List.iter
+    [ `Claim; `Authorize; `Commit; `Checkpoint; `Script; `Unexpected; `Cancel ]
+    ~f:(fun mode ->
+      with_actor_workspace (fun env workspace_instance ->
+        Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
+          let calls = ref 0 in
+          let registry = native_registry calls ~raises:false in
+          let manager =
+            prepared_legacy_callback_managers
+              ~capability_registry:registry
+              env
+              ~id:"typed-host-failure"
+              ~source:
+                (match mode with
+                 | `Script ->
+                   "let initial_state = 0\n\
+                    let on_event ctx state event = Task.fail(\"script failure\")"
+                 | _ ->
+                   "let initial_state = 0\n\
+                    let on_event ctx state event = Task.pure(state + 1)")
+              ()
+          in
+          let rejection =
+            P.Error.create
+              Permission_denied
+              ~message:"selected host adapter rejection"
+              ~retryable:false
+              ~data:(`Object [ "retained", `Array [ `String "host"; `Number "537" ] ])
+              ()
+          in
+          let unexpected = Failure "unexpected callback host exception" in
+          Job_fixtures.with_actor
+            ~environment:(env, workspace_instance)
+            ~start:false
+            ~prepare_state:(fun state ->
+              { state with runtime_initialization = Pending { fresh_history = true } })
+            (fun _env _sw actor _writer backend ->
+               let expected = A.state actor |> protocol_ok in
+               let original = Legacy_emit.authentication (Atomic.make true) in
+               let constructor =
+                 A.begin_initialization_authenticated actor ~actor:original ~expected
+                 |> protocol_ok
+               in
+               let tools =
+                 S.Script_tool_calls.create
+                   ~registry:(fun () -> registry)
+                   ~moderator_names:String.Set.empty
+                   ~now:P.Timestamp.now
+                   ~is_halted:(fun () -> false)
+                   ~requires_active_moderator:(fun _ -> false)
+                   ~authorize:(fun _ _ -> Ok ())
+                   ~prepare_output:(fun _ -> failwith "unexpected native output")
+                   ~defer_observation:(fun _ -> Ok ())
+               in
+               let receipt = ref None in
+               let pending_parent = ref None in
+               let producer_result = ref None in
+               let entered = ref false in
+               let committed = ref false in
+               let checkpointed = ref false in
+               let result =
+                 try
+                   Ok
+                     (Eio.Cancel.sub (fun cancellation ->
+                        let claim ~manager ~callback f =
+                          match mode with
+                          | `Claim -> Error rejection
+                          | `Unexpected -> raise unexpected
+                          | _ ->
+                            A.with_initialization_callback
+                              actor
+                              ~scope:constructor
+                              ~manager
+                              ~callback
+                              ~capture_cleanup:(fun actual -> receipt := Some actual)
+                              (fun ~scope ~commit ->
+                                 entered := true;
+                                 (match mode with
+                                  | `Authorize ->
+                                    pending_parent
+                                    := Some
+                                         (A.Initialization_scope.callback_cleanup
+                                            constructor
+                                          |> S.Callback_cleanup.Initialization.snapshot
+                                          |> protocol_ok)
+                                  | `Claim
+                                  | `Commit
+                                  | `Checkpoint
+                                  | `Script
+                                  | `Unexpected
+                                  | `Cancel -> ());
+                                 let check_current () =
+                                   let open Result.Let_syntax in
+                                   let%bind () = A.check_callback_current actor scope in
+                                   match mode with
+                                   | `Authorize -> Error rejection
+                                   | `Cancel ->
+                                     Eio.Cancel.cancel cancellation Exit;
+                                     Eio.Fiber.check ();
+                                     assert false
+                                   | _ -> Ok ()
+                                 in
+                                 let schedules =
+                                   A.callback_schedule_services actor ~scope
+                                 in
+                                 let services : R.Services.t =
+                                   { jobs =
+                                       { spawn_model =
+                                           (fun ~recipe:_ ~payload:_ -> assert false)
+                                       ; call_model =
+                                           (fun ~recipe:_ ~payload:_ ~execute:_ ->
+                                             assert false)
+                                       }
+                                   ; schedules =
+                                       { after_ms = schedules.after_ms
+                                       ; cancel = schedules.cancel
+                                       }
+                                   ; execute = A.callback_tool_executor actor ~scope
+                                   ; executing = A.Callback_scope.executing scope
+                                   ; policy_caller =
+                                       (fun () -> A.callback_policy_caller actor ~scope)
+                                   ; check_current
+                                   ; is_halted = (fun () -> false)
+                                   ; checkpoint =
+                                       (fun () ->
+                                         checkpointed := true;
+                                         match mode with
+                                         | `Checkpoint -> Error rejection
+                                         | _ ->
+                                           (match
+                                              A.Callback_scope.committed_checkpoint scope
+                                            with
+                                            | Some value -> Ok value
+                                            | None -> failwith "actual Event did not ACK"))
+                                   }
+                                 in
+                                 let produced =
+                                   f
+                                     ~services
+                                     ~commit:(fun ~snapshot ~requests ~notifications ->
+                                       match mode with
+                                       | `Commit -> Error rejection
+                                       | _ ->
+                                         let open Result.Let_syntax in
+                                         let%map () =
+                                           commit ~snapshot ~requests ~notifications
+                                         in
+                                         committed := true)
+                                 in
+                                 producer_result := Some produced;
+                                 produced)
+                        in
+                        R.run
+                          manager
+                          ~claim
+                          ~model_recipes:(fun _ -> Map.empty (module String))
+                          ~script_tools:tools
+                          ~selected:registry
+                          ~selection:(Boundary Session_start)
+                          ~session_id:"fixture"
+                          ~history:[]
+                          ~available_tools:[]
+                          ~session_meta:`Null
+                          ~now_ms:0))
+                 with
+                 | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())
+               in
+               (* These assertions are outside every Manager/Actor exception adapter. *)
+               (match mode, result with
+                | (`Claim | `Authorize | `Commit | `Checkpoint), Ok (Error actual) ->
+                  assert (
+                    Jsonaf.exactly_equal
+                      (P.Error.to_json rejection)
+                      (P.Error.to_json actual))
+                | `Script, Ok (Error actual) ->
+                  [%test_eq: P.Error.code] Invalid_state actual.code;
+                  assert (not actual.retryable);
+                  assert (
+                    not
+                      (Jsonaf.exactly_equal
+                         (P.Error.to_json rejection)
+                         (P.Error.to_json actual)))
+                | `Unexpected, Error (actual, _) -> assert (phys_equal actual unexpected)
+                | `Cancel, Error (Eio.Cancel.Cancelled _, _) -> ()
+                | _, Error (exn, backtrace) ->
+                  Exn.raise_with_original_backtrace exn backtrace
+                | _ -> failwith "legacy adapter lost its selected failure");
+               assert (
+                 Bool.equal
+                   !entered
+                   (match mode with
+                    | `Claim | `Unexpected -> false
+                    | _ -> true));
+               assert (
+                 Bool.equal
+                   !committed
+                   (match mode with
+                    | `Checkpoint -> true
+                    | _ -> false));
+               assert (
+                 Bool.equal
+                   !checkpointed
+                   (match mode with
+                    | `Checkpoint -> true
+                    | _ -> false));
+               [%test_eq: int] 0 !calls;
+               let settled = A.state actor |> protocol_ok in
+               assert_same_session_snapshot settled (S.Memory_backend.state backend);
+               assert (List.is_empty settled.invocations);
+               (match mode, settled.moderator_executions with
+                | (`Claim | `Unexpected), [] -> ()
+                | `Checkpoint, [ { status = Completed _; _ } ] -> ()
+                | `Cancel, [ { status = Interrupted _; _ } ] -> ()
+                | (`Authorize | `Commit | `Script), [ { status = Failed _; _ } ] -> ()
+                | _ ->
+                  raise_s
+                    [%sexp (settled.moderator_executions : P.Moderator_execution.t list)]);
+               A.end_initialization actor ~scope:constructor |> protocol_ok;
+               (match mode with
+                | `Authorize ->
+                  let module F = S.Callback_cleanup in
+                  let module C = F.Completion_snapshot in
+                  let receipt = Option.value_exn !receipt in
+                  (* The Manager adapter wraps its script-facing error inside
+                     the Actor producer phase, then restores the original typed
+                     host rejection outside that bracket. Observe each actual
+                     boundary instead of inventing identity between them. *)
+                  let phase_error =
+                    match !producer_result with
+                    | Some (Error actual) -> actual
+                    | None | Some (Ok ()) ->
+                      failwith "actual producer phase did not reject"
+                  in
+                  [%test_eq: P.Error.code] Invalid_state phase_error.code;
+                  let check_primary snapshot =
+                    match C.producer_exit snapshot with
+                    | Returned (Error (Protocol actual)) ->
+                      assert (phys_equal actual phase_error)
+                    | Not_returned | Returned (Ok ()) | Returned (Error (Raised _)) ->
+                      failwith "handled producer error was lost or classified as cleanup"
+                  in
+                  let completed = F.Completion.snapshot receipt |> protocol_ok in
+                  check_primary completed;
+                  (match C.finish_call completed, C.release completed with
+                   | Completed (Ok ()), Completed (Ok ()) -> ()
+                   | _ ->
+                     failwith "handled producer failure lacks actual positive cleanup");
+                  assert (List.is_empty (C.failures completed));
+                  let parent =
+                    A.Initialization_scope.callback_cleanup constructor
+                    |> F.Initialization.snapshot
+                    |> protocol_ok
+                  in
+                  assert (F.Cleanup_snapshot.registration_closed parent);
+                  assert (not (F.Cleanup_snapshot.pending parent));
+                  assert (List.is_empty (F.Cleanup_snapshot.failures parent));
+                  assert (List.is_empty (F.Cleanup_snapshot.completions parent));
+                  let pending = Option.value_exn !pending_parent in
+                  assert (F.Cleanup_snapshot.pending pending);
+                  [%test_eq: int] 1 (List.length (F.Cleanup_snapshot.completions pending));
+                  check_primary (F.Completion.snapshot receipt |> protocol_ok)
+                | `Claim | `Commit | `Checkpoint | `Script | `Unexpected | `Cancel -> ());
+               assert (Operator_authorization.is_current original)))));
+  print_endline
+    "claim/authorize/commit/checkpoint preserve whole host errors; script failure stays \
+     Invalid_state; unexpected exception and cancellation escape; no native effects";
+  [%expect
+    {| claim/authorize/commit/checkpoint preserve whole host errors; script failure stays Invalid_state; unexpected exception and cancellation escape; no native effects |}]
+;;
+
+let%expect_test "modern completed emits retain exact originals through queue claim ACK" =
+  let module S = Agent_session in
+  let module A = S.Session_actor in
+  let module P = Agent_protocol in
+  let module E = P.Moderator_execution in
+  let module I = P.Invocation in
+  let module N = S.Native_tool_invocation in
+  let module M = Chat_response.Moderator_manager in
+  let module Q = S.Moderator_queue in
+  List.iter
+    [ `Current_none; `Current_original; `Expired_original; `Historical_absent ]
+    ~f:(fun mode ->
+      with_actor_workspace (fun env workspace_instance ->
+        let live = Atomic.make true in
+        let original = Agent_authority_tests.authentication live in
+        let ambient_live = Atomic.make true in
+        let ambient_principal =
+          P.Principal.create
+            ~id:second_principal_id
+            ~authentication_kind:"local"
+            ~scopes:(P.Scope.Set.of_list [ Send_messages ])
+            ~attributes:[]
+          |> protocol_ok
+        in
+        let ambient =
+          Operator_authorization.guarded
+            ~principal:ambient_principal
+            ~is_current:(fun () -> Atomic.get ambient_live)
+        in
+        assert (
+          not
+            (P.Id.Principal.equal
+               (Operator_authorization.principal original).id
+               ambient_principal.id));
+        let calls = ref 0 in
+        let on_native = ref (fun () -> ()) in
+        let registry =
+          native_registry calls ~raises:false ~on_call:(fun () ->
+            !on_native ();
+            match mode with
+            | `Expired_original -> Atomic.set live false
+            | `Current_none | `Current_original | `Historical_absent -> ())
+        in
+        let finish =
+          match mode with
+          | `Expired_original ->
+            {|Task.bind(Tool.call("read_file", `Object([])), fun ignored -> Task.pure(state))|}
+          | `Current_none | `Current_original | `Historical_absent -> "Task.pure(state)"
+        in
+        let events =
+          {| | `Turn_start ->
+                    Task.bind(Runtime.emit(`String("equal")), fun ignored ->
+                    Task.bind(Runtime.emit(`String("equal")), fun ignored -> |}
+          ^ finish
+          ^ {|))
+                  | `Internal_event(payload) ->
+                    Task.bind(Tool.call("read_file", `Object([])), fun ignored -> Task.pure(state))
+                  | `Tool_observed(p) ->
+                    Task.bind(Runtime.emit(`String("observed")), fun ignored -> Task.pure(state))
+                  | _ -> Task.pure(state) |}
+        in
+        let make_manager ?snapshot () =
+          handoff_definition
+            env
+            ?snapshot
+            ~capability_registry:registry
+            ~declare_tool:false
+            ~events
+        in
+        let manager, _, definition = make_manager () in
+        let observer = M.invocation_observer manager |> Option.value_exn in
+        let initial_snapshot = M.identity_snapshot manager |> Result.ok_or_failwith in
+        let initial_encoded =
+          Some (S.Runtime_builder.encode_moderator_snapshot initial_snapshot)
+        in
+        let tools =
+          S.Script_tool_calls.create
+            ~registry:(fun () -> registry)
+            ~moderator_names:String.Set.empty
+            ~now:(fun () -> timestamp)
+            ~is_halted:(fun () -> false)
+            ~requires_active_moderator:(fun _ -> false)
+            ~authorize:(fun _ _ -> Ok ())
+            ~prepare_output:(fun _ -> Ok (`String "actual native result"))
+            ~defer_observation:(fun _ -> Ok ())
+        in
+        let reject_producer = ref false in
+        let reject_claim = ref false in
+        let producer_cut_completed = ref false in
+        let producer_rejections = ref 0 in
+        let claim_rejections = ref 0 in
+        let rejected = function
+          | Error _ -> ()
+          | Ok _ -> failwith "selected checkpoint unexpectedly acknowledged"
+        in
+        let queue state =
+          S.Moderator_checkpoint.queue state.S.Session_state.moderator
+          |> protocol_ok
+          |> Option.value_exn
+        in
+        let history actor () =
+          (A.state actor |> protocol_ok).conversation.canonical_history
+          |> S.History_codec.all_of_protocol
+          |> protocol_ok
+        in
+        let exercise actor backend ~worker =
+          let emitted = A.state actor |> protocol_ok in
+          let before_entries = Q.entries (queue emitted) in
+          [%test_eq: int] 2 (List.length before_entries);
+          let first = List.nth_exn before_entries 0 in
+          let second = List.nth_exn before_entries 1 in
+          assert (not (Int64.equal (Q.Entry.ordinal first) (Q.Entry.ordinal second)));
+          [%test_eq: string]
+            (Q.Entry.payload_sha256 first)
+            (Q.Entry.payload_sha256 second);
+          let producer =
+            match Q.Entry.producer first, Q.Entry.producer second with
+            | Some (Event a), Some (Event b) when P.Id.Moderator_execution.equal a b -> a
+            | _ -> failwith "actual emitted suffix lost its one completed producer"
+          in
+          assert (
+            List.exists emitted.moderator_executions ~f:(fun receipt ->
+              P.Id.Moderator_execution.equal receipt.E.context.id producer
+              && E.equal_phase receipt.context.phase Turn_start
+              && P.Invocation.equal_observer
+                   (Q.source (queue emitted)).observer
+                   receipt.context.source
+              && Int.equal
+                   (Q.source (queue emitted)).generation
+                   receipt.context.generation
+              && Option.is_some receipt.context.operation_id
+              &&
+              match receipt.status with
+              | Completed _ -> true
+              | Running | Failed _ | Interrupted _ -> false));
+          let claim ~snapshot f =
+            A.with_current_idle_queued_moderator_event_tools actor ~snapshot f
+          in
+          let run () =
+            S.Moderator_event.run_queued_idle
+              ~claim
+              ~script_tools:tools
+              ~manager
+              ~history:(history actor)
+              ~available_tools:[]
+              ~session_meta:`Null
+              ~now:(fun () -> timestamp)
+              ()
+          in
+          let drain_under_another_operation () =
+            let failure = ref None in
+            let handled = ref None in
+            let native_admissions = ref 0 in
+            let native_proofs = ref [] in
+            let drainer =
+              S.Operation_worker.create ~run:(fun ~sw:_ ~input caps ->
+                try
+                  let proof =
+                    caps.original_agent_actor () |> protocol_ok |> Option.value_exn
+                  in
+                  assert (
+                    P.Id.Principal.equal
+                      (Operator_authorization.principal proof).id
+                      ambient_principal.id);
+                  let result =
+                    Exn.protect
+                      ~finally:(fun () -> on_native := ignore)
+                      ~f:(fun () ->
+                        (on_native
+                         := fun () ->
+                              Int.incr native_admissions;
+                              let borrowed = N.borrow () |> protocol_ok in
+                              assert (
+                                Option.is_some
+                                  (N.borrowed_invocation borrowed).parent_event);
+                              match
+                                mode, N.borrowed_agent_actor borrowed |> protocol_ok
+                              with
+                              | `Current_original, Some proof ->
+                                assert (Operator_authorization.is_current proof);
+                                assert (
+                                  P.Id.Principal.equal
+                                    (Operator_authorization.principal proof).id
+                                    (Operator_authorization.principal original).id);
+                                native_proofs := proof :: !native_proofs
+                              | `Historical_absent, None -> ()
+                              | ( ( `Current_none
+                                  | `Current_original
+                                  | `Expired_original
+                                  | `Historical_absent )
+                                , _ ) ->
+                                failwith
+                                  "foreground drainer replaced the selected queue \
+                                   original");
+                        S.Moderator_event.run_queued_idle
+                          ~claim:caps.with_queued_moderator_event
+                          ~script_tools:tools
+                          ~manager
+                          ~history:(history actor)
+                          ~available_tools:[]
+                          ~session_meta:`Null
+                          ~now:(fun () -> timestamp)
+                          ()
+                        |> protocol_ok)
+                  in
+                  handled := result;
+                  Completed
+                    { final_history = input.history
+                    ; moderator_snapshot = (A.state actor |> protocol_ok).moderator
+                    ; runtime_requests = []
+                    }
+                with
+                | exn ->
+                  failure := Some exn;
+                  raise exn)
+            in
+            A.set_runtime_worker
+              ~moderator_manager:manager
+              actor
+              ~worker:(Some drainer)
+              ~inference:
+                (Some
+                   (Inference_ports.create ~config:Chat_response.Config.default ()
+                    |> Inference_ports.execution))
+            |> protocol_ok;
+            let reservation = A.reserve_history_block actor ~count:1 |> protocol_ok in
+            let entry =
+              Pending_input_tests.occurrence
+                (Int64.to_int_exn reservation.first_sequence)
+                "queued work drained by A"
+            in
+            let attachment, _ =
+              A.attach actor ~mode:Read_write ~subscribe:false |> protocol_ok
+            in
+            A.submit_message_authenticated
+              actor
+              ~actor:ambient
+              ~attachment_id:attachment.id
+              entry
+            |> protocol_ok
+            |> ignore;
+            let rec await_drainer () =
+              Option.iter !failure ~f:raise;
+              let current = A.state actor |> protocol_ok in
+              match current.active_operation, current.lifecycle.observed with
+              | None, Idle -> ()
+              | _ ->
+                Eio.Fiber.yield ();
+                await_drainer ()
+            in
+            await_drainer ();
+            assert (Option.is_some !handled);
+            [%test_eq: int] 1 !native_admissions;
+            List.iter !native_proofs ~f:(fun proof ->
+              assert (not (Operator_authorization.is_current proof)));
+            assert (Operator_authorization.is_current ambient);
+            assert (Operator_authorization.is_current original);
+            drainer
+          in
+          match mode with
+          | `Expired_original ->
+            let before_calls = !calls in
+            (match run () with
+             | Error failure -> [%test_eq: P.Error.code] Permission_denied failure.code
+             | Ok _ -> failwith "expired original borrowed a new contextual head");
+            [%test_eq: int] before_calls !calls;
+            assert_same_session_snapshot emitted (A.state actor |> protocol_ok);
+            assert_same_session_snapshot emitted (S.Memory_backend.state backend)
+          | `Current_none | `Current_original | `Historical_absent ->
+            (match mode with
+             | `Current_original ->
+               reject_claim := true;
+               rejected (run ());
+               [%test_eq: int] 1 !claim_rejections;
+               [%test_eq: int] 0 !calls;
+               assert_same_session_snapshot emitted (A.state actor |> protocol_ok);
+               assert_same_session_snapshot emitted (S.Memory_backend.state backend)
+             | `Current_none | `Historical_absent -> ()
+             | `Expired_original -> assert false);
+            let worker =
+              match mode with
+              | `Current_none ->
+                assert (Option.is_some (run () |> protocol_ok));
+                worker
+              | `Current_original | `Historical_absent -> drain_under_another_operation ()
+              | `Expired_original -> assert false
+            in
+            [%test_eq: int] 1 !calls;
+            let consumed = A.state actor |> protocol_ok in
+            let remaining = Q.entries (queue consumed) in
+            assert (List.equal Q.Entry.equal [ second ] remaining);
+            let proofs = ref [] in
+            let admissions = ref 0 in
+            let observed =
+              S.Moderator_observation.drain_idle_with_tools
+                ~max_observations:1
+                ~script_tools:tools
+                ~definition
+                ~claim:(fun f ->
+                  A.with_idle_moderator_observation_tools
+                    actor
+                    ~observer
+                    (fun ~observing ~capabilities ~execute ~commit ->
+                       Int.incr admissions;
+                       assert (Option.is_some observing.parent_event);
+                       (match
+                          mode, capabilities.borrow_agent_actor ~invocation:observing
+                        with
+                        | `Current_none, Ok None -> ()
+                        | `Current_original, Ok (Some proof) ->
+                          assert (Operator_authorization.is_current proof);
+                          assert (
+                            P.Id.Principal.equal
+                              (Operator_authorization.principal proof).id
+                              (Operator_authorization.principal original).id);
+                          proofs := proof :: !proofs
+                        | `Historical_absent, Error failure ->
+                          [%test_eq: P.Error.code] Permission_denied failure.code
+                        | ( ( `Current_none
+                            | `Current_original
+                            | `Historical_absent
+                            | `Expired_original )
+                          , unexpected ) ->
+                          ignore unexpected;
+                          failwith "observation changed the actual producer original");
+                       f ~observing ~capabilities ~execute ~commit))
+                ~manager
+                ~history:(history actor)
+                ~available_tools:[]
+                ~session_meta:`Null
+                ~now:(fun () -> timestamp)
+                ()
+              |> protocol_ok
+            in
+            ignore observed;
+            [%test_eq: int] 1 !admissions;
+            List.iter !proofs ~f:(fun proof ->
+              assert (not (Operator_authorization.is_current proof)));
+            let final = A.state actor |> protocol_ok in
+            let entries = Q.entries (queue final) in
+            [%test_eq: int] 2 (List.length entries);
+            assert (Q.Entry.equal second (List.hd_exn entries));
+            (match Q.Entry.producer (List.nth_exn entries 1) with
+             | Some (Invocation id) ->
+               assert (
+                 List.exists final.invocations ~f:(fun invocation ->
+                   P.Id.Invocation.equal invocation.context.id id
+                   &&
+                   match invocation.observation with
+                   | Some { status = Observed; _ } -> true
+                   | None
+                   | Some { status = Awaiting | Observing | Observation_failed _; _ } ->
+                     false))
+             | Some
+                 ( Event _
+                 | Invocation_at_source _
+                 | Job_completion _
+                 | Schedule_delivery _
+                 | Source_setup _
+                 | Ingress_delivery _ )
+             | None -> failwith "Tool_observed appended suffix lost its actual producer");
+            assert (Option.is_none final.active_operation);
+            assert_same_session_snapshot final (S.Memory_backend.state backend);
+            (match mode with
+             | `Current_original ->
+               let snapshot = M.identity_snapshot manager |> Result.ok_or_failwith in
+               let replacement, _, _ = make_manager ~snapshot () in
+               assert (not (phys_equal manager replacement));
+               A.set_runtime_worker
+                 ~moderator_manager:replacement
+                 actor
+                 ~worker:(Some worker)
+                 ~inference:
+                   (Some
+                      (Inference_ports.create ~config:Chat_response.Config.default ()
+                       |> Inference_ports.execution))
+               |> protocol_ok;
+               let replaced = A.state actor |> protocol_ok in
+               assert (
+                 P.Run_source.equal (Q.source (queue final)) (Q.source (queue replaced)));
+               assert (List.equal Q.Entry.equal entries (Q.entries (queue replaced)));
+               assert (
+                 Option.is_some
+                   (S.Moderator_event.run_queued_idle
+                      ~claim
+                      ~script_tools:tools
+                      ~manager:replacement
+                      ~history:(history actor)
+                      ~available_tools:[]
+                      ~session_meta:`Null
+                      ~now:(fun () -> timestamp)
+                      ()
+                    |> protocol_ok));
+               [%test_eq: int] 2 !calls;
+               let checked = ref false in
+               assert (
+                 A.with_idle_moderator_observation
+                   actor
+                   ~observer
+                   (fun ~observing ~capabilities ~commit ->
+                      (match capabilities.borrow_agent_actor ~invocation:observing with
+                       | Error failure ->
+                         [%test_eq: P.Error.code] Permission_denied failure.code
+                       | Ok _ -> failwith "replacement Manager revived old queue custody");
+                      checked := true;
+                      let snapshot =
+                        M.identity_snapshot replacement |> Result.ok_or_failwith
+                      in
+                      commit
+                        ~resolved:(I.complete_observation observing |> protocol_ok)
+                        ~snapshot)
+                 |> protocol_ok);
+               assert !checked;
+               assert_same_session_snapshot
+                 (A.state actor |> protocol_ok)
+                 (S.Memory_backend.state backend)
+             | `Current_none | `Historical_absent -> ()
+             | `Expired_original -> assert false)
+        in
+        let saved = ref None in
+        let worker_failure = ref None in
+        let make_worker actor backend =
+          S.Operation_worker.create ~run:(fun ~sw:_ ~input caps ->
+            try
+              (match mode, caps.original_agent_actor () |> protocol_ok with
+               | `Current_none, None -> ()
+               | (`Current_original | `Expired_original | `Historical_absent), Some proof
+                 -> assert (Operator_authorization.is_current proof)
+               | ( ( `Current_none
+                   | `Current_original
+                   | `Expired_original
+                   | `Historical_absent )
+                 , _ ) ->
+                 failwith "actual foreground Operation changed its original admission");
+              caps.commit_moderator initial_encoded |> protocol_ok;
+              let run () =
+                S.Moderator_event.run_ordinary
+                  ~event:Turn_start
+                  ~claim:(caps.with_moderator_event ~event:Turn_start)
+                  ~script_tools:tools
+                  ~manager
+                  ~history:(fun () -> input.history)
+                  ~available_tools:[]
+                  ~session_meta:`Null
+                  ~now:(fun () -> timestamp)
+                  ()
+              in
+              let write_source =
+                match mode with
+                | `Current_original when not !producer_cut_completed ->
+                  reject_producer := true;
+                  rejected (run ());
+                  [%test_eq: int] 1 !producer_rejections;
+                  let rejected_state = A.state actor |> protocol_ok in
+                  assert (
+                    S.Moderator_checkpoint.queue rejected_state.moderator
+                    |> protocol_ok
+                    |> Option.for_all ~f:(fun metadata ->
+                      List.is_empty (Q.entries metadata)));
+                  assert_same_session_snapshot
+                    rejected_state
+                    (S.Memory_backend.state backend);
+                  producer_cut_completed := true;
+                  false
+                | `Current_none
+                | `Current_original
+                | `Expired_original
+                | `Historical_absent -> true
+              in
+              if write_source then assert (Option.is_some (run () |> protocol_ok));
+              Completed
+                { final_history = input.history
+                ; moderator_snapshot = (A.state actor |> protocol_ok).moderator
+                ; runtime_requests = []
+                }
+            with
+            | exn ->
+              worker_failure := Some exn;
+              raise exn)
+        in
+        Job_fixtures.with_actor
+          ~environment:(env, workspace_instance)
+          ~reject_save:(fun next ->
+            let receipts = next.S.Session_transition.state.moderator_executions in
+            let producer_ack =
+              List.exists receipts ~f:(fun receipt ->
+                E.equal_phase receipt.E.context.phase Turn_start
+                &&
+                match receipt.status with
+                | Completed _ -> true
+                | Running | Failed _ | Interrupted _ -> false)
+            in
+            let head_claim =
+              List.exists receipts ~f:(fun receipt ->
+                E.equal_phase receipt.E.context.phase Internal_event
+                &&
+                match receipt.status with
+                | Running -> true
+                | Completed _ | Failed _ | Interrupted _ -> false)
+            in
+            if !reject_producer && producer_ack
+            then (
+              reject_producer := false;
+              Int.incr producer_rejections;
+              true)
+            else if !reject_claim && head_claim
+            then (
+              reject_claim := false;
+              Int.incr claim_rejections;
+              true)
+            else false)
+          (fun _env _sw actor writer backend ->
+             let worker = make_worker actor backend in
+             A.change_moderator actor initial_encoded |> protocol_ok |> ignore;
+             A.set_runtime_worker
+               ~moderator_manager:manager
+               actor
+               ~worker:(Some worker)
+               ~inference:
+                 (Some
+                    (Inference_ports.create ~config:Chat_response.Config.default ()
+                     |> Inference_ports.execution))
+             |> protocol_ok;
+             let entry =
+               S.History_codec.user_text ~id:history_id "modern emitted original"
+               |> S.History_codec.to_protocol
+             in
+             (match mode with
+              | `Current_none ->
+                A.submit_message
+                  ~submitting_principal:principal_id
+                  actor
+                  ~attachment_id:writer.id
+                  entry
+              | `Current_original | `Expired_original | `Historical_absent ->
+                A.submit_message_authenticated
+                  actor
+                  ~actor:original
+                  ~attachment_id:writer.id
+                  entry)
+             |> protocol_ok
+             |> ignore;
+             let rec await_producer () =
+               Option.iter !worker_failure ~f:raise;
+               let state = A.state actor |> protocol_ok in
+               match state.active_operation, state.lifecycle.observed with
+               | None, Idle -> state
+               | _ ->
+                 Eio.Fiber.yield ();
+                 await_producer ()
+             in
+             let completed = await_producer () in
+             let completed =
+               match mode with
+               | `Current_original ->
+                 assert !producer_cut_completed;
+                 let reservation =
+                   A.reserve_history_block actor ~count:1 |> protocol_ok
+                 in
+                 let fresh =
+                   Pending_input_tests.occurrence
+                     (Int64.to_int_exn reservation.first_sequence)
+                     "new B Operation after rejected producer ACK"
+                 in
+                 A.submit_message_authenticated
+                   actor
+                   ~actor:original
+                   ~attachment_id:writer.id
+                   fresh
+                 |> protocol_ok
+                 |> ignore;
+                 await_producer ()
+               | `Current_none | `Expired_original | `Historical_absent -> completed
+             in
+             match mode with
+             | `Historical_absent ->
+               saved
+               := Some
+                    (S.Session_state_document.authored completed
+                     |> S.Session_state_document.encode ~limits:document_limits
+                     |> document_ok
+                     |> S.Session_state_document.decode ~limits:document_limits
+                     |> document_ok
+                     |> S.Session_state_document.value)
+             | `Current_none | `Current_original | `Expired_original ->
+               exercise actor backend ~worker);
+        match mode with
+        | `Historical_absent ->
+          Job_fixtures.with_actor
+            ~environment:(env, workspace_instance)
+            ~start:false
+            ~prepare_state:(fun _ -> Option.value_exn !saved)
+            (fun _env _sw actor _writer backend ->
+               let worker = make_worker actor backend in
+               A.set_runtime_worker
+                 ~moderator_manager:manager
+                 actor
+                 ~worker:(Some worker)
+                 ~inference:
+                   (Some
+                      (Inference_ports.create ~config:Chat_response.Config.default ()
+                       |> Inference_ports.execution))
+               |> protocol_ok;
+               exercise actor backend ~worker)
+        | `Current_none | `Current_original | `Expired_original -> ()));
+  print_endline
+    "modern queue original B survives foreground A and ACK cuts; genuine None, expiry \
+     and restored absence stay distinct";
+  [%expect
+    {| modern queue original B survives foreground A and ACK cuts; genuine None, expiry and restored absence stay distinct |}]
 ;;

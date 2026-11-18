@@ -11,6 +11,7 @@ let deadline = Agent_protocol.Timestamp.of_string "2099-01-01T00:00:00Z" |> prot
 let add_claimed_job
       ?(payload = `Object [ "fixture", `String "owned tool job" ])
       ?(retry_policy = J.Never)
+      ?(inference_origin = Some J.Inference_origin.Unbound)
       actor
   =
   let job =
@@ -29,7 +30,11 @@ let add_claimed_job
       ; completed_at = None
       ; result = None
       ; delivery = Pending
-      ; launch = None
+      ; launch =
+          None
+          (* This fixture explicitly creates unrelated work. Historical-absence
+         cases pass [~inference_origin:None] rather than guessing at restoration. *)
+      ; inference_origin
       ; progress = None
       }
   in
@@ -58,12 +63,17 @@ let root (job : J.t) =
 ;;
 
 let complete actor (job : J.t) =
+  let result =
+    match job.kind with
+    | Async_tool -> Agent_protocol.Completion.to_json (Succeeded `Null)
+    | Model_call | Nested_agent | Scheduled_event | Shell_process | Compaction -> `Null
+  in
   A.complete_job
     actor
     ~job_id:job.id
     ~generation:job.generation
     ~attempt:job.attempt
-    (Agent_session.Runtime_builder.Model_succeeded `Null)
+    (Agent_session.Runtime_builder.Model_succeeded result)
 ;;
 
 let reject label result =
@@ -73,7 +83,11 @@ let reject label result =
   | Ok _ -> failwith (label ^ " was accepted")
 ;;
 
+(* [environment] reuses an existing real Eio/source-host workspace for composed
+   fixture owners. Default callers still allocate and release their own runner. *)
 let with_actor
+      ?environment
+      ?(start = true)
       ?(archive_reference = archive_reference)
       ?(reject_save = fun _ -> false)
       ?(prepare_state = Fn.id)
@@ -87,7 +101,12 @@ let with_actor
       ?(ingress_limits = Agent_session.Staged_ingress.default_limits)
       f
   =
-  with_actor_workspace (fun env workspace_instance ->
+  let with_workspace f =
+    match environment with
+    | None -> with_actor_workspace f
+    | Some (env, workspace_instance) -> f env workspace_instance
+  in
+  with_workspace (fun env workspace_instance ->
     Eio.Switch.run (fun sw ->
       let initial =
         actor_state ~workspace_instance ~liveness:Detached ~start_immediately:false
@@ -109,10 +128,23 @@ let with_actor
           ~persistence:
             { archive_reference
             ; commit =
-                (fun ~command_audit ~previous next ->
+                (fun ?observation ~command_audit ~previous next ->
                   match reject_save next with
-                  | true -> Error (handoff_error "injected job transition failure")
-                  | false -> persistence.commit ~command_audit ~previous next)
+                  | true ->
+                    (* This injected failure precedes the backend call. Record
+                       that fact for retained cleanup, without inventing a
+                       journal acknowledgement for the in-memory backend. *)
+                    let open Result.Let_syntax in
+                    let%bind () =
+                      Option.value_map observation ~default:(Ok ()) ~f:(fun observation ->
+                        Agent_session.Session_commit_observation.Host.observe_entry
+                          observation
+                          ~previous
+                          ~candidate:next
+                        |> Result.map ~f:ignore)
+                    in
+                    Error (handoff_error "injected job transition failure")
+                  | false -> persistence.commit ?observation ~command_audit ~previous next)
             }
           ~services:
             { now
@@ -129,6 +161,7 @@ let with_actor
             ; schedule_limits
             ; notification_limits
             ; ingress_limits
+            ; goal_descendant_profile
             ; subscription_limits
             ; state_committed
             }
@@ -140,7 +173,7 @@ let with_actor
             let writer, _ =
               A.attach actor ~mode:Read_write ~subscribe:false |> protocol_ok
             in
-            A.start actor ~attachment_id:writer.id |> protocol_ok |> ignore;
+            if start then A.start actor ~attachment_id:writer.id |> protocol_ok |> ignore;
             f env sw actor writer backend))))
 ;;
 

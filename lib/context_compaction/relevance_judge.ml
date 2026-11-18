@@ -50,7 +50,7 @@ let score_samples ~sample =
   |> fun sum -> sum /. 3.
 ;;
 
-let score_relevance ~inference (_cfg : Config.t) ~prompt =
+let score_relevance_with_guidance ~guidance ~inference (_cfg : Config.t) ~prompt =
   let setting =
     Inference.Request.Setting.create
       ~name:"reasoning"
@@ -66,8 +66,13 @@ let score_relevance ~inference (_cfg : Config.t) ~prompt =
         inference
         ~sw
         ~settings:[ setting ]
+        ?guidance
         ~messages:[ System, system_prompt; User, prompt ]
         ()))
+;;
+
+let score_relevance ~inference cfg ~prompt =
+  score_relevance_with_guidance ~guidance:None ~inference cfg ~prompt
 ;;
 
 let is_relevant ~inference cfg ~prompt =

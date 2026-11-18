@@ -186,6 +186,24 @@ let%test_module "actual prompt and retained-child custody owners" =
         in
         let parent = build standard
         and another = build native in
+        (* The pure carrier retains actual captured parser/program metadata and
+           bytes; its projection still grants no parser or execution owner. *)
+        let original = R.artifact parent in
+        let captured = Agent_store.Captured_prompt_artifact.create original |> ok in
+        let captured = Agent_store.Captured_prompt_artifact.to_document captured |> ok in
+        let restored =
+          Agent_store.Captured_prompt_artifact.of_document captured
+          |> ok
+          |> Agent_store.Captured_prompt_artifact.value
+        in
+        assert (Option.is_some restored.program_bundle);
+        assert (Store.Artifact.same_content original restored);
+        assert (
+          String.equal
+            (Agent_store.Prompt_manifest_document.Publication.bytes
+               original.manifest_publication)
+            (Agent_store.Prompt_manifest_document.Publication.bytes
+               restored.manifest_publication));
         assert (
           String.equal (R.artifact parent).root_chatmd (R.artifact another).root_chatmd);
         assert (not (Protocol.Id.Prompt_revision.equal (R.id parent) (R.id another)));

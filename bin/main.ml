@@ -738,6 +738,7 @@ let main_command =
     ; "html-to-markdown", html_to_markdown_command
     ; "h2md", html_to_markdown_command
     ; "shell", shell_command
+    ; "libraries", Capability_libraries_command.command
     ]
 ;;
 

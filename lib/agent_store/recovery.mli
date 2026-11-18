@@ -128,13 +128,28 @@ val preflight_shared
 module Retention_preflight : sig
   type t
 
-  (** Capture the existing shared-preflight policy once. Restoration, conversion,
-      application and equivalence must be deterministic for immutable inputs for
-      this owner's lifetime. Application/equivalence are pure; [validate] may
-      perform bounded archive reads and is repeated on every initial and final
-      checkpoint state. No proof is imported or supplied by the caller. *)
+  module Budget : sig
+    type t
+
+    (** Bounds retained restoration entry count and aggregate original record
+        bytes, not decoded OCaml heap. Negative values reject; zero disables
+        restoration reuse without weakening any retention check. *)
+    val create : max_entries:int -> max_original_bytes:int -> (t, Store_error.t) result
+
+    (** 128 entries and 16 MiB of aggregate original record bytes. *)
+    val default : t
+  end
+
+  (** Capture one fixed journal, directory, session, limits and callback policy.
+      [restore_snapshot], conversion, [apply] and [equivalent] must be pure and
+      deterministic for immutable inputs/results for this owner's lifetime, with
+      no required IO, cancellation/logging effects or identity freshness. They
+      must not consult mutable ambient policy. [validate] and
+      [validate_transaction] remain fresh in their original order on every check;
+      bounded archive reads remain permitted. No proof/cache can be imported. *)
   val create
-    :  env:Eio_unix.Stdenv.base
+    :  restoration_budget:Budget.t
+    -> env:Eio_unix.Stdenv.base
     -> journal:Journal.t
     -> snapshot_directory:string
     -> max_snapshot_payload_length:int
@@ -147,18 +162,35 @@ module Retention_preflight : sig
     -> validate:('state -> (unit, Store_error.t) result)
     -> t
 
-  (** Freshly validates every retained original frame, metadata, digest, chain,
-      checkpoint anchor and current-domain transaction/snapshot before consulting
-      the previous successful proof. Only an identical original checkpoint and a
-      still-reachable identical certified head in that verified original-byte
-      chain may seed replay at the prior head. Other routes fully replay; shared
-      replay uses these effective anchors and requires complete state/carrier
-      equivalence. Every route repeats final validation, including archive reads.
+  (** Freshly validates every retained original frame, metadata, digest, chain
+      and checkpoint anchor before restoration reuse. The same owner may reuse
+      successful immutable snapshot/transaction conversions only for exact
+      original flags, digest and bytes (and the same snapshot route). Every
+      supplied state and transaction validator, including initial/final archive
+      checks, still runs.
 
-      Successful checks privately replace the proof with only the observed
-      checkpoint routes. Failure/cancellation preserves the previous proof, which
-      cannot bypass any fresh checks. Later pruning failure does not invalidate
-      successful validation. Calls are serialized; cancellation and unexpected
-      exceptions propagate. No tail repair, pruning or file writes occur. *)
+      Replay-prefix reuse separately requires an identical original checkpoint
+      and still-reachable identical certified head in the verified chain. Other
+      routes fully replay; shared replay requires complete state/carrier equality.
+      A cached original state is never substituted for a replayed head.
+
+      Only complete success atomically replaces the proof and bounded restoration
+      cache with currently observed originals. Failure/cancellation preserves the
+      previous successful record and cannot bypass any fresh check. Budget
+      misses/eviction affect performance only. Later pruning failure does not
+      invalidate successful validation. Calls are serialized; cancellation and
+      unexpected exceptions propagate. No repair, pruning or file writes occur.
+
+      A caller retaining this owner's journal/Handle lifetime may perform a
+      read-only speculative check while its canonical writer appends and snapshots
+      are published. Such a check observes files non-atomically: success certifies
+      only the originals and replay prefixes actually verified, and an error may
+      reflect an intervening publication. It supplies no authority to prune or
+      seal. Maintenance must freshly check the complete current basis again while
+      excluding journal and snapshot mutation through later prune/seal operations.
+      The caller must recheck its actual owner and immutable persistence basis
+      before accepting a speculative result; a changed basis may defer the attempt,
+      while an unchanged basis must preserve a returned error. Unexpected
+      exceptions and cancellation still propagate. *)
   val check : t -> (unit, Store_error.t) result
 end

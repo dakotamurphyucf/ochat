@@ -31,13 +31,16 @@ type 'env t = private
   { inference_relation : Transcript.Scope.relation
   ; inference_context : Inference_runtime.Context.t
   ; inference_identity : Neutral_turn.Identity.t
+  ; before_inference_attempt : Inference_runtime.Attempt.t -> unit
   ; on_inference_attempt : Inference_runtime.Attempt.t -> unit
   ; on_inference_completion : Inference_client.Completion.t -> unit
   ; on_inference_observation : Inference.Observation.t -> unit
   ; on_admitted_call : In_memory_stream.Admitted_call.t -> unit
   ; submission_guard : Inference_runtime.Submission_guard.t
   ; before_inference_dispatch : Inference_runtime.Prepared.t -> unit
+  ; effect_checkpoint : (unit -> unit) option
   ; agent_prompt_v1_recipe : Moderation.Capabilities.model_recipe option
+  ; agent_guidance_scope : Agent_guidance.Scope.t
   ; env : 'env (** Underlying Eio standard environment. *)
   ; dir : Eio.Fs.dir_ty Eio.Path.t
     (** Base directory used when a function needs to access the
@@ -127,6 +130,13 @@ val with_submission_guard : 'env t -> Inference_runtime.Submission_guard.t -> 'e
     operation neither authorizes a target change nor recaptures stored selection. *)
 val with_inference : 'env t -> inference_context:Inference_runtime.Context.t -> 'env t
 
+(** Install an explicit host-issued attempt identity, retaining Context selection,
+    observers and all inherited guards. This does not mint or validate its owner. *)
+val with_inference_identity
+  :  'env t
+  -> inference_identity:Inference_client.Identity.t
+  -> 'env t
+
 (** Rebind actual tool-owner correlation on an immutable child context. The
     parent must come from Invocation.inference_parent or another actual owner;
     absent correlation must never be fabricated from a call alias. *)
@@ -140,6 +150,19 @@ val with_inference_parent : 'env t -> parent:Transcript.Scope.parent -> 'env t
     the recipe is later invoked. Ordinary contexts keep their constructor's
     existing recipe behavior. *)
 val with_agent_prompt_v1_recipe : 'env t -> Moderation.Capabilities.model_recipe -> 'env t
+
+(** Agent-conversation-only request context. Immutable descendants retain it;
+    explicitly authored independent Model recipes clear it. This does not wrap
+    [inference_execution] or alter generic model input. *)
+val with_agent_guidance : 'env t -> Agent_guidance.t -> 'env t
+
+val without_agent_guidance : 'env t -> 'env t
+
+(** Preserve the complete Eligible/Excluded state when reconstructing a child
+    context. An ordinary Agent binding cannot reverse inherited exclusion. *)
+val inherit_agent_guidance : 'env t -> from:'other t -> 'env t
+
+val agent_guidance : 'env t -> Agent_guidance.t option
 
 (** Selected inference ports for auxiliary requests owned by this invocation.
     Attempt admission remains the supplied host identity and acknowledgement;
@@ -164,3 +187,27 @@ val cache : _ t -> Cache.t
     directory when spawning tools.  When the caller did not override
     the value it is equal to {!dir}. *)
 val tool_dir : _ t -> Eio.Fs.dir_ty Eio.Path.t
+
+(** Strict selected-execution rejection, propagated without observer suppression
+    or conversion to a tool-construction diagnostic. Cancellation is distinct. *)
+exception Effect_rejected of Agent_protocol.Error.t
+
+(** Append an inherited selected-effect checkpoint. Context copies retain it;
+    ordinary contexts have no checkpoint. Composition is sequential; each
+    selected host callback must establish its own complete final owner checks.
+    This callback is not a grant. *)
+val with_effect_checkpoint : 'env t -> check:(unit -> unit) -> 'env t
+
+val check_effect : 'env t -> unit
+
+(** Replace one lexical graph's identity and all of its tracking callbacks
+    together. Inherited attempt, submission, dispatch and effect guards are
+    preserved. Install policy checks with the guard APIs so their lifetime is
+    independent of the selected graph. *)
+val with_inference_tracking
+  :  'env t
+  -> identity:Inference_client.Identity.t
+  -> on_attempt:(Inference_runtime.Attempt.t -> unit)
+  -> on_observation:(Inference.Observation.t -> unit)
+  -> on_completion:(Inference_client.Completion.t -> unit)
+  -> 'env t

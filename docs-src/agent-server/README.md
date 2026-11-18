@@ -62,3 +62,9 @@ Tutorial inputs and clients live in [tracked examples](../examples/agent-server/
 The [architecture](../design/ochat-agent-server-spec.md) and
 [implementation](../design/ochat-agent-server-implementation-spec.md) specifications
 provide deeper design rationale; current executable commands are in these guides.
+
+### Recurring automation
+
+Declare explicit native recurrence controls, read current CAS and select an existing
+session or an authored worker. The [recurring automation guide](recurring-automation.md)
+covers capture, checked ChatML helpers, timing, permissions and retained outcomes.

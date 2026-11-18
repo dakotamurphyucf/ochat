@@ -76,8 +76,11 @@ val error_to_string : Apply_patch_error.t -> string
      • [remove_fn path] – deletes [path] from the workspace; called
        for every [Delete] action and for the *source* path of a rename.
 
-     All three callbacks should be exception-free; any error they raise
-     will propagate to the caller of [process_patch].
+     [Eio.Cancel.Cancelled] and [Eio.Time.Timeout] from any callback propagate
+     with their original backtrace. Other [open_fn] exceptions become
+     [Diff_error (Missing_file ...)], preserving the reader's existing missing-file
+     diagnostic. Exceptions from [write_fn] and [remove_fn] propagate unchanged.
+     Already-applied changes are not rolled back on failure or cancellation.
 
      {1 Return value}
 

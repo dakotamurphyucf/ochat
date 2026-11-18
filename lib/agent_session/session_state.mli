@@ -44,6 +44,21 @@ module Spec : sig
   [@@deriving sexp]
 
   type t = Workspace_instance.t fields [@@deriving sexp]
+
+  (** Immutable runtime comparison, independent of session display metadata.
+      Capturing this DATA grants no resource, source or execution authority. *)
+  module Resource_identity : sig
+    type spec := t
+    type t
+
+    (** Nonyielding projection excluding only [protocol.display_name] and
+        [protocol.labels]. Every other Spec field participates, including the
+        typed inference selection that Spec's diagnostic sexp makes opaque.
+        Neither the supplied Spec nor its containing State is modified. *)
+    val capture : spec -> t
+
+    val equal : t -> t -> bool
+  end
 end
 
 module Compaction_archive : sig
@@ -176,6 +191,17 @@ type 'spec fields =
         A retried old key must not stop a subsequent runtime lifetime. *)
   ; moderator_executions : Agent_protocol.Moderator_execution.t list [@sexp.list]
   ; run_state : Run_state.t option [@sexp.option]
+  ; goal_catalog : Goal_catalog.t option [@sexp.option]
+  ; goal_accounts : (Goal_accounts.t option[@sexp.opaque])
+  ; delegated_usage : (Delegated_usage.t option[@sexp.opaque])
+  ; child_contributions : (Child_contributions.t option[@sexp.opaque])
+  ; goal_descendants : (Goal_descendants.t option[@sexp.opaque])
+  ; policy_canonical_usage : (Policy_canonical_usage.t option[@sexp.opaque])
+  ; goal_policy_contributions : (Goal_policy_contributions.t option[@sexp.opaque])
+  ; instruction_selection : Instruction_selection.t option [@sexp.option]
+    (** Exact inert captured instruction custody and immutable mutation receipts.
+        No transcript entry, source grant or provider activation is implied. *)
+  ; recurrence_catalog : Recurrence_catalog.t option [@sexp.option]
   ; subscriptions : Agent_protocol.Subscription.t list [@sexp.list]
   ; deliveries : Agent_protocol.Delivery.t list [@sexp.list]
   ; ingress_registrations : External_ingress.t list [@sexp.list]
@@ -190,6 +216,11 @@ type 'spec fields =
 [@@deriving sexp]
 
 type t = Spec.t fields [@@deriving sexp]
+
+(** Exact construction inputs for a cold ordinary Ready reload. The Actor owns
+    its live schedule table and commit stamps. Every other field, including the
+    owner lease generation and the selected checkpoints, remains exact. *)
+val same_ordinary_ready_reload_basis : t -> expected:t -> bool
 
 val current_schema_version : int
 
@@ -223,6 +254,28 @@ val create
 
 val validate : t -> (unit, Agent_protocol.Error.t) result
 
+(** Partial native DATA validation, not State admission or execution authority.
+    The opaque checkpoint retains the same immutable candidate between phases. *)
+module Native_validation : sig
+  type state = t
+  type t
+
+  (** Run the ordinary checks preceding combined Goal-policy validation. *)
+  val create : state -> (t, Agent_protocol.Error.t) Result.t
+
+  (** Complete all remaining native checks. Only Book/inline/Totals contexts use
+      [policy_revision]; headroom, metadata and ledger checks retain the original
+      candidate and counters. This is NOT actual-publication validation at an
+      arbitrary supplied revision. Ordinary [validate] supplies actual revision;
+      the opaque ordered document Prefix supplies only its checked cursor's exact
+      publication revision, then still requires full final State validation and
+      exact publication equality. No State or authority is returned. *)
+  val validate_remaining
+    :  t
+    -> policy_revision:int64
+    -> (unit, Agent_protocol.Error.t) Result.t
+end
+
 (** Planning-only validation before retiring the actual resource graph. The
     candidate retains the byte-exact previous ledger, admitted under its previous
     generation; all other native checks use the actual candidate identity. This
@@ -241,6 +294,13 @@ val authoring_references
 
 val summary : t -> Agent_protocol.Session.t
 
+(** Existing typed execution block, not a source/permission or validity proof.
+    Observed [Failed Migration_required] prevents queued execution claims. Stop
+    preserves that cause while observed [Stopped], until explicit rebuild clears
+    it. Other observed states do not inherit an old failure's migration block;
+    ordinary failures retain their existing scheduling semantics. *)
+val execution_migration_required : t -> bool
+
 (** Presentation-only projection shared by actual native state and prelayout
     sizing. A generic workspace supplies only its typed visible instance ID;
     this grants no workspace/runtime authority and admits no native state. *)
@@ -258,3 +318,39 @@ val moderator_projection : t -> Jsonaf.t
 
 (** Payload-free extension summaries in stable identity order. *)
 val extension_status : t -> Agent_protocol.Extension_status.t list
+
+(** Pure complete-state facts for queue/Schedule carrier validation; no live
+    owner or source permission is produced. *)
+val queue_provenance : t -> Queue_provenance_validation.t
+
+(** Finite actual native source/accounting projection used by ordered policy DATA
+    checks. A missing installed source stays None and grants no fresh work. *)
+val policy_context : t -> (Policy_cause_data.Context.t, Agent_protocol.Error.t) result
+
+(** Combined read DATA from the exact actual State. All full-owner facts must
+    agree with [owner]; missing historical causal history remains Unknown while
+    retaining its known subtotal. Does not authorize or reserve work. *)
+val goal_policy_context
+  :  t
+  -> owner:Agent_protocol.Session_ref.t
+  -> (Goal_policy_totals.Context.t, Agent_protocol.Error.t) result
+
+(** Current lifecycle pointer is DATA only; validate its exact installed source
+    and existing receipt, including complete-document restoration. *)
+val validate_moderator_lifecycle : t -> (unit, Agent_protocol.Error.t) result
+
+(** Ordinary index changes cannot select another lifecycle or discard current
+    evidence without an actual source invalidation. Paired claim owns selection. *)
+val validate_moderator_lifecycle_index_update
+  :  t
+  -> Run_state.t
+  -> (unit, Agent_protocol.Error.t) result
+
+(** Full-state adoption cannot select an old receipt or infer order among several
+    newly added lifecycle claims. No historical capture is synthesized. *)
+val validate_moderator_lifecycle_update
+  :  previous_runs:Run_state.t option
+  -> previous_generation:int
+  -> previous_executions:Agent_protocol.Moderator_execution.t list
+  -> t
+  -> (unit, Agent_protocol.Error.t) result

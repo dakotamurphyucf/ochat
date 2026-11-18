@@ -74,6 +74,10 @@ let%expect_test "custom host without seed Factory omits discovery and denies see
           ~blob_store:(S.Daemon.blob_store daemon)
           ~session_store:store
           ~authoring:None
+          ~recurrence_read:None
+          ~recurrence_operator:None
+          ~goal_read:None
+          ~goal_operator:None
           ~lifecycle_service
           ~retained:
             (S.Retained_session.create
@@ -87,6 +91,7 @@ let%expect_test "custom host without seed Factory omits discovery and denies see
           ~server_info:(fun () -> info)
           ~server_health:(fun _ -> failwith "unexpected health")
           ~cancel_job:(fun ~actor:_ ~job:_ -> failwith "unexpected cancellation")
+          ~create_session_authenticated:None
           ~create_session:(S.Session_factory.create_session factory)
           ~seed_factory:None
           ~seed_recovery_limits:S.Session_factory.Seed_recovery_limits.default

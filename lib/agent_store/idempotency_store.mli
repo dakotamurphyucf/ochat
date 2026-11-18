@@ -108,6 +108,34 @@ val with_retained_references
     existing-record mutation failures retain their ordinary IO/document semantics. *)
 val record : t -> record -> (record, Store_error.t) result
 
+module Removal : sig
+  (** Verified private lifecycle fact carried by an original protected receipt.
+      It contains no caller identity, reusable authorization, or request data. *)
+  type t = private
+    { session_id : Agent_protocol.Id.Session.t
+    ; generation : int
+    }
+end
+
+(** Reserve all private Remove metadata with the original Pending receipt.
+    Replaying a legacy receipt does not add a late reservation. *)
+val record_remove : t -> record -> (record, Store_error.t) result
+
+(** Complete the original protected typed Remove with exactly the same public
+    Delete result. Called only by the actual applied lifecycle outcome owner.
+    A legacy unreserved completion retains its public result without evidence. *)
+val complete_remove
+  :  t
+  -> key:Key.t
+  -> request_digest:string
+  -> generation:int
+  -> result:Agent_protocol.Method_result.Delete.t
+  -> (record, Store_error.t) result
+
+(** A bounded factual lookup in this opened Store owner. Pending/rejected
+    records and public delete successes without a private proof give no fact. *)
+val removal : t -> session_id:Agent_protocol.Id.Session.t -> Removal.t option
+
 (** [complete] durably replaces a matching pending record with its terminal
     outcome. Completed records are returned unchanged, making completion
     idempotent. *)

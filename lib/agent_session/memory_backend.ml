@@ -63,7 +63,8 @@ let commit t ~(previous : Session_state.t) transition =
 
 let persistence t =
   Session_actor.
-    { commit = (fun ~command_audit:_ ~previous value -> commit t ~previous value)
+    { commit =
+        (fun ?observation:_ ~command_audit:_ ~previous value -> commit t ~previous value)
     ; archive_reference =
         (fun ~previous ~kind id ->
           Compaction_archive.reference_for

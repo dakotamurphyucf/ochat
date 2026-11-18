@@ -19,6 +19,19 @@ open! Core
 
 type t
 
+module Conversation_host : sig
+  (** Actual Factory composition supports Goal source custody and Model recipe
+      selection. Background_only supports existing ordinary Async_tool hosts
+      with their installed executor, but has no Goal source owner or Model
+      resolver. Developer_only offers no fresh conversation work or delivery.
+      Factual maintenance of already-claimed conversation work is unchanged.
+      These alternatives select available services, never execution permission. *)
+  type t =
+    | Factory of Session_factory.t
+    | Background_only
+    | Developer_only
+end
+
 (** Pure ordering probe for the one owner-group chooser. A Host_job here is
     comparison data, never permission to claim or execute it. Groups must have
     unique owners; candidates retain their within-owner order. The returned
@@ -79,6 +92,9 @@ val reconcile_entry
     documents. Tool and Script packages attach to this ONE dispatcher; an
     unsupported kind or absent package stays queued without a claim.
     Conversation execution and delivery retain their actor/runtime path.
+    Host capability and exact retained attribution filter individual candidates
+    before fair ordering and are rechecked before a fresh claim. Unsupported
+    Goal/Model work stays queued; attribution errors never select ordinary work.
     Production daemon registry creation and installation belong to the
     developer-run host assembly. *)
 val start_controlled
@@ -88,10 +104,7 @@ val start_controlled
   -> registry:Session_registry.t
   -> developer_registry:Developer_root_owner.Registry.t option
   -> capacity:Job_capacity.t
-  -> model_job_inference:
-       (Session_registry.entry
-        -> Agent_protocol.Job.t
-        -> (Session_factory.model_job_inference, Agent_protocol.Error.t) Result.t)
+  -> conversation_host:Conversation_host.t
   -> t
 
 val start
@@ -100,10 +113,7 @@ val start
   -> registry:Session_registry.t
   -> developer_registry:Developer_root_owner.Registry.t option
   -> capacity:Job_capacity.t
-  -> model_job_inference:
-       (Session_registry.entry
-        -> Agent_protocol.Job.t
-        -> (Session_factory.model_job_inference, Agent_protocol.Error.t) Result.t)
+  -> conversation_host:Conversation_host.t
   -> t
 
 (** Comparison only for trusted daemon installation: this scheduler was

@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "namespace": "ochat.examples.lifecycle-composition.counter",
+  "dependencies": {
+    "lifecycle": {
+      "source": {
+        "kind": "local",
+        "path": "../../../../libraries/lifecycle"
+      },
+      "project": "chatml.project.json",
+      "environment": "pure"
+    }
+  },
+  "modules": {
+    "Counter": {
+      "implementation": "src/counter.chatml",
+      "interface": "src/counter.chatmli"
+    }
+  },
+  "environments": {
+    "default": {
+      "modules": {
+        "Counter": "self.Counter",
+        "Lifecycle": "lifecycle.Lifecycle"
+      },
+      "requires": {
+        "targets": [
+          "moderator_v1",
+          "delegated_moderator_v1"
+        ]
+      }
+    }
+  }
+}

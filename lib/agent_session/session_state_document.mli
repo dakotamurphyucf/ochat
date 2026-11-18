@@ -5,11 +5,13 @@ open! Core
     A decoded original retains its admitted immutable ledger and complete profile.
     Updating the native value never replaces this original preservation basis;
     any different profile re-admits the original child before continuity checks.
-    Historical absent run_state and explicit null remain distinct when its native
+    Historical absent run/goal/instruction carriers and explicit null remain distinct when its native
     value is None, including adoption and unrelated writes. The optional delivery
     subscription binding has the same policy, keyed by its typed delivery ID.
     A newly admitted Some value introduces its known field; wire presence never
-    supplies authority. *)
+    supplies authority. Run updates also validate against the retained template
+    and prior carrier, so encode/adopt cannot attach a new reciprocal origin to
+    an already retained Run or discard immutable Run/receipt custody. *)
 type t
 
 (** Version of newly authored complete session.state documents. *)
@@ -36,6 +38,22 @@ val value : t -> Session_state.t
 val with_value : t -> Session_state.t -> t
 val shape : Document_schema.Shape.t
 
+(** Capacity-only future shape witnesses for this exact already encoded native
+    state. The persistence owner supplies its admitted [document]. Witness JSON
+    is never decoded as state/evidence or installed; it owns no execution right. *)
+val terminal_capacity
+  :  t
+  -> document:Document_schema.Document.t
+  -> limits:Document_schema.Limits.t
+  -> (Run_terminal_document.t, Document_schema.Error.t) result
+
+(** Matching capacity-only recurrence control witness for this exact carrier. *)
+val recurrence_capacity
+  :  t
+  -> document:Document_schema.Document.t
+  -> limits:Document_schema.Limits.t
+  -> (Recurrence_control_capacity.t, Document_schema.Error.t) result
+
 val decode
   :  limits:Document_schema.Limits.t
   -> Document_schema.Document.t
@@ -53,6 +71,11 @@ val decode_after
   -> Document_schema.Document.t
   -> (t, Document_schema.Error.t) result
 
+(** Component exports are owned by one encoding invocation: the actual
+    preserved child/descendant documents and future-capacity proofs are reused
+    only for that invocation's host check. Raw admission remains independent.
+    Authored re-admission retains the original caller state as the final capacity
+    basis, including when decoding rehydrates different native fields. *)
 val encode
   :  t
   -> limits:Document_schema.Limits.t
@@ -96,11 +119,15 @@ val adopt
   -> t
   -> (t, Document_schema.Error.t) result
 
-(** Adjacent generic v1 through v10 conversion. The v9 to v10 step introduces
+(** Adjacent generic v1 through v12 conversion. The v9 to v10 step introduces
     required spec.root_invocation. Historical absence converts to Ui, the actual
     previous native root contract; present invalid values reject. Existing unknown
     fields remain in the original preservation carrier. The native state schema25
-    also rejects Headless claims in an older native schema.
+    also rejects Headless claims in an older native schema. Native schema26
+    introduces owned delegated accounting; historical absence stays absent and
+    cannot bootstrap exact zero or complete child inventory. Native schema27
+    adds optional descendant Goal accounting; the v11 to v12 conversion preserves
+    absent versus null fields and never invents historical origin or receipts.
      The v8 to v9 step wraps each
     original pending entry, preserving its entire raw document, and introduces
     independent pending revision/disposition fields with unknown legacy owner. The v7 to v8 step is
@@ -167,6 +194,55 @@ module Admitted : sig
 
   val state_document : t -> state_document
   val document : t -> Document_schema.Document.t
+
+  (** Union an actual Created carrier's compatible extension paths into this
+      ordered-admitted candidate. The receiver's exact final native value and
+      validated transition basis remain unchanged; captured known fields grant
+      no replacement permission. Full encoding/preservation checks still apply. *)
+  val merge_created
+    :  t
+    -> captured:state_document
+    -> limits:Document_schema.Limits.t
+    -> (t, Document_schema.Error.t) result
+end
+
+(** Complete ordered but unstamped DATA. Its encoding retains all native checks,
+    preservation and limits. Only combined Goal-policy context uses the exact
+    publication revision from its checked ordered cursor; all other checks use
+    original counters. This is distinct from finalized [Admitted] mutation.
+    Replay still requires full final State decoding and exact publication equality
+    after metadata stamping. [Prefix.materialize] performs that full admission; no
+    unstamped native State accessor is provided. *)
+module Prefix : sig
+  type state_document = t
+  type t
+
+  val document : t -> Document_schema.Document.t
+
+  (** Union only compatible Created extensions, retaining the same native
+      candidate, original transaction cursor and complete admission checks. The
+      captured Created image is fully validated; only the retargeted receiver
+      remains in ordered-prefix validation mode. *)
+  val merge_created
+    :  t
+    -> captured:state_document
+    -> limits:Document_schema.Limits.t
+    -> (t, Document_schema.Error.t) result
+
+  val validate_publication : t -> revision:int64 -> (unit, Document_schema.Error.t) result
+
+  (** Full final State decoding followed by the same publication check. Reuse is
+      limited to successful wire-field decodes from this prefix's last encoding,
+      for exact JSON at unchanged limits. Raw admission, native validation,
+      extension preservation, pending rehydration and capacity checks always run.
+      Created merges replace the evidence with their final actual re-encoding.
+      The result owns a new original wire basis and one evidence generation;
+      no candidate native value or execution authority is returned unchecked. *)
+  val materialize
+    :  t
+    -> limits:Document_schema.Limits.t
+    -> Document_schema.Document.t
+    -> (state_document, Document_schema.Error.t) result
 end
 
 (** Opaque ordered transaction prefixes. Only validated checkpoints and [finish] return durable carriers;
@@ -180,8 +256,127 @@ module Transaction : sig
     -> limits:Document_schema.Limits.t
     -> (t, Document_schema.Error.t) result
 
+  (** Ordinary absence-only entry. Rejects a positive baseline and never captures
+      a causal birth or constructs a policy source-work projection. The private
+      transaction retains its actual baseline and rejects any positive final
+      candidate. Chosen only from exhaustive actual whole-delta lookahead. *)
+  val begin_absent_policy
+    :  document
+    -> limits:Document_schema.Limits.t
+    -> (t, Document_schema.Error.t) result
+
+  (** Both optional accounting components are genuinely absent across the actual
+      whole delta. Avoids all new policy projection/capture work; finish still
+      rejects positive publication and preserves the issued history identity. *)
+  val begin_absent_accounting
+    :  document
+    -> limits:Document_schema.Limits.t
+    -> (t, Document_schema.Error.t) result
+
+  (** Advance the private combined-count cursor AFTER the corresponding actual
+      native leaf. These inputs are existing validated DATA, not runtime proof.
+      Final candidate equality and every existing native/PC/GD guard still apply. *)
+  val observe_goal_policy_catalog : t -> (t, Document_schema.Error.t) result
+
+  val observe_goal_policy_accounts : t -> (t, Document_schema.Error.t) result
+  val observe_goal_policy_children : t -> (t, Document_schema.Error.t) result
+
+  val observe_goal_policy_descendants
+    :  t
+    -> Goal_descendants.Update.t
+    -> (t, Document_schema.Error.t) result
+
+  val observe_goal_policy_update
+    :  t
+    -> Goal_policy_contributions.Update.t
+    -> (t, Document_schema.Error.t) result
+
+  val observe_goal_policy_metadata
+    :  t
+    -> Policy_canonical_usage.Update.t
+    -> (t, Document_schema.Error.t) result
+
+  val observe_goal_policy_canonical
+    :  t
+    -> before:Inference_ledger.t
+    -> policy:Policy_canonical_usage.Update.t option
+    -> (t, Document_schema.Error.t) result
+
+  val observe_goal_policy_replacement : t -> (t, Document_schema.Error.t) result
   val value : t -> Session_state.t
   val with_value : t -> Session_state.t -> t
+
+  (** Advance the same finite policy cursor using the shared native leaf mapping.
+      Actual native application supplies the before/after projections separately;
+      no callback, owner or authority can be supplied through this DATA step. *)
+  val advance_policy_usage
+    :  t
+    -> Policy_canonical_usage.Ordered.step
+    -> (t, Document_schema.Error.t) result
+
+  module Descendant_observation : sig
+    type t =
+      | Ordinary_children of Child_contributions.t
+      | Active_operation of Agent_protocol.Operation.t option
+      | Invocation of Agent_protocol.Invocation.t
+      | Moderator_execution of Agent_protocol.Moderator_execution.t
+  end
+
+  (** Observe an actual ordered context or ordinary child leaf. This never
+      changes the native candidate by itself; finish compares the actual fields.
+      Accounting updates and creation evidence can only advance through their
+      dedicated validated operations, not this observation interface. *)
+  val observe_descendants
+    :  t
+    -> Descendant_observation.t
+    -> (t, Document_schema.Error.t) result
+
+  (** Validate and apply the closed accounting/child replacement together. *)
+  val update_goal_descendants
+    :  t
+    -> Goal_descendants.Update.t
+    -> (t, Document_schema.Error.t) result
+
+  (** Continue the SAME transaction after actual History_retirement admission.
+      Requires the identical issued private accounting cursor, exact pure next
+      value and unchanged catalog/account/ledger projection; it cannot rebase or
+      import another snapshot's evidence. History/archive custody is checked by
+      the actual history owner before this call. *)
+  val continue_after_history
+    :  t
+    -> admitted:document
+    -> next:Session_state.t
+    -> limits:Document_schema.Limits.t
+    -> (t, Document_schema.Error.t) result
+
+  (** Validate one actual canonical edge and its paired own partition, then
+      advance the private accepted ledger/usage basis. The original complete
+      carrier template and all other prefix custody stay unchanged.
+      This is DATA admission, never a runtime or child-import permission. *)
+  val update_canonical_usage
+    :  t
+    -> ledger:Inference_ledger.t
+    -> delegated_usage:Delegated_usage.t option
+    -> (t, Document_schema.Error.t) result
+
+  (** Validate one ordered Goal-catalog leaf against the current prefix and
+      advance its preservation-validation basis. Every changed Goal and catalog
+      must still advance exactly once; the original extension template is kept.
+      [with_value] alone never advances this basis. Complete state, cross-record
+      evidence and capacity validation remain required at checkpoint/finish. *)
+  val update_goal_catalog : t -> Goal_catalog.t -> (t, Document_schema.Error.t) result
+
+  (** Actual ordered account leaf. New partitions retain only their genuine
+      earlier Goal prefix; original global ledger/account bounds are unchanged.
+      Generic with_value cannot record this evidence. *)
+  val update_goal_accounts : t -> Goal_accounts.t -> (t, Document_schema.Error.t) result
+
+  (** One actual Created replacement edge, not inferred sequential creation or
+      a fresh accounting baseline. Existing captured receiver evidence survives. *)
+  val replace_goal_accounting
+    :  t
+    -> Session_state.t
+    -> (t, Document_schema.Error.t) result
 
   (** Archive/retirement checkpoint validates current prefix completely; it cannot
       archive or expose an inconsistent native prefix. *)
@@ -198,8 +393,20 @@ module Transaction : sig
     -> limits:Document_schema.Limits.t
     -> (t, Document_schema.Error.t) result
 
+  (** Admit the complete exact ordered candidate before publication metadata.
+      Owner-stamped time/counters normalize for candidate equality; complete
+      unstamped native, preservation and capacity checks still run. This returns
+      only a [Prefix], whose actual publication revision remains to be checked. *)
+  val checkpoint_encoded
+    :  t
+    -> next:Session_state.t
+    -> limits:Document_schema.Limits.t
+    -> (Prefix.t, Document_schema.Error.t) result
+
   (** Validate complete candidate and exact ordered semantics; only owner-stamped
-      time/counters normalize. Ordinary durable encoding rechecks preservation. *)
+      time/counters normalize for equality. A newly Included local occurrence
+      must match [next]'s actual publication revision. Ordinary durable encoding
+      rechecks preservation. *)
   val finish_encoded
     :  t
     -> next:Session_state.t

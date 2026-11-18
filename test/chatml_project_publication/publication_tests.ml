@@ -208,6 +208,8 @@ let%test_module "selected lock publication" =
                   (contents (Lazy.force (if renamed then fresh else old))));
               let names = Eio.Path.read_dir directory in
               (match boundary with
+               | Before_stat | Before_open_in ->
+                 failwith "read boundary is outside the writer fault matrix"
                | After_create ->
                  (* open_out did not return, so the writer never admitted ownership.
                     Unknown temporaries must not be deleted automatically. *)

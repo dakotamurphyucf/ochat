@@ -1,0 +1,6 @@
+(library
+ (name goal_operator_protocol_tests)
+ (libraries core digestif jsonaf ochat.agent_protocol)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))

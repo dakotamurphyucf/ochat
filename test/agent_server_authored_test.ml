@@ -3,6 +3,7 @@ open Agent_server_test_support
 module P = Agent_protocol
 module D = Agent_server.Daemon
 module R = Agent_server.Session_registry
+module Owner = Agent_server.Runtime_owner
 module A = Agent_session.Session_actor
 module H = Agent_client.Session_handle
 module Res = Openai.Responses
@@ -16,7 +17,13 @@ let field json name = Jsonaf.member_exn name json
 let text json name = field json name |> Jsonaf.string_exn
 
 let state daemon id =
-  let entry = R.load (D.registry daemon) id |> protocol_ok in
+  let registry = D.registry daemon in
+  (* Observing the canonical actor does not acquire a new lifecycle reservation. *)
+  let entry =
+    match R.find registry id with
+    | Some entry -> entry
+    | None -> R.load registry id |> protocol_ok
+  in
   A.state entry.actor |> protocol_ok
 ;;
 
@@ -84,6 +91,102 @@ let answer ~id =
   |> Stdlib.List.to_seq
 ;;
 
+(* Exercise the source boundary on the actual named native child, after ordinary
+   execution/reopen has established its genuine parent owner. *)
+let assert_authored_source env daemon id =
+  let entry = R.load (D.registry daemon) id |> protocol_ok in
+  let before = A.state entry.actor |> protocol_ok in
+  let store_ok = function
+    | Ok value -> value
+    | Error error -> raise_s [%sexp (error : Agent_store.Store_error.t)]
+  in
+  let frames () =
+    let handle = Option.value_exn entry.store_handle in
+    let journal =
+      Agent_store.Journal.open_existing
+        ~env
+        ~directory:(Agent_store.Session_store.Handle.journal_directory handle)
+        ~max_payload_length:16777216
+        ~max_segment_bytes:67108864L
+        ~max_segment_frames:4096
+      |> store_ok
+    in
+    let scan = Agent_store.Journal.scan journal |> store_ok in
+    List.map scan.entries ~f:(fun entry -> Agent_store.Frame.payload entry.frame)
+  in
+  let saved = frames () in
+  let request =
+    Agent_session.Run_admission_request.Headless.create
+      ~session_id:id
+      ~generation:before.identity.generation
+      ~expected_revision:before.counters.revision
+      ~mode:Single_turn
+      ~input:Authored_start
+      ~key:(P.Idempotency_key.of_string "authored-source-stage" |> protocol_ok)
+    |> protocol_ok
+  in
+  let preparation =
+    match
+      A.begin_headless_run_preparation
+        entry.actor
+        ~actor:(Operator_authorization.trusted_local (principal ()))
+        ~authorize:(fun _ -> Ok ())
+        ~request
+      |> protocol_ok
+    with
+    | Prepare preparation -> preparation
+    | Retained _ -> failwith "authored source unexpectedly retained a Run"
+  in
+  Exn.protect
+    ~finally:(fun () -> A.end_run_preparation entry.actor preparation |> protocol_ok)
+    ~f:(fun () ->
+      Agent_server.Session_factory.with_prepared_run_source
+        (D.factory daemon)
+        entry
+        ~preparation
+        (fun prepared ->
+           Agent_server.Runtime_owner.Prepared.check_basis prepared |> protocol_ok;
+           let selected =
+             A.Source_binding.source
+               (Agent_server.Runtime_owner.Prepared.binding prepared)
+           in
+           match Agent_session.Runtime_builder.Source.selection selected with
+           | Authored_child { source = child; reference } ->
+             let revision = Agent_session.Prompt_child_source.revision child in
+             assert (
+               Agent_store.Delegation_store.Reference.equal
+                 reference
+                 (Option.value_exn before.spec.delegation));
+             let parent =
+               R.find (D.registry daemon) reference.key.parent_session_id
+               |> Option.value_exn
+             in
+             assert (
+               Result.is_error
+                 (Agent_session.Runtime_builder.Source.validate_target
+                    selected
+                    (A.state parent.actor |> protocol_ok)));
+             assert (
+               P.Id.Prompt_revision.equal
+                 before.spec.prompt_revision_id
+                 (Agent_session.Prompt_revision.id revision));
+             assert (
+               String.is_substring
+                 (Agent_session.Prompt_revision.artifact revision).root_chatmd
+                 ~substring:"AUTHORED_SPECIALIST");
+             Ok ()
+           | Authored _ | Captured _ | Generated _ | Generated_artifact _ ->
+             failwith "authored child source was reclassified")
+      |> protocol_ok);
+  assert (
+    Jsonaf.exactly_equal
+      (state_document before |> store_ok |> Document_schema.Document.json)
+      (state_document (A.state entry.actor |> protocol_ok)
+       |> store_ok
+       |> Document_schema.Document.json));
+  [%test_eq: string list] saved (frames ())
+;;
+
 let%expect_test
     "authored native sessions retain private moderator state over Unix sockets and \
      daemon restart"
@@ -118,6 +221,8 @@ let%expect_test
         let queued = ref None in
         let child_calls = ref 0 in
         let calls = ref 0 in
+        let constructions = ref 0 in
+        let observe_construction = ref (fun (_actor : A.t) -> ()) in
         let child_preflight = ref (fun () -> ()) in
         let provider ~sw:_ ~inputs =
           Int.incr calls;
@@ -184,6 +289,18 @@ let%expect_test
           Eio.Switch.run (fun sw ->
             Failure_diagnostic.reset diagnostic;
             let before = !calls in
+            let policy =
+              inference_policy ~default_model:"fixture-model" ~post_stream:provider
+            in
+            let policy =
+              { policy with
+                runtime_inference_ports =
+                  (fun actor ->
+                    Int.incr constructions;
+                    !observe_construction actor;
+                    policy.runtime_inference_ports actor)
+              }
+            in
             let daemon =
               run_phase "start daemon" (fun () ->
                 D.start
@@ -196,10 +313,7 @@ let%expect_test
                   ~options:
                     { D.default_options with
                       qualify_chatml_extensions = true
-                    ; inference_policy =
-                        Agent_server_test_support.inference_policy
-                          ~default_model:"fixture-model"
-                          ~post_stream:provider
+                    ; inference_policy = policy
                     }
                   ()
                 |> protocol_ok)
@@ -593,6 +707,12 @@ let%expect_test
           in
           assert (P.Id.Session.equal child continued);
           check_counter daemon child "count-3";
+          let before_calls = !calls in
+          let before_construction = !constructions in
+          run_phase "verify authored source after original edit and restart" (fun () ->
+            assert_authored_source env daemon child);
+          [%test_eq: int] before_calls !calls;
+          [%test_eq: int] before_construction !constructions;
           let continued =
             call sw daemon client caller ~session_id:grandchild "Inherited after restart."
           in
@@ -602,7 +722,103 @@ let%expect_test
             run_phase "verify one-off remains stopped after restart" (fun () ->
               let stopped = state daemon id in
               [%test_eq: P.Session.desired_state] Stopped stopped.lifecycle.desired;
-              check_counter daemon id "count-1")));
+              check_counter daemon id "count-1"));
+          run_phase "authored Ready and Pending cold construction" (fun () ->
+            (* Reuse the exact native-created child after its real restart and
+               pinned private-tool checks. A stopped child admits no concurrent
+               idle lifecycle callback while physical construction is observed. *)
+            let entry = R.load (D.registry daemon) child |> protocol_ok in
+            let handle = invocation_handle sw client child in
+            H.stop handle ~mode:Graceful |> protocol_ok |> ignore;
+            Owner.unload_and_wait entry.runtime |> protocol_ok;
+            let before = A.state entry.actor |> protocol_ok in
+            (match before.runtime_initialization with
+             | Ready -> ()
+             | Pending _ -> failwith "authored fixture is not genuinely Ready");
+            (match before.lifecycle.desired, before.lifecycle.observed with
+             | Stopped, Stopped -> ()
+             | _ -> failwith "authored child Stop did not join");
+            assert (Option.is_none before.active_operation);
+            assert (
+              Option.for_all before.run_state ~f:(fun index ->
+                List.for_all (Agent_session.Run_state.runs index) ~f:(fun run ->
+                  match run.P.Run.lifecycle with
+                  | Terminal _ -> true
+                  | Admitted | Active | Waiting _ -> false)));
+            assert (not (Owner.is_loaded entry.runtime));
+            let before_calls = !calls in
+            let before_constructions = !constructions in
+            (* This is the current actual fixture principal, independently of
+               the saved creator. No unresolved Run redirects its Ready Init. *)
+            let original = Operator_authorization.trusted_local (principal ()) in
+            Owner.ensure_loaded_authenticated entry.runtime ~actor:original |> protocol_ok;
+            let ready = A.state entry.actor |> protocol_ok in
+            [%test_eq: int] before.identity.generation ready.identity.generation;
+            (match ready.runtime_initialization with
+             | Ready -> ()
+             | Pending _ -> failwith "authored authenticated Ready Init did not finish");
+            (match ready.lifecycle.desired, ready.lifecycle.observed with
+             | Stopped, Stopped -> ()
+             | _ -> failwith "authored Ready construction changed stopped intent");
+            assert (
+              List.equal
+                P.Moderator_execution.equal
+                before.moderator_executions
+                ready.moderator_executions);
+            assert (Owner.is_loaded entry.runtime);
+            assert (Owner.source_lane_idle entry.runtime);
+            assert (not (Owner.has_activation_handoff entry.runtime));
+            [%test_eq: int] before_calls !calls;
+            [%test_eq: int] (before_constructions + 1) !constructions;
+            let pending_seen = ref false in
+            let rebuild_constructions = !constructions in
+            Exn.protect
+              ~finally:(fun () -> observe_construction := fun _ -> ())
+              ~f:(fun () ->
+                (* Observe the real constructor's inference-port boundary. This
+                   supplies no actor, source, permission or synthetic Init. *)
+                (observe_construction
+                 := fun actor ->
+                      if phys_equal actor entry.actor
+                      then (
+                        (observe_construction := fun _ -> ());
+                        let pending = A.state actor |> protocol_ok in
+                        [%test_eq: int]
+                          (ready.identity.generation + 1)
+                          pending.identity.generation;
+                        (match pending.runtime_initialization with
+                         | Pending _ -> ()
+                         | Ready ->
+                           failwith "authored rebuild skipped actual Pending Init");
+                        pending_seen := true));
+                let response =
+                  H.rebuild
+                    handle
+                    ~expected_revision:ready.counters.revision
+                    ~prompt_choice:Pinned
+                  |> protocol_ok
+                in
+                assert !pending_seen;
+                let after = A.state entry.actor |> protocol_ok in
+                [%test_eq: int] (ready.identity.generation + 1) after.identity.generation;
+                [%test_eq: P.Session.desired_state] Stopped response.desired_state;
+                (match after.runtime_initialization with
+                 | Ready -> ()
+                 | Pending _ -> failwith "authored Pending Init did not complete");
+                (match after.lifecycle.desired, after.lifecycle.observed with
+                 | Stopped, Stopped -> ()
+                 | _ -> failwith "authored rebuild changed stopped intent");
+                assert (Option.is_none after.active_operation);
+                assert (not (Owner.is_loaded entry.runtime));
+                (* The committed stopped event also queues public dependency
+                   retirement. Join that separate owner before asserting full
+                   quiescence; the command already retired its own runtime. *)
+                Owner.unload_and_wait entry.runtime |> protocol_ok;
+                assert (Owner.source_lane_idle entry.runtime);
+                assert (not (Owner.has_activation_handoff entry.runtime));
+                [%test_eq: int] before_calls !calls;
+                [%test_eq: int] (rebuild_constructions + 1) !constructions);
+            H.detach handle |> protocol_ok));
         print_endline
           "authored wrapper creates and continues a persisted child; generic management \
            sees it";
@@ -613,7 +829,9 @@ let%expect_test
         print_endline
           "default one-off calls return text, join child cleanup, and remain stopped \
            after restart";
-        print_endline "cancelling a one-off caller joins its blocked child provider"));
+        print_endline "cancelling a one-off caller joins its blocked child provider";
+        print_endline
+          "authored authenticated reload and fresh rebuild preserve stopped intent"));
   [%expect
     {|
     authored wrapper creates and continues a persisted child; generic management sees it
@@ -621,5 +839,6 @@ let%expect_test
     fixed and optional wrappers preserve declaration identity and actual caller ownership
     default one-off calls return text, join child cleanup, and remain stopped after restart
     cancelling a one-off caller joins its blocked child provider
+    authored authenticated reload and fresh rebuild preserve stopped intent
     |}]
 ;;

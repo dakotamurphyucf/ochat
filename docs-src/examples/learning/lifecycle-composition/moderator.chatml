@@ -1,0 +1,42 @@
+(* Explicit per-component fields; no mutable global or generic state registry. *)
+type state = {schema:int; config:{revision:int}; counter:Counter.state; review:Review.state}
+
+(* This checked migration is pure and explicit: a caller must select it when
+   replacing a source/config, never reinterpret an old checkpoint automatically.
+   The legacy example lacks Review state; this adds only the new field. *)
+let migrate_v0 = fun legacy ->
+  {schema = 1; config = {revision = 1}; counter = legacy.counter; review = Review.initial}
+
+(* This example explicitly selects its legacy migration at startup. A persisted
+   resume still needs the host to select the corresponding migration policy. *)
+let initial_state = migrate_v0({counter = Counter.initial})
+
+let completed = `Object([
+  {key = "kind"; value = `String("finish")},
+  {key = "terminal"; value = `Object([{key = "kind"; value = `String("completed")}])},
+  {key = "relinquish"; value = `Array([])}])
+
+let advance = fun state ->
+  let counter = Counter.step(state.counter) in
+  let review = Review.step(state.review) in
+  match Lifecycle_run.compose([counter.decision, review.decision]) with
+  | `Error(error) -> fail("Lifecycle decisions conflict; checkpoint remains unchanged.")
+  | `Ok(plan) ->
+      let next = {schema = state.schema; config = state.config;
+                  counter = counter.state; review = review.state} in
+      if Array.length(plan.active) == 0 then
+        Task.bind(Lifecycle_run.finish(plan, completed), fun result ->
+          match result with
+          | `Ok(ignored) -> Task.pure(next)
+          | `Error(error) -> fail("Root finish gate rejected."))
+      else Task.bind(Lifecycle_run.stage(plan.action), fun ignored -> Task.pure(next))
+
+let on_event = fun ctx state event ->
+  if state.schema != 1 then
+    fail("Explicit state/config migration is required before resuming.")
+  else if state.config.revision != 1 then
+    fail("Explicit state/config migration is required before resuming.")
+  else match event with
+    | `Session_start -> advance(state)
+    | `Turn_end -> advance(state)
+    | _ -> Task.pure(state)

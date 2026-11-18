@@ -1,0 +1,47 @@
+(rule
+ (targets bundled_capability_sources.ml)
+ (action
+  (with-stdout-to %{targets}
+   (run %{exe:../authoring_sources/embed_documents.exe}
+    examples/libraries/goal-requests/chatml.project.json %{dep:../../docs-src/examples/libraries/goal-requests/chatml.project.json}
+    examples/libraries/goal-requests/src/goal_requests.chatml %{dep:../../docs-src/examples/libraries/goal-requests/src/goal_requests.chatml}
+    examples/libraries/goal-requests/src/goal_requests.chatmli %{dep:../../docs-src/examples/libraries/goal-requests/src/goal_requests.chatmli}
+    guide/native-goal-metadata.md %{dep:../../docs-src/guide/native-goal-metadata.md}
+    examples/libraries/recurrence-requests/chatml.project.json %{dep:../../docs-src/examples/libraries/recurrence-requests/chatml.project.json}
+    examples/libraries/recurrence-requests/src/recurrence_requests.chatml %{dep:../../docs-src/examples/libraries/recurrence-requests/src/recurrence_requests.chatml}
+    examples/libraries/recurrence-requests/src/recurrence_requests.chatmli %{dep:../../docs-src/examples/libraries/recurrence-requests/src/recurrence_requests.chatmli}
+    agent-server/recurring-automation.md %{dep:../../docs-src/agent-server/recurring-automation.md}
+    examples/learning/instruction-selection/agent.chatmd %{dep:../../docs-src/examples/learning/instruction-selection/agent.chatmd}
+    examples/learning/instruction-selection/chatml.project.json %{dep:../../docs-src/examples/learning/instruction-selection/chatml.project.json}
+    examples/learning/instruction-selection/moderator.chatml %{dep:../../docs-src/examples/learning/instruction-selection/moderator.chatml}
+    examples/libraries/instruction-requests/chatml.project.json %{dep:../../docs-src/examples/libraries/instruction-requests/chatml.project.json}
+    examples/libraries/instruction-requests/src/instruction_requests.chatml %{dep:../../docs-src/examples/libraries/instruction-requests/src/instruction_requests.chatml}
+    examples/libraries/instruction-requests/src/instruction_requests.chatmli %{dep:../../docs-src/examples/libraries/instruction-requests/src/instruction_requests.chatmli}
+    guide/admitted-instructions.md %{dep:../../docs-src/guide/admitted-instructions.md}
+    examples/learning/lifecycle-composition/agent.chatmd %{dep:../../docs-src/examples/learning/lifecycle-composition/agent.chatmd}
+    examples/learning/lifecycle-composition/chatml.project.json %{dep:../../docs-src/examples/learning/lifecycle-composition/chatml.project.json}
+    examples/learning/lifecycle-composition/components/counter/chatml.project.json %{dep:../../docs-src/examples/learning/lifecycle-composition/components/counter/chatml.project.json}
+    examples/learning/lifecycle-composition/components/counter/src/counter.chatml %{dep:../../docs-src/examples/learning/lifecycle-composition/components/counter/src/counter.chatml}
+    examples/learning/lifecycle-composition/components/counter/src/counter.chatmli %{dep:../../docs-src/examples/learning/lifecycle-composition/components/counter/src/counter.chatmli}
+    examples/learning/lifecycle-composition/components/review/chatml.project.json %{dep:../../docs-src/examples/learning/lifecycle-composition/components/review/chatml.project.json}
+    examples/learning/lifecycle-composition/components/review/src/review.chatml %{dep:../../docs-src/examples/learning/lifecycle-composition/components/review/src/review.chatml}
+    examples/learning/lifecycle-composition/components/review/src/review.chatmli %{dep:../../docs-src/examples/learning/lifecycle-composition/components/review/src/review.chatmli}
+    examples/learning/lifecycle-composition/moderator.chatml %{dep:../../docs-src/examples/learning/lifecycle-composition/moderator.chatml}
+    examples/libraries/lifecycle-run/chatml.project.json %{dep:../../docs-src/examples/libraries/lifecycle-run/chatml.project.json}
+    examples/libraries/lifecycle-run/src/lifecycle_run.chatml %{dep:../../docs-src/examples/libraries/lifecycle-run/src/lifecycle_run.chatml}
+    examples/libraries/lifecycle-run/src/lifecycle_run.chatmli %{dep:../../docs-src/examples/libraries/lifecycle-run/src/lifecycle_run.chatmli}
+    examples/libraries/lifecycle/chatml.project.json %{dep:../../docs-src/examples/libraries/lifecycle/chatml.project.json}
+    examples/libraries/lifecycle/src/lifecycle.chatml %{dep:../../docs-src/examples/libraries/lifecycle/src/lifecycle.chatml}
+    examples/libraries/lifecycle/src/lifecycle.chatmli %{dep:../../docs-src/examples/libraries/lifecycle/src/lifecycle.chatmli}
+    guide/chatml-lifecycle-composition.md %{dep:../../docs-src/guide/chatml-lifecycle-composition.md}
+    guide/chatml-installed-libraries.md %{dep:../../docs-src/guide/chatml-installed-libraries.md}
+    guide/chatml-authoring-runs.md %{dep:../../docs-src/guide/chatml-authoring-runs.md}))))
+
+(library
+ (name capability_sources)
+ (public_name ochat.capability_sources)
+ (modules capability_sources capability_source_inventory bundled_capability_sources capability_source_inventory_tests)
+ (private_modules capability_source_inventory bundled_capability_sources capability_source_inventory_tests)
+ (libraries core jsonaf ochat.source ochat.chatml_source ochat.chatml_project ochat.document_schema)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

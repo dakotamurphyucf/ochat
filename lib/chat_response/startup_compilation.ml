@@ -283,27 +283,34 @@ let with_view
       ~map_error
       ~f
   =
-  Chatml.Chatml_checkpoint.protect callback ~f:(fun callback ->
-    let rec t =
-      { accounting
-      ; invocation
-      ; deadline
-      ; callback =
-          (fun () ->
-            Option.iter parent_checkpoint ~f:(fun checkpoint -> checkpoint ());
-            (match available t with
-             | Error failure -> raise (Rejected failure)
-             | Ok () -> ());
-            callback ())
-      ; parent
-      ; closed = false
-      }
-    in
-    Exn.protect
-      ~finally:(fun () -> t.closed <- true)
-      ~f:(fun () ->
-        try f t with
-        | Rejected failure -> Error (map_error failure)))
+  (* A timed phase can cancel a suspended callback. Its control exception must
+     remain visible to the race before this outer origin boundary unwinds. *)
+  Chatml.Chatml_checkpoint.protect
+    ~is_control_exception:(function
+      | Eio.Cancel.Cancelled _ -> true
+      | _ -> false)
+    callback
+    ~f:(fun callback ->
+      let rec t =
+        { accounting
+        ; invocation
+        ; deadline
+        ; callback =
+            (fun () ->
+              Option.iter parent_checkpoint ~f:(fun checkpoint -> checkpoint ());
+              (match available t with
+               | Error failure -> raise (Rejected failure)
+               | Ok () -> ());
+              callback ())
+        ; parent
+        ; closed = false
+        }
+      in
+      Exn.protect
+        ~finally:(fun () -> t.closed <- true)
+        ~f:(fun () ->
+          try f t with
+          | Rejected failure -> Error (map_error failure)))
 ;;
 
 let with_invocation (ledger : Ledger.t) ~limits ~checkpoint ~map_error ~f =

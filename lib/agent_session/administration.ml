@@ -111,7 +111,16 @@ let plan_reset state options =
                ~now:state.identity.updated_at)
             ~f:Option.some
     in
-    let candidate = { candidate with run_state } in
+    let%bind goal_catalog =
+      match state.goal_catalog with
+      | None -> Ok None
+      | Some catalog ->
+        let%map held =
+          Goal_run_resolution.plan_catalog catalog ~runs:run_state ~hold_for_review:true
+        in
+        Some (Option.value held ~default:catalog)
+    in
+    let candidate = { candidate with run_state; goal_catalog } in
     let%map () =
       Session_state.validate_administration_candidate candidate ~previous:state
     in
@@ -131,7 +140,22 @@ let admit_generation (state : Session_state.t) =
         ~retryable:false
         ())
   in
-  let state = { state with inference_ledger } in
+  let%bind delegated_usage =
+    match state.delegated_usage with
+    | None -> Ok None
+    | Some own ->
+      Delegated_usage.reconcile own ~before:state.inference_ledger ~after:inference_ledger
+      |> Result.map ~f:Option.some
+  in
+  let%bind policy_canonical_usage =
+    Option.value_map state.policy_canonical_usage ~default:(Ok None) ~f:(fun accounting ->
+      Policy_canonical_usage.reconcile_factual
+        accounting
+        ~before:state.inference_ledger
+        ~after:inference_ledger
+      |> Result.map ~f:Option.some)
+  in
+  let state = { state with inference_ledger; delegated_usage; policy_canonical_usage } in
   let%map () = Session_state.validate state in
   state
 ;;

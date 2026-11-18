@@ -10,8 +10,12 @@ type t =
   ; permissions : Permission.t list
   ; grants : Grant.t list
   ; jobs : Job.t list
+  ; instruction_status : Instruction_status.t option [@sexp.option]
+    (** None is legacy, unavailable or redacted; a supported empty selection is
+          Some with zero counts. Contains no body, source identity or authority. *)
   ; extension_status : Extension_status.t list [@sexp.list]
   ; schedules : Schedule.t list
+  ; goals : Goal_projection.t list [@sexp.list]
   ; active_tool_calls : Jsonaf.t list
   ; active_agent_calls : Jsonaf.t list
   ; halted : bool

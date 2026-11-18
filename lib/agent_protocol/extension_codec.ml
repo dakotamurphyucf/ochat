@@ -9,6 +9,26 @@ let text ~name ~max value =
   else Ok ()
 ;;
 
+(* Keep Jsonaf's number-token grammar after the finite-float check, including
+   legacy spellings such as +01 and .5. No string parser is needed for a token
+   that can contain only decimal characters and surrounding JSON whitespace. *)
+let number_syntax text =
+  let token =
+    String.strip text ~drop:(function
+      | ' ' | '\t' | '\r' | '\n' -> true
+      | _ -> false)
+  in
+  let decimal_character = function
+    | '-' | '+' | '0' .. '9' | '.' -> true
+    | _ -> false
+  in
+  (not (String.is_empty token))
+  && decimal_character token.[0]
+  && String.for_all token ~f:(function
+    | 'e' | 'E' -> true
+    | character -> decimal_character character)
+;;
+
 (* Bound traversal before invoking recursive codecs or allocating serialized
    text. This also validates values constructed directly, not only parsed JSON. *)
 let validate_json ?(max_bytes = 8 * 1024 * 1024) ?(max_depth = 128) json =
@@ -29,12 +49,7 @@ let validate_json ?(max_bytes = 8 * 1024 * 1024) ?(max_depth = 128) json =
         let%bind () = charge (String.length value) in
         (match Float.of_string_opt value with
          | Some number when Float.is_finite number ->
-           (try
-              match Jsonaf.of_string value with
-              | `Number _ -> Ok ()
-              | _ -> invalid "invalid JSON number"
-            with
-            | _ -> invalid "invalid JSON number")
+           if number_syntax value then Ok () else invalid "invalid JSON number"
          | _ -> invalid "extension JSON requires finite numbers")
       | `Array values ->
         List.fold_result values ~init:() ~f:(fun () value -> visit (depth + 1) value)

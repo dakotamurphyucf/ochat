@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "namespace": "ochat.capabilities.instruction-requests",
+  "modules": {
+    "Instruction_requests": {
+      "implementation": "src/instruction_requests.chatml",
+      "interface": "src/instruction_requests.chatmli"
+    }
+  },
+  "environments": {
+    "pure": {"modules": {"Instruction_requests": "self.Instruction_requests"}}
+  },
+  "default_environment": "pure"
+}

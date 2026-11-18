@@ -540,6 +540,27 @@ let reparse
            (parse_tree ~checkpoint ?content_limits materialized_tree artifact)))
 ;;
 
+let captured_config ?(checkpoint = Eio.Fiber.check) ?content_limits ~logical_tree artifact
+  =
+  Prompt_parser_boundary.run
+    ~checkpoint
+    ~on_parser_error:(fun exn ->
+      Error
+        [ exception_error
+            ~source:artifact.Agent_store.Prompt_artifact_store.Artifact.root_relative_path
+            exn
+        ])
+    ~f:(fun checkpoint ->
+      let _, elements, _ =
+        replay_custody
+          ~checkpoint
+          ~content_input:(Content_input.Stored content_limits)
+          logical_tree
+          artifact
+      in
+      Ok (Chat_response.Config.of_elements elements))
+;;
+
 let restore ?content_limits ~artifact_store (definition : Prompt_definition.t) revision_id
   =
   match Agent_store.Prompt_artifact_store.load artifact_store revision_id with

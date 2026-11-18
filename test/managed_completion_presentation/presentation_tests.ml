@@ -75,8 +75,10 @@ let snapshot () =
     ; permissions = []
     ; grants = []
     ; jobs = []
+    ; instruction_status = None
     ; extension_status = []
     ; schedules = []
+    ; goals = []
     ; active_tool_calls = []
     ; active_agent_calls = []
     ; halted = false
@@ -169,6 +171,7 @@ let terminal projection =
       internal
       ~body:(Full (Shared (P.Public.Durable.Shared_payload.of_internal payload |> ok)))
       ~extension_status:None
+      ~instruction_status:None
       ~replacement_snapshot:None
     |> ok
   in

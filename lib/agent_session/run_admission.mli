@@ -12,11 +12,47 @@ module Scope : sig
     -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
     -> (t, Agent_protocol.Error.t) result
 
+  (** Genuine proof-bearing counterpart; derives its principal from the original
+      object and repeats its currentness before the supplied host policy. *)
+  val create_authenticated
+    :  actor:Operator_authorization.t
+    -> observer:Agent_protocol.Invocation.observer
+    -> startup_pending:(unit -> bool)
+    -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
+    -> (t, Agent_protocol.Error.t) result
+
   val principal_id : t -> Agent_protocol.Id.Principal.t
+
+  (** Exact original proof when supplied by genuine authenticated admission.
+      Absence stays unavailable; a principal or retained receipt supplies none. *)
+  val original_actor : t -> Operator_authorization.t option
+
   val observer : t -> Agent_protocol.Invocation.observer
+
+  (** Nonyielding original-proof currentness only. Host policy must first be
+      refreshed through [authorize]; this check never invokes that callback. *)
+  val check_current : t -> (unit, Agent_protocol.Error.t) result
+
   val authorize : t -> Session_state.t -> (unit, Agent_protocol.Error.t) result
   val startup_pending : t -> bool
 end
+
+(** The existing Workflow uniqueness fence for the captured source. *)
+val unfinished_workflow
+  :  Run_state.t
+  -> source:Agent_protocol.Run_source.t
+  -> Agent_protocol.Run.t option
+
+module Held_input_availability : sig
+  type t =
+    | Authored_or_submission
+    | Submission_only
+    | Unavailable
+end
+
+(** Pure lifecycle and operation check used before held admission. This says
+    nothing about authority, actor startup custody, or successful activation. *)
+val held_input_availability : Session_state.t -> Held_input_availability.t
 
 type t
 
@@ -29,6 +65,19 @@ val prepare
   :  Session_state.t
   -> scope:Scope.t
   -> request:Agent_protocol.Run_start.t
+  -> session:Agent_protocol.Session_ref.t
+  -> run_id:Agent_protocol.Id.Run.t
+  -> operation:Agent_protocol.Operation.t option
+  -> request_sha256:string
+  -> now:Agent_protocol.Timestamp.t
+  -> (t, Agent_protocol.Error.t) result
+
+(** Normalized actor-internal request. Headless callers still require exact
+    actor-issued preparation and genuine command authorization. *)
+val prepare_request
+  :  Session_state.t
+  -> scope:Scope.t
+  -> request:Run_admission_request.t
   -> session:Agent_protocol.Session_ref.t
   -> run_id:Agent_protocol.Id.Run.t
   -> operation:Agent_protocol.Operation.t option
@@ -53,3 +102,43 @@ val prepare_from_preparation
 val run : t -> Agent_protocol.Run.t
 val receipt : t -> Agent_protocol.Run_receipt.t
 val index : t -> Run_state.t
+
+(** Pure prospective source index shared by ordinary, held and retry planning.
+    An existing observer must match exactly; an absent source advances its actual
+    installation epoch once and validates the resulting index, without retiring
+    live Runs. The returned DATA installs nothing and grants no source or
+    execution authority. No runtime construction, history or Run allocation. *)
+val prepare_source_index
+  :  Session_state.t
+  -> observer:Agent_protocol.Invocation.observer
+  -> (Run_state.t, Agent_protocol.Error.t) result
+
+module Held_plan : sig
+  (** Validated inert admission DATA, not a runtime, source authorization or
+      live held owner. The index precedes addition of the Run/receipt so its
+      actual owner can commit an exact reciprocal origin in the same candidate. *)
+  type t
+
+  val source_index : t -> Run_state.t
+  val run : t -> Agent_protocol.Run.t
+  val receipt : t -> Agent_protocol.Run_receipt.t
+end
+
+(** Callback-free facts from the exact preparation's original request and a
+    captured source selection. Checks only preparation custody, source/request
+    invariants and existing Run constraints; original authentication and policy
+    belong to the actual actor before persistence. Installs no scope or authority,
+    allocates no operation/history, and executes no native/compiler/startup work.
+    Legacy and extension sources carry actual source identity; neither a legacy
+    identity nor this plan creates extension invocation capability. No-moderator
+    sources reject, as in ordinary Run admission's orchestration requirement.
+    Actual initialized startup eligibility remains an activation-owner check. *)
+val prepare_held_from_preparation
+  :  Session_state.t
+  -> preparation:Run_preparation.t
+  -> owner:Run_preparation.Owner.t
+  -> source:Runtime_source_preparation.t
+  -> session:Agent_protocol.Session_ref.t
+  -> run_id:Agent_protocol.Id.Run.t
+  -> now:Agent_protocol.Timestamp.t
+  -> (Held_plan.t, Agent_protocol.Error.t) result

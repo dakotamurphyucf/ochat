@@ -103,7 +103,14 @@ let%expect_test "moderator saves select jobs before persistence and never reject
                 services.claim_event
                   ~event
                   ~snapshot:(fun () -> Ok before)
-                  (fun ~executing ~retirement_reason:_ ~event:_ ~execute:_ ~commit ->
+                  (fun ~executing
+                    ~policy_caller:_
+                    ~model_jobs:_
+                    ~allocate_inference:_
+                    ~retirement_reason:_
+                    ~event:_
+                    ~execute:_
+                    ~commit ->
                      Jobs.with_scope
                        jobs
                        ~owner:(Moderator_event executing.context.id)
@@ -168,7 +175,8 @@ let%expect_test "moderator saves select jobs before persistence and never reject
           | true, Array [ Int 1 ] | false, Array [ Int 0 ] -> ()
           | _ -> failwith "manager state disagrees with durable commit");
          let saved = Agent_session.Memory_backend.state backend in
-         assert (Option.exists saved.moderator ~f:(Jsonaf.exactly_equal (encode after)));
+         let metadata = assert_moderator_checkpoint saved ~snapshot:after in
+         assert_moderator_queue_frontier metadata ~required:committed ~head:0L ~next:0L;
          let job = Option.value_exn !staged in
          [%test_eq: bool]
            committed

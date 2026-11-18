@@ -319,3 +319,75 @@ let%test_unit "UTF-8 validation preserves code points across checkpoint slices" 
             checked
             (Ok (String.length (Jsonaf.to_string (`String text)))))))
 ;;
+
+let%expect_test "measurement preserves exact checkpoints and deferred diagnostic indices" =
+  let limits max_bytes =
+    Limits.create ~max_bytes ~max_depth:8 ~max_fields:20 ~max_nodes:100
+    |> Result.map_error ~f:(fun error -> Sexp.to_string_hum (Error.sexp_of_t error))
+    |> Result.ok_or_failwith
+  in
+  let measure json ~max_bytes =
+    let checkpoints = ref 0 in
+    let result =
+      Json.validate_and_measure_with_checkpoint
+        ~limits:(limits max_bytes)
+        ~checkpoint:(fun () -> incr checkpoints)
+        json
+    in
+    result, !checkpoints
+  in
+  List.iter
+    [ 65_535, 0; 65_536, 1; 65_537, 1 ]
+    ~f:(fun (length, expected) ->
+      let json = `String (String.make length 'x') in
+      let bytes = String.length (Jsonaf.to_string json) in
+      let result, checkpoints = measure json ~max_bytes:bytes in
+      require [%here] (Result.equal Int.equal Error.equal result (Ok bytes));
+      require [%here] (Int.equal checkpoints expected));
+  let cancellation = Failure "measurement boundary cancelled" in
+  List.iter
+    [ String.make 65_536 'x'; String.make 65_535 'x' ^ "\000" ]
+    ~f:(fun text ->
+      let json = `String text in
+      let max_bytes = String.length (Jsonaf.to_string json) - 1 in
+      let result, checkpoints = measure json ~max_bytes in
+      require
+        [%here]
+        (Result.equal Int.equal Error.equal result (Error (Error.Limit_exceeded "bytes")));
+      require [%here] (Int.equal checkpoints 1);
+      match
+        Json.validate_and_measure_with_checkpoint
+          ~limits:(limits max_bytes)
+          ~checkpoint:(fun () -> raise cancellation)
+          json
+      with
+      | exception exn -> require [%here] (phys_equal exn cancellation)
+      | Ok _ | Error _ -> failwith "byte overflow preempted its boundary checkpoint");
+  List.iter [ 1; 65_536 ] ~f:(fun max_bytes ->
+    let result, checkpoints = measure (`String (String.make 65_537 'x')) ~max_bytes in
+    require
+      [%here]
+      (Result.equal Int.equal Error.equal result (Error (Error.Limit_exceeded "bytes")));
+    require [%here] (Int.equal checkpoints 0));
+  let nested =
+    `Object
+      [ ( "outer"
+        , `Array
+            (List.init 13 ~f:(fun index ->
+               if Int.equal index 12 then `Object [ "inner", `Number "01" ] else `Null)) )
+      ]
+  in
+  let result, checkpoints = measure nested ~max_bytes:1_000 in
+  require
+    [%here]
+    (Result.equal
+       Int.equal
+       Error.equal
+       result
+       (Error
+          (Error.Invalid_field
+             { path = [ "outer"; "12"; "inner" ]; reason = "invalid JSON number" })));
+  require [%here] (Int.equal checkpoints 0);
+  print_endline "exact byte checkpoints, cancellation precedence and index12 preserved";
+  [%expect {| exact byte checkpoints, cancellation precedence and index12 preserved |}]
+;;

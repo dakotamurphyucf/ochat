@@ -21,6 +21,10 @@ let partition_history history =
 
 let token_codec = lazy (Tikitoken.create_codec Tiktoken_data.o200k_base)
 
+let estimated_text_tokens text =
+  List.length (Tikitoken.encode ~codec:(Lazy.force token_codec) ~text)
+;;
+
 let estimated_tokens items =
   let codec = Lazy.force token_codec in
   List.sum
@@ -84,12 +88,40 @@ let compact_entries_configured ~config ~score ~summarise ~allocator ~env ~histor
     retained @ [ reminder ])
 ;;
 
-let compact_entries ~inference ~allocator ~env ~history =
+let compact_entries_with_guidance
+      ~guidance
+      ~reserved_input_tokens
+      ~inference
+      ~allocator
+      ~env
+      ~history
+  =
   let config = Config.load ?env () in
-  compact_entries_configured
-    ~config
-    ~score:(fun prompt -> Relevance_judge.score_relevance ~inference config ~prompt)
-    ~summarise:(S.summarise ~inference)
+  if reserved_input_tokens < 0 || reserved_input_tokens >= config.context_limit
+  then
+    Error
+      (Failure
+         "instruction guidance exhausts compaction context_limit; original history \
+          retained")
+  else (
+    let config =
+      { config with context_limit = config.context_limit - reserved_input_tokens }
+    in
+    compact_entries_configured
+      ~config
+      ~score:(fun prompt ->
+        Relevance_judge.score_relevance_with_guidance ~guidance ~inference config ~prompt)
+      ~summarise:(S.summarise_with_guidance ~guidance ~inference)
+      ~allocator
+      ~env
+      ~history)
+;;
+
+let compact_entries ~inference ~allocator ~env ~history =
+  compact_entries_with_guidance
+    ~guidance:None
+    ~reserved_input_tokens:0
+    ~inference
     ~allocator
     ~env
     ~history

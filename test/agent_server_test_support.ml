@@ -152,12 +152,32 @@ end
     ledger in these tests. This fixture initializes its RNG before allocating a
     fresh host namespace, including when constructed before the Eio harness.
     Production compositions must supply actual tracking. *)
-let inference_policy ~default_model ~post_stream =
+let make_inference_policy
+      ?(on_prepare = ignore)
+      ~request_guidance
+      ~default_model
+      ~post_stream
+      ()
+  =
   Mirage_crypto_rng_unix.use_default ();
   let namespace =
     Agent_protocol.Id.Transaction.create () |> Agent_protocol.Id.Transaction.to_string
   in
-  let fixture = Inference_fixture.create ~namespace ~default_model ~post_stream in
+  let fixture =
+    if request_guidance
+    then
+      Inference_fixture.create_with_request_guidance
+        ~on_prepare
+        ~namespace
+        ~default_model
+        ~post_stream
+    else
+      Inference_fixture.create_with_observer
+        ~on_prepare
+        ~namespace
+        ~default_model
+        ~post_stream
+  in
   Agent_server.Session_factory.
     { capture_inference_target =
         (fun ~prompt_revision_id:_ ~config ->
@@ -191,6 +211,14 @@ let inference_policy ~default_model ~post_stream =
     }
 ;;
 
+let inference_policy ~default_model ~post_stream =
+  make_inference_policy ~request_guidance:false ~default_model ~post_stream ()
+;;
+
+let guidance_inference_policy ?on_prepare ~default_model ~post_stream () =
+  make_inference_policy ?on_prepare ~request_guidance:true ~default_model ~post_stream ()
+;;
+
 let delegation_stage payload =
   let document =
     Document_schema.Document.decode ~limits:Document_schema.Limits.default payload
@@ -198,7 +226,7 @@ let delegation_stage payload =
     |> Result.ok_or_failwith
   in
   assert (String.equal (Document_schema.Document.kind document) "delegation.intent");
-  assert (Int.equal (Document_schema.Document.version document) 6);
+  assert (Int.equal (Document_schema.Document.version document) 7);
   match
     Document_schema.Json.field (Document_schema.Document.payload document) ~name:"stage"
   with
@@ -365,6 +393,36 @@ let protocol_ok = function
   | Error error -> raise_s [%sexp (error : Agent_protocol.Error.t)]
 ;;
 
+(* This direct fixture host uses the actual daemon delegation profile, matching
+   its existing staged-service configuration. Each persisted component captures
+   its own immutable bounds; tests with narrower hosts can supply those instead. *)
+let goal_descendant_profile =
+  let host = Agent_server.Daemon.default_options.factory_limits in
+  Agent_session.Goal_descendants.Profile.create
+    ~max_scopes:host.delegation_max_depth
+    ~max_roots:16
+    ~max_branches:host.delegation_recovery_max_count
+    ~max_encoded_bytes:(256 * 1024)
+    ~child_max_encoded_bytes:host.delegation_recovery_max_bytes
+  |> protocol_ok
+;;
+
+(** Check the durable Session_start receipt of a fresh moderated fixture. An
+    idle actor can still be waiting to claim its first startup callback. Raise
+    with the actual receipt if startup failed or was interrupted. *)
+let session_start_completed_exn (state : Agent_session.Session_state.t) =
+  let module M = Agent_protocol.Moderator_execution in
+  List.exists state.moderator_executions ~f:(fun receipt ->
+    Int.equal receipt.context.generation state.identity.generation
+    && M.equal_phase receipt.context.phase Session_start
+    &&
+    match receipt.status with
+    | Completed _ -> true
+    | Running -> false
+    | Failed _ | Interrupted _ ->
+      raise_s [%sexp "fixture Session_start did not complete", (receipt : M.t)])
+;;
+
 let observed_idle = function
   | Agent_protocol.Session.Idle -> true
   | Stopped
@@ -411,6 +469,8 @@ let config
     ; source_file = Filename.concat root "server.sexp"
     ; server =
         { data_dir = Filename.concat root "data"
+        ; recurrence_automation = None
+        ; recurrence_execution = None
         ; session_helpers = []
         ; authoring_packages = []
         ; authoring_budget = None

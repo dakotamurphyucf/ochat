@@ -358,26 +358,37 @@ let%expect_test "attribute edits preserve strict decoded bytes and tag boundarie
 ;;
 
 let%expect_test "installed builtin suggestion resolves the embedded asset table" =
-  let text = {|<user><doc src="builtin:ch|} in
+  let text = {|<user><doc src="builtin:|} in
   let result =
     A.produce (facts text ~cursor_byte:(String.length text)) ~checkpoint:ignore
     |> ok A.Error.sexp_of_t
   in
-  let asset =
-    Builtin_instructions.Id.of_string "chatml"
-    |> Or_error.ok_exn
-    |> Builtin_instructions.find
-    |> ok Builtin_instructions.Error.sexp_of_t
+  let ids =
+    Builtin_instructions.installed_ids ~max_items:64 ~checkpoint:ignore
+    |> ok Builtin_instructions.Enumeration_error.sexp_of_t
   in
-  assert (
-    List.exists (W.Result.items result) ~f:(fun item ->
-      String.equal (W.Suggestion.insert_text item) "builtin:chatml"
-      &&
+  let installed =
+    List.filter_map (W.Result.items result) ~f:(fun item ->
       match W.Suggestion.evidence item with
       | Installed_builtin { id; sha256 } ->
-        String.equal id "chatml"
-        && String.equal (S.Digest.to_hex sha256) (Builtin_instructions.Asset.sha256 asset)
-      | _ -> false));
+        assert (String.equal (W.Suggestion.insert_text item) ("builtin:" ^ id));
+        let asset =
+          Builtin_instructions.Id.of_string id
+          |> Or_error.ok_exn
+          |> Builtin_instructions.find
+          |> ok Builtin_instructions.Error.sexp_of_t
+        in
+        assert (
+          String.equal (S.Digest.to_hex sha256) (Builtin_instructions.Asset.sha256 asset));
+        Some id
+      | _ -> None)
+  in
+  assert (
+    List.equal
+      String.equal
+      (List.sort installed ~compare:String.compare)
+      (List.map ids ~f:Builtin_instructions.Id.to_string
+       |> List.sort ~compare:String.compare));
   print_endline "embedded builtin ID and digest: PASS";
   [%expect {| embedded builtin ID and digest: PASS |}]
 ;;

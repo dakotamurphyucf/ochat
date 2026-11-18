@@ -117,7 +117,7 @@ let with_capacity_scheduler
       ; store_handle = None
       ; expire_permissions = (fun ~now:_ -> ())
       ; collect_results = (fun () -> Ok None)
-      ; close = ignore
+      ; close = Agent_server.Session_registry.Entry_close.legacy ignore
       }
     in
     Registry.add registry ~session_id entry |> protocol_ok;
@@ -142,7 +142,7 @@ let with_capacity_scheduler
         ~registry
         ~developer_registry:None
         ~capacity
-        ~model_job_inference:(fun _ _ -> failwith "unexpected model job inference")
+        ~conversation_host:Background_only
     in
     let scheduler = start () in
     Exn.protect
@@ -315,6 +315,7 @@ let new_job ?(retry_policy = J.Never) payload : J.t =
   ; generation = 0
   ; kind = Async_tool
   ; launch = None
+  ; inference_origin = None
   ; progress = None
   ; payload
   ; status = Queued
@@ -456,8 +457,7 @@ let%test_unit "shared capacity alternates conversation and developer owner turns
                 ~registry
                 ~developer_registry:(Some owners)
                 ~capacity
-                ~model_job_inference:(fun _ _ ->
-                  Error (Agent_protocol.Error.invalid_request "unused model job"))
+                ~conversation_host:Background_only
             in
             Exn.protect
               ~finally:(fun () ->
@@ -666,8 +666,7 @@ let%test_unit "developer scan advances beyond an unsupported 64-job window" =
                 ~registry
                 ~developer_registry:(Some owners)
                 ~capacity
-                ~model_job_inference:(fun _ _ ->
-                  Error (Agent_protocol.Error.invalid_request "unused model job"))
+                ~conversation_host:Background_only
             in
             Exn.protect
               ~finally:(fun () ->
@@ -848,8 +847,7 @@ let%test_unit "a saturated developer root leaves another physical root runnable"
                     ~registry
                     ~developer_registry:(Some owners)
                     ~capacity
-                    ~model_job_inference:(fun _ _ ->
-                      Error (Agent_protocol.Error.invalid_request "unused model job"))
+                    ~conversation_host:Background_only
                 in
                 Exn.protect
                   ~finally:(fun () ->

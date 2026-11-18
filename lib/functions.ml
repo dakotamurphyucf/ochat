@@ -247,6 +247,8 @@ let read_file_contents ~display_path path offset line_count =
   in
   match read () with
   | res -> res
+  | exception ((Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn) ->
+    Exn.raise_with_original_backtrace exn (Stdlib.Printexc.get_raw_backtrace ())
   | exception ex -> Fmt.str "error running read_file: %a" Eio.Exn.pp ex
 ;;
 
@@ -352,8 +354,11 @@ let scoped_resolver ~fs ~dir roots input =
   then Error "file must not contain NUL"
   else
     Result.bind (candidate_path ~fs ~dir roots input) ~f:(fun candidate ->
-      Result.try_with (fun () ->
-        Shell_access.Path_util.canonical ~fs (absolute_native_path candidate))
+      (match Shell_access.Path_util.canonical ~fs (absolute_native_path candidate) with
+       | canonical -> Ok canonical
+       | exception ((Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn) ->
+         Exn.raise_with_original_backtrace exn (Stdlib.Printexc.get_raw_backtrace ())
+       | exception exn -> Error exn)
       |> Result.map_error ~f:Exn.to_string
       |> Result.bind ~f:(fun canonical_path ->
         if
@@ -393,6 +398,8 @@ let append_to_file ~dir : Ochat_function.t =
       Io.append_doc ~dir path ("\n" ^ content);
       Printf.sprintf "Content appended to %s successfully." path
     with
+    | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn ->
+      Exn.raise_with_original_backtrace exn (Stdlib.Printexc.get_raw_backtrace ())
     | ex -> Fmt.str "error running append_to_file: %a" Eio.Exn.pp ex
   in
   Ochat_function.create_function
@@ -432,6 +439,8 @@ let find_and_replace ~dir : Ochat_function.t =
         Io.save_doc ~dir path new_content;
         Printf.sprintf "Replaced '%s' with '%s' in %s successfully." search replace path
     with
+    | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn ->
+      Exn.raise_with_original_backtrace exn (Stdlib.Printexc.get_raw_backtrace ())
     | ex -> Fmt.str "error running find_and_replace: %a" Eio.Exn.pp ex
   in
   Ochat_function.create_function
@@ -490,6 +499,8 @@ let query_vector_db ~dir ~net : Ochat_function.t =
     let corpus = Vector_db.create_corpus vecs in
     let bm25 =
       try Bm25.read_from_disk (dir / bm25_file) with
+      | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn ->
+        Exn.raise_with_original_backtrace exn (Stdlib.Printexc.get_raw_backtrace ())
       | _ -> Bm25.create []
     in
     let response = Openai.Embeddings.post_openai_embeddings net ~input:[ query ] in
@@ -552,6 +563,8 @@ let apply_patch ~dir : Ochat_function.t =
       in
       Printf.sprintf "✅ Patch applied successfully!\n\n%s" snippets_text
     | exception Apply_patch.Diff_error err -> Apply_patch.error_to_string err
+    | exception ((Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn) ->
+      Exn.raise_with_original_backtrace exn (Stdlib.Printexc.get_raw_backtrace ())
     | exception ex -> Fmt.str "error running apply_patch: %a" Eio.Exn.pp ex
   in
   Ochat_function.create_function
@@ -563,6 +576,8 @@ let read_dir ~dir : Ochat_function.t =
   let f path =
     match Io.directory ~dir path with
     | res -> String.concat ~sep:"\n" res
+    | exception ((Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn) ->
+      Exn.raise_with_original_backtrace exn (Stdlib.Printexc.get_raw_backtrace ())
     | exception ex -> Fmt.str "error running read_directory: %a" Eio.Exn.pp ex
   in
   Ochat_function.create_function
@@ -574,6 +589,8 @@ let mkdir ~dir : Ochat_function.t =
   let f path =
     match Io.mkdir ~exists_ok:true ~dir path with
     | () -> sprintf "Directory %s created successfully." path
+    | exception ((Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn) ->
+      Exn.raise_with_original_backtrace exn (Stdlib.Printexc.get_raw_backtrace ())
     | exception ex -> Fmt.str "error running mkdir: %a" Eio.Exn.pp ex
   in
   Ochat_function.create_function
@@ -646,6 +663,8 @@ let odoc_search ~dir ~net : Ochat_function.t =
       | None ->
         let vecs =
           try Vector_db.Vec.read_vectors_from_disk path_t with
+          | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn ->
+            Exn.raise_with_original_backtrace exn (Stdlib.Printexc.get_raw_backtrace ())
           | _ -> [||]
         in
         Eio.Mutex.lock mu;
@@ -698,11 +717,8 @@ let odoc_search ~dir ~net : Ochat_function.t =
           match pkg_opt with
           | None -> None
           | Some pkg ->
-            (match
-               Or_error.try_with (fun () ->
-                 Io.load_doc ~dir:index_path (pkg ^ "/" ^ id ^ ".md"))
-             with
-             | Ok text ->
+            (match Io.load_doc ~dir:index_path (pkg ^ "/" ^ id ^ ".md") with
+             | text ->
                let preview_len = 8000 in
                let preview =
                  if String.length text > preview_len
@@ -710,7 +726,11 @@ let odoc_search ~dir ~net : Ochat_function.t =
                  else text
                in
                Some (rank + 1, pkg, id, preview)
-             | Error _ -> None))
+             | exception ((Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn) ->
+               Exn.raise_with_original_backtrace
+                 exn
+                 (Stdlib.Printexc.get_raw_backtrace ())
+             | exception _ -> None))
         |> List.filter_map ~f:Fn.id
       in
       if List.is_empty results
@@ -765,6 +785,8 @@ let index_markdown_docs ~env ~dir : Ochat_function.t =
         ~root:root_path;
       "Markdown documents have been indexed successfully."
     with
+    | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn ->
+      Exn.raise_with_original_backtrace exn (Stdlib.Printexc.get_raw_backtrace ())
     | ex -> Fmt.str "error indexing markdown docs: %a" Eio.Exn.pp ex
   in
   Ochat_function.create_function
@@ -813,6 +835,8 @@ let markdown_search ~dir ~net : Ochat_function.t =
       | None ->
         let vecs =
           try Vector_db.Vec.read_vectors_from_disk path_t with
+          | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn ->
+            Exn.raise_with_original_backtrace exn (Stdlib.Printexc.get_raw_backtrace ())
           | _ -> [||]
         in
         Eio.Mutex.lock mu;
@@ -873,10 +897,9 @@ let markdown_search ~dir ~net : Ochat_function.t =
             | None -> None
             | Some idx_name ->
               (match
-                 Or_error.try_with (fun () ->
-                   Io.load_doc ~dir:index_dir (idx_name ^ "/snippets/" ^ id ^ ".md"))
+                 Io.load_doc ~dir:index_dir (idx_name ^ "/snippets/" ^ id ^ ".md")
                with
-               | Ok text ->
+               | text ->
                  let preview_len = 8000 in
                  let preview =
                    if String.length text > preview_len
@@ -884,7 +907,11 @@ let markdown_search ~dir ~net : Ochat_function.t =
                    else text
                  in
                  Some (rank + 1, idx_name, id, preview)
-               | Error _ -> None))
+               | exception ((Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn) ->
+                 Exn.raise_with_original_backtrace
+                   exn
+                   (Stdlib.Printexc.get_raw_backtrace ())
+               | exception _ -> None))
           |> List.filter_map ~f:Fn.id
         in
         if List.is_empty results

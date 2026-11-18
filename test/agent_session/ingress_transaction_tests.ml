@@ -26,7 +26,7 @@ let with_handler actor parent f =
     ~attempt:parent.attempt
     ~deadline:(Some deadline)
     (fun services ->
-       services.execute ~invocation:(root parent) (fun ~dispatched:root ->
+       services.execute ~invocation:(root parent) (fun ~dispatched:root ~capabilities:_ ->
          let invocation =
            P.Invocation.create
              { root.context with
@@ -37,8 +37,10 @@ let with_handler actor parent f =
              }
            |> protocol_ok
          in
-         services.moderator_execute ~invocation (fun ~dispatched ~commit ->
-           f ~owner:(P.Job.Invocation dispatched.context.id) ~dispatched ~commit)
+         services.moderator_execute
+           ~invocation
+           (fun ~dispatched ~capabilities:_ ~commit ->
+              f ~owner:(P.Job.Invocation dispatched.context.id) ~dispatched ~commit)
          |> Result.map ~f:(fun () -> P.Invocation.Complete `Null)))
 ;;
 

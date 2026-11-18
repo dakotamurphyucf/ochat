@@ -47,6 +47,9 @@ val selected
        (Agent_protocol.Id.Subscription.t -> int -> Agent_protocol.Subscription.t option)
   -> (External_ingress.t list, Agent_protocol.Error.t) result
 
+(** Actual selected receipts, in execution order, for paired creator custody. *)
+val selected_receipts : t -> owner:Agent_protocol.Job.launch_owner -> int list
+
 val abort
   :  t
   -> owner:Agent_protocol.Job.launch_owner

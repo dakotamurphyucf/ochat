@@ -186,7 +186,7 @@ let%expect_test
             ~persistence:
               { archive_reference
               ; commit =
-                  (fun ~command_audit:_ ~previous:_ _ ->
+                  (fun ?observation:_ ~command_audit:_ ~previous:_ _ ->
                     if !fail_commit
                     then
                       Error
@@ -216,6 +216,7 @@ let%expect_test
               ; schedule_limits = S.Staged_schedules.default_limits
               ; notification_limits = S.Staged_notifications.default_limits
               ; ingress_limits = S.Staged_ingress.default_limits
+              ; goal_descendant_profile
               ; subscription_limits = S.Staged_subscriptions.default_limits
               ; state_committed =
                   (fun _ _ -> publication_outside_admission := not !inside_admission)
@@ -401,7 +402,10 @@ let%expect_test
                         ~persistence:
                           { archive_reference
                           ; commit =
-                              (fun ~command_audit:_ ~previous:_ transition ->
+                              (fun ?observation:_
+                                ~command_audit:_
+                                ~previous:_
+                                transition ->
                                 if !admitted
                                 then (
                                   persisted := Some transition;
@@ -422,6 +426,7 @@ let%expect_test
                           ; schedule_limits = S.Staged_schedules.default_limits
                           ; notification_limits = S.Staged_notifications.default_limits
                           ; ingress_limits = S.Staged_ingress.default_limits
+                          ; goal_descendant_profile
                           ; subscription_limits = S.Staged_subscriptions.default_limits
                           ; state_committed =
                               (fun state events ->

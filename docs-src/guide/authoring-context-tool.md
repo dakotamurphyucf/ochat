@@ -391,7 +391,7 @@ extra properties are rejected. `version` is always `1`.
 
 Task IDs are `one_off_script`, `standalone_tool`, `moderator_tool`, `child_agent`
 and `background_workflow`. Feature IDs are `background_tools`, `subscriptions`,
-`timers`, `notifications`, `external_events` and `child_sessions`. A task cannot
+`timers`, `notifications`, `external_events`, `child_sessions` and `recurrences`. A task cannot
 enable a target absent from the invoking host. Requesting a topic incompatible
 with the selected target fails explicitly.
 

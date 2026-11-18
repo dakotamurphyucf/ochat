@@ -26,8 +26,9 @@ type t
     Owner acknowledgement and binding construction are cancellation-protected.
     A cancelled caller can receive the binding, install its cleanup without
     yielding, and then observe the original cancellation at its next effect.
-    All optional operation/invocation associations remain absent unless actual
-    per-execution ownership is supplied by a future explicit port.
+    The legacy [identity] path leaves optional operation/invocation associations
+    absent. [bind_identity] supplies the actual per-execution allocation port
+    without changing this graph's routing or acknowledgement owner.
 
     [run_preparation] is explicit constructor custody. The constructor clears
     this shared cell on every exit before a runtime escapes; later callbacks use
@@ -40,17 +41,73 @@ val create
   -> upstream:Upstream.t
   -> (t, Agent_protocol.Error.t) Result.t
 
+(** Same graph and acknowledgement body with the actual admitted constructor
+    context. Initial and existing-Goal construction remain distinct inside that
+    opaque context. Factual callbacks retain the exact issuing Init scope and
+    graph association after constructor cleanup. Every fresh inference requires
+    its actual execution allocation port; constructor custody and graph identity
+    never enable unbound inference. No mutable constructor state is retained. *)
+val create_for_runtime_construction
+  :  Agent_session.Session_actor.t
+  -> construction:Agent_session.Session_actor.Runtime_construction.t
+  -> source:Transcript.Source_id.t
+  -> upstream:Upstream.t
+  -> (t, Agent_protocol.Error.t) result
+
+(** Same actual registered graph opened under the Actor's policy-restoration
+    construction scope. Factual acknowledgement/observation/finish retain its
+    physical owner after construction ends. Every fresh inference requires its
+    genuine current execution allocation port; unbound identity cannot allocate. *)
+val create_for_policy_restoration
+  :  Agent_session.Session_actor.t
+  -> restoration:Agent_session.Session_actor.Policy_restoration.t
+  -> source:Transcript.Source_id.t
+  -> upstream:Upstream.t
+  -> (t, Agent_protocol.Error.t) result
+
+(** Same actual registered graph under lexical Factory native setup. Setup end
+    does not revoke factual cleanup; a genuine execution allocator remains
+    mandatory for every fresh inference. No token/old consumer authority retained. *)
+val create_for_native_setup
+  :  Agent_session.Session_actor.t
+  -> setup:Agent_session.Session_actor.Native_setup.t
+  -> source:Transcript.Source_id.t
+  -> upstream:Upstream.t
+  -> (t, Agent_protocol.Error.t) result
+
+(** One lexical input graph under the actual Actor-issued Parsing scope. All
+    ledger callbacks select that same scope and graph for factual ACKs, including
+    after original expiry. Fresh allocations still require its execution port;
+    [identity] alone cannot allocate. Finish before returning parsed input DATA. *)
+val create_for_held_input
+  :  Agent_session.Session_actor.t
+  -> scope:Agent_session.Session_actor.Held_input_scope.t
+  -> source:Transcript.Source_id.t
+  -> upstream:Upstream.t
+  -> (t, Agent_protocol.Error.t) result
+
 (** Sole durable allocator. Prepared admission, including an Untracked ordinal,
     is acknowledged before on_admitted and f. f runs exactly once and encloses
     scope validation, Prepared.start, acknowledgement, run and completion.
     Routing is removed on every exit, including pre-f observer failure. Cleanup
     preserves a primary exception/backtrace; normal cleanup failures propagate.
-    Only actual in-flight executions occupy the map, not retained ledger rows. *)
+    Only actual in-flight executions occupy the map. Existing Actor-owned graph
+    registrations retain initial-confirmation/factual duties after routing joins;
+    deferred correction is not positive cleanup and cannot admit fresh work. *)
 val identity : t -> Inference_client.Identity.t
 
+(** Bind the same graph routing/acknowledgement to the exact actual execution
+    allocator. Owned rejection cannot fall back to the unbound identity. *)
+val bind_identity
+  :  t
+  -> allocate:Agent_session.Inference_allocation.Port.t
+  -> Inference_client.Identity.t
+
 (** Tracking acknowledgement precedes the corresponding strict upstream callback.
-    Exact late observations remain admissible through the actor's retained handle
-    API; graph routing itself does not retain an unbounded late-event index. *)
+    Native ACK then outside-mailbox factual settlement precede strict upstream.
+    Deferred facts remain owned without converting an ordinary confirmation wait
+    into provider failure. Exact late observations retain the Actor's native-row
+    guard; graph routing has no retained Joined execution entries. *)
 val on_attempt : t -> Inference_runtime.Attempt.t -> unit
 
 (** After routing release, only an exact retained row under this live owner may

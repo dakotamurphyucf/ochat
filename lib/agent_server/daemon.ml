@@ -53,6 +53,46 @@ type options =
         option
   }
 
+(* Concrete progress of this Daemon's existing shutdown sequence. A phase
+   advances only after that actual stage succeeds, independently of diagnostics. *)
+module Shutdown = struct
+  type stage =
+    | Signal_recurrence_execution
+    | Close_dispatcher
+    | Signal_recurrence_automation
+    | Signal_start_scheduler
+    | Signal_permission_scheduler
+    | Signal_schedule_scheduler
+    | Close_maintenance
+    | Close_config_watcher
+    | Join_start_scheduler
+    | Close_developer
+    | Close_jobs
+    | Await_callbacks
+    | Close_registry
+    | Join_recurrence_automation
+    | Close_authoring
+    | Close_provider
+    | Close_sources
+    | Close_store
+    | Complete
+
+  type t =
+    { mutex : Eio.Mutex.t
+    ; mutable stage : stage
+    ; mutable registry_report : Disposal_report_data.t option
+    ; mutable report : Disposal_report_data.t option
+    }
+
+  let create () =
+    { mutex = Eio.Mutex.create ()
+    ; stage = Signal_recurrence_execution
+    ; registry_report = None
+    ; report = None
+    }
+  ;;
+end
+
 type t =
   { env : Eio_unix.Stdenv.base
   ; store : Agent_store.Session_store.t
@@ -71,6 +111,8 @@ type t =
   ; job_scheduler : Job_scheduler.t
   ; permission_scheduler : Permission_scheduler.t
   ; schedule_scheduler : Schedule_scheduler.t
+  ; recurrence_execution : Recurrence_execution_host.t option
+  ; recurrence_automation : Recurrence_automation_host.t option
   ; maintenance : Maintenance.t
   ; config_watcher : Config_watcher.t
   ; factory : Session_factory.t
@@ -89,6 +131,7 @@ type t =
   ; anonymous_http_principal : Agent_protocol.Principal.t option
   ; shutdown_grace_seconds : float
   ; status_ref : status ref
+  ; shutdown : Shutdown.t
   }
 
 type health_services =
@@ -277,9 +320,16 @@ module For_testing = struct
   let job_scheduler_wait_deadline t =
     Job_scheduler.For_testing.loop_wait_deadline t.job_scheduler
   ;;
+
+  let schedule_scheduler_wait_deadline t =
+    Schedule_scheduler.For_testing.loop_wait_deadline t.schedule_scheduler
+  ;;
+
+  let await_schedule_scheduler_idle t = Schedule_scheduler.await_idle t.schedule_scheduler
 end
 
 let factory t = t.factory
+let recurrence_execution_host t = t.recurrence_execution
 let blob_store t = t.blob_store
 let prompts t = t.prompts
 let workspaces t = t.workspaces
@@ -889,6 +939,12 @@ let server_health t request =
     }
 ;;
 
+let recurrence_zone_status t =
+  match t.recurrence_automation with
+  | None -> Recurrence_automation_host.Zone_status.Not_configured
+  | Some host -> Recurrence_automation_host.zone_status host
+;;
+
 let health t ~include_details =
   let services =
     { health_env = t.env
@@ -1191,15 +1247,11 @@ let compose
       ~max_upload_bytes:(Int64.of_int options.protocol_limits.max_request_bytes)
     |> Result.map_error ~f:protocol_of_store
   in
-  let%bind idempotency_store =
-    Agent_store.Idempotency_store.open_or_create
-      ~env
-      ~path:
-        (Filename.concat
-           (Agent_store.Data_root.indexes_path data_root)
-           "idempotency.sexp")
-    |> Result.map_error ~f:protocol_of_store
+  let module Command_receipts = Agent_store.Session_store.Command_receipts in
+  let%bind command_receipts =
+    Command_receipts.open_or_create store |> Result.map_error ~f:protocol_of_store
   in
+  let idempotency_store = Command_receipts.cache command_receipts in
   let%bind audit_store =
     Agent_store.Audit_store.open_or_create
       ~env
@@ -1273,6 +1325,22 @@ let compose
            ~source
            ~runtime_policy_revision:(identity "ochat.daemon.child-runtime.v1"))
   in
+  let%bind recurrence_automation =
+    match options.startup_mode, config.server.recurrence_automation with
+    | Operator_only, _ | (Execute | On_demand), None -> Ok None
+    | (Execute | On_demand), Some configuration ->
+      Recurrence_automation_host.open_owned
+        configuration
+        ~server_id:(Agent_store.Session_store.server_id store)
+        ~sw
+        ~fs:(Eio.Stdenv.fs env)
+        ~now:(fun () -> timestamp env)
+        ~checkpoint:Eio.Fiber.check
+      |> Result.map ~f:Option.some
+  in
+  Option.iter
+    recurrence_automation
+    ~f:(Startup_cleanup.adopt_recurrence_host_exn startup_cleanup);
   let factory =
     Session_factory.create
       ~sw
@@ -1298,9 +1366,27 @@ let compose
       ~script_preparation:options.script_preparation
       ~content_limits:options.content_limits
       ~child_sources
+      ~recurrence_planning_host:
+        (Option.map recurrence_automation ~f:Recurrence_automation_host.planning_host)
       ~durability:(durability config.server)
       ~limits:factory_limits
   in
+  let%bind recurrence_execution =
+    match options.startup_mode, config.server.recurrence_execution with
+    | Operator_only, _ | (Execute | On_demand), None -> Ok None
+    | (Execute | On_demand), Some configuration ->
+      Recurrence_execution_host.create
+        ~command_receipts
+        configuration
+        ~factory
+        ~server_id:(Agent_store.Session_store.server_id store)
+        ~sw
+        ~now:(fun () -> timestamp env)
+      |> Result.map ~f:Option.some
+  in
+  Option.iter
+    recurrence_execution
+    ~f:(Startup_cleanup.adopt_recurrence_execution_host_exn startup_cleanup);
   let lifecycle_service =
     Session_lifecycle_service.create
       ~store
@@ -1388,7 +1474,10 @@ let compose
              |> Result.map_error ~f:project_error)
          : (int, Agent_store.Store_error.t) result));
   if execute
-  then Session_registry.install_loader registry (Session_factory.recover_session factory);
+  then
+    Session_registry.install_recovery_loader
+      registry
+      (Session_factory.recover_registered_session factory);
   let%bind () =
     if not execute
     then Ok ()
@@ -1499,6 +1588,11 @@ let compose
       |> Result.map ~f:Option.some
   in
   Option.iter authoring ~f:(Startup_cleanup.adopt_authoring_exn startup_cleanup);
+  let%bind () =
+    match Option.bind authoring ~f:Authoring_installation.instruction_source_port with
+    | None -> Ok ()
+    | Some source -> Session_factory.install_instruction_sources factory source
+  in
   let%bind options =
     match config.server.developer with
     | None -> Ok options
@@ -1732,7 +1826,7 @@ let compose
       ~registry
       ~developer_registry:(Option.map developer ~f:Developer_host.registry)
       ~capacity:job_capacity
-      ~model_job_inference:(Session_factory.model_job_inference factory)
+      ~conversation_host:(Factory factory)
   in
   Startup_cleanup.adopt_job_scheduler_exn startup_cleanup job_scheduler;
   let%bind () =
@@ -1747,13 +1841,21 @@ let compose
       ~clock:(Eio.Stdenv.clock env)
       ~registry
   in
+  let recurrence_dispatcher =
+    Option.map recurrence_execution ~f:(fun host ->
+      Recurrence_dispatcher.create ~factory ~registry ~host)
+  in
   let schedule_scheduler =
     Schedule_scheduler.start_controlled
+      ?recurrence_dispatcher
+      ~factory
       ~enabled:execution_enabled
       ~sw
       ~clock:(Eio.Stdenv.mono_clock env)
       ~registry
+      ()
   in
+  Startup_cleanup.adopt_schedule_scheduler_exn startup_cleanup schedule_scheduler;
   let maintenance =
     Maintenance.start_controlled
       ~collection_policy:(if execute then Load_retained else Selected_only)
@@ -1822,6 +1924,75 @@ let compose
                  ())))
   in
   let options = with_installed_developer_features options developer_endpoint in
+  let server_id = Agent_store.Session_store.server_id store in
+  let authorize_operator_write actor state =
+    let open Agent_protocol in
+    let principal = Operator_authorization.principal actor in
+    if
+      Operator_authorization.is_current actor
+      && Principal.has_scope principal View_session_transcript
+      && Principal.has_scope principal Send_messages
+      && Authorization.session_visible_to
+           principal
+           (Agent_session.Session_state.summary state)
+    then Ok ()
+    else
+      Error
+        (Error.create
+           Permission_denied
+           ~message:
+             "Operator write requires current session visibility and send authority"
+           ~retryable:false
+           ())
+  in
+  let now () = timestamp env in
+  let goal_read =
+    Goal_read_service.create
+      ~registry
+      ~server_id
+      ~execution_enabled
+      ~authorize_write:authorize_operator_write
+  in
+  let goal_operator =
+    if execution_enabled
+    then (
+      let service =
+        Goal_operator_service.create
+          ~registry
+          ~factory
+          ~server_id
+          ~now
+          ~authorize_write:authorize_operator_write
+      in
+      Some (Goal_operator_service.execute service))
+    else None
+  in
+  let recurrence_read =
+    Recurrence_read_service.create
+      ~registry
+      ~factory
+      ~server_id
+      ~execution_enabled
+      ~authorize_write:authorize_operator_write
+  in
+  let recurrence_operator =
+    if execution_enabled
+    then (
+      let service =
+        Recurrence_operator_service.create
+          ~registry
+          ~factory
+          ~server_id
+          ~now
+          ~authorize_write:authorize_operator_write
+      in
+      Some
+        Command_handler.
+          { execute = Recurrence_operator_service.execute service
+          ; check_disclosure = Recurrence_operator_service.check_disclosure service
+          })
+    else None
+  in
   let handler =
     Command_handler.create
       ~sw
@@ -1835,6 +2006,10 @@ let compose
       ~blob_store
       ~session_store:store
       ~authoring
+      ~goal_read:(Some (Goal_read_service.query goal_read ~now))
+      ~goal_operator
+      ~recurrence_read:(Some (Recurrence_read_service.query recurrence_read ~now))
+      ~recurrence_operator
       ~lifecycle_service
       ~retained:
         (Retained_session.create
@@ -1856,6 +2031,8 @@ let compose
       ~server_health:(server_health health_services)
       ~cancel_job:(Job_scheduler.cancel_conversation job_scheduler)
       ~create_session:(Session_factory.create_session factory)
+      ~create_session_authenticated:
+        (Some (Session_factory.create_session_authenticated factory))
       ~seed_factory:(Some factory)
       ~seed_recovery_limits:options.seed_recovery_limits
       ~prepare_session_start:(Session_factory.prepare_session_start factory)
@@ -1895,6 +2072,8 @@ let compose
       | Session_search_navigate _
       | Session_runs _
       | Session_run _
+      | Recurrence_query _
+      | Goal_query _
       | Session_pending_inputs _
       | Session_pending_input _
       | Session_list _
@@ -1914,6 +2093,7 @@ let compose
       | Session_seed _
       | Session_get _
       | Session_configuration_get _
+      | Instructions _
       | Session_configuration_update _
       | Session_attach _
       | Session_detach _
@@ -1924,6 +2104,8 @@ let compose
       | Session_stop _
       | Session_cancel_operation _
       | Session_run_start _
+      | Recurrence_control _
+      | Goal_control _
       | Session_send_message _
       | Session_cancel_pending_input _
       | Session_replace_pending_input _
@@ -2000,6 +2182,8 @@ let compose
     ; job_scheduler
     ; permission_scheduler
     ; schedule_scheduler
+    ; recurrence_automation
+    ; recurrence_execution
     ; maintenance
     ; config_watcher
     ; project_sources
@@ -2017,6 +2201,7 @@ let compose
     ; anonymous_http_principal
     ; shutdown_grace_seconds = Float.of_int config.server.shutdown_grace_ms /. 1_000.
     ; status_ref
+    ; shutdown = Shutdown.create ()
     }
 ;;
 
@@ -2070,6 +2255,11 @@ let start
       | true ->
         Agent_session.Automatic_turn_budget.create options.chatml_runtime_policy
         |> Agent_session.Automatic_turn_budget.validate
+    in
+    let%bind () =
+      match config.server.recurrence_execution with
+      | None -> Ok ()
+      | Some configuration -> Recurrence_execution_configuration.validate configuration
     in
     let%bind () =
       match config.server.authoring_project_access with
@@ -2231,59 +2421,171 @@ let import_legacy t ~principal ~source_id ~source_path ~legacy request =
   Agent_session.Session_state.summary state
 ;;
 
-let shutdown_sessions t =
-  (* Admission is already closed. Let callbacks that own a checkpoint finish
-     within the configured grace, rather than needlessly leaving an ambiguous
-     interrupted event on an otherwise orderly restart. Never replay such an
-     event: if the grace expires, runtime retirement still cancels it normally.
-     Registry teardown itself is cancellation-protected and must always run. *)
-  Eio.Cancel.protect (fun () ->
-    (match
-       Eio.Time.with_timeout (Eio.Stdenv.clock t.env) t.shutdown_grace_seconds (fun () ->
-         Eio.Fiber.both
-           (fun () -> Schedule_scheduler.await_idle t.schedule_scheduler)
-           (fun () -> Job_scheduler.await_deliveries_idle t.job_scheduler);
-         Ok ())
-     with
-     | Ok () | Error `Timeout -> ());
-    Session_registry.shutdown t.registry)
+let await_shutdown_callbacks t =
+  (* Admission is already closed. Preserve the existing grace for admitted
+     callbacks; expiry still proceeds to actual protected Registry retirement. *)
+  Schedule_scheduler.await_recurrences_idle t.schedule_scheduler;
+  match
+    Eio.Time.with_timeout (Eio.Stdenv.clock t.env) t.shutdown_grace_seconds (fun () ->
+      Eio.Fiber.both
+        (fun () -> Schedule_scheduler.await_idle t.schedule_scheduler)
+        (fun () -> Job_scheduler.await_deliveries_idle t.job_scheduler);
+      Ok ())
+  with
+  | Ok () | Error `Timeout -> ()
 ;;
 
-let shutdown_remaining t =
-  Start_scheduler.close t.start_scheduler;
-  Permission_scheduler.close t.permission_scheduler;
-  Schedule_scheduler.close t.schedule_scheduler;
-  Maintenance.close t.maintenance;
-  Config_watcher.close_and_wait t.config_watcher;
-  Start_scheduler.close_and_wait t.start_scheduler;
-  let open Result.Let_syntax in
-  let%bind () =
-    match t.developer with
-    | None -> Ok ()
-    | Some developer -> Developer_host.close_and_wait developer
+let shutdown_reported_unlocked t =
+  let module Report = Disposal_report_data in
+  let state = t.shutdown in
+  (* Only the actual positive Registry report is stored. A current Retained
+     result's provenance is returned to the legacy adapter, never cached. *)
+  let failed failure =
+    let diagnostic = Report.Diagnostic.create [ failure ] in
+    let diagnostics =
+      Option.value_map state.registry_report ~default:[] ~f:Report.diagnostics
+      @ [ diagnostic ]
+    in
+    ( Report.create ~primary:diagnostic ~disposition:Retained diagnostics
+    , state.registry_report )
   in
-  let%bind () = Job_scheduler.close_and_wait t.job_scheduler in
-  shutdown_sessions t;
-  let%bind () =
-    match t.authoring with
-    | None -> Ok ()
-    | Some authoring -> Authoring_installation.close_and_wait authoring
+  let rec run () =
+    let advance stage =
+      state.stage <- stage;
+      run ()
+    in
+    let advance_result stage = function
+      | Ok () -> advance stage
+      | Error failure -> failed (Report.Failure.Protocol failure)
+    in
+    match state.stage with
+    | Signal_recurrence_execution ->
+      Option.iter t.recurrence_execution ~f:Recurrence_execution_host.close;
+      advance Close_dispatcher
+    | Close_dispatcher ->
+      Dispatcher.close_and_wait t.dispatcher
+      |> advance_result Signal_recurrence_automation
+    | Signal_recurrence_automation ->
+      Option.iter t.recurrence_automation ~f:Recurrence_automation_host.close;
+      advance Signal_start_scheduler
+    | Signal_start_scheduler ->
+      Start_scheduler.close t.start_scheduler;
+      advance Signal_permission_scheduler
+    | Signal_permission_scheduler ->
+      Permission_scheduler.close t.permission_scheduler;
+      advance Signal_schedule_scheduler
+    | Signal_schedule_scheduler ->
+      Schedule_scheduler.close t.schedule_scheduler;
+      advance Close_maintenance
+    | Close_maintenance ->
+      Maintenance.close t.maintenance;
+      advance Close_config_watcher
+    | Close_config_watcher ->
+      Config_watcher.close_and_wait t.config_watcher;
+      advance Join_start_scheduler
+    | Join_start_scheduler ->
+      Start_scheduler.close_and_wait t.start_scheduler;
+      advance Close_developer
+    | Close_developer ->
+      (match t.developer with
+       | None -> Ok ()
+       | Some developer -> Developer_host.close_and_wait developer)
+      |> advance_result Close_jobs
+    | Close_jobs ->
+      Job_scheduler.close_and_wait t.job_scheduler |> advance_result Await_callbacks
+    | Await_callbacks ->
+      await_shutdown_callbacks t;
+      advance Close_registry
+    | Close_registry ->
+      let report = Session_registry.shutdown_reported t.registry in
+      (match Report.disposition report with
+       | Retained -> report, Some report
+       | Disposed ->
+         state.registry_report <- Some report;
+         advance Join_recurrence_automation)
+    | Join_recurrence_automation ->
+      Option.iter t.recurrence_automation ~f:Recurrence_automation_host.close_and_wait;
+      advance Close_authoring
+    | Close_authoring ->
+      (match t.authoring with
+       | None -> Ok ()
+       | Some authoring -> Authoring_installation.close_and_wait authoring)
+      |> advance_result Close_provider
+    | Close_provider ->
+      Option.iter t.provider_operator ~f:Provider_operator_port.close;
+      advance Close_sources
+    | Close_sources ->
+      Project_source_host.close_and_wait t.project_sources;
+      advance Close_store
+    | Close_store ->
+      Agent_store.Session_store.close t.store
+      |> Result.map_error ~f:protocol_of_store
+      |> advance_result Complete
+    | Complete ->
+      let report =
+        match state.report with
+        | Some report -> report
+        | None ->
+          let report =
+            Report.combine ~disposition:Disposed (Option.to_list state.registry_report)
+          in
+          state.report <- Some report;
+          t.status_ref := Stopped;
+          report
+      in
+      report, state.registry_report
   in
-  Option.iter t.provider_operator ~f:Provider_operator_port.close;
-  Project_source_host.close_and_wait t.project_sources;
-  Agent_store.Session_store.close t.store |> Result.map_error ~f:protocol_of_store
+  match state.report with
+  | Some report -> report, state.registry_report
+  | None ->
+    t.status_ref := Draining;
+    (try run () with
+     | exn -> failed (Report.Failure.Raised (exn, Stdlib.Printexc.get_raw_backtrace ())))
+;;
+
+let shutdown_reported t =
+  Eio.Cancel.protect (fun () ->
+    Eio.Mutex.use_ro t.shutdown.mutex (fun () -> fst (shutdown_reported_unlocked t)))
 ;;
 
 let shutdown t =
-  match !(t.status_ref) with
-  | Stopped -> Ok ()
-  | Starting | Ready | Failed _ | Draining ->
-    Eio.Cancel.protect (fun () ->
-      t.status_ref := Draining;
-      let open Result.Let_syntax in
-      let%bind () = Dispatcher.close_and_wait t.dispatcher in
-      let%map () = shutdown_remaining t in
-      t.status_ref := Stopped)
+  let module Report = Disposal_report_data in
+  Eio.Cancel.protect (fun () ->
+    Eio.Mutex.use_ro t.shutdown.mutex (fun () ->
+      let report, registry_report = shutdown_reported_unlocked t in
+      match Report.take_legacy_diagnostic_exn report with
+      | Some (diagnostic, Report.Failure.Protocol failure) ->
+        if
+          Option.exists registry_report ~f:(fun registry ->
+            List.mem
+              (Report.diagnostics registry)
+              diagnostic
+              ~equal:Report.Diagnostic.equal)
+        then
+          raise
+            (Session_registry.Cleanup_failed
+               (Session_registry.Cleanup_failure.rejected failure))
+        else Error failure
+      | Some (_, Raised (exn, backtrace)) ->
+        Exn.raise_with_original_backtrace exn backtrace
+      | None ->
+        (match Report.disposition report with
+         | Disposed -> Ok ()
+         | Retained ->
+           let failure =
+             Agent_protocol.Error.create
+               Conflict
+               ~message:"daemon shutdown resources remain retained"
+               ~retryable:true
+               ()
+           in
+           (match registry_report with
+            | Some registry
+              when Report.equal_disposition (Report.disposition registry) Retained ->
+              raise
+                (Session_registry.Cleanup_failed
+                   (Session_registry.Cleanup_failure.rejected failure))
+            | None | Some _ -> Error failure))))
 ;;
 
 let select_session t ~principal ~expected =

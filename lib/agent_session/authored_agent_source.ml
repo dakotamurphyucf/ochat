@@ -167,8 +167,12 @@ let load_recorded_artifact
       ~(reservation : Agent_store.Delegation_store.record)
   =
   let open Result.Let_syntax in
+  let%bind source =
+    Agent_store.Delegation_store.Admission.authored_source reservation.admission
+    |> store_result
+  in
   let%bind () =
-    match reservation.admission.authored_tool with
+    match source with
     | Some _ -> Ok ()
     | None -> denied "authored artifact requires an authored reservation"
   in

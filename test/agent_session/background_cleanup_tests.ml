@@ -30,45 +30,49 @@ let%expect_test
              (fun services ->
                 match mode with
                 | `Handler ->
-                  services.execute ~invocation:(root job) (fun ~dispatched:parent ->
-                    let observer : I.observer =
-                      { script_id = before.script_id
-                      ; source_sha256 = before.script_source_hash
-                      }
-                    in
-                    let invocation =
-                      I.create
-                        ~observer
-                        { parent.context with
-                          id = Agent_protocol.Id.Invocation.create ()
-                        ; parent_job = None
-                        ; parent_invocation = Some parent.context.id
-                        ; tool_name = "counter"
-                        }
-                      |> protocol_ok
-                    in
-                    let result =
-                      services.moderator_execute ~invocation (fun ~dispatched ~commit ->
-                        incr effects;
-                        let resolved =
-                          I.resolve
-                            dispatched
-                            ~session_id
-                            ~generation:job.generation
-                            (Complete `Null)
-                          |> protocol_ok
-                        in
-                        let save () = commit ~resolved ~snapshot:after in
-                        escaped := save;
-                        reject_settlement := true;
-                        save ())
-                    in
-                    reject_settlement := false;
-                    assert (Result.is_error (!escaped ()));
-                    reject_settlement := true;
-                    let open Result.Let_syntax in
-                    let%map () = result in
-                    I.Complete `Null)
+                  services.execute
+                    ~invocation:(root job)
+                    (fun ~dispatched:parent ~capabilities:_ ->
+                       let observer : I.observer =
+                         { script_id = before.script_id
+                         ; source_sha256 = before.script_source_hash
+                         }
+                       in
+                       let invocation =
+                         I.create
+                           ~observer
+                           { parent.context with
+                             id = Agent_protocol.Id.Invocation.create ()
+                           ; parent_job = None
+                           ; parent_invocation = Some parent.context.id
+                           ; tool_name = "counter"
+                           }
+                         |> protocol_ok
+                       in
+                       let result =
+                         services.moderator_execute
+                           ~invocation
+                           (fun ~dispatched ~capabilities:_ ~commit ->
+                              incr effects;
+                              let resolved =
+                                I.resolve
+                                  dispatched
+                                  ~session_id
+                                  ~generation:job.generation
+                                  (Complete `Null)
+                                |> protocol_ok
+                              in
+                              let save () = commit ~resolved ~snapshot:after in
+                              escaped := save;
+                              reject_settlement := true;
+                              save ())
+                       in
+                       reject_settlement := false;
+                       assert (Result.is_error (!escaped ()));
+                       reject_settlement := true;
+                       let open Result.Let_syntax in
+                       let%map () = result in
+                       I.Complete `Null)
                   |> Result.map ~f:ignore
                 | `Event ->
                   let event =
@@ -84,7 +88,14 @@ let%expect_test
                   services.claim_event
                     ~event
                     ~snapshot:(fun () -> Ok before)
-                    (fun ~executing:_ ~retirement_reason:_ ~event:_ ~execute:_ ~commit ->
+                    (fun ~executing:_
+                      ~policy_caller:_
+                      ~model_jobs:_
+                      ~allocate_inference:_
+                      ~retirement_reason:_
+                      ~event:_
+                      ~execute:_
+                      ~commit ->
                        incr effects;
                        let save () =
                          commit
@@ -149,7 +160,14 @@ let%expect_test
                      ; meta = `Null
                      })
                 ~snapshot:(fun () -> Ok before)
-                (fun ~executing:_ ~retirement_reason:_ ~event:_ ~execute:_ ~commit ->
+                (fun ~executing:_
+                  ~policy_caller:_
+                  ~model_jobs:_
+                  ~allocate_inference:_
+                  ~retirement_reason:_
+                  ~event:_
+                  ~execute:_
+                  ~commit ->
                    commit
                      ~snapshot:before
                      ~requests:
@@ -165,6 +183,7 @@ let%expect_test
             admitted"));
   [%expect
     {|
+    +native Invocation cleanup failed: injected job transition failure
     Handler
     failed checkpoint retired; effect once; escaped commit rejected; next owner admitted
     +queued moderator cleanup failed: injected job transition failure

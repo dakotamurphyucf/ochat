@@ -46,6 +46,9 @@ module Make (Value : Value) : sig
     -> lookup:(Value.Id.t -> Value.t option)
     -> (Value.t list, Agent_protocol.Error.t) result
 
+  (** Read-only execution-order projection of the actual selected entries. *)
+  val selected_receipts : t -> owner:Agent_protocol.Job.launch_owner -> int list
+
   val abort
     :  t
     -> owner:Agent_protocol.Job.launch_owner

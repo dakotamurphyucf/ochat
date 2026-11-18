@@ -41,26 +41,32 @@ let lifetime_to_json = function
 
 let admission_to_json (a : Admission.t) =
   `Object
-    [ "child_session_id", text (P.Id.Session.to_string a.child_session_id)
-    ; "revision_id", text (P.Id.Prompt_revision.to_string a.revision_id)
-    ; "transaction_id", text (P.Id.Transaction.to_string a.transaction_id)
-    ; "manifest_sha256", text a.manifest_sha256
-    ; "parent_revision_id", text (P.Id.Prompt_revision.to_string a.parent_revision_id)
-    ; "parent_stop_epoch", nullable a.parent_stop_epoch ~f:F.decimal_json
-    ; "authority_sha256", text a.authority_sha256
-    ; ( "authored_tool"
-      , nullable a.authored_tool ~f:(fun authored ->
-          `Object
-            [ "name", text authored.name; "source_sha256", text authored.source_sha256 ])
-      )
-    ; ( "capability_pins"
-      , `Array
-          (List.map a.capability_pins ~f:(fun (name, pin) ->
-             `Object [ "name", text name; "pin", text pin ])) )
-    ; "lifetime", lifetime_to_json a.lifetime
-    ; "created_at", text (P.Timestamp.to_string a.created_at)
-    ; "inference_target", nullable a.inference_target ~f:Inference.Request.Target.to_json
-    ]
+    ([ "child_session_id", text (P.Id.Session.to_string a.child_session_id)
+     ; "revision_id", text (P.Id.Prompt_revision.to_string a.revision_id)
+     ; "transaction_id", text (P.Id.Transaction.to_string a.transaction_id)
+     ; "manifest_sha256", text a.manifest_sha256
+     ; "parent_revision_id", text (P.Id.Prompt_revision.to_string a.parent_revision_id)
+     ; "parent_stop_epoch", nullable a.parent_stop_epoch ~f:F.decimal_json
+     ; "authority_sha256", text a.authority_sha256
+     ; ( "authored_tool"
+       , nullable a.authored_tool ~f:(fun authored ->
+           `Object
+             [ "name", text authored.name; "source_sha256", text authored.source_sha256 ])
+       )
+     ; ( "capability_pins"
+       , `Array
+           (List.map a.capability_pins ~f:(fun (name, pin) ->
+              `Object [ "name", text name; "pin", text pin ])) )
+     ; "lifetime", lifetime_to_json a.lifetime
+     ; "created_at", text (P.Timestamp.to_string a.created_at)
+     ; "inference_target", nullable a.inference_target ~f:Inference.Request.Target.to_json
+     ]
+     @ Option.to_list
+         (Option.map a.captured_recurrence ~f:(fun origin ->
+            "captured_recurrence", Delegation_captured_origin.to_json origin))
+     @ Option.to_list
+         (Option.map a.goal_origin ~f:(fun origin ->
+            "goal_origin", Delegation_goal_origin.to_json origin)))
 ;;
 
 let stage_to_string = function
@@ -154,6 +160,20 @@ let admission_of_json ~limits json =
       let%map source_sha256 = F.required json "source_sha256" F.digest in
       Admission.{ name; source_sha256 })
   in
+  let%bind captured_recurrence =
+    F.optional json "captured_recurrence" (fun json ->
+      let%bind document = F.document ~limits:Delegation_captured_origin.limits json in
+      Delegation_captured_origin.of_document document)
+  in
+  let%bind goal_origin =
+    match D.Json.field json ~name:"goal_origin" with
+    | Absent -> Ok None
+    | Null -> F.invalid "goal_origin" "historical Goal origin must be omitted"
+    | Value json ->
+      Delegation_goal_origin.of_json ~max_scopes:Int.max_value ~limits json
+      |> F.protocol
+      |> Result.map ~f:Option.some
+  in
   let%bind pins = F.required json "capability_pins" F.array in
   let%bind capability_pins =
     List.map pins ~f:(fun json ->
@@ -183,6 +203,8 @@ let admission_of_json ~limits json =
     ; parent_stop_epoch
     ; authority_sha256
     ; authored_tool
+    ; captured_recurrence
+    ; goal_origin
     ; capability_pins
     ; lifetime
     ; created_at
@@ -276,6 +298,8 @@ let record_shape =
       ; "parent_stop_epoch", scalar
       ; "authority_sha256", scalar
       ; "authored_tool", D.Shape.nullable authored
+      ; "captured_recurrence", scalar
+      ; "goal_origin", Delegation_goal_origin.shape
       ; "capability_pins", pins
       ; "lifetime", lifetime
       ; "created_at", scalar
@@ -292,13 +316,45 @@ let record_shape =
     ]
 ;;
 
+let captured_semantics = "delegation.captured-recurrence.v1"
+let goal_semantics = "delegation.goal-origin.v1"
+let supported_semantics = [ captured_semantics; goal_semantics ]
+
+let upgrade document =
+  let open Result.Let_syntax in
+  let%bind () =
+    F.expect_versions
+      document
+      ~kind:"delegation.intent"
+      ~versions:[ 6; 7 ]
+      ~supported_semantics
+  in
+  (* This is a wire-only conversion. In particular the admission subtree is
+     neither decoded nor reserialized, and absent origin stays absent. *)
+  let%bind step =
+    D.Conversion.Step.of_function
+      ~kind:"delegation.intent"
+      ~from_version:6
+      ~f:Result.return
+  in
+  let%bind conversion =
+    D.Conversion.create
+      ~limits
+      ~targets:[ "delegation.intent", 7 ]
+      ~max_steps:1
+      ~max_operations:1
+      ~steps:[ step ]
+  in
+  D.Conversion.upgrade conversion document
+;;
+
 let codec () =
   D.Domain_codec.create
     ~limits
     ~kind:"delegation.intent"
-    ~version:6
+    ~version:7
     ~shape:record_shape
-    ~supported_semantics:[]
+    ~supported_semantics
     ~decode:(record_of_json ~limits)
     ~encode:(fun record -> Ok (record_to_json record))
 ;;
@@ -307,14 +363,58 @@ let value = D.Extension_carrier.value
 
 let of_document document =
   let open Result.Let_syntax in
+  let%bind document = upgrade document in
   let%bind codec = codec () in
-  D.Domain_codec.decode codec document
+  let%bind carrier = D.Domain_codec.decode codec document in
+  let required =
+    [ captured_semantics, Option.is_some (value carrier).admission.captured_recurrence
+    ; goal_semantics, Option.is_some (value carrier).admission.goal_origin
+    ]
+  in
+  if
+    List.exists required ~f:(fun (semantic, populated) ->
+      populated
+      && not
+           (List.mem
+              (D.Document.required_semantics document)
+              semantic
+              ~equal:String.equal))
+  then F.invalid "required_semantics" "populated delegation origin requires its semantics"
+  else Ok carrier
+;;
+
+let require_origin_semantics t document =
+  let required =
+    [ captured_semantics, Option.is_some (value t).admission.captured_recurrence
+    ; goal_semantics, Option.is_some (value t).admission.goal_origin
+    ]
+    |> List.filter_map ~f:(fun (semantic, populated) ->
+      if populated then Some semantic else None)
+  in
+  let semantics =
+    D.Document.required_semantics document
+    @ List.filter required ~f:(fun semantic ->
+      not (List.mem (D.Document.required_semantics document) semantic ~equal:String.equal))
+  in
+  if List.equal String.equal semantics (D.Document.required_semantics document)
+  then Ok document
+  else (
+    match D.Document.json document with
+    | `Object fields ->
+      D.Document.inspect
+        ~limits
+        (`Object
+            (List.filter fields ~f:(fun (name, _) ->
+               not (String.equal name "required_semantics"))
+             @ [ "required_semantics", `Array (List.map semantics ~f:text) ]))
+    | _ -> assert false)
 ;;
 
 let to_document t =
   let open Result.Let_syntax in
   let%bind codec = codec () in
   let%bind encoded = D.Domain_codec.encode codec t in
+  let%bind encoded = require_origin_semantics t encoded in
   match D.Extension_carrier.template t with
   | None -> Ok encoded
   | Some original ->
@@ -420,4 +520,48 @@ let admission_sha256 t =
 let with_disposition t ~stage ~revocation ~artifact_collection =
   let record = { (to_record t) with stage; revocation; artifact_collection } in
   of_record record
+;;
+
+let reserved_payload_bytes t =
+  let open Result.Let_syntax in
+  let%bind document = to_document t in
+  let current = value t in
+  let stages =
+    match current.revocation, current.stage with
+    | Some _, stage -> [ stage ]
+    | None, Reserved -> [ Reserved; Artifact_installed; Child_installed; Linked ]
+    | None, Artifact_installed -> [ Artifact_installed; Child_installed; Linked ]
+    | None, Child_installed -> [ Child_installed; Linked ]
+    | None, Linked -> [ Linked ]
+  in
+  let revocation =
+    match current.revocation with
+    | Some _ as existing -> existing
+    | None ->
+      List.max_elt
+        [ Parent_stopped; Parent_deleted; Authority_changed; Admission_failed ]
+        ~compare:(fun a b ->
+          Int.compare
+            (String.length (revocation_to_string a))
+            (String.length (revocation_to_string b)))
+  in
+  (* Encode at most four actual reachable documents, one at a time. Historical
+     optional fields can be absent rather than null: their insertion overhead,
+     field/node limits and every retained unknown must participate as well. *)
+  List.fold_result
+    stages
+    ~init:(String.length (D.Document.to_string document))
+    ~f:(fun maximum stage ->
+      let collection =
+        match current.artifact_collection, stage, revocation with
+        | Some Prepared, _, _ -> Some Prepared
+        | None, (Reserved | Artifact_installed), Some _ -> Some Prepared
+        | None, (Child_installed | Linked), _
+        | None, (Reserved | Artifact_installed), None -> None
+      in
+      let%bind future =
+        with_disposition t ~stage ~revocation ~artifact_collection:collection
+      in
+      let%map future = to_document future in
+      Int.max maximum (String.length (D.Document.to_string future)))
 ;;

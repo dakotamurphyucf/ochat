@@ -58,6 +58,7 @@ let%test_unit "selected source cannot borrow a different native invocation" =
     and self = ref None
     and tested = ref false
     and authorizations = ref 0 in
+    let probe_context = ref None in
     let delayed_reader = Eio.Fiber.create_key () in
     let completed_checks = ref 0 in
     let halted_after_checks = ref 0 in
@@ -79,6 +80,9 @@ let%test_unit "selected source cannot borrow a different native invocation" =
         (module Probe)
         (fun _ ->
            let services = Calls.current_native_services () |> Result.ok_or_failwith in
+           (match Calls.agent_context (Option.value_exn !probe_context) with
+            | _ -> failwith "native invocation without graph tracking was admitted"
+            | exception Chat_response.Ctx.Inference_admission_rejected -> ());
            let before = !authorizations in
            let context =
              Calls.agent_source_context
@@ -136,6 +140,8 @@ let%test_unit "selected source cannot borrow a different native invocation" =
         ~cache:(Chat_response.Cache.create ~max_size:1 ())
         ()
     in
+    assert (phys_equal ctx (Calls.agent_context ctx));
+    probe_context := Some ctx;
     let elements = Revision.elements original in
     let host =
       Runtime.host

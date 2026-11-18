@@ -514,6 +514,7 @@ let%expect_test "waiting job null completion schema preserves the absent domain 
       ; result = None
       ; delivery = Pending
       ; launch = None
+      ; inference_origin = None
       ; progress = None
       }
   in
@@ -920,6 +921,57 @@ let%expect_test
       { initial with counters = { initial.counters with revision = Int64.max_value } }
       |> A.Session_state_document.authored
     in
+    (* Actual ordinary Delta can add a Clear duty without editing counters.
+       Lower publication metadata must not repair that exhausted native prefix. *)
+    let root =
+      Instruction_content.Root_id.of_string "prefix-headroom" |> Or_error.ok_exn
+    in
+    let snapshot =
+      match
+        Instruction_content.Snapshot.capture
+          []
+          ~limits:Instruction_content.Limits.standard
+          ~checkpoint:ignore
+      with
+      | Ok snapshot -> snapshot
+      | Error error -> raise_s [%sexp (error : Instruction_content.Error.t)]
+    in
+    let project =
+      A.Instruction_capture.project ~root ~scope:Instruction_content.Scope.root snapshot
+      |> protocol_ok
+    in
+    let request =
+      A.Instruction_command.create
+        ~session_id:initial.identity.session_id
+        ~generation:initial.identity.generation
+        ~expected_revision:0L
+        ~key:(P.Idempotency_key.of_string "prefix-headroom" |> protocol_ok)
+        ~change:(Replace_project project)
+      |> protocol_ok
+    in
+    let selection =
+      match
+        A.Instruction_selection.prepare
+          A.Instruction_selection.empty
+          ~request
+          ~principal_id
+          ~session_id:initial.identity.session_id
+          ~generation:initial.identity.generation
+          ~now:timestamp
+        |> protocol_ok
+      with
+      | Commit { selection; _ } -> selection
+      | Retained _ -> failwith "new instruction command unexpectedly retained"
+    in
+    A.Session_state.validate (A.Session_state_document.value large) |> protocol_ok;
+    let duty = capture (Instruction_selection_changed selection) in
+    (match
+       A.Session_delta_document.apply duty ~transaction_metadata:metadata ~limits large
+     with
+     | Error (D.Error.Invalid_field { path = []; reason }) ->
+       [%test_eq: string] "active instructions require Clear counter headroom" reason
+     | Error error -> raise_s [%sexp "unexpected headroom failure", (error : D.Error.t)]
+     | Ok _ -> failwith "metadata repaired an exhausted unstamped instruction duty");
     let smaller =
       reference_transaction_metadata
         large
@@ -1129,6 +1181,7 @@ let%expect_test "live commits and snapshots retain the exact admitted replay bas
           ; result = None
           ; delivery = Pending
           ; launch = None
+          ; inference_origin = None
           ; progress = None
           }
         in
@@ -1542,6 +1595,7 @@ let%expect_test
         ; result = None
         ; delivery = Pending
         ; launch = None
+        ; inference_origin = None
         ; progress = None
         }
       in

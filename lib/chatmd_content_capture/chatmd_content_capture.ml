@@ -268,7 +268,7 @@ let run owner ~parsed_contexts ~limits ~checkpoint =
                 |> Result.map_error ~f:(fun _ ->
                   Error.invalid
                     ~range:(Occurrence.range occurrence)
-                    "unknown builtin document")
+                    ("unknown builtin document: " ^ Builtin_instructions.Id.to_string id))
             in
             let%bind limits = Budget.render_limits budget in
             let%bind value =

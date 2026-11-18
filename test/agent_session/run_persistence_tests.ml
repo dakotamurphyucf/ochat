@@ -39,6 +39,7 @@ let create_actor env sw initial persistence =
       ; create_reclaim_token = (fun () -> "run-persistence-reclaim")
       ; state_committed = (fun _ _ -> ())
       ; job_results = None
+      ; goal_descendant_profile
       ; subscription_limits = A.Staged_subscriptions.default_limits
       ; schedule_limits = A.Staged_schedules.default_limits
       ; notification_limits = A.Staged_notifications.default_limits
@@ -110,10 +111,15 @@ let%expect_test
         let persistence : A.Session_actor.persistence =
           { archive_reference
           ; commit =
-              (fun ~command_audit ~previous transition ->
+              (fun ?observation ~command_audit ~previous transition ->
                 let open Result.Let_syntax in
                 let%bind () =
-                  Persistence.commit durable ~command_audit ~previous transition
+                  Persistence.commit
+                    durable
+                    ?observation
+                    ~command_audit
+                    ~previous
+                    transition
                 in
                 if !lose_acknowledgement
                 then (
@@ -352,9 +358,11 @@ let%expect_test "physical retry carrier survives reopen and complete result coll
       in
       { A.Session_actor.archive_reference
       ; commit =
-          (fun ~command_audit ~previous transition ->
+          (fun ?observation ~command_audit ~previous transition ->
             let open Result.Let_syntax in
-            let%map () = Persistence.commit durable ~command_audit ~previous transition in
+            let%map () =
+              Persistence.commit durable ?observation ~command_audit ~previous transition
+            in
             if !preserve_marker
             then (
               preserve_marker := false;
@@ -595,7 +603,14 @@ let%expect_test "physical retry carrier survives reopen and complete result coll
              ~operation_id:None
              ~event:Session_start
              ~snapshot:(fun () -> Ok before)
-             (fun ~executing ~retirement_reason:_ ~event:_ ~execute:_ ~commit ->
+             (fun ~executing
+               ~policy_caller:_
+               ~model_jobs:_
+               ~allocate_inference:_
+               ~retirement_reason:_
+               ~event:_
+               ~execute:_
+               ~commit ->
                 let owner = P.Job.Moderator_event executing.context.id in
                 let captured =
                   Background_execution_tests.capture_tool

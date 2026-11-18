@@ -48,12 +48,23 @@ val create
 
 val commit
   :  t
+  -> ?observation:Session_commit_observation.t
   -> command_audit:Document_schema.Document.t option
   -> previous:Session_state.t
   -> Session_transition.t
   -> (unit, Agent_protocol.Error.t) result
 
 val actor_persistence : t -> Session_actor.persistence
+
+(** Return one actual persistence record and its SAME canonical writer/physical
+    commit-closure association. Supply this pair together to Actor's bound
+    runtime-source constructor. Domain/closure/session validation occurs before
+    Actor startup. This is backend identity only, not uncertain-write,
+    acknowledgement, custody settlement or execution authority. *)
+val actor_persistence_with_startup_disposal
+  :  t
+  -> Session_actor.persistence * Session_actor.Canonical_persistence.t
+
 val transaction_hash : t -> string option
 val restored : t -> Restored.t
 

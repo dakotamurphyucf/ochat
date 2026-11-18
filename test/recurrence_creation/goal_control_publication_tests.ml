@@ -1,0 +1,276 @@
+open! Core
+open Creation_support
+module Actor = A.Session_actor
+module G = P.Goal
+module Ledger = A.Inference_ledger
+module Runtime = Inference_runtime
+
+(* Exercise the real Store/controller publication boundary with an ordinary
+   Operation allocation, after the held activation has handed off. *)
+module Goal = Goal_worker_support
+
+let configuration () =
+  let fixture =
+    Inference_fixture.create
+      ~namespace:"goal-publication-registration"
+      ~default_model:"fixture"
+      ~post_stream:(fun ~sw:_ ~inputs:_ -> failwith "unexpected provider")
+  in
+  let inference_ok result =
+    Result.map_error result ~f:(fun error ->
+      Sexp.to_string_hum (Runtime.Preparation_error.sexp_of_t error))
+    |> Result.ok_or_failwith
+  in
+  let target =
+    Inference_fixture.capture_config fixture Chat_response.Config.default |> inference_ok
+  in
+  let context = Inference_fixture.resolve fixture target |> inference_ok in
+  let request =
+    Inference.Request.create
+      ~target
+      ~history:[]
+      ~tools:[]
+      ~assets:[]
+      ~limits:Transcript.Admission.default
+    |> Result.map_error ~f:(fun error ->
+      Sexp.to_string_hum (Inference.Request.Error.sexp_of_t error))
+    |> Result.ok_or_failwith
+  in
+  Runtime.Context.prepare context ~preparation_id:"goal-publication-configuration" request
+  |> inference_ok
+  |> Runtime.Prepared.configuration
+;;
+
+let%expect_test "same-value explicit Goal Hold revokes before publication yields" =
+  let refreshed, refreshed_u = Eio.Promise.create () in
+  let continue_check, continue_check_u = Eio.Promise.create () in
+  let published, published_u = Eio.Promise.create () in
+  let finish_publish, finish_publish_u = Eio.Promise.create () in
+  let checked, checked_u = Eio.Promise.create () in
+  let worker_failed, worker_failed_u = Eio.Promise.create () in
+  let prefix = ref 0 in
+  let expected_receipt = ref None in
+  let selected_handle = ref None in
+  let callback_state = ref None in
+  let release promise resolver =
+    if Option.is_none (Eio.Promise.peek promise) then Eio.Promise.resolve resolver ()
+  in
+  let release_all () =
+    release continue_check continue_check_u;
+    release finish_publish finish_publish_u
+  in
+  let report_worker_errors f () =
+    match f () with
+    | value -> value
+    | exception exn ->
+      let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+      ignore (Eio.Promise.try_resolve worker_failed_u (exn, backtrace) : bool);
+      release_all ();
+      Exn.raise_with_original_backtrace exn backtrace
+  in
+  let await_worker checkpoint =
+    Eio.Fiber.first checkpoint (fun () ->
+      let exn, backtrace = Eio.Promise.await worker_failed in
+      Exn.raise_with_original_backtrace exn backtrace)
+  in
+  let on_published (current : A.Session_state.t) =
+    match !expected_receipt with
+    | None -> ()
+    | Some key ->
+      let catalog = Option.value_exn current.goal_catalog in
+      if
+        List.exists (A.Goal_catalog.receipts catalog) ~f:(fun receipt ->
+          P.Idempotency_key.equal receipt.A.Goal_command_receipt.key key)
+      then (
+        expected_receipt := None;
+        callback_state := Some current;
+        Eio.Promise.resolve published_u ();
+        Eio.Promise.await finish_publish)
+  in
+  Own_ack_tests.with_controller
+    (* This controller is born in this test. Its count budget uses the same
+       initialized descendant accounting as a newly created Factory session. *)
+    ~initialize_state:(fun state -> initialize_new_unrelated_child state ~server_id)
+    ~published:on_published
+    (fun fixture actor source owner _intent _attempt ->
+       Eio.Time.with_timeout_exn (Eio.Stdenv.clock fixture.env) 30. (fun () ->
+         let joins = ref [] in
+         Handoff_tests.protect_cleanup
+           ~finally:(fun () ->
+             release_all ();
+             List.iter !joins ~f:(fun join -> Eio.Cancel.protect join))
+           (fun () ->
+              let worker =
+                A.Operation_worker.create ~run:(fun ~sw:_ ~input caps ->
+                  let graph =
+                    report_worker_errors
+                      (fun () ->
+                         Actor.open_inference_owner
+                           actor
+                           ~source:
+                             (Transcript.Source_id.of_string "goal-publication-operation"
+                              |> Result.ok_or_failwith)
+                         |> protocol_ok)
+                      ()
+                  in
+                  let allocated = ref None in
+                  Handoff_tests.protect_cleanup
+                    ~finally:
+                      (report_worker_errors (fun () ->
+                         (* Factual mailbox cleanup waits until the publisher is released. *)
+                         Eio.Promise.await finish_publish;
+                         Option.iter !allocated ~f:(fun allocation ->
+                           Actor.release_inference
+                             actor
+                             ~owner:graph
+                             ~handle:(A.Inference_allocation.handle allocation)
+                           |> protocol_ok);
+                         Actor.seal_inference_owner actor ~owner:graph |> protocol_ok;
+                         Actor.finish_inference_owner actor ~owner:graph |> protocol_ok))
+                    (report_worker_errors (fun () ->
+                       let configuration = configuration () in
+                       let first =
+                         caps.allocate_inference ~graph ~relation:Root ~configuration
+                         |> protocol_ok
+                       in
+                       allocated := Some first;
+                       selected_handle := Some (A.Inference_allocation.handle first);
+                       (* Reach the real automatic budget hold through a second fresh
+                       allocation. It charges nothing and retains the first handle. *)
+                       (match
+                          caps.allocate_inference ~graph ~relation:Root ~configuration
+                        with
+                        | Error error ->
+                          [%test_eq: P.Error.code] Permission_denied error.code
+                        | Ok _ -> failwith "attempt budget admitted a second allocation");
+                       let extra =
+                         Runtime.Submission_guard.create ~refresh:(fun () ->
+                           Eio.Promise.resolve refreshed_u ();
+                           Eio.Promise.await continue_check;
+                           Fn.id)
+                       in
+                       let guard =
+                         Runtime.Submission_guard.compose
+                           (A.Inference_allocation.submission_guard first)
+                           extra
+                       in
+                       let result =
+                         try
+                           Runtime.Submission_guard.check guard;
+                           Int.incr prefix;
+                           Ok ()
+                         with
+                         | A.Inference_allocation.Rejected error -> Error error
+                       in
+                       Eio.Promise.resolve checked_u result));
+                  A.Operation_worker.Completed
+                    { final_history = input.history
+                    ; moderator_snapshot = (state actor).moderator
+                    ; runtime_requests = []
+                    })
+              in
+              let budget =
+                G.Budget.create
+                  ~admitted_turns:None
+                  ~admitted_attempts:(Some 1L)
+                  ~observed_tokens:None
+                  ~deadline:None
+                |> protocol_ok
+              in
+              let submitted = Goal.start actor source owner ~budget ~worker in
+              let operation_id = Option.value_exn submitted.operation_id in
+              await_worker (fun () ->
+                Eio.Fiber.first
+                  (fun () -> Eio.Promise.await refreshed)
+                  (fun () ->
+                     match Eio.Promise.await checked with
+                     | Error error ->
+                       raise_s
+                         [%sexp
+                           "worker guard returned before refresh", (error : P.Error.t)]
+                     | Ok () -> failwith "worker guard completed before refresh"));
+              let held = state actor in
+              assert (
+                G.State.equal
+                  (Open (Held (Budget_gate Admitted_attempts)))
+                  (G.state (Goal.goal held)));
+              let key =
+                P.Idempotency_key.of_string "publication-explicit-hold" |> protocol_ok
+              in
+              expected_receipt := Some key;
+              let holding =
+                Eio.Fiber.fork_promise ~sw:fixture.sw (fun () ->
+                  Goal.command
+                    actor
+                    ~key:"publication-explicit-hold"
+                    (Hold (Goal.goal_id, Budget_gate Admitted_attempts)))
+              in
+              joins := [ (fun () -> Eio.Promise.await holding |> ignore) ];
+              await_worker (fun () ->
+                Eio.Fiber.first
+                  (fun () -> Eio.Promise.await published)
+                  (fun () ->
+                     Eio.Promise.await_exn holding |> ignore;
+                     if not (Eio.Promise.is_resolved published)
+                     then
+                       failwith
+                         "Hold command completed before acknowledgement publication"));
+              let acknowledged = Option.value_exn !callback_state in
+              assert (
+                G.State.equal
+                  (G.state (Goal.goal held))
+                  (G.state (Goal.goal acknowledged)));
+              let handle = Option.value_exn !selected_handle in
+              let row =
+                Ledger.find
+                  acknowledged.inference_ledger
+                  ~ordinal:(Ledger.Handle.ordinal handle)
+                |> Option.value_exn
+              in
+              assert (Ledger.Handle.equal handle (Ledger.Row.handle row));
+              [%test_eq: P.Id.Operation.t option]
+                (Some operation_id)
+                (Ledger.Handle.operation_id handle);
+              [%test_eq: int] 0 !prefix;
+              release continue_check continue_check_u;
+              (match await_worker (fun () -> Eio.Promise.await checked) with
+               | Error error ->
+                 [%test_eq: P.Error.code] Permission_denied error.code;
+                 [%test_eq: bool] false error.retryable
+               | Ok () ->
+                 failwith
+                   "explicit Hold ACK left the admitted final closure live during \
+                    publication");
+              [%test_eq: int] 0 !prefix;
+              release finish_publish finish_publish_u;
+              Eio.Promise.await_exn holding |> ignore;
+              joins := [];
+              let rec settled () =
+                let current = state actor in
+                match current.active_operation with
+                | Some _ ->
+                  Eio.Fiber.yield ();
+                  settled ()
+                | None -> current
+              in
+              let final = settled () in
+              let run =
+                A.Run_state.find
+                  (Option.value_exn final.run_state)
+                  (P.Goal_episode.admission
+                     (G.episode (Goal.goal final) |> Option.value_exn))
+                    .run_id
+                |> Option.value_exn
+              in
+              assert (
+                List.exists run.terminal_work ~f:(fun terminal ->
+                  P.Run_work.Key.equal
+                    terminal.P.Run_work.Terminal.work.key
+                    (Operation operation_id)
+                  && P.Run_work.Terminal.equal_outcome Succeeded terminal.outcome));
+              [%test_eq: int] 0 !prefix)));
+  print_endline
+    "real explicit Hold ACK fences the same admitted handle before publisher release";
+  [%expect
+    {| real explicit Hold ACK fences the same admitted handle before publisher release |}]
+;;

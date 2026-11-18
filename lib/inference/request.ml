@@ -1,6 +1,7 @@
 open! Core
 module D = Document_schema
 module Presence = History_entry.Payload.Presence
+module Guidance = Request_guidance
 
 module Error = struct
   type t =
@@ -507,9 +508,10 @@ type t =
   ; tools : Tool_spec.t list
   ; assets : Asset.t list
   ; encoded_bytes : int
+  ; guidance : Guidance.t option
   }
 
-let create ~target ~history ~tools ~assets ~limits =
+let create_with_guidance ~target ~history ~tools ~assets ~guidance ~limits =
   let open Result.Let_syntax in
   let%bind () =
     match
@@ -541,17 +543,19 @@ let create ~target ~history ~tools ~assets ~limits =
   in
   let skeleton =
     `Object
-      [ "target", Target.to_json target
-      ; ( "history"
-        , `Array
-            (List.map history ~f:(fun entry ->
-               `Object
-                 [ "id", `String (History_entry.Id.to_string (History_entry.id entry))
-                 ; "payload", History_entry.Payload.to_json (History_entry.payload entry)
-                 ])) )
-      ; "tools", `Array (List.map tools ~f:Tool_spec.admission_json)
-      ; "assets", `Array (List.map assets ~f:Asset.admission_json)
-      ]
+      ([ "target", Target.to_json target
+       ; ( "history"
+         , `Array
+             (List.map history ~f:(fun entry ->
+                `Object
+                  [ "id", `String (History_entry.Id.to_string (History_entry.id entry))
+                  ; "payload", History_entry.Payload.to_json (History_entry.payload entry)
+                  ])) )
+       ; "tools", `Array (List.map tools ~f:Tool_spec.admission_json)
+       ; "assets", `Array (List.map assets ~f:Asset.admission_json)
+       ]
+       @ Option.to_list
+           (Option.map guidance ~f:(fun value -> "guidance", Guidance.to_json value)))
   in
   let%bind base = D.Json.validate_and_measure ~limits skeleton |> json_error in
   (* Base64 is ASCII without JSON escaping. Empty placeholder strings already
@@ -573,6 +577,7 @@ let create ~target ~history ~tools ~assets ~limits =
   ; tools
   ; assets
   ; encoded_bytes = D.Limits.max_bytes limits - remaining
+  ; guidance
   }
 ;;
 
@@ -581,3 +586,19 @@ let history t = t.history
 let tools t = t.tools
 let assets t = t.assets
 let encoded_bytes t = t.encoded_bytes
+
+let create ~target ~history ~tools ~assets ~limits =
+  create_with_guidance ~target ~history ~tools ~assets ~guidance:None ~limits
+;;
+
+let with_guidance t ~guidance ~limits =
+  create_with_guidance
+    ~target:t.target
+    ~history:t.history
+    ~tools:t.tools
+    ~assets:t.assets
+    ~guidance
+    ~limits
+;;
+
+let guidance t = t.guidance

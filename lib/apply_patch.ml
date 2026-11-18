@@ -583,6 +583,8 @@ let patch_to_commit (p : patch) (orig : string String.Map.t) : commit =
 let load_files paths ~open_fn =
   List.fold paths ~init:String.Map.empty ~f:(fun acc p ->
     try Map.set acc ~key:p ~data:(open_fn p) with
+    | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn ->
+      Exn.raise_with_original_backtrace exn (Stdlib.Printexc.get_raw_backtrace ())
     | _ ->
       raise (Diff_error (Apply_patch_error.Missing_file { path = p; action = `Update })))
 ;;

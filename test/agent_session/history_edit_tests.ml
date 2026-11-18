@@ -208,7 +208,7 @@ let%expect_test
                (A.Session_state_document.value restored).conversation.canonical_history)
               .content_revision))
       (String.is_substring json ~substring:"\"evidence\":\"keep\"");
-    [%expect {| version=10 revision=0 unknown=true |}])
+    [%expect {| version=14 revision=0 unknown=true |}])
 ;;
 
 let%expect_test
@@ -757,6 +757,7 @@ let%expect_test
                         ; schedule_limits = A.Staged_schedules.default_limits
                         ; notification_limits = A.Staged_notifications.default_limits
                         ; ingress_limits = A.Staged_ingress.default_limits
+                        ; goal_descendant_profile
                         ; subscription_limits = A.Staged_subscriptions.default_limits
                         ; state_committed =
                             (fun _ events ->
@@ -1190,25 +1191,27 @@ let%expect_test "independent background outcome commits against edited current h
        let job = Job_fixtures.add_claimed_job actor in
        let resolved =
          Job_fixtures.with_job actor job (fun ~job:_ ~execute ->
-           execute ~invocation:(Job_fixtures.root job) (fun ~dispatched:_ ->
-             let before = A.Session_actor.state actor |> protocol_ok in
-             let saved =
-               A.Session_actor.edit_history
-                 actor
-                 { session_id
-                 ; attachment_id = writer.id
-                 ; expected_generation = before.identity.generation
-                 ; expected_revision = before.counters.revision
-                 ; edit = intent target "edited while background is running"
-                 ; idempotency_key =
-                     P.Idempotency_key.of_string "background-edit" |> protocol_ok
-                 }
-               |> protocol_ok
-             in
-             printf
-               "edit-committed=%b\n"
-               (R.equal saved.content_revision (R.of_int64 1L |> protocol_ok));
-             Ok (P.Invocation.Complete (`String "background result"))))
+           execute
+             ~invocation:(Job_fixtures.root job)
+             (fun ~dispatched:_ ~capabilities:_ ->
+                let before = A.Session_actor.state actor |> protocol_ok in
+                let saved =
+                  A.Session_actor.edit_history
+                    actor
+                    { session_id
+                    ; attachment_id = writer.id
+                    ; expected_generation = before.identity.generation
+                    ; expected_revision = before.counters.revision
+                    ; edit = intent target "edited while background is running"
+                    ; idempotency_key =
+                        P.Idempotency_key.of_string "background-edit" |> protocol_ok
+                    }
+                  |> protocol_ok
+                in
+                printf
+                  "edit-committed=%b\n"
+                  (R.equal saved.content_revision (R.of_int64 1L |> protocol_ok));
+                Ok (P.Invocation.Complete (`String "background result"))))
          |> protocol_ok
        in
        Job_fixtures.complete actor job |> protocol_ok |> ignore;

@@ -95,7 +95,10 @@ let make_identity namespace =
               Inference.Observation.Observation_id.of_string (id "usage" n)
               |> invariant_exn
             in
-            f ~scope ~accounting_id)
+            f
+              ~scope
+              ~accounting_id
+              ~submission_guard:Inference_runtime.Submission_guard.empty)
       }
 ;;
 

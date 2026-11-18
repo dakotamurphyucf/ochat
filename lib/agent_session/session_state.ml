@@ -13,7 +13,7 @@ module Identity = struct
     ; organization : Agent_protocol.Session_organization.Values.t
           [@sexp.default Agent_protocol.Session_organization.Values.empty]
     }
-  [@@deriving sexp]
+  [@@deriving sexp, fields ~iterators:map_poly]
 end
 
 module Spec = struct
@@ -37,6 +37,25 @@ module Spec = struct
   [@@deriving sexp]
 
   type t = Workspace_instance.t fields [@@deriving sexp]
+
+  module Resource_identity = struct
+    type spec = t
+
+    type t =
+      { spec : Sexp.t
+      ; inference : Inference.Selection.t
+      }
+
+    let capture (spec : spec) =
+      let protocol = { spec.protocol with display_name = None; labels = [] } in
+      { spec = sexp_of_t { spec with protocol }; inference = spec.inference_target }
+    ;;
+
+    let equal t other =
+      Sexp.equal t.spec other.spec
+      && Inference.Selection.equal t.inference other.inference
+    ;;
+  end
 end
 
 module Compaction_archive = struct
@@ -110,7 +129,7 @@ module Counters = struct
     ; transaction_sequence : int64
     ; owner_lease_generation : int64
     }
-  [@@deriving sexp]
+  [@@deriving equal, sexp]
 end
 
 type 'spec fields =
@@ -136,6 +155,15 @@ type 'spec fields =
   ; managed_stops : Managed_stop.t list [@sexp.list]
   ; moderator_executions : Agent_protocol.Moderator_execution.t list [@sexp.list]
   ; run_state : Run_state.t option [@sexp.option]
+  ; goal_catalog : Goal_catalog.t option [@sexp.option]
+  ; goal_accounts : (Goal_accounts.t option[@sexp.opaque])
+  ; delegated_usage : (Delegated_usage.t option[@sexp.opaque])
+  ; child_contributions : (Child_contributions.t option[@sexp.opaque])
+  ; goal_descendants : (Goal_descendants.t option[@sexp.opaque])
+  ; policy_canonical_usage : (Policy_canonical_usage.t option[@sexp.opaque])
+  ; goal_policy_contributions : (Goal_policy_contributions.t option[@sexp.opaque])
+  ; instruction_selection : Instruction_selection.t option [@sexp.option]
+  ; recurrence_catalog : Recurrence_catalog.t option [@sexp.option]
   ; subscriptions : Agent_protocol.Subscription.t list [@sexp.list]
   ; deliveries : Agent_protocol.Delivery.t list [@sexp.list]
   ; ingress_registrations : External_ingress.t list [@sexp.list]
@@ -147,17 +175,324 @@ type 'spec fields =
   ; failure : Agent_protocol.Error.t option
   ; counters : Counters.t
   }
-[@@deriving sexp]
+[@@deriving sexp, fields ~iterators:map_poly]
 
 type t = Spec.t fields [@@deriving sexp]
 
-let current_schema_version = 25
+let same_ordinary_ready_reload_basis (t : t) ~(expected : t) =
+  let identity = { t.identity with updated_at = expected.identity.updated_at } in
+  let counters =
+    { t.counters with
+      revision = expected.counters.revision
+    ; event_sequence = expected.counters.event_sequence
+    ; transaction_sequence = expected.counters.transaction_sequence
+    }
+  in
+  let current =
+    { t with
+      identity = expected.identity
+    ; schedules = expected.schedules
+    ; counters = expected.counters
+    }
+  in
+  (* Preserve exact construction inputs, including any new fields. The scheduler
+     owns its live table, and commits advance the stamps independently of it. *)
+  List.for_all
+    (Identity.Fields.map_poly
+       { f =
+           (fun field ->
+             phys_equal (Field.get field identity) (Field.get field expected.identity))
+       })
+    ~f:Fn.id
+  && Counters.equal counters expected.counters
+  && List.for_all
+       (Fields_of_fields.map_poly
+          { f =
+              (fun field ->
+                phys_equal (Field.get field current) (Field.get field expected))
+          })
+       ~f:Fn.id
+;;
+
+let execution_migration_required (t : t) =
+  match t.lifecycle.observed with
+  | Failed failure -> Agent_protocol.Error.equal_code failure.code Migration_required
+  | Stopped ->
+    Option.exists t.failure ~f:(fun failure ->
+      Agent_protocol.Error.equal_code failure.code Migration_required)
+  | Queued_for_slot
+  | Starting
+  | Recovering
+  | Idle
+  | Running_turn _
+  | Compacting _
+  | Waiting_for_permission _
+  | Stopping -> false
+;;
+
+let lifecycle_pointer (t : t) = Option.bind t.run_state ~f:Run_state.moderator_lifecycle
+
+let validate_moderator_lifecycle (t : t) =
+  let open Result.Let_syntax in
+  match lifecycle_pointer t, t.run_state with
+  | None, _ -> Ok ()
+  | Some pointer, Some index ->
+    let%bind source =
+      Run_source_installation.captured
+        (Run_state.installation index)
+        ~generation:t.identity.generation
+    in
+    Moderator_lifecycle.validate
+      pointer
+      ~session_id:t.identity.session_id
+      ~generation:t.identity.generation
+      ~current_source:source
+      ~executions:t.moderator_executions
+  | Some _, None -> assert false
+;;
+
+let validate_moderator_lifecycle_index_update (previous : t) incoming =
+  let before = lifecycle_pointer previous in
+  let after = Run_state.moderator_lifecycle incoming in
+  if Option.equal Moderator_lifecycle.equal before after
+  then Ok ()
+  else if
+    Option.is_none after
+    && Option.exists previous.run_state ~f:(fun index ->
+      not
+        (Run_source_installation.equal
+           (Run_state.installation index)
+           (Run_state.installation incoming)))
+  then Ok ()
+  else
+    Error
+      (Agent_protocol.Error.invalid_request
+         "ordinary run index update cannot select or discard lifecycle evidence")
+;;
+
+let validate_moderator_lifecycle_update
+      ~previous_runs
+      ~previous_generation
+      ~previous_executions
+      (incoming : t)
+  =
+  let before = Option.bind previous_runs ~f:Run_state.moderator_lifecycle in
+  let after = lifecycle_pointer incoming in
+  match before, after with
+  | None, None -> Ok ()
+  | _ ->
+    let open Result.Let_syntax in
+    let%bind () = validate_moderator_lifecycle incoming in
+    let newly_admitted =
+      (* Receipts are immutable. Exact shared list identity proves that no ID was
+         admitted; it grants no source or effect authority. *)
+      if phys_equal previous_executions incoming.moderator_executions
+      then []
+      else (
+        let previous_ids =
+          Hash_set.of_list
+            (module Agent_protocol.Id.Moderator_execution)
+            (List.map previous_executions ~f:(fun previous ->
+               previous.Agent_protocol.Moderator_execution.context.id))
+        in
+        List.filter incoming.moderator_executions ~f:(fun execution ->
+          let c = execution.Agent_protocol.Moderator_execution.context in
+          Int.equal c.generation incoming.identity.generation
+          && Moderator_lifecycle.lifecycle_phase c.phase
+          && not (Hash_set.mem previous_ids c.id)))
+    in
+    let invalid () =
+      Error
+        (Agent_protocol.Error.invalid_request
+           "lifecycle pointer transition has no unique new claim or source invalidation")
+    in
+    (match before, after with
+     | None, None -> assert false
+     | Some before, Some after when Moderator_lifecycle.equal before after ->
+       if List.is_empty newly_admitted then Ok () else invalid ()
+     | _, Some after ->
+       (match newly_admitted with
+        | [ execution ]
+          when Agent_protocol.Id.Moderator_execution.equal
+                 execution.context.id
+                 (Moderator_lifecycle.execution_id after)
+               &&
+               match execution.status with
+               | Running -> true
+               | Completed _ | Failed _ | Interrupted _ -> false -> Ok ()
+        | _ -> invalid ())
+     | Some before, None ->
+       let source_changed =
+         (not (Int.equal previous_generation incoming.identity.generation))
+         ||
+         match incoming.run_state with
+         | None -> true
+         | Some index ->
+           (match
+              Run_source_installation.captured
+                (Run_state.installation index)
+                ~generation:incoming.identity.generation
+            with
+            | Error _ -> true
+            | Ok current ->
+              not
+                (Agent_protocol.Run_source.equal
+                   current
+                   (Moderator_lifecycle.source before)))
+       in
+       if source_changed || not (List.is_empty newly_admitted) then Ok () else invalid ())
+;;
+
+let policy_context (t : t) =
+  let open Result.Let_syntax in
+  let%bind current_source =
+    match t.run_state with
+    | None -> Ok None
+    | Some index ->
+      let installation = Run_state.installation index in
+      (match installation.Run_source_installation.source with
+       | None -> Ok None
+       | Some _ ->
+         Run_source_installation.captured installation ~generation:t.identity.generation
+         |> Result.map ~f:Option.some)
+  in
+  Policy_cause_data.Context.create
+    ~session_id:t.identity.session_id
+    ~generation:t.identity.generation
+    ~current_source
+    ~events:t.moderator_executions
+    ~invocations:t.invocations
+    ~jobs:t.jobs
+    ~runs:t.run_state
+    ~accounts:t.goal_accounts
+    ~catalog:t.goal_catalog
+    ~descendants:t.goal_descendants
+;;
+
+let goal_policy_projection (t : t) =
+  Goal_policy_ordered.Projection.create
+    ~session_id:t.identity.session_id
+    ~session_revision:t.counters.revision
+    ~catalog:t.goal_catalog
+    ~accounts:t.goal_accounts
+    ~ledger:t.inference_ledger
+    ~descendants:t.goal_descendants
+    ~children:t.child_contributions
+    ~causal:t.goal_policy_contributions
+    ~canonical:t.policy_canonical_usage
+;;
+
+let goal_policy_context_at_revision (t : t) ~owner ~session_revision =
+  let open Result.Let_syntax in
+  let%bind projection = goal_policy_projection t in
+  let%bind () =
+    match Goal_policy_ordered.Projection.owner projection with
+    | Some actual when Agent_protocol.Session_ref.equal actual owner -> Ok ()
+    | None | Some _ ->
+      Error
+        (Agent_protocol.Error.invalid_request
+           "Goal view has no matching actual full owner")
+  in
+  Goal_policy_totals.Context.create
+    ~owner
+    ~catalog:t.goal_catalog
+    ~accounts:t.goal_accounts
+    ~ledger:t.inference_ledger
+    ~descendants:t.goal_descendants
+    ~children:t.child_contributions
+    ~causal:t.goal_policy_contributions
+    ~canonical:t.policy_canonical_usage
+    ~session_revision
+;;
+
+let goal_policy_context (t : t) ~owner =
+  goal_policy_context_at_revision t ~owner ~session_revision:t.counters.revision
+;;
+
+let validate_goal_policy (t : t) ~session_revision =
+  if Option.is_none t.goal_policy_contributions && Option.is_none t.policy_canonical_usage
+  then Ok ()
+  else
+    let open Result.Let_syntax in
+    let%bind projection = goal_policy_projection t in
+    match Goal_policy_ordered.Projection.owner projection with
+    | None ->
+      Error
+        (Agent_protocol.Error.invalid_request "positive Goal policy has no full owner")
+    | Some owner ->
+      let%bind () =
+        Option.value_map t.goal_policy_contributions ~default:(Ok ()) ~f:(fun book ->
+          Goal_policy_contributions.validate_context
+            book
+            ~owner
+            ~catalog:t.goal_catalog
+            ~accounts:t.goal_accounts
+            ~canonical:t.policy_canonical_usage
+            ~ledger:t.inference_ledger
+            ~session_revision)
+      in
+      let%bind inline =
+        Goal_policy_contributions_carrier.inline
+          ~owner
+          ~canonical:t.policy_canonical_usage
+          ~ledger:t.inference_ledger
+          ~session_revision
+      in
+      let%bind () =
+        if List.length inline <= Goal_policy_contributions.max_streams
+        then Ok ()
+        else
+          Error
+            (Agent_protocol.Error.invalid_request "inline Goal stream capacity exhausted")
+      in
+      let%bind context = goal_policy_context_at_revision t ~owner ~session_revision in
+      Option.value_map t.goal_accounts ~default:(Ok ()) ~f:(fun accounts ->
+        List.fold_result (Goal_accounts.documents accounts) ~init:() ~f:(fun () account ->
+          Goal_policy_totals.capture
+            context
+            ~goal_id:
+              (Goal_accounting.Stored.goal_id (Goal_accounting_document.stored account))
+          |> Result.map ~f:ignore))
+;;
+
+let current_schema_version = 29
 
 let upgrade_schema (t : t) =
-  if t.schema_version = current_schema_version
+  if t.schema_version < 29 && Option.is_some t.goal_policy_contributions
+  then
+    Error
+      (Agent_protocol.Error.invalid_request "Goal causal books require session schema29")
+  else if t.schema_version = 28
+  then Ok { t with schema_version = current_schema_version }
+  else if t.schema_version < 28 && Option.is_some t.policy_canonical_usage
+  then
+    Error
+      (Agent_protocol.Error.invalid_request
+         "policy canonical usage requires session schema 28")
+  else if t.schema_version = current_schema_version
   then Ok t
+  else if t.schema_version = 27
+  then Ok { t with schema_version = current_schema_version }
   else if
-    t.schema_version < current_schema_version
+    t.schema_version < 27
+    && (Option.is_some t.goal_descendants
+        || Option.exists t.child_contributions ~f:Child_contributions.has_goal_origins)
+  then
+    Error
+      (Agent_protocol.Error.invalid_request
+         "descendant Goal evidence requires session schema 27")
+  else if t.schema_version = 26
+  then Ok { t with schema_version = current_schema_version }
+  else if
+    t.schema_version < 26
+    && (Option.is_some t.delegated_usage || Option.is_some t.child_contributions)
+  then
+    Error
+      (Agent_protocol.Error.invalid_request "delegated usage requires session schema 26")
+  else if t.schema_version = 25
+  then Ok { t with schema_version = current_schema_version }
+  else if
+    t.schema_version < 25
     && Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.equal
          t.spec.root_invocation
          Headless
@@ -431,6 +766,15 @@ let create_fields ~(identity : Identity.t) ~spec ~desired ~initial_history =
   ; managed_stops = []
   ; moderator_executions = []
   ; run_state = None
+  ; goal_catalog = None
+  ; goal_accounts = None
+  ; delegated_usage = None
+  ; child_contributions = None
+  ; goal_descendants = None
+  ; policy_canonical_usage = None
+  ; goal_policy_contributions = None
+  ; instruction_selection = None
+  ; recurrence_catalog = None
   ; subscriptions = []
   ; deliveries = []
   ; ingress_registrations = []
@@ -1039,45 +1383,233 @@ let validate_domain (t : t) =
   else Ok ()
 ;;
 
+let queue_provenance (t : t) : Queue_provenance_validation.t =
+  { session_id = t.identity.session_id
+  ; generation = t.identity.generation
+  ; revision = t.counters.revision
+  ; moderator = t.moderator
+  ; runs = t.run_state
+  ; jobs = t.jobs
+  ; schedules = t.schedules
+  ; ingress_registrations = t.ingress_registrations
+  ; invocations = t.invocations
+  ; events = t.moderator_executions
+  }
+;;
+
+module Native_validation = struct
+  type state = t
+  type t = state
+
+  let create (t : state) =
+    let open Result.Let_syntax in
+    let%bind () = Queue_provenance_validation.validate (queue_provenance t) in
+    let%bind () = Job_inference_provenance.validate ~jobs:t.jobs ~runs:t.run_state in
+    let%bind () =
+      Invocation_inference_provenance.validate
+        ~invocations:t.invocations
+        ~jobs:t.jobs
+        ~events:t.moderator_executions
+        ~runs:t.run_state
+    in
+    let%bind () = Goal_run_evidence.validate ~catalog:t.goal_catalog ~runs:t.run_state in
+    let%bind () =
+      match t.goal_accounts with
+      | None -> Ok ()
+      | Some accounts ->
+        Goal_accounts.validate
+          accounts
+          ~catalog:t.goal_catalog
+          ~ledger:t.inference_ledger
+          ~runs:t.run_state
+    in
+    let%bind () =
+      match t.delegated_usage, t.spec.delegation with
+      | None, (None | Some _) -> Ok ()
+      | Some _, None ->
+        Error
+          (Agent_protocol.Error.invalid_request
+             "own delegated usage requires its actual delegation reference")
+      | Some own, Some reference ->
+        if
+          Agent_store.Delegation_store.Reference.equal
+            reference
+            (Delegated_usage.reference own)
+        then Delegated_usage.validate own ~ledger:t.inference_ledger
+        else
+          Error
+            (Agent_protocol.Error.invalid_request
+               "delegated usage admission identity differs")
+    in
+    let%bind () =
+      match t.child_contributions with
+      | None -> Ok ()
+      | Some children ->
+        let%bind _ = Child_contributions.to_jsonaf children in
+        List.fold_result
+          (Child_contributions.references children)
+          ~init:()
+          ~f:(fun () reference ->
+            if
+              Agent_protocol.Id.Session.equal
+                reference.Agent_store.Delegation_store.Reference.key.parent_session_id
+                t.identity.session_id
+              && not
+                   (Agent_protocol.Id.Session.equal
+                      reference.child_session_id
+                      t.identity.session_id)
+            then Ok ()
+            else
+              Error
+                (Agent_protocol.Error.invalid_request
+                   "child contribution belongs to another parent"))
+    in
+    let%bind () =
+      match t.goal_descendants with
+      | None ->
+        if Option.exists t.child_contributions ~f:Child_contributions.has_goal_origins
+        then
+          Error
+            (Agent_protocol.Error.invalid_request
+               "scoped child contributions require their descendant accounting owner")
+        else Ok ()
+      | Some descendants ->
+        Goal_descendants.validate_context
+          descendants
+          ~session_id:t.identity.session_id
+          ~ledger:t.inference_ledger
+          ~children:t.child_contributions
+          ~catalog:t.goal_catalog
+          ~accounts:t.goal_accounts
+          ~delegation:t.spec.delegation
+    in
+    let%bind () =
+      match t.policy_canonical_usage with
+      | None -> Ok ()
+      | Some accounting ->
+        let%bind context = policy_context t in
+        Policy_canonical_usage.validate accounting ~context ~ledger:t.inference_ledger
+    in
+    let%bind () =
+      match t.instruction_selection with
+      | None -> Ok ()
+      | Some selection ->
+        let summary = Instruction_selection.summary selection in
+        if
+          (summary.project_selected || summary.skills > 0)
+          && Int64.(
+               t.counters.revision >= max_value
+               || t.counters.event_sequence >= max_value
+               || t.counters.transaction_sequence >= max_value)
+        then
+          Error
+            (Agent_protocol.Error.create
+               Resource_limit
+               ~message:"active instructions require Clear counter headroom"
+               ~retryable:false
+               ())
+        else
+          Instruction_selection.validate
+            selection
+            ~session_id:t.identity.session_id
+            ~generation:t.identity.generation
+    in
+    let%bind () =
+      match t.goal_catalog with
+      | None -> Ok ()
+      | Some catalog ->
+        Goal_catalog.validate
+          catalog
+          ~session_id:t.identity.session_id
+          ~generation:t.identity.generation
+    in
+    let%bind () =
+      match t.recurrence_catalog with
+      | None -> Ok ()
+      | Some catalog ->
+        Recurrence_catalog.validate
+          catalog
+          ~session_id:t.identity.session_id
+          ~generation:t.identity.generation
+    in
+    let%bind () =
+      match t.run_state with
+      | None -> Ok ()
+      | Some runs ->
+        Run_state.validate
+          runs
+          ~session_id:t.identity.session_id
+          ~generation:t.identity.generation
+    in
+    let%map () = validate_moderator_lifecycle t in
+    t
+  ;;
+
+  let validate_remaining (t : t) ~policy_revision =
+    let open Result.Let_syntax in
+    let%bind () = validate_goal_policy t ~session_revision:policy_revision in
+    let%bind () = validate_domain t in
+    let instruction_clear =
+      Option.value_map t.instruction_selection ~default:0 ~f:(fun selection ->
+        let summary = Instruction_selection.summary selection in
+        if summary.project_selected || summary.skills > 0 then 1 else 0)
+    in
+    let%bind recurrence_steps =
+      match t.recurrence_catalog with
+      | None -> Ok 0
+      | Some catalog ->
+        Result.map
+          (Recurrence_catalog.reservation catalog)
+          ~f:Recurrence_catalog.Reservation.required_transition_steps
+    in
+    let additional_steps = instruction_clear + recurrence_steps in
+    let%bind () =
+      Session_terminal_capacity.validate
+        ~index:t.run_state
+        ~jobs:t.jobs
+        ~permissions:t.permissions
+        ~schedules:t.schedules
+        ~additional_steps
+        ~additional_events:instruction_clear
+        ~revision:t.counters.revision
+        ~transaction_sequence:t.counters.transaction_sequence
+        ~event_sequence:t.counters.event_sequence
+    in
+    let%bind identity_metadata =
+      Agent_protocol.Session_metadata.Values.create
+        ~display_name:t.identity.display_name
+        ~labels:t.identity.labels
+    in
+    let%bind spec_metadata =
+      Agent_protocol.Session_metadata.Values.create
+        ~display_name:t.spec.protocol.display_name
+        ~labels:t.spec.protocol.labels
+    in
+    let%bind () =
+      if
+        Int64.(t.identity.metadata_revision < zero)
+        || not
+             (Agent_protocol.Session_metadata.Values.equal
+                identity_metadata
+                spec_metadata)
+      then
+        Error
+          (Agent_protocol.Error.invalid_request
+             "session metadata mirrors or revision are inconsistent")
+      else Ok ()
+    in
+    Inference_ledger.validate
+      t.inference_ledger
+      ~limits:Inference_ledger.Limits.default
+      ~session_id:t.identity.session_id
+      ~generation:t.identity.generation
+    |> Result.map_error ~f:ledger_error
+  ;;
+end
+
 let validate (t : t) =
-  let open Result.Let_syntax in
-  let%bind () =
-    match t.run_state with
-    | None -> Ok ()
-    | Some runs ->
-      Run_state.validate
-        runs
-        ~session_id:t.identity.session_id
-        ~generation:t.identity.generation
-  in
-  let%bind () = validate_domain t in
-  let%bind identity_metadata =
-    Agent_protocol.Session_metadata.Values.create
-      ~display_name:t.identity.display_name
-      ~labels:t.identity.labels
-  in
-  let%bind spec_metadata =
-    Agent_protocol.Session_metadata.Values.create
-      ~display_name:t.spec.protocol.display_name
-      ~labels:t.spec.protocol.labels
-  in
-  let%bind () =
-    if
-      Int64.(t.identity.metadata_revision < zero)
-      || not
-           (Agent_protocol.Session_metadata.Values.equal identity_metadata spec_metadata)
-    then
-      Error
-        (Agent_protocol.Error.invalid_request
-           "session metadata mirrors or revision are inconsistent")
-    else Ok ()
-  in
-  Inference_ledger.validate
-    t.inference_ledger
-    ~limits:Inference_ledger.Limits.default
-    ~session_id:t.identity.session_id
-    ~generation:t.identity.generation
-  |> Result.map_error ~f:ledger_error
+  let%bind.Result checkpoint = Native_validation.create t in
+  Native_validation.validate_remaining checkpoint ~policy_revision:t.counters.revision
 ;;
 
 let validate_administration_candidate t ~previous =
@@ -1210,8 +1742,13 @@ let snapshot ~now t =
     ; permissions = t.permissions
     ; grants
     ; jobs = t.jobs
+    ; instruction_status =
+        Some
+          (Instruction_selection.summary
+             (Option.value t.instruction_selection ~default:Instruction_selection.empty))
     ; extension_status = extension_status t
     ; schedules = t.schedules
+    ; goals = Option.value_map t.goal_catalog ~default:[] ~f:Goal_catalog.goals
     ; active_tool_calls = []
     ; active_agent_calls = []
     ; halted = t.halted

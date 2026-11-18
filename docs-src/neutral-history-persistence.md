@@ -159,23 +159,41 @@ validated suffix. Unequal carriers continue ordinary replay.
 
 Each loaded persistence owner also owns one `Recovery.Retention_preflight`
 scope with fixed session, journal, limits and conversion policy. Every check
-rereads and validates the original stored records and all anchors, restores every
-retained checkpoint and validates every transaction. A route can resume from a
+rereads and validates the original stored records and all anchors. Within that
+same owner, exact original flags, digest and bytes can reuse a successful pure
+snapshot or transaction conversion; snapshots also require the same route.
+Every transaction validator and every original checkpoint and final fallback
+state still receives its normal validation, including bounded archive reads.
+
+A loaded retention worker may warm this same scope outside its Actor mailbox.
+That read-only check is not an atomic filesystem capture or pruning authority.
+The worker retains its actual resources until the entire attempt is joined.
+Before accepting the preliminary result it reacquires quiescent lifecycle
+exclusion and checks the same State, restored carrier, transaction hash and live
+owner tuple, with an available writer. A changed basis defers without pruning;
+an unchanged failure remains the original error. A successful preliminary check
+still requires a second complete fresh check under exclusion, followed by the
+unchanged checkpoint validation, snapshot/journal pruning and seal sequence.
+
+Restoration reuse is separate from replay permission. A route can resume from a
 previously validated replay result only when the checkpoint's original bytes
 still match and the freshly verified original-byte journal chain reaches the
 exact previously certified head. New or changed checkpoints and unreachable
 proof heads use full replay; newly appended transactions always replay normally.
-Shared replay compares states at their effective anchors, so a cached head is never
-mistaken for its older checkpoint's position. Every original checkpoint and final
-fallback state still receives its normal validation, including bounded archive
-reads. A failed check never publishes a new replay proof or repairs disk data.
+Shared replay compares states at their effective anchors, so a cached head is
+never mistaken for its older checkpoint's position.
 
-The scope retains only the last successful check's immutable snapshot routes
-and head; reopening a session constructs a fresh scope. Memory use therefore
-scales with the retained routes and their bounded state documents. Reuse requires
-pure deterministic replay and immutable state under that fixed policy; it does
-not authorize skipping integrity, conversion, transaction or archive checks.
-Ordinary loading keeps its sequential replay and original outer snapshot carrier.
+The scope atomically retains only the last successful check's immutable replay
+proof and a bounded subset of currently observed restorations. The explicit
+restoration budget defaults to 128 entries and 16 MiB of aggregate original
+record bytes; zero disables restoration reuse. These allowances bound entry
+count and original bytes, not decoded OCaml heap. Cache misses and eviction
+change performance only. A failed or cancelled check publishes neither a new
+proof nor new restorations and never repairs disk data. Reopening constructs a
+fresh scope. Restoration, replay and equivalence require pure deterministic
+operations and immutable state under that fixed policy; dynamic validators
+remain fresh. Ordinary loading keeps its sequential replay and original outer
+snapshot carrier.
 Preflight cost still scales with stored bytes and new replay work, and reopening
 requires complete validation again. This is not a production latency guarantee.
 Snapshot pruning validates every complete retained document and CURRENT before
@@ -424,7 +442,7 @@ until actor/journal hydration, with no invented pending initial start.
 | Projection recovery marker | `Session_projection_update` / `Session_index_recovery_document` | Store reopen/eager hydration | Named document; serialized recovery ownership |
 | Blob metadata | `Blob_store` / `Blob_metadata_document` | Expiry, preparation protection and `Blob_retention` share decoder | Named carrier; original blob ID and raw content digest |
 | Private result intent | `Job_result_intent` / `Job_result_intent_document` | Publisher restart and independent retention | Verified frame, full reference, exact temporary/durable metadata strings |
-| Delegation intent | `Delegation_store` / `Delegation_document` | Admission resolution, revoke and independent artifact collection | Named current v6; original scoped filename and immutable admission hash |
+| Delegation intent | `Delegation_store` / `Delegation_document` | Admission resolution, revoke and independent artifact collection | Named current v7 with structural v6 conversion; original scoped filename and immutable admission hash |
 | Prompt manifest | `Prompt_artifact_store` / `Prompt_manifest_document.Publication` | Revision rebuild and independent retention | Exact immutable bytes/digest before conversion; known inventory validation |
 | Root audit evidence | `Audit_store` / `Audit_evidence_document` / `Audit_event_document` | Complete semantic admission before tail repair | Original embedded bytes/hash; verified canonical snapshot and signed pages |
 | Host server ID, actor/daemon locks, secrets | Existing host owners | Existing validation | Intentionally outside session JSON |
@@ -485,8 +503,10 @@ owner lock. A fresh verified reopen remains possible after uncertain acknowledgm
 
 ## M3 delegation ledger
 
-The private delegation owner admits only current `delegation.intent` version 6
-named documents inside complete checksum-verified, zero-flag frames. The original
+The private delegation owner writes `delegation.intent` version 7 named
+documents inside complete checksum-verified, zero-flag frames. Supported version 6
+documents upgrade through a bounded structural conversion that retains the raw
+admission subtree and does not fill omitted fields. The original
 scoped key must match its deterministic existing filename before document
 conversion or current admission validation. Filename identity continues to use
 the current scoped key serialization; it does not admit historical ledger formats.
@@ -504,6 +524,46 @@ retention all use this same document owner. Record admission confers no authorit
 current generation, parent policy, stop/revocation and invocation lifetime checks
 still belong to the existing delegation coordination owner. Cancellation propagates
 outside the ledger mutex with its original exception/backtrace.
+
+Optional `goal_origin` is immutable lower DATA. Historical omission remains
+Unknown; new positive Unrelated and Associated origins are explicit birth
+choices by the runtime owner. Associated origins freeze each host-qualified
+Goal root, creator Workflow episode/source and original first-child branch
+anchor. Their bounded, strictly ordered root vector uses stable owner/Goal
+identities for preservation. A populated origin requires
+`delegation.goal-origin.v1`; missing semantics, explicit null and conflicting
+replay origins reject. The lower decoder does not authenticate ancestry or
+issue execution authority. Runtime binding and descendant admission validate
+execution authority independently.
+
+A captured recurrence Artifact retains its defining root, parsed source, script
+startup and manifest authorization. Factory binds it to the same real private
+delegation authority and parent-resource lease used for delegated execution;
+Artifact grammar does not make it an ordinary root session. Before graph or
+native-resource preparation, the captured origin must match the actual immutable
+lower Reference independently of mutable publication stage. Compiler and retained
+plan-restoration polls remain cancellation-only under their existing wall and work
+limits; they do not repeatedly read private ancestry. The same original constructor
+and captured-source authority are checked before preparation, after restoration
+before resource construction, at effect gates and before handing off the completed
+runtime. A denied final handoff closes that exact local runtime and retires its
+binding; it does not publish a replacement or claim cleanup succeeded on error.
+Preparation, service/native effects, legacy callbacks and workers retain current ancestry,
+capability pins, source policy and revocation checks. Captured metadata and
+source restoration alone grant none of these permissions. Authored-tool captures
+continue to use their existing specialist source family. The Artifact's original
+source-read lease stays bound to its own captured receipt and current catalog
+selection; the parent-resource lease does not substitute the parent's source root.
+
+The session carrier writes `session.state` version 12 (native schema 27) and
+`session.delta` version 8 for this accounting. Populated descendant components,
+positive child origins and scoped child snapshots require
+`session.goal-descendants.v1` in their enclosing session document. Conversion
+preserves old absent/null fields and raw historical evidence; decoding rejects
+populated scoped fields without the marker. The closed descendant delta carries
+one accounting candidate and an explicit preserve-or-replace child action.
+Readers validate the reason against the actual preceding ordered state before
+accepting either half. Historical origin remains unknown after unrelated edits.
 
 ## M3 prompt manifest publication
 

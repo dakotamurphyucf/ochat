@@ -94,11 +94,24 @@ parent configuration changes. A historical record without a captured target
 requires an explicit host migration and durable capture before model dispatch;
 loading it does not select current defaults.
 
-The default `lifetime` is `owned`. Parent stop propagates cancellation and cleanup
-through owned children. `independent` requires explicit host authorization and
-retains the authority/resource relationship even when its parent stops; it does
-not remove tool restrictions or ongoing revocation checks. Do not assume a host
-supports independent lifetime for every inherited runtime configuration.
+The default `lifetime` is `owned`, as in the example above. Parent stop propagates
+cancellation and cleanup through owned children. A qualified durable host can
+authorize `"lifetime": "independent"` so the child can continue after its parent
+stops. Creation still needs an active parent through linking. The host rechecks
+the linked ancestry, current grant, inherited tools and original moderator
+policy for subsequent work. Unsupported legacy moderation or unavailable source
+evidence denies the request.
+
+A later admitted call can run eligible `extensibility-v1` parent policy while
+the parent's session stays stopped. The host uses the original policy's
+captured source and retained state across restart. The parent's own Start or
+Resume remains a separate lifecycle action.
+
+A child created under a Goal retains its governing Goal associations after the
+creator Run finishes. Subsequent work needs fresh admission against those Goals
+and the current caller. Stopping a session that owns an enabled Goal puts the
+Goal on Hold. A Held governing Goal blocks new work under it, including in an
+independent child.
 
 Keep the creation `idempotency_key` with the exact intended request. Retry that
 request and key after an uncertain result. A changed payload conflicts; a new key

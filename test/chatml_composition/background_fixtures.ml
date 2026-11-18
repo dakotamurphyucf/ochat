@@ -15,8 +15,11 @@ let with_background_daemon
       ?(agent = native_agent)
       ?(sources = [])
       ?model_post_stream
+      ?(map_inference_policy = Fn.id)
+      ?(on_started = ignore)
       ?(runtime_policy = Agent_server.Daemon.default_options.chatml_runtime_policy)
       ?(expected_model_calls = 0)
+      ?before_start
       ?per_session_jobs
       ?(max_request_bytes =
         Agent_server.Daemon.default_options.protocol_limits.max_request_bytes)
@@ -153,6 +156,7 @@ let with_background_daemon
                         match model_post_stream with
                         | Some post -> post ~sw ~inputs
                         | None -> failwith "background work must not call the model")
+                    |> map_inference_policy
                 }
               ()
             |> protocol_ok
@@ -165,6 +169,7 @@ let with_background_daemon
                 shutdown daemon ~stage:"first daemon";
                 stage := "first daemon stopped")
               ~f:(fun () ->
+                on_started daemon;
                 List.iter
                   (Agent_session.Prompt_catalog.entries
                      (Agent_server.Daemon.prompts daemon))
@@ -182,7 +187,11 @@ let with_background_daemon
                   ~finally:(fun () -> Agent_client.Connection.close client)
                   ~f:(fun () ->
                     initialize client;
-                    let session, _ = create_session ~start_immediately:true client in
+                    let session, attachment =
+                      create_session
+                        ~start_immediately:(Option.is_none before_start)
+                        client
+                    in
                     let entry =
                       Agent_server.Session_registry.find
                         (Agent_server.Daemon.registry daemon)
@@ -198,6 +207,44 @@ let with_background_daemon
                              (Agent_session.Script_tool_calls.current_capabilities
                                 (Option.value_exn runtime.moderator_script_tools)))
                       |> protocol_ok
+                    in
+                    let initial =
+                      match before_start with
+                      | None -> initial
+                      | Some before_start ->
+                        let initial = A.state entry.actor |> protocol_ok in
+                        (* Warm the real v1 runtime before arming a rejection.
+                           Its constructor snapshots state; only authenticated
+                           Session_start owns the first lifecycle callback. *)
+                        (match
+                           ( initial.lifecycle.desired
+                           , initial.lifecycle.observed
+                           , initial.runtime_initialization )
+                         with
+                         | Stopped, Stopped, Ready -> ()
+                         | _ -> failwith "background fixture did not warm while stopped");
+                        assert (List.is_empty initial.jobs);
+                        assert (List.is_empty initial.invocations);
+                        assert (List.is_empty initial.moderator_executions);
+                        [%test_eq: int] 0 !requests;
+                        before_start ();
+                        (match
+                           Agent_client.Connection.request_without_history
+                             client
+                             (Session_start
+                                { session_id = session.id
+                                ; attachment_id = attachment.id
+                                ; queue_if_limited = false
+                                ; idempotency_key =
+                                    Agent_protocol.Idempotency_key.of_string
+                                      "background-fixture-start"
+                                    |> protocol_ok
+                                })
+                           |> protocol_ok
+                         with
+                         | Session_start _ -> ()
+                         | _ -> failwith "unexpected background fixture start response");
+                        initial
                     in
                     stage := "running test callback";
                     Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 20. (fun () ->
@@ -245,8 +292,19 @@ let with_background_daemon
           stage := "joining fixture switch")))
 ;;
 
-let submit ?created_at entry payload =
+let submit ?created_at ?(inference_origin = Some J.Inference_origin.Unbound) entry payload
+  =
   let state = A.state entry.Agent_server.Session_registry.actor |> protocol_ok in
+  (* This fixture host creates a new, unrelated root Job. It does not restore or
+     infer provenance for historical work. Scoped production launches have their
+     own capture path; tests of unavailable history explicitly pass [None]. *)
+  (match inference_origin with
+   | Some Unbound ->
+     assert (
+       Option.value_map state.run_state ~default:true ~f:(fun index ->
+         List.is_empty (Agent_session.Run_state.runs index)))
+   | None -> ()
+   | Some (Run _) -> failwith "background root fixture cannot claim a Run");
   let job =
     J.
       { id = Agent_protocol.Id.Job.create ()
@@ -265,6 +323,7 @@ let submit ?created_at entry payload =
       ; result = None
       ; delivery = Pending
       ; launch = None
+      ; inference_origin
       ; progress = None
       }
   in
@@ -292,6 +351,25 @@ let rec await env client (job : J.t) =
      | Pending, _ | Delivered _, Some _ -> ()
      | _ -> failwith "generic job has an unsupported delivery state");
     current, Completion.of_json (Option.value_exn current.result) |> protocol_ok
+;;
+
+(* Match a genuinely staged launch by its whole saved request, not a guessed
+   ID or an origin annotation on a raw added Job. The surrounding fixture bounds
+   the wait and checks the eventual completion. *)
+let rec await_launch env actor ~request =
+  let state = A.state actor |> protocol_ok in
+  let payload = B.to_json request in
+  match
+    List.filter state.jobs ~f:(fun job ->
+      J.equal_kind job.kind Async_tool
+      && Option.is_some job.launch
+      && Jsonaf.exactly_equal job.payload payload)
+  with
+  | [ job ] -> job
+  | [] ->
+    Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
+    await_launch env actor ~request
+  | jobs -> raise_s [%sexp "duplicate actual background launches", (jobs : J.t list)]
 ;;
 
 let tool capabilities name input =

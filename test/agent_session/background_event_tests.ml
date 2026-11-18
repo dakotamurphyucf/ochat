@@ -57,7 +57,14 @@ let%expect_test
                   services.claim_event
                     ~event
                     ~snapshot:(fun () -> Ok before)
-                    (fun ~executing ~retirement_reason:_ ~event:_ ~execute ~commit ->
+                    (fun ~executing
+                      ~policy_caller:_
+                      ~model_jobs:_
+                      ~allocate_inference:_
+                      ~retirement_reason:_
+                      ~event:_
+                      ~execute
+                      ~commit ->
                        let observer = executing.context.source in
                        let invocation =
                          I.create
@@ -76,7 +83,7 @@ let%expect_test
                        in
                        let open Result.Let_syntax in
                        let%bind _ =
-                         execute ~invocation (fun ~dispatched:_ ->
+                         execute ~invocation (fun ~dispatched:_ ~capabilities:_ ->
                            incr calls;
                            Ok (I.Complete (`String "effect happened")))
                        in
@@ -107,12 +114,12 @@ let%expect_test
            | true -> before
            | false -> after
          in
-         assert (
-           Option.exists
-             state.moderator
-             ~f:
-               (Jsonaf.exactly_equal
-                  (Agent_session.Runtime_builder.encode_moderator_snapshot expected)));
+         let metadata = assert_moderator_checkpoint state ~snapshot:expected in
+         assert_moderator_queue_frontier
+           metadata
+           ~required:(not fail_commit)
+           ~head:0L
+           ~next:0L;
          let receipt = List.hd_exn state.moderator_executions in
          let restored = E.of_json (E.to_json receipt) |> protocol_ok in
          assert (E.equal receipt restored);

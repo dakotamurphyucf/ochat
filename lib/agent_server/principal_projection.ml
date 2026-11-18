@@ -115,8 +115,10 @@ let snapshot principal (snapshot : P.Snapshot.t) =
     ; permissions = (if security then snapshot.permissions else [])
     ; grants = (if has principal Manage_grants then snapshot.grants else [])
     ; jobs = (if writer then snapshot.jobs else [])
+    ; instruction_status = (if transcript then snapshot.instruction_status else None)
     ; extension_status = (if security then snapshot.extension_status else [])
     ; schedules = (if writer then snapshot.schedules else [])
+    ; goals = (if transcript then snapshot.goals else [])
     ; active_tool_calls
     ; active_agent_calls
     ; halted = snapshot.halted
@@ -178,6 +180,7 @@ let durable principal (event : P.Event.Durable.t) =
     D.of_internal_envelope
       event
       ~body:Hidden
+      ~instruction_status:None
       ~extension_status:None
       ~replacement_snapshot:None
   else (
@@ -211,12 +214,22 @@ let durable principal (event : P.Event.Durable.t) =
       then P.Event.Durable.extension_status event
       else Ok None
     in
+    let%bind instruction_status =
+      if has principal View_session_transcript
+      then P.Event.Durable.instruction_status event
+      else Ok None
+    in
     let body =
       if has principal View_security_state && has principal View_session_transcript
       then D.Full payload
       else D.Filtered payload
     in
-    D.of_internal_envelope event ~body ~extension_status ~replacement_snapshot)
+    D.of_internal_envelope
+      event
+      ~body
+      ~instruction_status
+      ~extension_status
+      ~replacement_snapshot)
 ;;
 
 let recoverable principal event =
@@ -244,6 +257,20 @@ let attach principal (attached : P.Method_result.Attach.t) =
     ; latest_event_sequence = attached.latest_event_sequence
     ; reclaim_token = attached.reclaim_token
     }
+;;
+
+let operator_result value ~has_required_scope =
+  if has_required_scope
+  then
+    Result.map (P.Public.Result.Non_history.of_internal value) ~f:(fun value ->
+      P.Public.Result.Non_history value)
+  else
+    Error
+      (P.Error.create
+         Permission_denied
+         ~message:"Operator result scope is unavailable"
+         ~retryable:false
+         ())
 ;;
 
 let project_result principal = function
@@ -288,6 +315,31 @@ let project_result principal = function
     in
     Result.map (P.Public.Result.Non_history.of_internal value) ~f:(fun value ->
       P.Public.Result.Non_history value)
+  | Instructions result as value ->
+    let scope =
+      match result with
+      | P.Instruction_control.Result.Inspect _ | Refresh _ | Capture _ ->
+        P.Scope.View_session_transcript
+      | Activate _ | Remove _ -> Send_messages
+    in
+    if has principal scope
+    then
+      Result.map (P.Public.Result.Non_history.of_internal value) ~f:(fun value ->
+        P.Public.Result.Non_history value)
+    else
+      Error
+        (P.Error.create
+           Permission_denied
+           ~message:"instruction result scope is unavailable"
+           ~retryable:false
+           ())
+  | (Goal_query _ | Recurrence_query _) as value ->
+    operator_result value ~has_required_scope:(has principal View_session_transcript)
+  | (Goal_control _ | Recurrence_control _) as value ->
+    operator_result
+      value
+      ~has_required_scope:
+        (has principal View_session_transcript && has principal Send_messages)
   | Session_pending_inputs value ->
     let%bind.Result value = Pending_projection.view principal value in
     P.Public.Result.Non_history.of_internal (P.Method_result.Session_pending_inputs value)

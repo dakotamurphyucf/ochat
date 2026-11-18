@@ -130,3 +130,53 @@ let%expect_test "completion waits for scope release and cancellation wins late s
     (Cancelled 1 (Cancelled "tool stopped"))
     |}]
 ;;
+
+let%expect_test "checked retry endpoints preserve the failed completion" =
+  let maximum =
+    Agent_protocol.Timestamp.of_time_ns (Time_ns.of_int63_ns_since_epoch Int63.max_value)
+  in
+  let one_ms_before =
+    Agent_protocol.Timestamp.of_time_ns
+      (Time_ns.of_int63_ns_since_epoch Int63.(max_value - of_int 1_000_000))
+  in
+  List.iter
+    [ one_ms_before, 1, Some maximum; maximum, 0, Some maximum; maximum, 1, None ]
+    ~f:(fun (observed, backoff_ms, due) ->
+      let now = ref timestamp in
+      with_actor
+        ~now:(fun () -> !now)
+        (fun _env _sw actor _writer backend ->
+           let job =
+             add_claimed_job
+               actor
+               ~retry_policy:(Safe_retry { max_attempts = 2; backoff_ms })
+           in
+           now := observed;
+           let completion = failure ~retryable:true in
+           let completed = finish actor job completion |> protocol_ok in
+           [%test_eq: int] job.attempt completed.attempt;
+           assert (
+             Completion.equal
+               completion
+               (Completion.of_json (Option.value_exn completed.result) |> protocol_ok));
+           assert (Option.equal Agent_protocol.Timestamp.equal completed.next_run_at due);
+           match due, completed.status with
+           | Some _, Queued -> assert (Option.is_none completed.completed_at)
+           | None, Failed failure ->
+             [%test_eq: string] "Try later" failure.message;
+             assert failure.retryable;
+             assert (
+               Option.equal
+                 Agent_protocol.Timestamp.equal
+                 completed.completed_at
+                 (Some observed));
+             let before = Agent_session.Memory_backend.state backend in
+             (match finish actor job completion with
+              | Error error ->
+                assert (Agent_protocol.Error.equal_code error.code Already_resolved)
+              | Ok _ -> failwith "terminal retry overflow accepted another completion");
+             assert (phys_equal before (Agent_session.Memory_backend.state backend))
+           | _ -> failwith "retry endpoint selected the wrong factual phase"));
+  print_endline "exact maximum and zero delay queue; unrepresentable delay stays failed";
+  [%expect {| exact maximum and zero delay queue; unrepresentable delay stays failed |}]
+;;

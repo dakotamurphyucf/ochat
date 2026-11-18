@@ -1,0 +1,12 @@
+(executable
+ (name main)
+ (modules main retirement)
+ (libraries core eio eio_main mirage-crypto-rng.unix expect_test_helpers_core
+  agent_server_test_support factory_catalog_publication_tests
+  ochat.agent_server ochat.agent_session ochat.agent_store ochat.recurrence_rules)
+ (preprocess (pps ppx_jane)))
+
+(rule
+ (alias goal-accounting-retirement-local)
+ (deps (universe))
+ (action (run %{exe:main.exe})))

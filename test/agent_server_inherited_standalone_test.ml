@@ -118,6 +118,75 @@ let on_event ctx state event = match event with
         let requested_tool = ref "read_report" in
         let pending_call = ref false in
         let requests = ref 0 in
+        let last_readiness = ref None in
+        let await_ready ?(wait_for_session_start = false) (entry : R.entry) =
+          let rec loop () =
+            let current = state entry in
+            let owner_idle = Agent_server.Runtime_owner.source_lane_idle entry.runtime in
+            let running_callbacks =
+              List.count current.moderator_executions ~f:(fun receipt ->
+                match receipt.P.Moderator_execution.status with
+                | Running -> true
+                | Completed _ | Failed _ | Interrupted _ -> false)
+            in
+            let unfinished_invocations =
+              List.count current.invocations ~f:(fun invocation ->
+                match invocation.P.Invocation.status with
+                | Admitted | Dispatching -> true
+                | Resolved _ | Published _ -> false)
+            in
+            let startup_completed =
+              (not wait_for_session_start) || session_start_completed_exn current
+            in
+            let initialization =
+              match current.runtime_initialization with
+              | Ready -> "ready"
+              | Pending _ -> "pending"
+            in
+            let observed =
+              match current.lifecycle.observed with
+              | Stopped -> "stopped"
+              | Queued_for_slot -> "queued_for_slot"
+              | Starting -> "starting"
+              | Recovering -> "recovering"
+              | Idle -> "idle"
+              | Running_turn _ -> "running_turn"
+              | Compacting _ -> "compacting"
+              | Waiting_for_permission _ -> "waiting_for_permission"
+              | Stopping -> "stopping"
+              | Failed _ -> "failed"
+            in
+            last_readiness
+            := Some
+                 [%sexp
+                   (initialization : string)
+                 , (observed : string)
+                 , (Option.is_some current.active_operation : bool)
+                 , (owner_idle : bool)
+                 , (running_callbacks : int)
+                 , (unfinished_invocations : int)
+                 , (startup_completed : bool)];
+            match current.failure with
+            | Some failure -> raise_s [%sexp (failure : P.Error.t)]
+            | None ->
+              (match
+                 ( current.runtime_initialization
+                 , current.lifecycle.observed
+                 , current.active_operation )
+               with
+               | Ready, Idle, None
+                 when owner_idle
+                      && startup_completed
+                      && Int.equal running_callbacks 0
+                      && Int.equal unfinished_invocations 0 -> ()
+               | _ ->
+                 Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
+                 loop ())
+          in
+          (* This observes actual startup/cleanup quiescence. It reserves nothing;
+             all production source/State/admission guards still run afterwards. *)
+          loop ()
+        in
         let with_daemon f =
           Eio.Switch.run (fun sw ->
             let daemon =
@@ -194,13 +263,25 @@ let on_event ctx state event = match event with
                           (diagnostics
                            : Agent_session.Prompt_revision_builder.Diagnostic.t list)]
                     | Disabled -> failwith "fixture prompt disabled");
-                Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 15. (fun () ->
-                  let client = connection daemon (principal ()) in
-                  Exn.protect
-                    ~finally:(fun () -> Agent_client.Connection.close client)
-                    ~f:(fun () ->
-                      initialize client;
-                      f sw daemon client))))
+                last_readiness := None;
+                try
+                  Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 15. (fun () ->
+                    let client = connection daemon (principal ()) in
+                    Exn.protect
+                      ~finally:(fun () -> Agent_client.Connection.close client)
+                      ~f:(fun () ->
+                        initialize client;
+                        f sw daemon client))
+                with
+                | Eio.Time.Timeout as exn ->
+                  let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+                  Option.iter !last_readiness ~f:(fun flags ->
+                    eprintf
+                      "inherited standalone last readiness (initialization observed \
+                       active owner_idle callbacks invocations startup_completed): %s\n\
+                       %!"
+                      (Sexp.to_string flags));
+                  Exn.raise_with_original_backtrace exn backtrace))
         in
         let call
               ?(before_permission = fun (_ : P.Permission.t) -> ())
@@ -209,6 +290,7 @@ let on_event ctx state event = match event with
               entry
               name
           =
+          await_ready entry;
           requested_tool := name;
           pending_call := true;
           let handle =
@@ -339,7 +421,16 @@ let on_event ctx state event = match event with
             let parent_entry =
               R.find (Daemon.registry daemon) parent.id |> Option.value_exn
             in
+            (* A moderated parent can be idle before its first Session_start
+               claim. Child creation needs the subsequent durable checkpoint. *)
+            let wait_for_session_start =
+              match lifetime with
+              | Owned -> true
+              | Independent -> false
+            in
+            await_ready ~wait_for_session_start parent_entry;
             let child = create_child ~lifetime env root daemon parent_entry in
+            await_ready child;
             (match lifetime with
              | Owned -> ()
              | Independent ->
@@ -354,6 +445,7 @@ let on_event ctx state event = match event with
             let rejected = call sw client child "read_file" in
             [%test_eq: int] 3 (List.length rejected.invocations);
             check_parent parent_entry 3;
+            await_ready child;
             let grandchild = create_child env root daemon child in
             ( parent.id
             , (state child).identity.session_id

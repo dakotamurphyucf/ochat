@@ -11,8 +11,21 @@ val derive
   -> owner:Agent_protocol.Job.launch_owner
   -> (Agent_protocol.Job.launch, Agent_protocol.Error.t) result
 
-(** Validate persisted owner, ancestry and depth. Parent attempts may since have
-    advanced; an event's recorded attempt must still match exactly. *)
+(** Derive a NEW direct Model Job birth from the exact current immediate Job
+    attempt. This validates immutable ancestry/depth, not live producer authority.
+    The optional source is copied exactly from that immediate parent's launch,
+    including absence. The Actor separately proves the running scope and original. *)
+val derive_from_job
+  :  session_id:Agent_protocol.Id.Session.t
+  -> generation:int
+  -> jobs:Agent_protocol.Job.t list
+  -> job_id:Agent_protocol.Id.Job.t
+  -> attempt:int
+  -> (Agent_protocol.Job.launch, Agent_protocol.Error.t) result
+
+(** Validate persisted owner, ancestry and depth. Historical parent attempts may
+    since have advanced; a stored direct Job or event attempt stays frozen.
+    Self/cycles, exact optional source and exact depth remain strict. *)
 val validate
   :  invocations:Agent_protocol.Invocation.t list
   -> events:Agent_protocol.Moderator_execution.t list

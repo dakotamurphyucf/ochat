@@ -1,0 +1,309 @@
+type goal_state = [
+  `Awaiting_start | `Start_staged
+  | `Waiting({run_id:string; schedule_id:string; remaining_checks:int})
+  | `Finish_staged(string)]
+type review = {slot:string; session_id:string; run_id:string}
+type review_check = [ `Pending | `Completed(review) ]
+type recurrence_state = [
+  `Unobserved | `Enabled(string) | `Reviewed({first:review; second:review})]
+type instruction_state = [ `Uninspected | `Observed({revision:string;
+  project_selected:bool; project_files:float; skills:float}) ]
+type state = {schema:int; instructions:instruction_state; goal:goal_state;
+  recurrence:recurrence_state; order:string array}
+
+let initial_state : state =
+  {schema = 2; instructions = `Uninspected; goal = `Awaiting_start;
+    recurrence = `Unobserved; order = []}
+
+let goal_id = "goal_recurring_review"
+let recurrence_id = "rec_goal_review"
+let objective = "Review the release-note handoff in two recurring runs."
+let first_check_ms = 90000
+let retry_check_ms = 30000
+let max_retry_checks = 3
+
+let field = fun value key -> match Json.get_field(value, key) with
+  | `Some(found) -> found
+  | `None -> `Null
+
+let text = fun value key -> match field(value, key) with
+  | `String(value) -> Task.pure(value)
+  | _ -> Task.fail("Missing text field " ++ key)
+
+let rows = fun value key -> match field(value, key) with
+  | `Array(rows) -> Task.pure(rows)
+  | _ -> Task.fail("Missing array field " ++ key)
+
+let is_text = fun value key expected -> match field(value, key) with
+  | `String(actual) -> actual == expected
+  | _ -> false
+
+let is_true = fun value key -> match field(value, key) with
+  | `Bool(true) -> true
+  | _ -> false
+
+let is_null = fun value key -> match field(value, key) with
+  | `Null -> true
+  | _ -> false
+
+let delivered_once = fun owned_schedule ->
+  let schedule = field(owned_schedule, "schedule") in
+  if is_text(field(schedule, "status"), "type", "delivered") == false then false
+  else match field(schedule, "delivery_count") with
+    | `Number(1.0) -> true
+    | _ -> false
+
+let checked = fun result -> match result with
+  | `Ok(value) -> Task.pure(value)
+  | `Error(error) -> Task.fail("Checked request or decision rejected: " ++ to_string(error))
+
+let call = fun tool request ->
+  let* result = Tool.call(tool, request) in
+  match result with
+  | `Ok(value) -> Task.pure(value)
+  | `Error(code) -> Task.fail(tool ++ ": " ++ code)
+
+let inspect_instructions = fun state ->
+  let* status = call("instructions_status", Instruction_requests.status()) in
+  match (|field(status, "revision"), field(status, "project_selected"),
+           field(status, "project_files"), field(status, "skills")|) with
+    | (|`String(revision), `Bool(project_selected), `Number(project_files), `Number(skills)|) ->
+      Task.pure({state with instructions = `Observed({revision = revision;
+        project_selected = project_selected; project_files = project_files; skills = skills})})
+    | _ -> Task.fail("Stored instruction summary is malformed")
+
+let instruction_decision : json Lifecycle.component =
+  {id = "instructions"; obligation = `Finished; action = `No_action}
+
+let goal_basis : fun(json, string) -> Goal_requests.basis task = fun view key ->
+  let* generation = text(view, "generation") in
+  let* catalog_revision = text(view, "catalog_revision") in
+  Task.pure({generation = generation; catalog_revision = catalog_revision; key = key})
+
+let current_goal = fun () ->
+  let* request = checked(Goal_requests.get(goal_id)) in
+  let* view = call("goal_get", request) in
+  let* selected = rows(view, "goals") in
+  if Array.length(selected) == 1 then Task.pure({view = view; row = selected[0]})
+  else Task.fail("Expected the selected Goal")
+
+let start_goal = fun state before ->
+  let* goals = rows(before, "goals") in
+  let selected = Array.filter(goals, fun row -> is_text(field(row, "goal"), "id", goal_id)) in
+  let* prepared = if Array.length(selected) == 0 then
+    let* source = checked(Goal_requests.source_of_view(before)) in
+    let* basis = goal_basis(before, "recurring-review-create") in
+    let budget = {admitted_turns = `Set("8"); admitted_attempts = `Set("16");
+                  observed_tokens = `Unset; deadline = `Unset} in
+    let* request = checked(Goal_requests.create(basis, source, goal_id, objective, budget)) in
+    Task.map(call("goal_create", request), fun ignored -> ())
+  else Task.pure(()) in
+  let* current = current_goal() in
+  let goal = field(current.row, "goal") in
+  if is_text(goal, "objective", objective) == false then
+    Task.fail("Existing Goal has a different objective")
+  else if is_null(goal, "episode") == false then
+    if is_null(current.row, "current_run") then Task.pure(state)
+    else Task.pure({state with goal = `Start_staged})
+  else
+    let* source = checked(Goal_requests.source_of_view(current.view)) in
+    let* basis = goal_basis(current.view, "recurring-review-start") in
+    let* revision = text(goal, "revision") in
+    let selected = {basis = basis; goal_id = goal_id; goal_revision = revision} in
+    let input = `User_submission({kind = `Plain_text;
+      text = "Prepare the handoff for two release-note reviews."; attachments = []}) in
+    let* request = checked(Goal_requests.start(selected, source, input)) in
+    let* reply = call("goal_start", request) in
+    match (|field(reply, "staged"), field(reply, "effect")|) with
+    | (|`Bool(true), `String("goal_start")|) -> Task.pure({state with goal = `Start_staged})
+    | _ -> Task.fail("Goal Start did not confirm staging")
+
+(* Keep the JSON generation from the current native read, whose source and
+   lifecycle fields are echoed intact. Schedule and policy are checked data. *)
+let recurrence_request = fun read control key payload ->
+  let basis = field(read, "basis") in
+  `Object(Array.append([
+    {key = "id"; value = `String(recurrence_id)},
+    {key = "basis"; value = `Object([
+      {key = "generation"; value = field(basis, "generation")},
+      {key = "source"; value = field(basis, "source")},
+      {key = "expected_lifecycle_revision"; value = field(basis, "lifecycle_revision")},
+      {key = "expected_catalog_revision"; value = field(basis, "catalog_revision")},
+      {key = "expected_control_revision"; value = control},
+      {key = "key"; value = `String(key)}])}], payload))
+
+let enable_reviews = fun first_due ->
+  let* list = call("recurrence_list", Recurrence_requests.list()) in
+  let* entries = rows(field(list, "result"), "entries") in
+  let selected = Array.filter(entries, fun entry -> is_text(entry, "id", recurrence_id)) in
+  let* schedule = checked(Recurrence_requests.interval(`Fixed_delay, "60000", first_due)) in
+  let* policy = checked(Recurrence_requests.policy({misfire = `Coalesce; grace_ms = "300000";
+    max_pending = 1; max_history = 8; max_calendar_steps = 16})) in
+  let* prepared = if Array.length(selected) == 0 then
+    let capture = `Object([
+      {key = "schedule"; value = schedule},
+      {key = "target"; value = `Object([
+        {key = "kind"; value = `String("authored_child")},
+        {key = "name"; value = `String("review_worker")},
+        {key = "mode"; value = `String("workflow")}])},
+      {key = "policy"; value = policy}]) in
+    let request = recurrence_request(list, `Null, "recurring-review-publish",
+      [{key = "capture"; value = capture}]) in
+    Task.map(call("recurrence_create", request), fun ignored -> ())
+  else Task.pure(()) in
+  let* current = call("recurrence_get", Recurrence_requests.get(recurrence_id)) in
+  let entry = field(field(current, "result"), "entry") in
+  let* definition_revision = text(entry, "definition_revision") in
+  if Json.stringify(field(entry, "source")) != Json.stringify(field(field(current, "basis"), "source")) then
+    Task.fail("Recurrence needs current source review")
+  else if definition_revision != "0" then Task.fail("Recurrence definition was replaced")
+  else if is_text(entry, "target_kind", "fresh_child") == false then
+    Task.fail("Recurrence target must be a captured worker")
+  else if Json.stringify(field(field(entry, "schedule"), "rule")) != Json.stringify(field(schedule, "rule")) then
+    Task.fail("Recurrence interval was changed")
+  else if is_text(field(entry, "schedule"), "first_due", first_due) == false then
+    Task.fail("Recurrence first due time differs from the Goal admission")
+  else if Json.stringify(field(entry, "policy")) != Json.stringify(policy) then Task.fail("Recurrence policy was changed")
+  else
+    let control = field(entry, "control_revision") in
+    match (|field(field(entry, "control"), "kind"), control|) with
+    | (|`String("paused"), `String("0")|) ->
+        let request = recurrence_request(current, control, "recurring-review-enable", []) in
+        Task.map(call("recurrence_resume", request), fun ignored -> definition_revision)
+    | (|`String("enabled"), `String("1")|) -> Task.pure(definition_revision)
+    | _ -> Task.fail("Recurrence needs operator review before launch")
+
+let wake_data = fun run_id remaining_checks -> `Object([
+  {key = "kind"; value = `String("review_outcomes_due")},
+  {key = "run_id"; value = `String(run_id)},
+  {key = "remaining_checks"; value = `String(to_string(remaining_checks))}])
+
+let wait_for_reviews = fun state source run_id definition_revision delay_ms remaining_checks ->
+  let* schedule_id = Schedule.after_ms(delay_ms, wake_data(run_id, remaining_checks)) in
+  let* schedule = Schedule.get(schedule_id) in
+  let ownership = field(schedule, "ownership") in
+  let wake = `Object([
+    {key = "run_id"; value = `String(run_id)},
+    {key = "source"; value = source},
+    {key = "occurrence"; value = `Object([
+      {key = "kind"; value = `String("delivered_timer")},
+      {key = "schedule_id"; value = `String(schedule_id)},
+      {key = "delivery_count"; value = `Number(1.0)},
+      {key = "creator"; value = `Object([
+        {key = "kind"; value = field(ownership, "creator_type")},
+        {key = "id"; value = field(ownership, "creator_id")}])}])}]) in
+  let components : (json Lifecycle.component) array = [
+    instruction_decision,
+    {id = "goal"; obligation = `Active; action = `Wait(wake)},
+    {id = "recurrence"; obligation = `Active; action = `Wait(wake)}] in
+  let* plan = checked(Lifecycle_run.compose(components)) in
+  let* staged = Lifecycle_run.stage(plan.action) in
+  Task.pure({state with
+    goal = `Waiting({run_id = run_id; schedule_id = schedule_id; remaining_checks = remaining_checks});
+    recurrence = `Enabled(definition_revision); order = plan.order})
+
+let await_reviews = fun state ->
+  let* current = current_goal() in
+  let* run_id = text(field(current.row, "current_run"), "run_id") in
+  let admission = field(field(field(current.row, "goal"), "episode"), "admission") in
+  if is_text(admission, "run_id", run_id) == false then
+    Task.fail("Current Goal Run lacks the selected admission receipt")
+  else
+    let* first_due = text(admission, "committed_at") in
+    let* definition_revision = enable_reviews(first_due) in
+    wait_for_reviews(state, field(current.view, "source"), run_id,
+      definition_revision, first_check_ms, max_retry_checks)
+
+let review_for : fun(string, string, json array) -> review_check task =
+  fun slot definition_revision occurrences ->
+  let selected = Array.filter(occurrences, fun row ->
+    let occurrence = field(field(row, "nominal"), "occurrence") in
+    let definition = field(occurrence, "definition") in
+    if is_text(definition, "recurrence_id", recurrence_id) == false then false
+    else if is_text(definition, "revision", definition_revision) == false then false
+    else is_text(occurrence, "slot", slot)) in
+  if Array.length(selected) == 0 then Task.pure(`Pending)
+  else if Array.length(selected) != 1 then Task.fail("Repeated recurrence slot " ++ slot)
+  else
+    let* attempts = rows(selected[0], "attempts") in
+    if Array.length(attempts) != 1 then Task.fail("Review needs exactly one settled attempt")
+    else
+      let attempt = attempts[0] in
+      let target = field(attempt, "target") in
+      if is_null(attempt, "rejection") == false then Task.fail("Review admission was rejected")
+      else if is_null(attempt, "uncertainty") == false then Task.fail("Review outcome is uncertain")
+      else if is_true(attempt, "admission_recorded") == false then Task.pure(`Pending)
+      else if is_true(attempt, "terminal_recorded") == false then Task.pure(`Pending)
+      else if is_text(target, "visibility", "visible") == false then Task.fail("Review is not visible")
+      else if is_text(target, "detail", "retained") == false then Task.fail("Review runtime detail is missing")
+      else if is_text(field(target, "observed_run"), "kind", "completed") == false then
+        Task.fail("Review Run did not complete")
+      else if is_text(field(target, "retained_outcome"), "kind", "completed") == false then
+        Task.fail("Controller did not retain the completed Run outcome")
+      else
+        let* session_id = text(field(target, "session"), "session_id") in
+        let* run_id = text(target, "run_id") in
+        Task.pure(`Completed({slot = slot; session_id = session_id; run_id = run_id}))
+
+let complete_reviews = fun state current run_id first second ->
+  if first.session_id == second.session_id then Task.fail("Reviews reused a worker session")
+  else if first.run_id == second.run_id then Task.fail("Reviews reused a worker Run")
+  else
+    let components : (json Lifecycle.component) array = [
+      instruction_decision,
+      {id = "goal"; obligation = `Finished; action = `No_action},
+      {id = "recurrence"; obligation = `Finished; action = `No_action}] in
+    let* plan = checked(Lifecycle_run.compose(components)) in
+    let completed = `Object([
+      {key = "kind"; value = `String("finish")},
+      {key = "terminal"; value = `Object([{key = "kind"; value = `String("completed")}])},
+      {key = "relinquish"; value = `Array([])}]) in
+    let* action = checked(Lifecycle.root_finish(plan, completed)) in
+    let* revision = text(field(current.row, "goal"), "revision") in
+    let evidence = "Retained completed child Runs " ++ first.run_id ++ " and " ++ second.run_id in
+    let* staged = Goal.finish(`Object([
+      {key = "expected_goal_revision"; value = `String(revision)},
+      {key = "evidence"; value = `String(evidence)},
+      {key = "action"; value = action}])) in
+    Task.pure({state with goal = `Finish_staged(run_id);
+      recurrence = `Reviewed({first = first; second = second}); order = plan.order})
+
+let observe_reviews = fun state waiting definition_revision ->
+  let* timer = Schedule.get(waiting.schedule_id) in
+  if delivered_once(timer) == false then Task.pure(state)
+  else
+    let* current = current_goal() in
+    if is_text(field(current.row, "current_run"), "run_id", waiting.run_id) == false then
+      Task.fail("Review wake belongs to another Goal Run")
+    else
+      let* history = call("recurrence_history", Recurrence_requests.history(recurrence_id)) in
+      let* occurrences = rows(field(history, "result"), "occurrences") in
+      let* first = review_for("0", definition_revision, occurrences) in
+      let* second = review_for("1", definition_revision, occurrences) in
+      match (|first, second|) with
+      | (|`Completed(first), `Completed(second)|) ->
+          complete_reviews(state, current, waiting.run_id, first, second)
+      | _ ->
+          if waiting.remaining_checks == 0 then Task.fail("Review outcome observation window expired")
+          else wait_for_reviews(state, field(current.view, "source"), waiting.run_id,
+            definition_revision, retry_check_ms, waiting.remaining_checks - 1)
+
+let on_event = fun ctx state event ->
+  if state.schema != 2 then Task.fail("Explicit lifecycle state migration required")
+  else match (|state.goal, state.recurrence, event|) with
+    | (|`Awaiting_start, `Unobserved, `Session_start|) ->
+        let* read = Tool.call("goal_get", Goal_requests.list()) in
+        (match read with
+         | `Ok(before) -> start_goal(state, before)
+         | `Error("permission_denied") -> Task.pure(state)
+         | `Error(code) -> Task.fail("goal_get: " ++ code))
+    | (|_, _, `Session_resume|) -> inspect_instructions(state)
+    | (|`Start_staged, `Unobserved, `Turn_end|) ->
+        let* observed = inspect_instructions(state) in
+        await_reviews(observed)
+    | (|`Waiting(waiting), `Enabled(definition_revision), `Internal_event(payload)|) ->
+        if is_text(payload, "kind", "review_outcomes_due") == false then Task.pure(state)
+        else if is_text(payload, "run_id", waiting.run_id) == false then Task.pure(state)
+        else if is_text(payload, "remaining_checks", to_string(waiting.remaining_checks)) == false then Task.pure(state)
+        else observe_reviews(state, waiting, definition_revision)
+    | _ -> Task.pure(state)

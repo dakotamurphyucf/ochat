@@ -1,0 +1,19 @@
+(* Pure request construction, not source authority or activation. Select each
+   native tool explicitly. The host validates all IDs, paths, digests, canonical
+   decimal revisions, keys and capture completeness at the actual operation.
+   Arrays preserve order and are bounded to 64 entries before mapping. *)
+type selection = [ `Project({root:string; scope:string}) | `Skills(string array) ]
+type member = {root:string; member:string; sha256:string}
+type descriptor = {selection:selection; members:member array}
+type error = [ `Too_many_roots | `Too_many_members ]
+type 'a checked = [ `Ok('a) | `Error(error) ]
+
+val roots : fun() -> json
+val refresh : fun(selection) -> json checked
+val read : fun(descriptor) -> json checked
+(* Exact read descriptor, capture_id, expected_revision and idempotency key.
+   A successful read does not activate; a fresh activation still checks current
+   source access and CAS. Keep an acknowledged key/input unchanged for retries. *)
+val activate : fun(descriptor, string, string, string) -> json checked
+val clear : fun(string, string) -> json
+val status : fun() -> json

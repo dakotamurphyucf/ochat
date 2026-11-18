@@ -74,6 +74,7 @@ let job state ~request ~status =
     ; result = None
     ; delivery = Not_required
     ; launch = None
+    ; inference_origin = None
     ; progress = None
     }
 ;;

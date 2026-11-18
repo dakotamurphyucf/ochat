@@ -37,6 +37,12 @@ let classify = function
   | Model_job_target_captured _
   | Model_job_recipe_target_captured _
   | Model_job_target_restored _
+  | Delegated_inference_ledger_changed _
+  | Child_contributions_changed _
+  | Goal_descendants_changed _
+  | Goal_policy_contributions_changed _
+  | Policy_cause_changed _
+  | Policy_inference_ledger_changed _
   | Inference_ledger_changed _
   | Job_changed _
   | Schedule_changed _
@@ -46,6 +52,7 @@ let classify = function
   | Managed_stop_admitted _
   | Invocation_reconciled _
   | Moderator_execution_changed _
+  | Moderator_lifecycle_claimed _
   | Moderator_execution_reconciled _
   | Subscription_changed _
   | Subscription_expired _
@@ -54,6 +61,10 @@ let classify = function
   | Ingress_changed _
   | Delivery_committed _
   | Delivery_wake_changed _
+  | Instruction_selection_changed _
+  | Goal_accounts_changed _
+  | Goal_catalog_changed _
+  | Recurrence_catalog_changed _
   | Run_state_changed _
   | Moderator_changed _
   | Shell_changed _

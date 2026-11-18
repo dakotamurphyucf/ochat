@@ -90,6 +90,8 @@ let data_root env options =
 let server_config ~project_sources data_root =
   Config.Server.
     { data_dir = data_root
+    ; recurrence_automation = None
+    ; recurrence_execution = None
     ; session_helpers = []
     ; authoring_packages = []
     ; authoring_budget = None
@@ -966,24 +968,29 @@ let complete_script_activation host ~started ~attachment_id ~checkpoint =
     else fail Conflict "selected activation source or lifecycle changed"
   in
   let%bind () =
-    Runtime_owner.with_background_runtime entry.runtime (fun runtime ->
-      poll ();
-      let%bind () = A.Session_actor.authorize_writer entry.actor ~attachment_id in
-      let%bind current = A.Session_actor.state entry.actor in
-      let%bind () = authorize_script_selection host (A.Session_state.summary current) in
-      let%bind () =
-        if
-          same_configuration current
-          && P.Session.equal_desired_state current.lifecycle.desired Running
-          && Option.is_none current.active_operation
-          && Option.is_none current.failure
-          && not current.halted
-        then Ok ()
-        else fail Conflict "activation admission changed"
-      in
-      match runtime.A.Runtime_builder.moderator_activation with
-      | None -> fail Invalid_state "selected runtime has no authored lifecycle activation"
-      | Some activation -> Result.map (activation.run ()) ~f:ignore)
+    Runtime_owner.with_background_runtime_activation
+      entry.runtime
+      (fun _runtime ~activate ->
+         poll ();
+         let%bind () = A.Session_actor.authorize_writer entry.actor ~attachment_id in
+         let%bind current = A.Session_actor.state entry.actor in
+         let%bind () =
+           authorize_script_selection host (A.Session_state.summary current)
+         in
+         let%bind () =
+           if
+             same_configuration current
+             && P.Session.equal_desired_state current.lifecycle.desired Running
+             && Option.is_none current.active_operation
+             && Option.is_none current.failure
+             && not current.halted
+           then Ok ()
+           else fail Conflict "activation admission changed"
+         in
+         match activate with
+         | None ->
+           fail Invalid_state "selected runtime has no authored lifecycle activation"
+         | Some run -> Result.map (run ()) ~f:ignore)
   in
   poll ();
   let%bind () = check_open () in

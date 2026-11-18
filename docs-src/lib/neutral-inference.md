@@ -16,6 +16,30 @@ configuration and private admission fingerprint. No authentication or network
 request happens here. A prepared value contains its adapter implementation; a
 caller cannot pair it with another profile at dispatch.
 
+`Request.create` starts without request-only guidance. A host can construct
+`Request.Guidance` from exact UTF-8 text and a private provenance label, then call
+the receiver-first `Request.with_guidance request ~guidance:(Some guidance)`
+with its admission limits. This replaces the optional value and revalidates the
+complete request, including escaped guidance and provenance bytes. Passing
+`None` removes it. Text is limited to 512 KiB and provenance to 1024 bytes;
+the host's aggregate limits can be smaller.
+
+Guidance has fixed User priority. It creates no canonical history entry or ID,
+changes no authored System/Developer instruction or target setting, and grants
+no source access or tool authority. File-loaded content remains untrusted
+guidance. The host remains responsible for authentic source capture, current
+use policy, ordering, context-window allocation and the requests that receive
+it; this request representation does not activate session instructions.
+
+Adapters deny nonempty request guidance before their preparation callback unless
+they explicitly support its complete projection. OpenAI supports it as one User
+text message before the mapped history, independently for each preparation.
+The private prepared fingerprint covers the exact wire text and provenance;
+the public configuration contains neither. A returned plan must retain the exact
+request, including guidance presence, text and provenance. The runtime rejects
+a plan for a different capture. An adapter that opts in is responsible for
+preserving the guidance in its actual provider request.
+
 `Inference_client.run` performs final host admission, allocates an actual scope,
 and invokes the required attempt acknowledgement before running the attempt.
 Each attempt is single use. Authentication resolves only at dispatch under the

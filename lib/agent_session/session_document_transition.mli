@@ -20,3 +20,14 @@ val admit_encoded
   -> next:Session_state.t
   -> limits:Document_schema.Limits.t
   -> (Session_state_document.Admitted.t, Document_schema.Error.t) result
+
+(** Complete ordered admission before transaction-owner metadata stamping.
+    Retains the same candidate equality, native validation, preservation and
+    limits checks, but returns only unstamped DATA. Replay must validate the
+    actual published revision through [Session_state_document.Prefix]. *)
+val admit_prefix_encoded
+  :  Session_state_document.t
+  -> delta:Session_delta.t
+  -> next:Session_state.t
+  -> limits:Document_schema.Limits.t
+  -> (Session_state_document.Prefix.t, Document_schema.Error.t) result

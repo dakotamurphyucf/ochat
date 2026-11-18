@@ -81,15 +81,44 @@ type launch_owner =
   | Moderator_event of Id.Moderator_execution.t
 [@@deriving equal, sexp]
 
+(** Immutable birth provenance, never a callback mutation selector or authority.
+    Callback retains the exact historical invocation/event wire representation.
+    Job_attempt is the immediate native Job producer and its frozen positive
+    attempt; a later retry does not renew this stored birth reference. *)
+module Birth_parent : sig
+  type t [@@deriving equal, sexp]
+
+  type view =
+    | Callback of launch_owner
+    | Job_attempt of
+        { id : Id.Job.t
+        ; attempt : int
+        }
+
+  val callback : launch_owner -> t
+  val job_attempt : Id.Job.t -> attempt:int -> (t, Error.t) result
+  val view : t -> view
+
+  (** Callback-only host protocols reject a direct Job producer; this projection
+      does not select an ancestor callback or grant mutation permission. *)
+  val callback_owner : t -> launch_owner option
+end
+
 type launch =
-  { owner : launch_owner
+  { owner : Birth_parent.t
   ; parent_job : (Id.Job.t * int) option [@sexp.option]
   ; nested_depth : int
   ; moderator_source : Invocation.observer option [@sexp.option]
-    (** Optional schema2 source captured under the creating moderator's live
-        borrow. Absence never acquires the source of a subsequently loaded script. *)
+    (** Optional source captured under the creating owner's live borrow
+        (callback schema2 or direct-Job schema3). Absence never acquires the source of a subsequently loaded script. *)
   }
 [@@deriving equal, sexp]
+
+(** Immutable host-captured inference attribution evidence. A Run reference is
+    resolved through its exact retained occurrence; it is not a Goal selector or
+    execution permission. Missing historical evidence is represented by the
+    enclosing optional field, never by [Unbound]. *)
+module Inference_origin = Inference_origin
 
 type t =
   { id : Id.Job.t
@@ -108,8 +137,14 @@ type t =
   ; delivery : delivery
   ; launch : launch option [@sexp.option]
     (** Optional versioned launch provenance. Legacy jobs omit this field.
-        Host admission binds the invocation/event owner and actual parent attempt;
-        user scripts cannot choose their nesting depth. *)
+        Host admission binds the callback or direct Job-attempt producer. Callback
+        schemas1/2 retain their existing encoding; schema3 names a direct Job
+        owner and requires the identical parent_job pair. Only Model_call admits
+        the direct Job form. User scripts cannot choose their nesting depth. *)
+  ; inference_origin : Inference_origin.t option [@sexp.option]
+    (** Absent historical provenance is unavailable. No decoder or ordinary
+        constructor substitutes an unbound origin. A real admission owner must
+        capture new evidence before the first durable Job admission. *)
   ; progress : Job_progress.t option [@sexp.option]
     (** Transient read projection only. Durable job records omit progress, and
         terminal results never depend on retaining these display updates. *)
@@ -128,6 +163,15 @@ val validate_result : t -> (unit, Error.t) result
     This checks incremental journal changes; decoding a retained snapshot does not
     require the previous pending record. *)
 val validate_delivery_transition : previous:t option -> t -> (unit, Error.t) result
+
+(** Validate native nominal IDs and immutable origin through all retained Job
+    updates. Historical absence cannot be adopted retroactively; changing or
+    removing an existing origin rejects. Cross-state Run evidence is checked by
+    the complete Session carrier after its ordered batch. *)
+val validate_inference_origin_transition
+  :  previous:t option
+  -> t
+  -> (unit, Error.t) result
 
 (** Read the inline completion or explicit artifact descriptor without loading
     any bytes. Validates exact artifact session/job/generation/attempt ownership. *)

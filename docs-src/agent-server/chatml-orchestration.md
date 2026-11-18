@@ -25,8 +25,31 @@ acknowledgement, completion and notification patterns.
 ## Async work and timers
 
 `Model.call` awaits a registered recipe; `Model.spawn` starts background work and
-returns an ID; `Model_job_succeeded(id, recipe, result)` and
-`Model_job_failed(id, recipe, message)` events allow continuation-style dispatch.
+returns an ID. Legacy moderators receive `Model_job_succeeded(id, recipe, result)`
+and `Model_job_failed(id, recipe, message)`. Extensibility-v1 moderators receive
+`Internal_event(payload)` with `kind: "model_job_completed"`, `job_id`, `attempt`
+(as a decimal string), `recipe`, and `result` using the protocol's stored-completion
+JSON schema. The completion carries the actual terminal attempt, including failure,
+cancellation and interruption; it does not authorize another model call or a Job
+result read. The host checks the retained Job and exact queue append before saving
+`Delivered` and its checkpoint in one transaction. The existing 1MiB JSON event
+bound applies; oversized content rejects without truncation. This completion
+projection does not add Model Jobs to the generic script Job API or its authored
+Run Wait path.
+
+For a successful second attempt, the payload has this form:
+
+```json
+{"kind":"model_job_completed","job_id":"job_example","attempt":"2","recipe":"agent_prompt_v1","result":{"type":"succeeded","value":{"final_text":"done"}}}
+```
+
+A failed stored completion has `type: "failed"`, `code`, `message`, `retryable`,
+and `details`; cancellation uses `type: "cancelled"` and `reason`. Interrupted
+Model work is a failed completion with code `"interrupted"`. Invalid terminal
+Model data or a projection exceeding the event bound returns a typed error;
+projection failures use nonretryable `Invalid_state` and leave delivery pending.
+No payload is truncated or installed after a rejected append.
+
 There is no ChatML `Model.await` builtin. External clients inspect jobs with
 `job.get`/`job.list` and subscribe to events. The agent host records jobs and delivery state.
 `Process.run` is shell-runtime-backed process access, not unrestricted subprocess
@@ -38,6 +61,15 @@ Schedules specify due time/delay, payload and misfire policy: deliver once
 immediately, skip if expired, or fail. They are not a cron-expression service.
 Job and schedule methods require message-send scope, and mutations require a
 writable attachment. There is no arbitrary external `job.create` wire method.
+
+A legacy moderator can schedule a one-shot wake during session creation. If that
+timer comes due while a client starts the stopped session, the start preserves
+the timer and its delivery status. Use `schedule.get` with the original schedule
+ID to check the outcome.
+
+If startup detects that the moderator checkpoint changed while the runtime was
+loading, the host returns `Conflict` and preserves the newer checkpoint. Read
+the current session state before issuing a new start request.
 
 Global/principal/prompt/workspace/session/kind/nested-depth capacity bounds work.
 Jobs are claimed before execution, record terminal state, and release capacity on

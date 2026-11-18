@@ -27,7 +27,7 @@
  (depends
   (ocaml
    (>= 5.1.0))
-  (eio (>= 1.3))
+  (eio (= 1.3+ochat.1))
   dune
   omd
   lambdasoup
@@ -50,6 +50,7 @@
   lwt_eio
   base64
   jsonaf
+  angstrom
   uutf
   uuseg
   uri
@@ -70,7 +71,7 @@
   bimage-unix
   (nottui (< 0.5))
   ppx_blob
-  menhir
+  (menhir (>= 20180523))
   menhirLib
   (menhirSdk :build)
   piaf)

@@ -1,7 +1,8 @@
 open! Core
 
-(** Daemon-owned timer service for durable one-shot ChatML schedules. Session
-    actors remain authoritative for every claim and terminal transition. *)
+(** Sole daemon timer service for one-shot schedules and recurrence due sweeps.
+    Session actors own every durable transition; recurrence alarms are metadata,
+    never inserted into the legacy one-shot Schedule list. *)
 
 type t
 
@@ -23,22 +24,48 @@ val reconcile_entry
 
 (** Each pass also sweeps subscription deadlines through the actor, independently
     of any earlier callback holding this entry's runtime. Interrupted runtime
-    delivery retries an uncommitted claim; it does not turn shutdown into a
-    terminal schedule failure or undo a committed/cancelled schedule.
+    delivery retries an uncommitted claim. A typed clean refusal before the
+    delivery lease was acquired also retries; arbitrary retryable callback
+    failures do not. Neither path turns shutdown into a terminal schedule failure
+    or undoes a committed/cancelled schedule.
+    The actual Factory source owner is mandatory for Goal wake execution.
     Internal composition: false constructs a stopped service and starts no fiber. *)
 val start_controlled
-  :  enabled:bool
+  :  ?recurrence_dispatcher:Recurrence_dispatcher.t
+  -> factory:Session_factory.t
+  -> enabled:bool
+  -> sw:Eio.Switch.t
+  -> clock:_ Eio.Time.Mono.t
+  -> registry:Session_registry.t
+  -> unit
+  -> t
+
+val start
+  :  factory:Session_factory.t
   -> sw:Eio.Switch.t
   -> clock:_ Eio.Time.Mono.t
   -> registry:Session_registry.t
   -> t
 
-val start : sw:Eio.Switch.t -> clock:_ Eio.Time.Mono.t -> registry:Session_registry.t -> t
 val close : t -> unit
 
-(** After [close], wait for already-dispatched deliveries and moderator callbacks.
-    No new entry is admitted. The caller must bound this cancellable wait; an
-    unresponsive handler must not prevent subsequent runtime cancellation. *)
+(** [close] also cancels in-flight bounded recurrence preparations. Join these
+    before releasing their configured timezone root or shutting down actors used
+    by protected token cleanup. Legacy runtime callbacks keep existing grace. *)
+val await_recurrences_idle : t -> unit
+
+(** After [close], or while the actual loop cannot start another pass, wait for
+    already-dispatched deliveries and moderator callbacks. The caller must bound
+    this cancellable wait; an unresponsive handler must not prevent subsequent
+    runtime cancellation. *)
 val await_idle : t -> unit
 
 val is_running : t -> bool
+
+module For_testing : sig
+  (** Deadline of the actual loop's current injected monotonic-clock sleep,
+      after the preceding process pass returned. None while processing, after
+      sleep exits (including cancellation), or after close. A future deadline
+      is a read-only scheduling observation, not a claim or authority. *)
+  val loop_wait_deadline : t -> Mtime.t option
+end

@@ -33,7 +33,30 @@ let call input =
     input
 ;;
 
-let prompt action =
+type trigger =
+  | Schedule_work
+  | Repeat_after_first_completion
+  | Observe_only
+
+let prompt ~trigger action =
+  let after_start =
+    match trigger with
+    | Observe_only -> "Task.pure(state)"
+    | Schedule_work | Repeat_after_first_completion ->
+      {|Task.bind(Schedule.after_ms(0, `Go), fun scheduled -> Task.pure(state))|}
+  in
+  let on_success =
+    let append = {|state ++ "ok:" ++ id ++ ":" ++ Json.stringify(result) ++ ";"|} in
+    match trigger with
+    | Schedule_work | Observe_only -> sprintf "Task.pure(%s)" append
+    | Repeat_after_first_completion ->
+      sprintf
+        {|if String.contains(state, "repeat-scheduled;") then Task.pure(%s)
+          else Task.bind(Schedule.after_ms(0, `Go), fun scheduled ->
+            Task.pure(%s ++ "repeat-scheduled;"))|}
+        append
+        append
+  in
   sprintf
     {|
 <developer>Run deterministic background orchestration.</developer>
@@ -45,24 +68,28 @@ let prompt action =
   let initial_state = ""
   let on_event : context -> state -> event -> state task =
     fun ctx state event -> match event with
-    | `Session_start -> Task.pure(state)
+    | `Session_start -> %s
     | `Session_resume -> Task.pure(state)
     | `Go -> %s
     | `Wake -> Task.pure(state ++ "wake;")
     | `Halt -> Task.bind(Runtime.end_session("suppressed"), fun ignored -> Task.pure(state))
     | `Check -> Task.bind(Runtime.end_session(state), fun ignored -> Task.pure(state))
-    | `Model_job_succeeded(id, recipe, result) ->
-      Task.pure(state ++ "ok:" ++ id ++ ":" ++ Json.stringify(result) ++ ";")
+    | `Model_job_succeeded(id, recipe, result) -> %s
     | `Model_job_failed(id, recipe, message) ->
       Task.pure(state ++ "error:" ++ id ++ ":" ++ message ++ ";")
 </script>
 |}
+    after_start
     action
+    on_success
 ;;
 
-let fixture env environment name action =
+let fixture ?(trigger = Schedule_work) env environment name action =
   let fixture = Config_fixture.create environment ~name ~http_port:(F.reserve_port env) in
-  F.save fixture (Config_fixture.prompt_path fixture) (prompt (action (payload fixture)));
+  F.save
+    fixture
+    (Config_fixture.prompt_path fixture)
+    (prompt ~trigger (action (payload fixture)));
   let config =
     Config_fixture.configuration fixture ()
     |> String.substr_replace_first
@@ -86,8 +113,8 @@ let with_fixture env fixture f =
       ~finally:(fun () -> F.stop env daemon))
 ;;
 
-let with_daemon env environment name action f =
-  with_fixture env (fixture env environment name action) f
+let with_daemon ?trigger env environment name action f =
+  with_fixture env (fixture ?trigger env environment name action) f
 ;;
 
 let await_requests env provider count =
@@ -149,6 +176,44 @@ let await_checkpoint env fixture session predicate =
            state.jobs, state.attachments, F.moderator_state state)
          : (Agent_protocol.Job.t list * Agent_protocol.Session.Attachment.t list * string)
              option)]
+;;
+
+let schedule_delivered (schedule : Agent_protocol.Schedule.t) =
+  match schedule.status with
+  | Delivered -> schedule.delivery_count = 1
+  | _ -> false
+;;
+
+let assert_startup_schedule (state : Agent_session.Session_state.t) =
+  let open Agent_protocol in
+  let schedule, provenance =
+    List.find_map_exn state.schedules ~f:(fun schedule ->
+      Option.map schedule.inference_provenance ~f:(fun provenance -> schedule, provenance))
+  in
+  F.require (schedule_delivered schedule) "authored startup timer was not delivered once";
+  let module Occurrence = Moderator_execution.Queue_occurrence in
+  F.require
+    (List.exists state.moderator_executions ~f:(fun receipt ->
+       match receipt.status, receipt.queue_occurrence with
+       | Completed _, Some occurrence when Option.is_none receipt.context.operation_id ->
+         Run_source.equal
+           (Occurrence.source occurrence)
+           (Schedule_provenance.source provenance)
+         && Option.equal
+              Inference_origin.equal
+              (Occurrence.origin occurrence)
+              (Schedule_provenance.origin provenance)
+         && Occurrence.Producer.equal
+              (Occurrence.producer occurrence)
+              (Captured
+                 (Some
+                    (Schedule_delivery
+                       { id = schedule.id
+                       ; generation = schedule.generation
+                       ; delivery_count = 1
+                       })))
+       | _ -> false))
+    "idle callback did not consume the exact authored timer occurrence"
 ;;
 
 let await_zero_clients env fixture session =
@@ -237,11 +302,9 @@ let assert_success (job : Agent_protocol.Job.t) =
   result
 ;;
 
-let begin_work client name =
-  let session = F.create client (name ^ ":create") in
-  ignore (F.schedule client session (name ^ ":go") "Go" 0 : Agent_protocol.Schedule.t);
-  session
-;;
+(* Job work begins with a Schedule issued by the live Session_start callback.
+   A public raw timer can deliver a pure event, but cannot lend Model authority. *)
+let begin_work client name = F.create client (name ^ ":create")
 
 let success_text job result ~is_call =
   let id = Agent_protocol.Id.Job.to_string job.Agent_protocol.Job.id in
@@ -285,6 +348,7 @@ let success_case env environment ~is_call =
        Provider.release provider ~index:0;
        let durable = await_zero_clients env fixture session in
        F.require (Option.is_none durable.failure) "zero-client moderator failed";
+       assert_startup_schedule durable;
        F.with_client ~sw env fixture (fun client ->
          verify_success env client session name durable ~is_call);
        F.require (Provider.request_count provider = 1) "nested model ran more than once")
@@ -387,19 +451,30 @@ let cancel_blocked_case env environment =
   let name = "spawn.cancel-releases-blocked-capacity" in
   with_daemon env environment name spawn (fun sw fixture provider _daemon _port ->
     F.with_client ~sw env fixture (fun client ->
-      let next = F.create client (name ^ ":next") in
       let session = begin_work client name in
       await_requests env provider 1;
       let job = List.hd_exn (F.snapshot client session).jobs in
-      ignore
-        (cancel client session job (name ^ ":cancel")
-         : Agent_protocol.Job.Cancel_result.t);
       Exn.protect
         ~finally:(fun () -> Provider.release provider ~index:0)
         ~f:(fun () ->
+          let next = F.create client (name ^ ":next") in
           ignore
-            (F.schedule client next (name ^ ":next-go") "Go" 0
-             : Agent_protocol.Schedule.t);
+            (F.await_snapshot
+               env
+               client
+               next
+               "second session waiting for capacity"
+               (fun state ->
+                  match state.jobs with
+                  | [ { status = Queued; attempt = 0; _ } ] -> true
+                  | _ -> false)
+             : Agent_protocol.Public.Snapshot.Fields.t);
+          F.require
+            (Provider.request_count provider = 1)
+            "queued job exceeded global capacity";
+          ignore
+            (cancel client session job (name ^ ":cancel")
+             : Agent_protocol.Job.Cancel_result.t);
           await_requests env provider 2;
           verify_cancel env client session name;
           Provider.release provider ~index:1;
@@ -505,8 +580,7 @@ let running_and_queued env client session provider =
   running, queued
 ;;
 
-let reuse_capacity env client session provider name =
-  ignore (F.schedule client session (name ^ ":again") "Go" 0 : Agent_protocol.Schedule.t);
+let reuse_capacity env provider =
   await_requests env provider 2;
   F.require
     (Provider.request_count provider = 2)
@@ -516,10 +590,30 @@ let reuse_capacity env client session provider name =
   Provider.release provider ~index:2
 ;;
 
-let verify_capacity env client session provider queued name =
+let has_observed_job observed (job : Agent_protocol.Job.t) =
+  let prefix =
+    match job.status with
+    | Succeeded -> "ok:"
+    | _ -> "error:"
+  in
+  let pattern = prefix ^ Agent_protocol.Id.Job.to_string job.id ^ ":" in
+  List.length (String.substr_index_all observed ~pattern ~may_overlap:false) = 1
+;;
+
+let verify_capacity env fixture client session provider queued name =
   let state = completed env client session in
   F.require (List.length state.jobs = 4) "capacity exercise lost job identities";
-  let _, observed = check env client session name in
+  (* The complete transcript contains several provider replies and exceeds the
+     maximum halt-reason length. Keep the halt bounded and read its checkpoint. *)
+  ignore (F.schedule client session (name ^ ":halt") "Halt" 0 : Agent_protocol.Schedule.t);
+  let durable = await_checkpoint env fixture session (fun state -> state.halted) in
+  F.require
+    (Option.equal String.equal durable.halt_reason (Some "suppressed"))
+    "capacity scenario did not commit its halt";
+  let observed = F.moderator_state durable in
+  F.require
+    (List.for_all state.jobs ~f:(has_observed_job observed))
+    "moderator did not observe every capacity Job exactly once";
   let id = Agent_protocol.Id.Job.to_string queued.Agent_protocol.Job.id in
   F.require
     (String.is_substring observed ~substring:("error:" ^ id ^ ":job was cancelled;"))
@@ -541,7 +635,13 @@ let cancel_queued env client session provider queued name =
   ignore
     (cancel client session queued (name ^ ":cancel") : Agent_protocol.Job.Cancel_result.t);
   Provider.release provider ~index:0;
-  let state = completed env client session in
+  let state =
+    F.await_snapshot env client session "queued cancellation delivered" (fun state ->
+      List.exists state.jobs ~f:(fun job ->
+        Agent_protocol.Id.Job.equal job.id queued.id
+        && is_terminal job
+        && is_delivered job))
+  in
   let cancelled =
     List.find_exn state.jobs ~f:(fun job ->
       Agent_protocol.Id.Job.compare job.id queued.id = 0)
@@ -557,21 +657,29 @@ let cancel_queued env client session provider queued name =
 
 let capacity_case env environment =
   let name = "spawn.capacity-queued-cancel" in
-  with_daemon env environment name two_spawns (fun sw fixture provider _daemon _port ->
-    F.with_client ~sw env fixture (fun client ->
-      let session = begin_work client name in
-      let running, queued = running_and_queued env client session provider in
-      cancel_queued env client session provider queued name;
-      reuse_capacity env client session provider name;
-      verify_capacity env client session provider queued name;
-      F.require
-        (List.exists (F.snapshot client session).jobs ~f:(fun job ->
-           Agent_protocol.Id.Job.compare job.id running.id = 0))
-        "first running job disappeared"))
+  with_daemon
+    ~trigger:Repeat_after_first_completion
+    env
+    environment
+    name
+    two_spawns
+    (fun sw fixture provider _daemon _port ->
+       F.with_client ~sw env fixture (fun client ->
+         let session = begin_work client name in
+         let running, queued = running_and_queued env client session provider in
+         cancel_queued env client session provider queued name;
+         reuse_capacity env provider;
+         verify_capacity env fixture client session provider queued name;
+         F.require
+           (List.exists (F.snapshot client session).jobs ~f:(fun job ->
+              Agent_protocol.Id.Job.compare job.id running.id = 0))
+           "first running job disappeared"))
 ;;
 
 let capacity_fixture env environment dimension =
-  let fixture = fixture env environment dimension two_spawns in
+  let fixture =
+    fixture ~trigger:Repeat_after_first_completion env environment dimension two_spawns
+  in
   let fields =
     [ "daemon_total"
     ; "per_principal"
@@ -609,8 +717,8 @@ let capacity_dimension env environment dimension record =
          let _, queued = running_and_queued env client session provider in
          record fixture daemon client (dimension ^ "-saturated");
          cancel_queued env client session provider queued dimension;
-         reuse_capacity env client session provider dimension;
-         verify_capacity env client session provider queued dimension;
+         reuse_capacity env provider;
+         verify_capacity env fixture client session provider queued dimension;
          record fixture daemon client (dimension ^ "-released")))
 ;;
 
@@ -633,22 +741,6 @@ let run_load_capacity env ~record =
 let same_job state (job : Agent_protocol.Job.t) =
   List.find_exn state.Agent_protocol.Public.Snapshot.Fields.jobs ~f:(fun candidate ->
     Agent_protocol.Id.Job.compare candidate.id job.id = 0)
-;;
-
-let schedule_delivered (schedule : Agent_protocol.Schedule.t) =
-  match schedule.status with
-  | Delivered -> schedule.delivery_count = 1
-  | _ -> false
-;;
-
-let has_observed_job observed (job : Agent_protocol.Job.t) =
-  let prefix =
-    match job.status with
-    | Succeeded -> "ok:"
-    | _ -> "error:"
-  in
-  let pattern = prefix ^ Agent_protocol.Id.Job.to_string job.id ^ ":" in
-  List.length (String.substr_index_all observed ~pattern ~may_overlap:false) = 1
 ;;
 
 let checkpoint_ready env fixture session schedule =
@@ -767,6 +859,7 @@ let inspect_stable_restart env client session after wake name events =
 let first_completed_restart ~sw env fixture provider session wake before name port events =
   with_restart ~sw env fixture port (fun _ ->
     let checkpoint = checkpoint_ready env fixture session wake in
+    assert_startup_schedule checkpoint;
     F.require (List.is_empty checkpoint.attachments) "restart delivery required a client";
     F.require (Provider.request_count provider = 1) "completed job reran after restart";
     let events =
@@ -968,28 +1061,34 @@ let inspect_overdue env client session deliver name before_events =
 
 let overdue_case env environment =
   let name = "restart.schedule-overdue-policies" in
-  with_daemon env environment name spawn (fun sw fixture provider daemon port ->
-    let session, deliver, skip, fail, events =
-      F.with_client ~sw env fixture (fun client -> create_overdue client name)
-    in
-    F.stop env daemon;
-    wait_past_due env fail;
-    with_restart ~sw env fixture port (fun _ ->
-      let checkpoint =
-        await_checkpoint env fixture session (fun state ->
-          schedule_delivered (same_schedule state.schedules deliver)
-          && String.equal (F.moderator_state state) "wake;")
-      in
-      assert_misfires checkpoint.schedules skip fail;
-      F.with_client ~sw env fixture (fun client ->
-        inspect_overdue env client session deliver name events);
-      F.require
-        (Provider.request_count provider = 0)
-        "schedule-only recovery invoked a model"))
+  with_daemon
+    ~trigger:Observe_only
+    env
+    environment
+    name
+    spawn
+    (fun sw fixture provider daemon port ->
+       let session, deliver, skip, fail, events =
+         F.with_client ~sw env fixture (fun client -> create_overdue client name)
+       in
+       F.stop env daemon;
+       wait_past_due env fail;
+       with_restart ~sw env fixture port (fun _ ->
+         let checkpoint =
+           await_checkpoint env fixture session (fun state ->
+             schedule_delivered (same_schedule state.schedules deliver)
+             && String.equal (F.moderator_state state) "wake;")
+         in
+         assert_misfires checkpoint.schedules skip fail;
+         F.with_client ~sw env fixture (fun client ->
+           inspect_overdue env client session deliver name events);
+         F.require
+           (Provider.request_count provider = 0)
+           "schedule-only recovery invoked a model"))
 ;;
 
 let suppression_prompt fixture =
-  let source = prompt (spawn (payload fixture)) in
+  let source = prompt ~trigger:Schedule_work (spawn (payload fixture)) in
   let pattern =
     {|Task.pure(state ++ "ok:" ++ id ++ ":" ++ Json.stringify(result) ++ ";")|}
   in
@@ -1060,9 +1159,44 @@ let suppression_case env environment =
       "shutdown delivered a suppressed event")
 ;;
 
+let raw_schedule_denies_model env environment =
+  let name = "schedule.raw-event-denies-model" in
+  with_daemon
+    ~trigger:Observe_only
+    env
+    environment
+    name
+    call
+    (fun sw fixture provider _daemon _port ->
+       let session, schedule =
+         F.with_client ~sw env fixture (fun client ->
+           let session = begin_work client name in
+           let schedule = F.schedule client session (name ^ ":raw-go") "Go" 0 in
+           F.close_client client;
+           session, schedule)
+       in
+       let state =
+         await_checkpoint env fixture session (fun state ->
+           let module Occurrence = Agent_protocol.Moderator_execution.Queue_occurrence in
+           List.exists state.moderator_executions ~f:(fun receipt ->
+             match receipt.status, receipt.queue_occurrence with
+             | Failed _, Some occurrence ->
+               Occurrence.Producer.equal (Occurrence.producer occurrence) (Captured None)
+               && Option.is_none (Occurrence.origin occurrence)
+             | _ -> false))
+       in
+       let delivered = same_schedule state.schedules schedule in
+       F.require
+         (schedule_delivered delivered && Option.is_none delivered.inference_provenance)
+         "raw timer did not retain truthful absent creator provenance";
+       F.require (List.is_empty state.jobs) "raw timer admitted a Model Job";
+       F.require (Provider.request_count provider = 0) "raw timer reached the provider")
+;;
+
 let cases =
   [ "spawn.zero-client-success", success_case ~is_call:false
   ; "call.success", success_case ~is_call:true
+  ; "schedule.raw-event-denies-model", raw_schedule_denies_model
   ; "spawn.failure", failure_case ~is_call:false
   ; "call.failure", failure_case ~is_call:true
   ; "spawn.running-cancel", cancel_case

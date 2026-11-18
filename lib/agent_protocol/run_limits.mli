@@ -7,4 +7,8 @@ val max_occurrences : int
 val max_document_bytes : int
 val max_depth : int
 val check_count : int -> (unit, Error.t) result
+
+(** Validate the document against the Run byte and depth ceilings. *)
+val validate_document : Jsonaf.t -> (unit, Error.t) result
+
 val list : (Jsonaf.t -> ('a, Error.t) result) -> Jsonaf.t -> ('a list, Error.t) result

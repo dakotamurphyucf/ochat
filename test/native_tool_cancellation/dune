@@ -1,0 +1,5 @@
+(library
+ (name native_tool_cancellation_tests)
+ (libraries core eio eio_main ochat.functions ochat.apply_patch)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

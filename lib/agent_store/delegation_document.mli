@@ -1,4 +1,7 @@
-(** Validated current named delegation document. Original immutable admission
+(** Validated current v7 named delegation document. v6 upgrades structurally
+    without filling historical origin omissions. Populated Goal origin requires
+    [delegation.goal-origin.v1]; construction/decoding grants no authority.
+    Original immutable admission
     JSON and nested/envelope extensions survive disposition updates. *)
 type t
 
@@ -23,6 +26,14 @@ val stored_key
 (** SHA256 of the original admission subtree serialized with its original JSON
     ordering and lexemes. It is independent of mutable record disposition. *)
 val admission_sha256 : t -> string
+
+(** Maximum complete JSON payload bytes for this record's known remaining
+    stage/revocation/collection dispositions. Preserves the original immutable
+    admission, compatible unknowns, required semantics and immutable historical presence.
+    Rejects if that bounded future payload cannot fit [limits]. No disposition
+    is installed or authorized. The store adds its actual frame overhead and
+    charges only positive growth beyond the bytes already read for this record. *)
+val reserved_payload_bytes : t -> (int, Document_schema.Error.t) result
 
 val with_disposition
   :  t

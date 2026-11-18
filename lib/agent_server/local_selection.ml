@@ -177,7 +177,12 @@ let select_indexed t reservation principal expected indexed =
          ~authorize:(authorize principal)
          ~recover:(fun () ->
            transferred := true;
-           let%bind entry = Session_factory.recover_owned_session t.factory handle in
+           (* This API is the explicit trusted-host selection boundary. Preserve
+              its actual caller through reconstruction, never the saved creator. *)
+           let actor = Operator_authorization.trusted_local principal in
+           let%bind entry =
+             Session_factory.recover_owned_session t.factory handle ~actor
+           in
            qualify_recovered t entry))
 ;;
 
@@ -214,7 +219,18 @@ let select_loaded t reservation principal expected entry =
        let%bind () = authorize principal (Current.entry current).session in
        let%bind () = validate t expected current in
        if Current.is_current current handle && not (Registry.is_closing t.registry)
-       then Ok entry
+       then (
+         let%map () =
+           Registry.select_loaded
+             t.registry
+             reservation
+             ~store:t.store
+             ~handle
+             ~current
+             entry
+             ~authorize:(authorize principal)
+         in
+         entry)
        else fail Conflict "selected owner became unavailable")
 ;;
 

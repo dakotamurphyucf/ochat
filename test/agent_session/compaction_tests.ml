@@ -19,7 +19,9 @@ let%expect_test "compaction atomically replaces history and advances its generat
                ~liveness:Process_bound
                ~start_immediately:false)
           ~persistence:
-            { archive_reference; commit = (fun ~command_audit:_ ~previous:_ _ -> Ok ()) }
+            { archive_reference
+            ; commit = (fun ?observation:_ ~command_audit:_ ~previous:_ _ -> Ok ())
+            }
           ~operation_worker:None
           ~services:
             { now = (fun () -> Agent_protocol.Timestamp.now ())
@@ -30,6 +32,7 @@ let%expect_test "compaction atomically replaces history and advances its generat
             ; schedule_limits = Agent_session.Staged_schedules.default_limits
             ; notification_limits = Agent_session.Staged_notifications.default_limits
             ; ingress_limits = Agent_session.Staged_ingress.default_limits
+            ; goal_descendant_profile
             ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
             ; state_committed = (fun _ _ -> ())
             }
@@ -111,6 +114,7 @@ let compaction_cancel_actor ~sw env workspace_instance state_committed =
     ; schedule_limits = Agent_session.Staged_schedules.default_limits
     ; notification_limits = Agent_session.Staged_notifications.default_limits
     ; ingress_limits = Agent_session.Staged_ingress.default_limits
+    ; goal_descendant_profile
     ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
     ; state_committed
     }
@@ -122,7 +126,9 @@ let compaction_cancel_actor ~sw env workspace_instance state_committed =
     ~compaction_env:None
     ~initial_state:(compaction_cancel_state workspace_instance)
     ~persistence:
-      { archive_reference; commit = (fun ~command_audit:_ ~previous:_ _ -> Ok ()) }
+      { archive_reference
+      ; commit = (fun ?observation:_ ~command_audit:_ ~previous:_ _ -> Ok ())
+      }
     ~operation_worker:None
     ~services
 ;;
@@ -365,7 +371,7 @@ let%expect_test
          ~f:(fun () ->
            let port : A.Compaction_inference.t =
              { with_execution =
-                 (fun ~operation ~selection:admitted f ->
+                 (fun ~operation ~selection:admitted ~borrow_agent_actor:_ f ->
                    [%test_eq: Agent_protocol.Operation.kind] Compaction operation.kind;
                    assert (
                      Document_schema.Json.equal
@@ -374,7 +380,7 @@ let%expect_test
                    Owner.with_auxiliary_execution_lifetime owner (fun installed ->
                      assert (Option.is_none installed);
                      incr uses;
-                     f execution))
+                     f execution ~guidance:None ~reserved_input_tokens:0))
              }
            in
            A.set_compaction_inference actor (Some port) |> protocol_ok;

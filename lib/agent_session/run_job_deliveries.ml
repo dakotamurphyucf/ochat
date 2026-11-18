@@ -10,6 +10,14 @@ type t =
 
 let empty = Missing
 
+let equal left right =
+  match left, right with
+  | Missing, Missing | Null, Null -> true
+  | Present left, Present right -> Map.equal Delivery.equal left right
+  | Missing, (Null | Present _) | Null, (Missing | Present _) | Present _, (Missing | Null)
+    -> false
+;;
+
 let entries = function
   | Missing | Null -> []
   | Present entries -> Map.data entries

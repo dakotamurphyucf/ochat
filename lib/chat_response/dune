@@ -7,6 +7,8 @@
   converter
   converter_source
   ctx
+  effect_rejection
+  agent_guidance
   driver
   agent_response_loop
   agent_trace
@@ -31,6 +33,8 @@
   moderation
   run_operations
   moderator_manager
+  goal_native_scope
+  goal_native_operations
   moderator_program
   moderator_invocation
   execution_gate
@@ -85,7 +89,7 @@
   fork_history
   fork
   compact_history)
- (private_modules managed_code_contract)
+ (private_modules managed_code_contract effect_rejection)
  (libraries ochat.history_chatmd ochat.inference_client ochat.inference ochat.inference_runtime ochat.transcript
   ochat.document_schema
   core

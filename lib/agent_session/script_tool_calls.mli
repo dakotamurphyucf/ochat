@@ -19,6 +19,58 @@ type t
     ceiling: native borrows still supply the exact permitted selection. *)
 val current_native_services : unit -> (t, string) result
 
+(** Actual invoking session's instruction consumer. This overlay grants no tools,
+    source roots or actor authority; every call needs genuine native admission. *)
+val with_instruction_service : t -> Instruction_service.t -> t
+
+val instruction_service : t -> Instruction_service.t option
+
+(** Actual invoking session's recurrence metadata consumer. Installation grants
+    no selected tool, source, controller or execution authority. *)
+val with_recurrence_service : t -> Recurrence_service.t -> t
+
+val recurrence_service : t -> Recurrence_service.t option
+
+(** Actual invoking session's Goal metadata/control consumer. Installation grants
+    no selected tool or actor authority and never starts/resumes execution. *)
+val with_goal_metadata_service : t -> Goal_native_metadata_service.t -> t
+
+val goal_metadata_service : t -> Goal_native_metadata_service.t option
+
+(** Require this SAME current native service and completed admitted binding,
+    then run the inherited host check before/after yielding and recheck physical
+    services/native admission. Reuses metadata policy; never requests approval.
+    Must run outside an Actor mailbox callback. Cancellation propagates. *)
+val check_current_metadata_admission
+  :  t
+  -> Agent_protocol.Invocation.t
+  -> Chat_response.Tool_capability.binding
+  -> (unit, Agent_protocol.Error.t) result
+
+module Inference_tracking : sig
+  type t =
+    { bind_identity : Inference_allocation.Port.t -> Inference_client.Identity.t
+    ; on_attempt : Inference_runtime.Attempt.t -> unit
+    ; on_observation : Inference.Observation.t -> unit
+    ; on_completion : Inference_client.Completion.t -> unit
+    }
+end
+
+(** Bind native Agent inference to the exact invoking handler's expiring
+    actor-issued allocator. The identity and all callbacks belong to the same
+    graph. This installs tracking for that graph without granting authority. *)
+val with_inference_tracking : t -> Inference_tracking.t -> t
+
+(** Rebind native Agent inference and eligible agent-conversation guidance to the existing actual native
+    invocation's checked borrow. Constructor contexts cannot lend their expired
+    initialization owner to a later child. Guidance exclusions remain sticky
+    independently of inference binding. An unbound context acquires no session
+    port. An active scope requires its graph binding and an expired scope
+    rejects, so neither can fall back to an unrelated graph. *)
+val agent_context
+  :  Eio_unix.Stdenv.base Chat_response.Ctx.t
+  -> Eio_unix.Stdenv.base Chat_response.Ctx.t
+
 module Native_services_scope : sig
   type nonrec t =
     | Unbound
@@ -238,6 +290,11 @@ type preparation =
   ; session_id : Agent_protocol.Id.Session.t
   ; generation : int
   ; owner : preparation_owner
+  ; caller : Delegated_policy_caller.t option
+    (** Borrowed SAME-owner transport, valid only during preparation and checked
+        again at parent transfer. The issuing adapter closes it on exit. None is
+        absent transport, not a genuine admitted None original or permission to
+        use an ambient owner. Capture itself grants no execution admission. *)
   ; selected : Chat_response.Tool_capability.t
   ; call : Chat_response.Moderation.Tool_call.t
   }
@@ -260,6 +317,7 @@ val with_preparation : t -> prepare:preparation_policy -> t
     kind. No policy installed leaves the dispatcher unchanged. *)
 val with_model_preparation
   :  t
+  -> capture_caller:(unit -> (Delegated_policy_caller.t, Agent_protocol.Error.t) result)
   -> selected:Chat_response.Tool_capability.t
   -> input:Operation_worker.Input.t
   -> Chat_response.In_memory_stream.Tool_dispatch.t
@@ -370,6 +428,7 @@ val with_invocation
   :  t
   -> prepared:Chat_response.Extension_compiler.t
   -> capabilities:Operation_worker.Capabilities.t
+  -> invocation_capabilities:Invocation_capabilities.t
   -> parent:Agent_protocol.Invocation.t
   -> ((name:string
        -> args:Jsonaf.t
@@ -400,12 +459,17 @@ val with_managed_invocation
     targets must remain in the captured subset and pass schema/authority
     checks after approval. Rejections never reach native authorization or effects.
     The host supplies current admission through [authorize] and owns observation
-    draining. This primitive does not install moderation or public dispatch. *)
+    draining. [invocation_capabilities] must be the SAME executor-issued bundle
+    for [parent]; nested host preparation captures its Caller directly without
+    requiring or rediscovering an ambient native scope. Its existing physical
+    execution and original-admission guards remain current at use. This primitive
+    does not install moderation or public dispatch. *)
 val with_standalone
   :  ?observer:Agent_protocol.Invocation.observer
   -> t
   -> prepared:Chat_response.Extension_compiler.t
   -> capabilities:Operation_worker.Capabilities.t
+  -> invocation_capabilities:Invocation_capabilities.t
   -> parent:Agent_protocol.Invocation.t
   -> moderate:
        (Chat_response.Moderation.Tool_call.t
@@ -479,6 +543,7 @@ val with_observation
   :  t
   -> definition:Chat_response.Extension_compiler.definition
   -> execute:Native_tool_invocation.executor
+  -> capabilities:Invocation_capabilities.t
   -> observing:Agent_protocol.Invocation.t
   -> ((name:string
        -> args:Jsonaf.t
@@ -495,7 +560,8 @@ val with_observation
     field; event cancellation and deadlines remain the host's responsibility.
     No active-moderator authorizing decision may be deferred until after effects. *)
 val with_event
-  :  t
+  :  ?policy_caller:Delegated_policy_caller.t
+  -> t
   -> definition:Chat_response.Extension_compiler.definition
   -> execute:Native_tool_invocation.executor
   -> executing:Agent_protocol.Moderator_execution.t
@@ -504,3 +570,26 @@ val with_event
        -> (Chat_response.Moderation.Capabilities.tool_call_result, string) result)
       -> 'a)
   -> 'a
+
+(** Native calls from one genuine legacy Manager callback. [selected] is the
+    host-prepared capability ceiling, not the script's required-tools list.
+    [execute] must own this same Running receipt. Values use protocol outcome
+    bounds, while disclosure, per-effect policy and the standard 100-attempt host
+    call-scope guard remain enforced. This does not impose v1 script limits or
+    replace the actual Manager's execution policy. Escaped calls expire on return. *)
+val with_legacy_event
+  :  ?capture_caller:(unit -> (Delegated_policy_caller.t, Agent_protocol.Error.t) result)
+  -> t
+  -> selected:Chat_response.Tool_capability.t
+  -> execute:Native_tool_invocation.executor
+  -> executing:Agent_protocol.Moderator_execution.t
+  -> ((name:string
+       -> args:Jsonaf.t
+       -> (Chat_response.Moderation.Capabilities.tool_call_result, string) result)
+      -> 'a)
+  -> 'a
+
+(** Actual nondelegated authored/root source wiring only. Installs no permission
+    and preserves an already retained delegated/current guard. Missing modern
+    provenance is otherwise unavailable, never implicitly local. *)
+val with_local_execution_current : t -> t

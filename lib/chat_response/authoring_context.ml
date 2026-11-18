@@ -180,6 +180,7 @@ let features =
   ; "notifications", "runtime.delivery.notifications"
   ; "external_events", "runtime.delivery.ingress"
   ; "child_sessions", "runtime.delegation.stop-helper"
+  ; "recurrences", "runtime.recurrence"
   ]
 ;;
 
@@ -415,6 +416,15 @@ let orientation corpus ~host ~capabilities ~surface_id =
          output cursors and session lifetime have explicit rules."
         Child_agent
         [ "runtime.delegation.stop-helper" ]
+    ; guide
+        "Recurring automation"
+        "Create paused definitions, explicitly enable eligible work, and inspect \
+         retained outcomes using selected same-controller native tools."
+        "Scheduling repeated existing-session input or a persistent authored worker: \
+         read exact CAS, retry identity, captured resources and current authority \
+         contracts."
+        One_off_script
+        [ "runtime.recurrence" ]
     ; guide
         "Authority and validation"
         "Check generated source without running it and understand which tools, shell \

@@ -37,7 +37,7 @@ let%test_unit
       let state = { initial with spec = { initial.spec with root_invocation = role } } in
       S.validate state |> protocol_ok;
       let document = D.encode (D.authored state) ~limits:document_limits |> document_ok in
-      [%test_eq: int] 10 (Doc.version document);
+      [%test_eq: int] 14 (Doc.version document);
       let with_future =
         Doc.create
           ~limits:document_limits
@@ -83,7 +83,10 @@ let%test_unit
         |> D.value
       in
       assert (Role.equal Ui migrated.spec.root_invocation);
-      [%test_eq: int] 25 migrated.schema_version;
+      [%test_eq: int] S.current_schema_version migrated.schema_version;
+      let restored = S.upgrade_schema { state with schema_version = 25 } |> protocol_ok in
+      [%test_eq: int] S.current_schema_version restored.schema_version;
+      assert (Role.equal role restored.spec.root_invocation);
       let old_native = S.upgrade_schema { state with schema_version = 24 } in
       match role, old_native with
       | Ui, Ok restored -> assert (Role.equal Ui restored.spec.root_invocation)

@@ -19,6 +19,7 @@ let schedule () : P.Schedule.t =
   ; status = Scheduled
   ; delivery_count = 0
   ; last_delivery_at = None
+  ; inference_provenance = None
   ; delivery_cancellation = None
   ; ownership = None
   }
@@ -200,7 +201,14 @@ let%expect_test "expiry and moderator completion choose the first persisted winn
                 services.claim_event
                   ~event
                   ~snapshot:(fun () -> Ok Setup.before)
-                  (fun ~executing ~retirement_reason:_ ~event:_ ~execute:_ ~commit:save ->
+                  (fun ~executing
+                    ~policy_caller:_
+                    ~model_jobs:_
+                    ~allocate_inference:_
+                    ~retirement_reason:_
+                    ~event:_
+                    ~execute:_
+                    ~commit:save ->
                      let owner = J.Moderator_event executing.context.id in
                      let completed =
                        Setup.finish subscription (Succeeded (`String "won"))
@@ -244,10 +252,13 @@ let%expect_test "expiry and moderator completion choose the first persisted winn
            | `Expiry_first -> Setup.before
            | `Completion_first -> Setup.after
          in
-         assert (
-           Option.exists
-             state.moderator
-             ~f:(Jsonaf.exactly_equal (Setup.encode expected_snapshot)));
+         let metadata = assert_moderator_checkpoint state ~snapshot:expected_snapshot in
+         let completed =
+           match mode with
+           | `Completion_first -> true
+           | `Expiry_first -> false
+         in
+         assert_moderator_queue_frontier metadata ~required:completed ~head:0L ~next:0L;
          print_s
            [%sexp
              (mode : [ `Expiry_first | `Completion_first ])

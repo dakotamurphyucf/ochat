@@ -155,6 +155,7 @@ let reopen ~env ~sw ~initial ~wall_now ~elapsed f =
         ; create_reclaim_token = (fun () -> "elapsed-reopen")
         ; state_committed = (fun _ _ -> ())
         ; job_results = None
+        ; goal_descendant_profile
         ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
         ; schedule_limits = Agent_session.Staged_schedules.default_limits
         ; notification_limits = Agent_session.Staged_notifications.default_limits

@@ -7,6 +7,10 @@
     returned normally; it does not imply semantic success, moderation,
     canonical output publication, history insertion, or turn completion.
 
+    Optional [before_effect] runs after strict Started delivery, immediately
+    before the selected runner, under the same terminal/error handling. It is
+    independent of legacy observer suppression and does not itself grant a tool.
+
     Legacy [on_tool_execution] observer exceptions are suppressed.
     [on_execution_event] is the strict typed-delivery channel: observer errors
     and cancellation propagate. Runner failures retain their original backtrace;
@@ -20,6 +24,7 @@ val run
   -> name:string
   -> payload:string
   -> runner:Ochat_function.runner
+  -> ?before_effect:(unit -> unit)
   -> ?inference_parent:Transcript.Scope.parent
   -> ?on_tool_execution:(Tool_execution_event.t -> unit)
   -> ?on_execution_event:(Tool_execution_event.t -> unit)

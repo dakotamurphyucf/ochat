@@ -1,0 +1,5 @@
+<developer>
+This checked example composes independent counter and review policy.
+The host owns run startup, callback admission and terminal settlement.
+</developer>
+<script id="lifecycle" language="chatml" kind="moderator" api="extensibility-v1" project="chatml.project.json" src="moderator.chatml"/>

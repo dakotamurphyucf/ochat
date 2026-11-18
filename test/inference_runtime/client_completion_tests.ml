@@ -5,12 +5,18 @@ module C = Inference_client
 let identity =
   C.Identity.
     { new_preparation_id = (fun () -> "client-preparation")
-    ; with_attempt = (fun _ ~relation:_ ~f -> f ~scope ~accounting_id)
+    ; with_attempt =
+        (fun _ ~relation:_ ~f ->
+          f
+            ~scope
+            ~accounting_id
+            ~submission_guard:Inference_runtime.Submission_guard.empty)
     }
 ;;
 
 let run
       ?(identity = identity)
+      ?submission_guard
       context
       ~on_attempt
       ~on_completion
@@ -20,6 +26,7 @@ let run
   Eio_main.run (fun _ ->
     Eio.Switch.run (fun sw ->
       C.run
+        ?submission_guard
         context
         ~sw
         ~identity
@@ -189,7 +196,11 @@ let%expect_test
             incr allocations;
             Exn.protect
               ~finally:(fun () -> incr releases)
-              ~f:(fun () -> f ~scope ~accounting_id))
+              ~f:(fun () ->
+                f
+                  ~scope
+                  ~accounting_id
+                  ~submission_guard:Inference_runtime.Submission_guard.empty))
       }
   in
   let dispatched = ref false in
@@ -237,4 +248,81 @@ let%expect_test
      once";
   [%expect
     {| one f per admitted allocation; callback exception and normal return release exactly once |}]
+;;
+
+exception Allocation_revoked
+
+let%expect_test
+    "allocation final guard composes with the caller guard after acknowledgement"
+  =
+  let checks = ref [] in
+  let revoked = ref false in
+  let guard name ~deny =
+    Inference_runtime.Submission_guard.create ~refresh:(fun () ->
+      checks := !checks @ [ "refresh-" ^ name ];
+      fun () ->
+        checks := !checks @ [ "check-" ^ name ];
+        if deny () then raise Allocation_revoked)
+  in
+  let allocation_guard = guard "allocation" ~deny:(fun () -> !revoked) in
+  let caller_guard = guard "caller" ~deny:(fun () -> false) in
+  let identity =
+    C.Identity.
+      { new_preparation_id = (fun () -> "explicit-allocation")
+      ; with_attempt =
+          (fun _ ~relation:_ ~f ->
+            f ~scope ~accounting_id ~submission_guard:allocation_guard)
+      }
+  in
+  let submitted = ref 0 in
+  let selected =
+    context
+      (fun
+          ~sw:_
+           ~scope
+           ~accounting_id
+           ~note_delivery:_
+           ~on_event:_
+           ~on_observation:_
+           ~submission_guard
+         ->
+         Inference_runtime.Submission_guard.check submission_guard;
+         incr submitted;
+         receipt ~scope ~accounting_id ())
+  in
+  run
+    ~identity
+    ~submission_guard:caller_guard
+    selected
+    ~on_attempt:ignore
+    ~on_completion:ignore
+    ~on_observation:ignore
+    ~on_event:ignore
+  |> ok
+  |> ignore;
+  assert (!submitted = 1);
+  print_s [%sexp (!checks : string list)];
+  checks := [];
+  let rejected =
+    try
+      run
+        ~identity
+        ~submission_guard:caller_guard
+        selected
+        ~on_attempt:(fun _ -> revoked := true)
+        ~on_completion:ignore
+        ~on_observation:ignore
+        ~on_event:ignore
+      |> ignore;
+      false
+    with
+    | Allocation_revoked -> true
+  in
+  assert (rejected && !submitted = 1);
+  print_s [%sexp (!checks : string list)];
+  [%expect
+    {|
+    (refresh-caller refresh-allocation check-caller check-allocation)
+    (refresh-caller refresh-allocation check-caller check-allocation)
+  |}]
 ;;

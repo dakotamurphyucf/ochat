@@ -5,11 +5,16 @@
   protocol_error
   error
   id
+  inference_origin
+  schedule_provenance
+  session_storage_semantics
   execution_owner
   version
   timestamp
   json_codec
   idempotency_key
+  instruction_status
+  instruction_control
   session_ref
   session_lifecycle
   prompt_dependency_selection
@@ -64,9 +69,21 @@
   job_artifact
   job_result_reference
   invocation
+  moderator_observer
+  goal_edit
+  goal_resume_request
+  goal_native_resume_intent
+  goal_native_start_request
+  goal_native_start_intent
+  goal_native_action_intent
+  native_goal_action_conversion
+  goal_native_request_codec
+  goal_native_create_request
+  goal_native_control_request
   host_invocation
   completion_contract
   completion_projection
+  queue_producer
   moderator_execution
   extension_codec
   extension_status
@@ -104,8 +121,33 @@
   run
   run_action
   run_receipt
+  run_input
   run_start
   run_query
+  goal_text
+  goal_budget
+  goal_episode
+  goal_achievement
+  goal_state
+  goal_capacity
+  goal
+  goal_projection
+  goal_wire
+  goal_query_accounting
+  goal_query_observation
+  goal_control_outcome
+  goal_command
+  goal_command_receipt
+  goal_query
+  goal_control
+  recurrence_wire
+  recurrence_schedule
+  recurrence_policy
+  recurrence_control
+  recurrence_query_definition
+  recurrence_query_evidence
+  recurrence_query_snapshot
+  recurrence_query
   session_activity_summary
   session_activity
   activity_query
@@ -151,6 +193,15 @@
   stream_error
   inference_query)
  (private_modules
+  recurrence_wire
+  recurrence_query_definition
+  recurrence_query_evidence
+  recurrence_query_snapshot
+  goal_wire
+  goal_query_accounting
+  goal_query_observation
+  goal_control_outcome
+  goal_native_request_codec
   developer_repl_wire_common
   developer_repl_wire_result
   developer_repl_wire_task
@@ -180,6 +231,6 @@
   authoring_assistance_base
   authoring_assistance_lexical
   authoring_assistance_suggestions)
- (libraries uri ochat.inference core jsonaf base64 digestif mirage-crypto-rng uutf ochat.history_entry ochat.document_schema ochat.transcript ochat.chatml_source ochat.chatml_editor_position ochat.chatml_project ochat.source)
+ (libraries uri ochat.inference core jsonaf base64 digestif mirage-crypto-rng uutf ochat.history_entry ochat.document_schema ochat.transcript ochat.chatml_source ochat.chatml_editor_position ochat.chatml_project ochat.source ochat.recurrence_rules)
  (preprocess
   (pps ppx_jane)))

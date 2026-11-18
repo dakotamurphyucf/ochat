@@ -119,7 +119,7 @@ let%expect_test
                let registry = D.registry daemon in
                let original = R.remove registry session.id |> Option.value_exn in
                Agent_server.Runtime_owner.close_and_wait original.runtime;
-               original.close ();
+               Agent_server.Session_registry.close_entry original;
                let indexed =
                  Agent_store.Session_index.find_checked
                    (S.session_index (D.store daemon))

@@ -113,6 +113,11 @@ let has_command_receipt = function
   | Provider_status _
   | Provider_login_challenge _
   | Ingress_submit _
+  | Instructions _
+  | Goal_query _
+  | Goal_control _
+  | Recurrence_query _
+  | Recurrence_control _
   | Authoring _ -> false
 ;;
 

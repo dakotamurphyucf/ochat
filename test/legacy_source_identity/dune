@@ -1,0 +1,6 @@
+(library
+ (name legacy_source_identity_tests)
+ (libraries core eio eio_main chat_response chatmd chatmd_shell_spec
+  ochat.agent_session ochat.agent_store ochat.agent_protocol ochat.session)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

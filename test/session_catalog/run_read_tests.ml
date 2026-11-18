@@ -466,6 +466,7 @@ let%expect_test
           ; result = None
           ; delivery = Not_required
           ; launch = None
+          ; inference_origin = None
           ; progress = None
           }
       in
@@ -760,7 +761,7 @@ let%expect_test "run authority revoked during an admitted cold read prevents dis
       let registry = S.Daemon.registry daemon in
       let removed = S.Session_registry.remove registry session.id |> Option.value_exn in
       S.Runtime_owner.close_and_wait removed.runtime;
-      removed.close ();
+      Agent_server.Session_registry.close_entry removed;
       let indexed =
         Agent_store.Session_index.find_checked
           (Agent_store.Session_store.session_index (S.Daemon.store daemon))

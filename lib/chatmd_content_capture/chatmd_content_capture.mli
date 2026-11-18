@@ -40,7 +40,7 @@ val accounting : t -> Accounting.t
     paths before native reads. Count every actual slot, including dynamic slots;
     visit each captured slot once without deduplicating its input allowance.
     Local member is resolved solely from the authentic declaring Input.path and
-    src. Builtin finds the exact embedded ID; unknown/reserved skills rejects.
+    src. Builtin finds the exact embedded ID; unknown IDs reject without fallback.
     No remote read, decompression, fallback or widened authority.
 
     Before each native read reserve [allowance + 2*components + 6] conservative

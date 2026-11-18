@@ -7,7 +7,8 @@ module Config : sig
   type t =
     { env : Eio_unix.Stdenv.base
     ; inference_context : Inference_runtime.Context.t
-    ; inference_identity : Chat_response.Neutral_turn.Identity.t
+    ; inference_identity :
+        Inference_allocation.Port.t -> Chat_response.Neutral_turn.Identity.t
     ; on_inference_attempt : Inference_runtime.Attempt.t -> unit
     ; on_inference_completion : Inference_client.Completion.t -> unit
     ; on_inference_observation : Inference.Observation.t -> unit
@@ -41,13 +42,22 @@ end
     initial notification hook supplies only newly committed entries and claims
     restored wakes for the upcoming provider admission. New data receives its
     item-appended callbacks once; restored history is not appended or re-emitted.
-    All committed data is retained if a callback ends the session. *)
+    All committed data is retained if a callback ends the session. Typed host
+    [Chat_response.Ctx.Effect_rejected] and [Inference_allocation.Rejected] errors
+    become the exact failed operation outcome, including their retryability.
+    Rejection after a canonical inference acknowledgement does not erase that
+    acknowledged accounting. Cancellation and unknown exceptions keep their
+    existing paths. *)
 val create
   :  ?root_binding:Chat_response.Root_binding.t
   -> ?runtime_policy:Chat_response.Runtime_semantics.policy
   -> ?authoring_context:
        (input:Operation_worker.Input.t
         -> (Chat_response.Authoring_materialization.t, Agent_protocol.Error.t) result)
+  -> ?agent_guidance:
+       (input:Operation_worker.Input.t
+        -> capabilities:Operation_worker.Capabilities.t
+        -> Chat_response.Agent_guidance.t)
   -> ?dispatch_tool:
        (input:Operation_worker.Input.t
         -> capabilities:Operation_worker.Capabilities.t

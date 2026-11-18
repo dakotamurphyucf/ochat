@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "namespace": "ochat.capabilities.goal-requests",
+  "modules": {
+    "Goal_requests": {
+      "implementation": "src/goal_requests.chatml",
+      "interface": "src/goal_requests.chatmli"
+    }
+  },
+  "environments": {
+    "pure": {
+      "modules": {
+        "Goal_requests": "self.Goal_requests"
+      }
+    }
+  },
+  "default_environment": "pure"
+}

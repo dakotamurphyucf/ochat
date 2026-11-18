@@ -16,7 +16,7 @@ let admit ?(before_create = ignore) actor parent after_create =
     ~attempt:parent.attempt
     ~deadline:(Some deadline)
     (fun services ->
-       services.execute ~invocation:(root parent) (fun ~dispatched:root ->
+       services.execute ~invocation:(root parent) (fun ~dispatched:root ~capabilities:_ ->
          let invocation =
            I.create
              { root.context with
@@ -27,37 +27,39 @@ let admit ?(before_create = ignore) actor parent after_create =
              }
            |> protocol_ok
          in
-         services.moderator_execute ~invocation (fun ~dispatched ~commit ->
-           let owner = J.Invocation dispatched.context.id in
-           before_create ();
-           let receipt, subscription =
-             A.create_script_subscription
-               actor
-               ~owner
-               ~source:Setup.source
-               ~kind:"elapsed"
-               ~lifetime_ms:1000
-               ~wake:No_wake
-               ~completion_schema:(Some (`Object [ "type", `String "string" ]))
-             |> protocol_ok
-           in
-           captured := Some subscription;
-           after_create ();
-           A.select_subscription_mutations
-             actor
-             ~owner
-             ~source:Setup.source
-             ~receipts:[ receipt ]
-           |> protocol_ok;
-           let resolved =
-             I.resolve
-               dispatched
-               ~session_id
-               ~generation:0
-               (Pending (Subscription subscription.context.id, `String "accepted"))
-             |> protocol_ok
-           in
-           commit ~resolved ~snapshot:Setup.after)
+         services.moderator_execute
+           ~invocation
+           (fun ~dispatched ~capabilities:_ ~commit ->
+              let owner = J.Invocation dispatched.context.id in
+              before_create ();
+              let receipt, subscription =
+                A.create_script_subscription
+                  actor
+                  ~owner
+                  ~source:Setup.source
+                  ~kind:"elapsed"
+                  ~lifetime_ms:1000
+                  ~wake:No_wake
+                  ~completion_schema:(Some (`Object [ "type", `String "string" ]))
+                |> protocol_ok
+              in
+              captured := Some subscription;
+              after_create ();
+              A.select_subscription_mutations
+                actor
+                ~owner
+                ~source:Setup.source
+                ~receipts:[ receipt ]
+              |> protocol_ok;
+              let resolved =
+                I.resolve
+                  dispatched
+                  ~session_id
+                  ~generation:0
+                  (Pending (Subscription subscription.context.id, `String "accepted"))
+                |> protocol_ok
+              in
+              commit ~resolved ~snapshot:Setup.after)
          |> Result.map ~f:(fun () -> I.Complete `Null)))
   |> protocol_ok
   |> ignore;
@@ -315,7 +317,14 @@ let%expect_test
          A.with_current_idle_queued_moderator_event_tools
            actor
            ~snapshot:(fun () -> Ok queued)
-           (fun ~executing:_ ~retirement_reason ~event:_ ~execute:_ ~commit ->
+           (fun ~executing:_
+             ~policy_caller:_
+             ~model_jobs:_
+             ~allocate_inference:_
+             ~retirement_reason
+             ~event:_
+             ~execute:_
+             ~commit ->
               reason := retirement_reason;
               commit
                 ~snapshot:Setup.after

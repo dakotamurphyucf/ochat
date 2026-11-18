@@ -103,8 +103,9 @@ let receipt ?(output = []) ?(revision = 0L) ?(tokens = 3L) ~scope ~accounting_id
   |> ok
 ;;
 
-let context ?(prepared_request = Fn.id) run =
+let context ?(prepared_request = Fn.id) ?(supports_request_guidance = false) run =
   Runtime.Adapter.create
+    ~supports_request_guidance
     ~preflight_history:(fun ~target:_ _ -> Ok ())
     ~id:"synthetic"
     ~limits:Runtime.Limits.default
