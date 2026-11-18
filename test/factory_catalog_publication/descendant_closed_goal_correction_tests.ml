@@ -292,6 +292,7 @@ let%expect_test "closed Goal retains corrected descendant usage through physical
          |> Agent_store.Data_root.path
          |> Filename.dirname
        in
+       let parent_before_reopen = state parent in
        let replayed = ref 0 in
        let policy =
          inference_policy
@@ -305,8 +306,11 @@ let%expect_test "closed Goal retains corrected descendant usage through physical
            Registry.load (Daemon.registry recovered) parent_id |> protocol_ok
          in
          let child = Registry.load (Daemon.registry recovered) child_id |> protocol_ok in
-         within (fun () -> Actor.with_moderator_checkpoint parent.actor (fun () -> Ok ()))
-         |> protocol_ok;
+         (* A newly recovered Session_resume can enter after an idle checkpoint.
+            Join its durable ACK before testing the duplicate's full-state equality. *)
+         within (fun () ->
+           Retry_rotation_tests.await_recovered parent parent_before_reopen)
+         |> ignore;
          within (fun () -> Actor.with_moderator_checkpoint child.actor (fun () -> Ok ()))
          |> protocol_ok;
          Evidence.check evidence ~parent ~child ~expected:11L;
