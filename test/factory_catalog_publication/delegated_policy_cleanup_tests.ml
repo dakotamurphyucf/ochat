@@ -312,7 +312,8 @@ type tree =
   ; model_calls : int ref
   ; before_upper : A.Session_state.t
   ; release : unit -> unit
-  ; next_candidate : unit Eio.Promise.t
+  ; join_forwarding_callback : unit -> unit
+  ; await_next_candidate : unit -> A.Session_state.t
   ; continue_candidate : unit -> unit
   ; file_reads : int String.Table.t
   }
@@ -324,6 +325,7 @@ let with_tree ?(scenario = Scenario.Cleanup) f =
   let leaf_emitted = ref false in
   let model_calls = ref 0 in
   let candidate = ref 0 in
+  let candidate_leaf = ref None in
   let file_reads = String.Table.create () in
   let next_candidate, enter_candidate = Eio.Promise.create () in
   let candidate_released, release_candidate = Eio.Promise.create () in
@@ -389,7 +391,10 @@ let with_tree ?(scenario = Scenario.Cleanup) f =
              Warm_vector.response ~id:"593-vector-first" Warm_vector.original
            | 1 ->
              Int.incr candidate;
-             Eio.Promise.resolve enter_candidate ();
+             (* Capture the leaf before the second provider returns its response.
+                The previous invocation must already be Published. *)
+             let leaf = Option.value_exn !candidate_leaf in
+             Eio.Promise.resolve enter_candidate (state leaf);
              Eio.Promise.await candidate_released;
              Warm_vector.response ~id:"593-vector-second" Warm_vector.rejected
            | _ -> completed_response "593 actual vector leaf completed both candidates")
@@ -403,10 +408,9 @@ let with_tree ?(scenario = Scenario.Cleanup) f =
               (`Object [ "root", `String "data"; "file", `String "597-effect.txt" ]))))
   in
   Birth.with_native_goal_child
-    ~timeout:
-      (match scenario with
-       | Cleanup -> 90.
-       | Completed_vector -> 180.)
+  (* The enclosing watchdog covers native birth, the controlled correction
+       hold and settlement. Their individual deadlines identify a stalled phase. *)
+    ~timeout:180.
     ~wrap_env:(fun env ->
       let env = Root_read.wrap read env in
       match scenario with
@@ -474,6 +478,7 @@ let with_tree ?(scenario = Scenario.Cleanup) f =
                 |> protocol_ok
               in
               let leaf = Registry.find (Daemon.registry daemon) id |> Option.value_exn in
+              candidate_leaf := Some leaf;
               let born = state leaf in
               let reference = Option.value_exn born.spec.delegation in
               let actual =
@@ -497,11 +502,36 @@ let with_tree ?(scenario = Scenario.Cleanup) f =
                 Direct.start_child daemon leaf);
               let before_upper = Model.checkpoint upper in
               let before_middle = Model.checkpoint middle in
+              let join_forwarding_callback () =
+                within env "join actual forwarding callback after nested Model" (fun () ->
+                  Eio.Promise.await provider_exited;
+                  Model.checkpoint middle |> ignore)
+              in
+              let rec await_next_candidate () =
+                let changed = A.Durable_event_log.changed leaf.durable_events in
+                Failure.raise_if_present failure;
+                let current = state leaf in
+                match Eio.Promise.peek next_candidate with
+                | Some at_provider -> at_provider
+                | None when Option.is_none current.active_operation ->
+                  raise_s
+                    [%sexp
+                      "actual leaf Run ended before the second provider candidate"
+                    , (current.run_state : A.Run_state.t option)]
+                | None ->
+                  Eio.Fiber.any
+                    [ (fun () -> ignore (Eio.Promise.await next_candidate))
+                    ; (fun () -> Eio.Promise.await changed)
+                    ; (fun () -> Failure.await failure)
+                    ];
+                  await_next_candidate ()
+              in
               protect_cleanup
                 ~finally:(fun () ->
                   read.selected <- None;
                   release ();
                   continue_candidate ();
+                  if Eio.Promise.is_resolved entered then join_forwarding_callback ();
                   within env "join actual leaf after policy provider release" (fun () ->
                     await_leaf_quiet leaf |> ignore);
                   within env "join actual middle policy checkpoint" (fun () ->
@@ -567,7 +597,8 @@ let with_tree ?(scenario = Scenario.Cleanup) f =
                      ; model_calls
                      ; before_upper
                      ; release
-                     ; next_candidate
+                     ; join_forwarding_callback
+                     ; await_next_candidate
                      ; continue_candidate
                      ; file_reads
                      }
@@ -905,9 +936,13 @@ let%expect_test "warm Owned vector commits two rewrites before a later root reje
               (Cause.Goal_target.owner (PC.Choice.target choice)))));
     [%test_eq: int] 0 (file_reads Warm_vector.final);
     tree.release ();
-    within env "first candidate published before the second provider candidate" (fun () ->
-      Eio.Promise.await tree.next_candidate);
-    let leaf_first = state tree.leaf in
+    tree.join_forwarding_callback ();
+    let leaf_first =
+      within
+        env
+        "first candidate published before the second provider candidate"
+        tree.await_next_candidate
+    in
     let middle_first = Model.checkpoint tree.middle in
     let upper_first = Model.checkpoint tree.upper in
     let first = invocation leaf_first "593-vector-first" in

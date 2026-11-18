@@ -18,10 +18,15 @@ let first_marker = "597_FIRST_POLICY_MODEL"
 let second_marker = "597_SECOND_POLICY_MODEL_AT_CAP"
 let recipe = "597-policy-model.chatmd"
 
-let parent_prompt =
-  {|<developer>597 actual parent policy Model owner.</developer>
+let parent_prompt_with_budget wall_time =
+  let wall_time =
+    Option.value_map wall_time ~default:"" ~f:(fun seconds ->
+      sprintf " wall_time=\"%ds\"" seconds)
+  in
+  [%string
+    {|<developer>597 actual parent policy Model owner.</developer>
 <tool name="policy_recipe" agent="597-policy-model.chatmd" local/>
-<script id="parent-policy" language="chatml" kind="moderator" api="extensibility-v1">
+<script id="parent-policy" language="chatml" kind="moderator" api="extensibility-v1"%{wall_time}>
 let initial_state = 0
 let payload text = `Object([
   {key = "prompt"; value = `String("597-policy-model.chatmd")},
@@ -46,8 +51,10 @@ let on_event ctx state event = match event with
     if denied then Task.pure(state + 1) else Task.fail("second policy provider ran")
   else Task.pure(state)
 | _ -> Task.pure(state)
-</script>|}
+</script>|}]
 ;;
+
+let parent_prompt = parent_prompt_with_budget None
 
 let child_prompt =
   {|<authoring_context policy="manual"/><config model="fixture-model"/>
@@ -346,7 +353,9 @@ let%expect_test
   in
   Birth.with_native_goal_child
     ~timeout:90.
-    ~parent_prompt_text:parent_prompt
+      (* The Model attempt, remote cap rejection and checkpoint each cross
+       durable authority. This positive trajectory has an explicit budget. *)
+    ~parent_prompt_text:(parent_prompt_with_budget (Some 60))
     ~sources:
       [ recipe, "<developer>597 actual captured policy model recipe.</developer>"
       ; "597-effect.txt", "597 real inherited effect"
@@ -491,6 +500,10 @@ let%expect_test
              let final_parent, final_child =
                within env !phase (fun () ->
                  let rec await () =
+                   let parent_changed =
+                     A.Durable_event_log.changed parent.durable_events
+                   in
+                   let child_changed = A.Durable_event_log.changed child.durable_events in
                    Failure.raise_if_present failure;
                    let parent_state = state parent in
                    let child_state = state child in
@@ -531,7 +544,13 @@ let%expect_test
                      && settled
                    then checkpoint parent, checkpoint child
                    else (
-                     Eio.Fiber.yield ();
+                     (* Committed receipt statuses and the terminal child Run both
+                        publish durable events. Recheck authority after the pulse. *)
+                     Eio.Fiber.any
+                       [ (fun () -> Eio.Promise.await parent_changed)
+                       ; (fun () -> Eio.Promise.await child_changed)
+                       ; (fun () -> Failure.await failure)
+                       ];
                      await ())
                  in
                  await ())
