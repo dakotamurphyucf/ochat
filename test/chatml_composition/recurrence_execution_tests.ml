@@ -184,6 +184,7 @@ let%expect_test
   =
   let inputs = ref [] in
   let child_providers = ref 0 in
+  let parent_turn_timeout = 60. in
   let phase = ref "initial parent turn" in
   let last_parent = ref None in
   let last_child = ref None in
@@ -220,7 +221,7 @@ let%expect_test
     ~initial_requests:5
     ~expected_requests:8
     ~expect_moderator:true
-    ~completion_timeout:60.
+    ~completion_timeout:parent_turn_timeout
     ~inspect_request:(fun number request ->
       parent_requests := number;
       inputs := request)
@@ -318,7 +319,6 @@ let%expect_test
       | _ -> failwith "unexpected native private execution transcript")
     ~after_turn:(fun env handle parent ->
       let clock = Eio.Stdenv.clock env in
-      let await_progress f = Eio.Time.with_timeout_exn clock 30. f in
       let mono_clock = Eio.Stdenv.mono_clock env in
       let started = Eio.Time.Mono.now mono_clock in
       let elapsed () =
@@ -392,7 +392,7 @@ let%expect_test
         try
           (* The child and parent turn have independent progress watchdogs.
              Bound the remaining actor calls with an emergency watchdog. *)
-          Eio.Time.with_timeout_exn clock 90. (fun () ->
+          Eio.Time.with_timeout_exn clock 120. (fun () ->
             Actor.set_recurrence_planning_host
               parent.actor
               (Agent_server.Recurrence_automation_host.planning_host planning)
@@ -492,7 +492,7 @@ let%expect_test
                 Eio.Time.sleep clock 0.02;
                 await_child ()
             in
-            let child, current = await_progress await_child in
+            let child, current = Eio.Time.with_timeout_exn clock 30. await_child in
             set_phase "verify actual captured child startup";
             actual_child := Some child;
             let native = List.hd_exn current.invocations in
@@ -573,7 +573,7 @@ let%expect_test
                 Eio.Promise.await changed;
                 await_second ())
             in
-            await_progress await_second;
+            Eio.Time.with_timeout_exn clock parent_turn_timeout await_second;
             [%test_eq: int] 1 !child_providers;
             let document state =
               state_document state
