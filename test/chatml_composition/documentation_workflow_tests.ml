@@ -41,18 +41,17 @@ let workspace_files =
   @ [ "sample-project/expected-report.json", Documentation_shell_tests.expected_report ]
 ;;
 
-let send host key text =
-  Host.request
-    host
-    (Session_send_message
-       { session_id = E.session_id host
-       ; attachment_id = (E.attachment host).id
-       ; content = { kind = Plain_text; text; attachments = [] }
-       ; idempotency_key = P.Idempotency_key.of_string key |> protocol_ok
-       ; timing = Agent_protocol.Pending_input.Timing.Safe_boundary
-       })
-  |> ignore
+let send_command host key text =
+  P.Command.Session_send_message
+    { session_id = E.session_id host
+    ; attachment_id = (E.attachment host).id
+    ; content = { kind = Plain_text; text; attachments = [] }
+    ; idempotency_key = P.Idempotency_key.of_string key |> protocol_ok
+    ; timing = Agent_protocol.Pending_input.Timing.Safe_boundary
+    }
 ;;
+
+let send host key text = Host.request host (send_command host key text) |> ignore
 
 let complete = function
   | P.Invocation.Complete json -> json
