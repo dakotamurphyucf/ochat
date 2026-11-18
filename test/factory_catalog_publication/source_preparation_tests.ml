@@ -372,18 +372,31 @@ let on_event ctx state event = Task.pure(state)
         | Error error ->
           Agent_server.Session_registry.close_entry parent;
           raise_s [%sexp (error : P.Error.t)]);
+       (* Idle with an installed moderator still allows its first Session_start
+          callback. Join that checkpoint before child creation captures parent State. *)
        Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
-         let rec await_idle () =
-           let current = state parent in
+         let rec await_startup () =
+           let current =
+             A.Session_actor.with_moderator_checkpoint parent.actor (fun () ->
+               A.Session_actor.state parent.actor)
+             |> protocol_ok
+           in
+           Option.iter current.failure ~f:(fun failure ->
+             raise_s [%sexp "source fixture parent startup failed", (failure : P.Error.t)]);
            match
-             current.active_operation, current.lifecycle.observed, current.moderator
+             ( current.active_operation
+             , current.lifecycle.observed
+             , current.runtime_initialization
+             , current.moderator )
            with
-           | None, Idle, Some _ -> ()
+           | None, Idle, Ready, Some _
+             when session_start_completed_exn current
+                  && Owner.source_lane_idle parent.runtime -> ()
            | _ ->
              Eio.Fiber.yield ();
-             await_idle ()
+             await_startup ()
          in
-         await_idle ());
+         await_startup ());
        let definition =
          Owner.with_loaded_runtime parent.runtime (fun (runtime : A.Runtime_builder.t) ->
            let native = Option.value_exn runtime.native_runtime in
