@@ -1248,6 +1248,9 @@ let%expect_test "checked Goal requests example stages and admits one real Workfl
         Eio.Promise.resolve reached_u path;
         Eio.Promise.await release)
   in
+  let module Polling = Ordinary_warm_resource_tests.Polling in
+  let reopened_polling = Polling.create () in
+  let wrap_reopened_env env = Polling.wrap reopened_polling env |> wrap_env in
   let policy =
     inference_policy ~default_model:"fixture-model" ~post_stream:(fun ~sw:_ ~inputs ->
       Int.incr providers;
@@ -1448,7 +1451,7 @@ let%expect_test "checked Goal requests example stages and admits one real Workfl
               daemon
               startup
               policy
-              wrap_env
+              wrap_reopened_env
               entry
               (fun reopened loaded ->
                  let recovered = state loaded in
@@ -1544,7 +1547,11 @@ let%expect_test "checked Goal requests example stages and admits one real Workfl
                  armed := Some response_directory;
                  protect_cleanup ~finally:release_worker (fun () ->
                    let completion =
-                     Example_recovery.start reopened loaded fixture.session startup
+                     protect_cleanup ~finally:reopened_polling.resume (fun () ->
+                       (* The revised startup ACK can precede release of its runtime
+                          lease. Park the polls and join the scheduler before Start. *)
+                       Polling.park reopened_polling reopened;
+                       Example_recovery.start reopened loaded fixture.session startup)
                    in
                    assert (not (P.Id.Run.equal admission.run_id completion.run_id));
                    assert (P.Run_source.equal completion.source source);
