@@ -39,12 +39,7 @@ let to_jsonaf t =
 
 let of_jsonaf json =
   let open Result.Let_syntax in
-  let%bind () =
-    P.Extension_codec.validate_json
-      ~max_bytes:P.Run_limits.max_document_bytes
-      ~max_depth:P.Run_limits.max_depth
-      json
-  in
+  let%bind () = P.Run_limits.validate_document json in
   let%bind fields = X.object_ json in
   let%bind id = X.required fields "run_id" P.Id.Run.of_json in
   let%bind goal_id = X.required fields "goal_id" P.Id.Goal.of_json in

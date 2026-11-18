@@ -44,10 +44,7 @@ let fields = function
 let check_size t =
   let open Result.Let_syntax in
   let%bind () = P.Run_limits.check_count (List.length (entries t)) in
-  P.Extension_codec.validate_json
-    ~max_bytes:P.Run_limits.max_document_bytes
-    ~max_depth:P.Run_limits.max_depth
-    (`Object (fields t))
+  P.Run_limits.validate_document (`Object (fields t))
 ;;
 
 let add t link =
@@ -74,12 +71,7 @@ let of_field = function
   | Some `Null -> Ok Null
   | Some json ->
     let open Result.Let_syntax in
-    let%bind () =
-      P.Extension_codec.validate_json
-        ~max_bytes:P.Run_limits.max_document_bytes
-        ~max_depth:P.Run_limits.max_depth
-        json
-    in
+    let%bind () = P.Run_limits.validate_document json in
     let%bind links = P.Run_limits.list Run_goal_link.of_jsonaf json in
     let%bind map =
       match

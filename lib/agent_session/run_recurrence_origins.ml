@@ -94,12 +94,7 @@ let of_field = function
   | Some `Null -> Ok Null
   | Some json ->
     let open Result.Let_syntax in
-    let%bind () =
-      P.Extension_codec.validate_json
-        ~max_bytes:P.Run_limits.max_document_bytes
-        ~max_depth:P.Run_limits.max_depth
-        json
-    in
+    let%bind () = P.Run_limits.validate_document json in
     let%bind rows =
       P.Run_limits.list
         (fun json ->
