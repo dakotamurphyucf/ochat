@@ -67,7 +67,19 @@ let%expect_test
           Eio.Path.(Eio.Stdenv.fs env / prompt)
           source;
         let configuration =
-          config ~profile:{ permission_profile with tool_default = Ask } root root prompt
+          let base =
+            config
+              ~profile:{ permission_profile with tool_default = Ask }
+              root
+              root
+              prompt
+          in
+          (* Keep elapsed-time snapshot retention from contending with explicit
+             permission and lifecycle requests. Event-count snapshots remain enabled. *)
+          let durability =
+            { base.server.durability with snapshot_every_ms = Int.max_value }
+          in
+          { base with server = { base.server with durability } }
         in
         let phase = ref "startup" in
         let started = ref (Eio.Time.now (Eio.Stdenv.clock env)) in
