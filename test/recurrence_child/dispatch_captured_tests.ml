@@ -636,6 +636,17 @@ let assert_one_physical_attempt parent session =
 
 let%expect_test "captured occurrence spends its original Goal's final Attempt once" =
   Eio_main.run (fun env ->
+    let clock = Eio.Stdenv.clock env in
+    let phase name f =
+      let started = Eio.Time.now clock in
+      match f () with
+      | result -> result
+      | exception Eio.Time.Timeout ->
+        let elapsed_seconds = Eio.Time.now clock -. started in
+        raise_s
+          [%message
+            "captured Goal recurrence timed out" (name : string) (elapsed_seconds : float)]
+    in
     Mirage_crypto_rng_unix.use_default ();
     let root = T.temporary_root env in
     protect_cleanup
@@ -680,32 +691,38 @@ let%expect_test "captured occurrence spends its original Goal's final Attempt on
          let load daemon id =
            Agent_server.Session_registry.load (Daemon.registry daemon) id |> protocol_ok
          in
-         (* The captured dispatch crosses independent Start, Goal, import and due waits.
-            Keep their individual deadlines and bound the aggregate separately. *)
+         (* The named phase deadlines catch stalls. This outer watchdog also bounds
+            the combined body, including daemon calls outside those phases. *)
          let with_captured_dispatch =
-           with_daemon ~policy ~timeout:60. env root config ~provider_calls:providers
+           with_daemon ~policy ~timeout:180. env root config ~provider_calls:providers
          in
          let recover =
            with_captured_dispatch (fun sw daemon ->
              protect_cleanup ~finally:release_provider (fun () ->
                let parent = load daemon parent_id in
                with_controller_connection daemon (fun connection ->
-                 start_parent_settled env sw connection parent;
+                 phase "controller startup" (fun () ->
+                   start_parent_settled env sw connection parent);
                  let session = owner daemon parent in
-                 let episode = start_controller_goal env daemon parent session in
-                 let target, _ =
-                   Cold.cold_target
-                     ~catalog_target:true
-                     ~mode:Single_turn
-                     env
-                     daemon
-                     parent
-                     ~root_file:child_prompt
+                 let episode =
+                   phase "controller Goal Workflow" (fun () ->
+                     start_controller_goal env daemon parent session)
                  in
-                 assert_attempt_availability parent session Available;
-                 create_bound_recurrence parent target;
-                 assert_goal_capture parent session episode;
-                 Eio.Promise.await entered;
+                 phase "captured source and first Model provider" (fun () ->
+                   Eio.Time.with_timeout_exn clock 60. (fun () ->
+                     let target, _ =
+                       Cold.cold_target
+                         ~catalog_target:true
+                         ~mode:Single_turn
+                         env
+                         daemon
+                         parent
+                         ~root_file:child_prompt
+                     in
+                     assert_attempt_availability parent session Available;
+                     create_bound_recurrence parent target;
+                     assert_goal_capture parent session episode;
+                     Eio.Promise.await entered));
                  let execution = actual_execution parent in
                  let attempt = Execution.current_attempt execution in
                  let origin = Execution.Attempt.origin attempt |> Option.value_exn in
@@ -724,10 +741,11 @@ let%expect_test "captured occurrence spends its original Goal's final Attempt on
                  [%test_eq: int64] 0L (Totals.View.pending totals ~dimension:Attempt);
                  release_provider ();
                  let execution, terminal =
-                   await env (fun () ->
-                     let execution = actual_execution parent in
-                     Execution.Attempt.terminal (Execution.current_attempt execution)
-                     |> Option.map ~f:(fun terminal -> execution, terminal))
+                   phase "captured terminal import" (fun () ->
+                     await env (fun () ->
+                       let execution = actual_execution parent in
+                       Execution.Attempt.terminal (Execution.current_attempt execution)
+                       |> Option.map ~f:(fun terminal -> execution, terminal)))
                  in
                  assert_finished child origin terminal ~job_id ~handle;
                  let usage = assert_one_physical_attempt parent session in
@@ -758,7 +776,10 @@ let%expect_test "captured occurrence spends its original Goal's final Attempt on
                      (Goal.state (goal (state parent)))
                      (Open (Held Operator_pause)));
                  assert_attempt_availability parent session Available;
-                 let next = await_ready_nominal parent ~clock:(Eio.Stdenv.clock env) in
+                 let next =
+                   phase "next nominal under held Goal" (fun () ->
+                     await_ready_nominal parent ~clock)
+                 in
                  let occurrence = A.Recurrence_nominal.key next in
                  assert (
                    not
