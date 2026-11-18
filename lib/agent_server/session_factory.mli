@@ -720,9 +720,8 @@ val check_execution_selected_owner
 (** Pure negative association check against this Factory's actual registry,
     Actor/Owner pairing and owned Handle. [session] is expected-reference DATA,
     compared with the actual Store server and Handle session. Closing, failed
-    cleanup, foreign and displaced owners return nonretryable [Conflict].
-    An otherwise current owner with a concurrent lifecycle reservation returns
-    retryable [Conflict]. No runtime is loaded. Stopped/recovered entries remain
+    cleanup, foreign or displaced owners, and concurrent lifecycle reservations
+    return nonretryable [Conflict]. No runtime is loaded. Stopped/recovered entries remain
     valid for factual reconciliation. This grants no permission: actual source
     CPS still requires its private Factory key, and all final authority checks
     remain in the existing Actor/Runtime_owner ports. *)
@@ -878,6 +877,16 @@ val preview_recurrence_source
     registered source/activation owners but cannot serve as selected controllers.
     Ordinary genuine pre-registration creation remains a separate private path. *)
 val check_execution_selected_entry
+  :  t
+  -> Session_registry.entry
+  -> session:Agent_protocol.Session_ref.t
+  -> (unit, Agent_protocol.Error.t) result
+
+(** Initial recurrence controller selection, before the scheduler has issued a proof
+    or attempted work. A temporary lifecycle reservation on the exact, selected
+    owner returns retryable [Conflict]. Ordinary entry and execution admission
+    retain their nonretryable reservation checks. *)
+val check_recurrence_controller_selection
   :  t
   -> Session_registry.entry
   -> session:Agent_protocol.Session_ref.t

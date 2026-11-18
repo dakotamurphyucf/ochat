@@ -159,7 +159,7 @@ let on_event ctx state event = Task.pure(state)
                       (Host.controller host selected |> failure);
                     [%test_eq: P.Error.code * bool]
                       (Conflict, false)
-                      (Agent_server.Session_factory.check_registered_entry
+                      (Agent_server.Session_factory.check_recurrence_controller_selection
                          (Daemon.factory daemon)
                          selected
                          ~session:foreign

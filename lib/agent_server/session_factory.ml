@@ -14222,24 +14222,28 @@ let read_recurrence_snapshot t ~actor ~authorize ~request indexed =
 
 let owns_handle t handle = Agent_store.Session_store.owns_handle t.store handle
 
-let check_registered_entry t (entry : Session_registry.entry) ~session =
+let registered_entry_reservation t entry ~session =
   let open Result.Let_syntax in
   let reserved =
     Session_registry.lifecycle_reserved
       t.registry
       (Agent_protocol.Session_ref.session_id session)
   in
-  (* The reservation lookup can yield. Check the exact owner and failed cleanup
-     afterwards, with no further yield before classifying the exclusion. *)
-  let%bind () = check_registered_owner t entry ~session in
+  (* The reservation lookup can yield. Validate the exact owner and failed
+     cleanup afterwards, before interpreting the reservation. *)
+  let%map () = check_registered_owner t entry ~session in
+  reserved
+;;
+
+let check_registered_entry t entry ~session =
+  let open Result.Let_syntax in
+  let%bind reserved = registered_entry_reservation t entry ~session in
   if reserved
   then
     Error
-      (Agent_protocol.Error.create
+      (unavailable
          Conflict
-         ~message:"recurrence entry has a concurrent lifecycle reservation"
-         ~retryable:true
-         ())
+         "recurrence entry is not this Factory's current registered owner")
   else Ok ()
 ;;
 
@@ -19367,20 +19371,37 @@ let reconcile_seed_creations t ~limits ~checkpoint =
   Session_seed_recovery.reconcile (seed_recovery t) ~limits ~checkpoint
 ;;
 
-let check_execution_selected_owner t entry ~session =
-  let open Result.Let_syntax in
-  let%bind () = check_registered_owner t entry ~session in
+let check_execution_selection t entry =
   if Session_registry.execution_selected t.registry entry
   then Ok ()
   else Error (unavailable Conflict "recurrence entry is not selected for execution")
 ;;
 
+let check_execution_selected_owner t entry ~session =
+  let open Result.Let_syntax in
+  let%bind () = check_registered_owner t entry ~session in
+  check_execution_selection t entry
+;;
+
 let check_execution_selected_entry t entry ~session =
   let open Result.Let_syntax in
   let%bind () = check_registered_entry t entry ~session in
-  if Session_registry.execution_selected t.registry entry
-  then Ok ()
-  else Error (unavailable Conflict "recurrence entry is not selected for execution")
+  check_execution_selection t entry
+;;
+
+let check_recurrence_controller_selection t entry ~session =
+  let open Result.Let_syntax in
+  let%bind reserved = registered_entry_reservation t entry ~session in
+  let%bind () = check_execution_selection t entry in
+  if reserved
+  then
+    Error
+      (Agent_protocol.Error.create
+         Conflict
+         ~message:"recurrence controller has a concurrent lifecycle reservation"
+         ~retryable:true
+         ())
+  else Ok ()
 ;;
 
 let read_recurrence_state t ~session ~actor ~authorize =
