@@ -118,9 +118,10 @@ per call and one final response, and still rejects unexpected jobs/extra work.
 Sequential quota and repair-tally checks use the existing configured daemon fixture
 with a checkpoint cadence of 1,000 events or 60 seconds. They retain per-transaction
 journal flushing, initial and shutdown snapshots, and the complete retention
-preflight before pruning. The ten-second completion deadline, exact provider counts,
-canonical state and outcome checks remain unchanged. These checks measure extension
-semantics; deterministic storage tests separately cover periodic retained-checkpoint
+preflight before pruning. The host allows ten seconds for each next scripted provider
+request or final settlement, with a finite bound set by the exact expected provider
+count. The oracle checks canonical state and outcomes after settlement. Deterministic
+storage tests separately cover periodic retained-checkpoint
 replay, changed snapshot/archive rejection and current/fallback pruning. Batched
 checks and background completion-replay checks retain their existing host defaults.
 The configured fixture uses genuine detached durable sessions; process-bound
@@ -180,7 +181,11 @@ content and retained prior assistant output on follow-up, and emits distinguisha
 answers. The submitted send/read templates must deliver both rounds to the created
 session and use the previous cursor without repeating older output. The host waits
 on actual submission receipts, stops the child through `agent_stop`, and checks
-that it reaches stopped state before teardown. Missing/unused companion files,
+that it reaches stopped state before teardown. Each parent call and the final
+stop observation has a real monotonic deadline. The native `agent_wait` retains
+its own ten-second receipt timeout inside a twenty-second parent-call limit so
+the parent has time to admit and publish the result. Deadline failures identify
+the call and its last observed state. Missing/unused companion files,
 new native file roots, foreign IDs and omitted cursors fail. All three guidance
 conditions run actual static validation and execution. This proves local persisted
 lifecycle integration, not crash/restart recovery or real-model review quality.

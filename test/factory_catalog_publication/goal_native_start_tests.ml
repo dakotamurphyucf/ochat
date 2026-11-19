@@ -443,13 +443,14 @@ type accepted_start =
   ; callback_transaction : Agent_store.Transaction.t
   ; resume_scheduler : unit -> unit
   ; advance_scheduler : float -> unit
+  ; scheduler_monotonic_now : unit -> Mtime.t
   ; selection : Actor.Goal_native_start.Selection.t
   ; session : P.Session_ref.t
   }
 
 (* Reuse the existing real controlled clocks. The small outer clock only
    observes sleep registration; it does not implement another clock model. *)
-let observed_scheduler_clocks env ~pause ~resume ~advance ~await_poll =
+let observed_scheduler_clocks env ~pause ~resume ~advance ~await_poll ~monotonic_now =
   let clocked =
     Goal_control_job_tests.with_controlled_due_clocks env ~pause ~resume ~advance
   in
@@ -489,6 +490,7 @@ let observed_scheduler_clocks env ~pause ~resume ~advance ~await_poll =
             await ())
         in
         await ());
+  monotonic_now := Clock.now;
   let mono_clock = Eio.Resource.T ((), Eio.Time.Pi.clock (module Clock)) in
   object
     method clock = clocked#clock
@@ -536,11 +538,13 @@ let with_accepted_start
   let resume = ref (fun () -> ()) in
   let advance = ref (fun _ -> failwith "scheduler clock not installed") in
   let await_poll = ref (fun () -> failwith "scheduler clock not installed") in
+  let monotonic_now = ref (fun () -> failwith "scheduler clock not installed") in
   Creation_tests.with_daemon
     ?test_root
     ?configure
     ~wrap_env:(fun env ->
-      observed_scheduler_clocks env ~pause ~resume ~advance ~await_poll |> wrap_env)
+      observed_scheduler_clocks env ~pause ~resume ~advance ~await_poll ~monotonic_now
+      |> wrap_env)
     ~prompt_text:(prompt ~recurrence ~later_callback ~v1)
     ?workspace_prompt:startup.workspace_prompt
     ~workspace_project_roots:startup.workspace_project_roots
@@ -715,6 +719,7 @@ let with_accepted_start
                   ; callback_transaction
                   ; resume_scheduler = !resume
                   ; advance_scheduler = !advance
+                  ; scheduler_monotonic_now = !monotonic_now
                   ; selection
                   ; session
                   })
@@ -776,6 +781,7 @@ let run ?(recurrence = false) ~v1 () =
           ; callback_transaction
           ; resume_scheduler = _
           ; advance_scheduler = _
+          ; scheduler_monotonic_now = _
           ; selection
           ; session = _
           }

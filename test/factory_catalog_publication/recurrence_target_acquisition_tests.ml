@@ -401,7 +401,7 @@ let%expect_test
        assert_unselected registry target;
        let proposal = Host.preview_target_source selected |> protocol_ok in
        with_planner env sw reopened controller (fun () ->
-         let occurrence = create_occurrence reopened controller target in
+         let occurrence = create_occurrence env reopened controller target in
          assert (
            P.Run_source.equal
              (Intent.source occurrence.intent)
@@ -747,7 +747,7 @@ let selection_cut cut =
          protect_cleanup ~finally:cleanup_attachment (fun () ->
            let proposal = Host.preview_target_source selected |> protocol_ok in
            with_planner env sw daemon controller (fun () ->
-             let occurrence = create_occurrence daemon controller target in
+             let occurrence = create_occurrence env daemon controller target in
              let previous =
                Attempt.create
                  ~intent:occurrence.intent

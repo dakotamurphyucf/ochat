@@ -219,7 +219,8 @@ type occurrence =
   ; previous : Attempt.t
   }
 
-let create_occurrence daemon controller target_entry =
+let create_occurrence env daemon controller target_entry =
+  assert (Registry.execution_selected (Daemon.registry daemon) controller);
   let current = state target_entry in
   let session =
     P.Session_ref.create
@@ -252,10 +253,29 @@ let create_occurrence daemon controller target_entry =
     "539-create"
     (Create (recurrence_id, { schedule; target; policy = A.Recurrence_policy.default }));
   command controller "539-enable" (Enable recurrence_id);
-  Actor.sweep_recurrences controller.actor |> protocol_ok;
-  let recurrence = recurrence controller in
-  let frontier = Entry.frontier recurrence |> protocol_ok in
-  let nominal = Frontier.ready frontier |> List.hd_exn in
+  (* The daemon owns the due sweep. Wait for its committed frontier before
+     freezing the request basis for the manual service call. *)
+  let recurrence, frontier, nominal =
+    let clock = Eio.Stdenv.clock env in
+    Eio.Time.with_timeout_exn clock 10. (fun () ->
+      let rec await_ready () =
+        let entry = recurrence controller in
+        let definition = A.Recurrence_definition.key (Entry.current entry) in
+        let frontier = Entry.frontier entry |> protocol_ok in
+        match
+          List.find (Frontier.ready frontier) ~f:(fun nominal ->
+            A.Recurrence_identity.Definition.equal
+              (A.Recurrence_identity.Occurrence.definition
+                 (A.Recurrence_nominal.key nominal))
+              definition)
+        with
+        | Some nominal -> entry, frontier, nominal
+        | None ->
+          Eio.Time.sleep clock 0.01;
+          await_ready ()
+      in
+      await_ready ())
+  in
   let nominal_json =
     Frontier.to_document frontier
     |> document_ok

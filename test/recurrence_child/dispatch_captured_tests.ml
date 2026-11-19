@@ -440,6 +440,8 @@ let start_controller_goal env daemon parent session =
     else None)
 ;;
 
+let captured_dispatch_watchdog_ms = 180_000
+
 let create_bound_recurrence parent target =
   let period =
     Recurrence_rules.Rule.Period.create_ms 5_000L
@@ -453,6 +455,19 @@ let create_bound_recurrence parent target =
       ; first_due = P.Timestamp.to_time_ns (P.Timestamp.now ())
       }
   in
+  let policy =
+    let module Policy = A.Recurrence_policy in
+    let default = Policy.default in
+    (* Grace starts at the nominal, before the controller records execution.
+       Keep the accounting scenario eligible through its existing body watchdog. *)
+    Policy.create
+      ~misfire:(Policy.misfire default)
+      ~grace_ms:(Int64.of_int captured_dispatch_watchdog_ms)
+      ~max_pending:(Policy.max_pending default)
+      ~max_history:(Policy.max_history default)
+      ~max_calendar_steps:(Policy.max_calendar_steps default)
+    |> protocol_ok
+  in
   let goal_owner =
     A.Recurrence_command.Goal_owner_request.create
       ~goal_id
@@ -463,7 +478,7 @@ let create_bound_recurrence parent target =
     ~goal_owner
     parent
     "555-create-bound-recurrence"
-    (Create (recurrence_id, { schedule; target; policy = A.Recurrence_policy.default }))
+    (Create (recurrence_id, { schedule; target; policy }))
   |> protocol_ok
   |> ignore;
   command parent "555-enable-bound-recurrence" (Enable recurrence_id) |> ignore
@@ -696,7 +711,8 @@ let%expect_test "captured occurrence spends its original Goal's final Attempt on
          (* The named phase deadlines catch stalls. This outer watchdog also bounds
             the combined body, including daemon calls outside those phases. *)
          let with_captured_dispatch =
-           with_daemon ~policy ~timeout:180. env root config ~provider_calls:providers
+           let timeout = Float.of_int captured_dispatch_watchdog_ms /. 1_000. in
+           with_daemon ~policy ~timeout env root config ~provider_calls:providers
          in
          let recover =
            with_captured_dispatch (fun sw daemon ->

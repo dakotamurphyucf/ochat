@@ -130,7 +130,7 @@ let exercise selection =
                 (Operator_authorization.principal target_actor).scopes
                 (P.Scope.Set.of_list [ Send_messages; View_session_transcript ]));
             unchanged ();
-            let occurrence = create_occurrence daemon controller target in
+            let occurrence = create_occurrence env daemon controller target in
             (* Freeze the first request from the genuine configured original, not
            the fixture operator who authored the administrative recurrence. *)
             let previous =

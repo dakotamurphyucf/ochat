@@ -519,7 +519,7 @@ let check_resident
   let tick () = started.advance_scheduler 0.1 in
   (* Give the fixed-delay successor a nominal after the first review while
      keeping the first occurrence within its captured grace. *)
-  started.advance_scheduler 35.1;
+  Support.advance_schedule_and_join ~clock daemon started 35.1;
   let first, first_child =
     Support.join_occurrence ~clock ~tick daemon driver parent ~slot:0L
   in
@@ -565,7 +565,7 @@ let check_resident
   [%test_eq: int] 0 scheduled.delivery_count;
   [%test_eq: int] 2 (List.length (root_receipts review admitted Action));
   [%test_eq: int] 0 (List.length (root_receipts review admitted Terminal));
-  started.advance_scheduler 6.1;
+  Support.advance_schedule_and_join ~clock daemon started 6.1;
   let second, second_child =
     Support.join_occurrence ~clock ~tick daemon driver parent ~slot:1L
   in

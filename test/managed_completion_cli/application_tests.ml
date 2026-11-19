@@ -316,12 +316,20 @@ let%test_unit
        in
        assert (String.is_substring imported.chatmd ~substring:"explicit edited transcript");
        Eio.Path.unlink Eio.Path.(Eio.Stdenv.fs env / root / "definition.chatmd");
+       (* Observe a stopped session so recovery cannot advance the session
+          between the terminal lookup and its exact-revision export. *)
+       stop session.id;
        let observed =
          run ~session_id:session.id ~run_id:admission.run_id Workflow "retained.chatmd"
          |> protocol_ok
        in
        [%test_eq: string] imported.chatmd observed.chatmd;
-       assert (P.Id.Session.equal (selected observed).id session.id);
+       let retained = selected observed in
+       assert (P.Id.Session.equal retained.id session.id);
+       assert (P.Session.equal_desired_state retained.desired_state Stopped);
+       (match retained.observed_state with
+        | Stopped -> ()
+        | _ -> assert false);
        (match observed.evidence with
         | Managed_run actual -> assert (P.Run_receipt.equal actual.admission admission)
         | Foreground _ -> assert false);
@@ -336,7 +344,6 @@ let%test_unit
        assert (Result.is_error rejected);
        assert (
          not (Eio.Path.is_file Eio.Path.(Eio.Stdenv.fs env / root / "definition.chatmd")));
-       stop session.id;
        let submitted =
          run
            ~session_id:session.id

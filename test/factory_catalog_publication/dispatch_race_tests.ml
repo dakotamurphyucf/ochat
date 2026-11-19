@@ -105,7 +105,7 @@ let with_driver ?(other_targets = []) daemon sw controllers target f =
 
 let occurrence daemon env sw controller target =
   with_planner env sw daemon controller (fun () ->
-    create_occurrence daemon controller target)
+    create_occurrence env daemon controller target)
 ;;
 
 let await env f =

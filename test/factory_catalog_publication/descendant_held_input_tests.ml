@@ -356,7 +356,7 @@ let successful consumer =
            receipt
          | Recurrence ->
            with_planner env sw daemon parent (fun () ->
-             let occurrence = create_occurrence daemon parent child in
+             let occurrence = create_occurrence env daemon parent child in
              let service = Recurrence_service_tests.service daemon in
              let call () =
                Recurrence_service.activate
@@ -461,7 +461,7 @@ let%expect_test
        within env "actual scripted child startup" (fun () ->
          Direct.start_child daemon child);
        with_planner env sw daemon parent (fun () ->
-         let occurrence = create_occurrence daemon parent child in
+         let occurrence = create_occurrence env daemon parent child in
          let initial = Direct.marks child in
          [%test_eq: int64] 0L initial.turn;
          [%test_eq: int64] 0L initial.attempt;

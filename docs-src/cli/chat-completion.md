@@ -93,8 +93,11 @@ original receipt and terminal without starting another run or reloading source.
 Once attached, the command can follow updates from a recovered moderator's resume
 callback within the selected session, generation, and prompt revision. A changed
 generation or prompt revision conflicts. The command exports canonical history
-at the exact revision reported by its terminal lookup. Unavailable evidence does
-not authorize rerunning the original run.
+at the exact revision reported by its terminal lookup. If the session changes
+before export and that revision has no retained archive, the command reports a
+conflict. Once the session settles, repeat the observation with the same
+`-session-id`, `-run-id` and `-run-mode` to request a fresh transcript for
+the original run.
 
 ## Rebuild or import deliberately
 

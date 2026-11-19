@@ -390,6 +390,23 @@ type occurrence =
   ; reference : Delegations.Reference.t
   }
 
+let advance_schedule_and_join ~clock daemon (started : Native.accepted_start) seconds =
+  let await_idle () =
+    await ~clock ~phase:"joining the daemon schedule pass" (fun () ->
+      match Daemon.For_testing.schedule_scheduler_wait_deadline daemon with
+      | Some deadline when Mtime.compare deadline (started.scheduler_monotonic_now ()) > 0
+        ->
+        Daemon.For_testing.await_schedule_scheduler_idle daemon;
+        Some ()
+      | Some _ | None -> None)
+  in
+  (* Join the preceding pass before advancing the paused clock, then wait for
+     the released pass to return to a future sleep and finish its workers. *)
+  await_idle ();
+  started.advance_scheduler seconds;
+  await_idle ()
+;;
+
 let join_occurrence ~clock ~tick daemon driver (parent : Registry.entry) ~slot =
   let selected, origin =
     await
@@ -403,7 +420,6 @@ let join_occurrence ~clock ~tick daemon driver (parent : Registry.entry) ~slot =
              ( selected
              , Option.value_exn (Exec.Attempt.origin (Exec.current_attempt selected)) )
          | Some _ | None ->
-           drive (Actor.sweep_recurrences parent.actor);
            drive (Driver.process_entry driver parent);
            None)
   in
