@@ -102,7 +102,7 @@ let%expect_test "public self input retains its exact admission across replay and
   =
   with_recoverable_fixture (fun env sw root daemon policy entry runtime _ counters ->
     with_planner env sw daemon entry (fun () ->
-      let occurrence = create_occurrence daemon entry entry in
+      let occurrence = create_occurrence env daemon entry entry in
       let startup = (state entry).moderator_executions in
       let ports = !(counters.inference_ports) in
       let public = service daemon in
@@ -306,7 +306,7 @@ let%expect_test "public self input retains its exact admission across replay and
 let%expect_test "public explicit retry consumes real joined absence once" =
   with_fixture (fun env sw daemon entry _runtime _ counters ->
     with_planner env sw daemon entry (fun () ->
-      let occurrence = create_occurrence daemon entry entry in
+      let occurrence = create_occurrence env daemon entry entry in
       let absence = initial_absence env daemon entry occurrence in
       let request = next_request entry occurrence in
       let sha =
@@ -372,7 +372,7 @@ let%expect_test "public explicit retry consumes real joined absence once" =
 let%expect_test "public policy revocation after reciprocal ACK preserves known admission" =
   with_fixture (fun env sw daemon entry _runtime _ counters ->
     with_planner env sw daemon entry (fun () ->
-      let occurrence = create_occurrence daemon entry entry in
+      let occurrence = create_occurrence env daemon entry entry in
       let target_live = ref true
       and revoked = ref false in
       let controller_actor =

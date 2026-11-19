@@ -88,7 +88,7 @@ let%expect_test "native target disclosure repeats actual host policy after index
          Source.with_loaded_entry daemon (fun ~entry:controller ~runtime ~revision:_ ->
            Source.with_loaded_entry daemon (fun ~entry:target ~runtime:_ ~revision:_ ->
              with_planner env sw daemon controller (fun () ->
-               let occurrence = create_occurrence daemon controller target in
+               let occurrence = create_occurrence env daemon controller target in
                ignore
                  (initial_absence ~controller env daemon target occurrence
                   : Actor.No_effects_observation.t);

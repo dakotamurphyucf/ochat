@@ -55,7 +55,7 @@ let run_activation (source_path : Source_path.t) =
                | Internal_event -> false)
            in
            let startup = startup_receipts (state entry) in
-           let occurrence = create_occurrence daemon entry entry in
+           let occurrence = create_occurrence env daemon entry entry in
            let source_failure =
              match source_path with
              | Direct -> None
@@ -336,7 +336,7 @@ let%expect_test "failed source resumes the same joined retry before actual activ
 let%expect_test "public pending retry preparation cannot enter ordinary construction" =
   with_fixture (fun env sw daemon entry _runtime _revision counters ->
     with_planner env sw daemon entry (fun () ->
-      let occurrence = create_occurrence daemon entry entry in
+      let occurrence = create_occurrence env daemon entry entry in
       let observation = initial_absence env daemon entry occurrence in
       let before = state entry in
       let frames = Existing.frames env entry in

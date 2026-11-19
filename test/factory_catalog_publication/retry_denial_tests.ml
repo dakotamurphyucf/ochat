@@ -29,13 +29,13 @@ let%expect_test
   with_fixture ~max_root_agents:2 (fun env sw daemon entry _runtime _revision counters ->
     let occurrence, observation =
       with_planner env sw daemon entry (fun () ->
-        let occurrence = create_occurrence daemon entry entry in
+        let occurrence = create_occurrence env daemon entry entry in
         occurrence, initial_absence env daemon entry occurrence)
     in
     Source.with_loaded_entry daemon (fun ~entry:foreign ~runtime:_ ~revision:_ ->
       let foreign_occurrence =
         with_planner env sw daemon foreign (fun () ->
-          create_occurrence daemon foreign foreign)
+          create_occurrence env daemon foreign foreign)
       in
       let request = next_request entry occurrence in
       let callbacks = ref 0 in
@@ -110,7 +110,7 @@ let%expect_test
   =
   with_fixture (fun env sw daemon entry _runtime _revision counters ->
     with_planner env sw daemon entry (fun () ->
-      let occurrence = create_occurrence daemon entry entry in
+      let occurrence = create_occurrence env daemon entry entry in
       let observation = initial_absence env daemon entry occurrence in
       let request = next_request entry occurrence in
       let next_principal = principal_with_id "pri_539_fresh_retry_caller" in

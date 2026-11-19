@@ -17,7 +17,7 @@ let with_distinct_target ?wrap_env ?post_stream f =
                 (state controller).identity.session_id
                 (state target).identity.session_id));
          with_planner env sw daemon controller (fun () ->
-           let occurrence = create_occurrence daemon controller target in
+           let occurrence = create_occurrence env daemon controller target in
            let observation = initial_absence ~controller env daemon target occurrence in
            f
              env

@@ -176,13 +176,13 @@ let with_saved_sessions env sw daemon f =
     Source.with_loaded_entry daemon (fun ~entry:old_target ~runtime:_ ~revision:_ ->
       let old_occurrence =
         with_planner env sw daemon historical (fun () ->
-          create_occurrence daemon historical old_target)
+          create_occurrence env daemon historical old_target)
       in
       let no_effects = selected_failure daemon historical old_target old_occurrence in
       Source.with_loaded_entry daemon (fun ~entry:current ~runtime:_ ~revision:_ ->
         let current_occurrence =
           with_planner env sw daemon current (fun () ->
-            create_occurrence daemon current current)
+            create_occurrence env daemon current current)
         in
         let historical_id = (state historical).identity.session_id in
         let current_before = state current in
