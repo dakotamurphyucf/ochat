@@ -27,10 +27,12 @@ let child_id = P.Id.Recurrence.of_string "rec_native_private_execution" |> proto
 let existing_id = P.Id.Recurrence.of_string "rec_native_private_existing" |> protocol_ok
 let private_text = "actual native recurrence private resource"
 
+(* Startup includes the real file read and its durable checkpoints. Give that
+   callback its own budget so the test can exercise the captured workflow under load. *)
 let worker =
   {|<developer>RECURRENCE-NATIVE-PRIVATE-WORKER.</developer>
 <tool name="read_file"><read id="private" path="${workspace}"/></tool>
-<script id="worker" language="chatml" kind="moderator" api="extensibility-v1">
+<script id="worker" language="chatml" kind="moderator" api="extensibility-v1" wall_time="20s">
 let initial_state = 0
 let on_event ctx state event = match event with
 | `Session_start ->
