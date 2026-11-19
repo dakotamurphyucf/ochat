@@ -27,6 +27,13 @@ let state daemon id =
   A.state entry.actor |> protocol_ok
 ;;
 
+let retained_state daemon id =
+  (* Maintenance may evict a stopped child. Keep the exact actor alive for the
+     mailbox read, waiting for an admitted eviction before recovering if needed. *)
+  R.with_loaded_read (D.registry daemon) id (fun entry -> A.state entry.actor)
+  |> protocol_ok
+;;
+
 let function_call ~id name arguments =
   let open Res.Response_stream in
   [ Output_item_added
@@ -257,11 +264,12 @@ let%expect_test
           Failure_diagnostic.create ~now:(fun () -> Eio.Time.now (Eio.Stdenv.clock env))
         in
         let invocation_ordinal = ref 0 in
-        let state daemon id =
-          let current = state daemon id in
+        let observe current =
           Failure_diagnostic.observe diagnostic current;
           current
         in
+        let state daemon id = observe (state daemon id) in
+        let retained_state daemon id = observe (retained_state daemon id) in
         (* Each required operation has its own progress deadline. The workflow
            has many independent invocations; their accumulated CPU time is not
            a bound on any single invocation's liveness. *)
@@ -444,27 +452,37 @@ let%expect_test
           [%test_eq: string] "completed" (text result "status");
           field result "session_id" |> P.Id.Session.of_json |> protocol_ok
         in
+        let assert_counter (current : Agent_session.Session_state.t) expected =
+          let values =
+            List.filter_map current.invocations ~f:(fun invocation ->
+              match invocation.status with
+              | Published (Complete (`String value))
+                when String.is_prefix value ~prefix:"count-" -> Some value
+              | _ -> None)
+          in
+          assert (List.mem values expected ~equal:String.equal);
+          let reads =
+            List.filter_map current.invocations ~f:(fun invocation ->
+              match invocation.status with
+              | (Published (Complete value) | Resolved (Complete value))
+                when String.is_substring
+                       (Jsonaf.to_string value)
+                       ~substring:"private-approved-content" -> Some value
+              | _ -> None)
+          in
+          assert (not (List.is_empty reads))
+        in
         let check_counter daemon child expected =
           run_phase ("check private counter " ^ expected) (fun () ->
-            let current = state daemon child in
-            let values =
-              List.filter_map current.invocations ~f:(fun invocation ->
-                match invocation.status with
-                | Published (Complete (`String value))
-                  when String.is_prefix value ~prefix:"count-" -> Some value
-                | _ -> None)
-            in
-            assert (List.mem values expected ~equal:String.equal);
-            let reads =
-              List.filter_map current.invocations ~f:(fun invocation ->
-                match invocation.status with
-                | (Published (Complete value) | Resolved (Complete value))
-                  when String.is_substring
-                         (Jsonaf.to_string value)
-                         ~substring:"private-approved-content" -> Some value
-                | _ -> None)
-            in
-            assert (not (List.is_empty reads)))
+            assert_counter (state daemon child) expected)
+        in
+        let check_one_off daemon child =
+          let stopped = retained_state daemon child in
+          (match stopped.lifecycle.desired, stopped.lifecycle.observed with
+           | Stopped, Stopped -> ()
+           | _ -> failwith "one-off child cleanup did not finish");
+          assert (Option.is_none stopped.active_operation);
+          assert_counter stopped "count-1"
         in
         let one_off_children = ref [] in
         let one_off sw daemon client caller =
@@ -512,12 +530,7 @@ let%expect_test
                 | _ -> failwith "one-off owner was not published")
              | _ -> failwith "one-off received reusable lifetime");
             let child = record.admission.child_session_id in
-            let stopped = state daemon child in
-            (match stopped.lifecycle.desired, stopped.lifecycle.observed with
-             | Stopped, Stopped -> ()
-             | _ -> failwith "one-off child cleanup did not finish");
-            assert (Option.is_none stopped.active_operation);
-            check_counter daemon child "count-1";
+            check_one_off daemon child;
             denied
               sw
               daemon
@@ -689,7 +702,7 @@ let%expect_test
               List.iter owned_records ~f:(fun record ->
                 match record.admission.lifetime with
                 | Invocation_owned _ ->
-                  let current = state daemon record.admission.child_session_id in
+                  let current = retained_state daemon record.admission.child_session_id in
                   (match current.lifecycle.desired, current.lifecycle.observed with
                    | Stopped, Stopped -> ()
                    | _ -> failwith "cancellation left a one-off child running")
@@ -720,15 +733,13 @@ let%expect_test
           check_counter daemon grandchild "count-2";
           List.iter !one_off_children ~f:(fun id ->
             run_phase "verify one-off remains stopped after restart" (fun () ->
-              let stopped = state daemon id in
-              [%test_eq: P.Session.desired_state] Stopped stopped.lifecycle.desired;
-              check_counter daemon id "count-1"));
+              check_one_off daemon id));
           run_phase "authored Ready and Pending cold construction" (fun () ->
             (* Reuse the exact native-created child after its real restart and
                pinned private-tool checks. A stopped child admits no concurrent
                idle lifecycle callback while physical construction is observed. *)
-            let entry = R.load (D.registry daemon) child |> protocol_ok in
             let handle = invocation_handle sw client child in
+            let entry = R.load (D.registry daemon) child |> protocol_ok in
             H.stop handle ~mode:Graceful |> protocol_ok |> ignore;
             Owner.unload_and_wait entry.runtime |> protocol_ok;
             let before = A.state entry.actor |> protocol_ok in
