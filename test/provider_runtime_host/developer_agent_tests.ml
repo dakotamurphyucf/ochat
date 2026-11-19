@@ -3098,57 +3098,86 @@ let%test_unit "selected ordinary Agent Tool runs through its registered child so
        in
        let mono_clock = Eio.Stdenv.mono_clock env in
        let started = Eio.Time.Mono.now mono_clock in
-       let elapsed () =
-         Mtime.span started (Eio.Time.Mono.now mono_clock)
+       let elapsed_at now =
+         Mtime.span started now
          |> Mtime.Span.to_float_ns
          |> fun nanoseconds -> nanoseconds /. 1e9
        in
-       let phase = ref Phase.Bootstrap in
+       let elapsed () = elapsed_at (Eio.Time.Mono.now mono_clock) in
+       let phase = ref (Phase.Bootstrap, started) in
        let phases = ref [ Phase.Bootstrap, 0. ] in
        let scheduler_barrier = ref None in
        let timeout_reported = ref false in
-       let mark next =
-         phase := next;
-         phases := List.take ((next, elapsed ()) :: !phases) 32
+       let report_timeout ~wait seconds =
+         if not !timeout_reported
+         then (
+           timeout_reported := true;
+           (* Only static fixture labels, timings, counts and flags are reported.
+              Reporting must not replace the original timeout/backtrace. *)
+           try
+             eprintf
+               "%s\n%!"
+               (Sexp.to_string_hum
+                  [%sexp
+                    "selected Agent Tool fixture timeout"
+                  , (wait : string)
+                  , (seconds : float)
+                  , (fst !phase : Phase.t)
+                  , (elapsed () : float)
+                  , (List.rev !phases : (Phase.t * float) list)
+                  , (!scheduler_barrier : (Phase.t * float * bool) option)
+                  , ("provider-requests", (!requests : int))
+                  , ("provider-bodies", (List.length !bodies : int))
+                  , ( "depth-provider-bodies"
+                    , (Option.map !depth_body_start ~f:(fun start ->
+                         List.length !bodies - start)
+                       : int option) )
+                  , ("tool-response-sent", (!sent_tool_call : bool))
+                  , ("depth-output-seen", (!depth_output_seen : bool))
+                  , ("depth-native-attempts", (List.length !limited_grand_revisions : int))
+                  , ("held-response-enabled", (!hold_grand_response : bool))
+                  , ("held-submit-waiting", (!awaiting_grand_submit : bool))])
+           with
+           | _ -> ())
        in
        let with_timeout_exn ~wait seconds f =
          try Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) seconds f with
          | Eio.Time.Timeout as exn ->
            let backtrace = Stdlib.Printexc.get_raw_backtrace () in
-           if not !timeout_reported
-           then (
-             timeout_reported := true;
-             (* Only static fixture labels, timings, counts and flags are reported.
-                Reporting must not replace the original timeout/backtrace. *)
-             try
-               eprintf
-                 "%s\n%!"
-                 (Sexp.to_string_hum
-                    [%sexp
-                      "selected Agent Tool fixture timeout"
-                    , (wait : string)
-                    , (seconds : float)
-                    , (!phase : Phase.t)
-                    , (elapsed () : float)
-                    , (List.rev !phases : (Phase.t * float) list)
-                    , (!scheduler_barrier : (Phase.t * float * bool) option)
-                    , ("provider-requests", (!requests : int))
-                    , ("provider-bodies", (List.length !bodies : int))
-                    , ( "depth-provider-bodies"
-                      , (Option.map !depth_body_start ~f:(fun start ->
-                           List.length !bodies - start)
-                         : int option) )
-                    , ("tool-response-sent", (!sent_tool_call : bool))
-                    , ("depth-output-seen", (!depth_output_seen : bool))
-                    , ( "depth-native-attempts"
-                      , (List.length !limited_grand_revisions : int) )
-                    , ("held-response-enabled", (!hold_grand_response : bool))
-                    , ("held-submit-waiting", (!awaiting_grand_submit : bool))])
-             with
-             | _ -> ());
+           report_timeout ~wait seconds;
            Stdlib.Printexc.raise_with_backtrace exn backtrace
        in
-       with_timeout_exn ~wait:"whole-test" 45. (fun () ->
+       (* The fixture runs several serial scenarios. Every one-way phase boundary
+          starts a fresh liveness budget for setup, command calls, and assertions.
+          Specific waits below retain their tighter deadlines. *)
+       let phase_timeout_seconds = 30 in
+       let phase_deadline () =
+         Mtime.add_span (snd !phase) Mtime.Span.(phase_timeout_seconds * s)
+         |> Option.value_exn
+       in
+       let check_phase_deadline now =
+         if not (Mtime.is_earlier now ~than:(phase_deadline ()))
+         then (
+           report_timeout ~wait:"phase-progress" (Float.of_int phase_timeout_seconds);
+           raise Eio.Time.Timeout)
+       in
+       let mark next =
+         let now = Eio.Time.Mono.now mono_clock in
+         check_phase_deadline now;
+         phase := next, now;
+         phases := List.take ((next, elapsed_at now) :: !phases) 32
+       in
+       let rec watch_phase_deadlines () =
+         Eio.Time.Mono.sleep_until mono_clock (phase_deadline ());
+         check_phase_deadline (Eio.Time.Mono.now mono_clock);
+         watch_phase_deadlines ()
+       in
+       let with_phase_deadlines f =
+         Eio.Fiber.first watch_phase_deadlines (fun () ->
+           f ();
+           check_phase_deadline (Eio.Time.Mono.now mono_clock))
+       in
+       with_phase_deadlines (fun () ->
          let bootstrap = create () in
          ignore (RH.setup bootstrap : P.Method_result.t);
          let reads = ref 0 in
@@ -3237,7 +3266,7 @@ let run ctx input =
          let pause_at_scheduler_wait daemon clock pause =
            pause ();
            let paused_now = Eio.Time.now clock in
-           let barrier_phase = !phase in
+           let barrier_phase = fst !phase in
            let barrier_started = elapsed () in
            scheduler_barrier := Some (barrier_phase, barrier_started, false);
            with_timeout_exn ~wait:"scheduler-barrier" 5. (fun () ->

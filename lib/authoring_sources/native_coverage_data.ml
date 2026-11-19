@@ -420,7 +420,7 @@ let implementation_sources =
   ; ( "lib/agent_server/descendant_accounting_host.ml"
     , "3baff14cf9c606e899c08f95805cc3ca9f070827b46ec531e1c230314820b0fd" )
   ; ( "lib/agent_server/session_factory.ml"
-    , "d0e58637be9c6a3b87c992a214534eb565bc6a9f46bc7b1aeda0b2c735aba22c" )
+    , "d63dce5653c3b920b2a51420bf8ff217437bfc064e6fd6ce09d46708a5016ab8" )
   ; ( "lib/agent_session/authoring_context_tool.ml"
     , "6e318b45f799b485f802dc6d5e4d8bc031721e379cc8800f6ed484d59694840d" )
   ; ( "lib/agent_session/authoring_reference_scope.ml"
@@ -625,16 +625,16 @@ let topic_contracts =
     , "1cc2b63d172178c6d22bdeee69376def6c26e8e3e4ee56a9a54671e168b49de9" )
   ; ( "one_off_v1"
     , "runtime.recurrence"
-    , "1a41d752fff95295beac7ea7f862bb8cf478c8e7355f0a14fb1b3213995137b5" )
+    , "3ec1bae20eb9312ec86f282e96b505cadbbfbd9a8eada03326c9c1f5a926e1aa" )
   ; ( "tool_v1"
     , "runtime.recurrence"
-    , "441ef9c605d2fbadcf12f75ccaa08fe9d53a92886d1b85f14fed93c2f957b41e" )
+    , "f4a39986db916b6891bfbf8d2fc1e1e89ae61b51ee783b5b22d9285e5c2f9a8d" )
   ; ( "moderator_v1"
     , "runtime.recurrence"
-    , "d6733e821259037f6f1f02ebc90f9246e06ab1eb12d6b54e1bda820ffbe4ec8f" )
+    , "04fb3591cde63f3c53252282812b8dcfb83c164417b5b6a3f6e73e8b0ab7c057" )
   ; ( "delegated_moderator_v1"
     , "runtime.recurrence"
-    , "438609f6b912102142d0bd4395cf5e37b9ea2bf4e8288bad345c16c32fe804aa" )
+    , "9caa6c7750073640259235210b396ff8ed629382d3f07dadab45e6716bdf0fed" )
   ; ( "one_off_v1"
     , "runtime.goal_metadata"
     , "44ad5546e7c97ff0a76627d5fc911a181a460f279a94fd41722793a35c7f9a06" )

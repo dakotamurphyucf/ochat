@@ -131,6 +131,35 @@ let await_job env host id =
   Option.value_exn !completed
 ;;
 
+let send_lab_message env host key =
+  let request = Agent_client.Connection.request_without_history (E.connection host) in
+  let command = Workflow.send_command host key "Perform the requested lab operation." in
+  let receipt_request =
+    P.Command.Command_receipt
+      { method_name = P.Command.method_name command
+      ; original_params = P.Command.params command
+      }
+  in
+  (* Snapshot retention can hold the session lifecycle reservation before the
+     writer is admitted. Resubmit only the identical command while its original
+     receipt is Missing. A recorded result stays authoritative. *)
+  Background_shell_tests.wait ~timeout:15. env (fun () ->
+    match request command with
+    | Ok (Session_send_message _) -> true
+    | Ok _ -> failwith "lab send returned another method"
+    | Error ({ code = Conflict; retryable = true; _ } as error) ->
+      (match request receipt_request |> protocol_ok with
+       | Command_receipt Missing -> false
+       | Command_receipt receipt ->
+         raise_s
+           [%sexp
+             "conflicted lab send has a receipt"
+           , (error : P.Error.t)
+           , (receipt : P.Command_receipt.t)]
+       | _ -> failwith "lab command receipt returned another method")
+    | Error error -> protocol_ok (Error error))
+;;
+
 let%expect_test
     "lab checks and approved staging preserve originals and change real recheck evidence"
   =
@@ -158,7 +187,7 @@ let%expect_test
     (fun env workspace host ->
        let invoke id name fields =
          queued := [ id, name, `Object fields ];
-         Workflow.send host id "Perform the requested lab operation.";
+         send_lab_message env host id;
          (* Observe the complete turn: retiring its persisted history can take more
             than five CPU seconds after the earlier lab operations. Tool and shell
             execution deadlines remain independently enforced. *)

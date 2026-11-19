@@ -192,15 +192,15 @@ let controller host entry =
               ~retryable:false
               ())
   in
-  let basis () =
-    let%bind () = current host in
-    Session_factory.check_execution_selected_entry host.factory entry ~session
+  let selection =
+    Session_factory.check_recurrence_controller_selection host.factory entry ~session
   in
+  let%bind () = current host in
+  let%bind () = selection in
   let authority_basis () =
     let%bind () = current host in
     Session_factory.check_execution_selected_owner host.factory entry ~session
   in
-  let%bind () = basis () in
   let scopes = P.Scope.[ Send_messages; View_session_transcript ] in
   let scopes =
     if grant.captured_children then P.Scope.Create_sessions :: scopes else scopes

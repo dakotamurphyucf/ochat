@@ -66,7 +66,9 @@ end
 
 (** Select only an actual already-registered entry of this Factory. Never calls
     Registry.load, Local_selection.select or ensure_loaded. A registered stopped
-    owner can provide factual reconciliation; new work still needs lower gates. *)
+    owner can provide factual reconciliation; new work still needs lower gates.
+    A lifecycle reservation on the current selected controller defers this initial
+    lookup with retryable [Conflict]. It issues no proof or execution request. *)
 val controller
   :  t
   -> Session_registry.entry

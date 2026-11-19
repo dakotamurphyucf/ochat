@@ -177,6 +177,10 @@ with a current target before resuming it. Already admitted or uncertain work
 retains its existing disposition. A busy target or temporarily unavailable host
 or target does not establish a permanent change.
 
+If maintenance temporarily reserves the controller, the execution host returns a
+retryable `Conflict`. The scheduler can check the controller again on a later
+sweep. The reservation alone leaves the recurrence enabled.
+
 ## Inspect status and retained history
 
 Status reports effective control, planning availability, bounded ready/lookahead

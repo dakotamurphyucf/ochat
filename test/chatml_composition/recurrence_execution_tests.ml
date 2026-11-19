@@ -27,10 +27,12 @@ let child_id = P.Id.Recurrence.of_string "rec_native_private_execution" |> proto
 let existing_id = P.Id.Recurrence.of_string "rec_native_private_existing" |> protocol_ok
 let private_text = "actual native recurrence private resource"
 
+(* Startup includes the real file read and its durable checkpoints. Give that
+   callback its own budget so the test can exercise the captured workflow under load. *)
 let worker =
   {|<developer>RECURRENCE-NATIVE-PRIVATE-WORKER.</developer>
 <tool name="read_file"><read id="private" path="${workspace}"/></tool>
-<script id="worker" language="chatml" kind="moderator" api="extensibility-v1">
+<script id="worker" language="chatml" kind="moderator" api="extensibility-v1" wall_time="20s">
 let initial_state = 0
 let on_event ctx state event = match event with
 | `Session_start ->
@@ -184,6 +186,7 @@ let%expect_test
   =
   let inputs = ref [] in
   let child_providers = ref 0 in
+  let parent_turn_timeout = 60. in
   let phase = ref "initial parent turn" in
   let last_parent = ref None in
   let last_child = ref None in
@@ -220,7 +223,7 @@ let%expect_test
     ~initial_requests:5
     ~expected_requests:8
     ~expect_moderator:true
-    ~completion_timeout:60.
+    ~completion_timeout:parent_turn_timeout
     ~inspect_request:(fun number request ->
       parent_requests := number;
       inputs := request)
@@ -317,6 +320,7 @@ let%expect_test
         []
       | _ -> failwith "unexpected native private execution transcript")
     ~after_turn:(fun env handle parent ->
+      let clock = Eio.Stdenv.clock env in
       let mono_clock = Eio.Stdenv.mono_clock env in
       let started = Eio.Time.Mono.now mono_clock in
       let elapsed () =
@@ -387,14 +391,17 @@ let%expect_test
         Agent_server.Recurrence_automation_host.close_and_wait planning
       in
       protect_cleanup ~finally (fun () ->
-        Actor.set_recurrence_planning_host
-          parent.actor
-          (Agent_server.Recurrence_automation_host.planning_host planning)
-        |> protocol_ok;
         try
-          Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 30. (fun () ->
+          (* The child and parent turn have independent progress watchdogs.
+             Bound the remaining actor calls with an emergency watchdog. *)
+          Eio.Time.with_timeout_exn clock 120. (fun () ->
+            Actor.set_recurrence_planning_host
+              parent.actor
+              (Agent_server.Recurrence_automation_host.planning_host planning)
+            |> protocol_ok;
             let acknowledged_child = ref false in
             let selected_child = ref None in
+            (* Private startup acknowledgements need not append a public event. *)
             let rec await_child () =
               Int.incr child_polls;
               let selected =
@@ -481,13 +488,13 @@ let%expect_test
                     | Running | Failed _ | Interrupted _ -> false)
                 then child, current
                 else (
-                  Eio.Fiber.yield ();
+                  Eio.Time.sleep clock 0.02;
                   await_child ())
               | None ->
-                Eio.Fiber.yield ();
+                Eio.Time.sleep clock 0.02;
                 await_child ()
             in
-            let child, current = await_child () in
+            let child, current = Eio.Time.with_timeout_exn clock 30. await_child in
             set_phase "verify actual captured child startup";
             actual_child := Some child;
             let native = List.hd_exn current.invocations in
@@ -568,7 +575,7 @@ let%expect_test
                 Eio.Promise.await changed;
                 await_second ())
             in
-            await_second ();
+            Eio.Time.with_timeout_exn clock parent_turn_timeout await_second;
             [%test_eq: int] 1 !child_providers;
             let document state =
               state_document state

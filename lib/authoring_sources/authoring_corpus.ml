@@ -3745,7 +3745,7 @@ let runtime_foundation ~sources =
          ; review =
              Audited
                { excerpt_sha256 =
-                   [ "33060b79e99187de189202b5b1c1582fa00929ca289fbfb9fca4227473629127" ]
+                   [ "8c393156de8312ec682ff337873303132e2d90614251c49464e1dd2aa7c7ce36" ]
                ; evidence =
                    [ "test/recurrence_creation/recurrence_native_request_tests.ml"
                    ; "test/chatml_composition/recurrence_runtime_tests.ml"

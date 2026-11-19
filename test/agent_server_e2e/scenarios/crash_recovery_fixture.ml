@@ -310,21 +310,25 @@ let child ~sw ?(environment_overrides = []) env environment ~case ~arguments =
     [ self_executable env; "--scenario"; "crash-matrix"; "--case"; "child." ^ case ]
 ;;
 
-let await_marker env child marker =
+let await_marker env child ?(timeout_seconds = 10.) marker =
   match
     Process_manager.wait_for_stdout
       child
       ~clock:(Eio.Stdenv.clock env)
-      ~timeout_seconds:10.
+      ~timeout_seconds
       ~ready:(String.is_substring ~substring:marker)
   with
   | Ok () -> ()
   | Error error ->
+    let stderr = Process_manager.stderr child in
     raise_s
       [%sexp
         "child boundary not reached"
-      , (error : Process_manager.readiness_error)
-      , (Process_manager.stderr child : Process_manager.output)]
+      , { marker : string
+        ; timeout_seconds : float
+        ; error : Process_manager.readiness_error
+        ; stderr : Process_manager.output
+        }]
 ;;
 
 let kill env child =

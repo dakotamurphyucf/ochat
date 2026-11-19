@@ -28,6 +28,43 @@ let on_event = fun ctx state event -> match event with
 </script>|}
 ;;
 
+let await_revision handle ~clock revision =
+  let rec wait () =
+    let fields =
+      C.Session_handle.projection handle
+      |> C.Projection.snapshot
+      |> P.Public.Snapshot.fields
+    in
+    if Int64.(fields.revision < revision)
+    then (
+      Eio.Time.sleep clock 0.001;
+      wait ())
+  in
+  match Eio.Time.with_timeout_exn clock 5. wait with
+  | () -> ()
+  | exception Eio.Time.Timeout ->
+    failwithf "managed test reader did not reach revision %Ld" revision ()
+;;
+
+let change_session_name handle ~clock (selected : P.Session.t) =
+  let patch =
+    P.Session_metadata.Patch.create
+      ~name:(Set "Updated session name")
+      ~set_labels:[]
+      ~remove_labels:[]
+    |> protocol_ok
+  in
+  let updated =
+    C.Session_handle.update_metadata
+      handle
+      ~expected_metadata_revision:selected.metadata_revision
+      ~patch
+    |> protocol_ok
+  in
+  assert (Int64.(updated.revision > selected.revision));
+  await_revision handle ~clock updated.revision
+;;
+
 let%expect_test "actual managed run terminal, canonical transcript and original receipt" =
   let requests = ref 0 in
   with_host
@@ -66,10 +103,23 @@ let%expect_test "actual managed run terminal, canonical transcript and original 
          | Terminal (Completed _) -> ()
          | _ -> failwith "actual workflow did not finish");
         assert (Option.is_some terminal.terminal_receipt);
-        let current = snapshot connection session.id in
-        let selected = current.session in
+        let request = M.Request.Observe_run admission in
+        let observe prepare =
+          let session = (snapshot connection session.id).session in
+          run
+            connection
+            ~env
+            ~session
+            ~request
+            ~prepare
+            ~on_admission:(fun _ -> assert false)
+            ()
+        in
+        let clock = Eio.Stdenv.clock env in
         let observed =
-          run connection ~env ~session:selected ~request:(Observe_run admission) ()
+          observe (fun handle selected ->
+            change_session_name handle ~clock selected;
+            Ok (request, selected))
           |> checked
         in
         (match observed.evidence with
@@ -98,6 +148,27 @@ let%expect_test "actual managed run terminal, canonical transcript and original 
                    completed.chatmd
                    ~substring:"Managed completion definition."
                  : bool)];
+        if index = 1
+        then (
+          let rejects prepare =
+            match observe prepare with
+            | Error (M.Error.Protocol { code = Conflict; _ }) -> ()
+            | Error _ | Ok _ -> failwith "changed source or session admitted observation"
+          in
+          let foreign = create connection ~key:"foreign-observation-scope" in
+          rejects (fun _ _ -> Ok (request, foreign));
+          rejects (fun handle selected ->
+            let stopped = C.Session_handle.stop handle ~mode:Graceful |> protocol_ok in
+            let rebuilt =
+              C.Session_handle.rebuild
+                handle
+                ~expected_revision:stopped.revision
+                ~prompt_choice:Current_catalog
+              |> protocol_ok
+            in
+            assert (rebuilt.generation > selected.generation);
+            await_revision handle ~clock rebuilt.revision;
+            Ok (request, selected)));
         if index = 0
         then (
           let failing = create connection ~key:"admission-callback-failure" in
@@ -410,9 +481,7 @@ let%test_unit "same reader rejects closure and overshoot before execution" =
         let prepare handle selected =
           if close
           then C.Session_handle.close handle
-          else (
-            C.Session_handle.start handle ~queue_if_limited:false |> protocol_ok |> ignore;
-            C.Session_handle.stop handle ~mode:Cancel |> protocol_ok |> ignore);
+          else change_session_name handle ~clock:(Eio.Stdenv.clock env) selected;
           Ok (M.Request.Authored_start Single_turn, selected)
         in
         match

@@ -108,6 +108,14 @@ val child
   -> arguments:string list
   -> Support.Process_manager.t
 
-val await_marker : Eio_unix.Stdenv.base -> Support.Process_manager.t -> string -> unit
+(** Wait for child stdout to contain the marker, up to [timeout_seconds]
+    (default 10 seconds). Raise on timeout or child exit before the marker. *)
+val await_marker
+  :  Eio_unix.Stdenv.base
+  -> Support.Process_manager.t
+  -> ?timeout_seconds:float
+  -> string
+  -> unit
+
 val kill : Eio_unix.Stdenv.base -> Support.Process_manager.t -> unit
 val terminate : Eio_unix.Stdenv.base -> Support.Process_manager.t -> unit

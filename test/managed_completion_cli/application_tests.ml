@@ -4,6 +4,46 @@ module P = Agent_protocol
 module C = Agent_client
 module A = Managed_completion_command
 
+let fresh_moderator_executions
+      (before : P.Public.Snapshot.Fields.t)
+      (current : P.Public.Snapshot.Fields.t)
+  =
+  List.filter current.extension_status ~f:(fun status ->
+    P.Extension_status.equal_kind status.kind Moderator_execution
+    && Int.equal status.generation current.session.generation
+    && not
+         (List.exists before.extension_status ~f:(fun previous ->
+            P.Extension_status.equal_kind previous.kind status.kind
+            && String.equal previous.id status.id)))
+;;
+
+let resume_settlement (before : P.Public.Snapshot.Fields.t) projection =
+  let current = P.Public.Snapshot.fields (C.Projection.snapshot projection) in
+  if Int64.(current.revision <= before.revision)
+  then None
+  else (
+    let same_session =
+      P.Id.Session.equal before.session.id current.session.id
+      && Int.equal before.session.generation current.session.generation
+      && Option.equal
+           P.Id.Prompt_revision.equal
+           before.session.prompt_revision
+           current.session.prompt_revision
+    in
+    let failed message =
+      Some (Error (P.Error.create Invalid_state ~message ~retryable:false ()))
+    in
+    if not same_session
+    then failed "session source changed during stop fixture recovery"
+    else (
+      (* The idle fixture has no other work to create a moderator execution after
+         selection. Historical receipts cannot establish this activation settled. *)
+      match fresh_moderator_executions before current with
+      | [] | [ { state = "running"; _ } ] -> None
+      | [ { state = "completed"; _ } ] -> Some (Ok ())
+      | _ -> failed "unexpected moderator execution state during stop fixture recovery"))
+;;
+
 let with_application f =
   Eio_main.run (fun actual_env ->
     Mirage_crypto_rng_unix.use_default ();
@@ -136,30 +176,61 @@ let with_application f =
                 options
                 ~f:(fun host ->
                   let connection = Agent_server.Embedded.host_connection host in
-                  let%bind.Result snapshot = C.Admin.get_session connection session_id in
-                  let lifecycle =
-                    (P.Public.Snapshot.fields snapshot).lifecycle |> Option.value_exn
-                  in
+                  let%bind.Result before = C.Admin.get_session connection session_id in
+                  let before = P.Public.Snapshot.fields before in
+                  let lifecycle = Option.value_exn before.lifecycle in
                   let%bind.Result () =
                     Agent_server.Embedded.select_session
                       host
                       (P.Session_lifecycle.Observation.expected lifecycle)
                   in
                   Eio.Switch.run (fun handle_sw ->
+                    let clock = Eio.Stdenv.clock env in
+                    let settled, resolve = Eio.Promise.create () in
+                    let settle result =
+                      ignore (Eio.Promise.try_resolve resolve result : bool)
+                    in
+                    let observe projection =
+                      Option.iter (resume_settlement before projection) ~f:settle
+                    in
                     let%bind.Result handle =
                       C.Session_handle.attach
                         ~sw:handle_sw
-                        ~clock:(Eio.Stdenv.clock env)
+                        ~clock
                         ~connection
                         ~session_id
                         ~mode:Read_write
-                        ~subscribe:false
+                        ~subscribe:true
+                        ~on_update:observe
+                        ~on_error:(fun error -> settle (Error error))
                         ()
                     in
                     Exn.protect
                       ~finally:(fun () ->
                         Eio.Cancel.protect (fun () -> C.Session_handle.close handle))
                       ~f:(fun () ->
+                        observe (C.Session_handle.projection handle);
+                        let%bind.Result () =
+                          match
+                            Eio.Time.with_timeout_exn clock 10. (fun () ->
+                              Eio.Promise.await settled)
+                          with
+                          | result -> result
+                          | exception Eio.Time.Timeout ->
+                            let current =
+                              C.Session_handle.projection handle
+                              |> C.Projection.snapshot
+                              |> P.Public.Snapshot.fields
+                            in
+                            let fresh = fresh_moderator_executions before current in
+                            raise_s
+                              [%message
+                                "timed out waiting for resume before graceful stop"
+                                  (session_id : P.Id.Session.t)
+                                  ~before_revision:(before.revision : int64)
+                                  ~observed_revision:(current.revision : int64)
+                                  (fresh : P.Extension_status.t list)]
+                        in
                         let%map.Result session =
                           C.Session_handle.stop handle ~mode:Graceful
                         in

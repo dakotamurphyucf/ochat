@@ -91,11 +91,16 @@ end
     attachment successor guard. It may perform the caller's actual stopped-only
     rebuild and genuine retained source query, returning the request and command's
     actual session positions. It must not escape the handle or install a reader.
-    After the callback and yielding checkpoints, wait for the returned command's
-    exact ID/generation/revision on this handle's existing reader. A behind
-    projection waits; foreign identity, overshoot, closure or reader failure rejects.
-    Recheck exact equality before activation/admission; never substitute newer
-    positions or install another reader. Original exceptions propagate.
+    For execution, after the callback and yielding checkpoints, wait for the
+    returned command's exact ID/generation/revision on this handle's existing
+    reader. A behind projection waits; foreign identity, overshoot, closure or
+    reader failure rejects. Recheck exact equality before activation/admission.
+    For Observe_run the callback keeps the original attached anchor. The
+    current reader may have advanced within the same session, generation and
+    prompt revision while the retained receipt was being read. Observation
+    uses that receipt and the authorized terminal lookup to anchor the exact
+    canonical export, which must still match the selected source. Original
+    exceptions propagate.
 
     Foreground_continue uses actual continue_history Started ID+mutation and
     Completion_view.await_terminal; Not_started retains its typed reason.
