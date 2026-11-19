@@ -207,12 +207,27 @@ let execute ?audit ~env candidate =
       ~workspace_files:[ "evidence.txt", "EVIDENCE-CONTENT" ]
       ~post_stream
       (fun ~workspace:_ embedded ->
-         Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 20. (fun () ->
-           let serial = ref 0 in
-           let invoke name args =
-             incr serial;
-             let id = sprintf "lifecycle-%d" !serial in
-             let expected_requests = !parent_requests + 2 in
+         let serial = ref 0 in
+         let invoke ?(seconds = 10.) name args =
+           incr serial;
+           let id = sprintf "lifecycle-%d" !serial in
+           let expected_requests = !parent_requests + 2 in
+           let stage = ref "sending parent message" in
+           let latest = ref None in
+           let describe () =
+             Sexp.to_string_hum
+               [%message
+                 "child evaluation exceeded its host deadline"
+                   ~tool:(name : string)
+                   ~call:(id : string)
+                   ~stage:(!stage : string)
+                   ~parent_requests:(!parent_requests : int)
+                   ~target_requests:(expected_requests : int)
+                   ~child_requests:(!child_requests : int)
+                   ~last_parent_snapshot:
+                     (Option.map !latest ~f:H.snapshot_status : Sexp.t option)]
+           in
+           H.within_phase ~env ~seconds ~describe (fun () ->
              pending := Some (id, name, args);
              ignore
                (H.request
@@ -229,104 +244,99 @@ let execute ?audit ~env candidate =
                      ; timing = Agent_protocol.Pending_input.Timing.Safe_boundary
                      })
                 : P.Public.Result.t);
-             let rec wait () =
-               let snapshot = H.snapshot embedded in
-               Option.iter snapshot.failure ~f:(fun e -> raise (H.Protocol_error e));
-               match
-                 !parent_requests >= expected_requests
-                 && Option.is_none snapshot.session.active_operation
-               with
-               | false ->
-                 Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
-                 wait ()
-               | true ->
+             stage := "awaiting parent settlement";
+             let snapshot =
+               H.await_snapshot embedded ~env ~select:(fun snapshot ->
+                 latest := Some snapshot;
                  H.require
-                   (!parent_requests = expected_requests)
+                   (!parent_requests <= expected_requests)
                    "extra parent model turn";
-                 (match H.outcome snapshot id with
-                  | Complete value -> value
-                  | outcome ->
-                    raise
-                      (H.Scenario_failure
-                         (Sexp.to_string_hum (P.Invocation.sexp_of_outcome outcome))))
+                 Option.some_if
+                   (!parent_requests = expected_requests
+                    && Option.is_none snapshot.session.active_operation)
+                   snapshot)
              in
-             wait ()
+             match H.outcome snapshot id with
+             | Complete value -> value
+             | outcome ->
+               raise
+                 (H.Scenario_failure
+                    (Sexp.to_string_hum (P.Invocation.sexp_of_outcome outcome))))
+         in
+         let created = invoke "agent_create" (creation candidate) in
+         let session_id = field created "session_id" in
+         let target = [ "session_id", session_id ] in
+         let first_page = invoke "agent_read" (`Object target) in
+         let cursor = ref (field first_page "next_cursor") in
+         List.iter [ 1; 2 ] ~f:(fun index ->
+           let replacements =
+             [ "$session_id", session_id
+             ; "$cursor", !cursor
+             ; "$message", `String (sprintf "Review evidence, round %d." index)
+             ; "$key", `String (sprintf "review-round-%d" index)
+             ]
            in
-           let created = invoke "agent_create" (creation candidate) in
-           let session_id = field created "session_id" in
-           let target = [ "session_id", session_id ] in
-           let first_page = invoke "agent_read" (`Object target) in
-           let cursor = ref (field first_page "next_cursor") in
-           List.iter [ 1; 2 ] ~f:(fun index ->
-             let replacements =
-               [ "$session_id", session_id
-               ; "$cursor", !cursor
-               ; "$message", `String (sprintf "Review evidence, round %d." index)
-               ; "$key", `String (sprintf "review-round-%d" index)
-               ]
-             in
-             let sent =
-               invoke "agent_send" (substitute replacements (field candidate "send"))
-             in
-             let receipt = field sent "receipt_id" in
-             let waited =
-               invoke
-                 "agent_wait"
-                 (`Object
-                     (target @ [ "receipt_id", receipt; "timeout_ms", `Number "10000" ]))
-             in
-             H.require
-               (Jsonaf.exactly_equal (field waited "reason") (`String "receipt_terminal"))
-               "child receipt never completed";
-             let page =
-               invoke "agent_read" (substitute replacements (field candidate "read"))
-             in
-             let text = Jsonaf.to_string page in
-             H.require
-               (String.is_substring
-                  text
-                  ~substring:(sprintf "review-%d:EVIDENCE-CONTENT" index))
-               "new child output missing";
-             (match index with
-              | 2 ->
-                H.require
-                  (not (String.is_substring text ~substring:"review-1:EVIDENCE-CONTENT"))
-                  "read repeated old output instead of using its cursor"
-              | _ -> ());
-             cursor := field page "next_cursor");
-           H.require (!child_reads = 2) "expected one native evidence read per child turn";
-           ignore
-             (invoke
-                "agent_stop"
-                (`Object
-                    (target
-                     @ [ "mode", `String "cancel"
-                       ; "idempotency_key", `String "review-stop"
-                       ]))
-              : Jsonaf.t);
-           let rec stopped () =
-             match
-               H.request
-                 embedded
-                 (Session_get
-                    { session_id = P.Id.Session.of_json session_id |> H.get
-                    ; history = None
-                    })
-             with
-             | Session_get snapshot ->
-               let snapshot = P.Public.Snapshot.fields snapshot in
-               (match snapshot.session.desired_state, snapshot.session.observed_state with
-                | Stopped, Stopped -> ()
-                | _ ->
-                  Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
-                  stopped ())
-             | _ -> failwith "unexpected child snapshot response"
+           let sent =
+             invoke "agent_send" (substitute replacements (field candidate "send"))
            in
-           stopped ();
-           Passed))
+           let receipt = field sent "receipt_id" in
+           let waited =
+             (* Leave time for the parent to admit and settle the native
+                call around its own ten-second receipt deadline. *)
+             invoke
+               ~seconds:20.
+               "agent_wait"
+               (`Object (target @ [ "receipt_id", receipt; "timeout_ms", `Number "10000" ]))
+           in
+           H.require
+             (Jsonaf.exactly_equal (field waited "reason") (`String "receipt_terminal"))
+             "child receipt never completed";
+           let page =
+             invoke "agent_read" (substitute replacements (field candidate "read"))
+           in
+           let text = Jsonaf.to_string page in
+           H.require
+             (String.is_substring
+                text
+                ~substring:(sprintf "review-%d:EVIDENCE-CONTENT" index))
+             "new child output missing";
+           (match index with
+            | 2 ->
+              H.require
+                (not (String.is_substring text ~substring:"review-1:EVIDENCE-CONTENT"))
+                "read repeated old output instead of using its cursor"
+            | _ -> ());
+           cursor := field page "next_cursor");
+         H.require (!child_reads = 2) "expected one native evidence read per child turn";
+         ignore
+           (invoke
+              "agent_stop"
+              (`Object
+                  (target
+                   @ [ "mode", `String "cancel"
+                     ; "idempotency_key", `String "review-stop"
+                     ]))
+            : Jsonaf.t);
+         let child_id = P.Id.Session.of_json session_id |> H.get in
+         let latest = ref None in
+         let describe () =
+           Sexp.to_string_hum
+             [%message
+               "child evaluation exceeded its host deadline while observing stop"
+                 ~last_child_snapshot:
+                   (Option.map !latest ~f:H.snapshot_status : Sexp.t option)]
+         in
+         H.within_phase ~env ~seconds:10. ~describe (fun () ->
+           H.await_snapshot ~session_id:child_id embedded ~env ~select:(fun snapshot ->
+             latest := Some snapshot;
+             match snapshot.session.desired_state, snapshot.session.observed_state with
+             | Stopped, Stopped -> Some ()
+             | _ -> None));
+         Passed)
   with
   | result -> result
   | exception H.Scenario_failure message -> Failed (Semantics, message)
+  | exception H.Host_deadline message -> Failed (Infrastructure, message)
   | exception Eio.Time.Timeout ->
-    Failed (Infrastructure, "child evaluation exceeded its host deadline")
+    Failed (Infrastructure, "child evaluation exceeded a runtime deadline")
 ;;
