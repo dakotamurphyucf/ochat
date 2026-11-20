@@ -44,6 +44,7 @@ end
 module Estimator : sig
   type method_ =
     | O200k_serialized_history
+    | O200k_serialized_prepared_request
     | Utf8_heuristic
   [@@deriving equal, sexp_of]
 

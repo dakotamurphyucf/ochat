@@ -4,6 +4,7 @@ module E = Inference.Event
 module O = Inference.Observation
 module Runtime = Inference_runtime
 module P = History_entry.Payload
+module Capacity = Runtime.Context_capacity
 
 let ok result =
   Result.ok_or_failwith (Result.map_error result ~f:(fun _ -> "fixture admission"))
@@ -103,7 +104,12 @@ let receipt ?(output = []) ?(revision = 0L) ?(tokens = 3L) ~scope ~accounting_id
   |> ok
 ;;
 
-let context ?(prepared_request = Fn.id) ?(supports_request_guidance = false) run =
+let context
+      ?(prepared_request = Fn.id)
+      ?(supports_request_guidance = false)
+      ?capacity_source
+      run
+  =
   Runtime.Adapter.create
     ~supports_request_guidance
     ~preflight_history:(fun ~target:_ _ -> Ok ())
@@ -121,7 +127,10 @@ let context ?(prepared_request = Fn.id) ?(supports_request_guidance = false) run
           ~limits:O.Admission.observation
         |> ok
       in
-      Runtime.Plan.create ~request ~configuration ~fingerprint:"private fingerprint" ~run)
+      Runtime.Plan.create ~request ~configuration ~fingerprint:"private fingerprint" ~run
+      |> Result.map ~f:(fun plan ->
+        Option.value_map capacity_source ~default:plan ~f:(fun source ->
+          Runtime.Plan.with_capacity_source plan (source request))))
     ()
   |> ok
   |> Runtime.Context.create ~target
@@ -635,4 +644,212 @@ let%expect_test "owned binding without adapter session rejects new prepare after
   [%expect
     {|Session_closed
 admitted plan unchanged; unrelated graph context remains open|}]
+;;
+
+let capacity_limits : Capacity.Policy.model_limit =
+  Bounded { total = 120L; input = Some 75L; output = Some 30L }
+;;
+
+let capacity_allowance : Capacity.Policy.allowance =
+  { host_total = Some 110L
+  ; session_total = Some 100L
+  ; omitted_output_default = Some 20L
+  ; checkpoint_reserve = 15L
+  ; warning_lead = 10L
+  }
+;;
+
+let capacity_policy ?(model_limit = capacity_limits) ?estimate target =
+  Capacity.Policy.create
+    ~target
+    ~encoder:Openai_responses_v1
+    ~model_limit
+    ~allowance:capacity_allowance
+    ~estimate
+  |> ok
+;;
+
+let capacity_preparation context target =
+  Runtime.Context.prepare context ~preparation_id:"same-public-id" (request target) |> ok
+;;
+
+let%expect_test "exact prepared capacity honors reserves, thresholds and local freshness" =
+  let reads = ref 0 in
+  let context_for tokens =
+    let count = O.Count.create (Actual tokens) |> ok in
+    let source _request =
+      Capacity.Source.create ~encoder:Openai_responses_v1 ~read:(fun () ->
+        incr reads;
+        Covered count)
+    in
+    context ~capacity_source:source no_effect
+  in
+  let context = context_for 76L in
+  let first = capacity_preparation context target in
+  let policy = capacity_policy target in
+  let missing = Runtime.Prepared.assess_capacity first |> Capacity.Assessment.view in
+  (match missing with
+   | Unavailable Policy_missing -> ()
+   | _ -> failwith "unexpected default evidence");
+  assert (Int.equal !reads 0);
+  List.iter [ 49L; 50L; 59L; 60L; 75L; 76L ] ~f:(fun tokens ->
+    let prepared = capacity_preparation (context_for tokens) target in
+    let assessment = Runtime.Prepared.assess_capacity prepared ~policy in
+    match Capacity.Assessment.view assessment with
+    | Assessed
+        { evidence = Measured input
+        ; total
+        ; output
+        ; hard_input
+        ; soft_input
+        ; warn_input
+        ; pressure
+        ; remaining
+        ; _
+        } ->
+      assert (Int64.equal input tokens);
+      assert (
+        List.equal
+          Int64.equal
+          [ total; output; hard_input; soft_input; warn_input ]
+          [ 100L; 20L; 75L; 60L; 50L ]);
+      print_s
+        [%sexp
+          (tokens : int64)
+        , (pressure : Capacity.Assessment.pressure)
+        , (remaining : Capacity.Assessment.remaining)]
+    | _ -> failwith "missing measured capacity");
+  let assessment = Runtime.Prepared.assess_capacity first ~policy in
+  let repeated = capacity_preparation context target in
+  let changed_policy = capacity_policy target in
+  let before = !reads in
+  ignore
+    (Runtime.Prepared.assess_capacity first ~policy:changed_policy
+     : Capacity.Assessment.t);
+  assert (Int.equal !reads before);
+  ignore (Runtime.Prepared.assess_capacity repeated ~policy : Capacity.Assessment.t);
+  assert (Int.equal !reads (before + 1));
+  let changed_target =
+    R.Target.with_setting
+      target
+      ~name:"max_output_tokens"
+      ~value:(Value (`Number "24"))
+      ~provenance:Execution_override
+      ~limits
+    |> ok
+  in
+  let changed_context = Runtime.Context.derive context ~target:changed_target |> ok in
+  let changed = capacity_preparation changed_context changed_target in
+  let before = !reads in
+  (match Runtime.Prepared.assess_capacity changed ~policy |> Capacity.Assessment.view with
+   | Unavailable Target_changed -> ()
+   | _ -> failwith "stale policy");
+  assert (Int.equal !reads before);
+  printf
+    "fresh=%b repeated-id=%b changed-policy=%b changed-target=%b\n"
+    (Runtime.Prepared.capacity_assessment_is_current first assessment ~policy)
+    (Runtime.Prepared.capacity_assessment_is_current repeated assessment ~policy)
+    (Runtime.Prepared.capacity_assessment_is_current
+       first
+       assessment
+       ~policy:changed_policy)
+    (Runtime.Prepared.capacity_assessment_is_current changed assessment ~policy);
+  let new_policy = capacity_policy changed_target in
+  (match
+     Runtime.Prepared.assess_capacity changed ~policy:new_policy
+     |> Capacity.Assessment.view
+   with
+   | Assessed { output; _ } -> printf "effective-output=%Ld\n" output
+   | _ -> failwith "missing changed output");
+  let smaller = R.Target.with_model target ~model:"smaller" ~limits |> ok in
+  let smaller_policy =
+    capacity_policy
+      ~model_limit:(Bounded { total = 80L; input = None; output = Some 30L })
+      smaller
+  in
+  let smaller_context = Runtime.Context.derive context ~target:smaller |> ok in
+  let smaller_prepared = capacity_preparation smaller_context smaller in
+  (match
+     Runtime.Prepared.assess_capacity smaller_prepared ~policy |> Capacity.Assessment.view
+   with
+   | Unavailable Target_changed -> ()
+   | _ -> failwith "reused previous model policy");
+  (match
+     Runtime.Prepared.assess_capacity smaller_prepared ~policy:smaller_policy
+     |> Capacity.Assessment.view
+   with
+   | Assessed { hard_input; pressure = Hard_limit_exceeded; _ } ->
+     printf "smaller-model-hard=%Ld\n" hard_input
+   | _ -> failwith "smaller model was not reassessed");
+  [%expect
+    {|
+    (49 Below_warning (Available 26))
+    (50 Near_limit (Available 25))
+    (59 Near_limit (Available 16))
+    (60 Checkpoint_due (Available 15))
+    (75 Checkpoint_due (Available 0))
+    (76 Hard_limit_exceeded (Exceeded_by 1))
+    fresh=true repeated-id=false changed-policy=false changed-target=false
+    effective-output=24
+    smaller-model-hard=60
+    |}]
+;;
+
+let%expect_test "unqualified estimate stays unknown and overflow stays known excessive" =
+  let estimator =
+    O.Estimator.create ~method_:O200k_serialized_prepared_request ~version:1 |> ok
+  in
+  let source _request =
+    Capacity.Source.create ~encoder:Openai_responses_v1 ~read:(fun () ->
+      Covered (O.Count.create (Estimated { tokens = Int64.max_value; estimator }) |> ok))
+  in
+  let context = context ~capacity_source:source no_effect in
+  let prepared = capacity_preparation context target in
+  List.iter
+    [ capacity_policy target
+    ; capacity_policy ~model_limit:Unbounded target
+    ; capacity_policy ~model_limit:Undeclared target
+    ]
+    ~f:(fun policy ->
+      match
+        Runtime.Prepared.assess_capacity prepared ~policy |> Capacity.Assessment.view
+      with
+      | Unavailable reason -> print_s [%sexp (reason : Capacity.Assessment.unavailable)]
+      | Assessed _ -> failwith "unqualified policy");
+  let qualified =
+    capacity_policy ~estimate:{ estimator; margin = Int64.max_value } target
+  in
+  (match
+     Runtime.Prepared.assess_capacity prepared ~policy:qualified
+     |> Capacity.Assessment.view
+   with
+   | Assessed { evidence = Estimated estimate; pressure; remaining; _ } ->
+     let count = O.Context_estimate.count estimate in
+     (match O.Count.view count with
+      | Estimated { tokens; _ } -> assert (Int64.equal tokens Int64.max_value)
+      | Unknown _ | Actual _ -> failwith "wrong estimate");
+     print_s
+       [%sexp
+         (pressure : Capacity.Assessment.pressure)
+       , (remaining : Capacity.Assessment.remaining)]
+   | _ -> failwith "missing estimated capacity");
+  let invalid =
+    Capacity.Policy.create
+      ~target
+      ~encoder:Openai_responses_v1
+      ~model_limit:capacity_limits
+      ~allowance:{ capacity_allowance with checkpoint_reserve = Int64.max_value }
+      ~estimate:None
+  in
+  (match invalid with
+   | Error reason -> print_s [%sexp (reason : Capacity.Policy.error)]
+   | Ok _ -> failwith "invalid policy accepted");
+  [%expect
+    {|
+    Estimate_unqualified
+    Limit_unbounded
+    Limit_undeclared
+    (Hard_limit_exceeded Excess_out_of_range)
+    Invalid_reservations
+    |}]
 ;;

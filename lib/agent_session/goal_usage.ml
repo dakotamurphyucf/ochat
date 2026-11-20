@@ -287,6 +287,7 @@ module Persistence = struct
           , `String
               (match method_ with
                | O.Estimator.O200k_serialized_history -> "o200k_serialized_history"
+               | O200k_serialized_prepared_request -> "o200k_serialized_prepared_request"
                | Utf8_heuristic -> "utf8_heuristic") )
         ; "version", X.integer_json version
         ]
@@ -300,6 +301,8 @@ module Persistence = struct
       let%bind method_ =
         match method_ with
         | "o200k_serialized_history" -> Ok O.Estimator.O200k_serialized_history
+        | "o200k_serialized_prepared_request" ->
+          Ok O.Estimator.O200k_serialized_prepared_request
         | "utf8_heuristic" -> Ok O.Estimator.Utf8_heuristic
         | _ -> invalid "unknown aggregate estimator"
       in

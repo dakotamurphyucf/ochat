@@ -4,6 +4,10 @@ open! Core
     selection before runtime activation; prepare performs no authentication or
     network I/O. A host supplies the profile, actual optional revision, driver,
     and exact credential resolver. No ambient model/key/profile lookup. *)
+val capacity_encoder : Inference_runtime.Context_capacity.Encoder.t
+
+val capacity_estimator : Inference.Observation.Estimator.t
+
 val capture_target
   :  Responses_driver.Profile.t
   -> profile_revision:string option

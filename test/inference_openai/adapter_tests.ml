@@ -37,12 +37,12 @@ let caps =
   |> ok
 ;;
 
-let profile ?(defaults = []) endpoint =
+let profile ?(defaults = []) ?(capabilities = caps) endpoint =
   D.Profile.create
     ~id:"selected"
     ~account:(Some "account")
     ~endpoint
-    ~capabilities:caps
+    ~capabilities
     ~defaults
   |> ok
 ;;
@@ -1160,4 +1160,210 @@ let%expect_test
           | Authored | Reconstructed _ -> assert false);
          print_endline "real captured A bytes/origin retained; only declared B preflights"));
   [%expect {|real captured A bytes/origin retained; only declared B preflights|}]
+;;
+
+module Capacity = Runtime.Context_capacity
+
+let prepared_capacity_policy ?(omitted_output_default = Some 100L) target =
+  Capacity.Policy.create
+    ~target
+    ~encoder:A.capacity_encoder
+    ~model_limit:(Bounded { total = 10000L; input = None; output = Some 1000L })
+    ~allowance:
+      { host_total = Some 9000L
+      ; session_total = Some 8000L
+      ; omitted_output_default
+      ; checkpoint_reserve = 100L
+      ; warning_lead = 100L
+      }
+    ~estimate:(Some { estimator = A.capacity_estimator; margin = 20L })
+  |> ok
+;;
+
+let capacity_entry ?(sequence = 0) content =
+  let semantic =
+    P.Semantic.create
+      (Message { form = Input; role = User; phase = Absent; content = [ content ] })
+      ~metadata:P.Metadata.empty
+    |> ok
+  in
+  History_entry.create_with_id
+    ~id:(History_entry.Id.create ~namespace:"capacity" ~sequence |> ok)
+    (P.authored semantic)
+;;
+
+let%expect_test
+    "OpenAI finalized preparation counts instructions, schemas and guided history"
+  =
+  Eio_main.run (fun env ->
+    let caps =
+      D.Capability.create
+        ~baseline:
+          [ Text_input, Supported
+          ; Function_tools, Supported
+          ; Setting "instructions", Supported
+          ; Setting "max_output_tokens", Supported
+          ]
+        ~models:[]
+      |> ok
+    in
+    let profile =
+      D.Profile.create
+        ~id:"selected"
+        ~account:(Some "account")
+        ~endpoint:"http://127.0.0.1:1/v1/responses"
+        ~capabilities:caps
+        ~defaults:[]
+      |> ok
+    in
+    let make_target ~instructions =
+      let settings =
+        List.filter_map
+          [ "instructions", Option.map instructions ~f:(fun text -> `String text)
+          ; "max_output_tokens", Some (`Number "160")
+          ]
+          ~f:(fun (name, value) ->
+            Option.map value ~f:(fun value ->
+              D.Setting.create ~name ~value:(Value value) ~provenance:Execution_override
+              |> ok))
+      in
+      A.capture_target profile ~profile_revision:None ~model:"fixture" ~settings ~limits
+      |> ok
+    in
+    let auth_calls = ref 0 in
+    let auth ~sw:_ _ =
+      incr auth_calls;
+      Error D.Auth.Missing
+    in
+    let prepared ~target ?(history = []) ?(tools = []) ?guidance () =
+      let input =
+        R.create ~target ~history ~tools ~assets:[] ~limits
+        |> ok
+        |> R.with_guidance ~guidance ~limits
+        |> ok
+      in
+      prepare (context env profile ~target ~auth) input
+    in
+    let count prepared =
+      let policy = prepared_capacity_policy (Runtime.Prepared.target prepared) in
+      let assessment = Runtime.Prepared.assess_capacity prepared ~policy in
+      match Capacity.Assessment.view assessment with
+      | Assessed { evidence = Estimated estimate; output; total; hard_input; margin; _ }
+        ->
+        assert (Int64.equal output 160L);
+        assert (Int64.equal total 8000L);
+        assert (Int64.equal hard_input 7840L);
+        assert (Int64.equal margin 20L);
+        assert (String.equal (O.Context_estimate.preparation_id estimate) "opaque");
+        (match O.Count.view (O.Context_estimate.count estimate) with
+         | Estimated { tokens; estimator } ->
+           assert (O.Estimator.equal estimator A.capacity_estimator);
+           tokens
+         | _ -> failwith "no estimated count")
+      | _ -> failwith "no finalized estimate"
+    in
+    let text = String.concat (List.init 16 ~f:(fun _ -> " private prepared data")) in
+    let bare = make_target ~instructions:None in
+    let instructions = make_target ~instructions:(Some text) in
+    let tool =
+      R.Tool_spec.create
+        ~name:"local_fixture"
+        ~description:Absent
+        ~output_schema:Absent
+        ~view:
+          (Function
+             { parameters =
+                 Value
+                   (`Object
+                       [ "type", `String "object"
+                       ; "description", `String text
+                       ; "properties", `Object []
+                       ])
+             ; strict = Value false
+             })
+        ~limits
+      |> ok
+    in
+    let history = capacity_entry (Text { text; annotations = []; logprobs = Absent }) in
+    let guidance = R.Guidance.create ~text ~provenance:"private fixture" ~limits |> ok in
+    let baseline = prepared ~target:bare () |> count in
+    printf
+      "framing=%b instructions=%b schema=%b history=%b guidance=%b auth=%d\n"
+      Int64.(baseline > zero)
+      Int64.(count (prepared ~target:instructions ()) > baseline)
+      Int64.(count (prepared ~target:bare ~tools:[ tool ] ()) > baseline)
+      Int64.(count (prepared ~target:bare ~history:[ history ] ()) > baseline)
+      Int64.(count (prepared ~target:bare ~guidance ()) > baseline)
+      !auth_calls);
+  [%expect
+    {| framing=true instructions=true schema=true history=true guidance=true auth=0 |}]
+;;
+
+let%expect_test "OpenAI bounds exact wire before checking media coverage" =
+  Eio_main.run (fun env ->
+    let capabilities =
+      D.Capability.create
+        ~baseline:
+          [ Text_input, Supported
+          ; Image_input, Supported
+          ; Document_input, Supported
+          ; Function_tools, Supported
+          ]
+        ~models:[]
+      |> ok
+    in
+    let profile = profile ~capabilities "http://127.0.0.1:1/v1/responses" in
+    let target = target profile in
+    let context = context env profile ~target ~auth in
+    let policy = prepared_capacity_policy target in
+    let image =
+      capacity_entry (Image { uri = "data:image/png;base64,eA=="; detail = Value "auto" })
+    in
+    let document : P.Content.t =
+      Unknown
+        { kind = "input_file"
+        ; raw =
+            `Object
+              [ "type", `String "input_file"
+              ; "filename", `String "fixture.pdf"
+              ; "file_data", `String "eA=="
+              ]
+        }
+    in
+    let document_output =
+      P.Semantic.create
+        (Result { relation = Unresolved; kind = Function; output = Content [ document ] })
+        ~metadata:{ P.Metadata.empty with call_id = Value "fixture-call" }
+      |> ok
+      |> P.authored
+      |> History_entry.create_with_id
+           ~id:(History_entry.Id.create ~namespace:"capacity" ~sequence:1 |> ok)
+    in
+    let oversized =
+      capacity_entry
+        ~sequence:1
+        (Text
+           { text = String.make (1024 * 1024) 'x'; annotations = []; logprobs = Absent })
+    in
+    let assess ~policy request =
+      match
+        Runtime.Prepared.assess_capacity (prepare context request) ~policy
+        |> Capacity.Assessment.view
+      with
+      | Unavailable reason -> print_s [%sexp (reason : Capacity.Assessment.unavailable)]
+      | Assessed _ -> failwith "unqualified capacity assessed"
+    in
+    assess ~policy (request ~history:[ image ] target);
+    assess ~policy (request ~history:[ document_output ] target);
+    assess ~policy (request ~history:[ image; oversized ] target);
+    assess
+      ~policy:(prepared_capacity_policy ~omitted_output_default:None target)
+      (request target));
+  [%expect
+    {|
+    (Coverage_incomplete Image)
+    (Coverage_incomplete Document)
+    (Coverage_incomplete Counter_limit)
+    Output_unresolved
+    |}]
 ;;

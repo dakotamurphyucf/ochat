@@ -3,6 +3,7 @@ module Request = Inference.Request
 module Event = Inference.Event
 module Observation = Inference.Observation
 module Session = Session
+module Context_capacity = Context_capacity
 
 module Submission_guard = struct
   type t = (unit -> unit -> unit) list
@@ -221,6 +222,7 @@ module Plan = struct
     { request : Request.t
     ; configuration : Observation.Configuration.t
     ; fingerprint : string
+    ; capacity_source : Context_capacity.Source.t option
     ; run :
         sw:Eio.Switch.t
         -> scope:Transcript.Scope.t
@@ -235,8 +237,10 @@ module Plan = struct
   let create ~request ~configuration ~fingerprint ~run =
     if String.is_empty fingerprint || not (configuration_matches request configuration)
     then Error Preparation_error.Invalid_preparation
-    else Ok { request; configuration; fingerprint; run }
+    else Ok { request; configuration; fingerprint; capacity_source = None; run }
   ;;
+
+  let with_capacity_source t source = { t with capacity_source = Some source }
 end
 
 module Adapter = struct
@@ -529,12 +533,21 @@ module Prepared = struct
   type t =
     { plan : Plan.t
     ; limits : Limits.t
+    ; capacity_binding : Context_capacity.Binding.t
     }
 
   let target t = Request.target t.plan.request
   let preparation_id t = Observation.Configuration.preparation_id t.plan.configuration
   let configuration t = t.plan.configuration
   let fingerprint t = t.plan.fingerprint
+
+  let assess_capacity ?policy t =
+    Context_capacity.Binding.assess ?policy t.capacity_binding
+  ;;
+
+  let capacity_assessment_is_current ?policy t assessment =
+    Context_capacity.Binding.matches ?policy t.capacity_binding assessment
+  ;;
 
   let start t ~scope ~accounting_id =
     Ok
@@ -755,7 +768,13 @@ module Context = struct
                     ~submission_guard)
           }
         in
-        Ok { Prepared.plan; limits = t.adapter.limits }))
+        let capacity_binding =
+          Context_capacity.Binding.create
+            ~target:(Request.target request)
+            ~configuration:plan.configuration
+            ~source:plan.capacity_source
+        in
+        Ok { Prepared.plan; limits = t.adapter.limits; capacity_binding }))
   ;;
 
   let identity target =

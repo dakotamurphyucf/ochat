@@ -66,6 +66,30 @@ observation path. [Count and context estimate](../../lib/inference/observation.m
 [effective configuration](../../lib/inference/observation.mli#L165-L245),
 [OpenAI usage decoding](../../lib/openai/inference_output.ml#L320-L325).
 
+The prepared assessment is accessible through
+`Inference_runtime.Prepared.assess_capacity` immediately before dispatch.
+Pass the trusted policy for that exact target and encoder. Validate a
+previously captured result with `capacity_assessment_is_current` before
+using it on the active path. The check uses private preparation and policy
+identities, so having the same displayed preparation ID cannot authorize
+reuse. With no policy the accessor returns `Policy_missing` and does no
+counting. Assessment neither changes dispatch nor acknowledges a wake.
+
+The OpenAI Responses adapter offers a versioned O200k estimate over compact
+JSON of the finished request. It includes the finalized text, instructions,
+guidance, tool schemas and framing. The 1 MiB bound is checked on the
+immutable JSON before scanning content coverage or encoding the request
+for the tokenizer. A preparation retains its bounded numeric reading or
+closed coverage result across explicit assessments. Policy and threshold
+decisions are recalculated separately.
+Images, documents, opaque reasoning, unknown retained item shapes and
+requests beyond the bound return a typed unknown. A host must qualify
+the estimator and choose its safety margin for the actual target. Real
+provider input usage remains separate. No automatic pressure policy ships
+with this assessment. [Assessment contract](../../lib/inference_runtime/context_capacity.mli),
+[prepared API](../../lib/inference_runtime/inference_runtime.mli),
+[OpenAI implementation](../../lib/openai/inference_capacity.ml).
+
 For a bounded target, use checked nonnegative token arithmetic:
 
 | Quantity | Definition |

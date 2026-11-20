@@ -153,6 +153,7 @@ end
 module Estimator = struct
   type method_ =
     | O200k_serialized_history
+    | O200k_serialized_prepared_request
     | Utf8_heuristic
   [@@deriving equal, sexp_of]
 
@@ -177,6 +178,7 @@ module Estimator = struct
         , string
             (match t.method_ with
              | O200k_serialized_history -> "o200k_serialized_history"
+             | O200k_serialized_prepared_request -> "o200k_serialized_prepared_request"
              | Utf8_heuristic -> "utf8_heuristic") )
       ; "version", integer t.version
       ]
@@ -189,6 +191,7 @@ module Estimator = struct
         Decode.tag
           value
           [ "o200k_serialized_history", O200k_serialized_history
+          ; "o200k_serialized_prepared_request", O200k_serialized_prepared_request
           ; "utf8_heuristic", Utf8_heuristic
           ])
     in

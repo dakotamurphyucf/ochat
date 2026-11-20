@@ -5,6 +5,8 @@ module D = Responses_driver
 module E = Inference_runtime.Preparation_error
 module P = History_entry.Payload.Presence
 
+let capacity_encoder = Inference_capacity.encoder
+let capacity_estimator = Inference_capacity.estimator
 let invalid result = Result.map_error result ~f:(fun _ -> E.Invalid_preparation)
 
 let capture_target profile ~profile_revision ~model ~settings ~limits =
@@ -345,6 +347,10 @@ let create
         | exn ->
           Option.iter session ~f:D.Websocket_session.invalidate;
           raise exn)
+    |> Result.map ~f:(fun plan ->
+      Inference_runtime.Plan.with_capacity_source
+        plan
+        (Inference_capacity.source (D.Prepared.request prepared)))
   in
   let prepare_with_policy ~policy ~preparation_id request =
     prepare ~policy ~preparation_id request

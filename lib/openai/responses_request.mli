@@ -204,7 +204,9 @@ val create
     failed validation returns an error and does not change the supplied value. *)
 val of_jsonaf : Jsonaf.t -> t Or_error.t
 
+(** Returns the admitted immutable JSON tree without copying or encoding it. *)
 val jsonaf_of_t : t -> Jsonaf.t
+
 val to_jsonaf : t -> Jsonaf.t
 val stream : t -> bool
 val model : t -> string

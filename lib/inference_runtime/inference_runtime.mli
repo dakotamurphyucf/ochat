@@ -1,4 +1,5 @@
 open! Core
+module Context_capacity = Context_capacity
 
 (** Trusted per-attempt application-submission checkpoint. A guard contains a
     host-owned [refresh] callback, not authority created by this module. Refresh
@@ -161,6 +162,10 @@ module Plan : sig
           -> submission_guard:Submission_guard.t
           -> Receipt.t)
     -> (t, Preparation_error.t) Result.t
+
+  (** Attest the encoder and coverage of the same finalized input captured by
+      this plan. The callback runs only for explicit capacity assessment. *)
+  val with_capacity_source : t -> Context_capacity.Source.t -> t
 end
 
 module Session = Session
@@ -262,6 +267,22 @@ module Prepared : sig
   val preparation_id : t -> string
   val configuration : t -> Inference.Observation.Configuration.t
   val fingerprint : t -> string
+
+  (** Explicit, local assessment of this accepted prepared request under the
+      host policy. It allocates no attempt, does not authorize dispatch, and
+      never performs authentication or provider I/O. No policy means unknown. *)
+  val assess_capacity
+    :  ?policy:Context_capacity.Policy.t
+    -> t
+    -> Context_capacity.Assessment.t
+
+  (** Reject attempts to reuse a result from a different preparation or policy,
+      including after independent preparation with the same display ID. *)
+  val capacity_assessment_is_current
+    :  ?policy:Context_capacity.Policy.t
+    -> t
+    -> Context_capacity.Assessment.t
+    -> bool
 
   (** Local allocation only, before credential resolution or network effects.
       The trusted host supplies fresh actual scope/accounting identities and
