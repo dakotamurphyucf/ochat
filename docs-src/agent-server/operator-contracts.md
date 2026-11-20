@@ -519,3 +519,27 @@ let event_cursor request =
        | _ -> Error (error Invalid_request "event cursor is invalid")))
 ;;
 ```
+
+## Local recovery windows
+
+Request the `recovery.windows` feature at initialization. Use a JSON-RPC request
+ID that fits in 256 encoded bytes. On a daemon that
+selects it, `session.recovery.enable` starts the window ledger for one
+settled session. Supply the host-qualified `session`, the `attachment_id` of
+the owner writer on this connection, and the session's `expected_generation`.
+The owner needs message-send and transcript access. Repeating enable in the
+same generation returns its active window. A stale generation returns a
+conflict. Recovery starts only when requested.
+
+Use `session.recovery.windows` to list the windows in lineage order. A
+reader with session and transcript access can do this without attaching.
+Supply the host-qualified `session` and a `limit` from 1 to 50. Omit
+`generation` to read the current generation, or pass a specific generation.
+The optional `state` takes `open`, `sealed` or `expired`. To continue, pass
+the returned `next_cursor` as `cursor` with the same filters and limit.
+An ordinary append preserves the page. When the service returns
+`Cursor_expired`, start a new list. Each row reports its scope and state.
+
+OCaml clients can use `Agent_client.Recovery_windows.enable` and
+`Agent_client.Recovery_windows.list` over an initialized connection. The
+default `Session_handle.initialize` requests this feature.

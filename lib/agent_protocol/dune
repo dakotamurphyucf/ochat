@@ -31,6 +31,7 @@
   recovery_wire
   recovery_item_version
   recovery_window
+  recovery_query
   history_edit
   search_term
   search_snippet

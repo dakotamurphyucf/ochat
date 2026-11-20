@@ -158,6 +158,8 @@ type t =
   | Session_configuration_get of Session_configuration.t
   | Session_configuration_update of Session_configuration.t
   | Instructions of (Instruction_control.Result.t[@sexp.opaque])
+  | Recovery_enable of (Recovery_window.Scope.t[@sexp.opaque])
+  | Recovery_windows of (Recovery_query.Summary.t Page.t[@sexp.opaque])
   | Goal_query of (Goal_query.Result.t[@sexp.opaque])
   | Goal_control of (Goal_control.Result.t[@sexp.opaque])
   | Recurrence_query of (Recurrence_query.Result.t[@sexp.opaque])

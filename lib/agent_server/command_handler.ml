@@ -164,7 +164,8 @@ let create
     Option.value_map authoring ~default:[] ~f:Authoring_installation.available_features
   in
   let operator_features =
-    [ Agent_protocol.Goal_query.Features.inspect, Option.is_some goal_read
+    [ Agent_protocol.Recovery_query.Features.windows, Option.is_some seed_factory
+    ; Agent_protocol.Goal_query.Features.inspect, Option.is_some goal_read
     ; Agent_protocol.Goal_control.Features.control, Option.is_some goal_operator
     ; Agent_protocol.Recurrence_query.Features.inspect, Option.is_some recurrence_read
     ; ( Agent_protocol.Recurrence_control.Features.control
@@ -508,7 +509,9 @@ let idempotency = function
   | Agent_protocol.Command.Instructions _ -> None
   (* Goal writers reconcile their exact receipts at the canonical owner. The
      general command journal cannot authorize their replay or fabricate absence. *)
-  | Agent_protocol.Command.Goal_query _
+  | Agent_protocol.Command.Recovery_enable _
+  | Recovery_windows _
+  | Goal_query _
   | Goal_control _
   | Recurrence_query _
   | Recurrence_control _
@@ -1302,6 +1305,13 @@ let with_attached_writer t context ~session_id ~attachment_id f =
   in
   let%bind () = Agent_session.Session_actor.authorize_writer entry.actor ~attachment_id in
   f entry
+;;
+
+let recovery_window_operator t context actor =
+  Recovery_window_operator.create
+    t.seed_factory ~context ~actor ~registry:t.registry
+    ~server_id:(Agent_store.Session_store.server_id t.session_store)
+    ~now:(fun () -> now t)
 ;;
 
 let pending_service t context =
@@ -3032,6 +3042,8 @@ let prepared_writer_attachment command =
   | Session_runs _
   | Session_run _
   | Session_run_start _
+  | Recovery_enable _
+  | Recovery_windows _
   | Goal_query _
   | Goal_control _
   | Recurrence_query _
@@ -3104,6 +3116,7 @@ let authorize_mutation t ?prepared_writer context command =
 let dispatch_authorized
       t
       ?prepared_writer
+      ~on_release
       ~actor
       ~agent_actor
       ~context
@@ -3199,6 +3212,19 @@ let dispatch_authorized
     handle_session_stop t ?prepared_writer context command_audit request
   | Session_cancel_operation request ->
     handle_session_cancel_operation t ?prepared_writer context command_audit request
+  | Recovery_enable request ->
+    let open Result.Let_syntax in
+    let%bind service = recovery_window_operator t context actor in
+    with_attached_writer t context
+      ~session_id:(Agent_protocol.Session_ref.session_id request.session)
+      ~attachment_id:request.attachment_id (fun entry ->
+        let%map scope = Recovery_window_operator.enable service entry ~on_release request in
+        Agent_protocol.Method_result.Recovery_enable scope)
+  | Recovery_windows request ->
+    let open Result.Let_syntax in
+    let%bind service = recovery_window_operator t context actor in
+    let%map page = Recovery_window_operator.list service ~on_release request in
+    Agent_protocol.Method_result.Recovery_windows page
   | Goal_query request ->
     let open Result.Let_syntax in
     let%bind read =
@@ -3311,6 +3337,7 @@ let dispatch_authorized
 let handle_authorized
       t
       ?prepared_writer
+      ~on_release
       ~actor
       ~agent_actor
       ~context
@@ -3324,6 +3351,7 @@ let handle_authorized
     dispatch_authorized
       t
       ?prepared_writer
+      ~on_release
       ~actor
       ~agent_actor
       ~context
@@ -3396,6 +3424,8 @@ let command_session_id = function
     Some (Agent_protocol.Session_ref.session_id request.session)
   | Recurrence_control request ->
     Some (Agent_protocol.Session_ref.session_id request.session)
+  | Recovery_enable request -> Some (Agent_protocol.Session_ref.session_id request.session)
+  | Recovery_windows request -> Some (Agent_protocol.Session_ref.session_id request.session)
   | Goal_query request -> Some (Agent_protocol.Session_ref.session_id request.session)
   | Goal_control request ->
     Some
@@ -3595,6 +3625,8 @@ let receipt_summary ~session_id result =
   | Schedule_list _
   | Schedule_get _
   | Ingress_submit _
+  | Recovery_enable _
+  | Recovery_windows _
   | Goal_query _
   | Goal_control _
   | Recurrence_query _
@@ -4036,7 +4068,7 @@ let handle_seed t ~actor context request =
          "seed authority changed after receipt admission; outcome is unknown")
 ;;
 
-let execute t ~actor ~agent_actor context ~inference_budget command =
+let execute t ~on_release ~actor ~agent_actor context ~inference_budget command =
   match command with
   | Agent_protocol.Command.Session_seed request -> handle_seed t ~actor context request
   | Agent_protocol.Command.Prompt_dependencies_status -> dependency_status t
@@ -4073,6 +4105,7 @@ let execute t ~actor ~agent_actor context ~inference_budget command =
      | None ->
        handle_authorized
          t
+         ~on_release
          ~actor
          ~agent_actor
          ~context
@@ -4092,6 +4125,7 @@ let execute t ~actor ~agent_actor context ~inference_budget command =
          fun command_audit ->
            handle_authorized
              t
+             ~on_release
              ?prepared_writer
              ~actor
              ~agent_actor
@@ -4101,7 +4135,7 @@ let execute t ~actor ~agent_actor context ~inference_budget command =
              command))
 ;;
 
-let handle t ?actor ~context ~inference_budget command =
+let handle t ?actor ?(on_release = ignore) ~context ~inference_budget command =
   let open Result.Let_syntax in
   let agent_actor = Option.first_some actor (Connection_context.original_actor context) in
   let%bind actor = Connection_context.request_actor context actor in
@@ -4151,9 +4185,11 @@ let handle t ?actor ~context ~inference_budget command =
         read_visible_state t context request.session_id |> Result.map ~f:(fun _ -> ())
       | _ -> Ok ()
     in
+    let release = ref None in
+    let register check = release := Some check in
     let outcome =
       Result.bind
-        (execute t ~actor ~agent_actor context ~inference_budget command)
+        (execute t ~on_release:register ~actor ~agent_actor context ~inference_budget command)
         ~f:(Principal_projection.result (Connection_context.principal context))
     in
     let outcome =
@@ -4167,6 +4203,7 @@ let handle t ?actor ~context ~inference_budget command =
     in
     let operator =
       match command with
+      | Recovery_enable _ | Recovery_windows _ -> Some "context recovery"
       | Goal_query _ | Goal_control _ -> Some "Goal"
       | Recurrence_query _ | Recurrence_control _ -> Some "Recurrence"
       | _ -> None
@@ -4177,6 +4214,12 @@ let handle t ?actor ~context ~inference_budget command =
       Error (error Permission_denied (name ^ " authority expired or was revoked"))
     | Ok _, Ok _, Some _ ->
       (match command, t.recurrence_operator with
+       | (Recovery_enable _ | Recovery_windows _), _ ->
+         let%bind check = Result.of_option !release
+           ~error:(error Permission_denied "missing recovery response authority") in
+         let%bind () = check () in
+         on_release check;
+         outcome
        | Recurrence_control request, Some operator ->
          Result.bind (operator.check_disclosure ~actor ~context request) ~f:(fun () ->
            outcome)

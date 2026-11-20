@@ -2078,6 +2078,7 @@ let compose
       | Session_runs _
       | Session_run _
       | Recurrence_query _
+      | Recovery_windows _
       | Goal_query _
       | Session_pending_inputs _
       | Session_pending_input _
@@ -2110,6 +2111,7 @@ let compose
       | Session_cancel_operation _
       | Session_run_start _
       | Recurrence_control _
+      | Recovery_enable _
       | Goal_control _
       | Session_send_message _
       | Session_cancel_pending_input _

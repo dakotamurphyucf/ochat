@@ -5,7 +5,7 @@ module Window = Recovery_window_record
 module Scope = P.Recovery_window.Scope
 module Hash = Digestif.SHA256
 
-type summary =
+type summary = P.Recovery_query.Summary.t =
   { scope : Scope.t
   ; state : Window.state
   }
@@ -45,7 +45,7 @@ let list signer (source : Session_state.t) ~actor ~generation ~state page =
   let open Result.Let_syntax in
   let current = source.identity.generation in
   let selected = Option.value generation ~default:current in
-  if page.P.Page.Request.limit <= 0 || page.limit > 50 || selected < 0
+  if page.P.Page.Request.limit <= 0 || page.limit > P.Recovery_query.max_page_size || selected < 0
   then Error (P.Error.invalid_request "invalid recovery window generation or page size")
   else if not (Operator_authorization.is_current actor)
   then

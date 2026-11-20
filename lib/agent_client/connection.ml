@@ -114,7 +114,9 @@ let has_command_receipt = function
   | Provider_login_challenge _
   | Ingress_submit _
   | Instructions _
+  | Recovery_windows _
   | Goal_query _
+  | Recovery_enable _
   | Goal_control _
   | Recurrence_query _
   | Recurrence_control _
@@ -1016,8 +1018,7 @@ let close t =
   if Atomic.compare_and_set t.closed false true then Transport.close t.transport
 ;;
 
-let request_without_history t command =
-  match request t command with
+let non_history_response = function
   | Ok (Agent_protocol.Public.Result.Non_history value) ->
     Ok (Agent_protocol.Public.Result.Non_history.value value)
   | Ok (Private_provider_challenge _) ->
@@ -1027,6 +1028,31 @@ let request_without_history t command =
   | Ok (Session_get _ | Session_attach _ | Session_create _) ->
     Error (Agent_protocol.Error.invalid_request "unexpected history-bearing result")
   | Error _ as failure -> failure
+;;
+
+let request_without_history t command = non_history_response (request t command)
+
+type recovery_command =
+  | Enable of P.Recovery_query.Enable.t
+  | List_windows of P.Recovery_query.List_windows.t
+
+let request_recovery t ~initialized_as command =
+  let command =
+    match command with
+    | Enable request -> P.Command.Recovery_enable request
+    | List_windows request -> P.Command.Recovery_windows request
+  in
+  let check () =
+    if Option.exists (initialization t) ~f:(phys_equal initialized_as)
+    then Ok ()
+    else Error (P.Error.create Interrupted ~message:"recovery connection changed" ~retryable:false ())
+  in
+  with_request_lock t (fun () ->
+    let open Result.Let_syntax in
+    let%bind () = check () in
+    let%bind result = non_history_response (request_locked t command) in
+    let%map () = check () in
+    result)
 ;;
 
 let pending_identity pending = pending.recovery_identity

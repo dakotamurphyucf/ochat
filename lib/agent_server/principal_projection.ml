@@ -333,9 +333,9 @@ let project_result principal = function
            ~message:"instruction result scope is unavailable"
            ~retryable:false
            ())
-  | (Goal_query _ | Recurrence_query _) as value ->
+  | (Recovery_windows _ | Goal_query _ | Recurrence_query _) as value ->
     operator_result value ~has_required_scope:(has principal View_session_transcript)
-  | (Goal_control _ | Recurrence_control _) as value ->
+  | (Recovery_enable _ | Goal_control _ | Recurrence_control _) as value ->
     operator_result
       value
       ~has_required_scope:

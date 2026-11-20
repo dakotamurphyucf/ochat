@@ -15,11 +15,14 @@ val fixture
   -> Config_fixture.t
 
 val connect
-  :  sw:Eio.Switch.t
+  :  ?features:string list
+  -> sw:Eio.Switch.t
   -> Eio_unix.Stdenv.base
   -> Config_fixture.t
   -> string
   -> Http_driver.t * Agent_protocol.Id.Principal.t
+
+val connection : Http_driver.t -> Agent_client.Connection.t
 
 val create
   :  ?mode:Agent_protocol.Session.attachment_mode

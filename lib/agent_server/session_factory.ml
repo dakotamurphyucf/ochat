@@ -14493,7 +14493,7 @@ module Recovery_source_host = struct
 
   let denied () = P.Error.invalid_request "recovery source is unavailable"
 
-  let with_source t source ~authorize ~f =
+  let with_observed_source t source ~authorize ~f =
     if
       not
         (P.Id.Server.equal
@@ -14525,7 +14525,7 @@ module Recovery_source_host = struct
                      let%map () = authorize state in
                      state)
                  in
-                 f handle ~observation ~current))
+                 f handle ~observation ~current ~check_owner))
       in
       try
         match Eio.Time.Timeout.run_exn timeout run with
@@ -14533,6 +14533,10 @@ module Recovery_source_host = struct
         | Ok outcome -> outcome
       with
       | Eio.Time.Timeout -> Error Source.Unavailable)
+  ;;
+  let with_source t source ~authorize ~f =
+    with_observed_source t source ~authorize
+      ~f:(fun handle ~observation ~current ~check_owner:_ -> f handle ~observation ~current)
   ;;
 end
 
@@ -14546,7 +14550,7 @@ module Recovery_history = struct
     | Range of P.Error.t
   [@@deriving sexp_of]
 
-  let list_windows t ~actor ~session ?generation ?state page =
+  let list_windows t ?(on_release = ignore) ~actor ~session ?generation ?state page =
     let principal = Operator_authorization.principal actor in
     let denied () =
       P.Error.create
@@ -14573,21 +14577,32 @@ module Recovery_history = struct
     then Error (denied ())
     else (
       let%bind result =
-        Recovery_source_host.with_source
+        Recovery_source_host.with_observed_source
           t
           session
           ~authorize
-          ~f:(fun _handle ~observation ~current ->
-            let result =
-              Agent_session.Session_actor.Resource_observation.list_recovery_windows
-                observation
-                ~actor
-                ~generation
-                ~state
-                page
-            in
+          ~f:(fun _handle ~observation ~current ~check_owner ->
+            let module O = Agent_session.Session_actor.Resource_observation in
+            let list () = O.list_recovery_windows observation ~actor ~generation ~state page in
+            let result = list () in
             let%map _ = current () |> Result.map_error ~f:(fun _ -> Source.Denied) in
-            result)
+            Result.map result ~f:(fun accepted ->
+              let check () =
+                let%bind () = check_owner () |> Result.map_error ~f:(fun _ -> denied ()) in
+                let%bind latest = O.check_current observation |> Result.map_error ~f:(fun _ -> denied ()) in
+                let%bind () = authorize latest in
+                let%bind observed = list () in
+                let same_row (first : P.Recovery_query.Summary.t) (second : P.Recovery_query.Summary.t) =
+                  P.Recovery_window.Scope.equal first.scope second.scope
+                  && P.Recovery_query.State.equal first.state second.state
+                in
+                if List.equal same_row accepted.items observed.items
+                   && Option.equal P.Page.Cursor.equal accepted.next_cursor observed.next_cursor
+                then Ok ()
+                else Error (denied ())
+              in
+              on_release check;
+              accepted))
         |> Result.map_error ~f:(fun _ -> denied ())
       in
       result)

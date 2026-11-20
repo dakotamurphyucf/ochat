@@ -101,9 +101,20 @@ let recurrence_query_limits =
     Agent_protocol.Recurrence_query.max_envelope_bytes
 ;;
 
+let recovery_method name =
+  String.equal name Agent_protocol.Recovery_query.Enable.method_name
+  || String.equal name Agent_protocol.Recovery_query.List_windows.method_name
+;;
+
+let recovery_envelope_limits =
+  query_envelope_limits ~max_depth:18 ~max_fields:516 ~max_nodes:1032
+    (Agent_protocol.Recovery_query.max_page_bytes + 512)
+;;
+
 let operator_query_limits method_ =
   if List.mem Agent_protocol.Goal_query.Request.methods method_ ~equal:String.equal
   then Some ("Goal", goal_query_limits)
+  else if recovery_method method_ then Some ("Recovery", recovery_envelope_limits)
   else if
     List.mem Agent_protocol.Recurrence_query.Request.methods method_ ~equal:String.equal
   then Some ("Recurrence", recurrence_query_limits)
@@ -123,11 +134,11 @@ let validate_query_envelope name limits envelope =
       ())
 ;;
 
-let trace_request_id request_id =
+let bounded_request_id ~family request_id =
   let error =
     Agent_protocol.Error.create
       Resource_limit
-      ~message:"trace request ID exceeds installed bound"
+      ~message:(family ^ " request ID exceeds installed bound")
       ~retryable:false
       ()
   in
@@ -183,13 +194,17 @@ let dispatch_developer_trace t ?actor ~context request =
   Developer_endpoint.handle_trace installed.endpoint ?actor ~connection:context request
 ;;
 
-let dispatch_command t ?actor ~context command =
+let run_command t ?actor ?on_release ~context command =
   let open Result.Let_syntax in
   let%bind () = t.admit command in
   let%bind inference_budget =
     Inference_query_budget.for_embedded ~max_result_bytes:(16 * 1024 * 1024)
   in
-  Command_handler.handle t.handler ?actor ~context ~inference_budget command
+  Command_handler.handle t.handler ?actor ?on_release ~context ~inference_budget command
+;;
+
+let dispatch_command t ?actor ~context command =
+  run_command t ?actor ~context command
 ;;
 
 let decode method_ params = Agent_protocol.Command.of_method_and_params ~method_ ~params
@@ -199,7 +214,7 @@ let inference_method method_ =
   || String.equal method_ "session.inference_observations"
 ;;
 
-let request t ?actor context (request : Agent_protocol.Envelope.request) =
+let request t ?actor ~on_release context (request : Agent_protocol.Envelope.request) =
   if developer_trace_method request.method_
   then
     let open Result.Let_syntax in
@@ -207,7 +222,7 @@ let request t ?actor context (request : Agent_protocol.Envelope.request) =
       let%bind installed = developer t in
       let%bind () = installed.admit () in
       let%bind limits = Developer_endpoint.trace_limits installed.endpoint in
-      let%bind () = trace_request_id request.id in
+      let%bind () = bounded_request_id ~family:"trace" request.id in
       let%bind () =
         trace_envelope
           ~limits:(Agent_protocol.Developer_trace_wire.Limits.request limits)
@@ -342,7 +357,7 @@ let request t ?actor context (request : Agent_protocol.Envelope.request) =
           Inference_query_budget.for_request t.inference_response_policy request.id
         in
         Command_handler.handle t.handler ?actor ~context ~inference_budget command)
-      else dispatch_command t ?actor ~context command
+      else run_command t ?actor ~on_release ~context command
     in
     let response =
       match outcome with
@@ -439,9 +454,51 @@ let close_and_wait t =
   | Some installed -> Developer_endpoint.close_and_wait installed.endpoint
 ;;
 
-let dispatch_envelope t ?actor ~context = function
-  | Agent_protocol.Envelope.Request value -> request t ?actor context value
-  | Notification value -> notification t ?actor context value
+module Output = struct
+  type t =
+    | Immediate of Agent_protocol.Envelope.t
+    | Checked of
+        { id : Agent_protocol.Envelope.Request_id.t
+        ; envelope : Agent_protocol.Envelope.t
+        ; check : unit -> (unit, Agent_protocol.Error.t) result
+        }
+
+  let immediate envelope = Immediate envelope
+
+  let requires_check = function
+    | Immediate _ -> false
+    | Checked _ -> true
+  ;;
+
+  let materialize = function
+    | Immediate envelope -> envelope
+    | Checked { id; envelope; check } ->
+      (match check () with
+       | Ok () -> envelope
+       | Error _ ->
+         Agent_protocol.Envelope.failure ~id
+           (Agent_protocol.Error.create Permission_denied
+              ~message:"recovery result is no longer available" ~retryable:false ()))
+  ;;
+end
+
+let dispatch_output t ?actor ~context = function
+  | Agent_protocol.Envelope.Request value ->
+    let%bind.Result () =
+      if recovery_method value.method_
+      then bounded_request_id ~family:"recovery" value.id
+      else Ok ()
+    in
+    let release = ref None in
+    let on_release check = release := Some check in
+    let%map.Result response = request t ?actor ~on_release context value in
+    Option.map response ~f:(fun envelope ->
+      match !release, envelope with
+      | Some check, Agent_protocol.Envelope.Response { outcome = Ok _; id } ->
+        Output.Checked { id; envelope; check }
+      | _ -> Output.immediate envelope)
+  | Notification value ->
+    notification t ?actor context value |> Result.map ~f:(Option.map ~f:Output.immediate)
   | Response _ ->
     Error
       (Agent_protocol.Error.create
@@ -449,6 +506,11 @@ let dispatch_envelope t ?actor ~context = function
          ~message:"server dispatcher does not accept response envelopes"
          ~retryable:false
          ())
+;;
+
+let dispatch_envelope t ?actor ~context envelope =
+  dispatch_output t ?actor ~context envelope
+  |> Result.map ~f:(Option.map ~f:Output.materialize)
 ;;
 
 type dispatch_schedule =

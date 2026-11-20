@@ -415,6 +415,8 @@ type t =
   | Session_configuration_get of Session_configuration.t
   | Session_configuration_update of Session_configuration.t
   | Instructions of (Instruction_control.Result.t[@sexp.opaque])
+  | Recovery_enable of (Recovery_window.Scope.t[@sexp.opaque])
+  | Recovery_windows of (Recovery_query.Summary.t Page.t[@sexp.opaque])
   | Goal_query of (Goal_query.Result.t[@sexp.opaque])
   | Goal_control of (Goal_control.Result.t[@sexp.opaque])
   | Recurrence_query of (Recurrence_query.Result.t[@sexp.opaque])
@@ -505,6 +507,8 @@ let method_name = function
   | Session_work _ -> "session.work"
   | Session_configuration_get _ -> "session.configuration_get"
   | Instructions result -> Instruction_control.Result.method_name result
+  | Recovery_enable _ -> Recovery_query.Enable.method_name
+  | Recovery_windows _ -> Recovery_query.List_windows.method_name
   | Goal_query result -> Goal_query.Result.method_name result
   | Goal_control result -> Goal_control.Result.method_name result
   | Recurrence_query result -> Recurrence_query.Result.method_name result
@@ -598,6 +602,8 @@ let to_json = function
   | Activity_list value -> Page.to_json Session_activity.to_json value
   | Session_work value -> Page.to_json Session_work.to_json value
   | Instructions result -> Instruction_control.Result.payload result
+  | Recovery_enable v -> Recovery_window.Scope.to_json v
+  | Recovery_windows v -> Recovery_query.Summary.page_to_json v
   | Goal_query result -> Goal_query.Result.payload result
   | Goal_control result -> Goal_control.Result.payload result
   | Recurrence_query result -> Recurrence_query.Result.payload result
@@ -766,6 +772,8 @@ let decoders =
   ; "session.stop", map Session_mutation.of_json (fun x -> Session_stop x)
   ; ( "session.cancel_operation"
     , map Session_mutation.of_json (fun x -> Session_cancel_operation x) )
+  ; Recovery_query.Enable.method_name, map Recovery_window.Scope.of_json (fun x -> Recovery_enable x)
+  ; Recovery_query.List_windows.method_name, map Recovery_query.Summary.page_of_json (fun x -> Recovery_windows x)
   ; "session.runs", map (Page.of_json Run_query.View.of_json) (fun x -> Session_runs x)
   ; "session.run", map Run_query.Outcome.of_json (fun x -> Session_run x)
   ; ( "session.pending_inputs"

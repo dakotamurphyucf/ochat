@@ -5,7 +5,7 @@ open! Core
 module P = Agent_protocol
 module Window = Recovery_window_record
 
-type summary =
+type summary = P.Recovery_query.Summary.t =
   { scope : P.Recovery_window.Scope.t
   ; state : Window.state
   }

@@ -63,14 +63,15 @@ let writer output outgoing =
     match Agent_session.Mailbox.pop outgoing with
     | None -> ()
     | Some envelope ->
-      write_envelope output envelope;
+      write_envelope output (Agent_server.Dispatcher.Output.materialize envelope);
       loop ()
   in
   loop ()
 ;;
 
 let publish outgoing envelope =
-  Agent_session.Mailbox.try_push outgoing ~priority:Normal envelope
+  Agent_session.Mailbox.try_push outgoing ~priority:Normal
+    (Agent_server.Dispatcher.Output.immediate envelope)
 ;;
 
 let report_parse_failure outgoing on_error line failure =
@@ -80,10 +81,10 @@ let report_parse_failure outgoing on_error line failure =
 ;;
 
 let dispatch ~worker_sw dispatcher context outgoing on_error envelope =
-  match Agent_server.Dispatcher.dispatch_envelope dispatcher ~context envelope with
+  match Agent_server.Dispatcher.dispatch_output dispatcher ~context envelope with
   | Ok None -> ()
   | Ok (Some response) ->
-    if not (publish outgoing response)
+    if not (Agent_session.Mailbox.try_push outgoing ~priority:Normal response)
     then (
       on_error (invalid "connection outgoing queue is full");
       Eio.Switch.fail worker_sw (Failure "connection outgoing queue is full"))

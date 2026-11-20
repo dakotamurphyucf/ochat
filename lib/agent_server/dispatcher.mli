@@ -60,6 +60,23 @@ val dispatch_command
   -> Agent_protocol.Command.t
   -> (Agent_protocol.Public.Result.t, Agent_protocol.Error.t) result
 
+module Output : sig
+  (** A queued response. Protected results retain their original disclosure
+      checks until the last handoff to the transport. *)
+  type t
+
+  val immediate : Agent_protocol.Envelope.t -> t
+  val requires_check : t -> bool
+  val materialize : t -> Agent_protocol.Envelope.t
+end
+
+val dispatch_output
+  :  t
+  -> ?actor:Operator_authorization.t
+  -> context:Connection_context.t
+  -> Agent_protocol.Envelope.t
+  -> (Output.t option, Agent_protocol.Error.t) result
+
 (** Request envelopes produce one response unless an inference query cannot fit
     even its correlated error under the configured envelope policy, in which case
     a transport-level error is returned without publication. Notification-safe calls

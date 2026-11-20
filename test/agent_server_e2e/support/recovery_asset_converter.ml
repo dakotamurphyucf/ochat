@@ -163,7 +163,23 @@ let run env environment =
   let token = Config_fixture.admin_token fixture in
   let options = Daemon_host.with_offline_inference Agent_server.Daemon.default_options in
   Daemon_host.with_ env fixture ~options (fun sw daemon ->
-    let client, principal = F.connect ~sw env fixture token in
+    let client =
+      Http_driver.create
+        ~sw
+        ~env
+        ~port:(Config_fixture.http_port fixture)
+        ~token:(Some token)
+      |> Result.ok_or_failwith
+    in
+    let typed = F.connection client in
+    let negotiated =
+      Agent_client.Session_handle.initialize
+        typed
+        ~implementation_name:"recovery-integration"
+        ~implementation_version:"dev"
+      |> protocol_ok
+    in
+    let principal = negotiated.principal.id in
     let session, attachment = F.create ~mode:Owner_read_write client "real-converter" in
     let attachment_id = attachment.id in
     let entry =
@@ -230,10 +246,49 @@ let run env environment =
     require
       (String.is_substring (text legacy ~part:0) ~substring:"Equivalent")
       "ordinary converted text was lost";
-    let scope =
-      Actor.enable_recovery_windows entry.actor ~actor:proof ~attachment_id ~authorize
+    let owner =
+      P.Session_ref.create
+        ~server_id:
+          (Agent_store.Session_store.server_id (Agent_server.Daemon.store daemon))
+        ~session_id:session.id
+    in
+    let enable connection expected_generation =
+      Http_driver.request_without_history
+        connection
+        (Recovery_enable { session = owner; attachment_id; expected_generation })
+    in
+    let enabled () =
+      Agent_client.Recovery_windows.enable
+        typed
+        { session = owner; attachment_id; expected_generation = idle.identity.generation }
       |> protocol_ok
     in
+    let scope = enabled () in
+    require
+      (P.Recovery_window.Scope.equal scope (enabled ()))
+      "activation retry created another window";
+    (match enable client (idle.identity.generation + 1) with
+     | Error failure when P.Error.equal_code failure.code Conflict -> ()
+     | _ -> failwith "stale writer generation was accepted");
+    let observer, _ = F.connect ~sw env fixture token in
+    let request =
+      P.Recovery_query.List_windows.
+        { session = owner
+        ; generation = None
+        ; state = None
+        ; page = P.Page.Request.create ~limit:1 () |> protocol_ok
+        }
+    in
+    (match Http_driver.request_without_history observer (Recovery_windows request) with
+     | Error failure when P.Error.equal_code failure.code Method_not_found -> ()
+     | _ -> failwith "recovery was available without negotiating it");
+    Http_driver.shutdown observer;
+    let observer, _ =
+      F.connect ~sw ~features:[ P.Recovery_query.Features.windows ] env fixture token
+    in
+    (match enable observer idle.identity.generation with
+     | Error _ -> ()
+     | Ok _ -> failwith "another connection reused the owner's attachment");
     expect_error Unavailable (read (citation scope legacy) ~part:0);
     let entered, release = hold_next () in
     ignore (send ~name:"converter-hold" Plain_text "hold before adoption" : _);
@@ -352,6 +407,15 @@ let run env environment =
       (P.Recovery_window.Scope.equal predecessor.scope scope
        && A.Recovery_window_record.equal_state predecessor.state Sealed)
       "the first page must name the sealed predecessor";
+    let remote ?cursor () =
+      let page = P.Page.Request.create ~limit:1 ?cursor () |> protocol_ok in
+      Agent_client.Recovery_windows.list typed { request with page } |> protocol_ok
+    in
+    let remote_first = remote () in
+    require
+      (P.Recovery_window.Scope.equal (List.hd_exn remote_first.items).scope scope)
+      "remote predecessor mismatch";
+    let remote_cursor = Option.value_exn remote_first.next_cursor in
     let cursor = Option.value_exn page.next_cursor in
     let independent =
       Operator_authorization.trusted_local (Operator_authorization.principal proof)
@@ -370,6 +434,11 @@ let run env environment =
       |> A.History_codec.to_protocol
     in
     Actor.append_history entry.actor ~attachment_id [ appended ] |> protocol_ok |> ignore;
+    let remote_next = remote ~cursor:remote_cursor () in
+    require
+      (Option.is_none remote_next.next_cursor && List.length remote_next.items = 1)
+      "remote continuation missed successor";
+    Http_driver.shutdown observer;
     let next = windows ~cursor (authenticate ()) |> protocol_ok in
     require
       (Option.is_none next.next_cursor
@@ -394,8 +463,59 @@ let run env environment =
          retained
          ~part:0
          ~max_bytes:1024);
+    (* Hold a fully dispatched response as a slow stdio writer or HTTP batch
+       would. Withdraw the original source before handing any bytes to it. *)
+    let module Server = Agent_server in
+    let module D = Server.Dispatcher in
+    let context =
+      Server.Connection_context.create_authenticated
+        ~actor:proof
+        ~connection_id:"held-recovery-result"
+        ~transport:Stdio
+        ~publish_notification:ignore
+        ~max_attachments:1
+    in
+    let dispatcher = Server.Daemon.dispatcher daemon in
+    let local =
+      Agent_client.Transport.create
+        ~request:(D.dispatch_command dispatcher ~actor:proof ~context)
+        ~next_notification:(fun () -> None)
+        ~close:ignore
+      |> Agent_client.Connection.create
+    in
+    ignore
+      (Agent_client.Session_handle.initialize
+         local
+         ~implementation_name:"held-writer"
+         ~implementation_version:"dev"
+       |> protocol_ok
+       : P.Initialize.Response.t);
+    let id = P.Envelope.Request_id.of_json (`String "held-window-page") |> protocol_ok in
+    let command = P.Command.Recovery_windows request in
+    let held =
+      D.dispatch_output
+        dispatcher
+        ~actor:proof
+        ~context
+        (P.Envelope.request
+           ~id
+           ~method_:(P.Command.method_name command)
+           ~params:(P.Command.params command)
+           ())
+      |> protocol_ok
+      |> Option.value_exn
+    in
+    require
+      (D.Output.requires_check held)
+      "queued recovery response lost its disclosure guard";
     Actor.expire_recovery_window entry.actor ~actor:proof ~attachment_id ~authorize scope
     |> protocol_ok;
+    (match D.Output.materialize held with
+     | Response { id = actual; outcome = Error failure }
+       when P.Envelope.Request_id.compare id actual = 0
+            && P.Error.equal_code failure.code Permission_denied -> ()
+     | _ -> failwith "queued response disclosed an expired window");
+    D.close_connection_and_wait dispatcher context |> protocol_ok;
     expect_expired (windows ~cursor (authenticate ()));
     expect_error Expired (read retained ~part:0);
     Http_driver.shutdown client)

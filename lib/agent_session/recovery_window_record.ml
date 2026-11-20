@@ -22,7 +22,7 @@ type origin =
   | New_generation of { previous : Window_id.t }
 [@@deriving sexp_of]
 
-type state =
+type state = P.Recovery_query.State.t =
   | Open
   | Sealed
   | Expired
@@ -107,20 +107,9 @@ let to_jsonaf t =
     [ "id", Window_id.to_json (id t)
     ; "generation", X.host_counter_to_json (Scope.generation (scope t))
     ; "origin", origin_to_jsonaf t.origin
-    ; ( "state"
-      , `String
-          (match t.state with
-           | Open -> "open"
-           | Sealed -> "sealed"
-           | Expired -> "expired") )
+    ; "state", P.Recovery_query.State.to_json t.state
     ; "members", `Array (Array.to_list t.members |> List.map ~f:Member.to_jsonaf)
     ]
-;;
-
-let state_of_jsonaf =
-  J.enum
-    ~name:"recovery window state"
-    [ "open", Open; "sealed", Sealed; "expired", Expired ]
 ;;
 
 let of_jsonaf owner json =
@@ -130,7 +119,7 @@ let of_jsonaf owner json =
   let%bind generation = X.required fields "generation" X.host_counter_of_json in
   let%bind scope = Scope.create ~session:owner ~generation ~window in
   let%bind origin = X.required fields "origin" origin_of_jsonaf in
-  let%bind state = X.required fields "state" state_of_jsonaf in
+  let%bind state = X.required fields "state" P.Recovery_query.State.of_json in
   let%bind members =
     X.required fields "members" (function
       | `Array members when Stdlib.List.compare_length_with members max_members <= 0 ->

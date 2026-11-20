@@ -36,6 +36,20 @@ let require (state : Session_state.t) ~attachment_id ~now =
      | Expired -> error Lease_stale "owner lease has expired")
 ;;
 
+let require_recovery_owner state ~principal ~attachment_id ~now =
+  let open Result.Let_syntax in
+  let%bind attachment = require state ~attachment_id ~now in
+  let actual =
+    match attachment.mode, attachment.owner_lease, state.spec.protocol.liveness with
+    | Owner_read_write, Some lease, Owner_bound _ -> lease.principal_id
+    | Owner_read_write, None, Detached -> state.identity.creating_principal
+    | _ -> None
+  in
+  if Option.exists actual ~f:(P.Id.Principal.equal principal)
+  then Ok ()
+  else error Permission_denied "recovery management requires the source owner writer"
+;;
+
 let any (state : Session_state.t) ~now =
   List.exists state.attachments ~f:(fun attachment ->
     match status attachment ~now with

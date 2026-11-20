@@ -15,7 +15,7 @@ type origin =
   | New_generation of { previous : P.Id.Context_window.t }
 [@@deriving sexp_of]
 
-type state =
+type state = P.Recovery_query.State.t =
   | Open
   | Sealed
   | Expired

@@ -4281,6 +4281,8 @@ let method_coverage =
   ; "session.renew_owner", "conformance.error-codes"
   ; "session.start", "conformance.session-lifecycle"
   ; "session.run.start", "conformance.run-admission"
+  ; "session.recovery.enable", "daemon-recovery.converter-adoption"
+  ; "session.recovery.windows", "daemon-recovery.converter-adoption"
   ; "session.goals", "conformance.goal-operator"
   ; "session.goal", "conformance.goal-operator"
   ; "session.goal.command", "conformance.goal-operator"

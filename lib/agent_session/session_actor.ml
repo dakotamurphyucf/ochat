@@ -57131,19 +57131,8 @@ let recovery_note_mutation_identity t ~access ~effect_kind route =
 ;;
 
 let require_recovery_owner_writer t ~principal ~attachment_id =
-  let module P = Agent_protocol in
-  let open Result.Let_syntax in
-  let%bind attachment = write_attachment t attachment_id in
-  let actual =
-    match attachment.mode, attachment.owner_lease, t.state.spec.protocol.liveness with
-    | Owner_read_write, Some lease, Owner_bound _ -> lease.principal_id
-    | Owner_read_write, None, Detached -> t.state.identity.creating_principal
-    | _ -> None
-  in
-  if Option.exists actual ~f:(P.Id.Principal.equal principal)
-  then Ok ()
-  else
-    Error (error Permission_denied "recovery management requires the source owner writer")
+  Writer_attachment.require_recovery_owner
+    t.state ~principal ~attachment_id ~now:t.services.now
 ;;
 
 let enable_recovery_windows_internal t actor attachment_id authorize =

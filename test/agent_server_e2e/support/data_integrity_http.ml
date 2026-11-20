@@ -79,7 +79,7 @@ let configured_principal fixture token =
   | _ -> failwith "invalid credential fixture"
 ;;
 
-let connect ~sw env fixture token =
+let connect ?features ~sw env fixture token =
   let client =
     Http_driver.create
       ~sw
@@ -88,7 +88,7 @@ let connect ~sw env fixture token =
       ~token:(Some token)
     |> string_ok
   in
-  let initialized, _ = Http_driver.initialize client |> protocol_ok in
+  let initialized, _ = Http_driver.initialize ?features client |> protocol_ok in
   require
     (Agent_protocol.Id.Principal.compare
        initialized.principal.id

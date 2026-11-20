@@ -749,6 +749,7 @@ module Recovery_history : sig
       requires a fresh current proof. *)
   val list_windows
     :  t
+    -> ?on_release:((unit -> (unit, Agent_protocol.Error.t) result) -> unit)
     -> actor:Operator_authorization.t
     -> session:Agent_protocol.Session_ref.t
     -> ?generation:int

@@ -98,6 +98,7 @@ val create
 val handle
   :  t
   -> ?actor:Operator_authorization.t
+  -> ?on_release:((unit -> (unit, Agent_protocol.Error.t) result) -> unit)
   -> context:Connection_context.t
   -> inference_budget:Inference_query_budget.t
   -> Agent_protocol.Command.t
