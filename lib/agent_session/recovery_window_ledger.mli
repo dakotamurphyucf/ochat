@@ -22,6 +22,11 @@ val windows : t -> Window.t list
 val active : t -> Window.t
 val has_withdrawals : t -> bool
 
+(** Recognize exact canonical and effective bases derived from ordinary
+    compaction across retained or carried windows. An effective legacy base
+    with unqualified revision matches any known summary of that occurrence. *)
+val is_derived_summary : t -> P.Recovery_window.Citation.t -> bool
+
 (** Commit a permanent expiry fence for one exact sealed window. Preserve its
     membership and source coordinates for authenticated status and retention. *)
 val expire : t -> P.Recovery_window.Scope.t -> (t, P.Error.t) result

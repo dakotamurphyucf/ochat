@@ -210,6 +210,7 @@ let image_message () =
     [ Text { text = inline_uri; annotations = []; logprobs = Absent }
     ; Image { uri = inline_uri; detail = Absent }
     ; Image { uri = "https://not-a-local-asset.invalid/test"; detail = Absent }
+    ; Text { text = "aβc"; annotations = []; logprobs = Absent }
     ]
   in
   Payload.Semantic.create
@@ -233,6 +234,45 @@ let check_image fixture actor member =
       ~part
       ~max_bytes:34
   in
+  let module Text = A.Recovery_item_text in
+  let text ?max_text_bytes ?(max_payload_bytes = payload_limit) view =
+    Text.resolve
+      ?max_text_bytes
+      fixture.sessions
+      ~handle:fixture.handle
+      ~max_frame_bytes:payload_limit
+      ~max_payload_bytes
+      (Canonical citation)
+      ~view
+      ~current:(fun _selected _view -> Actor.state actor)
+  in
+  let projection = text Ordinary |> Result.ok |> Option.value_exn in
+  assert (Text.equal_role (Text.role projection) User);
+  (match Text.parts projection with
+   | [ first; last ] ->
+     [%test_eq: int list] [ first.index; last.index ] [ 0; 3 ];
+     [%test_eq: string] first.text inline_uri;
+     [%test_eq: string]
+       (P.History_text.read last ~start:1 ~stop:3 |> protocol_ok).text
+       "β"
+   | _ -> failwith "ordinary text projection exposed other content parts");
+  assert (
+    Option.equal
+      A.Recovery_source_reader.equal_error
+      (Result.error (text Selected_developer))
+      (Some Unavailable));
+  assert (
+    Option.equal
+      A.Recovery_source_reader.equal_error
+      (Result.error (text ~max_payload_bytes:1 Ordinary))
+      (Some Limit));
+  let exact_text_bytes = String.length inline_uri + String.length "aβc" in
+  assert (Result.is_ok (text ~max_text_bytes:exact_text_bytes Ordinary));
+  assert (
+    Option.equal
+      A.Recovery_source_reader.equal_error
+      (Result.error (text ~max_text_bytes:(exact_text_bytes - 1) Ordinary))
+      (Some Limit));
   let image = read 1 |> Result.ok |> Option.value_exn in
   [%test_eq: string]
     "1e85ec81b9800b4c443d39caca0d0926089a3ac201120db1ceb45b93789480b8"
@@ -454,6 +494,20 @@ let walk fixture sw ~fault ~initial =
                  (Result.error (read ()))
                  (Some Corrupt)));
          let summary = List.last_exn (membership after) in
+         let summary_citation = Ledger.Member.citation summary in
+         assert (Ledger.is_derived_summary (ledger after) summary_citation);
+         (match
+            A.Recovery_item_text.resolve
+              fixture.sessions
+              ~handle:fixture.handle
+              ~current:(fun _ _ -> Actor.state actor)
+              ~max_frame_bytes:payload_limit
+              ~max_payload_bytes:payload_limit
+              (Canonical summary_citation)
+              ~view:Ordinary
+          with
+          | Error Unavailable -> ()
+          | _ -> failwith "derived summary exposed recovery text or metadata");
          match Ledger.Member.provenance summary with
          | Derived_summary operation ->
            assert (P.Id.Operation.equal operation captured.operation_id)

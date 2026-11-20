@@ -85,12 +85,16 @@ module Row = struct
       (fst (versioned t ~remaining_bytes:max_bytes))
       ~f:(fun (_, entry) ->
         let provenance : P.History.provenance =
-          match t.provenance with
-          | Canonical ->
-            Option.value_map t.canonical ~default:P.History.Canonical ~f:(fun entry ->
-              entry.provenance)
-          | Moderator_inserted _ -> Moderator_inserted
-          | Moderator_replacement { target_id; _ } -> Moderator_replaced target_id
+          match
+            Option.map t.canonical ~f:(fun e -> e.P.History.provenance), t.provenance
+          with
+          | Some ((Runtime_authoring _ | Runtime_notification _) as host), _ ->
+            (* A replacement changes model content. Its source keeps the host's
+               disclosure classification even if the replacement looks like user text. *)
+            host
+          | original, Canonical -> Option.value original ~default:P.History.Canonical
+          | _, Moderator_inserted _ -> Moderator_inserted
+          | _, Moderator_replacement { target_id; _ } -> Moderator_replaced target_id
         in
         let content_revision =
           Option.value_map

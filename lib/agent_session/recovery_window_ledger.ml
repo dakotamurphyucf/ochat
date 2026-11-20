@@ -40,17 +40,55 @@ module Source = Recovery_window_location.Source
 module Member = Recovery_window_location.Member
 module Window = Recovery_window_record
 
+module Summary_key = struct
+  module T = struct
+    type t = int * P.History.Id.t * P.History.Content_revision.t option
+    [@@deriving compare, sexp_of]
+  end
+
+  include T
+  include Comparator.Make (T)
+end
+
+let remember_summary versions member =
+  let citation = Member.citation member in
+  match Member.provenance member, Citation.version citation with
+  | Derived_summary _, Canonical revision ->
+    let generation = Scope.generation (Citation.scope citation) in
+    let id = Citation.occurrence citation in
+    Set.add (Set.add versions (generation, id, Some revision)) (generation, id, None)
+  | _ -> versions
+;;
+
 type t =
   { owner : P.Session_ref.t
   ; windows : Window.t list
   ; active : Window.t
   ; has_withdrawals : bool
+  ; summary_versions : Set.M(Summary_key).t
   }
 
 let owner t = t.owner
 let windows t = t.windows
 let active t = t.active
 let has_withdrawals t = t.has_withdrawals
+
+let is_derived_summary t citation =
+  let has revision =
+    P.Session_ref.equal t.owner (Scope.session (Citation.scope citation))
+    && Set.mem
+         t.summary_versions
+         ( Scope.generation (Citation.scope citation)
+         , Citation.occurrence citation
+         , revision )
+  in
+  match Citation.version citation with
+  | Canonical revision
+  | Effective { origin = Unchanged revision | Replaced { base = revision; _ }; _ } ->
+    has (Some revision)
+  | Effective { origin = Captured _; _ } -> has None
+  | Effective { origin = Inserted _; _ } -> false
+;;
 
 (* Older readers must reject any ledger that contains a visibility fence. *)
 let version t = if has_withdrawals t then 2 else 1
@@ -146,29 +184,34 @@ let create ~owner windows =
     in
     let ids = Hash_set.create (module Window_id) in
     let operations = Hash_set.create (module Operation) in
-    let%bind _ =
-      List.fold_result windows ~init:(None, 0) ~f:(fun (previous, total) window ->
-        let scope = Window.scope window in
-        let id = Window.id window in
-        let total = total + Window.length window in
-        if
-          (not (P.Session_ref.equal owner (Scope.session scope)))
-          || Hash_set.mem ids id
-          || (Window.equal_state (Window.state window) Open
-              && not (Window_id.equal id (Window.id active)))
-        then invalid "foreign, duplicate or nonterminal open recovery window"
-        else if total > max_members
-        then invalid "recovery ledger exceeds the aggregate member limit"
-        else (
-          Hash_set.add ids id;
-          let%bind () = validate_origin previous window operations in
-          let%map () =
-            Window.fold_members window ~init:() ~f:(fun () -> validate_carry previous)
-          in
-          Some window, total))
+    let%bind _, _, summary_versions =
+      List.fold_result
+        windows
+        ~init:(None, 0, Set.empty (module Summary_key))
+        ~f:(fun (previous, total, versions) window ->
+          let scope = Window.scope window in
+          let id = Window.id window in
+          let total = total + Window.length window in
+          if
+            (not (P.Session_ref.equal owner (Scope.session scope)))
+            || Hash_set.mem ids id
+            || (Window.equal_state (Window.state window) Open
+                && not (Window_id.equal id (Window.id active)))
+          then invalid "foreign, duplicate or nonterminal open recovery window"
+          else if total > max_members
+          then invalid "recovery ledger exceeds the aggregate member limit"
+          else (
+            Hash_set.add ids id;
+            let%bind () = validate_origin previous window operations in
+            let%map versions =
+              Window.fold_members window ~init:versions ~f:(fun versions member ->
+                let%map () = validate_carry previous member in
+                remember_summary versions member)
+            in
+            Some window, total, versions))
     in
     let has_withdrawals = List.exists windows ~f:Window.has_withdrawals in
-    let t = { owner; windows; active; has_withdrawals } in
+    let t = { owner; windows; active; has_withdrawals; summary_versions } in
     let%bind () = if has_withdrawals then check_withdrawals windows else Ok () in
     let%map () = validate_encoded (to_jsonaf t) |> Result.map_error ~f:document_error in
     t)

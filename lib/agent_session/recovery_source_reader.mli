@@ -19,8 +19,11 @@ type error =
   | Limit
 [@@deriving equal, sexp_of]
 
+(** [visible] can further narrow the admitted source. A false result hides
+    the selection before I/O and after projection. *)
 val read
-  :  Agent_store.Session_store.t
+  :  ?visible:(Session_state.t -> bool)
+  -> Agent_store.Session_store.t
   -> handle:Agent_store.Session_store.Handle.t
   -> current:(unit -> (Session_state.t, P.Error.t) result)
   -> max_frame_bytes:int
@@ -30,9 +33,13 @@ val read
 
 (** Resolve one exact effective preparation member. [source_revision] identifies
     the durable preparation rather than the archive revision. The same current
-    authority and visibility checks surround opening the source and projection. *)
+    authority and visibility checks surround opening the source and projection.
+    [check_replaced_source] can require that the original canonical row also
+    qualifies for the requested disclosure when a moderator replaced it. *)
 val read_effective
-  :  Agent_store.Session_store.t
+  :  ?visible:(Session_state.t -> bool)
+  -> ?check_replaced_source:(P.History.entry -> (unit, error) result)
+  -> Agent_store.Session_store.t
   -> handle:Agent_store.Session_store.Handle.t
   -> current:(unit -> (Session_state.t, P.Error.t) result)
   -> max_frame_bytes:int

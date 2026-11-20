@@ -365,7 +365,17 @@ explicit history, owned-note or exact-share scope. Default history search
 covers selected semantic user and assistant text and explicitly admitted
 developer and tool-result text. Host instructions, generated summaries or
 hints, raw invocation data, unknown payloads and opaque reasoning are excluded.
-A filter can narrow the projection.
+A filter can narrow the projection. An exact text read checks one canonical citation
+or one preparation revision and effective citation. The ordinary view accepts
+semantic user and assistant messages. Developer messages and tool outputs
+each need their own explicit view and current host authorization for that
+selection. A message containing text, an image and then more text exposes
+the original text part numbers 0 and 2. Source annotations, model log
+probabilities, image URLs and invocation arguments do not enter this text
+result. Compaction-derived versions and reserved system-reminder messages
+are excluded from the ordinary text projection. A moderator replacement must
+qualify under both the original source and its effective content.
+[Exact item text](../../lib/agent_session/recovery_item_text.mli).
 
 First-slice search walks the selected visible positions in ascending window,
 member and part order. Take one hit per exact owner, occurrence and version

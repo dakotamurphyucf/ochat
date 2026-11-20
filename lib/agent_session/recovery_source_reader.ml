@@ -84,7 +84,7 @@ let archive_row store handle state member (root : Ledger.Source.archive) ~max_fr
   else Error Corrupt
 ;;
 
-let current_visibility store handle ~current =
+let current_visibility store handle ~current ~visible =
   let open Result.Let_syntax in
   let owner =
     P.Session_ref.create
@@ -97,6 +97,8 @@ let current_visibility store handle ~current =
     let%bind state = current () |> Result.map_error ~f:(fun _ -> Denied) in
     if not (Sessions.retained_lifecycle_available store handle)
     then Error Denied
+    else if not (visible state)
+    then Error Unavailable
     else (
       let%map view =
         Recovery_visibility.create state ~owner |> Result.map_error ~f:(fun _ -> Corrupt)
@@ -104,10 +106,18 @@ let current_visibility store handle ~current =
       state, view))
 ;;
 
-let read store ~handle ~current ~max_frame_bytes citation ~project =
+let read
+      ?(visible = fun _ -> true)
+      store
+      ~handle
+      ~current
+      ~max_frame_bytes
+      citation
+      ~project
+  =
   let open Result.Let_syntax in
   let select () =
-    let%bind state, view = current_visibility store handle ~current in
+    let%bind state, view = current_visibility store handle ~current ~visible in
     match Recovery_visibility.select view citation with
     | Unavailable -> Error Unavailable
     | Withdrawn -> Error Withdrawn
@@ -142,6 +152,8 @@ let read store ~handle ~current ~max_frame_bytes citation ~project =
 ;;
 
 let read_effective
+      ?(visible = fun _ -> true)
+      ?check_replaced_source
       store
       ~handle
       ~current
@@ -152,7 +164,7 @@ let read_effective
   =
   let open Result.Let_syntax in
   let select () =
-    let%bind state, view = current_visibility store handle ~current in
+    let%bind state, view = current_visibility store handle ~current ~visible in
     let%bind record =
       Effective_capture.resolve_record state ~source_revision
       |> Result.of_option ~error:Unavailable
@@ -173,12 +185,22 @@ let read_effective
   if max_frame_bytes < 1
   then Error Limit
   else (
+    let check_origin (state : Session_state.t) ordinal (row : P.History.entry) =
+      match check_replaced_source, row.provenance with
+      | Some check, Moderator_replaced id ->
+        (match Option.bind ordinal ~f:(List.nth state.conversation.canonical_history) with
+         | Some original when P.History.Id.equal original.id id ->
+           Result.map (check original) ~f:(fun () -> row)
+         | Some _ | None -> Error Corrupt)
+      | _ -> Ok row
+    in
     let live_row state =
       let%bind row =
         Effective_capture.resolve_live state ~source_revision citation
         |> Result.map_error ~f:(fun _ -> Corrupt)
       in
-      Result.of_option row ~error:Unavailable
+      let%bind row = Result.of_option row ~error:Unavailable in
+      check_origin state (Effective.Member.canonical_ordinal member) row
     in
     let custody = Effective.custody record in
     let row =
@@ -186,7 +208,7 @@ let read_effective
       | Live -> live_row state
       | Lost -> Error Unavailable
       | Archived location ->
-        let%bind _position =
+        let%bind position =
           Effective.Archive.find
             location
             ~request_ordinal:(Effective.Member.request_ordinal member)
@@ -207,7 +229,8 @@ let read_effective
           Effective_capture.resolve_archived archived record citation
           |> Result.map_error ~f:(fun _ -> Corrupt)
         in
-        Result.of_option row ~error:Corrupt
+        let%bind row = Result.of_option row ~error:Corrupt in
+        check_origin archived (Effective.Archive.Position.canonical_ordinal position) row
     in
     let recheck () =
       let%bind fresh_state, fresh_record, _ = select () in

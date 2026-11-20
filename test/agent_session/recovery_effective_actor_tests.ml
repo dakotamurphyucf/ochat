@@ -243,6 +243,35 @@ let check_archived_source fixture (replayed : State.t) =
   assert (
     String.is_substring (Jsonaf.to_string recovered.payload) ~substring:"new version");
   assert (P.History.equal_provenance recovered.provenance (Moderator_replaced target));
+  let module Text = A.Recovery_item_text in
+  let citation = Effective_record.Member.citation selected in
+  let source_revision = Effective_record.source_revision latest in
+  let item =
+    Text.resolve
+      fixture.sessions
+      ~handle:fixture.handle
+      ~current:(fun _ _ -> Ok replayed)
+      ~max_frame_bytes:payload_limit
+      ~max_payload_bytes:payload_limit
+      (Prepared { citation; source_revision })
+      ~view:Ordinary
+    |> Result.ok
+    |> Option.value_exn
+  in
+  [%test_eq: string list] [ "new version" ] (List.map (Text.parts item) ~f:(fun part -> part.text));
+  Source.read_effective
+    ~check_replaced_source:(fun original ->
+      assert (P.History.Id.equal original.id target);
+      assert (String.is_substring (Jsonaf.to_string original.payload) ~substring:"original canonical body");
+      Error Source.Unavailable)
+    fixture.sessions
+    ~handle:fixture.handle
+    ~current
+    ~max_frame_bytes:payload_limit
+    ~source_revision
+    citation
+    ~project:(fun _ -> failwith "denied original reached projection")
+  |> expect Unavailable;
   let location = archived_location latest in
   let position =
     Effective_archive.find
@@ -770,4 +799,124 @@ let%test_unit
     Option.is_none
       (create
          (List.init (A.Recovery_window_record.max_members + 1) ~f:(fun _ -> visible))))
+;;
+
+let%test_unit "single-item recovery discloses only the selected semantic view" =
+  let module Text = A.Recovery_item_text in
+  let module Payload = History_entry.Payload in
+  let message role text : Payload.Semantic.view =
+    Message
+      { form = Input
+      ; role
+      ; content =
+          [ Text
+              { text; annotations = [ `String "private annotation" ]; logprobs = Absent }
+          ]
+      ; phase = Absent
+      }
+  in
+  let cases : (Payload.Semantic.view * (Text.view * string) option) list =
+    [ message Developer "developer text", Some (Selected_developer, "developer text")
+    ; ( Result { kind = Function; relation = Unresolved; output = Text "tool result" }
+      , Some (Selected_tool_result, "tool result") )
+    ; message Assistant "answer", Some (Ordinary, "answer")
+    ; message User "<system-reminder>host instruction", None
+    ; message System "system instruction", None
+    ; Reasoning { readable_summary = [ "reasoning summary" ] }, None
+    ; ( Call
+          { kind = Function
+          ; name = "tool"
+          ; namespace = Absent
+          ; input_bytes = "private argument"
+          ; async = Absent
+          }
+      , None )
+    ]
+  in
+  with_actor_workspace (fun env workspace_instance ->
+    Eio.Switch.run (fun sw ->
+      let rows =
+        List.mapi cases ~f:(fun i (semantic, _) ->
+          let semantic =
+            Payload.Semantic.create semantic ~metadata:Payload.Metadata.empty
+            |> Result.ok_or_failwith
+          in
+          Payload.captured
+            semantic
+            ~origin:Payload.Origin.unavailable
+            ~raw:(`Object [ "private", `String "raw provider data" ])
+          |> Result.ok_or_failwith
+          |> History_entry.create_with_id ~id:(history i "").id
+          |> A.History_codec.to_protocol)
+      in
+      let base =
+        actor_state ~workspace_instance ~liveness:Detached ~start_immediately:false
+      in
+      let base =
+        { base with
+          conversation =
+            { base.conversation with
+              canonical_history = rows
+            ; next_history_sequence = Int64.of_int (List.length rows)
+            ; reserved_history_through = Int64.of_int (List.length rows)
+            }
+        }
+      in
+      let storage = Job_artifact_fixtures.create env sw base in
+      let owner =
+        P.Session_ref.create
+          ~server_id:(Store.Session_store.server_id storage.sessions)
+          ~session_id
+      in
+      let ledger =
+        A.Recovery_window_capture.bootstrap
+          base
+          ~owner
+          ~window:(P.Id.Context_window.create ())
+        |> protocol_ok
+      in
+      let source = { base with recovery_windows = Some ledger } in
+      List.iter2_exn (membership source) cases ~f:(fun member (_, expected) ->
+        let citation = Ledger.Member.citation member in
+        let resolve view ~current =
+          Text.resolve
+            storage.sessions
+            ~handle:storage.session
+            ~current
+            ~max_frame_bytes:payload_limit
+            ~max_payload_bytes:payload_limit
+            (Canonical citation)
+            ~view
+        in
+        List.iter
+          [ Text.Ordinary; Selected_developer; Selected_tool_result ]
+          ~f:(fun view ->
+            let current selection requested =
+              (match selection with
+               | Text.Canonical selected -> assert (Citation.equal selected citation)
+               | Prepared _ -> assert false);
+              assert (Text.equal_view requested view);
+              Ok source
+            in
+            match expected, resolve view ~current with
+            | Some (allowed, content), Ok item when Text.equal_view allowed view ->
+              [%test_eq: string list]
+                [ content ]
+                (List.map (Text.parts item) ~f:(fun p -> p.text))
+            | None, Error Source.Unavailable -> ()
+            | Some (allowed, _), Error Source.Unavailable
+              when not (Text.equal_view allowed view) -> ()
+            | _ ->
+              failwith "recovery exposed an ineligible part or missed an eligible one");
+        Option.iter expected ~f:(fun (view, _) ->
+          let calls = ref 0 in
+          let current _ _ =
+            Int.incr calls;
+            if !calls >= 3
+            then Error (P.Error.invalid_request "authority withdrawn")
+            else Ok source
+          in
+          match resolve view ~current with
+          | Error Denied -> ()
+          | _ -> failwith "a revoked selection escaped at release"))))
 ;;
