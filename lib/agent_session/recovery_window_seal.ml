@@ -72,7 +72,7 @@ let carry
          ~provenance:(Carried_from (Scope.window predecessor))
      | Live _ | Archive _ ->
        invalid "rollover carry differs from its live canonical source")
-  | Unavailable | Withdrawn -> invalid "rollover carry is unavailable"
+  | Unavailable | Withdrawn | Expired -> invalid "rollover carry is unavailable"
 ;;
 
 let prepare

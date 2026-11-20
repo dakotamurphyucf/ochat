@@ -22,6 +22,10 @@ val windows : t -> Window.t list
 val active : t -> Window.t
 val has_withdrawals : t -> bool
 
+(** Commit a permanent expiry fence for one exact sealed window. Preserve its
+    membership and source coordinates for authenticated status and retention. *)
+val expire : t -> P.Recovery_window.Scope.t -> (t, P.Error.t) result
+
 (** Validate against the owning committed state and its exact summary archive
     references. [has_archive] runs once per distinct archived root.
     This validates retained root identity; verified frame I/O and authorization

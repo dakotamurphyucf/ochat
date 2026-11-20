@@ -137,6 +137,12 @@ let atom_to_jsonaf ~limits ~state_document delta =
           [ "kind", `String "canonical_history_replaced"
           ; "entries", (X.list_json P.History.entry_to_json) value
           ])
+  | Recovery_window_expired scope ->
+    Ok (
+      `Object
+        [ "kind", `String "recovery_window_expired"
+        ; "scope", P.Recovery_window.Scope.to_json scope
+        ])
   | Recovery_window_enabled (owner, window) ->
     Ok
       (`Object
@@ -582,6 +588,9 @@ let atom_of_jsonaf ~limits json =
     Result.map
       (X.required fields "entries" (X.list P.History.entry_of_json))
       ~f:(fun value -> Delta.Canonical_history_replaced value)
+  | "recovery_window_expired" ->
+    let%map scope = X.required fields "scope" P.Recovery_window.Scope.of_json in
+    Delta.Recovery_window_expired scope
   | "recovery_window_enabled" ->
     let%bind owner = X.required fields "owner" P.Session_ref.of_json in
     let%map window = X.required fields "window" P.Id.Context_window.of_json in
@@ -928,6 +937,8 @@ let shape =
                          ~identity_field:"id"
                          Session_record_shapes.history_entry )
                    ] )
+             ; ( "recovery_window_expired"
+               , X.shape_exn [ "kind", D.Shape.value; "scope", D.Shape.value ] )
              ; ( "recovery_window_enabled"
                , X.shape_exn
                    [ "kind", D.Shape.value

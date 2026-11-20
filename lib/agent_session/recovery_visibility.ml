@@ -16,6 +16,7 @@ type t =
 type selection =
   | Unavailable
   | Withdrawn
+  | Expired
   | Eligible of Ledger.Member.t
 
 let create (state : Session_state.t) ~owner =
@@ -45,15 +46,17 @@ let select t citation =
     || not (Int.equal t.generation (Scope.generation scope))
   then Unavailable
   else (
-    let member =
+    let selected =
       let open Option.Let_syntax in
       let%bind window = Hashtbl.find t.windows (Scope.window scope) in
       let%bind ordinal = P.Recovery_window.ordinal (Window.manifest window) citation in
-      Window.at window ~ordinal
+      let%map member = Window.at window ~ordinal in
+      Window.state window, member
     in
-    match member with
+    match selected with
     | None -> Unavailable
-    | Some member ->
+    | Some (Expired, _) -> Expired
+    | Some ((Open | Sealed), member) ->
       if
         Ledger.Member.is_withdrawn member
         || Hash_set.mem t.suppressed (Citation.occurrence citation)

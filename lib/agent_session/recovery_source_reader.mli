@@ -11,6 +11,7 @@ type error =
   | Denied
   | Unavailable
   | Withdrawn
+  | Expired
   | Stale
   | Missing
   | Corrupt

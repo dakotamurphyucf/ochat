@@ -700,7 +700,7 @@ let recovery_window_delta_requires payload =
   | Value (`Array changes) ->
     List.exists changes ~f:(fun change ->
       match D.Json.field change ~name:"kind", D.Json.field change ~name:"state" with
-      | Value (`String ("recovery_window_enabled" | "recovery_summary_compacted")), _ ->
+      | Value (`String ("recovery_window_enabled" | "recovery_window_expired" | "recovery_summary_compacted")), _ ->
         true
       | Value (`String "created"), Value state ->
         (match D.Json.field state ~name:"payload" with

@@ -12,6 +12,7 @@ type t =
   | Workspace_changed of Workspace_instance.t
   | Canonical_entries_appended of Agent_protocol.History.entry list
   | Canonical_history_replaced of Agent_protocol.History.entry list
+  | Recovery_window_expired of (Agent_protocol.Recovery_window.Scope.t[@sexp.opaque])
   | Recovery_window_enabled of
       Agent_protocol.Session_ref.t * Agent_protocol.Id.Context_window.t
   | Recovery_effective_prepared of (Recovery_effective_record.t[@sexp.opaque])
@@ -195,6 +196,7 @@ let rec contains_policy_usage = function
   | Workspace_changed _
   | Canonical_entries_appended _
   | Canonical_history_replaced _
+  | Recovery_window_expired _
   | Recovery_window_enabled _
   | Recovery_effective_prepared _
   | Recovery_summary_compacted _
@@ -277,6 +279,7 @@ let rec contains_goal_policy = function
   | Workspace_changed _
   | Canonical_entries_appended _
   | Canonical_history_replaced _
+  | Recovery_window_expired _
   | Recovery_window_enabled _
   | Recovery_effective_prepared _
   | Recovery_summary_compacted _
@@ -692,6 +695,11 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
     }
   | Canonical_history_replaced history ->
     replace_canonical_history state history ~retired:[]
+  | Recovery_window_expired scope ->
+    let open Result.Let_syntax in
+    let%bind ledger = Result.of_option state.recovery_windows ~error:(Agent_protocol.Error.invalid_request "recovery windows are disabled") in
+    let%map ledger = Recovery_window_ledger.expire ledger scope in
+    { state with recovery_windows = Some ledger }
   | Recovery_window_enabled (owner, window) ->
     let%map.Result ledger = Recovery_window_capture.bootstrap state ~owner ~window in
     { state with recovery_windows = Some ledger }
@@ -1984,6 +1992,7 @@ let validate_goal_accounts delta ~(previous : Session_state.t) ~(next : Session_
     | Workspace_changed _
     | Canonical_entries_appended _
     | Canonical_history_replaced _
+    | Recovery_window_expired _
     | Recovery_window_enabled _
     | Recovery_effective_prepared _
     | Recovery_summary_compacted _
@@ -2137,6 +2146,7 @@ let validate_goal_descendants
     | Workspace_changed _
     | Canonical_entries_appended _
     | Canonical_history_replaced _
+    | Recovery_window_expired _
     | Recovery_window_enabled _
     | Recovery_effective_prepared _
     | Recovery_summary_compacted _
@@ -2241,6 +2251,7 @@ let rec validate_descendant_publication delta ~revision =
   | Workspace_changed _
   | Canonical_entries_appended _
   | Canonical_history_replaced _
+  | Recovery_window_expired _
   | Recovery_window_enabled _
   | Recovery_effective_prepared _
   | Recovery_summary_compacted _
@@ -2365,6 +2376,7 @@ let policy_usage_step delta ~(previous : Session_state.t) ~(next : Session_state
   | Workspace_changed _
   | Canonical_entries_appended _
   | Canonical_history_replaced _
+  | Recovery_window_expired _
   | Recovery_window_enabled _
   | Recovery_effective_prepared _
   | Recovery_summary_compacted _
@@ -2503,6 +2515,7 @@ let goal_policy_step delta ~(previous : Session_state.t) ~(next : Session_state.
   | Workspace_changed _
   | Canonical_entries_appended _
   | Canonical_history_replaced _
+  | Recovery_window_expired _
   | Recovery_window_enabled _
   | Recovery_effective_prepared _
   | Recovery_summary_compacted _

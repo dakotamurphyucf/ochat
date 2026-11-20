@@ -3879,6 +3879,16 @@ val enable_recovery_windows
   -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
   -> (Agent_protocol.Recovery_window.Scope.t, Agent_protocol.Error.t) result
 
+(** Permanently fence one sealed window. Requires the current source manager
+    and owner writer. An authorized retry on an expired window is idempotent. *)
+val expire_recovery_window
+  :  t
+  -> actor:Operator_authorization.t
+  -> attachment_id:Agent_protocol.Id.Attachment.t
+  -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> Agent_protocol.Recovery_window.Scope.t
+  -> (unit, Agent_protocol.Error.t) result
+
 (** The bound durable actor checks original owned-session authority in its mailbox.
     Exact note bytes travel only on this requested result. Listing pairs metadata
     with the current catalog revision needed by a subsequent create. *)

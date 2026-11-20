@@ -9,6 +9,7 @@ type t
 type selection =
   | Unavailable
   | Withdrawn
+  | Expired
   | Eligible of Recovery_window_ledger.Member.t
 
 (** Require the runtime host's source session identity. A malformed moderator

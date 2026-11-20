@@ -11,6 +11,7 @@ type error =
   | Denied
   | Unavailable
   | Withdrawn
+  | Expired
   | Stale
   | Missing
   | Corrupt
@@ -92,6 +93,7 @@ let read store ~handle ~current ~max_frame_bytes citation ~project =
         match Recovery_visibility.select view citation with
         | Unavailable -> Error Unavailable
         | Withdrawn -> Error Withdrawn
+        | Expired -> Error Expired
         | Eligible member -> Ok (state, member)))
   in
   let%bind state, member = select () in

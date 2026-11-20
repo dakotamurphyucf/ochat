@@ -14,6 +14,7 @@ type t =
   | Workspace_changed of Workspace_instance.t
   | Canonical_entries_appended of Agent_protocol.History.entry list
   | Canonical_history_replaced of Agent_protocol.History.entry list
+  | Recovery_window_expired of (Agent_protocol.Recovery_window.Scope.t[@sexp.opaque])
   | Recovery_window_enabled of
       Agent_protocol.Session_ref.t * Agent_protocol.Id.Context_window.t
   | Recovery_effective_prepared of (Recovery_effective_record.t[@sexp.opaque])

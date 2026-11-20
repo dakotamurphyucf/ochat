@@ -25,6 +25,7 @@ type origin =
 type state =
   | Open
   | Sealed
+  | Expired
 [@@deriving equal, sexp_of]
 
 type t =
@@ -42,9 +43,10 @@ let create scope ~origin ~state members =
     let%bind () =
       List.fold_result members ~init:() ~f:(fun () member ->
         match state, Member.source member with
-        | Sealed, Source.Live _ when Member.is_withdrawn member -> Ok ()
-        | Sealed, Source.Live _ -> invalid "sealed recovery window contains a live member"
-        | Open, (Live _ | Archive _) | Sealed, Archive _ -> Ok ())
+        | (Sealed | Expired), Source.Live _ when Member.is_withdrawn member -> Ok ()
+        | (Sealed | Expired), Source.Live _ ->
+          invalid "sealed recovery window contains a live member"
+        | Open, (Live _ | Archive _) | (Sealed | Expired), Archive _ -> Ok ())
     in
     let%map manifest = Manifest.create scope (List.map members ~f:Member.citation) in
     { manifest; origin; state; members = Array.of_list members })
@@ -53,6 +55,14 @@ let create scope ~origin ~state members =
 let manifest t = t.manifest
 let origin t = t.origin
 let state t = t.state
+
+let expire t =
+  match t.state with
+  | Open -> invalid "the active recovery window cannot expire"
+  | Sealed -> Ok { t with state = Expired }
+  | Expired -> Ok t
+;;
+
 let length t = Array.length t.members
 let has_withdrawals t = Array.exists t.members ~f:Member.is_withdrawn
 
@@ -101,13 +111,16 @@ let to_jsonaf t =
       , `String
           (match t.state with
            | Open -> "open"
-           | Sealed -> "sealed") )
+           | Sealed -> "sealed"
+           | Expired -> "expired") )
     ; "members", `Array (Array.to_list t.members |> List.map ~f:Member.to_jsonaf)
     ]
 ;;
 
 let state_of_jsonaf =
-  J.enum ~name:"recovery window state" [ "open", Open; "sealed", Sealed ]
+  J.enum
+    ~name:"recovery window state"
+    [ "open", Open; "sealed", Sealed; "expired", Expired ]
 ;;
 
 let of_jsonaf owner json =

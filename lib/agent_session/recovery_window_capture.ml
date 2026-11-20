@@ -227,8 +227,8 @@ let replace_at ledger ~previous ~history ~revision ~retired =
     List.map (Ledger.windows ledger) ~f:(fun window ->
       match Window.state window with
       | Open -> refresh_open window ~history ~revision ~index ~retired ~archive:None
-      | Sealed when Hash_set.is_empty retired -> Ok window
-      | Sealed ->
+      | (Sealed | Expired) when Hash_set.is_empty retired -> Ok window
+      | Sealed | Expired ->
         let members =
           List.map (members window) ~f:(fun member ->
             if Hash_set.mem retired (occurrence member)

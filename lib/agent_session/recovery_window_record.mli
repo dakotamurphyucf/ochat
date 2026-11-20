@@ -18,6 +18,7 @@ type origin =
 type state =
   | Open
   | Sealed
+  | Expired
 [@@deriving equal, sexp_of]
 
 type t
@@ -32,6 +33,10 @@ val create
 val manifest : t -> P.Recovery_window.t
 val origin : t -> origin
 val state : t -> state
+
+(** Permanently expire a sealed window, retaining exact immutable membership. *)
+val expire : t -> (t, P.Error.t) result
+
 val length : t -> int
 val has_withdrawals : t -> bool
 val at : t -> ordinal:int -> Member.t option

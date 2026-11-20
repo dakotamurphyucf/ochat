@@ -196,6 +196,12 @@ their own authority.
 | Unsupported projection or asset | Report unsupported. Preserve opaque payloads, including provider reasoning envelopes, in their original storage. |
 | Unknown or never-admitted ID | Report unavailable within an authorized scope. A caller without scope receives denial without an existence signal. |
 
+A source owner with an active writer attachment and grant-management scope can
+commit expiry for a sealed window. Exact citations in that window subsequently
+report expired. The open successor and its independently admitted citations keep
+their own status. The durable fence retains membership so retries, restart and
+later reads can identify the expired revisions without reopening an archive.
+
 Before collecting visibility metadata, prove that every affected citation or
 window is expired or guarded by a retained fence. Keep validated membership,
 manifests and artifact descriptors as typed roots under the existing store and

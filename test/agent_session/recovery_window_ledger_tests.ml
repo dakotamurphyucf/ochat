@@ -425,10 +425,10 @@ let%expect_test "withdrawal preserves ordinals and cannot be bypassed by a carri
     List.iter [ first; carried ] ~f:(fun m ->
       match select m with
       | Withdrawn -> ()
-      | Eligible _ | Unavailable -> failwith "lost withdrawal");
+      | Eligible _ | Expired | Unavailable -> failwith "lost withdrawal");
     (match select second with
      | Eligible found -> assert (Ledger.Member.same_version found second)
-     | Withdrawn | Unavailable -> failwith "unrelated member suppressed");
+     | Withdrawn | Expired | Unavailable -> failwith "unrelated member suppressed");
     let snapshot = handoff_snapshot 0 in
     let tombstone : Session.Moderator_state.Identity_snapshot.Tombstone.t =
       { target_id = Citation.occurrence (Ledger.Member.citation second); change_id = 0 }
@@ -443,7 +443,7 @@ let%expect_test "withdrawal preserves ordinals and cannot be bypassed by a carri
     in
     (match A.Recovery_visibility.select masked (Ledger.Member.citation second) with
      | Withdrawn -> ()
-     | Eligible _ | Unavailable ->
+     | Eligible _ | Expired | Unavailable ->
        failwith "current moderator tombstone did not suppress archived text");
     let unknown =
       Citation.create
@@ -454,7 +454,7 @@ let%expect_test "withdrawal preserves ordinals and cannot be bypassed by a carri
     in
     (match A.Recovery_visibility.select view unknown with
      | Unavailable -> ()
-     | Eligible _ | Withdrawn -> failwith "invented membership");
+     | Eligible _ | Expired | Withdrawn -> failwith "invented membership");
     assert (
       Option.equal
         Int.equal

@@ -1122,7 +1122,7 @@ let%expect_test "middle paired deletion transfers only archived unknown custody"
             (P.History.Id.equal call.id expected.id
              || P.History.Id.equal output.id expected.id));
         assert (A.Recovery_window_ledger.Member.matches current expected)
-      | Unavailable -> failwith "paired deletion lost membership evidence");
+      | Expired | Unavailable -> failwith "paired deletion lost membership evidence");
     let raw =
       A.Session_state_document.authored state
       |> fun document ->

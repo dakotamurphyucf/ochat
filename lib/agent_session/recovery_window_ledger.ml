@@ -174,6 +174,22 @@ let create ~owner windows =
     t)
 ;;
 
+let expire t scope =
+  let open Result.Let_syntax in
+  if not (Int.equal (Scope.generation scope) (Scope.generation (Window.scope t.active)))
+  then invalid "recovery window generation differs from the active generation"
+  else (
+    match List.find t.windows ~f:(fun w -> Scope.equal (Window.scope w) scope) with
+    | None -> invalid "recovery window is unavailable"
+    | Some window when Window.equal_state (Window.state window) Expired -> Ok t
+    | Some window ->
+      let%bind expired = Window.expire window in
+      create
+        ~owner:t.owner
+        (List.map t.windows ~f:(fun w ->
+           if Window_id.equal (Window.id w) (Window.id expired) then expired else w)))
+;;
+
 let validate_state
       t
       ~session_id

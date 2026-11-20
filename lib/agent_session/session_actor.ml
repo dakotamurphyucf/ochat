@@ -5487,6 +5487,12 @@ module Context_request = struct
         * Inference_runtime.Recovery_input.t
         * (unit -> bool)
         -> unit t
+    | Expire_recovery_window :
+        Operator_authorization.t
+        * Agent_protocol.Id.Attachment.t
+        * (Session_state.t -> (unit, Agent_protocol.Error.t) result)
+        * Agent_protocol.Recovery_window.Scope.t
+        -> unit t
     | Enable_recovery_windows :
         Operator_authorization.t
         * Agent_protocol.Id.Attachment.t
@@ -12561,6 +12567,7 @@ let rec deferred_execution_delta (previous : Session_state.t) (delta : Session_d
   | Workspace_changed _
   | Canonical_entries_appended _
   | Canonical_history_replaced _
+  | Recovery_window_expired _
   | Recovery_window_enabled _
   | Recovery_effective_prepared _
   | Recovery_summary_compacted _
@@ -48773,7 +48780,7 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Update_organization _
   | Goal_request (Apply _)
   | Context_request
-      (Instruction_command _ | Recovery_note (Mutate _) | Enable_recovery_windows _)
+      (Instruction_command _ | Recovery_note (Mutate _) | Enable_recovery_windows _ | Expire_recovery_window _)
   | Context_request (Recovery_note_share (Establish_target _ | Create _ | Revoke _))
   | Context_request (Rollover (Native_new_window _ | Operator_request _))
   | Set_recurrence_controller _
@@ -57020,6 +57027,58 @@ let handle_recovery_rollover
     admit_recovery_rollover t ~check ~expected
 ;;
 
+let expire_recovery_window_internal t actor attachment_id authorize scope =
+  let module P = Agent_protocol in
+  let module L = Recovery_window_ledger in
+  let open Result.Let_syntax in
+  let check () =
+    let principal = Operator_authorization.principal actor in
+    let%bind () =
+      if
+        Operator_authorization.is_current actor
+        && P.Principal.has_scope principal Manage_grants
+        && P.Principal.has_scope principal Send_messages
+      then authorize t.state
+      else
+        Error
+          (error Permission_denied "recovery expiry requires a current source manager")
+    in
+    let%bind () =
+      require_recovery_owner_writer t ~principal:principal.id ~attachment_id
+    in
+    let owner =
+      Option.bind t.canonical_persistence ~f:(fun binding ->
+        if Canonical_backend_binding_data.is_available binding
+        then Canonical_backend_binding_data.session_owner binding
+        else None)
+    in
+    if
+      Option.exists owner ~f:(P.Session_ref.equal (P.Recovery_window.Scope.session scope))
+      && Int.equal t.state.identity.generation (P.Recovery_window.Scope.generation scope)
+    then Ok ()
+    else Error (error Invalid_state "recovery expiry source is unavailable")
+  in
+  let%bind () = check () in
+  let%bind ledger =
+    Result.of_option
+      t.state.recovery_windows
+      ~error:(error Invalid_state "recovery windows are disabled")
+  in
+  let%bind window =
+    List.find (L.windows ledger) ~f:(fun window ->
+      P.Recovery_window.Scope.equal (L.Window.scope window) scope)
+    |> Result.of_option ~error:(error Invalid_state "recovery window is unavailable")
+  in
+  match L.Window.state window with
+  | Open -> Error (error Conflict "the active recovery window cannot expire")
+  | Expired -> Ok ()
+  | Sealed ->
+    persist_recovery_delta
+      t
+      ~delta:(Recovery_window_expired scope)
+      ~check_before_commit:check
+;;
+
 let handle_recovery_note
   : type a. t -> a Recovery_note_request.t -> (a, Agent_protocol.Error.t) result
   =
@@ -58392,6 +58451,8 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
     | Context_request (Recovery_note request) -> handle_recovery_note t request
     | Context_request (Recovery_note_share request) ->
       handle_recovery_note_share t request
+    | Context_request (Expire_recovery_window (actor, attachment_id, authorize, scope)) ->
+      expire_recovery_window_internal t actor attachment_id authorize scope
     | Context_request (Enable_recovery_windows (actor, attachment_id, authorize)) ->
       enable_recovery_windows_internal t actor attachment_id authorize
     | Context_request (Instruction_command (admission, source, request)) ->
@@ -62326,6 +62387,10 @@ let context_new_window_native t ~access ~window =
 let request_context_rollover t ~actor ~attachment_id ~authorize ?authorize_force ~key expected =
   call t
     (Context_request (Rollover (Operator_request (actor, attachment_id, authorize, authorize_force, key, expected))))
+;;
+
+let expire_recovery_window t ~actor ~attachment_id ~authorize scope =
+  call t (Context_request (Expire_recovery_window (actor, attachment_id, authorize, scope)))
 ;;
 
 let enable_recovery_windows t ~actor ~attachment_id ~authorize =

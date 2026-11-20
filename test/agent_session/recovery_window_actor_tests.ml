@@ -48,11 +48,15 @@ let same_ledger before after =
   D.Json.equal (Ledger.to_jsonaf (ledger before)) (Ledger.to_jsonaf (ledger after))
 ;;
 
-let actor_proof ?(id = principal_id) () =
+let actor_proof
+      ?(id = principal_id)
+      ?(scopes = [ P.Scope.Send_messages; View_session_transcript ])
+      ()
+  =
   P.Principal.create
     ~id
     ~authentication_kind:"recovery.window.test"
-    ~scopes:(P.Scope.Set.of_list [ Send_messages; View_session_transcript ])
+    ~scopes:(P.Scope.Set.of_list scopes)
     ~attributes:[]
   |> protocol_ok
   |> Operator_authorization.trusted_local
@@ -637,4 +641,147 @@ let%expect_test
     fault=false journal_replayed=true archive_references=2
     fault=true journal_replayed=true archive_references=1
     |}]
+;;
+
+let%expect_test
+    "expiry fences exactly one sealed window through the real writer and journal"
+  =
+  with_actor_workspace (fun env workspace_instance ->
+    Eio.Switch.run (fun sw ->
+      let base =
+        actor_state ~workspace_instance ~liveness:Detached ~start_immediately:false
+      in
+      let item = history 0 "original archived row" in
+      let base =
+        { base with
+          conversation =
+            { base.conversation with
+              canonical_history = [ item ]
+            ; next_history_sequence = 1L
+            ; reserved_history_through = 1L
+            }
+        }
+      in
+      let storage = Job_artifact_fixtures.create env sw base in
+      let owner =
+        P.Session_ref.create
+          ~server_id:(Store.Session_store.server_id storage.sessions)
+          ~session_id
+      in
+      let fixture =
+        { env; owner; sessions = storage.sessions; handle = storage.session }
+      in
+      let window = P.Id.Context_window.create () in
+      let root = A.Recovery_window_capture.bootstrap base ~owner ~window |> protocol_ok in
+      let before = { base with recovery_windows = Some root } in
+      let predecessor = scope before in
+      let successor =
+        Scope.create ~generation:0 ~session:owner ~window:(P.Id.Context_window.create ())
+        |> protocol_ok
+      in
+      let doc = A.Session_state_document.authored before in
+      let archive =
+        Archive.reference_for doc ~kind:Rollover ~limits:document_limits operation_id
+        |> protocol_ok
+      in
+      Archive.write
+        ~env
+        ~handle:fixture.handle
+        ~max_payload_length:payload_limit
+        archive
+        doc
+      |> protocol_ok;
+      let sealed =
+        A.Recovery_window_seal.prepare
+          before
+          ~predecessor
+          ~successor
+          ~archive
+          ~retained:[ item ]
+        |> protocol_ok
+      in
+      let starting =
+        { before with
+          recovery_windows = Some sealed
+        ; counters =
+            { before.counters with revision = Int64.succ before.counters.revision }
+        ; conversation = { before.conversation with compaction_archives = [ archive ] }
+        }
+      in
+      let initial = Persistence.Restored.authored starting in
+      let cite w =
+        Ledger.Window.at w ~ordinal:0 |> Option.value_exn |> Ledger.Member.citation
+      in
+      let old = cite (Ledger.active root)
+      and carried = cite (Ledger.active sealed) in
+      let read current citation =
+        A.Recovery_source_reader.read
+          fixture.sessions
+          ~handle:fixture.handle
+          ~current
+          ~max_frame_bytes:payload_limit
+          citation
+          ~project:(fun row -> Ok row.id)
+      in
+      let store = journal fixture Store.Journal.create in
+      with_actor
+        fixture
+        sw
+        store
+        ~restored:initial
+        ~previous_transaction_hash:None
+        ~archive:(fun _ _ -> failwith "expiry rewrote the archive")
+        (fun actor _ ->
+           let writer = attach actor in
+           let expire proof =
+             Actor.expire_recovery_window
+               actor
+               ~actor:proof
+               ~attachment_id:writer
+               ~authorize:(fun _ -> Ok ())
+           in
+           let manager = actor_proof ~scopes:[ Send_messages; Manage_grants ] () in
+           let live () = Actor.state actor in
+           let prior = state actor in
+           assert (Result.is_error (expire (actor_proof ()) predecessor));
+           assert (Result.is_error (expire manager successor));
+           assert (Int64.equal prior.counters.revision (state actor).counters.revision);
+           assert (
+             P.History.Id.equal (read live old |> Result.ok |> Option.value_exn) item.id);
+           expire manager predecessor |> protocol_ok;
+           let after = state actor in
+           let frame = data_transaction store after in
+           [%test_eq: string list] (delta_kinds frame) [ "recovery_window_expired" ];
+           let replayed =
+             Persistence.apply_transaction
+               ~limits:document_limits
+               (Persistence.Restored.authored prior)
+               frame
+             |> store_ok
+             |> Persistence.Restored.state
+           in
+           assert (same_ledger after replayed);
+           let calls = ref 0 in
+           let while_reading () =
+             incr calls;
+             Ok (if !calls = 1 then prior else replayed)
+           in
+           List.iter
+             [ live; while_reading; (fun () -> Ok replayed) ]
+             ~f:(fun current ->
+               match read current old with
+               | Error Expired -> ()
+               | _ -> failwith "expired archived bytes escaped");
+           assert (!calls >= 2);
+           assert (
+             P.History.Id.equal
+               (read live carried |> Result.ok |> Option.value_exn)
+               item.id);
+           expire manager predecessor |> protocol_ok;
+           assert (Int64.equal after.counters.revision (state actor).counters.revision))));
+  print_endline
+    "archived citation expired; carried citation readable; authorized retry appended no \
+     transaction";
+  [%expect
+    {| archived citation expired; carried citation readable; authorized retry appended no transaction |}]
 ;;
