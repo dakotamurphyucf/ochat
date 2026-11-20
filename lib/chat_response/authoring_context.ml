@@ -417,6 +417,12 @@ let orientation corpus ~host ~capabilities ~surface_id =
         Child_agent
         [ "runtime.delegation.stop-helper" ]
     ; guide
+        "Context windows and recovery notes"
+        "Inspect local window capacity, request a transition and retain notes for a later window."
+        "Preparing a handoff or selecting a protected read, shared revision or authored write."
+        One_off_script
+        [ "runtime.context_windows"; "runtime.recovery_notes" ]
+    ; guide
         "Recurring automation"
         "Create paused definitions, explicitly enable eligible work, and inspect \
          retained outcomes using selected same-controller native tools."

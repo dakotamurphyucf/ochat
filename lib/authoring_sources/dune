@@ -41,6 +41,14 @@
     lib/agent_session/goal_native_metadata_service.ml %{dep:../agent_session/goal_native_metadata_service.ml}
     lib/agent_session/goal_native_metadata_view.ml %{dep:../agent_session/goal_native_metadata_view.ml}
     lib/agent_session/goal_run_evidence.ml %{dep:../agent_session/goal_run_evidence.ml}
+    lib/agent_session/recovery_note_access.ml %{dep:../agent_session/recovery_note_access.ml}
+    lib/agent_session/recovery_note_native_request.ml %{dep:../agent_session/recovery_note_native_request.ml}
+    lib/agent_session/recovery_note_native_tool.ml %{dep:../agent_session/recovery_note_native_tool.ml}
+    lib/agent_session/recovery_note_native_service.ml %{dep:../agent_session/recovery_note_native_service.ml}
+    lib/agent_session/recovery_note_query.ml %{dep:../agent_session/recovery_note_query.ml}
+    lib/agent_session/recovery_note_share.ml %{dep:../agent_session/recovery_note_share.ml}
+    lib/agent_session/recovery_context_native_tool.ml %{dep:../agent_session/recovery_context_native_tool.ml}
+    lib/agent_session/recovery_context_service.ml %{dep:../agent_session/recovery_context_service.ml}
     lib/agent_session/recurrence_native_admission.ml %{dep:../agent_session/recurrence_native_admission.ml}
     lib/agent_session/recurrence_native_schema.ml %{dep:../agent_session/recurrence_native_schema.ml}
     lib/agent_session/recurrence_native_request.ml %{dep:../agent_session/recurrence_native_request.ml}
@@ -612,6 +620,8 @@
     guide/chatml-authoring-goals.md %{dep:../../docs-src/guide/chatml-authoring-goals.md}
     guide/native-goal-metadata.md %{dep:../../docs-src/guide/native-goal-metadata.md}
     guide/chatml-authoring-runs.md %{dep:../../docs-src/guide/chatml-authoring-runs.md}
+    development/context-window-tools.md %{dep:../../docs-src/development/context-window-tools.md}
+    development/recovery-note-tools.md %{dep:../../docs-src/development/recovery-note-tools.md}
     guide/admitted-instructions.md %{dep:../../docs-src/guide/admitted-instructions.md}
     guide/builtin-instructions.md %{dep:../../docs-src/guide/builtin-instructions.md}
     guide/chatml-installed-libraries.md %{dep:../../docs-src/guide/chatml-installed-libraries.md}

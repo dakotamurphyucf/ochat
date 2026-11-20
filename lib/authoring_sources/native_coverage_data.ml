@@ -277,6 +277,28 @@ let features =
       ; "test/factory_catalog_publication/goal_native_resume_tests.ml"
       ; "test/goal_domain/goal_resume_request_tests.ml"
       ] )
+  ; ( "recovery.note_tools"
+    , "Operation-owned note reads, selected revisions, guarded delivery and durable mutations"
+    , [ "lib/agent_session/recovery_note_access.ml"
+      ; "lib/agent_session/recovery_note_native_request.ml"
+      ; "lib/agent_session/recovery_note_native_tool.ml"
+      ; "lib/agent_session/recovery_note_native_service.ml"
+      ; "lib/agent_session/recovery_note_query.ml"
+      ; "lib/agent_session/recovery_note_share.ml"
+      ]
+    , "runtime.recovery_notes"
+    , [ "test/agent_session/recovery_note_native_tests.ml"
+      ; "test/agent_server_e2e/scenarios/recovery_note_provider_scenario.ml"
+      ; "test/agent_server_e2e/scenarios/recovery_note_shared_provider_scenario.ml"
+      ] )
+  ; ( "recovery.window_tools"
+    , "Foreground capacity observation and durable window intent through the current writer"
+    , [ "lib/agent_session/recovery_context_native_tool.ml"
+      ; "lib/agent_session/recovery_context_service.ml"
+      ]
+    , "runtime.context_windows"
+    , [ "test/agent_session/recovery_rollover_tests.ml"
+      ] )
   ; ( "recurrence.selected_metadata"
     , "Nine explicitly selected same-controller native metadata operations with genuine \
        invocation/current original checks and admitted write semantics"
@@ -472,7 +494,7 @@ let implementation_sources =
   ; ( "lib/agent_store/delegation_store.ml"
     , "d3704db75bdf7a7b49b77042c52368fab87565443fa527ecba2a84927526ba09" )
   ; ( "lib/chat_response/authoring_context.ml"
-    , "36a5bf17c9ba8f20b9156cc03af4b130e175e08419343dfcf6681a859a3b46e8" )
+    , "4a688ad7aa00adf9dbaf45333f60ca20b9b0e418b394126ac3ac93acd972b43e" )
   ; ( "lib/chat_response/authoring_validation.ml"
     , "71b6c71022bde3b92bfd1954904fc516994532e938b74ebe0fb3b2f6ca948694" )
   ; ( "lib/chat_response/generated_admission.ml"
@@ -493,6 +515,22 @@ let implementation_sources =
     , "d8eea801d69ffa262cfc1d0a9bee45123ce8d4b08f74c25c67df450cd247600c" )
   ; ( "lib/agent_store/prompt_source_receipt.ml"
     , "d1089027dc9f0e69fb6db67815b2de78086d88a29334ac7c12ec6aa9f9b8258e" )
+  ; ( "lib/agent_session/recovery_note_access.ml"
+    , "526b0eff312e38a1b8d22c923ff0a6fd4a9927c553dbf1472d2bfbe75df062e8" )
+  ; ( "lib/agent_session/recovery_note_native_request.ml"
+    , "b3a49e0c30765f5e065717604f8c006bcb93d3ed6acd85b3219cbcc2f3885a73" )
+  ; ( "lib/agent_session/recovery_note_native_tool.ml"
+    , "b932759361cd23d5e9dfc65a3fda0779a07e9c69437630e79a1968516c7d8879" )
+  ; ( "lib/agent_session/recovery_note_native_service.ml"
+    , "400a199e28a3e91a813cd2811f072a67e6b5503c0c07d2d4b9cb6e3297c37e31" )
+  ; ( "lib/agent_session/recovery_note_query.ml"
+    , "2acbe58eca4e1606832e9731b8e36f5a2011c10bd1cdcbd9fa95123f4b5b9e26" )
+  ; ( "lib/agent_session/recovery_note_share.ml"
+    , "acb9e33cf47fa9e267b3dc1adf562950ca87afd5a13f9a023259c82face86254" )
+  ; ( "lib/agent_session/recovery_context_native_tool.ml"
+    , "865055f707e71926f75285ccde820f384191d3d60dc0973102a0de8e241e8c59" )
+  ; ( "lib/agent_session/recovery_context_service.ml"
+    , "c037e415b07c93015683dffe339c4a7811686a076f93671876e522aa6ad75174" )
   ; ( "lib/agent_session/recurrence_native_admission.ml"
     , "6dedc770d93c9329092e2ec809b1e5f4158065aef2a9fba365770f012dc71297" )
   ; ( "lib/agent_session/recurrence_native_schema.ml"
@@ -647,5 +685,29 @@ let topic_contracts =
   ; ( "delegated_moderator_v1"
     , "runtime.goal_metadata"
     , "4f6d7742b639ab6d13441a1ca1b3b654d6a1ba1c37b8d950973e2b108f966351" )
+  ; ( "one_off_v1"
+    , "runtime.context_windows"
+    , "84e75e3226c713607c62cafac5ee0717f633aba8a88b82c995e5aeb0b6b6b6ca" )
+  ; ( "tool_v1"
+    , "runtime.context_windows"
+    , "5202e35ec92b7becb02921a74fd8baf61292bb798f330039f2c5b2d66993c8db" )
+  ; ( "moderator_v1"
+    , "runtime.context_windows"
+    , "a5f77b1ad7df9beccc5075ba66f5ef16eadfc600d478b92d90061431c42de7dd" )
+  ; ( "delegated_moderator_v1"
+    , "runtime.context_windows"
+    , "f5d2e36661a0ae4297e19a48fc58a0e5e96029c65a9d67f0749b4b0f118176d6" )
+  ; ( "one_off_v1"
+    , "runtime.recovery_notes"
+    , "29bd47eefc500611825c2eafd5989929fcb4a9629e270828ad5618188571b41d" )
+  ; ( "tool_v1"
+    , "runtime.recovery_notes"
+    , "a43ece4980f874811c0576a14636ac4b71f928920e3aa80ba98e80034dc387a2" )
+  ; ( "moderator_v1"
+    , "runtime.recovery_notes"
+    , "56b2bd3caa4f6e4e5b63eaa437dd34233730359b795253009b17c456f5e98c48" )
+  ; ( "delegated_moderator_v1"
+    , "runtime.recovery_notes"
+    , "9b93296d1c0bdb428ce6aacf184f221e262e517bf7648b816d0d6d549168ed5d" )
   ]
 ;;

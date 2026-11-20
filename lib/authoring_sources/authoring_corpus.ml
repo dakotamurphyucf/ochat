@@ -3732,6 +3732,48 @@ let runtime_foundation ~sources =
                }
          }
        ]
+     @ [ { id = "runtime.context_windows"
+         ; title = "Inspect capacity and request a local context window"
+         ; prerequisites = []
+         ; surfaces = shared
+         ; excerpts =
+             [ { path = "development/context-window-tools.md"
+               ; heading = "# Selected context window tools"
+               ; include_children = true
+               }
+             ]
+         ; review =
+             Audited
+               { excerpt_sha256 =
+                   [ "1144c9a8ee941bf76d44bd9aca47a2506f4051cf8c3d4000efaa3bfac4bd238a" ]
+               ; evidence =
+                   [ "test/agent_session/recovery_rollover_tests.ml"
+                   ]
+               }
+         }
+       ]
+     @ [ { id = "runtime.recovery_notes"
+         ; title = "Read, share and update selected recovery notes"
+         ; prerequisites = []
+         ; surfaces = shared
+         ; excerpts =
+             [ { path = "development/recovery-note-tools.md"
+               ; heading = "# Selected recovery note tools"
+               ; include_children = true
+               }
+             ]
+         ; review =
+             Audited
+               { excerpt_sha256 =
+                   [ "9563520674b403f46660bd82f74743428f0b792f20f837131588db25028a7041" ]
+               ; evidence =
+                   [ "test/agent_session/recovery_note_native_tests.ml"
+                   ; "test/agent_server_e2e/scenarios/recovery_note_provider_scenario.ml"
+                   ; "test/agent_server_e2e/scenarios/recovery_note_shared_provider_scenario.ml"
+                   ]
+               }
+         }
+       ]
      @ [ { id = "runtime.recurrence"
          ; title = "Recurring automation metadata, exact requests and retained outcomes"
          ; prerequisites = []

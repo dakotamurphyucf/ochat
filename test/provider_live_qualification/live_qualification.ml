@@ -317,6 +317,7 @@ module Failure = struct
         | Transport_unavailable
         | Session_closed
         | Invalid_preparation
+        | Protected_delivery _
         | Request_limit _ )
     | Terminal _ -> false
   ;;
@@ -334,6 +335,7 @@ module Failure = struct
     | Transport_unavailable -> "transport_unavailable"
     | Session_closed -> "session_closed"
     | Invalid_preparation -> "invalid_preparation"
+    | Protected_delivery _ -> "protected_delivery"
     | Request_limit _ -> "request_limit"
   ;;
 
