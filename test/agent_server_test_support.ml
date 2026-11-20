@@ -596,6 +596,14 @@ let connection daemon principal =
     ~close:(fun () -> Agent_server.Daemon.close_connection daemon context)
 ;;
 
+let with_stage_timeout ~clock ~seconds ~stage f =
+  try Eio.Time.with_timeout_exn clock seconds f with
+  | Eio.Time.Timeout as exn ->
+    let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+    eprintf "timed out waiting for %s\n%!" stage;
+    Exn.raise_with_original_backtrace exn backtrace
+;;
+
 let initialize connection =
   Agent_client.Session_handle.initialize
     connection

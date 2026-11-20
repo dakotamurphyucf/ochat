@@ -115,6 +115,9 @@ let on_event ctx state event = match event with
             server = { configuration.server with data_dir = Filename.concat root "store" }
           }
         in
+        let await stage f =
+          with_stage_timeout ~clock:(Eio.Stdenv.clock env) ~seconds:15. ~stage f
+        in
         let requested_tool = ref "read_report" in
         let pending_call = ref false in
         let requests = ref 0 in
@@ -185,7 +188,7 @@ let on_event ctx state event = match event with
           in
           (* This observes actual startup/cleanup quiescence. It reserves nothing;
              all production source/State/admission guards still run afterwards. *)
-          loop ()
+          await "inherited session readiness" loop
         in
         let with_daemon f =
           Eio.Switch.run (fun sw ->
@@ -265,13 +268,12 @@ let on_event ctx state event = match event with
                     | Disabled -> failwith "fixture prompt disabled");
                 last_readiness := None;
                 try
-                  Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 15. (fun () ->
-                    let client = connection daemon (principal ()) in
-                    Exn.protect
-                      ~finally:(fun () -> Agent_client.Connection.close client)
-                      ~f:(fun () ->
-                        initialize client;
-                        f sw daemon client))
+                  let client = connection daemon (principal ()) in
+                  Exn.protect
+                    ~finally:(fun () -> Agent_client.Connection.close client)
+                    ~f:(fun () ->
+                      await "client initialization" (fun () -> initialize client);
+                      f sw daemon client)
                 with
                 | Eio.Time.Timeout as exn ->
                   let backtrace = Stdlib.Printexc.get_raw_backtrace () in
@@ -294,21 +296,23 @@ let on_event ctx state event = match event with
           requested_tool := name;
           pending_call := true;
           let handle =
-            H.attach
-              ~sw
-              ~clock:(Eio.Stdenv.clock env)
-              ~connection:client
-              ~session_id:(state entry).identity.session_id
-              ~mode:Read_write
-              ~subscribe:false
-              ()
-            |> protocol_ok
+            await "inherited caller attachment" (fun () ->
+              H.attach
+                ~sw
+                ~clock:(Eio.Stdenv.clock env)
+                ~connection:client
+                ~session_id:(state entry).identity.session_id
+                ~mode:Read_write
+                ~subscribe:false
+                ()
+              |> protocol_ok)
           in
-          H.send_message
-            handle
-            { kind = Plain_text; text = "Read the report"; attachments = [] }
-          |> protocol_ok
-          |> ignore;
+          await "inherited tool submission" (fun () ->
+            H.send_message
+              handle
+              { kind = Plain_text; text = "Read the report"; attachments = [] }
+            |> protocol_ok
+            |> ignore);
           let rec idle () =
             let current = state entry in
             List.iter current.permissions ~f:(fun permission ->
@@ -338,27 +342,28 @@ let on_event ctx state event = match event with
               Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
               idle ()
           in
-          let current = idle () in
+          let current = await ("inherited tool settlement for " ^ name) idle in
           H.detach handle |> protocol_ok;
           current
         in
         let check_public entry =
-          Agent_server.Runtime_owner.with_background_runtime
-            entry.R.runtime
-            (fun runtime ->
-               let native =
-                 Option.value_exn runtime.Agent_session.Runtime_builder.native_runtime
-               in
-               let registry =
-                 Lazy.force native.capabilities
-                 |> Result.map_error ~f:(fun e -> P.Error.invalid_request e.C.message)
-               in
-               Result.map registry ~f:(fun registry ->
-                 [%test_eq: string list]
-                   [ "read_report"; "start_report" ]
-                   (List.map (C.references registry) ~f:(fun r -> r.name));
-                 assert (List.is_empty native.functions)))
-          |> protocol_ok
+          await "inherited public capability catalog" (fun () ->
+            Agent_server.Runtime_owner.with_background_runtime
+              entry.R.runtime
+              (fun runtime ->
+                 let native =
+                   Option.value_exn runtime.Agent_session.Runtime_builder.native_runtime
+                 in
+                 let registry =
+                   Lazy.force native.capabilities
+                   |> Result.map_error ~f:(fun e -> P.Error.invalid_request e.C.message)
+                 in
+                 Result.map registry ~f:(fun registry ->
+                   [%test_eq: string list]
+                     [ "read_report"; "start_report" ]
+                     (List.map (C.references registry) ~f:(fun r -> r.name));
+                   assert (List.is_empty native.functions)))
+            |> protocol_ok)
         in
         let check_success current =
           assert (Option.is_none current.Agent_session.Session_state.moderator);
@@ -416,7 +421,8 @@ let on_event ctx state event = match event with
         let parent_id, child_id, grandchild_id =
           with_daemon (fun sw daemon client ->
             let parent, parent_attachment =
-              create_session ~start_immediately:true client
+              await "inherited parent creation" (fun () ->
+                create_session ~start_immediately:true client)
             in
             let parent_entry =
               R.find (Daemon.registry daemon) parent.id |> Option.value_exn
@@ -429,16 +435,23 @@ let on_event ctx state event = match event with
               | Independent -> false
             in
             await_ready ~wait_for_session_start parent_entry;
-            let child = create_child ~lifetime env root daemon parent_entry in
+            let child =
+              await "inherited child creation" (fun () ->
+                create_child ~lifetime env root daemon parent_entry)
+            in
             await_ready child;
             (match lifetime with
              | Owned -> ()
              | Independent ->
-               A.stop parent_entry.actor ~attachment_id:parent_attachment.id ~mode:Cancel
-               |> protocol_ok
-               |> ignore;
-               Agent_server.Runtime_owner.unload_and_wait parent_entry.runtime
-               |> protocol_ok);
+               await "inherited parent stop" (fun () ->
+                 A.stop
+                   parent_entry.actor
+                   ~attachment_id:parent_attachment.id
+                   ~mode:Cancel
+                 |> protocol_ok
+                 |> ignore;
+                 Agent_server.Runtime_owner.unload_and_wait parent_entry.runtime
+                 |> protocol_ok));
             check_public child;
             call sw client child "read_report" |> check_success;
             check_parent parent_entry 3;
@@ -446,15 +459,21 @@ let on_event ctx state event = match event with
             [%test_eq: int] 3 (List.length rejected.invocations);
             check_parent parent_entry 3;
             await_ready child;
-            let grandchild = create_child env root daemon child in
+            let grandchild =
+              await "inherited grandchild creation" (fun () ->
+                create_child env root daemon child)
+            in
             ( parent.id
             , (state child).identity.session_id
             , (state grandchild).identity.session_id ))
         in
         with_daemon (fun sw daemon client ->
-          let parent = R.load (Daemon.registry daemon) parent_id |> protocol_ok in
-          let child = R.load (Daemon.registry daemon) child_id |> protocol_ok in
-          let grandchild = R.load (Daemon.registry daemon) grandchild_id |> protocol_ok in
+          let load stage id =
+            await stage (fun () -> R.load (Daemon.registry daemon) id |> protocol_ok)
+          in
+          let parent = load "inherited parent recovery" parent_id in
+          let child = load "inherited child recovery" child_id in
+          let grandchild = load "inherited grandchild recovery" grandchild_id in
           check_public child;
           check_public grandchild;
           call sw client grandchild "read_report" |> check_success;
@@ -489,7 +508,7 @@ let on_event ctx state event = match event with
                 , (status : P.Job.status)
                 , (job.result : Jsonaf.t option)]
           in
-          let job = completed () in
+          let job = await "inherited background completion" completed in
           assert (P.Id.Session.equal job.session_id grandchild_id);
           (match P.Job.terminal_completion job |> protocol_ok with
            | Some (Succeeded (`String text)) ->
