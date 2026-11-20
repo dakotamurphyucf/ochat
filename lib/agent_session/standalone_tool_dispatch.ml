@@ -321,5 +321,12 @@ let create
                   |> require)
           }
   in
-  D.{ for_fork = None; commit_call; prepare_call = None; validate_original; run }
+  D.
+    { protection = None
+    ; for_fork = None
+    ; commit_call
+    ; prepare_call = None
+    ; validate_original
+    ; run
+    }
 ;;

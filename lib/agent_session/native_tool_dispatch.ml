@@ -41,9 +41,50 @@ let create_current
          | Managed _ -> false)
       | Error _ -> false)
   in
+  let protected =
+    List.filter_map references ~f:(fun reference ->
+      match C.resolve initial ~id:reference.id ~fingerprint:reference.fingerprint with
+      | Ok binding
+        when C.equal_result_contract (C.result_contract binding) Protected_recovery_v1 ->
+        Some (reference.name, binding)
+      | _ -> None)
+    |> String.Map.of_alist_exn
+  in
+  let claims ~name = Map.mem protected name in
+  let pending = Protected_delivery_queue.create () in
+  let protection =
+    Option.some_if
+      (not (Map.is_empty protected))
+      D.
+        { claims
+        ; take = (fun () -> Protected_delivery_queue.take pending)
+        ; close = (fun () -> Protected_delivery_queue.close pending)
+        }
+  in
   let cache = Stream_invocation.cache () in
   let find name =
     List.find references ~f:(fun reference -> String.equal reference.C.name name)
+  in
+  let check_projection (request : D.request) =
+    let denied () =
+      raise
+        (Dispatch_error
+           (Agent_protocol.Error.invalid_request
+              "protected invocation requires its body-free canonical call"))
+    in
+    if
+      claims ~name:request.original_name
+      && not (String.equal request.original_name request.name)
+    then denied ();
+    if claims ~name:request.name
+    then
+      let module Payload = History_entry.Payload in
+      let payload = History_entry.payload request.call in
+      match
+        Payload.representation payload, Payload.Semantic.view (Payload.semantic payload)
+      with
+      | Authored, Call { input_bytes; _ } when String.equal input_bytes "{}" -> ()
+      | _ -> denied ()
   in
   let prepare (reference : C.reference) (request : D.request) =
     if Option.is_some request.source || Option.is_some request.parent_call_id
@@ -66,10 +107,14 @@ let create_current
         ~implementation_revision:reference.C.implementation_revision
         ~capability_fingerprint:(C.fingerprint initial)
         ~now
-        ~value:(Result.ok value |> Option.value ~default:`Null))
+        ~value:
+          (if claims ~name:request.name
+           then `Null
+           else Result.ok value |> Option.value ~default:`Null))
     |> require
   in
   let commit_call request =
+    check_projection request;
     match find request.D.name with
     | None -> false
     | Some reference ->
@@ -99,6 +144,7 @@ let create_current
       |> Result.map_error ~f:(fun _ -> "invalid native tool input")
   in
   let run ?run_native (request : D.request) ~authorize =
+    check_projection request;
     match find request.name with
     | None -> None
     | Some reference ->
@@ -115,7 +161,7 @@ let create_current
         Stream_invocation.parse_input ~kind:request.kind ~payload:request.payload
       in
       let invocation = prepare reference request in
-      let resolved, runtime_requests =
+      let execute () =
         Chat_response.Runtime_request_scope.collect (fun () ->
           if Result.is_error value && Option.is_none request.rejection
           then
@@ -139,10 +185,22 @@ let create_current
               ~prepare_output
             |> require)
       in
+      let (resolved, runtime_requests), selection =
+        match Map.find protected request.name, value with
+        | Some binding, Ok input ->
+          Protected_native_call.with_input ~invocation ~binding ~input execute
+        | _ -> execute (), None
+      in
       let outcome =
         match resolved.status with
         | Resolved outcome -> outcome
         | _ -> assert false
+      in
+      let deliver =
+        match outcome, selection with
+        | I.Complete `Null, Some (Protected_native_call.Deliver make) ->
+          Atomic.make (Some make)
+        | _ -> Atomic.make None
       in
       Some
         D.
@@ -154,10 +212,22 @@ let create_current
                   capabilities.publish_invocation_output
                     ~invocation_id:resolved.context.id
                     entry
-                  |> require)
+                  |> require;
+                  Option.iter (Atomic.exchange deliver None) ~f:(fun make ->
+                    Protected_delivery_queue.add
+                      pending
+                      (make ~call:request.call ~output:entry)
+                    |> require))
           }
   in
-  D.{ for_fork = None; commit_call; prepare_call = None; validate_original; run }
+  D.
+    { protection
+    ; for_fork = None
+    ; commit_call
+    ; prepare_call = None
+    ; validate_original
+    ; run
+    }
 ;;
 
 let create =

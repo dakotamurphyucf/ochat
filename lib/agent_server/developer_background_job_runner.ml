@@ -234,6 +234,10 @@ let execute_with_budget t active claim job request deadline effective control ~i
       | None -> N.managed_definition t.native
       | Some issuer -> Some (Claimed.managed_definition issuer)
     in
+    let* () =
+      C.require_plain_invocation binding
+      |> Result.map_error ~f:(fun e -> P.Error.invalid_request e.message)
+    in
     let* revision, completion_schema =
       selected_schema t ~managed_definition capabilities reference
     in
@@ -413,6 +417,10 @@ let call_script_tool t ~active ~claim ~deadline ~prepared ~issuer ~name ~args =
   let* binding =
     C.find capabilities ~name
     |> Result.map_error ~f:(fun error -> P.Error.invalid_request error.message)
+  in
+  let* () =
+    C.require_plain_invocation binding
+    |> Result.map_error ~f:(fun e -> P.Error.invalid_request e.message)
   in
   let reference = C.reference binding in
   let managed_definition =

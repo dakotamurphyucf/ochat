@@ -566,7 +566,8 @@ let tool_items ~host capabilities =
         , `String
             (match C.result_contract binding with
              | Native_output -> "native_output"
-             | Invocation_v1 -> "invocation_v1") )
+             | Invocation_v1 -> "invocation_v1"
+             | Protected_recovery_v1 -> "protected_recovery_v1") )
       ])
   |> Result.all
 ;;

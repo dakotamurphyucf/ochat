@@ -63,11 +63,11 @@ let denied () =
        ())
 ;;
 
-let current actor effect_kind =
+let current actor scope =
   let principal = Operator_authorization.principal actor in
   if
     Operator_authorization.is_current actor
-    && P.Principal.has_scope principal (Effect.scope effect_kind)
+    && P.Principal.has_scope principal scope
   then Ok principal.id
   else denied ()
 ;;
@@ -81,25 +81,51 @@ let native token ~binding ~effect_kind =
   let%bind () = N.check_now token ~binding in
   let binding_name = (Chat_response.Tool_capability.reference binding).name in
   match N.actor token with
-  | Some actor when String.equal binding_name (Effect.name effect_kind) ->
-    let%map _ = current actor effect_kind in
+  | Some actor
+    when String.equal binding_name (Effect.name effect_kind)
+         && Chat_response.Tool_capability.equal_result_contract
+              (Chat_response.Tool_capability.result_contract binding)
+              Protected_recovery_v1 ->
+    let%map _ = current actor (Effect.scope effect_kind) in
     Native_route { token; binding; effect_kind; actor }
   | Some _ | None -> denied ()
+;;
+
+let check_operator
+      ~(state : Session_state.t)
+      ~owner
+      ~scope
+      ~actor
+      ~expected_owner
+      ~generation
+      ~authorize
+  =
+  let open Result.Let_syntax in
+  if
+    (not (P.Session_ref.equal expected_owner owner))
+    || not (Int.equal generation state.identity.generation)
+  then denied ()
+  else (
+    let%bind _ = current actor scope in
+    let%bind () = authorize state in
+    current actor scope)
 ;;
 
 let check_now t (state : Session_state.t) ~owner ~effect_kind =
   let open Result.Let_syntax in
   match t with
   | Operator_route route ->
-    if
-      (not (P.Session_ref.equal route.owner owner))
-      || not (Int.equal route.generation state.identity.generation)
-    then denied ()
-    else (
-      let%bind _ = current route.actor effect_kind in
-      let%bind () = route.authorize state in
-      let%map principal = current route.actor effect_kind in
-      Operator { principal; attachment_id = route.attachment_id })
+    let%map principal =
+      check_operator
+        ~state
+        ~owner
+        ~scope:(Effect.scope effect_kind)
+        ~actor:route.actor
+        ~expected_owner:route.owner
+        ~generation:route.generation
+        ~authorize:route.authorize
+    in
+    Operator { principal; attachment_id = route.attachment_id }
   | Native_route route ->
     let%bind () = N.check_now route.token ~binding:route.binding in
     let invocation = N.invocation route.token in
@@ -108,7 +134,28 @@ let check_now t (state : Session_state.t) ~owner ~effect_kind =
       && P.Id.Session.equal invocation.context.session_id state.identity.session_id
       && Int.equal invocation.context.generation state.identity.generation
     then (
-      let%map _ = current route.actor effect_kind in
+      let%map _ = current route.actor (Effect.scope effect_kind) in
       Native invocation)
     else denied ()
+;;
+
+let check_management t state ~owner =
+  let open Result.Let_syntax in
+  match t with
+  | Operator_route route ->
+    (match route.attachment_id with
+     | None -> denied ()
+     | Some attachment_id ->
+       let%map principal =
+         check_operator
+           ~state
+           ~owner
+           ~scope:Manage_grants
+           ~actor:route.actor
+           ~expected_owner:route.owner
+           ~generation:route.generation
+           ~authorize:route.authorize
+       in
+       principal, attachment_id)
+  | Native_route _ -> denied ()
 ;;

@@ -266,6 +266,9 @@ let call_tool t ~control ~prepared ~(limits : X.limits) ~parent ~call_child ~nam
   let* binding =
     C.find selected ~name |> Result.map_error ~f:(fun error -> invalid error.message)
   in
+  let* () =
+    C.require_plain_invocation binding |> Result.map_error ~f:(fun e -> invalid e.message)
+  in
   let reference = C.reference binding in
   let* revision =
     match C.implementation binding with

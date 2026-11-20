@@ -43,6 +43,8 @@ end
 
 let run
       ?(submission_guard = R.Submission_guard.empty)
+      ?(protected_delivery = [])
+      ?(protect_tool_arguments = false)
       context
       ~sw
       ~(identity : Identity.t)
@@ -55,9 +57,21 @@ let run
       ~on_observation
   =
   let open Result.Let_syntax in
+  let%bind () =
+    match relation with
+    | Transcript.Scope.Nested _ when not (List.is_empty protected_delivery) ->
+      List.iter protected_delivery ~f:R.Protected_delivery.expire_pending;
+      Error (Error.Preparation (Protected_delivery Unavailable))
+    | Root | Nested _ -> Ok ()
+  in
   let preparation_id = identity.new_preparation_id () in
   let%bind prepared =
-    R.Context.prepare context ~preparation_id request
+    R.Context.prepare
+      ~protected_delivery
+      ~protect_tool_arguments
+      context
+      ~preparation_id
+      request
     |> Result.map_error ~f:(fun error -> Error.Preparation error)
   in
   before_dispatch prepared;

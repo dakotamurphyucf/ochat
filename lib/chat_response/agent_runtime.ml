@@ -1355,7 +1355,8 @@ let require_saved_agent_source t ~binding ~max_registrations ~checkpoint =
        invalid "saved Agent.run source preparer is unavailable"
      | Native_output, Native_output, Ordinary ->
        invalid "saved Agent.run requires an installed native source registration"
-     | Invocation_v1, _, _ | _, Invocation_v1, _ ->
+     | (Invocation_v1 | Protected_recovery_v1), _, _
+     | _, (Invocation_v1 | Protected_recovery_v1), _ ->
        invalid "persistent native source is not a saved Agent.run target")
 ;;
 

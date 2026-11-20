@@ -544,6 +544,23 @@ the delivery contract reports the protected read as unavailable. A read
 whose final check preceded revocation may already have disclosed data.
 [Submission guard](../../lib/inference_runtime/inference_runtime.mli#L3-L22).
 
+The session dispatcher recognizes the trusted native registration's
+`Protected_recovery_v1` contract. It displays `{}` as the recorded call
+arguments. A successful invocation records a JSON null outcome. The live
+handler receives the validated original arguments under its admitted native
+scope. A second result selection, an expired invocation, or a request with
+an unprojected canonical call fails. A host-side redirect cannot transfer a
+protected call's arguments to an ordinary tool.
+
+After the actor acknowledges the exact canonical output, the dispatcher can
+hand the next preparation a process-local plan bound to that output. The
+plan supplies its result in the original tool-output role and preserves the
+provider call ID. A stored null outcome can be replayed independently of
+that live handoff. Native code that needs to acknowledge a mutation without
+disclosing content can choose an acknowledgement without a plan.
+[Session native result](../../lib/agent_session/recovery_native_result.mli),
+[transient provider delivery](../../lib/inference_runtime/protected_delivery.mli).
+
 ## Host lifetime and recovery
 
 - A durable on-demand host can close and later reopen the same store. A

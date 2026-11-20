@@ -23,10 +23,13 @@ type error =
 
 (** Native text is opaque unless its actual host registration explicitly opts
     into the versioned invocation outcome envelope. Submitted code, tool names
-    and output text cannot choose or change this contract. *)
+    and output text cannot choose or change this contract. [Protected_recovery_v1]
+    requires the owning session to provide transient arguments and a safe durable
+    result. Its identity differs from both ordinary result contracts. *)
 type result_contract =
   | Native_output
   | Invocation_v1
+  | Protected_recovery_v1
 [@@deriving sexp, equal]
 
 type binding
@@ -79,6 +82,11 @@ val implementation : binding -> implementation
 val descriptor : binding -> Openai.Completions.tool
 
 val native_implementation : binding -> Ochat_function.t option
+
+(** Check before admitting arguments to a native route that stores ordinary
+    invocation input. A protected registration needs the operation-owned
+    session dispatcher, including when reached through a redirect. *)
+val require_plain_invocation : binding -> (unit, error) result
 
 (** Check host-supplied restrictions on transferring an implementation to a
     generated session. Restrictions bind the actual registration and participate

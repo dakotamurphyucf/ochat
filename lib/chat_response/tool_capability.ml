@@ -24,6 +24,7 @@ type error =
 type result_contract =
   | Native_output
   | Invocation_v1
+  | Protected_recovery_v1
 [@@deriving sexp, equal]
 
 type implementation =
@@ -54,9 +55,18 @@ let reference binding = binding.reference
 let implementation binding = binding.implementation
 let descriptor binding = binding.descriptor
 
+let require_plain_invocation binding =
+  match binding.result_contract with
+  | Protected_recovery_v1 ->
+    error
+      "capability.protected_owner_required"
+      "Recovery requires its owning protected session dispatch."
+  | Native_output | Invocation_v1 -> Ok ()
+;;
+
 let check_delegation binding =
   match binding.delegation_restriction with
-  | None -> Ok ()
+  | None -> require_plain_invocation binding
   | Some message -> error "delegation.native_context_unavailable" message
 ;;
 
@@ -123,6 +133,9 @@ let bind
     | Native _, Native_output -> interface
     | Native _, Invocation_v1 ->
       [%sexp ("ochat.native-result.v1" : string), (interface : string)] |> Sexp.to_string
+    | Native _, Protected_recovery_v1 ->
+      [%sexp ("ochat.protected-recovery.v1" : string), (interface : string)]
+      |> Sexp.to_string
     | Managed target, _ ->
       [%sexp
         ("ochat.managed-tool.v1" : string)

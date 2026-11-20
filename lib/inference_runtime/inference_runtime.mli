@@ -1,5 +1,6 @@
 open! Core
 module Context_capacity = Context_capacity
+module Protected_delivery = Protected_delivery
 
 (** Trusted per-attempt application-submission checkpoint. A guard contains a
     host-owned [refresh] callback, not authority created by this module. Refresh
@@ -39,6 +40,7 @@ module Preparation_error : sig
     | Transport_unavailable
     | Session_closed
     | Invalid_preparation
+    | Protected_delivery of Protected_delivery.error
     | Request_limit of Document_schema.Error.t
   [@@deriving equal, sexp_of]
 end
@@ -125,6 +127,16 @@ end
 module Plan : sig
   type t
 
+  type run =
+    sw:Eio.Switch.t
+    -> scope:Transcript.Scope.t
+    -> accounting_id:Inference.Observation.Observation_id.t
+    -> note_delivery:(Inference.Event.Terminal.delivery -> unit)
+    -> on_event:(Inference.Event.t -> unit)
+    -> on_observation:(Inference.Observation.t -> unit)
+    -> submission_guard:Submission_guard.t
+    -> Receipt.t
+
   (** Trusted backend preparation. The closure captures the immutable lowered
       request, selected driver and exact host auth resolver. Its request is
       private. Configuration is the safe projection of this request's target,
@@ -152,15 +164,16 @@ module Plan : sig
     :  request:Inference.Request.t
     -> configuration:Inference.Observation.Configuration.t
     -> fingerprint:string
-    -> run:
-         (sw:Eio.Switch.t
-          -> scope:Transcript.Scope.t
-          -> accounting_id:Inference.Observation.Observation_id.t
-          -> note_delivery:(Inference.Event.Terminal.delivery -> unit)
-          -> on_event:(Inference.Event.t -> unit)
-          -> on_observation:(Inference.Observation.t -> unit)
-          -> submission_guard:Submission_guard.t
-          -> Receipt.t)
+    -> run:run
+    -> (t, Preparation_error.t) Result.t
+
+  (** Trusted protected adapter. Configuration reflects omission of optional
+      prompt-cache settings. Capacity is withheld for isolated preparations. *)
+  val create_isolated
+    :  request:Inference.Request.t
+    -> configuration:Inference.Observation.Configuration.t
+    -> fingerprint:string
+    -> run:run
     -> (t, Preparation_error.t) Result.t
 
   (** Attest the encoder and coverage of the same finalized input captured by
@@ -208,6 +221,12 @@ module Adapter : sig
     :  ?supports_request_guidance:bool
     -> ?prepare_with_policy:
          (policy:Inference.Observation.Transport_policy.t
+          -> preparation_id:string
+          -> Inference.Request.t
+          -> (Plan.t, Preparation_error.t) Result.t)
+    -> ?prepare_protected:
+         (policy:Inference.Observation.Transport_policy.t
+          -> materialized:Protected_delivery.Materialized.t
           -> preparation_id:string
           -> Inference.Request.t
           -> (Plan.t, Preparation_error.t) Result.t)
@@ -288,7 +307,8 @@ module Prepared : sig
       The trusted host supplies fresh actual scope/accounting identities and
       durably admits tracking before run. Reusing a scope across attempts is a
       host ownership error; this value is not a durable identity allocator.
-      Repeated starts are explicit new attempts, never hidden retries. *)
+      Repeated starts are explicit new attempts for ordinary requests. Protected
+      preparation admits at most one actual root scope and one submission. *)
   val start
     :  t
     -> scope:Transcript.Scope.t
@@ -363,9 +383,14 @@ module Context : sig
 
   (** The request must match this complete selected target. Final history,
       guidance, tools and immutable assets are already captured. A plan with a
-      different request, preparation identity or safe configuration rejects. *)
+      different request, preparation identity or safe configuration rejects.
+      A protected plan must match the exact committed output in effective
+      history. [protect_tool_arguments] also isolates a turn which may generate
+      protected call arguments, before the tool has produced a delivery plan. *)
   val prepare
-    :  t
+    :  ?protected_delivery:Protected_delivery.t list
+    -> ?protect_tool_arguments:bool
+    -> t
     -> preparation_id:string
     -> Inference.Request.t
     -> (Prepared.t, Preparation_error.t) Result.t

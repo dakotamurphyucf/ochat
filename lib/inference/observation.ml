@@ -996,11 +996,26 @@ module Configuration = struct
     | name -> Name.to_string name, None
   ;;
 
-  let of_target ?transport_policy target ~preparation_id ~transport ~capabilities ~limits =
+  let of_target
+        ?transport_policy
+        ?(omit_prompt_cache = false)
+        target
+        ~preparation_id
+        ~transport
+        ~capabilities
+        ~limits
+    =
     if List.length capabilities > 64
     then invalid "capabilities" "at most 64 declarations"
     else (
       let raw_settings = Request.Target.settings target in
+      let raw_settings =
+        if omit_prompt_cache
+        then
+          List.filter raw_settings ~f:(fun setting ->
+            not (Request.Setting.is_prompt_cache setting))
+        else raw_settings
+      in
       let known_names = List.map Name.all ~f:(fun name -> fst (source name)) in
       let settings =
         List.map Name.all ~f:(fun name ->

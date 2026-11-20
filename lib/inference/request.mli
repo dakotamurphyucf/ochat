@@ -46,6 +46,7 @@ module Setting : sig
     -> (t, Error.t) Result.t
 
   val name : t -> string
+  val is_prompt_cache : t -> bool
   val value : t -> Jsonaf.t Presence.t
   val provenance : t -> provenance
 

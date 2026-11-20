@@ -97,7 +97,8 @@ let table () =
 ;;
 
 let service ~commit_call ~commit_output ?prepare_call () : S.Tool_dispatch.t =
-  { for_fork = None
+  { protection = None
+  ; for_fork = None
   ; commit_call
   ; prepare_call
   ; validate_original = (fun ~kind:_ ~name:_ ~payload:_ -> Ok ())
@@ -141,7 +142,8 @@ let%expect_test "host-rejected committed call never issues admitted-call proof" 
     let tokens = ref 0 in
     let commits = ref 0 in
     let dispatch : S.Tool_dispatch.t =
-      { for_fork = None
+      { protection = None
+      ; for_fork = None
       ; commit_call =
           (fun _ ->
             Int.incr commits;

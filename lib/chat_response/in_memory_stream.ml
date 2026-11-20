@@ -51,8 +51,15 @@ module Tool_dispatch = struct
     ; runtime_requests : Moderation.Runtime_request.t list
     }
 
+  type protection =
+    { claims : name:string -> bool
+    ; take : unit -> Inference_runtime.Protected_delivery.t list
+    ; close : unit -> unit
+    }
+
   type t =
-    { for_fork : (source:string -> parent_call_id:string -> t) option
+    { protection : protection option
+    ; for_fork : (source:string -> parent_call_id:string -> t) option
     ; commit_call : request -> bool
     ; prepare_call :
         (request -> (Moderation.Tool_moderation.t option, string) Result.t) option
@@ -75,7 +82,14 @@ module Tool_dispatch = struct
       | [ prepare ] -> Some prepare
       | _ -> invalid_arg "tool dispatch requires a single host preparation policy"
     in
+    let protection =
+      match List.filter_map services ~f:(fun service -> service.protection) with
+      | [] -> None
+      | [ owner ] -> Some owner
+      | _ -> invalid_arg "tool dispatch requires a single protected delivery owner"
+    in
     { for_fork
+    ; protection
     ; prepare_call
     ; commit_call =
         (fun request ->
@@ -234,6 +248,8 @@ type ctx =
   ; on_inference_observation : Inference.Observation.t -> unit
   ; on_admitted_call : Admitted_call.t -> unit
   ; agent_guidance : Agent_guidance.t option
+  ; take_protected_delivery : (unit -> Inference_runtime.Protected_delivery.t list) option
+  ; protect_tool_arguments : bool
   ; submission_guard : Inference_runtime.Submission_guard.t
   ; before_inference_dispatch : Inference_runtime.Prepared.t -> unit
   ; before_tool_effect : (unit -> unit) option
@@ -305,6 +321,8 @@ type args =
   ; on_inference_observation : Inference.Observation.t -> unit
   ; on_admitted_call : Admitted_call.t -> unit
   ; agent_guidance : Agent_guidance.t option
+  ; take_protected_delivery : (unit -> Inference_runtime.Protected_delivery.t list) option
+  ; protect_tool_arguments : bool
   ; submission_guard : Inference_runtime.Submission_guard.t
   ; before_inference_dispatch : Inference_runtime.Prepared.t -> unit
   ; before_tool_effect : (unit -> unit) option
@@ -843,8 +861,14 @@ let finish_turn ~(moderator : moderator option) ~available_tools ~now_ms ~histor
   runtime_requests_of_outcomes_result ~source:"turn_end" (outcomes_to_list outer ~drained)
 ;;
 
+let protected_call (c : ctx) name =
+  Option.exists c.dispatch_tool ~f:(fun dispatch ->
+    Option.exists dispatch.protection ~f:(fun protection -> protection.claims ~name))
+;;
+
 let moderate_tool_call_with_event
       ~(moderator : moderator option)
+      ~project_input
       ~run_event
       ~(kind : Tool_call.Kind.t)
       ~(name : string)
@@ -858,14 +882,22 @@ let moderate_tool_call_with_event
   let original_call_item =
     Tool_call.call_item ~kind ~name ~payload ~call_id ~id:item_id
   in
+  let observed_item =
+    let projected = project_input ~name payload in
+    if String.equal projected payload
+    then original_call_item
+    else Tool_call.call_item ~kind ~name ~payload:projected ~call_id ~id:item_id
+  in
   let tool_call =
-    match Moderation.Tool_call.of_response_item original_call_item with
+    match Moderation.Tool_call.of_response_item observed_item with
     | None ->
       failwith "Expected tool call item when moderating a pending tool invocation."
     | Some tool_call -> tool_call
   in
   let%bind outer =
-    run_event ~original_call_item ~event:(Moderation.Event.Pre_tool_call tool_call)
+    run_event
+      ~original_call_item:observed_item
+      ~event:(Moderation.Event.Pre_tool_call tool_call)
   in
   let%bind () = ensure_not_waiting_on_ui moderator in
   let%bind runtime_requests, action =
@@ -914,18 +946,25 @@ let moderate_tool_call_with_event
 ;;
 
 let moderate_tool_call ~moderator ~available_tools ~now_ms ~history =
-  moderate_tool_call_with_event ~moderator ~run_event:(fun ~original_call_item ~event ->
-    run_moderation_event
-      ~moderator
-      ~available_tools
-      ~now_ms
-      ~history:(history @ [ original_call_item ])
-      ~event)
+  moderate_tool_call_with_event
+    ~project_input:(fun ~name:_ payload -> payload)
+    ~moderator
+    ~run_event:(fun ~original_call_item ~event ->
+      run_moderation_event
+        ~moderator
+        ~available_tools
+        ~now_ms
+        ~history:(history @ [ original_call_item ])
+        ~event)
 ;;
 
-let moderate_tool_call_entries ~moderator ~available_tools ~now_ms ~history =
-  moderate_tool_call_with_event ~moderator ~run_event:(fun ~original_call_item:_ ~event ->
-    run_moderation_event_entries ~moderator ~available_tools ~now_ms ~history ~event)
+let moderate_tool_call_entries ~project_input ~moderator ~available_tools ~now_ms ~history
+  =
+  moderate_tool_call_with_event
+    ~project_input
+    ~moderator
+    ~run_event:(fun ~original_call_item:_ ~event ->
+      run_moderation_event_entries ~moderator ~available_tools ~now_ms ~history ~event)
 ;;
 
 let handle_tool_result_with_events
@@ -1425,6 +1464,7 @@ let make_run_fork_admitted
     { ctx with
       allocator = child_allocator
     ; root_context = None
+    ; take_protected_delivery = None
     ; inference_context = Inference_runtime.Context.detach ctx.inference_context
     ; fork_depth = Option.map ctx.fork_depth ~f:(fun depth -> depth + 1)
     ; id_source = History_entry.Id_source.of_allocator child_allocator
@@ -1627,6 +1667,8 @@ let prepare_tool_call (c : ctx) ~hist ~st ~kind ~name ~payload ~call_id ~item_id
       try
         let moderate =
           moderate_tool_call_entries
+            ~project_input:(fun ~name payload ->
+              if protected_call c name then "{}" else payload)
             ~moderator:c.moderator
             ~available_tools:c.tools
             ~now_ms:(now_ms c.env)
@@ -1643,6 +1685,11 @@ let prepare_tool_call (c : ctx) ~hist ~st ~kind ~name ~payload ~call_id ~item_id
     (match result with
      | Error message when Option.is_none c.dispatch_tool -> failwith message
      | Error _ -> reject Tool_dispatch.Pre_tool_failed "Pre-tool moderation failed."
+     | Ok moderated when protected_call c name && not (String.equal name moderated.name)
+       ->
+       reject
+         Tool_dispatch.Pre_tool
+         "A protected call cannot transfer its arguments to another tool."
      | Ok moderated
        when Option.is_none moderated.synthetic_result
             && Option.is_some
@@ -1656,12 +1703,15 @@ let prepare_tool_call (c : ctx) ~hist ~st ~kind ~name ~payload ~call_id ~item_id
        , Option.map moderated.synthetic_result ~f:(fun _ -> Tool_dispatch.Pre_tool) ))
 ;;
 
-let rewrite_call_payload payload ~name ~input_bytes =
+let rewrite_call_payload ~protected payload ~name ~input_bytes =
   let module P = History_entry.Payload in
   let semantic = P.semantic payload in
   match P.Semantic.view semantic with
   | Call call ->
-    if String.equal call.name name && String.equal call.input_bytes input_bytes
+    if
+      (not protected)
+      && String.equal call.name name
+      && String.equal call.input_bytes input_bytes
     then payload
     else
       P.Semantic.create
@@ -1705,6 +1755,13 @@ let prepare_host_tool_entry
         ; parent_call_id = c.parent_call_id
         }
     in
+    let request =
+      let project name payload = if protected_call c name then "{}" else payload in
+      { request with
+        original_payload = project original_name original_payload
+      ; payload = project moderated.name moderated.payload
+      }
+    in
     let decision =
       try prepare request with
       | (Eio.Cancel.Cancelled _ | Effect_rejection.Rejected _) as exn -> raise exn
@@ -1723,6 +1780,14 @@ let prepare_host_tool_entry
         , Some Tool_dispatch.Pre_tool_failed )
       | Ok (Some (Rewrite_args args)) ->
         { moderated with payload = payload_of_jsonaf ~kind:moderated.kind args }, None
+      | Ok (Some (Redirect (name, _)))
+        when protected_call c original_name && not (String.equal name original_name) ->
+        ( { moderated with
+            name = original_name
+          ; payload = original_payload
+          ; synthetic_result = Some (Output.Text "Protected tool redirect rejected.")
+          }
+        , Some Tool_dispatch.Pre_tool )
       | Ok (Some (Redirect (name, args))) ->
         ( { moderated with name; payload = payload_of_jsonaf ~kind:moderated.kind args }
         , None )
@@ -1739,6 +1804,7 @@ let prepare_host_tool_entry
     History_entry.with_payload
       entry
       (rewrite_call_payload
+         ~protected:(protected_call c moderated.name)
          (History_entry.payload entry)
          ~name:moderated.name
          ~input_bytes:(c.redact_tool_payload ~name:moderated.name moderated.payload))
@@ -1870,6 +1936,7 @@ let accept_inference_candidate
         match P.Semantic.view (P.semantic payload) with
         | Call { name; input_bytes; _ } ->
           rewrite_call_payload
+            ~protected:(protected_call c name)
             payload
             ~name
             ~input_bytes:(c.redact_tool_payload ~name input_bytes)
@@ -1935,6 +2002,7 @@ let accept_inference_candidate
       let prepared = ref (moderated, rejection) in
       let payload =
         rewrite_call_payload
+          ~protected:(protected_call c moderated.name)
           payload
           ~name:moderated.name
           ~input_bytes:(c.redact_tool_payload ~name:moderated.name moderated.payload)
@@ -2277,7 +2345,10 @@ let run_turn (root_ctx : ctx) ~sw ~(history : History_entry.t list) =
             Sexp.to_string_hum (Inference.Request.Error.sexp_of_t error))
           |> Result.ok_or_failwith
         in
-        let receipt =
+        let protected_delivery =
+          Option.value_map c.take_protected_delivery ~default:[] ~f:(fun take -> take ())
+        in
+        let run () =
           Agent_guidance.with_request
             c.agent_guidance
             ~request
@@ -2286,6 +2357,8 @@ let run_turn (root_ctx : ctx) ~sw ~(history : History_entry.t list) =
             (fun request ~guard ~reserved_input_tokens:_ ->
                Neutral_turn.run
                  ~submission_guard:guard
+                 ~protected_delivery
+                 ~protect_tool_arguments:c.protect_tool_arguments
                  c.inference_context
                  ~sw
                  ~identity:c.inference_identity
@@ -2320,6 +2393,13 @@ let run_turn (root_ctx : ctx) ~sw ~(history : History_entry.t list) =
                |> Result.ok_or_failwith)
           |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
           |> Result.ok_or_failwith
+        in
+        let receipt =
+          if List.is_empty protected_delivery
+          then run ()
+          else
+            Exn.protect ~f:run ~finally:(fun () ->
+              List.iter protected_delivery ~f:Inference_runtime.Protected_delivery.retire)
         in
         c, receipt
       in
@@ -2424,6 +2504,8 @@ let setup_ctx ~(sw : Eio.Switch.t) (a : args) =
     ; on_inference_observation = a.on_inference_observation
     ; on_admitted_call = a.on_admitted_call
     ; agent_guidance = a.agent_guidance
+    ; take_protected_delivery = a.take_protected_delivery
+    ; protect_tool_arguments = a.protect_tool_arguments
     ; submission_guard = a.submission_guard
     ; before_inference_dispatch = a.before_inference_dispatch
     ; before_tool_effect = a.before_tool_effect
@@ -2495,6 +2577,8 @@ let run_completion_stream_in_memory_entries
       ~on_inference_attempt
       ~on_inference_completion
       ?agent_guidance
+      ?take_protected_delivery
+      ?(protect_tool_arguments = false)
       ?(submission_guard = Inference_runtime.Submission_guard.empty)
       ?(inference_relation = Transcript.Scope.Root)
       ?(on_inference_observation = fun _ -> ())
@@ -2540,6 +2624,21 @@ let run_completion_stream_in_memory_entries
       ?sw
       ()
   =
+  let protection =
+    Option.bind dispatch_tool ~f:(fun (dispatch : Tool_dispatch.t) -> dispatch.protection)
+  in
+  let protect_tool_arguments = protect_tool_arguments || Option.is_some protection in
+  let take_protected_delivery =
+    match protection, take_protected_delivery with
+    | Some owner, None -> Some owner.take
+    | None, take -> take
+    | Some _, Some _ -> invalid_arg "protected input has two delivery owners"
+  in
+  let redact_tool_payload ~name payload =
+    if Option.exists protection ~f:(fun owner -> owner.claims ~name)
+    then "{}"
+    else redact_tool_payload ~name payload
+  in
   if Option.is_some post_stream
   then
     invalid_arg
@@ -2614,6 +2713,8 @@ let run_completion_stream_in_memory_entries
     ; on_inference_observation
     ; on_admitted_call
     ; agent_guidance
+    ; take_protected_delivery
+    ; protect_tool_arguments
     ; submission_guard
     ; before_inference_dispatch
     ; before_tool_effect
@@ -2656,11 +2757,16 @@ let run_completion_stream_in_memory_entries
     ; parent_call_id
     }
   in
-  let entries =
+  let run () =
     match sw with
     | Some sw -> run_completion_stream_in_memory_entries_impl ~sw args
     | None ->
       Eio.Switch.run (fun sw -> run_completion_stream_in_memory_entries_impl ~sw args)
+  in
+  let entries =
+    match protection with
+    | None -> run ()
+    | Some owner -> Exn.protect ~finally:owner.close ~f:run
   in
   History_entry.Id_source.validate id_source entries |> Result.ok_or_failwith;
   entries

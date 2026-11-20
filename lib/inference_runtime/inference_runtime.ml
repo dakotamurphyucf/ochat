@@ -4,6 +4,7 @@ module Event = Inference.Event
 module Observation = Inference.Observation
 module Session = Session
 module Context_capacity = Context_capacity
+module Protected_delivery = Protected_delivery
 
 module Submission_guard = struct
   type t = (unit -> unit -> unit) list
@@ -32,6 +33,7 @@ module Preparation_error = struct
     | Transport_unavailable
     | Session_closed
     | Invalid_preparation
+    | Protected_delivery of Protected_delivery.error
     | Request_limit of Document_schema.Error.t
   [@@deriving equal, sexp_of]
 end
@@ -203,10 +205,11 @@ module Receipt = struct
   let output_coverage t = t.output_coverage
 end
 
-let configuration_matches request configuration =
+let configuration_matches ~isolated request configuration =
   match
     Observation.Configuration.of_target
       ?transport_policy:(Observation.Configuration.transport_policy configuration)
+      ~omit_prompt_cache:isolated
       (Request.target request)
       ~preparation_id:(Observation.Configuration.preparation_id configuration)
       ~transport:(Observation.Configuration.transport configuration)
@@ -218,34 +221,47 @@ let configuration_matches request configuration =
 ;;
 
 module Plan = struct
+  type run =
+    sw:Eio.Switch.t
+    -> scope:Transcript.Scope.t
+    -> accounting_id:Observation.Observation_id.t
+    -> note_delivery:(Event.Terminal.delivery -> unit)
+    -> on_event:(Event.t -> unit)
+    -> on_observation:(Observation.t -> unit)
+    -> submission_guard:Submission_guard.t
+    -> Receipt.t
+
   type t =
     { request : Request.t
     ; configuration : Observation.Configuration.t
     ; fingerprint : string
     ; capacity_source : Context_capacity.Source.t option
-    ; run :
-        sw:Eio.Switch.t
-        -> scope:Transcript.Scope.t
-        -> accounting_id:Observation.Observation_id.t
-        -> note_delivery:(Event.Terminal.delivery -> unit)
-        -> on_event:(Event.t -> unit)
-        -> on_observation:(Observation.t -> unit)
-        -> submission_guard:Submission_guard.t
-        -> Receipt.t
+    ; isolated : bool
+    ; run : run
     }
 
-  let create ~request ~configuration ~fingerprint ~run =
-    if String.is_empty fingerprint || not (configuration_matches request configuration)
+  let create_for ~isolated ~request ~configuration ~fingerprint ~run =
+    if
+      String.is_empty fingerprint
+      || not (configuration_matches ~isolated request configuration)
     then Error Preparation_error.Invalid_preparation
-    else Ok { request; configuration; fingerprint; capacity_source = None; run }
+    else Ok { request; configuration; fingerprint; capacity_source = None; isolated; run }
   ;;
 
+  let create = create_for ~isolated:false
+  let create_isolated = create_for ~isolated:true
   let with_capacity_source t source = { t with capacity_source = Some source }
 end
 
 module Adapter = struct
   type prepare =
     preparation_id:string -> Request.t -> (Plan.t, Preparation_error.t) Result.t
+
+  type prepare_protected =
+    materialized:Protected_delivery.Materialized.t
+    -> preparation_id:string
+    -> Request.t
+    -> (Plan.t, Preparation_error.t) Result.t
 
   module Session_binding = struct
     type t =
@@ -273,6 +289,7 @@ module Adapter = struct
   type t =
     { id : string
     ; supports_request_guidance : bool
+    ; supports_protected : bool
     ; limits : Limits.t
     ; bind : Request.Target.t -> (unit, Preparation_error.t) Result.t
     ; preflight_history :
@@ -280,6 +297,7 @@ module Adapter = struct
         -> History_entry.t list
         -> (unit, Preparation_error.t) Result.t
     ; prepare : policy:Observation.Transport_policy.t -> prepare
+    ; prepare_protected : policy:Observation.Transport_policy.t -> prepare_protected
     ; open_session :
         (Session.t
          -> policy:Observation.Transport_policy.t
@@ -290,6 +308,7 @@ module Adapter = struct
   let create
         ?(supports_request_guidance = false)
         ?prepare_with_policy
+        ?prepare_protected
         ?open_session
         ~id
         ~limits
@@ -315,13 +334,22 @@ module Adapter = struct
               | Prefer_websocket | Require_websocket ->
                 Error Preparation_error.Transport_unavailable)
         in
+        let supports_protected = Option.is_some prepare_protected in
+        let prepare_protected =
+          Option.value
+            prepare_protected
+            ~default:(fun ~policy:_ ~materialized:_ ~preparation_id:_ _ ->
+              Error (Preparation_error.Protected_delivery Unavailable))
+        in
         Ok
           { id
           ; supports_request_guidance
+          ; supports_protected
           ; limits
           ; bind
           ; preflight_history
           ; prepare
+          ; prepare_protected
           ; open_session
           })
   ;;
@@ -534,6 +562,7 @@ module Prepared = struct
     { plan : Plan.t
     ; limits : Limits.t
     ; capacity_binding : Context_capacity.Binding.t
+    ; protected_input : Protected_delivery.Materialized.t option
     }
 
   let target t = Request.target t.plan.request
@@ -550,14 +579,43 @@ module Prepared = struct
   ;;
 
   let start t ~scope ~accounting_id =
-    Ok
-      { Attempt.plan = t.plan
-      ; limits = t.limits
-      ; scope
-      ; accounting_id
-      ; started = Atomic.make false
-      ; delivery = Atomic.make Event.Terminal.Definitely_not_submitted
-      }
+    let open Result.Let_syntax in
+    let%map plan =
+      match t.protected_input with
+      | None -> Ok t.plan
+      | Some materialized ->
+        let%map refresh =
+          Protected_delivery.Materialized.bind materialized ~scope
+          |> Result.map_error ~f:(fun error -> Preparation_error.Protected_delivery error)
+        in
+        let guard = Submission_guard.create ~refresh in
+        let run
+              ~sw
+              ~scope
+              ~accounting_id
+              ~note_delivery
+              ~on_event
+              ~on_observation
+              ~submission_guard
+          =
+          t.plan.run
+            ~sw
+            ~scope
+            ~accounting_id
+            ~note_delivery
+            ~on_event
+            ~on_observation
+            ~submission_guard:(Submission_guard.compose submission_guard guard)
+        in
+        { t.plan with Plan.run }
+    in
+    { Attempt.plan
+    ; limits = t.limits
+    ; scope
+    ; accounting_id
+    ; started = Atomic.make false
+    ; delivery = Atomic.make Event.Terminal.Definitely_not_submitted
+    }
   ;;
 end
 
@@ -577,18 +635,41 @@ let request_equal a b =
 ;;
 
 module Context = struct
+  type prepare_protected =
+    sources:Protected_delivery.t list
+    -> preparation_id:string
+    -> Request.t
+    -> (Plan.t * Protected_delivery.Materialized.t, Preparation_error.t) Result.t
+
   type t =
     { adapter : Adapter.t
     ; target : Request.Target.t
     ; policy : Observation.Transport_policy.t
     ; session : Session.t option
     ; prepare : Adapter.prepare
+    ; prepare_protected : prepare_protected
     }
 
   let preflight_history t history =
     let open Result.Let_syntax in
     let%bind () = t.adapter.bind t.target in
     t.adapter.preflight_history ~target:t.target history
+  ;;
+
+  let private_preparation (adapter : Adapter.t) ~policy ~sources ~preparation_id request =
+    let open Result.Let_syntax in
+    let%bind () = adapter.bind (Request.target request) in
+    let%bind materialized =
+      Protected_delivery.Materialized.prepare sources ~history:(Request.history request)
+      |> Result.map_error ~f:(fun error -> Preparation_error.Protected_delivery error)
+    in
+    let%map plan =
+      Exn.protect
+        ~finally:(fun () -> Protected_delivery.Materialized.release_contents materialized)
+        ~f:(fun () ->
+          adapter.prepare_protected ~policy ~materialized ~preparation_id request)
+    in
+    plan, materialized
   ;;
 
   let create adapter ~target =
@@ -598,17 +679,29 @@ module Context = struct
     else (
       let%map () = adapter.bind target in
       let policy = Observation.Transport_policy.Http_sse in
-      { adapter; target; policy; session = None; prepare = adapter.prepare ~policy })
+      { adapter
+      ; target
+      ; policy
+      ; session = None
+      ; prepare = adapter.prepare ~policy
+      ; prepare_protected = private_preparation adapter ~policy
+      })
   ;;
 
   let target t = t.target
   let transport_policy t = t.policy
   let limits t = t.adapter.limits
-  let detach t = { t with session = None; prepare = t.adapter.prepare ~policy:t.policy }
 
   let with_transport_policy t policy =
-    { t with policy; session = None; prepare = t.adapter.prepare ~policy }
+    { t with
+      policy
+    ; session = None
+    ; prepare = t.adapter.prepare ~policy
+    ; prepare_protected = private_preparation t.adapter ~policy
+    }
   ;;
+
+  let detach t = with_transport_policy t t.policy
 
   module Owned_binding = struct
     type context = t
@@ -645,6 +738,11 @@ module Context = struct
               if !alive
               then prepare ~preparation_id request
               else Error Preparation_error.Session_closed)
+        ; prepare_protected =
+            (fun ~sources ~preparation_id request ->
+              if !alive
+              then t.prepare_protected ~sources ~preparation_id request
+              else Error Preparation_error.Session_closed)
         }
       in
       match t.adapter.open_session with
@@ -679,7 +777,12 @@ module Context = struct
       then t.prepare ~preparation_id request
       else Error Preparation_error.Session_closed
     in
-    { t with prepare }
+    let prepare_protected ~sources ~preparation_id request =
+      if is_open ()
+      then t.prepare_protected ~sources ~preparation_id request
+      else Error Preparation_error.Session_closed
+    in
+    { t with prepare; prepare_protected }
   ;;
 
   let closed_receipt ~scope ~accounting_id ~limits =
@@ -724,7 +827,13 @@ module Context = struct
     |> contract_exn
   ;;
 
-  let prepare t ~preparation_id request =
+  let prepare_request
+        t
+        ~protected_delivery
+        ~protect_tool_arguments
+        ~preparation_id
+        request
+    =
     let open Result.Let_syntax in
     if Option.exists t.session ~f:Session.is_closed
     then Error Preparation_error.Session_closed
@@ -734,14 +843,24 @@ module Context = struct
     else if not (Request.Target.equal t.target (Request.target request))
     then Error Preparation_error.Target_mismatch
     else (
-      let%bind plan = t.prepare ~preparation_id request in
+      let%bind plan, protected_input =
+        if List.is_empty protected_delivery && not protect_tool_arguments
+        then Result.map (t.prepare ~preparation_id request) ~f:(fun plan -> plan, None)
+        else if not t.adapter.supports_protected
+        then Error (Preparation_error.Protected_delivery Unavailable)
+        else (
+          let%map plan, materialized =
+            t.prepare_protected ~sources:protected_delivery ~preparation_id request
+          in
+          plan, Some materialized)
+      in
       if
         (not (request_equal plan.request request))
         || (not
               (String.equal
                  preparation_id
                  (Observation.Configuration.preparation_id plan.configuration)))
-        || not (configuration_matches request plan.configuration)
+        || not (Bool.equal plan.isolated (Option.is_some protected_input))
       then Error Preparation_error.Invalid_preparation
       else (
         let original = plan.Plan.run in
@@ -772,9 +891,30 @@ module Context = struct
           Context_capacity.Binding.create
             ~target:(Request.target request)
             ~configuration:plan.configuration
-            ~source:plan.capacity_source
+            ~source:(if plan.isolated then None else plan.capacity_source)
         in
-        Ok { Prepared.plan; limits = t.adapter.limits; capacity_binding }))
+        Ok { Prepared.plan; limits = t.adapter.limits; capacity_binding; protected_input }))
+  ;;
+
+  let prepare
+        ?(protected_delivery = [])
+        ?(protect_tool_arguments = false)
+        t
+        ~preparation_id
+        request
+    =
+    match
+      prepare_request
+        t
+        ~protected_delivery
+        ~protect_tool_arguments
+        ~preparation_id
+        request
+    with
+    | Ok _ as result -> result
+    | Error _ as result ->
+      List.iter protected_delivery ~f:Protected_delivery.expire_pending;
+      result
   ;;
 
   let identity target =

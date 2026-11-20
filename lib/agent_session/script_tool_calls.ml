@@ -109,6 +109,11 @@ let implementation_revision t selected (reference : C.reference) =
     |> Result.map_error ~f:(fun error ->
       Agent_protocol.Error.invalid_request error.C.message)
   in
+  let%bind () =
+    C.require_plain_invocation binding
+    |> Result.map_error ~f:(fun error ->
+      Agent_protocol.Error.invalid_request error.C.message)
+  in
   match C.implementation binding, t.managed with
   | Managed _, Some service ->
     Managed.execution_revision (service t).definition binding
@@ -1109,6 +1114,10 @@ let with_scope_results
         List.find references ~f:(fun reference -> String.equal reference.C.name name)
       with
       | None -> tool_error "invocation.unselected_tool"
+      | Some _
+        when match C.find selected ~name with
+             | Ok binding -> Result.is_error (C.require_plain_invocation binding)
+             | Error _ -> false -> tool_error "invocation.protected_owner_required"
       | Some reference ->
         let execute () =
           let open Result.Let_syntax in

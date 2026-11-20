@@ -131,6 +131,7 @@
   delegation_authority_tests
   delegated_moderation_tests
   delegated_routing_tests
+  protected_native_tests
   delegation_lifecycle_tests
   generated_runtime_tests
   generated_session_state_tests

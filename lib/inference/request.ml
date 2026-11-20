@@ -154,6 +154,13 @@ module Setting = struct
   ;;
 
   let name t = t.name
+
+  let is_prompt_cache t =
+    match t.name with
+    | "prompt_cache_key" | "prompt_cache_retention" | "prompt_cache_options" -> true
+    | _ -> false
+  ;;
+
   let value t = t.value
   let provenance t = t.provenance
   let to_json t = t.json

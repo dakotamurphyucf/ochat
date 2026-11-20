@@ -172,10 +172,11 @@ let create
     then check_current ()
     else Error E.Target_mismatch
   in
-  let prepare ?session ~policy ~preparation_id request =
+  let prepare ?session ?materialized ~policy ~preparation_id request =
     let open Result.Let_syntax in
+    let isolated = Option.is_some materialized in
     let%bind () = bind (R.target request) in
-    let%bind prepared = Inference_input.prepare profile request in
+    let%bind prepared = Inference_input.prepare ?materialized profile request in
     let supported =
       match
         D.Profile.capability
@@ -200,6 +201,7 @@ let create
     let%bind configuration =
       O.Configuration.of_target
         ~transport_policy:policy
+        ~omit_prompt_cache:isolated
         (R.target request)
         ~preparation_id
         ~transport
@@ -212,10 +214,18 @@ let create
       | Auth_source.Static resolver -> Ok resolver
       | Capture capture -> capture ~target:(R.target request)
     in
-    Inference_runtime.Plan.create
+    let create_plan =
+      if isolated
+      then Inference_runtime.Plan.create_isolated
+      else Inference_runtime.Plan.create
+    in
+    create_plan
       ~request
       ~configuration
-      ~fingerprint:(D.Prepared.fingerprint prepared)
+      ~fingerprint:
+        (if isolated
+         then "isolated:" ^ preparation_id
+         else D.Prepared.fingerprint prepared)
       ~run:
         (fun
           ~sw
@@ -224,9 +234,16 @@ let create
           ~note_delivery
           ~on_event
           ~on_observation
-          ~submission_guard
-        ->
+          ~submission_guard ->
         Eio.Switch.check sw;
+        let on_event event =
+          match Inference.Event.view event with
+          | Live live when isolated ->
+            (match Transcript.Stream.view live with
+             | Unknown_event _ -> ()
+             | _ -> on_event event)
+          | _ -> on_event event
+        in
         let projector =
           Inference_output.create ~target:(R.target request) ~scope ~accounting_id ~limits
           |> function
@@ -273,6 +290,7 @@ let create
           let result =
             D.run_with_transport
               ~submission_guard
+              ~isolated
               ~cache_assets:(R.assets request)
               driver
               ~session
@@ -348,9 +366,12 @@ let create
           Option.iter session ~f:D.Websocket_session.invalidate;
           raise exn)
     |> Result.map ~f:(fun plan ->
-      Inference_runtime.Plan.with_capacity_source
-        plan
-        (Inference_capacity.source (D.Prepared.request prepared)))
+      if isolated
+      then plan
+      else
+        Inference_runtime.Plan.with_capacity_source
+          plan
+          (Inference_capacity.source (D.Prepared.request prepared)))
   in
   let prepare_with_policy ~policy ~preparation_id request =
     prepare ~policy ~preparation_id request
@@ -374,6 +395,8 @@ let create
       Inference_input.preflight_history profile ~target history)
     ~prepare:(prepare_with_policy ~policy:O.Transport_policy.Http_sse)
     ~prepare_with_policy
+    ~prepare_protected:(fun ~policy ~materialized ~preparation_id request ->
+      prepare ~materialized ~policy ~preparation_id request)
     ~open_session
     ()
 ;;

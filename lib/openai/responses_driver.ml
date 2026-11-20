@@ -1719,6 +1719,7 @@ let websocket_dispatch
       ~published
       ~submitted
       ~cache_assets
+      ~isolated
   =
   let channel =
     match session.Websocket_session.channel with
@@ -1750,7 +1751,8 @@ let websocket_dispatch
     loop prefix input
   in
   let continuation =
-    Option.bind channel.cache ~f:(fun cache ->
+    (if isolated then None else channel.cache)
+    |> Option.bind ~f:(fun cache ->
       if
         List.equal Inference.Request.Asset.equal cache_assets cache.assets
         && Document_schema.Json.equal envelope cache.envelope
@@ -1845,10 +1847,11 @@ let websocket_dispatch
             in
             let retained = `Array prefix in
             if
-              Result.is_ok
-                (Document_schema.Json.validate
-                   ~limits:Transcript.Admission.default
-                   retained)
+              (not isolated)
+              && Result.is_ok
+                   (Document_schema.Json.validate
+                      ~limits:Transcript.Admission.default
+                      retained)
               && Option.is_some channel.identity
             then
               channel.cache
@@ -1868,6 +1871,7 @@ let websocket_dispatch
 
 let run_with_transport
       ?(cache_assets = [])
+      ?(isolated = false)
       ?(submission_guard = Inference_runtime.Submission_guard.empty)
       t
       ~session
@@ -1958,7 +1962,8 @@ let run_with_transport
                        ~on_event
                        ~published
                        ~submitted
-                       ~cache_assets)))
+                       ~cache_assets
+                       ~isolated)))
         in
         let retire () =
           Option.iter !owned ~f:(fun session ->
@@ -1974,7 +1979,7 @@ let run_with_transport
           try
             match
               t.with_timeout (fun () ->
-                match session with
+                match if isolated then None else session with
                 | Some session -> execute session
                 | None ->
                   Eio.Switch.run (fun sw ->

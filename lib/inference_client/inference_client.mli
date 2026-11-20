@@ -81,6 +81,8 @@ end
     credential lease. *)
 val run
   :  ?submission_guard:Inference_runtime.Submission_guard.t
+  -> ?protected_delivery:Inference_runtime.Protected_delivery.t list
+  -> ?protect_tool_arguments:bool
   -> Inference_runtime.Context.t
   -> sw:Eio.Switch.t
   -> identity:Identity.t
