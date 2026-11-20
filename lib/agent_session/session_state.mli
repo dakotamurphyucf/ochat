@@ -70,7 +70,10 @@ module Compaction_archive : sig
     | Edit
     | Delete
     | Pending_input
+    | Rollover
   [@@deriving equal, enumerate, sexp]
+
+  val of_recovery_source : Recovery_window_ledger.Source.archive_kind -> kind
 
   (** Administrative reconciliation of an invocation in the checksummed archive.
       Original inputs and recorded outcomes remain in that archive, not copied

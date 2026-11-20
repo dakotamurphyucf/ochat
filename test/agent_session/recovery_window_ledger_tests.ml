@@ -85,7 +85,8 @@ let with_ledger f =
     let next = scope ~generation:0 "next" in
     let digest = Chatml_source.Digest.of_hex archive.sha256 |> Or_error.ok_exn in
     let archived =
-      Ledger.Source.summary_archive
+      Ledger.Source.archive
+        ~kind:Summary
         (basis ~owner ~generation:0 1L)
         ~operation:operation_id
         ~digest
@@ -357,7 +358,7 @@ let%expect_test "window ledger rejects foreign sources, duplicates and broken li
            ~generation:0
            ~revision:2L
            ~history:[ entry 3 ]
-           ~has_summary_archive:(fun _ -> true)
+           ~has_archive:(fun _ -> true)
            ~has_summary_operation:(fun _ -> true)));
     let next_member = Ledger.Window.at active ~ordinal:0 |> Option.value_exn in
     let carried =
@@ -466,4 +467,60 @@ let%expect_test "withdrawal preserves ordinals and cannot be bypassed by a carri
        remains unavailable");
   [%expect
     {| withdrawn in both windows; unaffected neighbour retains ordinal 1; unknown remains unavailable |}]
+;;
+
+let%expect_test "sealing preserves the original rows and carries exact selected revisions"
+  =
+  with_ledger (fun _ state ledger _ active ->
+    let state = { state with recovery_windows = Some ledger } in
+    let predecessor = Ledger.Window.scope active in
+    let successor = scope ~generation:0 "successor" in
+    let operation = P.Id.Operation.of_string "op_exact_cut" |> protocol_ok in
+    let cut =
+      A.Compaction_archive.reference_for
+        (Codec.authored state)
+        ~limits:document_limits
+        ~kind:Rollover
+        operation
+      |> protocol_ok
+    in
+    let prepare archive retained =
+      A.Recovery_window_seal.prepare state ~predecessor ~successor ~archive ~retained
+    in
+    let kept = List.hd_exn state.conversation.canonical_history in
+    let sealed = prepare cut [ kept ] |> protocol_ok in
+    let post archive =
+      { state with
+        recovery_windows = Some sealed
+      ; conversation =
+          { state.conversation with
+            canonical_history = [ kept ]
+          ; compaction_archives = archive :: state.conversation.compaction_archives
+          }
+      ; counters = { state.counters with revision = Int64.succ state.counters.revision }
+      }
+    in
+    let through_storage =
+      state_document (post cut) |> decode |> document_ok |> Codec.value
+    in
+    let windows = Option.value_exn through_storage.recovery_windows |> Ledger.windows in
+    let first_source window =
+      Ledger.Window.at window ~ordinal:0 |> Option.value_exn |> Ledger.Member.source
+    in
+    (match List.map windows ~f:first_source with
+     | [ Archive { kind = Summary; _ }
+       ; Archive { kind = Rollover; operation = id; _ }
+       ; Live _
+       ] -> assert (P.Id.Operation.equal id operation)
+     | _ -> failwith "summary and rollover coordinates lost their original source kind");
+    assert (Result.is_error (prepare { cut with kind = Compaction } [ kept ]));
+    assert (
+      Result.is_error
+        (Codec.encode
+           (Codec.authored (post { cut with kind = Compaction }))
+           ~limits:document_limits));
+    assert (Result.is_error (prepare cut [ { kept with payload = (entry 1).payload } ]));
+    assert (Result.is_error (prepare cut [ kept; kept ]));
+    print_endline "previous summary archive, sealed rollover archive, carried live row");
+  [%expect {| previous summary archive, sealed rollover archive, carried live row |}]
 ;;

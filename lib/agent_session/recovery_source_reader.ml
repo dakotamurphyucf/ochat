@@ -31,7 +31,7 @@ let lookup state member =
 
 let archive_reference state (root : Ledger.Source.archive) =
   List.find state.Session_state.conversation.compaction_archives ~f:(fun reference ->
-    Archive.equal_kind reference.kind Compaction
+    Archive.equal_kind reference.kind (Archive.of_recovery_source root.kind)
     && P.Id.Operation.equal reference.operation_id root.operation
     && Int64.equal reference.revision root.basis.revision
     && String.equal reference.sha256 (Chatml_source.Digest.to_hex root.digest))
@@ -104,7 +104,7 @@ let read store ~handle ~current ~max_frame_bytes citation ~project =
     let row =
       match Member.source member with
       | Live _ -> lookup state member
-      | Summary_archive root ->
+      | Archive root ->
         archive_row store handle state member root ~max_frame_bytes
     in
     let recheck () =

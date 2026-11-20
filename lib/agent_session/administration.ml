@@ -216,6 +216,7 @@ let archive ~archive_reference ~previous (candidate : Session_state.t) kind =
   let%bind candidate, invocation_dispositions =
     match kind with
     | Session_state.Compaction_archive.Compaction
+    | Rollover
     | Upgrade
     | Edit
     | Delete

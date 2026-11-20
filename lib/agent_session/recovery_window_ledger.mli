@@ -23,7 +23,7 @@ val active : t -> Window.t
 val has_withdrawals : t -> bool
 
 (** Validate against the owning committed state and its exact summary archive
-    references. [has_summary_archive] runs once per distinct archived root.
+    references. [has_archive] runs once per distinct archived root.
     This validates retained root identity; verified frame I/O and authorization
     remain with the actual archive read. *)
 val validate_state
@@ -32,7 +32,7 @@ val validate_state
   -> generation:int
   -> revision:int64
   -> history:P.History.entry list
-  -> has_summary_archive:(Source.archive -> bool)
+  -> has_archive:(Source.archive -> bool)
   -> has_summary_operation:(P.Id.Operation.t -> bool)
   -> (unit, P.Error.t) result
 

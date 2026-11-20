@@ -11,8 +11,14 @@ module Source : sig
     }
   [@@deriving equal, sexp_of]
 
+  type archive_kind =
+    | Summary
+    | Rollover
+  [@@deriving equal, sexp_of]
+
   type archive = private
-    { basis : basis
+    { kind : archive_kind
+    ; basis : basis
     ; operation : P.Id.Operation.t
     ; digest : Chatml_source.Digest.t
     }
@@ -20,7 +26,7 @@ module Source : sig
 
   type t =
     | Live of basis
-    | Summary_archive of archive
+    | Archive of archive
   [@@deriving equal, sexp_of]
 
   val basis
@@ -29,8 +35,9 @@ module Source : sig
     -> revision:int64
     -> (basis, P.Error.t) result
 
-  val summary_archive
+  val archive
     :  basis
+    -> kind:archive_kind
     -> operation:P.Id.Operation.t
     -> digest:Chatml_source.Digest.t
     -> t

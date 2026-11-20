@@ -355,7 +355,7 @@ let walk fixture sw ~fault ~initial =
        let before_member = List.last_exn (membership appended) in
        (match Ledger.Member.source before_member with
         | Live basis -> [%test_eq: int64] appended.counters.revision basis.revision
-        | Summary_archive _ -> failwith "ordinary append was already archived");
+        | Archive _ -> failwith "ordinary append was already archived");
        check_image fixture actor before_member;
        fail_next := fault;
        let after = compact fixture actor writer in
@@ -408,7 +408,7 @@ let walk fixture sw ~fault ~initial =
                (Ledger.Member.citation before_member))
          in
          (match Ledger.Member.source relocated with
-          | Summary_archive root ->
+          | Archive root ->
             assert (P.Id.Operation.equal root.operation captured.operation_id);
             [%test_eq: int64] root.basis.revision captured.revision;
             [%test_eq: string] (Chatml_source.Digest.to_hex root.digest) captured.sha256
@@ -508,7 +508,7 @@ let save_edit actor writer ~owner =
          (Ledger.Member.citation member)));
   (match Ledger.Member.source member with
    | Live basis -> [%test_eq: int64] after.counters.revision basis.revision
-   | Summary_archive _ -> failwith "edited member was bound to an archive");
+   | Archive _ -> failwith "edited member was bound to an archive");
   after
 ;;
 

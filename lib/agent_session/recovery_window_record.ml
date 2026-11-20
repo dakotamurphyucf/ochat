@@ -44,7 +44,7 @@ let create scope ~origin ~state members =
         match state, Member.source member with
         | Sealed, Source.Live _ when Member.is_withdrawn member -> Ok ()
         | Sealed, Source.Live _ -> invalid "sealed recovery window contains a live member"
-        | Open, (Live _ | Summary_archive _) | Sealed, Summary_archive _ -> Ok ())
+        | Open, (Live _ | Archive _) | Sealed, Archive _ -> Ok ())
     in
     let%map manifest = Manifest.create scope (List.map members ~f:Member.citation) in
     { manifest; origin; state; members = Array.of_list members })

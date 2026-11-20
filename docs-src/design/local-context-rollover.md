@@ -268,6 +268,12 @@ the same intent against the refreshed revision and cutoff before publication,
 or expose a retriable conflict. No previously executed hook effect is
 repeated just to refresh a revision.
 
+The canonical seal uses a distinct `rollover-<operation>.frame` archive.
+Existing summary locations continue to resolve to their original frames. Live
+rows from the closing window keep their original ordinals in the rollover
+frame. A carried row gets an ordinal in the successor and must match the prior
+visible row, including its payload and revision. [Canonical seal](../../lib/agent_session/recovery_window_seal.mli)
+
 **Archive and publish.** Build a validated, bounded candidate using the
 pre-commit hook and current local authorization. Preflight the minimum
 first request when there is a saved follow-up, including required current

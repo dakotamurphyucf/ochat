@@ -67,7 +67,13 @@ module Compaction_archive = struct
     | Edit
     | Delete
     | Pending_input
+    | Rollover
   [@@deriving equal, enumerate, sexp]
+
+  let of_recovery_source : Recovery_window_ledger.Source.archive_kind -> kind = function
+    | Summary -> Compaction
+    | Rollover -> Rollover
+  ;;
 
   type invocation_disposition =
     { invocation_id : Agent_protocol.Id.Invocation.t
@@ -1076,22 +1082,23 @@ let validate_domain (t : t) ~recovery_revision =
     match t.recovery_windows with
     | None -> Ok ()
     | Some ledger ->
-      let summaries = Hashtbl.create (module Agent_protocol.Id.Operation) in
+      let archives = Hashtbl.create (module Agent_protocol.Id.Operation) in
       List.iter t.conversation.compaction_archives ~f:(fun archive ->
-        if Compaction_archive.equal_kind archive.kind Compaction
-        then Hashtbl.add_multi summaries ~key:archive.operation_id ~data:archive);
-      let summary_reference operation ~f =
-        match Hashtbl.find summaries operation with
-        | None -> false
-        | Some references -> List.exists references ~f
+        match archive.kind with
+        | Compaction | Rollover ->
+          Hashtbl.add_multi archives ~key:archive.operation_id ~data:archive
+        | Reset | Rebuild | Upgrade | Edit | Delete | Pending_input -> ());
+      let reference operation ~f =
+        Option.exists (Hashtbl.find archives operation) ~f:(List.exists ~f)
       in
-      let has_summary_archive (source : Recovery_window_ledger.Source.archive) =
-        summary_reference source.operation ~f:(fun archive ->
-          Int64.equal archive.revision source.basis.revision
+      let has_archive (source : Recovery_window_ledger.Source.archive) =
+        reference source.operation ~f:(fun archive ->
+          Compaction_archive.equal_kind archive.kind (Compaction_archive.of_recovery_source source.kind)
+          && Int64.equal archive.revision source.basis.revision
           && String.equal archive.sha256 (Chatml_source.Digest.to_hex source.digest))
       in
       let has_summary_operation operation =
-        summary_reference operation ~f:(fun _ -> true)
+        reference operation ~f:(fun archive -> Compaction_archive.equal_kind archive.kind Compaction)
       in
       Recovery_window_ledger.validate_state
         ledger
@@ -1099,7 +1106,7 @@ let validate_domain (t : t) ~recovery_revision =
         ~generation:t.identity.generation
         ~revision:recovery_revision
         ~history:t.conversation.canonical_history
-        ~has_summary_archive
+        ~has_archive
         ~has_summary_operation
   in
   let%bind () =

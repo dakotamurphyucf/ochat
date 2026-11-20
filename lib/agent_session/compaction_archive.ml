@@ -69,6 +69,7 @@ module Name = struct
     | Edit -> "edit-"
     | Delete -> "delete-"
     | Pending_input -> "pending-input-"
+    | Rollover -> "rollover-"
   ;;
 
   let suffix = ".frame"

@@ -303,6 +303,7 @@ let archive_kind_to_jsonaf = function
   | Edit -> `String "edit"
   | Delete -> `String "delete"
   | Pending_input -> `String "pending_input"
+  | Rollover -> `String "rollover"
 ;;
 
 let archive_kind_of_jsonaf =
@@ -315,6 +316,7 @@ let archive_kind_of_jsonaf =
     ; "edit", Edit
     ; "delete", Delete
     ; "pending_input", Pending_input
+    ; "rollover", Rollover
     ]
 ;;
 
@@ -3016,7 +3018,7 @@ let transfer_pending_internal
       let kind_allowed =
         match reference.Session_state.Compaction_archive.kind with
         | Pending_input | Reset | Rebuild | Upgrade -> true
-        | Compaction | Edit | Delete -> false
+        | Compaction | Edit | Delete | Rollover -> false
       in
       if
         kind_allowed

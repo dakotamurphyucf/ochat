@@ -180,7 +180,7 @@ let validate_state
       ~generation
       ~revision
       ~history
-      ~has_summary_archive
+      ~has_archive
       ~has_summary_operation
   =
   let open Result.Let_syntax in
@@ -202,11 +202,11 @@ let validate_state
           | Some (admitted, positions) when Source.equal_archive admitted archive ->
             Ok positions
           | Some _ -> invalid "recovery archive operation has conflicting roots"
-          | None when has_summary_archive archive ->
+          | None when has_archive archive ->
             let positions = Int.Table.create () in
             Hashtbl.set archives ~key:archive.operation ~data:(archive, positions);
             Ok positions
-          | None -> invalid "recovery summary archive has no exact retained reference"
+          | None -> invalid "recovery archive has no exact retained reference"
         in
         let ordinal = Member.source_ordinal member in
         match Hashtbl.find positions ordinal with
@@ -237,7 +237,7 @@ let validate_state
                 || (ordinal < Array.length live && Member.matches member live.(ordinal)))
           then Ok ()
           else invalid "live recovery source no longer matches its exact occurrence"
-        | Summary_archive archive -> bind_archive archive member)))
+        | Archive archive -> bind_archive archive member)))
 ;;
 
 let of_jsonaf json =

@@ -17246,7 +17246,7 @@ let commit_administration t attachment_id expected_revision kind candidate =
            candidate.Session_state.identity.generation
            (t.state.identity.generation + 1)
       && List.is_empty candidate.ingress_registrations
-    | Upgrade | Compaction | Edit | Delete | Pending_input ->
+    | Upgrade | Compaction | Edit | Delete | Pending_input | Rollover ->
       List.equal
         External_ingress.equal
         candidate.ingress_registrations
@@ -17294,12 +17294,12 @@ let commit_administration t attachment_id expected_revision kind candidate =
           match kind with
           | Reset -> Pending_disposition.Retirement_reason.Source_reset
           | Rebuild -> Source_replaced
-          | Compaction | Upgrade | Edit | Delete | Pending_input ->
+          | Compaction | Upgrade | Edit | Delete | Pending_input | Rollover ->
             Canonical_history_retired
         in
         prepare_pending t ~archive:(Some archive) (Retire reason)
         |> Result.map ~f:Option.some)
-    | Compaction | Upgrade | Edit | Delete | Pending_input -> Ok None
+    | Compaction | Upgrade | Edit | Delete | Pending_input | Rollover -> Ok None
   in
   let state =
     Option.value_map pending ~default:state ~f:(fun prepared ->

@@ -364,6 +364,7 @@
   recovery_effective_ledger
   recovery_effective_capture
   recovery_visibility
+  recovery_window_seal
   recovery_source_reader
   recovery_image
   administration

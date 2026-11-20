@@ -19,8 +19,14 @@ module Source = struct
     }
   [@@deriving equal, sexp_of]
 
+  type archive_kind =
+    | Summary
+    | Rollover
+  [@@deriving equal, sexp_of]
+
   type archive =
-    { basis : basis
+    { kind : archive_kind
+    ; basis : basis
     ; operation : Operation.t
     ; digest : Digest.t
     }
@@ -28,7 +34,7 @@ module Source = struct
 
   type t =
     | Live of basis
-    | Summary_archive of archive
+    | Archive of archive
   [@@deriving equal, sexp_of]
 
   let basis ~owner ~generation ~revision =
@@ -37,12 +43,10 @@ module Source = struct
     else Ok { owner; generation; revision }
   ;;
 
-  let summary_archive basis ~operation ~digest =
-    Summary_archive { basis; operation; digest }
-  ;;
+  let archive basis ~kind ~operation ~digest = Archive { kind; basis; operation; digest }
 
   let coordinates = function
-    | Live basis | Summary_archive { basis; _ } -> basis
+    | Live basis | Archive { basis; _ } -> basis
   ;;
 
   let digest_of_jsonaf json =
@@ -58,8 +62,13 @@ module Source = struct
     let location =
       match t with
       | Live _ -> [ "kind", `String "live" ]
-      | Summary_archive { operation; digest; _ } ->
-        [ "kind", `String "summary_archive"
+      | Archive { kind; operation; digest; _ } ->
+        let tag =
+          match kind with
+          | Summary -> "summary_archive"
+          | Rollover -> "rollover_archive"
+        in
+        [ "kind", `String tag
         ; "operation", Operation.to_json operation
         ; "sha256", `String (Digest.to_hex digest)
         ]
@@ -82,10 +91,11 @@ module Source = struct
     let%bind kind = X.required fields "kind" J.string in
     match kind with
     | "live" -> Ok (Live basis)
-    | "summary_archive" ->
+    | ("summary_archive" | "rollover_archive") as tag ->
       let%bind operation = X.required fields "operation" Operation.of_json in
       let%map digest = X.required fields "sha256" digest_of_jsonaf in
-      summary_archive basis ~operation ~digest
+      let kind = if String.equal tag "summary_archive" then Summary else Rollover in
+      archive basis ~kind ~operation ~digest
     | _ -> invalid "unknown recovery source kind"
   ;;
 
@@ -99,11 +109,14 @@ module Source = struct
       ; "kind", D.Shape.value
       ]
     in
+    let archived =
+      X.shape_exn (basis @ [ "operation", D.Shape.value; "sha256", D.Shape.value ])
+    in
     X.tagged_shape_exn
       ~discriminator:"kind"
       [ "live", X.shape_exn basis
-      ; ( "summary_archive"
-        , X.shape_exn (basis @ [ "operation", D.Shape.value; "sha256", D.Shape.value ]) )
+      ; "summary_archive", archived
+      ; "rollover_archive", archived
       ]
   ;;
 end

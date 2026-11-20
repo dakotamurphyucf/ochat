@@ -162,7 +162,7 @@ let refresh_open window ~history ~revision ~index ~retired ~archive =
       match Member.source member with
       | _ when Member.is_withdrawn member -> Ok (member :: kept)
       | _ when Hash_set.mem retired id -> Ok (Member.withdraw member :: kept)
-      | Summary_archive _ -> Ok (member :: kept)
+      | Archive _ -> Ok (member :: kept)
       | Live _ ->
         (match Hashtbl.find index id with
          | Some (ordinal, entry) when Member.matches member entry ->
@@ -305,7 +305,7 @@ let summarize (state : S.t) ~(archive : S.Compaction_archive.t) ~history =
     let%bind basis =
       Source.basis ~owner ~generation:state.identity.generation ~revision:archive.revision
     in
-    let source = Source.summary_archive basis ~operation:archive.operation_id ~digest in
+    let source = Source.archive basis ~kind:Summary ~operation:archive.operation_id ~digest in
     let retired = Hash_set.create (module History_id) in
     update_active ledger ~f:(fun window ->
       refresh_open
@@ -367,7 +367,7 @@ let check_replacement_archive (state : S.t) ~(incoming : S.t) =
       &&
       match archive.kind with
       | Reset | Rebuild -> true
-      | Compaction | Upgrade | Edit | Delete | Pending_input -> false)
+      | Compaction | Upgrade | Edit | Delete | Pending_input | Rollover -> false)
   then Ok ()
   else invalid "recovery generation replacement requires an exact administrative archive"
 ;;

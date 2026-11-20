@@ -949,7 +949,7 @@ let implementation_sources =
   ; ( "lib/agent_session/run_state.mli"
     , "6293ace6a1162a861309252c911a59b8cc52d4b904e3b9001fb2b4b17008b915" )
   ; ( "lib/agent_session/session_state.mli"
-    , "4e70ca3f6a548674350037fe78f033c1ba8adbdd32dd88e4ac854adf5d47694b" )
+    , "24a16bcf5bf9f286069940bedede85beed07811fff59dfcc48db395805ca6888" )
   ; ( "lib/agent_server/session_retention.ml"
     , "0a8fa0865eb44be8e2a01be44d219ef0e01bc9c3d4f879712dc06e829ae9c828" )
   ; ( "lib/agent_server/session_retention.mli"
@@ -1075,7 +1075,7 @@ let implementation_sources =
   ; ( "lib/agent_session/session_state_decode_evidence.mli"
     , "c7f2a5c52c54801bcff4f743f7f6d9ae0f870499b3e2e9c9c43f68c93d1d201d" )
   ; ( "lib/agent_session/session_state_document.ml"
-    , "4b499559012fe398c6723ee338ec2cecbdca637cdb494330e29a1444c27ab78f" )
+    , "3539afac59148f1be227d32f36eaa0f5a6ff5702ab9a88d6faf60ba9eb21fa57" )
   ; ( "lib/agent_session/session_delta_document.ml"
     , "b26a0104f0801c5c9f16b2ee0543117085229c60f0700081b5aa335bc9883101" )
   ; ( "lib/agent_protocol/session_storage_semantics.ml"
@@ -1119,7 +1119,7 @@ let implementation_sources =
   ; ( "lib/agent_session/legacy_moderator_checkpoint.ml"
     , "e541ee7532b2a3e96d7c06c539cd1637c0ddaa1c55d7f1c51cec24b6d9c4f399" )
   ; ( "lib/agent_session/session_state.ml"
-    , "0e7b4c27227e9ebc8bcbd0c658cdd5ed1a7cf21f83f16cdb5cdbdb7e36ebe88f" )
+    , "a89f9df29e5682225ffdb527edac0891bfecae84318b631b4a9546c0fbe91456" )
   ; ( "lib/agent_session/script_tool_calls.ml"
     , "7ba5f9ec8a7bc1add2bb861bbba8d1aad879b7278821f11c55ba3f7e04fc963f" )
   ; ( "lib/chat_response/agent_guidance.ml"
@@ -1311,7 +1311,7 @@ let implementation_sources =
   ; ( "lib/chatml_trace/chatml_trace.mli"
     , "8ebf49b2e1858f86daadf6fb687cce0436edec79bdb46935fd7ae2647e1e8f7b" )
   ; ( "lib/agent_session/administration.ml"
-    , "848f90bc4f80878037cb1a08ba7cb8b5ff919aa24ede729032a6782489b81ee1" )
+    , "71f8520dae74f28180715364ab03b3405948b3b1097ed6a98d4401a3bb8447aa" )
   ; ( "lib/agent_server/command_handler.ml"
     , "0a331dc88614547715edd4eb016ebacb478df3053bdf18190673a42ed26ca203" )
   ; ( "lib/agent_session/preparation_tracking.ml"
@@ -1509,7 +1509,7 @@ let implementation_sources =
   ; ( "lib/agent_session/goal_continuation_phase.ml"
     , "e24a210492bfcc9e94c7bf472603531eb053eb7654de7c6100083464da9b1b51" )
   ; ( "lib/agent_session/session_actor.ml"
-    , "30f46c93d27a91ee13ed17b018dfc05979d197791756dd5dcbf0d5af88317c57" )
+    , "bd4906f70cffbf240d5876b51d8671fecbd49535eb9257fa4441ffbedfe6e88d" )
   ; ( "lib/agent_session/idle_completion_write.ml"
     , "d427fa80c4346b64f3f9bf4d5025ad2218403278816ade76ff17ba1adaa426d9" )
   ; ( "lib/agent_session/goal_descendant_admission_custody.ml"

@@ -213,6 +213,7 @@ let%expect_test "archive names round-trip every supported kind" =
     edit-op_round-trip_id.frame
     delete-op_round-trip_id.frame
     pending-input-op_round-trip_id.frame
+    rollover-op_round-trip_id.frame
     |}]
 ;;
 
