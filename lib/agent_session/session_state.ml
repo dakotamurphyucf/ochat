@@ -1140,6 +1140,7 @@ let validate_domain (t : t) ~recovery_revision =
         ledger
         ~windows:t.recovery_windows
         ~publication_revision:recovery_revision
+        ~accounting:t.inference_ledger
         ~has_archive:(fun reference ->
           let module Source = Recovery_effective_archive in
           let kind = Compaction_archive.of_recovery_source (Source.kind reference) in

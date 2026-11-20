@@ -81,6 +81,7 @@ let apply_internal ?inherited_turn ~now state ~delta ~payloads =
   let%bind () = validate_session_updates state payloads in
   let%bind delta = Session_delta.capture_new_model_jobs state delta in
   let%bind state = Session_delta.apply state delta in
+  let%bind () = Recovery_effective_receipts.check_transaction ~previous ~next:state in
   let%bind () =
     Goal_run_evidence.validate_transition
       ~previous_runs:previous.run_state

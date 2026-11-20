@@ -1,5 +1,5 @@
-(** Bounded, immutable local preparation records and their current overlay
-    incarnation. The ledger cannot attest to provider submission. *)
+(** Bounded local preparation records, overlay incarnation, and delivery facts
+    attached by the actual foreground attempt. *)
 open! Core
 
 module P = Agent_protocol
@@ -29,10 +29,17 @@ val relocate
   -> transfer:(Record.t -> (Record.t, P.Error.t) result)
   -> (t, P.Error.t) result
 
+val update_attempt
+  :  t
+  -> source_revision:int64
+  -> Recovery_effective_attempt.t
+  -> (t, P.Error.t) result
+
 val validate_state
   :  t
   -> windows:Recovery_window_ledger.t option
   -> publication_revision:int64
+  -> accounting:Inference_ledger.t
   -> has_archive:(Record.Archive.t -> bool)
   -> (unit, P.Error.t) result
 

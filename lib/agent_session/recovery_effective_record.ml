@@ -11,6 +11,7 @@ module Version = P.Recovery_item_version
 module Digest = Chatml_source.Digest
 module Operation = P.Id.Operation
 module Archive = Recovery_effective_archive
+module Attempt = Recovery_effective_attempt
 
 let invalid reason = Error (P.Error.invalid_request reason)
 
@@ -115,6 +116,7 @@ type t =
   ; input_count : int
   ; members : Member.t list
   ; custody : custody
+  ; attempt : Attempt.t option
   }
 
 let preparation_id t = t.preparation_id
@@ -125,6 +127,7 @@ let overlay_incarnation t = t.overlay_incarnation
 let input_count t = t.input_count
 let members t = t.members
 let custody t = t.custody
+let attempt t = t.attempt
 
 let valid_preparation_id id =
   Result.is_ok (Inference.Observation.Observation_id.of_string id)
@@ -140,6 +143,8 @@ let create t =
          t.source_revision < 0L
          || t.overlay_incarnation < 0L
          || t.overlay_incarnation > t.source_revision)
+    || Option.exists t.attempt ~f:(fun attempt ->
+      not (Attempt.belongs_to attempt t.scope))
     || t.input_count < 0
     || t.input_count > I.max_input_count
     || Stdlib.List.compare_length_with t.members t.input_count > 0
@@ -220,6 +225,48 @@ let lose_live_source t =
   | Lost | Archived _ -> t
 ;;
 
+let update_attempt t attempt =
+  let open Result.Let_syntax in
+  let%map () =
+    match t.attempt, Attempt.phase attempt with
+    | None, Allocated when Attempt.belongs_to attempt t.scope -> Ok ()
+    | None, _ -> invalid "recovery attempt was never admitted for this source"
+    | Some previous, _ -> Attempt.check_transition previous ~incoming:attempt
+  in
+  { t with attempt = Some attempt }
+;;
+
+let matches_configuration t configuration =
+  let module Configuration = Inference.Observation.Configuration in
+  String.equal t.preparation_id (Configuration.preparation_id configuration)
+  && Digest.equal
+       t.configuration_digest
+       (Digest.of_contents
+          (Jsonaf.to_string (Configuration.to_json configuration))
+          ~checkpoint:ignore)
+;;
+
+let validate_attempt t ~accounting =
+  Option.value_map t.attempt ~default:true ~f:(fun attempt ->
+    let ordinal = Attempt.ordinal attempt in
+    Int64.(ordinal <= Inference_ledger.last_attempt_ordinal accounting)
+    &&
+    match Inference_ledger.find accounting ~ordinal with
+    | None -> true
+    | Some row ->
+      let module Handle = Inference_ledger.Handle in
+      let handle = Inference_ledger.Row.handle row in
+      let accounting = Inference_ledger.Row.record row in
+      Attempt.tracked attempt
+      && Attempt.matches_handle attempt handle
+      && Option.exists (Handle.operation_id handle) ~f:(P.Id.Operation.equal t.operation)
+      && Option.is_none (Handle.invocation_id handle)
+      && Attempt.matches_accounting attempt accounting
+      && matches_configuration
+           t
+           (Inference.Observation.Attempt_record.configuration accounting))
+;;
+
 let capture input ~projection ~scope ~operation ~source_revision ~overlay_incarnation =
   let open Result.Let_syntax in
   let%bind members, _ =
@@ -257,6 +304,7 @@ let capture input ~projection ~scope ~operation ~source_revision ~overlay_incarn
     ; input_count = I.input_count input
     ; members = List.rev members
     ; custody = Live
+    ; attempt = None
     }
 ;;
 
@@ -328,11 +376,17 @@ let equal_preparation t other =
 ;;
 
 let to_jsonaf t =
-  let fields = preparation_fields t in
-  match t.custody with
-  | Live -> `Object fields
-  | Lost -> `Object (fields @ [ "archive", `Null ])
-  | Archived archive -> `Object (fields @ [ "archive", Archive.to_jsonaf archive ])
+  let archive =
+    match t.custody with
+    | Live -> []
+    | Lost -> [ "archive", `Null ]
+    | Archived archive -> [ "archive", Archive.to_jsonaf archive ]
+  in
+  let attempt =
+    Option.value_map t.attempt ~default:[] ~f:(fun attempt ->
+      [ "attempt", Attempt.to_jsonaf attempt ])
+  in
+  `Object (preparation_fields t @ archive @ attempt)
 ;;
 
 let digest_of_json json =
@@ -375,6 +429,7 @@ let of_jsonaf json =
     | Null -> Ok Lost
     | Value raw -> Result.map (Archive.of_jsonaf raw) ~f:(fun archive -> Archived archive)
   in
+  let%bind attempt = J.optional_as fields "attempt" Attempt.of_jsonaf in
   create
     { preparation_id
     ; configuration_digest
@@ -385,6 +440,7 @@ let of_jsonaf json =
     ; input_count
     ; members
     ; custody
+    ; attempt
     }
 ;;
 
@@ -404,6 +460,7 @@ let shape =
     ; "overlay_incarnation", D.Shape.value
     ; "input_count", D.Shape.value
     ; "archive", D.Shape.nullable Archive.shape
+    ; "attempt", Attempt.shape
     ; "members", X.array_shape_exn ~identity_field:"occurrence" Member.shape
     ]
 ;;

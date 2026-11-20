@@ -5509,6 +5509,7 @@ module Context_request = struct
     | Recovery_effective :
         Configuration_capture.Token.t
         * Inference_runtime.Recovery_input.t
+        * Inference.Observation.Configuration.t
         * (unit -> bool)
         -> unit t
     | Expire_recovery_window :
@@ -12595,6 +12596,7 @@ let rec deferred_execution_delta (previous : Session_state.t) (delta : Session_d
   | Recovery_window_expired _
   | Recovery_window_enabled _
   | Recovery_effective_prepared _
+  | Recovery_effective_attempt_changed _
   | Recovery_summary_compacted _
   | Authoring_references_forgotten _
   | Authoring_publication_changed _
@@ -14013,12 +14015,17 @@ module Held_inference_allocation_acknowledgement = struct
   ;;
 end
 
+let recovery_attempt_deltas receipts =
+  List.map receipts ~f:(fun receipt -> Session_delta.Recovery_effective_attempt_changed receipt)
+;;
+
 let commit_inference_ledger
       ?allocation_acknowledgement
       ?owned_graph
       ?run_preparation
       ?admission
       ?check_before_commit
+      ?(recovery_attempts = [])
       t
       ledger
   =
@@ -14036,47 +14043,56 @@ let commit_inference_ledger
        | None -> Ok ()
        | Some preparation -> check_run_preparation t preparation)
   in
-  if
-    Int64.equal
-      (Inference_ledger.revision ledger)
-      (Inference_ledger.revision t.state.inference_ledger)
+  let accounting_changed =
+    not
+      (Int64.equal
+         (Inference_ledger.revision ledger)
+         (Inference_ledger.revision t.state.inference_ledger))
+  in
+  if not accounting_changed && List.is_empty recovery_attempts
   then (
     let%map () =
       Option.value_map check_before_commit ~default:(Ok ()) ~f:(fun check -> check ())
     in
     Option.iter owned_graph ~f:(install_input_graph_acknowledgement t))
   else (
-    let%bind accounting =
-      Canonical_usage_update.prepare
-        ?policy_usage:t.state.policy_canonical_usage
-        t.state.inference_ledger
-        ~accounts:t.state.goal_accounts
-        ~catalog:t.state.goal_catalog
-        ~after:ledger
-        ~delegated_usage:t.state.delegated_usage
-        ~admission
+    let%bind changes, payloads =
+      if not accounting_changed
+      then Ok ([], [])
+      else (
+        let%map accounting =
+          Canonical_usage_update.prepare
+            ?policy_usage:t.state.policy_canonical_usage
+            t.state.inference_ledger
+            ~accounts:t.state.goal_accounts
+            ~catalog:t.state.goal_catalog
+            ~after:ledger
+            ~delegated_usage:t.state.delegated_usage
+            ~admission
+        in
+        let accounting_delta =
+          if Canonical_usage_update.accounts_changed accounting
+          then
+            [ Session_delta.Goal_accounts_changed
+                (Option.value_exn (Canonical_usage_update.accounts accounting))
+            ]
+          else []
+        in
+        let changes =
+          Session_delta.inference_ledger_update
+            ?policy_update:(Canonical_usage_update.policy_update accounting)
+            ledger
+            ~delegated_usage:(Canonical_usage_update.delegated_usage accounting)
+          :: accounting_delta
+        in
+        let payloads =
+          [ Agent_protocol.Event.Durable.Payload.Session_updated
+              (Session_state.summary { t.state with inference_ledger = ledger })
+          ]
+        in
+        changes, payloads)
     in
-    let accounting_delta =
-      if Canonical_usage_update.accounts_changed accounting
-      then
-        [ Session_delta.Goal_accounts_changed
-            (Option.value_exn (Canonical_usage_update.accounts accounting))
-        ]
-      else []
-    in
-    let delta =
-      Session_delta.Batch
-        (Session_delta.inference_ledger_update
-           ?policy_update:(Canonical_usage_update.policy_update accounting)
-           ledger
-           ~delegated_usage:(Canonical_usage_update.delegated_usage accounting)
-         :: accounting_delta)
-    in
-    let payloads =
-      [ Agent_protocol.Event.Durable.Payload.Session_updated
-          (Session_state.summary { t.state with inference_ledger = ledger })
-      ]
-    in
+    let delta = Session_delta.Batch (changes @ recovery_attempt_deltas recovery_attempts) in
     match allocation_acknowledgement, owned_graph with
     | Some acknowledgement, None ->
       let%bind () =
@@ -14458,6 +14474,18 @@ let acknowledge_inference ?owned_graph ?run_preparation t owner handle attempt =
   let open Result.Let_syntax in
   let%bind registration = inference_registration t owner handle in
   let%bind () = validate_inference_attempt registration attempt in
+  let recovery_attempts =
+    Recovery_effective_receipts.acknowledge t.state handle |> Option.to_list
+  in
+  let%bind () =
+    if
+      List.is_empty recovery_attempts
+      || phys_equal
+           (Inference_owner.Registration.configuration registration)
+           (Inference_runtime.Attempt.configuration attempt)
+    then Ok ()
+    else Error (error Conflict "recovery acknowledgement is from another prepared configuration")
+  in
   let%bind ledger =
     Inference_ledger.set_state t.state.inference_ledger handle Running
     |> Result.map_error ~f:inference_error
@@ -14470,7 +14498,7 @@ let acknowledge_inference ?owned_graph ?run_preparation t owner handle attempt =
   (match owned_graph with
    | None -> Inference_owner.Registration.acknowledge registration attempt
    | Some _ -> ());
-  commit_inference_ledger ?owned_graph ?run_preparation t ledger
+  commit_inference_ledger ?owned_graph ?run_preparation ~recovery_attempts t ledger
 ;;
 
 let observe_inference ?owned_graph ?run_preparation t handle incoming =
@@ -14560,7 +14588,19 @@ let complete_inference ?owned_graph ?run_preparation t owner handle completion =
     | Some _ -> owned_graph
     | None -> Some (select_factual_graph t owner Preserve)
   in
-  commit_inference_ledger ?owned_graph ?run_preparation t ledger
+  let recovery_attempts =
+    Recovery_effective_receipts.complete t.state handle completion |> Option.to_list
+  in
+  let%bind () =
+    if
+      List.is_empty recovery_attempts
+      || Option.exists
+           (Inference_owner.Registration.attempt registration)
+           ~f:(phys_equal (Inference_client.Completion.attempt completion))
+    then Ok ()
+    else Error (error Conflict "completion is from another actual recovery attempt")
+  in
+  commit_inference_ledger ?owned_graph ?run_preparation ~recovery_attempts t ledger
 ;;
 
 let interrupt_inference_row ledger handle ~delivery =
@@ -14588,21 +14628,21 @@ let interrupt_inference_row ledger handle ~delivery =
 let release_inference ?owned_graph ?run_preparation t owner handle =
   let open Result.Let_syntax in
   let%bind registration = inference_registration t owner handle in
-  let%bind ledger =
-    interrupt_inference_row
-      t.state.inference_ledger
-      handle
-      ~delivery:
-        (Option.map
-           (Inference_owner.Registration.attempt registration)
-           ~f:Inference_runtime.Attempt.delivery)
+  let delivery =
+    Option.map
+      (Inference_owner.Registration.attempt registration)
+      ~f:Inference_runtime.Attempt.delivery
+  in
+  let%bind ledger = interrupt_inference_row t.state.inference_ledger handle ~delivery in
+  let recovery_attempts =
+    Recovery_effective_receipts.release t.state handle ~delivery |> Option.to_list
   in
   let owned_graph =
     match owned_graph with
     | Some _ -> owned_graph
     | None -> Some (select_factual_graph t owner Preserve)
   in
-  let%map () = commit_inference_ledger ?owned_graph ?run_preparation t ledger in
+  let%map () = commit_inference_ledger ?owned_graph ?run_preparation ~recovery_attempts t ledger in
   Graph_owner.release
     owner
     ~ledger:t.state.inference_ledger
@@ -14691,10 +14731,26 @@ let finish_inference_owner ?owned_graph ?run_preparation t owner =
         Owned_inference_mutation.acknowledgement = Native_join installation
       }
     in
+    let recovery_attempts =
+      if Option.is_none t.state.recovery_effective
+      then []
+      else (
+        let receipts = ref [] in
+        Graph_owner.iter_registrations owner ~f:(fun registration ->
+          let handle = Inference_owner.Registration.handle registration in
+          let delivery =
+            Option.map (Inference_owner.Registration.attempt registration)
+              ~f:Inference_runtime.Attempt.delivery
+          in
+          Option.iter (Recovery_effective_receipts.release t.state handle ~delivery)
+            ~f:(fun receipt -> receipts := receipt :: !receipts));
+        List.rev !receipts)
+    in
     let%map () =
       commit_inference_ledger
         ~owned_graph:mutation
         ?run_preparation
+        ~recovery_attempts
         ~check_before_commit:(fun () ->
           Inference_native_finish_installation.check_basis installation ~actor:t)
         t
@@ -14871,7 +14927,8 @@ let reconcile_inference_recovery t =
       ~f:(fun ledger row ->
         interrupt_inference_row ledger (Inference_ledger.Row.handle row) ~delivery:None)
   in
-  commit_inference_ledger t ledger
+  let recovery_attempts = Recovery_effective_receipts.recover t.state in
+  commit_inference_ledger ~recovery_attempts t ledger
 ;;
 
 let abort_staged_work t ~owner =
@@ -25434,7 +25491,7 @@ let mark_context_capacity t capture observation =
     observation
 ;;
 
-let capture_recovery_preparation t capture input ~binding_is_current =
+let capture_recovery_preparation t capture input ~configuration ~binding_is_current =
   let open Result.Let_syntax in
   let operation = Configuration_capture.Token.operation_id capture in
   let check () =
@@ -25485,6 +25542,11 @@ let capture_recovery_preparation t capture input ~binding_is_current =
         ~commit_observation
     in
     install_committed_transition ?run_preparation t candidate;
+    Configuration_capture.record_recovery_binding
+      t.configuration_capture
+      capture
+      ~configuration
+      ~source_revision:(Recovery_effective_record.source_revision record);
     publish_committed_transition t candidate;
     Ok ()
 ;;
@@ -25494,8 +25556,9 @@ let root_configuration_context t operation_id =
     ~begin_capture:(fun () -> call t (Begin_configuration_capture operation_id))
     ~publish_capacity:(fun capture observation ->
       call t (Context_request (Capacity (Publish (capture, observation)))))
-    ~publish_recovery:(fun capture input ~binding_is_current ->
-      call t (Context_request (Recovery_effective (capture, input, binding_is_current))))
+    ~publish_recovery:(fun capture input ~configuration ~binding_is_current ->
+      call t
+        (Context_request (Recovery_effective (capture, input, configuration, binding_is_current))))
     ~mark:(fun capture configuration ->
       call t (Mark_configuration_capture (capture, configuration)))
     ~finish:(fun capture ~success ->
@@ -42687,6 +42750,25 @@ let prepare_legacy_attempt
          ~submission_guard:Inference_runtime.Submission_guard.empty))
 ;;
 
+let plan_recovery_attempt t execution configuration handle ~tracking =
+  let open Option.Let_syntax in
+  match execution, (Inference_ledger.Handle.scope handle).relation with
+  | Inference_operation (operation, _), Root ->
+    let%bind source_revision =
+      Configuration_capture.recovery_source_revision
+        t.configuration_capture
+        ~operation_id:operation.id
+        ~configuration
+    in
+    Recovery_effective_receipts.allocate
+      t.state
+      ~source_revision
+      handle
+      ~tracking
+      configuration
+  | _ -> None
+;;
+
 let prepare_runtime_attempt ?origin_observation t execution owner relation configuration =
   let open Result.Let_syntax in
   let%bind () = require_settled_inference_usage t in
@@ -42877,8 +42959,12 @@ let prepare_runtime_attempt ?origin_observation t execution owner relation confi
       in
       Inherited_attempt.Prepared.Inherited plan)
     else (
+      let recovery_attempts =
+        plan_recovery_attempt t execution configuration handle ~tracking |> Option.to_list
+      in
       let%bind () =
         commit_inference_ledger
+          ~recovery_attempts
           ?allocation_acknowledgement
           ?run_preparation:basis.preparation
           ?admission
@@ -43347,6 +43433,13 @@ let commit_inherited_attempt t (plan : Inherited_attempt.Plan.t) before_writer =
         ]
       else []
     in
+    let recovery_attempts =
+      match plan.original with
+      | Legacy _ -> []
+      | Runtime { execution; _ } ->
+        plan_recovery_attempt t execution plan.configuration plan.handle ~tracking:plan.tracking
+        |> Option.to_list
+    in
     let delta =
       Session_delta.Batch
         ((Session_delta.inference_ledger_update
@@ -43355,9 +43448,10 @@ let commit_inherited_attempt t (plan : Inherited_attempt.Plan.t) before_writer =
             ~delegated_usage:(Canonical_usage_update.delegated_usage accounting)
           :: accounting_deltas)
          @
-         match included with
-         | None -> []
-         | Some (update, _) -> [ Goal_descendants_changed update ])
+         (match included with
+          | None -> []
+          | Some (update, _) -> [ Session_delta.Goal_descendants_changed update ])
+         @ recovery_attempt_deltas recovery_attempts)
     in
     let run_preparation = inherited_attempt_preparation plan in
     let previous = t.state in
@@ -58022,8 +58116,8 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
       mark_configuration_capture t capture configuration
     | Context_request (Capacity (Publish (capture, observation))) ->
       mark_context_capacity t capture observation
-    | Context_request (Recovery_effective (capture, input, binding_is_current)) ->
-      capture_recovery_preparation t capture input ~binding_is_current
+    | Context_request (Recovery_effective (capture, input, configuration, binding_is_current)) ->
+      capture_recovery_preparation t capture input ~configuration ~binding_is_current
     | Finish_configuration_capture (capture, success) ->
       finish_configuration_capture t capture success
     | Snapshot -> Ok (current_snapshot t)

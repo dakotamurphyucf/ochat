@@ -193,6 +193,7 @@ type t =
 
 let value t = Candidate.value t.candidate
 let revision t = (value t).revision
+let last_attempt_ordinal t = (value t).last_ordinal
 let rows t = Map.data (value t).rows
 let find t ~ordinal = Map.find (value t).rows ordinal
 let str s = `String s

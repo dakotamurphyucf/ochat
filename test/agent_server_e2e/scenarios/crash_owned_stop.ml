@@ -81,6 +81,7 @@ let rec has_stop_epoch (delta : Agent_session.Session_delta.t) =
   | Compaction_generation_changed _
   | Compaction_archived _
   | Recovery_effective_prepared _
+  | Recovery_effective_attempt_changed _
   | Recovery_rollover_changed _
   | Recovery_rollover_committed _
   | History_deleted _

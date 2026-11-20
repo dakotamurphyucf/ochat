@@ -9,6 +9,7 @@ let moderator_lifecycle = "session.moderator-lifecycle.v1"
 let recovery_windows = "session.recovery-windows.v1"
 let recovery_effective = "session.recovery-effective.v1"
 let recovery_effective_archive = "session.recovery-effective-archive.v1"
+let recovery_effective_attempt = "session.recovery-effective-attempt.v1"
 let recovery_withdrawals = "session.recovery-withdrawals.v1"
 let recurrence_controller_goal = "recurrence.controller-goal.v1"
 let recovery_notes = "session.recovery-notes.v1"
@@ -31,6 +32,7 @@ let supported_children =
   ; recovery_windows
   ; recovery_effective
   ; recovery_effective_archive
+  ; recovery_effective_attempt
   ; recovery_withdrawals
   ; recurrence_controller_goal
   ; recovery_notes

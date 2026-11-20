@@ -4,6 +4,7 @@ module D = Document_schema
 module X = Persistence_codec
 module Record = Recovery_effective_record
 module Archive = Record.Archive
+module Attempt = Recovery_effective_attempt
 module Scope = P.Recovery_window.Scope
 module Windows = Recovery_window_ledger
 
@@ -11,23 +12,28 @@ let invalid reason = Error (P.Error.invalid_request reason)
 let max_preparations = 64
 let max_members = 8192
 
-let limits ~archive_budget =
+let limits ~archive_budget ~attempt_budget =
   D.Limits.create
-    ~max_bytes:((2 * 1024 * 1024) + archive_budget)
+    ~max_bytes:((2 * 1024 * 1024) + archive_budget + attempt_budget)
     ~max_depth:32
     ~max_fields:
-      ((16 * max_members) + if archive_budget > 0 then 6 * max_preparations else 0)
-    ~max_nodes:((22 * max_members) + if archive_budget > 0 then 5 * max_members else 0)
+      ((16 * max_members)
+       + (if archive_budget > 0 then 6 * max_preparations else 0)
+       + if attempt_budget > 0 then 16 * max_preparations else 0)
+    ~max_nodes:
+      ((22 * max_members)
+       + (if archive_budget > 0 then 5 * max_members else 0)
+       + if attempt_budget > 0 then 24 * max_preparations else 0)
   |> Result.map_error ~f:(fun error -> Error.create_s [%sexp (error : D.Error.t)])
   |> Or_error.ok_exn
 ;;
 
-let preparation_limits = limits ~archive_budget:0
+let preparation_limits = limits ~archive_budget:0 ~attempt_budget:0
 
 (* A single grouped archive header per preparation and at most one triple of
    bounded decimal positions per member. Reserve their encoded growth
    separately so a qualified transfer cannot consume preparation capacity. *)
-let storage_limits = limits ~archive_budget:(256 * 1024)
+let storage_limits = limits ~archive_budget:(256 * 1024) ~attempt_budget:(64 * 1024)
 let validate_encoded = D.Json.validate ~limits:storage_limits
 
 type t =
@@ -77,6 +83,7 @@ let admit t =
   else if Stdlib.List.compare_length_with t.records max_preparations > 0
   then Error Capacity
   else (
+    let ordinals = Hash_set.create (module Int64) in
     let%bind last, _ =
       List.fold_result t.records ~init:(None, 0) ~f:(fun (last, count) record ->
         let source_revision = Record.source_revision record in
@@ -87,7 +94,14 @@ let admit t =
         then fail "effective preparation ledger has duplicate or unordered evidence"
         else if count > max_members
         then Error Capacity
-        else Ok (Some record, count))
+        else (
+          match Record.attempt record with
+          | Some attempt when Hash_set.mem ordinals (Attempt.ordinal attempt) ->
+            fail "actual root attempt appears under more than one preparation"
+          | attempt ->
+            Option.iter attempt ~f:(fun attempt ->
+              Hash_set.add ordinals (Attempt.ordinal attempt));
+            Ok (Some record, count)))
     in
     let%bind () =
       match t.current_incarnation, last with
@@ -151,7 +165,26 @@ let relocate t ~transfer =
       | Invalid error -> error))
 ;;
 
-let validate_state t ~windows ~publication_revision ~has_archive =
+let update_attempt t ~source_revision attempt =
+  let open Result.Let_syntax in
+  let%bind found, records =
+    List.fold_result t.records ~init:(false, []) ~f:(fun (found, records) record ->
+      if Int64.equal (Record.source_revision record) source_revision
+      then (
+        let%map changed = Record.update_attempt record attempt in
+        true, changed :: records)
+      else Ok (found, record :: records))
+  in
+  if not found
+  then invalid "actual attempt has no retained preparation"
+  else
+    admit { t with records = List.rev records }
+    |> Result.map_error ~f:(function
+      | Capacity -> capacity_error
+      | Invalid error -> error)
+;;
+
+let validate_state t ~windows ~publication_revision ~accounting ~has_archive =
   match windows with
   | None -> invalid "effective preparation requires its window ledger"
   | Some windows ->
@@ -168,8 +201,9 @@ let validate_state t ~windows ~publication_revision ~has_archive =
         Int64.(Record.source_revision record < publication_revision)
         && List.mem scopes (Record.scope record) ~equal:Scope.equal
         && archive_ok
+        && Record.validate_attempt record ~accounting
       then Ok ()
-      else invalid "effective preparation names an unrelated window or uncommitted source")
+      else invalid "effective preparation names an unrelated or uncommitted source")
 ;;
 
 let of_jsonaf json =

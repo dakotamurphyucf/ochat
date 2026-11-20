@@ -188,8 +188,18 @@ The reader applies current scope and visibility before opening the archive
 and again before disclosing the result. The archived prestate must contain
 the original preparation, and the selected position must reproduce its
 exact occurrence, effective version and digest. A preparation record and its
-archive locator establish the prepared source. Provider submission requires
-its own durable evidence.
+archive locator establish the prepared source.
+
+The actor binds that preparation to the actual foreground root allocation
+before dispatch. The binding uses the exact prepared configuration on the
+live host and records the operation, scope and attempt ordinal. An
+acknowledgement marks the point after which a backend could have started.
+The runtime terminal or interruption records whether submission definitely
+did not occur, could have occurred, or produced a confirmed response. If the
+host stops first, reopening can distinguish an allocation that never reached
+acknowledgement from an acknowledged attempt with an unknown submission outcome.
+The terminal record survives retirement of detailed inference accounting
+without retaining request bodies or replaying execution authority.
 
 ### Logical visibility and physical custody
 

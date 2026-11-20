@@ -16,6 +16,7 @@ type t =
   | Recovery_window_enabled of
       Agent_protocol.Session_ref.t * Agent_protocol.Id.Context_window.t
   | Recovery_effective_prepared of (Recovery_effective_record.t[@sexp.opaque])
+  | Recovery_effective_attempt_changed of (Recovery_effective_receipts.t[@sexp.opaque])
   | Recovery_summary_compacted of
       Session_state.Compaction_archive.t
       * Agent_protocol.History.entry list
@@ -202,6 +203,7 @@ let rec contains_policy_usage = function
   | Recovery_window_expired _
   | Recovery_window_enabled _
   | Recovery_effective_prepared _
+  | Recovery_effective_attempt_changed _
   | Recovery_summary_compacted _
   | Authoring_references_forgotten _
   | Authoring_publication_changed _
@@ -286,6 +288,7 @@ let rec contains_goal_policy = function
   | Recovery_window_expired _
   | Recovery_window_enabled _
   | Recovery_effective_prepared _
+  | Recovery_effective_attempt_changed _
   | Recovery_summary_compacted _
   | Authoring_references_forgotten _
   | Authoring_publication_changed _
@@ -815,6 +818,9 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
     { state with recovery_windows = Some ledger }
   | Recovery_effective_prepared record ->
     let%map.Result ledger = Recovery_effective_capture.apply state record in
+    { state with recovery_effective = Some ledger }
+  | Recovery_effective_attempt_changed receipt ->
+    let%map.Result ledger = Recovery_effective_receipts.apply state receipt in
     { state with recovery_effective = Some ledger }
   | Recovery_summary_compacted (archive, history, capture) ->
     let open Result.Let_syntax in
@@ -2120,6 +2126,7 @@ let validate_goal_accounts delta ~(previous : Session_state.t) ~(next : Session_
     | Recovery_window_expired _
     | Recovery_window_enabled _
     | Recovery_effective_prepared _
+    | Recovery_effective_attempt_changed _
     | Recovery_summary_compacted _
     | Authoring_references_forgotten _
     | Authoring_publication_changed _
@@ -2275,6 +2282,7 @@ let validate_goal_descendants
     | Recovery_window_expired _
     | Recovery_window_enabled _
     | Recovery_effective_prepared _
+    | Recovery_effective_attempt_changed _
     | Recovery_summary_compacted _
     | Authoring_references_forgotten _
     | Authoring_publication_changed _
@@ -2381,6 +2389,7 @@ let rec validate_descendant_publication delta ~revision =
   | Recovery_window_expired _
   | Recovery_window_enabled _
   | Recovery_effective_prepared _
+  | Recovery_effective_attempt_changed _
   | Recovery_summary_compacted _
   | Authoring_references_forgotten _
   | Authoring_publication_changed _
@@ -2507,6 +2516,7 @@ let policy_usage_step delta ~(previous : Session_state.t) ~(next : Session_state
   | Recovery_window_expired _
   | Recovery_window_enabled _
   | Recovery_effective_prepared _
+  | Recovery_effective_attempt_changed _
   | Recovery_summary_compacted _
   | Authoring_references_forgotten _
   | Authoring_publication_changed _
@@ -2647,6 +2657,7 @@ let goal_policy_step delta ~(previous : Session_state.t) ~(next : Session_state.
   | Recovery_window_expired _
   | Recovery_window_enabled _
   | Recovery_effective_prepared _
+  | Recovery_effective_attempt_changed _
   | Recovery_summary_compacted _
   | Authoring_references_forgotten _
   | Authoring_publication_changed _

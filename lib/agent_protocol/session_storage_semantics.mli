@@ -19,6 +19,7 @@ val recovery_windows : string
 
 val recovery_effective : string
 val recovery_effective_archive : string
+val recovery_effective_attempt : string
 
 (** Exact membership survives withdrawal. Older reducers must reject even a journal-only edit or deletion. *)
 val recovery_withdrawals : string

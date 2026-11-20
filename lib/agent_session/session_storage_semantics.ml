@@ -1039,16 +1039,28 @@ let recovery_effective_archive_name =
   Agent_protocol.Session_storage_semantics.recovery_effective_archive
 ;;
 
-let state_has_effective_transfer payload =
+let state_has_effective_field payload ~field =
   match D.Json.field payload ~name:"recovery_effective" with
   | Value ledger ->
     (match D.Json.field ledger ~name:"preparations" with
      | Value (`Array records) ->
        List.exists records ~f:(fun record ->
-         match D.Json.field record ~name:"archive" with
+         match D.Json.field record ~name:field with
          | Absent -> false
          | Null | Value _ -> true)
      | Absent | Null | Value _ -> false)
+  | Absent | Null -> false
+;;
+
+let state_has_effective_transfer payload = state_has_effective_field payload ~field:"archive"
+let state_has_effective_attempt payload = state_has_effective_field payload ~field:"attempt"
+
+let delta_created_requires change ~state_requires =
+  match D.Json.field change ~name:"state" with
+  | Value state ->
+    (match D.Json.field state ~name:"payload" with
+     | Value payload -> state_requires payload
+     | Absent | Null -> false)
   | Absent | Null -> false
 ;;
 
@@ -1062,12 +1074,19 @@ let delta_has_effective_transfer payload =
          | Absent -> false
          | Null | Value _ -> true)
       | Value (`String "created") ->
-        (match D.Json.field change ~name:"state" with
-         | Value state ->
-           (match D.Json.field state ~name:"payload" with
-            | Value payload -> state_has_effective_transfer payload
-            | Absent | Null -> false)
-         | Absent | Null -> false)
+        delta_created_requires change ~state_requires:state_has_effective_transfer
+      | _ -> false)
+  | Absent | Null | Value _ -> false
+;;
+
+let delta_has_effective_attempt payload =
+  match D.Json.field payload ~name:"changes" with
+  | Value (`Array changes) ->
+    List.exists changes ~f:(fun change ->
+      match D.Json.field change ~name:"kind" with
+      | Value (`String "recovery_effective_attempt_changed") -> true
+      | Value (`String "created") ->
+        delta_created_requires change ~state_requires:state_has_effective_attempt
       | _ -> false)
   | Absent | Null | Value _ -> false
 ;;
@@ -1087,6 +1106,8 @@ let check_effective_archive document ~requires =
     ~required:(requires (D.Document.payload document))
 ;;
 
+let effective_attempt_name = Agent_protocol.Session_storage_semantics.recovery_effective_attempt
+
 let require_state_without_effective = require_state
 let check_state_without_effective = check_state
 let require_delta_without_effective = require_delta
@@ -1094,6 +1115,10 @@ let check_delta_without_effective = check_delta
 
 let require_state document ~limits =
   let%bind.Result document = require_state_without_effective document ~limits in
+  let%bind.Result document =
+    require document ~name:effective_attempt_name
+      ~required:(state_has_effective_attempt (D.Document.payload document)) ~limits
+  in
   let%bind.Result document =
     require_effective_archive document ~limits ~requires:state_has_effective_transfer
   in
@@ -1107,6 +1132,10 @@ let require_state document ~limits =
 let check_state document =
   let%bind.Result () = check_state_without_effective document in
   let%bind.Result () =
+    check document ~name:effective_attempt_name
+      ~required:(state_has_effective_attempt (D.Document.payload document))
+  in
+  let%bind.Result () =
     check_effective_archive document ~requires:state_has_effective_transfer
   in
   check
@@ -1117,6 +1146,10 @@ let check_state document =
 
 let require_delta document ~limits =
   let%bind.Result document = require_delta_without_effective document ~limits in
+  let%bind.Result document =
+    require document ~name:effective_attempt_name
+      ~required:(delta_has_effective_attempt (D.Document.payload document)) ~limits
+  in
   let%bind.Result document =
     require_effective_archive document ~limits ~requires:delta_has_effective_transfer
   in
@@ -1129,6 +1162,10 @@ let require_delta document ~limits =
 
 let check_delta document =
   let%bind.Result () = check_delta_without_effective document in
+  let%bind.Result () =
+    check document ~name:effective_attempt_name
+      ~required:(delta_has_effective_attempt (D.Document.payload document))
+  in
   let%bind.Result () =
     check_effective_archive document ~requires:delta_has_effective_transfer
   in

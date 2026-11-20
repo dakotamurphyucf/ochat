@@ -76,6 +76,7 @@ let apply state record =
     (match Record.custody record with
      | Live -> false
      | Lost | Archived _ -> true)
+    || Option.is_some (Record.attempt record)
     || (not (Scope.equal (Record.scope record) scope))
     || (not (Int64.equal state.counters.revision (Record.source_revision record)))
     || not (Int64.equal overlay_incarnation (Record.overlay_incarnation record))

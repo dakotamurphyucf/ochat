@@ -41,6 +41,21 @@ val check_recovery
   -> scope:Agent_protocol.Recovery_window.Scope.t
   -> (unit, Agent_protocol.Error.t) Result.t
 
+(** Exact process-local identity of the immutable configuration object from
+    the same adapter preparation. It is cleared on dispatch or scope exit. *)
+val record_recovery_binding
+  :  t
+  -> Token.t
+  -> configuration:Inference.Observation.Configuration.t
+  -> source_revision:int64
+  -> unit
+
+val recovery_source_revision
+  :  t
+  -> operation_id:Agent_protocol.Id.Operation.t
+  -> configuration:Inference.Observation.Configuration.t
+  -> int64 option
+
 val mark
   :  t
   -> Token.t
@@ -97,6 +112,7 @@ val root_port
   -> publish_recovery:
        (Token.t
         -> Inference_runtime.Recovery_input.t
+        -> configuration:Inference.Observation.Configuration.t
         -> binding_is_current:(unit -> bool)
         -> (unit, Agent_protocol.Error.t) Result.t)
   -> mark:

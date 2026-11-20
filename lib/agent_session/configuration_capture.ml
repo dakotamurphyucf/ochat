@@ -50,6 +50,11 @@ module Capacity_observation = struct
 end
 
 module Token = struct
+  type recovery_binding =
+    { configuration : Inference.Observation.Configuration.t
+    ; source_revision : int64
+    }
+
   type t =
     { identity : unit ref
     ; operation_id : Agent_protocol.Id.Operation.t
@@ -59,6 +64,7 @@ module Token = struct
     ; policy : Configuration_policy.t
     ; capacity : Capacity_basis.t option
     ; recovery_scope : Agent_protocol.Recovery_window.Scope.t option
+    ; recovery_binding : recovery_binding option
     ; capture_recovery : bool
     ; assessment : Capacity_observation.t option
     ; configuration : Inference.Observation.Configuration.t option
@@ -91,6 +97,7 @@ let begin_capture
     ; policy
     ; capacity
     ; recovery_scope
+    ; recovery_binding = None
     ; capture_recovery
     ; assessment = None
     ; configuration = None
@@ -116,6 +123,25 @@ let check_recovery t token ~scope =
   | _ -> Error (Agent_protocol.Error.invalid_request "root preparation custody changed")
 ;;
 
+let record_recovery_binding t token ~configuration ~source_revision =
+  match t.current with
+  | Some (current, Preparing) when owns t token && current.capture_recovery ->
+    let recovery_binding = Some { Token.configuration; source_revision } in
+    t.current <- Some ({ current with recovery_binding }, Preparing)
+  | _ -> ()
+;;
+
+let recovery_source_revision t ~operation_id ~configuration =
+  let open Option.Let_syntax in
+  let%bind token, phase = t.current in
+  let%bind binding = token.recovery_binding in
+  match phase with
+  | Preparing
+    when Agent_protocol.Id.Operation.equal token.operation_id operation_id
+         && phys_equal binding.configuration configuration -> Some binding.source_revision
+  | _ -> None
+;;
+
 let mark t token configuration =
   match t.current with
   | Some (current, _) when owns t token ->
@@ -128,7 +154,10 @@ let mark t token configuration =
                   configuration) -> { current with capacity = None; assessment = None }
       | None | Some _ -> current
     in
-    t.current <- Some ({ current with configuration = Some configuration }, C.Effective);
+    t.current
+    <- Some
+         ( { current with configuration = Some configuration; recovery_binding = None }
+         , C.Effective );
     Ok ()
   | _ ->
     Error
@@ -196,7 +225,8 @@ let native_window t ~operation_id ~configuration_revision ~target =
          && Int64.equal token.revision configuration_revision
          && Inference.Request.Target.equal token.target target
          && Option.is_some token.configuration
-         && Option.exists token.assessment ~f:(fun observation -> observation.binding_is_current ()) ->
+         && Option.exists token.assessment ~f:(fun observation ->
+           observation.binding_is_current ()) ->
     Option.map token.recovery_scope ~f:(fun selected_scope ->
       Native_window.{ identity = token.identity; scope = selected_scope })
   | _ -> None
@@ -206,7 +236,10 @@ let finish t token ~success =
   if owns t token
   then
     if success
-    then t.current <- Option.map t.current ~f:(fun (current, _) -> current, C.Retained)
+    then
+      t.current
+      <- Option.map t.current ~f:(fun (current, _) ->
+           { current with recovery_binding = None }, C.Retained)
     else t.current <- None
 ;;
 
@@ -276,15 +309,20 @@ let root_port ~begin_capture ~publish_capacity ~publish_recovery ~mark ~finish =
             |> require;
             let on_prepared prepared =
               (if token.capture_recovery && Option.is_some token.recovery_scope
-               then (
-                let module Prepared = Inference_runtime.Prepared in
-                let binding_is_current = Prepared.binding_guard prepared in
-                if
-                  Inference.Request.Target.equal token.target (Prepared.target prepared)
-                  && binding_is_current ()
-                then
-                  Option.iter (Prepared.recovery_input prepared) ~f:(fun input ->
-                    publish_recovery token input ~binding_is_current |> require)));
+               then
+                 let module Prepared = Inference_runtime.Prepared in
+                 let binding_is_current = Prepared.binding_guard prepared in
+                 if
+                   Inference.Request.Target.equal token.target (Prepared.target prepared)
+                   && binding_is_current ()
+                 then
+                   Option.iter (Prepared.recovery_input prepared) ~f:(fun input ->
+                     publish_recovery
+                       token
+                       input
+                       ~configuration:(Prepared.configuration prepared)
+                       ~binding_is_current
+                     |> require));
               Option.iter token.capacity ~f:(fun capacity ->
                 let module Prepared = Inference_runtime.Prepared in
                 let policy = Capacity.Selection.policy capacity.selection in

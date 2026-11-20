@@ -56,6 +56,7 @@ let collect state ~delta ~limits =
       | Recovery_window_expired _
       | Recovery_window_enabled _
       | Recovery_effective_prepared _
+      | Recovery_effective_attempt_changed _
       | Recovery_summary_compacted _
       | Authoring_references_forgotten _
       | Authoring_publication_changed _

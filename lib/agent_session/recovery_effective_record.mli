@@ -37,6 +37,10 @@ val overlay_incarnation : t -> int64
 val input_count : t -> int
 val members : t -> Member.t list
 val custody : t -> custody
+val attempt : t -> Recovery_effective_attempt.t option
+val update_attempt : t -> Recovery_effective_attempt.t -> (t, P.Error.t) result
+val matches_configuration : t -> Inference.Observation.Configuration.t -> bool
+val validate_attempt : t -> accounting:Inference_ledger.t -> bool
 val find_member : t -> P.Recovery_window.Citation.t -> Member.t option
 
 (** A transfer is performed at most once. Existing physical evidence wins over

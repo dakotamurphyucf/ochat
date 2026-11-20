@@ -18,6 +18,7 @@ type t =
   | Recovery_window_enabled of
       Agent_protocol.Session_ref.t * Agent_protocol.Id.Context_window.t
   | Recovery_effective_prepared of (Recovery_effective_record.t[@sexp.opaque])
+  | Recovery_effective_attempt_changed of (Recovery_effective_receipts.t[@sexp.opaque])
   | Recovery_summary_compacted of
       Session_state.Compaction_archive.t
       * Agent_protocol.History.entry list

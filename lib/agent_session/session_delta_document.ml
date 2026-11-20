@@ -156,6 +156,12 @@ let atom_to_jsonaf ~limits ~state_document delta =
           [ "kind", `String "recovery_effective_prepared"
           ; "record", Recovery_effective_record.to_jsonaf record
           ])
+  | Recovery_effective_attempt_changed receipt ->
+    Ok
+      (`Object
+         [ "kind", `String "recovery_effective_attempt_changed"
+         ; "receipt", Recovery_effective_receipts.to_jsonaf receipt
+         ])
   | Recovery_summary_compacted (archive, history, capture) ->
     let additions =
       match capture with
@@ -606,6 +612,9 @@ let atom_of_jsonaf ~limits json =
   | "recovery_effective_prepared" ->
     let%map record = X.required fields "record" Recovery_effective_record.of_jsonaf in
     Delta.Recovery_effective_prepared record
+  | "recovery_effective_attempt_changed" ->
+    let%map receipt = X.required fields "receipt" Recovery_effective_receipts.of_jsonaf in
+    Delta.Recovery_effective_attempt_changed receipt
   | "recovery_summary_compacted" ->
     let%bind archive =
       X.required fields "archive" Session_state_document.archive_reference_of_jsonaf
@@ -965,6 +974,9 @@ let shape =
              ; ( "recovery_effective_prepared"
                , X.shape_exn
                    [ "kind", D.Shape.value; "record", Recovery_effective_record.shape ] )
+             ; ( "recovery_effective_attempt_changed"
+               , X.shape_exn
+                   [ "kind", D.Shape.value; "receipt", Recovery_effective_receipts.shape ] )
              ; ( "recovery_summary_compacted"
                , X.shape_exn
                    [ "kind", D.Shape.value

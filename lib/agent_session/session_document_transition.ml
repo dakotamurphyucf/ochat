@@ -134,6 +134,7 @@ let prepare previous ~delta ~limits =
         | Recovery_window_expired _
         | Recovery_window_enabled _
         | Recovery_effective_prepared _
+        | Recovery_effective_attempt_changed _
         | Authoring_references_forgotten _
         | Authoring_publication_changed _
         | Initial_prompt_count_changed _
@@ -281,6 +282,7 @@ let prepare previous ~delta ~limits =
        | Recovery_window_expired _
        | Recovery_window_enabled _
        | Recovery_effective_prepared _
+       | Recovery_effective_attempt_changed _
        | Recovery_summary_compacted _
        | Authoring_references_forgotten _
        | Authoring_publication_changed _
@@ -353,6 +355,10 @@ let prepare previous ~delta ~limits =
   in
   let%bind () =
     Queue_provenance_validation.validate (Session_state.queue_provenance current)
+    |> X.document_result
+  in
+  let%bind () =
+    Recovery_effective_receipts.check_transaction ~previous:previous_value ~next:current
     |> X.document_result
   in
   let%map () =
