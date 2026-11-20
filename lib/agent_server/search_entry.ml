@@ -1,13 +1,7 @@
 open! Core
 module P = Agent_protocol
 module H = P.Public_history
-
-module Part = struct
-  type t =
-    { index : int
-    ; text : string
-    }
-end
+module Part = P.History_text
 
 type t =
   { history_id : P.History.Id.t
@@ -26,7 +20,7 @@ let resource_limit () =
 
 let admit (entry : H.t) content =
   let open Result.Let_syntax in
-  if List.length content > 4096
+  if Stdlib.List.compare_length_with content 4096 > 0
   then Error (resource_limit ())
   else (
     let%map _, text_bytes, reversed =
@@ -37,9 +31,9 @@ let admit (entry : H.t) content =
           let length = String.length text in
           if length > 1_048_576 - bytes
           then Error (resource_limit ())
-          else if not (Stdlib.String.is_valid_utf_8 text)
-          then Error (P.Error.invalid_request "search entry is not valid UTF-8")
-          else Ok (index + 1, bytes + length, Part.{ index; text } :: reversed))
+          else (
+            let%map part = Part.create ~index ~text in
+            index + 1, bytes + length, part :: reversed))
     in
     if List.is_empty reversed
     then None

@@ -34,6 +34,7 @@
   history_edit
   search_term
   search_snippet
+  history_text
   search_query
   search_hit
   search_page

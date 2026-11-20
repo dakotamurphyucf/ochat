@@ -35,3 +35,19 @@ publication.
 The protocol encodings describe recognized coordinates. A persistent session
 document owns its extension fields, archive references and visibility decisions.
 [Recovery design](../design/local-context-recovery.md)
+
+### Reading a text part
+
+Search and reads use half-open byte offsets in the original UTF-8 part. A
+search for `fox` in the part `🦊 FOX` returns the range `[5,8)`. Reading
+that range yields `FOX`. The highlight in a search snippet is relative to
+the snippet, which may start later than byte zero of the original part.
+
+`Agent_protocol.History_text` admits a validated part and keeps its original
+index even when earlier parts were hidden. A range read defaults to 4 KiB
+and accepts a budget of up to 16 KiB. If more text remains, use the returned
+next offset as the start of the next read, with the same end offset and source
+revision. A budget too small for a single scalar returns a resource-limit
+error. The caller checks visibility and the revision each time it discloses
+a result. Conversation search continues to admit its existing user and
+assistant text and refusal parts.
