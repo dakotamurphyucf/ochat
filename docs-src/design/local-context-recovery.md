@@ -434,6 +434,16 @@ the range short, the next UTF-8 byte offset. For example, reading bytes
 caller's current authority again.
 [Factory recovery API](../../lib/agent_server/session_factory.mli).
 
+The Factory's window list returns each admitted window's identity and status
+in lineage order. It defaults to the current generation and takes an optional
+generation or state filter. Request 1–50 summaries per page. Each request
+requires current transcript access to the session. The signed cursor binds
+the filter, page size, selected lineage, lifecycle and originating credential
+to the physical actor. An ordinary history append leaves the list unchanged,
+so the next page still works. Expiring a listed window, reloading the actor,
+or authenticating with a different credential requires starting a fresh list.
+[Window summaries](../../lib/agent_session/recovery_window_page.mli).
+
 First-slice search walks the selected visible positions in ascending window,
 member and part order. Take one hit per exact owner, occurrence and version
 within the selected family, attributed to its earliest eligible window in

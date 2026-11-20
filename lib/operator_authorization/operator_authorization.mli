@@ -10,6 +10,15 @@ val principal : t -> Agent_protocol.Principal.t
     callers must not replace them with authorization success. *)
 val is_current : t -> bool
 
+(** Process-local discriminator for a signed continuation. Independent
+    authentications can represent the same principal. This value conveys no
+    authority and has no persistent meaning. *)
+val origin : t -> int
+
+(** Narrow the same credential. Both its original check and [is_current] must
+    still succeed. A new invocation can narrow that credential independently. *)
+val restrict : ?original_first:bool -> t -> is_current:(unit -> bool) -> t
+
 (** Explicit local trusted contexts; never a remote authentication default. *)
 val trusted_local : Agent_protocol.Principal.t -> t
 

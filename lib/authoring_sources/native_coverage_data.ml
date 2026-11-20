@@ -442,7 +442,7 @@ let implementation_sources =
   ; ( "lib/agent_server/descendant_accounting_host.ml"
     , "3baff14cf9c606e899c08f95805cc3ca9f070827b46ec531e1c230314820b0fd" )
   ; ( "lib/agent_server/session_factory.ml"
-    , "f8f55bf271a48904844ef630b349c901e58cda6c04e7d7d703cb71597a42a288" )
+    , "f5c90b7c3e9ab92330590eda44f18acc71f37502593b3b1e5331f69bf3a26c62" )
   ; ( "lib/agent_session/authoring_context_tool.ml"
     , "6e318b45f799b485f802dc6d5e4d8bc031721e379cc8800f6ed484d59694840d" )
   ; ( "lib/agent_session/authoring_reference_scope.ml"
@@ -478,7 +478,7 @@ let implementation_sources =
   ; ( "lib/agent_session/managed_wait_tool.ml"
     , "2482da27415b0f542bbf5e2fa61bf97de70fb047790cb6ee5100ced465b43708" )
   ; ( "lib/agent_session/native_tool_invocation.ml"
-    , "713913b7879b8175628094608e814debf421074e9b90792ab601a83b576feae2" )
+    , "bd518e1e8c19a622141e881060cd039e92e25bd0dc33caabf1925a9c105773a3" )
   ; ( "lib/agent_session/native_tool_policy.ml"
     , "3b6ff346554c99eab19f15b35562acfc8575d556226ca4881ac6ed7e2213c5f5" )
   ; ( "lib/agent_session/one_off_execution.ml"

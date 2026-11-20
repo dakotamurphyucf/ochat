@@ -14525,7 +14525,7 @@ module Recovery_source_host = struct
                      let%map () = authorize state in
                      state)
                  in
-                 f handle ~current))
+                 f handle ~observation ~current))
       in
       try
         match Eio.Time.Timeout.run_exn timeout run with
@@ -14545,6 +14545,53 @@ module Recovery_history = struct
     | Source of Source.error
     | Range of P.Error.t
   [@@deriving sexp_of]
+
+  let list_windows t ~actor ~session ?generation ?state page =
+    let principal = Operator_authorization.principal actor in
+    let denied () =
+      P.Error.create
+        Permission_denied
+        ~message:"recovery window list is unavailable"
+        ~retryable:false
+        ()
+    in
+    let admitted () =
+      Operator_authorization.is_current actor
+      && P.Principal.has_scope principal View_session_transcript
+    in
+    let authorize current =
+      if
+        admitted ()
+        && Authorization.session_visible_to
+             principal
+             (Agent_session.Session_state.summary current)
+      then Ok ()
+      else Error (denied ())
+    in
+    let open Result.Let_syntax in
+    if not (admitted ())
+    then Error (denied ())
+    else (
+      let%bind result =
+        Recovery_source_host.with_source
+          t
+          session
+          ~authorize
+          ~f:(fun _handle ~observation ~current ->
+            let result =
+              Agent_session.Session_actor.Resource_observation.list_recovery_windows
+                observation
+                ~actor
+                ~generation
+                ~state
+                page
+            in
+            let%map _ = current () |> Result.map_error ~f:(fun _ -> Source.Denied) in
+            result)
+        |> Result.map_error ~f:(fun _ -> denied ())
+      in
+      result)
+  ;;
 
   let read_text t ~authorize selection ~view ~part ~start ~stop ?max_bytes () =
     let citation =
@@ -14567,28 +14614,32 @@ module Recovery_history = struct
     in
     let open Result.Let_syntax in
     let%bind range =
-      Recovery_source_host.with_source t source ~authorize ~f:(fun handle ~current ->
-        Source.with_allowance ~checkpoint t.store ~handle ~f:(fun allowance ->
-          let%bind item =
-            Text.resolve
-              ~allowance
-              t.store
-              ~handle
-              ~current:(fun _ _ -> current ())
-              ~max_frame_bytes:t.limits.max_journal_payload
-              ~max_payload_bytes:t.limits.max_journal_payload
-              selection
-              ~view
-          in
-          let%bind selected =
-            List.find (Text.parts item) ~f:(fun candidate ->
-              Int.equal candidate.index part)
-            |> Result.of_option ~error:Source.Unavailable
-          in
-          let range = P.History_text.read ?max_bytes selected ~start ~stop in
-          checkpoint ();
-          let%map _ = current () |> Result.map_error ~f:(fun _ -> Source.Denied) in
-          range))
+      Recovery_source_host.with_source
+        t
+        source
+        ~authorize
+        ~f:(fun handle ~observation:_ ~current ->
+          Source.with_allowance ~checkpoint t.store ~handle ~f:(fun allowance ->
+            let%bind item =
+              Text.resolve
+                ~allowance
+                t.store
+                ~handle
+                ~current:(fun _ _ -> current ())
+                ~max_frame_bytes:t.limits.max_journal_payload
+                ~max_payload_bytes:t.limits.max_journal_payload
+                selection
+                ~view
+            in
+            let%bind selected =
+              List.find (Text.parts item) ~f:(fun candidate ->
+                Int.equal candidate.index part)
+              |> Result.of_option ~error:Source.Unavailable
+            in
+            let range = P.History_text.read ?max_bytes selected ~start ~stop in
+            checkpoint ();
+            let%map _ = current () |> Result.map_error ~f:(fun _ -> Source.Denied) in
+            range))
       |> Result.map_error ~f:(fun e -> Source e)
     in
     Result.map_error range ~f:(fun e -> Range e)
@@ -14599,7 +14650,6 @@ module Recovery_assets = struct
   module P = Agent_protocol
   module A = Agent_session
   module Asset = A.Recovery_asset
-
   module Source = A.Recovery_source_reader
   module Actor = A.Session_actor
   module Observation = Actor.Resource_observation
@@ -14612,16 +14662,20 @@ module Recovery_assets = struct
     let source =
       P.Recovery_window.Citation.scope citation |> P.Recovery_window.Scope.session
     in
-    Recovery_source_host.with_source t source ~authorize ~f:(fun handle ~current ->
-      let open Result.Let_syntax in
-      let%bind asset =
-        Asset.create
-          t.blob_store
-          ~sessions:t.store
-          ~handle
-          ~max_frame_bytes:t.limits.max_journal_payload
-      in
-      f asset ~current)
+    Recovery_source_host.with_source
+      t
+      source
+      ~authorize
+      ~f:(fun handle ~observation:_ ~current ->
+        let open Result.Let_syntax in
+        let%bind asset =
+          Asset.create
+            t.blob_store
+            ~sessions:t.store
+            ~handle
+            ~max_frame_bytes:t.limits.max_journal_payload
+        in
+        f asset ~current)
   ;;
 
   let read t ~sw ~authorize citation ~part ~max_bytes =

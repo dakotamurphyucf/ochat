@@ -6720,6 +6720,7 @@ and t =
   ; event_sequence : int64 Atomic.t
   ; mutable state : Session_state.t
   ; mutable stopped : bool
+  ; recovery_window_cursor : Recovery_window_page.signer Lazy.t
   ; mutable protected_source_custody : unit ref option
   ; mutable canonical_write_in_progress : bool
     (* Synchronous share publication observes only an installed durable state. *)
@@ -7353,6 +7354,14 @@ module Resource_observation = struct
     then Ok current
     else Error (error Conflict "session resource observation is stale")
   ;;
+
+  let list_recovery_windows t ~actor ~generation ~state page =
+    let open Result.Let_syntax in
+    let%bind current = check_current t in
+    Recovery_window_page.list
+      (Lazy.force t.actor.recovery_window_cursor) current ~actor ~generation ~state page
+  ;;
+
 end
 
 module Recurrence_target_invalidation = struct
@@ -22245,11 +22254,10 @@ let callback_actor_after_current t ~scope =
      | Some custody ->
        let%map actor = Execution_custody.actor custody in
        Some
-         (Operator_authorization.guarded
-            ~principal:(Operator_authorization.principal actor)
+         (Operator_authorization.restrict
+            actor
             ~is_current:(fun () ->
-              Result.is_ok (check_callback_inference_current t scope)
-              && Operator_authorization.is_current actor)))
+              Result.is_ok (check_callback_inference_current t scope))))
 ;;
 
 let callback_agent_actor t ~scope =
@@ -27445,13 +27453,12 @@ let invocation_agent_actor t execution invocation =
   in
   Ok
     (Option.map actor ~f:(fun actor ->
-       Operator_authorization.guarded
-         ~principal:(Operator_authorization.principal actor)
+       Operator_authorization.restrict
+         actor
          ~is_current:(fun () ->
            Atomic.get execution.authority_live
            && Result.is_ok (check_execution_descendant t (Inference_invocation execution))
-           && owner_current ()
-           && Operator_authorization.is_current actor)))
+           && owner_current ())))
 ;;
 
 (* Caller preparation is a fresh-effect boundary. Existing settlement selectors
@@ -58500,11 +58507,10 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
        | Some custody ->
          Result.map (Execution_custody.actor custody) ~f:(fun actor ->
            Some
-             (Operator_authorization.guarded
-                ~principal:(Operator_authorization.principal actor)
+             (Operator_authorization.restrict
+                actor
                 ~is_current:(fun () ->
-                  Result.is_ok (check_moderator_effect_current t borrow invocation)
-                  && Operator_authorization.is_current actor))))
+                  Result.is_ok (check_moderator_effect_current t borrow invocation)))))
     | Begin_run_initialization (purpose, preparation, expected) ->
       let open Result.Let_syntax in
       let%bind () = check_run_preparation t preparation in
@@ -59946,6 +59952,7 @@ let create_internal
     ; event_sequence = Atomic.make initial_state.counters.event_sequence
     ; state = initial_state
     ; stopped = false
+    ; recovery_window_cursor = lazy (Recovery_window_page.create ())
     ; protected_source_custody = None
     ; canonical_write_in_progress = false
     ; command_audit = None

@@ -205,10 +205,8 @@ let borrowed_agent_actor (scope : borrowed) =
           (Agent_protocol.Error.invalid_request "native invocation scope is not active")
     in
     Option.map actor ~f:(fun actor ->
-      Operator_authorization.guarded
-        ~principal:(Operator_authorization.principal actor)
-        ~is_current:(fun () ->
-          Atomic.get scope.active && Operator_authorization.is_current actor)))
+      Operator_authorization.restrict actor ~is_current:(fun () ->
+        Atomic.get scope.active)))
 ;;
 
 let borrowed_policy_caller (scope : borrowed) =

@@ -744,6 +744,20 @@ module Recovery_history : sig
     | Range of Agent_protocol.Error.t
   [@@deriving sexp_of]
 
+  (** Check the current authenticated principal and session visibility, then
+      list window identities and status under the retained actor. Each page
+      requires a fresh current proof. *)
+  val list_windows
+    :  t
+    -> actor:Operator_authorization.t
+    -> session:Agent_protocol.Session_ref.t
+    -> ?generation:int
+    -> ?state:Agent_session.Recovery_window_record.state
+    -> Agent_protocol.Page.Request.t
+    -> ( Agent_session.Recovery_window_page.summary Agent_protocol.Page.t
+         , Agent_protocol.Error.t )
+         result
+
   val read_text
     :  t
     -> authorize:

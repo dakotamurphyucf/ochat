@@ -365,6 +365,7 @@
   compaction_archive
   recovery_window_location
   recovery_window_record
+  recovery_window_page
   recovery_window_ledger
   recovery_window_capture
   recovery_effective_projection

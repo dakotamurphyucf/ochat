@@ -793,6 +793,17 @@ module Resource_observation : sig
       State, the exact host association and physical source, and existing
       per-effect guards. *)
   val check_current : t -> (Session_state.t, Agent_protocol.Error.t) result
+
+  (** List safe window summaries on this physical actor. The Factory establishes
+      session visibility and retains source custody through release. *)
+  val list_recovery_windows
+    :  t
+    -> actor:Operator_authorization.t
+    -> generation:int option
+    -> state:Recovery_window_record.state option
+    -> Agent_protocol.Page.Request.t
+    -> (Recovery_window_page.summary Agent_protocol.Page.t, Agent_protocol.Error.t) result
+
 end
 
 (** Observes accepted State through this Actor's mailbox. May yield. The host

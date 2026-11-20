@@ -170,13 +170,14 @@ let run env environment =
       Agent_server.Session_registry.find (Agent_server.Daemon.registry daemon) session.id
       |> Option.value_exn
     in
-    let proof =
+    let authenticate () =
       Agent_server.Daemon.authenticate_http_actor
         daemon
         { client_address = `Tcp (Eio.Net.Ipaddr.V4.loopback, 0); headers = [] }
         (Some token)
       |> protocol_ok
     in
+    let proof = authenticate () in
     let authorize (state : A.Session_state.t) =
       if
         Operator_authorization.is_current proof
@@ -338,6 +339,43 @@ let run env environment =
       | _ -> failwith "expected a real replacement attachment"
     in
     archive_only entry proof attachment_id authorize scope;
+    let windows ?cursor actor =
+      Agent_server.Session_factory.Recovery_history.list_windows
+        factory
+        ~actor
+        ~session:(P.Recovery_window.Scope.session scope)
+        (P.Page.Request.create ~limit:1 ?cursor () |> protocol_ok)
+    in
+    let page = windows proof |> protocol_ok in
+    let predecessor = List.hd_exn page.items in
+    require
+      (P.Recovery_window.Scope.equal predecessor.scope scope
+       && A.Recovery_window_record.equal_state predecessor.state Sealed)
+      "the first page must name the sealed predecessor";
+    let cursor = Option.value_exn page.next_cursor in
+    let independent =
+      Operator_authorization.trusted_local (Operator_authorization.principal proof)
+    in
+    let expect_expired = function
+      | Error error when P.Error.equal_code error.P.Error.code Cursor_expired -> ()
+      | _ -> failwith "a changed window query basis accepted the old cursor"
+    in
+    expect_expired (windows ~cursor independent);
+    let append_id =
+      History_entry.Id.create ~namespace:"window-page-test" ~sequence:0
+      |> Result.ok_or_failwith
+    in
+    let appended =
+      A.History_codec.user_text ~id:append_id "append between pages"
+      |> A.History_codec.to_protocol
+    in
+    Actor.append_history entry.actor ~attachment_id [ appended ] |> protocol_ok |> ignore;
+    let next = windows ~cursor (authenticate ()) |> protocol_ok in
+    require
+      (Option.is_none next.next_cursor
+       && List.length next.items = 1
+       && A.Recovery_window_record.equal_state (List.hd_exn next.items).state Open)
+      "a new authentication of the same credential must resume after an append";
     let archived = state entry in
     require
       (Option.is_none
@@ -358,6 +396,7 @@ let run env environment =
          ~max_bytes:1024);
     Actor.expire_recovery_window entry.actor ~actor:proof ~attachment_id ~authorize scope
     |> protocol_ok;
+    expect_expired (windows ~cursor (authenticate ()));
     expect_error Expired (read retained ~part:0);
     Http_driver.shutdown client)
 ;;
