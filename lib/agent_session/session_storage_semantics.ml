@@ -926,6 +926,93 @@ let check_delta document =
   check_recovery_note_fields document ~requires:recovery_note_delta_requires
 ;;
 
+let rollover_commit_name =
+  Agent_protocol.Session_storage_semantics.recovery_rollover_commit
+;;
+
+let state_has_rollover_commit payload =
+  match D.Json.field payload ~name:"recovery_rollover" with
+  | Value ledger ->
+    (match D.Json.field ledger ~name:"checkpoint" with
+     | Value _ | Null -> true
+     | Absent -> false)
+    ||
+      (match D.Json.field ledger ~name:"receipts" with
+      | Value (`Array receipts) ->
+        List.exists receipts ~f:(fun receipt ->
+          match D.Json.field receipt ~name:"status" with
+          | Value status ->
+            (match D.Json.field status ~name:"kind" with
+             | Value (`String "committed") -> true
+             | _ -> false)
+          | Absent | Null -> false)
+      | Absent | Null | Value _ -> false)
+  | Absent | Null -> false
+;;
+
+let delta_has_rollover_commit payload =
+  match D.Json.field payload ~name:"changes" with
+  | Value (`Array changes) ->
+    List.exists changes ~f:(fun change ->
+      match D.Json.field change ~name:"kind" with
+      | Value (`String "recovery_rollover_committed") -> true
+      | Value (`String "recovery_rollover_changed") ->
+        (match D.Json.field change ~name:"value" with
+         | Value value ->
+           (match D.Json.field value ~name:"kind" with
+            | Value (`String "record_checkpoint") -> true
+            | _ -> false)
+         | Absent | Null -> false)
+      | Value (`String "created") ->
+        (match D.Json.field change ~name:"state" with
+         | Value state ->
+           (match D.Json.field state ~name:"payload" with
+            | Value payload -> state_has_rollover_commit payload
+            | Absent | Null -> false)
+         | Absent | Null -> false)
+      | _ -> false)
+  | Absent | Null | Value _ -> false
+;;
+
+let require_state_without_rollover_commit = require_state
+let check_state_without_rollover_commit = check_state
+let require_delta_without_rollover_commit = require_delta
+let check_delta_without_rollover_commit = check_delta
+
+let require_state document ~limits =
+  let%bind.Result document = require_state_without_rollover_commit document ~limits in
+  require
+    document
+    ~name:rollover_commit_name
+    ~required:(state_has_rollover_commit (D.Document.payload document))
+    ~limits
+;;
+
+let check_state document =
+  let%bind.Result () = check_state_without_rollover_commit document in
+  check
+    document
+    ~name:rollover_commit_name
+    ~required:(state_has_rollover_commit (D.Document.payload document))
+;;
+
+let require_delta document ~limits =
+  let%bind.Result document = require_delta_without_rollover_commit document ~limits in
+  require
+    document
+    ~name:rollover_commit_name
+    ~required:(delta_has_rollover_commit (D.Document.payload document))
+    ~limits
+;;
+
+let check_delta document =
+  let%bind.Result () = check_delta_without_rollover_commit document in
+  check
+    document
+    ~name:rollover_commit_name
+    ~required:(delta_has_rollover_commit (D.Document.payload document))
+;;
+
 let recovery_effective_name = Agent_protocol.Session_storage_semantics.recovery_effective
 
 let recovery_effective_state_requires payload =

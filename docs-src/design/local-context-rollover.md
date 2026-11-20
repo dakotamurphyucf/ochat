@@ -311,6 +311,20 @@ A worker returning old history can never reinstall the previous active
 projection. Advance the logical window ID independently of session copy,
 generation and existing summary-compaction counters.
 
+An idle actor can settle an intent through its owning writer at an exact
+window and revision. The writer can record an explicit checkpoint recipe
+with the history it covers and the local note revisions it selects. The
+checkpoint remains eligible while that history and those revisions match.
+Missing or stale checkpoint evidence supersedes an ordinary
+intent. An explicitly forced intent can publish an archive-only result
+with a recorded reason and current force authority. The journal encodes
+the successor, exact archive digest, checkpoint quality and a pending
+continuation obligation in a single rollover delta. The archive uses the
+complete previous persisted document, and the writer verifies its framed
+bytes after sync before publishing the delta. While an intent is pending,
+each canonical write also verifies that the next journal transaction and
+snapshot can still represent a no-archive supersession.
+
 **Reconcile and resume.** Cancellation, stale configuration or history,
 revoked authority and storage failure before publication leave the old
 window authoritative. An unreferenced staged archive is eligible for

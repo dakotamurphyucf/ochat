@@ -9,6 +9,7 @@ module Policy_path = struct
 end
 
 let prepare previous ~delta ~limits =
+  let%bind.Result () = Session_delta.validate_rollover_transaction delta |> X.document_result in
   let previous_value = Session_state_document.value previous in
   let policy_path =
     if
@@ -184,6 +185,14 @@ let prepare previous ~delta ~limits =
           History_retirement.admit_summary previous ~archive ~next:state ~limits
         in
         Transaction.continue_after_history carrier ~admitted ~next:state ~limits
+      | Recovery_rollover_committed change as delta ->
+        let%bind previous = Transaction.checkpoint carrier ~limits in
+        let%bind state =
+          Session_delta.apply ~limits (Transaction.value carrier) delta
+          |> X.document_result
+        in
+        let%bind admitted = History_retirement.admit_rollover previous change ~next:state ~limits in
+        Transaction.continue_after_history carrier ~admitted ~next:state ~limits
       | (History_deleted _ | History_edited _) as delta ->
         let open Result.Let_syntax in
         let%bind previous = Transaction.checkpoint carrier ~limits in
@@ -313,6 +322,7 @@ let prepare previous ~delta ~limits =
        | Recovery_note_changed _
        | Recovery_note_share_changed _
        | Recovery_rollover_changed _
+       | Recovery_rollover_committed _
        | Recurrence_catalog_changed _
        | Run_state_changed _
        | Moderator_changed _

@@ -98,6 +98,7 @@ type t =
   | Recovery_note_changed of (Recovery_note_change.t[@sexp.opaque])
   | Recovery_note_share_changed of (Recovery_note_share_change.t[@sexp.opaque])
   | Recovery_rollover_changed of (Recovery_rollover.Change.t[@sexp.opaque])
+  | Recovery_rollover_committed of (Recovery_rollover.Commit.t[@sexp.opaque])
   | Recurrence_catalog_changed of Recurrence_catalog.t
   | Run_state_changed of Run_state.t
   | Moderator_changed of Jsonaf.t option
@@ -132,6 +133,13 @@ val apply
   -> Session_state.t
   -> t
   -> (Session_state.t, Agent_protocol.Error.t) result
+
+val validate_rollover_transaction : t -> (unit, Agent_protocol.Error.t) result
+
+val rollover_retained_history
+  :  Session_state.t
+  -> Recovery_rollover.Commit.t
+  -> (Agent_protocol.History.entry list, Agent_protocol.Error.t) result
 
 (** Live host admission only: append an immutable source binding next to every
     genuinely new Model_call Job_changed using the then-selected captured source.

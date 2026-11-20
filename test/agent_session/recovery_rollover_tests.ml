@@ -127,6 +127,8 @@ let%expect_test "operator admission compares the exact head and survives reopen"
                  (Some ledger)
                  ~active:scope
                  ~revision:state.counters.revision
+                 ~history:state.conversation.canonical_history
+                 ~catalog:state.recovery_notes
                  change
                |> protocol_ok
              in
@@ -145,23 +147,17 @@ let%expect_test "operator admission compares the exact head and survives reopen"
              in
              let committed =
                R.Receipt.Committed
-                 { successor; cut_revision = state.counters.revision; archive }
+                 { successor
+                 ; cut_revision = state.counters.revision
+                 ; archive
+                 ; checkpoint = Archive_only Checkpoint_missing
+                 ; continuation = Awaiting_after_commit id
+                 }
              in
              let change = R.Change.(Settle { id; terminal = committed }) in
-             let unsupported =
-               R.apply
-                 (Some ledger)
-                 ~active:scope
-                 ~revision:state.counters.revision
-                 change
-               |> protocol_ok
-             in
              Identity.expect_error
                Invalid_request
-               (R.validate_state
-                  unsupported
-                  ~windows:(Some windows)
-                  ~revision:(Int64.succ state.counters.revision));
+               (A.Session_delta.apply state (Recovery_rollover_changed change));
              let public = R.Receipt.to_public_json receipt |> Jsonaf.to_string in
              assert (not (String.is_substring public ~substring:"operator-secret-key"));
              expected, receipt)

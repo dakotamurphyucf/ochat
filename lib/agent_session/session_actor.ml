@@ -5476,6 +5476,22 @@ module Recovery_rollover_request = struct
         * P.Idempotency_key.t
         * R.Expected.t
         -> R.Receipt.t t
+    | Operator_settle :
+        Operator_authorization.t
+        * P.Id.Attachment.t
+        * authorize
+        * authorize option
+        * P.Id.Operation.t
+        * R.Expected.t
+        * R.Settlement.t
+        -> R.Receipt.t t
+    | Operator_checkpoint :
+        Operator_authorization.t
+        * P.Id.Attachment.t
+        * authorize
+        * R.Expected.t
+        * Recovery_notes.Catalog.selection list
+        -> R.Checkpoint.t t
 end
 
 module Context_request = struct
@@ -6574,6 +6590,7 @@ and t =
   ; mutable organization_admission : Session_organization_admission.t option
   ; mutable configuration_policy : Configuration_policy.t option
   ; mutable context_capacity_host : Session_context_capacity.Host.t
+  ; mutable rollover_requires_recovery : bool
   ; mutable recurrence_controller : Recurrence_controller.t option
   ; recurrence_runtime : Recurrence_runtime.t
   ; recurrence_creation_owner : unit ref
@@ -12623,6 +12640,7 @@ let rec deferred_execution_delta (previous : Session_state.t) (delta : Session_d
   | Recovery_note_changed _
   | Recovery_note_share_changed _
   | Recovery_rollover_changed _
+  | Recovery_rollover_committed _
   | Recurrence_catalog_changed _
   | Run_state_changed _
   | Moderator_changed _
@@ -12982,6 +13000,12 @@ let check_protected_source_write t ~(requested : Session_transition.t) =
   else Ok ()
 ;;
 
+let require_rollover_recovered t =
+  if t.rollover_requires_recovery
+  then Error (error Conflict "rollover outcome requires canonical journal recovery")
+  else Ok ()
+;;
+
 let persist_transition
       ?(causal_canonical_fence = Causal_canonical_custody.Fence.Unrestricted)
       ?commit_observation
@@ -12998,6 +13022,7 @@ let persist_transition
       (candidate : Session_transition.t)
   =
   let open Result.Let_syntax in
+  let%bind () = require_rollover_recovered t in
   let%bind () = check_protected_source_write t ~requested:candidate in
   let%bind () =
     Causal_canonical_custody.check_fence t ~requested:candidate causal_canonical_fence
@@ -15937,7 +15962,8 @@ let set_operation_worker t worker =
 ;;
 
 let runtime_admission_open t =
-  Option.is_none t.runtime_retirement
+  (not t.rollover_requires_recovery)
+  && Option.is_none t.runtime_retirement
   && Option.is_none t.lifecycle_fence
   &&
   match t.policy_restoration with
@@ -48799,7 +48825,8 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Context_request
       (Instruction_command _ | Recovery_note (Mutate _) | Enable_recovery_windows _ | Expire_recovery_window _)
   | Context_request (Recovery_note_share (Establish_target _ | Create _ | Revoke _))
-  | Context_request (Rollover (Native_new_window _ | Operator_request _))
+  | Context_request
+      (Rollover (Native_new_window _ | Operator_request _ | Operator_settle _ | Operator_checkpoint _))
   | Set_recurrence_controller _
   | Set_recurrence_planning_host _
   | Recurrence_due_ids
@@ -56817,26 +56844,45 @@ let enable_recovery_windows_internal t actor attachment_id authorize =
     Ok (scope ledger)
 ;;
 
-let persist_recovery_delta t ~delta ~check_before_commit =
+let persist_recovery_delta
+      ?(rollover = false)
+      ?(payloads = [])
+      t
+      ~delta
+      ~check_before_commit
+  =
   let open Result.Let_syntax in
   let previous = t.state in
   let run_preparation =
     Option.map t.run_source_binding ~f:(fun binding -> binding.Source_binding.preparation)
   in
-  let%bind candidate = prepare_transition ?run_preparation t ~delta ~payloads:[] in
+  let%bind candidate = prepare_transition ?run_preparation t ~delta ~payloads in
   let commit_observation =
     Session_commit_observation.Owner.create_guarded
       ~previous
       ~candidate
       ~check_at_writer:check_before_commit
   in
-  let%bind () =
+  let persist () =
     persist_transition
       ?run_preparation
       t
       candidate
       ~check_before_commit
       ~commit_observation
+  in
+  let%bind () =
+    if not rollover
+    then persist ()
+    else
+      Exn.protect ~f:persist ~finally:(fun () ->
+        match Session_commit_observation.outcome commit_observation with
+        | Not_called | Returned (Ok ()) -> ()
+        | In_progress | Returned (Error _) | Raised _ ->
+          (match Session_commit_observation.progress commit_observation with
+           | Before_writer -> ()
+           | Unobserved | Writer_entered _ | Journal_acknowledged _ ->
+             t.rollover_requires_recovery <- true))
   in
   install_committed_transition ?run_preparation t candidate;
   publish_committed_transition t candidate;
@@ -56915,6 +56961,7 @@ let admit_recovery_rollover ?(check_basis = fun () -> Ok ()) t ~check ~expected 
   let module P = Agent_protocol in
   let open Result.Let_syntax in
   let%bind requester = check () in
+  let%bind () = require_rollover_recovered t in
   let%bind retained = R.previous t.state.recovery_rollover ~requester ~expected in
   match retained with
   | Some receipt -> Ok receipt
@@ -56946,6 +56993,7 @@ let admit_recovery_rollover ?(check_basis = fun () -> Ok ()) t ~check ~expected 
     in
     let%bind () =
       persist_recovery_delta t
+        ~rollover:true
         ~delta:(Recovery_rollover_changed (Admit intent))
         ~check_before_commit
     in
@@ -56972,6 +57020,203 @@ let context_native_execution t ~access ~effect_kind =
   let%bind current = authorized_native_child_basis t (Inference_invocation execution) in
   let%map () = current.check_current () in
   principal, execution, operation_id
+;;
+
+let rollover_operator t actor ~attachment_id ~authorize =
+  let module P = Agent_protocol in
+  let open Result.Let_syntax in
+  let principal = Operator_authorization.principal actor in
+  let%bind () =
+    if
+      Operator_authorization.is_current actor
+      && P.Principal.has_scope principal Send_messages
+    then authorize t.state
+    else Error (error Permission_denied "rollover operator authority expired")
+  in
+  let%map () = require_recovery_owner_writer t ~principal:principal.id ~attachment_id in
+  principal
+;;
+
+let check_rollover_cut t ~previous ~(expected : Recovery_rollover.Expected.t) ~check =
+  let open Result.Let_syntax in
+  let%bind _ = check () in
+  let%bind () = require_runtime_admission t in
+  match active_rollover_window t, t.state.lifecycle.observed with
+  | Some scope, (Idle | Stopped)
+    when phys_equal previous t.state
+         && Agent_protocol.Recovery_window.Scope.equal scope expected.scope
+         && Int64.equal t.state.counters.revision expected.revision
+         && Option.is_none t.state.active_operation
+         && List.is_empty t.invocation_executions
+         && (not t.idle_moderator_borrowed)
+         && not (moderator_is_borrowed t) -> Ok ()
+  | _ -> Error (error Conflict "rollover cut or runtime authority changed")
+;;
+
+let record_context_checkpoint_internal t ~check expected notes =
+  let module P = Agent_protocol in
+  let module R = Recovery_rollover in
+  let open Result.Let_syntax in
+  let prior = t.state in
+  let%bind (principal : P.Principal.t) = check () in
+  let%bind () =
+    if P.Principal.has_scope principal View_session_transcript
+    then Ok ()
+    else Error (error Permission_denied "checkpoint requires transcript authority")
+  in
+  let check_before_commit () =
+    let%bind () = check_rollover_cut t ~previous:prior ~expected ~check in
+    if Option.is_some (current_context_capacity_basis t)
+    then Ok ()
+    else Error (error Invalid_state "local context mode is disabled")
+  in
+  let%bind () = check_before_commit () in
+  let%bind checkpoint =
+    R.Checkpoint.capture
+      expected
+      ~history:prior.conversation.canonical_history
+      ~catalog:prior.recovery_notes
+      ~notes
+      ~recipe:(Owner_selection principal.id)
+  in
+  let%map () =
+    persist_recovery_delta
+      t
+      ~rollover:true
+      ~delta:(Recovery_rollover_changed (Record_checkpoint checkpoint))
+      ~check_before_commit
+  in
+  checkpoint
+;;
+
+let settle_context_rollover_internal
+      t
+      ~check
+      ~authorize_force
+      ~id
+      (expected : Recovery_rollover.Expected.t)
+      (settlement : Recovery_rollover.Settlement.t)
+  =
+  let module P = Agent_protocol in
+  let module R = Recovery_rollover in
+  let module Scope = P.Recovery_window.Scope in
+  let open Result.Let_syntax in
+  let%bind principal = check () in
+  let%bind () = require_rollover_recovered t in
+  let find () =
+    Option.bind t.state.recovery_rollover ~f:(fun ledger -> R.find ledger ~id)
+    |> Result.of_option ~error:(error Conflict "rollover intent is unavailable")
+  in
+  let%bind receipt = find () in
+  match receipt.status with
+  | Terminal _ -> Ok receipt
+  | Pending ->
+    let previous = t.state in
+    let check_cut () = check_rollover_cut t ~previous ~expected ~check in
+    let%bind () = check_cut () in
+    let persist ?(payloads = []) delta ~check_before_commit =
+      let%bind () =
+        persist_recovery_delta t ~rollover:true ~payloads ~delta ~check_before_commit
+      in
+      find ()
+    in
+    let supersede reason =
+      persist
+        (Recovery_rollover_changed (Settle { id; terminal = Superseded reason }))
+        ~check_before_commit:check_cut
+    in
+    if not (Scope.equal receipt.intent.expected.scope expected.scope)
+    then supersede Basis_changed
+    else (
+      match settlement with
+      | Cancel -> supersede Cancelled
+      | Publish { checkpoint; retain } ->
+        let%bind basis =
+          Result.of_option
+            (current_context_capacity_basis t)
+            ~error:(error Invalid_state "local context mode is disabled")
+        in
+        let%bind quality =
+          match checkpoint with
+          | None -> Ok (Error R.Receipt.Checkpoint_missing)
+          | Some checkpoint when P.Principal.has_scope principal View_session_transcript
+            ->
+            let stored = Option.value_exn previous.recovery_rollover in
+            (match
+               R.check_checkpoint
+                 stored
+                 checkpoint
+                 ~expected
+                 ~history:previous.conversation.canonical_history
+                 ~catalog:previous.recovery_notes
+             with
+             | Ok () -> Ok (Ok (R.Receipt.Checkpointed checkpoint))
+             | Error _ -> Ok (Error R.Receipt.Checkpoint_unavailable))
+          | Some _ ->
+            Error (error Permission_denied "checkpoint requires transcript authority")
+        in
+        let check_force () =
+          match receipt.intent.requester, authorize_force with
+          | Operator { force = true; _ }, Some authorized -> authorized t.state
+          | _ ->
+            Error
+              (error
+                 Permission_denied
+                 "archive-only rollover requires current force authority")
+        in
+        let commit quality =
+          let check_before_commit () =
+            let%bind () = check_cut () in
+            let%bind () =
+              if
+                Option.exists
+                  (current_context_capacity_basis t)
+                  ~f:(Configuration_capture.Capacity_basis.equal basis)
+              then Ok ()
+              else Error (error Conflict "rollover target or policy changed")
+            in
+            match quality with
+            | R.Receipt.Archive_only _ -> check_force ()
+            | Checkpointed _ ->
+              (* The checked immutable checkpoint and note revisions are still at [previous]. *)
+              Ok ()
+          in
+          let%bind () = check_before_commit () in
+          let%bind archive =
+            t.persistence.archive_reference ~previous ~kind:Rollover id
+          in
+          let%bind archive =
+            Chatml_source.Digest.of_hex archive.sha256
+            |> Result.map_error ~f:(fun _ ->
+              error Persistence_error "rollover archive digest is invalid")
+          in
+          let%bind successor =
+            Scope.create
+              ~session:(Scope.session expected.scope)
+              ~generation:(Scope.generation expected.scope)
+              ~window:(P.Id.Context_window.create ())
+          in
+          let%bind change =
+            R.Commit.create
+              receipt.intent
+              ~expected
+              ~successor
+              ~archive
+              ~checkpoint:quality
+              ~retain
+          in
+          let%bind retained = Session_delta.rollover_retained_history previous change in
+          let payloads =
+            [ P.Event.Durable.Payload.History_replaced
+                (Session_state.history_window retained)
+            ]
+          in
+          persist (Recovery_rollover_committed change) ~payloads ~check_before_commit
+        in
+        (match quality, receipt.intent.requester with
+         | Ok quality, _ -> commit quality
+         | Error reason, Operator { force = true; _ } -> commit (Archive_only reason)
+         | Error _, (Operator _ | Native _) -> supersede Checkpoint_required))
 ;;
 
 let handle_recovery_rollover
@@ -57033,17 +57278,17 @@ let handle_recovery_rollover
     admit_recovery_rollover t ~check ~check_basis ~expected
   | Operator_request (actor, attachment_id, authorize, force, key, expected) ->
     let check () =
-      let principal = Operator_authorization.principal actor in
-      let%bind () =
-        if Operator_authorization.is_current actor && P.Principal.has_scope principal Send_messages
-        then authorize t.state
-        else Error (error Permission_denied "rollover operator authority expired")
-      in
-      let%bind () = require_recovery_owner_writer t ~principal:principal.id ~attachment_id in
+      let%bind principal = rollover_operator t actor ~attachment_id ~authorize in
       let%map () = Option.value_map force ~default:(Ok ()) ~f:(fun check -> check t.state) in
       R.Requester.Operator { principal = principal.id; key; force = Option.is_some force }
     in
     admit_recovery_rollover t ~check ~expected
+  | Operator_settle (actor, attachment_id, authorize, authorize_force, id, expected, settlement) ->
+    let check () = rollover_operator t actor ~attachment_id ~authorize in
+    settle_context_rollover_internal t ~check ~authorize_force ~id expected settlement
+  | Operator_checkpoint (actor, attachment_id, authorize, expected, notes) ->
+    let check () = rollover_operator t actor ~attachment_id ~authorize in
+    record_context_checkpoint_internal t ~check expected notes
 ;;
 
 let expire_recovery_window_internal t actor attachment_id authorize scope =
@@ -59285,6 +59530,7 @@ let create_internal
     ; organization_admission = None
     ; configuration_policy = None
     ; context_capacity_host = Session_context_capacity.Host.off
+    ; rollover_requires_recovery = false
     ; recurrence_controller = None
     ; recurrence_runtime = Recurrence_runtime.create ~origin:(services.monotonic_now ())
     ; recurrence_creation_owner = ref ()
@@ -62417,6 +62663,31 @@ let context_new_window_native t ~access ~window =
 let request_context_rollover t ~actor ~attachment_id ~authorize ?authorize_force ~key expected =
   call t
     (Context_request (Rollover (Operator_request (actor, attachment_id, authorize, authorize_force, key, expected))))
+;;
+
+let settle_context_rollover
+      t
+      ~actor
+      ~attachment_id
+      ~authorize
+      ?authorize_force
+      ~id
+      expected
+      settlement
+  =
+  call
+    t
+    (Context_request
+       (Rollover
+          (Operator_settle
+             (actor, attachment_id, authorize, authorize_force, id, expected, settlement))))
+;;
+
+let record_context_checkpoint t ~actor ~attachment_id ~authorize expected ~notes =
+  call
+    t
+    (Context_request
+       (Rollover (Operator_checkpoint (actor, attachment_id, authorize, expected, notes))))
 ;;
 
 let expire_recovery_window t ~actor ~attachment_id ~authorize scope =

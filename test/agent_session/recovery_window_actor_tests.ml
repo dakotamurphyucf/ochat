@@ -86,7 +86,10 @@ let journal fixture make =
   |> store_ok
 ;;
 
-let with_actor fixture sw journal ~restored ~previous_transaction_hash ~archive f =
+let with_actor
+      ?(state_committed = fun _ _ -> ())
+      fixture sw journal ~restored ~previous_transaction_hash ~archive f
+  =
   let initial_state = Persistence.Restored.state restored in
   let writer =
     Store.Commit_writer.create
@@ -142,7 +145,7 @@ let with_actor fixture sw journal ~restored ~previous_transaction_hash ~archive 
             ; monotonic_now = (fun () -> Mtime.min_stamp)
             ; create_attachment_id = P.Id.Attachment.create
             ; create_reclaim_token = (fun () -> "recovery-window-reclaim")
-            ; state_committed = (fun _ _ -> ())
+            ; state_committed
             ; job_results = None
             ; goal_descendant_profile
             ; subscription_limits = A.Staged_subscriptions.default_limits

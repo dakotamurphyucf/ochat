@@ -8,6 +8,7 @@ module Capacity_basis : sig
   type t
 
   val capture : Session_state.t -> selection:Session_context_capacity.Selection.t -> t
+  val equal : t -> t -> bool
 end
 
 module Capacity_observation : sig

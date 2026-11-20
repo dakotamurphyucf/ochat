@@ -133,6 +133,8 @@ type mutation_error =
 
 type t
 
+val max_notes : int
+
 type outcome =
   | Applied of t * Receipt.t
   | Replayed of Receipt.t

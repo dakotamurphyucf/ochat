@@ -94,6 +94,13 @@ module Compaction_archive : sig
     ; invocation_dispositions : invocation_disposition list [@sexp.list]
     }
   [@@deriving sexp]
+
+  val of_rollover : Recovery_rollover.Commit.t -> t
+
+  val check_rollover_unchanged
+    :  t list
+    -> incoming:t list
+    -> (unit, Agent_protocol.Error.t) result
 end
 
 module Conversation : sig

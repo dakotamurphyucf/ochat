@@ -91,7 +91,7 @@ let accepted_at_ns state =
   |> Int64.of_int
 ;;
 
-let transaction t ~state_document ~command_audit previous transition =
+let transaction t ~previous_hash ~state_document ~command_audit previous transition =
   let open Result.Let_syntax in
   let%bind delta =
     Session_delta_document.create
@@ -123,7 +123,7 @@ let transaction t ~state_document ~command_audit previous transition =
       ~session_id:previous.Session_state.identity.session_id
       ~generation:transition.state.identity.generation
       ~transaction_sequence:transition.state.counters.transaction_sequence
-      ~previous_transaction_hash:t.previous_transaction_hash
+      ~previous_transaction_hash:previous_hash
       ~session_revision:transition.state.counters.revision
       ~first_event_sequence
       ~last_event_sequence
@@ -221,6 +221,49 @@ let admit_recovery_storage
     else Ok ())
 ;;
 
+let reserve_rollover_supersession t ~snapshot_payload_limit ~state_document current =
+  let open Result.Let_syntax in
+  let state = Session_state_document.value state_document in
+  match Option.bind state.recovery_rollover ~f:Recovery_rollover.pending with
+  | None -> Ok ()
+  | Some intent ->
+    (* Reserve the largest typed no-archive terminal for the actual next head,
+       including unrelated writes while the pending intent is retained. *)
+    let delta =
+      Session_delta.Recovery_rollover_changed
+        (Settle { id = intent.id; terminal = Superseded Checkpoint_required })
+    in
+    let%bind transition =
+      Session_transition.apply ~now:state.identity.updated_at state ~delta ~payloads:[]
+    in
+    let%bind admitted =
+      Session_document_transition.admit_encoded
+        state_document
+        ~delta
+        ~next:transition.state
+        ~limits:t.archive_limits
+      |> Result.map_error ~f:(fun error -> protocol_error (document_error error))
+    in
+    let%bind future, _ =
+      transaction
+        t
+        ~previous_hash:(Some (Store.Transaction.hash current))
+        ~state_document
+        ~command_audit:None
+        state
+        transition
+      |> Result.map_error ~f:protocol_error
+    in
+    admit_recovery_storage
+      t
+      ~snapshot_payload_limit
+      ~previous:state
+      ~transition
+      ~admitted
+      future
+    |> Result.map_error ~f:protocol_error
+;;
+
 let commit_with_profile
       t
       ~snapshot_payload_limit
@@ -281,7 +324,7 @@ let commit_with_profile
       ~max_payload_length:(Store.Commit_writer.max_payload_length t.writer)
   in
   let%bind transaction, events =
-    transaction t ~state_document ~command_audit previous transition
+    transaction t ~previous_hash:t.previous_transaction_hash ~state_document ~command_audit previous transition
     |> Result.map_error ~f:protocol_error
   in
   let%bind () =
@@ -294,11 +337,16 @@ let commit_with_profile
       transaction
     |> Result.map_error ~f:protocol_error
   in
+  let%bind () = reserve_rollover_supersession t ~snapshot_payload_limit ~state_document transaction in
   let references =
     List.filter transition.state.conversation.compaction_archives ~f:(fun reference ->
       not
         (List.exists previous.conversation.compaction_archives ~f:(fun old ->
-           Int64.equal old.revision reference.revision)))
+           if Session_state.Compaction_archive.equal_kind reference.kind Rollover
+           then
+             Session_state.Compaction_archive.equal_kind old.kind Rollover
+             && P.Id.Operation.equal old.operation_id reference.operation_id
+           else Int64.equal old.revision reference.revision)))
   in
   let%bind archive =
     match references with
@@ -339,7 +387,12 @@ let commit_with_profile
       | Some document -> t.archive reference document)
   in
   let commit () =
-    Store.Commit_writer.commit t.writer ~durability:t.durability transaction
+    let durability =
+      if Option.equal phys_equal previous.recovery_rollover transition.state.recovery_rollover
+      then t.durability
+      else Store.Journal_segment.Flush
+    in
+    Store.Commit_writer.commit t.writer ~durability transaction
     |> Result.map_error ~f:protocol_error
     |> Result.map ~f:(fun committed ->
       Session_commit_observation.Returned.

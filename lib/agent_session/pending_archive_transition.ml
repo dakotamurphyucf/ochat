@@ -46,12 +46,13 @@ let collect state ~delta ~limits =
       | Instruction_selection_changed _
       | Recovery_note_changed _
       | Recovery_note_share_changed _
+      | Recovery_rollover_changed _
+      | Recovery_rollover_committed _
       | Goal_accounts_changed _
       | Goal_catalog_changed _
       | Recurrence_catalog_changed _
       | Run_state_changed _
       | Canonical_history_replaced _
-      | Recovery_rollover_changed _
       | Recovery_window_expired _
       | Recovery_window_enabled _
       | Recovery_effective_prepared _

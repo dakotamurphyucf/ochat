@@ -9,31 +9,8 @@ let revision_json revision = `Number (Int64.to_string revision)
 let invalid message = Error (P.Error.invalid_request message)
 let conflict message = Error (P.Error.create Conflict ~message ~retryable:true ())
 
-module Expected = struct
-  type t =
-    { scope : Scope.t
-    ; revision : int64
-    }
-  [@@deriving equal, sexp_of]
-
-  let create scope ~revision =
-    if Int64.(revision < 0L)
-    then invalid "invalid recovery rollover revision"
-    else Ok { scope; revision }
-  ;;
-
-  let to_json t =
-    `Object [ "scope", Scope.to_json t.scope; "revision", revision_json t.revision ]
-  ;;
-
-  let of_json json =
-    let open Result.Let_syntax in
-    let%bind fields = J.fields json in
-    let%bind scope = J.required_as fields "scope" Scope.of_json in
-    let%bind revision = J.required_as fields "revision" nonnegative in
-    create scope ~revision
-  ;;
-end
+module Checkpoint = Recovery_rollover_checkpoint
+module Expected = Checkpoint.Expected
 
 module Requester = struct
   type t =
@@ -145,10 +122,25 @@ module Receipt = struct
     | Checkpoint_required
   [@@deriving equal, sexp_of]
 
+  type archive_only_reason =
+    | Checkpoint_missing
+    | Checkpoint_unavailable
+  [@@deriving equal, sexp_of]
+
+  type checkpoint_quality =
+    | Checkpointed of Checkpoint.t
+    | Archive_only of archive_only_reason
+  [@@deriving equal, sexp_of]
+
+  type continuation = Awaiting_after_commit of P.Id.Operation.t
+  [@@deriving equal, sexp_of]
+
   type committed =
     { successor : Scope.t
     ; cut_revision : int64
     ; archive : Chatml_source.Digest.t
+    ; checkpoint : checkpoint_quality
+    ; continuation : continuation
     }
   [@@deriving equal, sexp_of]
 
@@ -174,17 +166,66 @@ module Receipt = struct
     | Checkpoint_required -> "checkpoint_required"
   ;;
 
-  let status_to_json t =
+  let checkpoint_to_json ~public = function
+    | Checkpointed checkpoint ->
+      `Object
+        ([ "kind", `String "checkpointed" ]
+         @ if public then [] else [ "selection", Checkpoint.to_json checkpoint ])
+    | Archive_only reason ->
+      let reason =
+        match reason with
+        | Checkpoint_missing -> "checkpoint_missing"
+        | Checkpoint_unavailable -> "checkpoint_unavailable"
+      in
+      `Object [ "kind", `String "archive_only"; "reason", `String reason ]
+  ;;
+
+  let checkpoint_of_json json =
+    let open Result.Let_syntax in
+    let%bind fields = J.fields json in
+    let%bind kind = J.required_as fields "kind" J.string in
+    match kind with
+    | "checkpointed" ->
+      let%map selection = J.required_as fields "selection" Checkpoint.of_json in
+      Checkpointed selection
+    | "archive_only" ->
+      let%bind reason = J.required_as fields "reason" J.string in
+      (match reason with
+       | "checkpoint_missing" -> Ok (Archive_only Checkpoint_missing)
+       | "checkpoint_unavailable" -> Ok (Archive_only Checkpoint_unavailable)
+       | _ -> invalid "unknown archive-only rollover reason")
+    | _ -> invalid "unknown rollover checkpoint quality"
+  ;;
+
+  let continuation_to_json (Awaiting_after_commit id) =
+    `Object [ "kind", `String "awaiting_after_commit"; "id", P.Id.Operation.to_json id ]
+  ;;
+
+  let continuation_of_json json =
+    let open Result.Let_syntax in
+    let%bind fields = J.fields json in
+    let%bind kind = J.required_as fields "kind" J.string in
+    if String.equal kind "awaiting_after_commit"
+    then (
+      let%map id = J.required_as fields "id" P.Id.Operation.of_json in
+      Awaiting_after_commit id)
+    else invalid "unknown rollover continuation obligation"
+  ;;
+
+  let status_to_json ?(public = false) t =
     `Object
       (match t with
        | Pending -> [ "kind", `String "pending" ]
        | Terminal (Superseded reason) ->
          [ "kind", `String "superseded"; "reason", `String (supersession_name reason) ]
-       | Terminal (Committed { successor; cut_revision; archive }) ->
+       | Terminal
+           (Committed { successor; cut_revision; archive; checkpoint; continuation }) ->
          [ "kind", `String "committed"
          ; "successor", Scope.to_json successor
          ; "cut_revision", revision_json cut_revision
          ; "archive", `String (Chatml_source.Digest.to_hex archive)
+         ; "checkpoint", checkpoint_to_json ~public checkpoint
+         ; "continuation", continuation_to_json continuation
          ])
   ;;
 
@@ -208,12 +249,14 @@ module Receipt = struct
       let%bind successor = J.required_as fields "successor" Scope.of_json in
       let%bind cut_revision = J.required_as fields "cut_revision" nonnegative in
       let%bind archive = J.required_as fields "archive" J.string in
+      let%bind checkpoint = J.required_as fields "checkpoint" checkpoint_of_json in
+      let%bind continuation = J.required_as fields "continuation" continuation_of_json in
       let%map archive =
         Chatml_source.Digest.of_hex archive
         |> Result.map_error ~f:(fun _ ->
           P.Error.invalid_request "invalid rollover archive digest")
       in
-      Terminal (Committed { successor; cut_revision; archive })
+      Terminal (Committed { successor; cut_revision; archive; checkpoint; continuation })
     | _ -> invalid "unknown recovery rollover status"
   ;;
 
@@ -221,18 +264,33 @@ module Receipt = struct
     let expected = t.intent.expected in
     match t.status with
     | Pending | Terminal (Superseded _) -> Ok ()
-    | Terminal (Committed { successor; cut_revision; _ }) ->
+    | Terminal
+        (Committed { successor; cut_revision; checkpoint; continuation; archive = _ }) ->
+      let (Awaiting_after_commit owner) = continuation in
+      let checkpoint_binds_cut =
+        match checkpoint with
+        | Checkpointed checkpoint ->
+          Scope.equal (Checkpoint.expected checkpoint).scope expected.scope
+          && Int64.((Checkpoint.expected checkpoint).revision < cut_revision)
+        | Archive_only _ ->
+          (match t.intent.requester with
+           | Operator { force; _ } -> force
+           | Native _ -> false)
+      in
       if
         P.Session_ref.equal (Scope.session expected.scope) (Scope.session successor)
         && Int.equal (Scope.generation expected.scope) (Scope.generation successor)
         && (not (Scope.equal expected.scope successor))
-        && Int64.(cut_revision >= expected.revision)
+        && Int64.(cut_revision > expected.revision)
+        && P.Id.Operation.equal owner t.intent.id
+        && checkpoint_binds_cut
       then Ok ()
       else invalid "rollover terminal receipt differs from its admitted intent"
   ;;
 
   let to_public_json t =
-    `Object (("status", status_to_json t.status) :: Intent.public_fields t.intent)
+    `Object
+      (("status", status_to_json ~public:true t.status) :: Intent.public_fields t.intent)
   ;;
 
   let to_json t =
@@ -250,14 +308,103 @@ module Receipt = struct
   ;;
 end
 
-type t = Receipt.t list
+module Commit = struct
+  type t =
+    { id : P.Id.Operation.t
+    ; expected : Expected.t
+    ; successor : Scope.t
+    ; archive : Chatml_source.Digest.t
+    ; checkpoint : Receipt.checkpoint_quality
+    ; retain : P.History.Id.t list
+    }
+
+  let validate_selection t =
+    if
+      Stdlib.List.compare_length_with t.retain Recovery_window_record.max_members > 0
+      || List.contains_dup t.retain ~compare:P.History.Id.compare
+    then invalid "invalid rollover carry selection"
+    else Ok t
+  ;;
+
+  let terminal t =
+    Receipt.Committed
+      { successor = t.successor
+      ; cut_revision = t.expected.revision
+      ; archive = t.archive
+      ; checkpoint = t.checkpoint
+      ; continuation = Awaiting_after_commit t.id
+      }
+  ;;
+
+  let check_intent t (intent : Intent.t) =
+    if
+      P.Id.Operation.equal t.id intent.id
+      && Scope.equal t.expected.scope intent.expected.scope
+      && Int64.(t.expected.revision > intent.expected.revision)
+    then Receipt.validate { intent; status = Terminal (terminal t) }
+    else conflict "rollover publication does not match the admitted intent"
+  ;;
+
+  let create (intent : Intent.t) ~expected ~successor ~archive ~checkpoint ~retain =
+    let open Result.Let_syntax in
+    let%bind t =
+      validate_selection
+        { id = intent.id; expected; successor; archive; checkpoint; retain }
+    in
+    let%map () = check_intent t intent in
+    t
+  ;;
+
+  let to_json t =
+    `Object
+      [ "id", P.Id.Operation.to_json t.id
+      ; "expected", Expected.to_json t.expected
+      ; "successor", Scope.to_json t.successor
+      ; "archive", `String (Chatml_source.Digest.to_hex t.archive)
+      ; "checkpoint", Receipt.checkpoint_to_json ~public:false t.checkpoint
+      ; "retain", `Array (List.map t.retain ~f:P.History.Id.to_json)
+      ]
+  ;;
+
+  let of_json json =
+    let open Result.Let_syntax in
+    let%bind fields = J.fields json in
+    let%bind id = J.required_as fields "id" P.Id.Operation.of_json in
+    let%bind expected = J.required_as fields "expected" Expected.of_json in
+    let%bind successor = J.required_as fields "successor" Scope.of_json in
+    let%bind archive = J.required_as fields "archive" J.string in
+    let%bind archive =
+      Chatml_source.Digest.of_hex archive
+      |> Result.map_error ~f:(fun _ ->
+        P.Error.invalid_request "invalid rollover archive digest")
+    in
+    let%bind checkpoint = J.required_as fields "checkpoint" Receipt.checkpoint_of_json in
+    let%bind retain = J.required_as fields "retain" (J.list P.History.Id.of_json) in
+    validate_selection { id; expected; successor; archive; checkpoint; retain }
+  ;;
+end
+
+module Settlement = struct
+  type t =
+    | Cancel
+    | Publish of
+        { checkpoint : Checkpoint.t option
+        ; retain : P.History.Id.t list
+        }
+end
+
+type t =
+  { receipts : Receipt.t list
+  ; checkpoint : Checkpoint.t option
+  }
 
 let find t ~id =
-  List.find t ~f:(fun receipt -> P.Id.Operation.equal receipt.Receipt.intent.id id)
+  List.find t.receipts ~f:(fun receipt ->
+    P.Id.Operation.equal receipt.Receipt.intent.id id)
 ;;
 
 let pending t =
-  List.find_map t ~f:(fun receipt ->
+  List.find_map t.receipts ~f:(fun receipt ->
     match receipt.Receipt.status with
     | Pending -> Some receipt.intent
     | Terminal _ -> None)
@@ -265,11 +412,9 @@ let pending t =
 
 let previous t ~requester ~expected =
   match
-    Option.bind
-      t
-      ~f:
-        (List.find ~f:(fun receipt ->
-           Requester.same_key requester receipt.Receipt.intent.requester))
+    Option.bind t ~f:(fun t ->
+      List.find t.receipts ~f:(fun receipt ->
+        Requester.same_key requester receipt.Receipt.intent.requester))
   with
   | None -> Ok None
   | Some receipt
@@ -287,6 +432,7 @@ let previous t ~requester ~expected =
 module Change = struct
   type t =
     | Admit of Intent.t
+    | Record_checkpoint of Checkpoint.t
     | Settle of
         { id : P.Id.Operation.t
         ; terminal : Receipt.terminal
@@ -294,6 +440,11 @@ module Change = struct
 
   let to_json = function
     | Admit intent -> `Object [ "kind", `String "admit"; "intent", Intent.to_json intent ]
+    | Record_checkpoint checkpoint ->
+      `Object
+        [ "kind", `String "record_checkpoint"
+        ; "checkpoint", Checkpoint.to_json checkpoint
+        ]
     | Settle { id; terminal } ->
       `Object
         [ "kind", `String "settle"
@@ -310,6 +461,9 @@ module Change = struct
     | "admit" ->
       let%map intent = J.required_as fields "intent" Intent.of_json in
       Admit intent
+    | "record_checkpoint" ->
+      let%map checkpoint = J.required_as fields "checkpoint" Checkpoint.of_json in
+      Record_checkpoint checkpoint
     | "settle" ->
       let%bind id = J.required_as fields "id" P.Id.Operation.of_json in
       let%bind status = J.required_as fields "status" Receipt.status_of_json in
@@ -321,7 +475,13 @@ module Change = struct
 end
 
 let to_json t =
-  `Object [ "version", `Number "1"; "receipts", `Array (List.map t ~f:Receipt.to_json) ]
+  `Object
+    ([ "version", `Number "1"
+     ; "receipts", `Array (List.map t.receipts ~f:Receipt.to_json)
+     ]
+     @ Option.to_list
+         (Option.map t.checkpoint ~f:(fun value -> "checkpoint", Checkpoint.to_json value))
+    )
 ;;
 
 let bounded t =
@@ -334,36 +494,91 @@ let bounded t =
       ())
 ;;
 
-let apply t ~active ~revision change =
+let settle t ~id ~terminal =
   let open Result.Let_syntax in
-  let receipts = Option.value t ~default:[] in
+  match find t ~id with
+  | Some ({ status = Pending; _ } as receipt) ->
+    let settled = { receipt with status = Terminal terminal } in
+    let%bind () = Receipt.validate settled in
+    let receipts =
+      List.map t.receipts ~f:(fun previous ->
+        if P.Id.Operation.equal previous.intent.id id then settled else previous)
+    in
+    Ok { t with receipts }
+  | Some { status = Terminal current; _ } when Receipt.equal_terminal current terminal ->
+    Ok t
+  | Some _ | None -> conflict "rollover settlement has no matching pending intent"
+;;
+
+let apply previous_ledger ~active ~revision ~history ~catalog change =
+  let open Result.Let_syntax in
+  let t = Option.value previous_ledger ~default:{ receipts = []; checkpoint = None } in
   let%bind next =
     match change with
     | Change.Admit intent ->
       let%bind duplicate =
-        previous t ~requester:intent.requester ~expected:intent.expected
+        previous previous_ledger ~requester:intent.requester ~expected:intent.expected
       in
-      if Option.is_some duplicate || Option.is_some (find receipts ~id:intent.id)
+      if Option.is_some duplicate || Option.is_some (find t ~id:intent.id)
       then conflict "rollover admission identity already retained"
       else if
         not
           (Scope.equal active intent.expected.scope
            && Int64.equal revision intent.expected.revision)
       then conflict "expected recovery window or revision changed"
-      else if Option.is_some (pending receipts)
+      else if Option.is_some (pending t)
       then conflict "another rollover intent is pending"
-      else Ok (Receipt.{ intent; status = Pending } :: receipts)
-    | Settle { id; terminal } ->
-      (match find receipts ~id with
-       | Some ({ status = Pending; _ } as receipt) ->
-         let settled = { receipt with status = Terminal terminal } in
-         let%map () = Receipt.validate settled in
-         List.map receipts ~f:(fun previous ->
-           if P.Id.Operation.equal previous.intent.id id then settled else previous)
-       | Some { status = Terminal current; _ }
-         when Receipt.equal_terminal current terminal -> Ok receipts
-       | Some _ | None -> conflict "rollover settlement has no matching pending intent")
+      else Ok { t with receipts = Receipt.{ intent; status = Pending } :: t.receipts }
+    | Record_checkpoint checkpoint ->
+      if
+        Scope.equal active (Checkpoint.expected checkpoint).scope
+        && Int64.equal revision (Checkpoint.expected checkpoint).revision
+      then (
+        let%map () = Checkpoint.check_contents checkpoint ~history ~catalog in
+        { t with checkpoint = Some checkpoint })
+      else conflict "checkpoint recording cut is stale"
+    | Settle { terminal = Committed _; _ } ->
+      invalid "committed rollover requires its atomic archive and successor delta"
+    | Settle { id; terminal = Superseded _ as terminal } -> settle t ~id ~terminal
   in
+  let%map () = bounded next in
+  next
+;;
+
+let check_checkpoint t selected ~expected ~history ~catalog =
+  match t.checkpoint with
+  | Some checkpoint
+    when Checkpoint.equal checkpoint selected
+         && Scope.equal (Checkpoint.expected checkpoint).scope expected.Expected.scope
+         && Int64.((Checkpoint.expected checkpoint).revision < expected.revision) ->
+    Checkpoint.check_contents checkpoint ~history ~catalog
+  | Some _ | None -> conflict "rollover checkpoint is not recorded for the current cut"
+;;
+
+let commit t (change : Commit.t) ~active ~revision ~history ~catalog =
+  let open Result.Let_syntax in
+  let%bind intent =
+    Result.of_option
+      (pending t)
+      ~error:
+        (P.Error.invalid_request "rollover publication has no matching pending intent")
+  in
+  let%bind () = Commit.check_intent change intent in
+  let%bind () =
+    if
+      Scope.equal active change.expected.scope
+      && Int64.equal revision change.expected.revision
+    then Ok ()
+    else conflict "rollover publication cut is stale"
+  in
+  let%bind () =
+    match change.checkpoint with
+    | Checkpointed selected ->
+      check_checkpoint t selected ~expected:change.expected ~history ~catalog
+    | Archive_only _ -> Ok ()
+  in
+  let%bind t = settle t ~id:change.id ~terminal:(Commit.terminal change) in
+  let next = { t with checkpoint = None } in
   let%map () = bounded next in
   next
 ;;
@@ -381,6 +596,7 @@ let of_json json =
   then invalid "unsupported recovery rollover ledger"
   else (
     let%bind receipts = J.required_as fields "receipts" (J.list Receipt.of_json) in
+    let%bind checkpoint = J.optional_as fields "checkpoint" Checkpoint.of_json in
     let ids = Hash_set.create (module P.Id.Operation) in
     let%map _ =
       List.fold_result
@@ -398,10 +614,10 @@ let of_json json =
             Hash_set.add ids receipt.intent.id;
             Ok (active || pending, Set.add requesters key)))
     in
-    receipts)
+    { receipts; checkpoint })
 ;;
 
-let validate_state t ~windows ~revision =
+let validate_state t ~windows ~revision ~has_archive =
   let open Result.Let_syntax in
   let%bind ledger =
     Result.of_option
@@ -410,21 +626,30 @@ let validate_state t ~windows ~revision =
   in
   let owner = Recovery_window_ledger.owner ledger in
   let windows = Recovery_window_ledger.windows ledger in
-  List.fold_result t ~init:() ~f:(fun () (receipt : Receipt.t) ->
+  let covers_existing_window (expected : Expected.t) =
+    P.Session_ref.equal owner (Scope.session expected.scope)
+    && Int64.(expected.revision < revision)
+    && List.exists windows ~f:(fun window ->
+      Scope.equal (Recovery_window_record.scope window) expected.scope)
+  in
+  let%bind () =
+    match t.checkpoint with
+    | None -> Ok ()
+    | Some checkpoint when covers_existing_window (Checkpoint.expected checkpoint) ->
+      Ok ()
+    | Some _ -> invalid "rollover checkpoint has no owning recovery window"
+  in
+  List.fold_result t.receipts ~init:() ~f:(fun () (receipt : Receipt.t) ->
     let expected = receipt.intent.expected in
-    if
-      (not (P.Session_ref.equal owner (Scope.session expected.scope)))
-      || Int64.(expected.revision >= revision)
-      || not
-           (List.exists windows ~f:(fun window ->
-              Scope.equal (Recovery_window_record.scope window) expected.scope))
+    if not (covers_existing_window expected)
     then invalid "rollover receipt has no owning recovery window"
     else (
       match receipt.status with
       | Pending | Terminal (Superseded _) -> Ok ()
-      | Terminal (Committed { successor; cut_revision; _ }) ->
+      | Terminal (Committed { successor; cut_revision; archive; _ }) ->
         if
           Int64.(cut_revision < revision)
+          && has_archive ~id:receipt.intent.id ~revision:cut_revision archive
           && List.exists windows ~f:(fun window ->
             Scope.equal (Recovery_window_record.scope window) successor
             &&
@@ -438,7 +663,11 @@ let validate_state t ~windows ~revision =
 ;;
 
 let check_unchanged t ~incoming =
-  if Option.equal (List.equal Receipt.equal) t incoming
+  let equal left right =
+    List.equal Receipt.equal left.receipts right.receipts
+    && Option.equal Checkpoint.equal left.checkpoint right.checkpoint
+  in
+  if Option.equal equal t incoming
   then Ok ()
   else invalid "replacement changed durable rollover receipts"
 ;;

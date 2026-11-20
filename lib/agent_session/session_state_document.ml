@@ -2824,6 +2824,12 @@ let adopt previous ~limits incoming =
     |> X.document_result
   in
   let%bind () =
+    S.Compaction_archive.check_rollover_unchanged
+      (value previous).conversation.compaction_archives
+      ~incoming:(value incoming).conversation.compaction_archives
+    |> X.document_result
+  in
+  let%bind () =
     validate_instruction_update
       (value previous).instruction_selection
       (value incoming).instruction_selection

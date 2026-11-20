@@ -80,6 +80,7 @@ type t =
   | Recovery_note_changed of (Recovery_note_change.t[@sexp.opaque])
   | Recovery_note_share_changed of (Recovery_note_share_change.t[@sexp.opaque])
   | Recovery_rollover_changed of (Recovery_rollover.Change.t[@sexp.opaque])
+  | Recovery_rollover_committed of (Recovery_rollover.Commit.t[@sexp.opaque])
   | Recurrence_catalog_changed of Recurrence_catalog.t
   | Run_state_changed of Run_state.t
   | Moderator_changed of Jsonaf.t option
@@ -249,6 +250,7 @@ let rec contains_policy_usage = function
   | Recovery_note_changed _
   | Recovery_note_share_changed _
   | Recovery_rollover_changed _
+  | Recovery_rollover_committed _
   | Recurrence_catalog_changed _
   | Run_state_changed _
   | Moderator_changed _
@@ -331,6 +333,7 @@ let rec contains_goal_policy = function
   | Recovery_note_changed _
   | Recovery_note_share_changed _
   | Recovery_rollover_changed _
+  | Recovery_rollover_committed _
   | Recurrence_catalog_changed _
   | Run_state_changed _
   | Moderator_changed _
@@ -383,8 +386,108 @@ let attach_archive (state : Session_state.t) archive =
   }
 ;;
 
+let rec contains_rollover_publication = function
+  | Recovery_rollover_committed _ | Recovery_rollover_changed (Record_checkpoint _) ->
+    true
+  | Batch deltas -> List.exists deltas ~f:contains_rollover_publication
+  | _ -> false
+;;
+
+let validate_rollover_transaction = function
+  | Batch
+      [ (Recovery_rollover_committed _ | Recovery_rollover_changed (Record_checkpoint _))
+      ] -> Ok ()
+  | Batch deltas when List.exists deltas ~f:contains_rollover_publication ->
+    Error
+      (Agent_protocol.Error.invalid_request
+         "rollover archive or checkpoint requires a standalone delta")
+  | _ -> Ok ()
+;;
+
+let rollover_retained_history
+      (state : Session_state.t)
+      (change : Recovery_rollover.Commit.t)
+  =
+  let module P = Agent_protocol in
+  let by_id = Hashtbl.create (module P.History.Id) in
+  List.iter state.conversation.canonical_history ~f:(fun entry ->
+    Hashtbl.set by_id ~key:entry.P.History.id ~data:entry);
+  List.map change.retain ~f:(fun id ->
+    Result.of_option
+      (Hashtbl.find by_id id)
+      ~error:(P.Error.invalid_request "rollover carries an unavailable occurrence"))
+  |> Result.all
+;;
+
+let require_quiescent_rollover_cut (state : Session_state.t) =
+  match
+    state.active_operation, state.runtime_initialization, state.lifecycle.observed
+  with
+  | None, Ready, (Idle | Stopped) -> Ok ()
+  | _ ->
+    Error
+      (Agent_protocol.Error.invalid_request "rollover requires a quiescent canonical cut")
+;;
+
+let apply_rollover (state : Session_state.t) (change : Recovery_rollover.Commit.t) =
+  let open Result.Let_syntax in
+  let module P = Agent_protocol in
+  let module R = Recovery_rollover in
+  let module W = Recovery_window_ledger in
+  let%bind () = require_quiescent_rollover_cut state in
+  let%bind windows =
+    Result.of_option
+      state.recovery_windows
+      ~error:(P.Error.invalid_request "rollover has no active window")
+  in
+  let%bind receipts =
+    Result.of_option
+      state.recovery_rollover
+      ~error:(P.Error.invalid_request "rollover has no admitted intent")
+  in
+  let predecessor = W.Window.scope (W.active windows) in
+  let history = state.conversation.canonical_history in
+  let%bind recovery_rollover =
+    R.commit
+      receipts
+      change
+      ~active:predecessor
+      ~revision:state.counters.revision
+      ~history
+      ~catalog:state.recovery_notes
+  in
+  let%bind retained = rollover_retained_history state change in
+  let initial = Hash_set.create (module P.History.Id) in
+  List.iter
+    (List.take history state.conversation.initial_prompt_entry_count)
+    ~f:(fun entry -> Hash_set.add initial entry.id);
+  let initial_prompt_entry_count =
+    List.take_while change.retain ~f:(Hash_set.mem initial) |> List.length
+  in
+  let archive = Session_state.Compaction_archive.of_rollover change in
+  let%bind windows =
+    Recovery_window_seal.prepare
+      state
+      ~predecessor
+      ~successor:change.successor
+      ~archive
+      ~retained
+  in
+  let%bind recovery_effective = Recovery_effective_capture.relocate state ~archive in
+  let%map next = with_canonical_history state retained ~recovery_windows:(Some windows) in
+  attach_archive
+    { next with
+      conversation = { next.conversation with initial_prompt_entry_count }
+    ; recovery_rollover = Some recovery_rollover
+    ; recovery_effective
+    }
+    archive
+;;
+
 let rec apply ?(limits = native_limits) (state : Session_state.t) = function
-  | Batch deltas -> List.fold_result deltas ~init:state ~f:(apply ~limits)
+  | Batch deltas as delta ->
+    let%bind.Result () = validate_rollover_transaction delta in
+    List.fold_result deltas ~init:state ~f:(apply ~limits)
   | Created created ->
     let open Result.Let_syntax in
     let%bind () =
@@ -425,6 +528,11 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
     in
     let%bind () =
       Recovery_rollover.check_unchanged state.recovery_rollover ~incoming:created.recovery_rollover
+    in
+    let%bind () =
+      Session_state.Compaction_archive.check_rollover_unchanged
+        state.conversation.compaction_archives
+        ~incoming:created.conversation.compaction_archives
     in
     let%bind () =
       match state.instruction_selection, created.instruction_selection with
@@ -789,7 +897,9 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
     in
     retire_pending_dispositions next ~history_ids:(History_edit.retired_ids plan) ~limits
   | Compaction_archived archive ->
-    if
+    if Session_state.Compaction_archive.equal_kind archive.kind Rollover
+    then Error (Agent_protocol.Error.invalid_request "rollover archive requires atomic publication")
+    else if
       Option.is_some state.recovery_windows
       && Session_state.Compaction_archive.equal_kind archive.kind Compaction
     then
@@ -1764,6 +1874,11 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
     { state with recovery_notes = Some catalog }
   | Recovery_rollover_changed change ->
     let open Result.Let_syntax in
+    let%bind () =
+      match change with
+      | Record_checkpoint _ -> require_quiescent_rollover_cut state
+      | Admit _ | Settle _ -> Ok ()
+    in
     let%bind windows =
       Result.of_option
         state.recovery_windows
@@ -1775,9 +1890,12 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
         state.recovery_rollover
         ~active
         ~revision:state.counters.revision
+        ~history:state.conversation.canonical_history
+        ~catalog:state.recovery_notes
         change
     in
     { state with recovery_rollover = Some ledger }
+  | Recovery_rollover_committed change -> apply_rollover state change
   | Recovery_note_share_changed change ->
     let%map.Result shares =
       Recovery_note_share_change.apply
@@ -2050,6 +2168,7 @@ let validate_goal_accounts delta ~(previous : Session_state.t) ~(next : Session_
     | Recovery_note_changed _
     | Recovery_note_share_changed _
     | Recovery_rollover_changed _
+    | Recovery_rollover_committed _
     | Recurrence_catalog_changed _
     | Run_state_changed _
     | Moderator_changed _
@@ -2193,6 +2312,7 @@ let validate_goal_descendants
     | Recovery_note_changed _
     | Recovery_note_share_changed _
     | Recovery_rollover_changed _
+    | Recovery_rollover_committed _
     | Recurrence_catalog_changed _
     | Run_state_changed _
     | Moderator_changed _
@@ -2308,6 +2428,7 @@ let rec validate_descendant_publication delta ~revision =
   | Recovery_note_changed _
   | Recovery_note_share_changed _
   | Recovery_rollover_changed _
+  | Recovery_rollover_committed _
   | Recurrence_catalog_changed _
   | Run_state_changed _
   | Moderator_changed _
@@ -2423,6 +2544,7 @@ let policy_usage_step delta ~(previous : Session_state.t) ~(next : Session_state
   | Recovery_note_changed _
   | Recovery_note_share_changed _
   | Recovery_rollover_changed _
+  | Recovery_rollover_committed _
   | Recurrence_catalog_changed _
   | Shell_changed _
   | History_block_reserved _
@@ -2566,6 +2688,7 @@ let goal_policy_step delta ~(previous : Session_state.t) ~(next : Session_state.
   | Recovery_note_changed _
   | Recovery_note_share_changed _
   | Recovery_rollover_changed _
+  | Recovery_rollover_committed _
   | Recurrence_catalog_changed _
   | Run_state_changed _
   | Moderator_changed _

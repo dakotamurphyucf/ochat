@@ -69,6 +69,7 @@ let classify = function
   | Recovery_note_changed _
   | Recovery_note_share_changed _
   | Recovery_rollover_changed _
+  | Recovery_rollover_committed _
   | Goal_accounts_changed _
   | Goal_catalog_changed _
   | Recurrence_catalog_changed _

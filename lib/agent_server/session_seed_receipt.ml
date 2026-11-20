@@ -51,7 +51,6 @@ let created_document transaction ~limits =
   | Workspace_changed _
   | Canonical_entries_appended _
   | Canonical_history_replaced _
-  | Recovery_rollover_changed _
   | Recovery_window_expired _
   | Recovery_window_enabled _
   | Recovery_effective_prepared _
@@ -101,6 +100,8 @@ let created_document transaction ~limits =
   | Delivery_wake_changed _
   | Recovery_note_changed _
   | Recovery_note_share_changed _
+  | Recovery_rollover_changed _
+  | Recovery_rollover_committed _
   | Instruction_selection_changed _
   | Goal_accounts_changed _
   | Goal_catalog_changed _

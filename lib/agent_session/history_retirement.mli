@@ -38,3 +38,12 @@ val admit_summary
   -> next:Session_state.t
   -> limits:Document_schema.Limits.t
   -> (Session_state_document.t, Document_schema.Error.t) result
+
+(** Verify the same exact prior universal carrier as the durable Rollover frame,
+    then retain the selected entry envelopes and unrelated extension fields. *)
+val admit_rollover
+  :  Session_state_document.t
+  -> Recovery_rollover.Commit.t
+  -> next:Session_state.t
+  -> limits:Document_schema.Limits.t
+  -> (Session_state_document.t, Document_schema.Error.t) result

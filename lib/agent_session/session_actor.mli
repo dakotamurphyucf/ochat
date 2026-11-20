@@ -3868,6 +3868,36 @@ val request_context_rollover
   -> Recovery_rollover.Expected.t
   -> (Recovery_rollover.Receipt.t, Agent_protocol.Error.t) result
 
+(** Settle one admitted intent under the current durable owner writer and an
+    exact quiescent cut. Checkpoint use requires transcript scope. Archive-only
+    publication requires an admitted force and a current force check. The host
+    checks must not yield. An already terminal intent returns its immutable
+    receipt after checking current caller authority. An ambiguous writer needs
+    reopen/replay before the actor can authorize another runtime operation. *)
+val settle_context_rollover
+  :  t
+  -> actor:Operator_authorization.t
+  -> attachment_id:Agent_protocol.Id.Attachment.t
+  -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> ?authorize_force:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> id:Agent_protocol.Id.Operation.t
+  -> Recovery_rollover.Expected.t
+  -> Recovery_rollover.Settlement.t
+  -> (Recovery_rollover.Receipt.t, Agent_protocol.Error.t) result
+
+(** Record the owning writer's explicit checkpoint recipe against the exact
+    quiescent history and immutable note revisions. The holder needs transcript
+    scope and the current host check. A later exact cut may use the recorded
+    checkpoint if the covered history and selected note revisions are unchanged. *)
+val record_context_checkpoint
+  :  t
+  -> actor:Operator_authorization.t
+  -> attachment_id:Agent_protocol.Id.Attachment.t
+  -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> Recovery_rollover.Expected.t
+  -> notes:Recovery_notes.Catalog.selection list
+  -> (Recovery_rollover.Checkpoint.t, Agent_protocol.Error.t) result
+
 (** Opt in with the original current writer and host visibility check. The
     actor records exactly the settled canonical view under its durable Store's
     actual host-qualified owner. Repeating enablement returns the current scope

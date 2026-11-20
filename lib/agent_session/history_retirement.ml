@@ -122,20 +122,26 @@ let create previous ~edit ~archive ~limits =
   create_plan previous ~edit:(Edit edit) ~archive ~limits
 ;;
 
-let admit_summary previous ~(archive : S.Compaction_archive.t) ~next ~limits =
+let admit_archived_history
+      previous
+      ~(archive : S.Compaction_archive.t)
+      ~kind
+      ~reason
+      ~next
+      ~limits
+  =
   let open Result.Let_syntax in
   let state = Session_state_document.value previous in
   let%bind document = Compaction_archive.archive_document previous ~limits in
   let%bind () =
     if
-      S.Compaction_archive.equal_kind archive.kind Compaction
+      S.Compaction_archive.equal_kind archive.kind kind
       && Int64.equal archive.revision state.counters.revision
       && String.equal
            archive.sha256
            (Agent_store.Document_record.digest (D.Document.to_string document))
     then Ok ()
-    else
-      Error (invalid "summary archive does not bind the exact previous admitted document")
+    else Error (invalid reason)
   in
   let%map carrier =
     Session_state_document.retire_canonical_compaction
@@ -144,6 +150,27 @@ let admit_summary previous ~(archive : S.Compaction_archive.t) ~next ~limits =
       ~limits
   in
   Session_state_document.with_value carrier next
+;;
+
+let admit_summary previous ~archive ~next ~limits =
+  admit_archived_history
+    previous
+    ~archive
+    ~kind:Compaction
+    ~reason:"summary archive does not bind the exact previous admitted document"
+    ~next
+    ~limits
+;;
+
+let admit_rollover previous change ~next ~limits =
+  let archive = S.Compaction_archive.of_rollover change in
+  admit_archived_history
+    previous
+    ~archive
+    ~kind:Rollover
+    ~reason:"rollover archive does not bind the exact previous admitted document"
+    ~next
+    ~limits
 ;;
 
 let admit previous ~delta ~next ~limits =
@@ -161,7 +188,6 @@ let admit previous ~delta ~next ~limits =
     | Workspace_changed _
     | Canonical_entries_appended _
     | Canonical_history_replaced _
-    | Recovery_rollover_changed _
     | Recovery_window_expired _
     | Recovery_window_enabled _
     | Recovery_effective_prepared _
@@ -212,6 +238,8 @@ let admit previous ~delta ~next ~limits =
     | Instruction_selection_changed _
     | Recovery_note_changed _
     | Recovery_note_share_changed _
+    | Recovery_rollover_changed _
+    | Recovery_rollover_committed _
     | Goal_accounts_changed _
     | Goal_catalog_changed _
     | Recurrence_catalog_changed _

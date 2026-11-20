@@ -45,6 +45,23 @@ module Intent : sig
     -> t
 end
 
+module Checkpoint : sig
+  (** Owner-selected note revisions and the exact canonical history they cover.
+      Capture alone confers no authority. Publication requires the same proof in
+      the current journal ledger and rechecks its history and note revisions. *)
+  type t [@@deriving equal, sexp_of]
+
+  type recipe = Owner_selection of P.Id.Principal.t
+
+  val capture
+    :  Expected.t
+    -> history:P.History.entry list
+    -> catalog:Recovery_notes.Catalog.t option
+    -> notes:Recovery_notes.Catalog.selection list
+    -> recipe:recipe
+    -> (t, P.Error.t) result
+end
+
 module Receipt : sig
   type supersession =
     | Basis_changed
@@ -52,10 +69,25 @@ module Receipt : sig
     | Checkpoint_required
   [@@deriving equal, sexp_of]
 
+  type archive_only_reason =
+    | Checkpoint_missing
+    | Checkpoint_unavailable
+  [@@deriving equal, sexp_of]
+
+  type checkpoint_quality =
+    | Checkpointed of Checkpoint.t
+    | Archive_only of archive_only_reason
+  [@@deriving equal, sexp_of]
+
+  type continuation = Awaiting_after_commit of P.Id.Operation.t
+  [@@deriving equal, sexp_of]
+
   type committed =
     { successor : P.Recovery_window.Scope.t
     ; cut_revision : int64
     ; archive : Chatml_source.Digest.t
+    ; checkpoint : checkpoint_quality
+    ; continuation : continuation
     }
   [@@deriving equal, sexp_of]
 
@@ -80,6 +112,40 @@ module Receipt : sig
   val to_public_json : t -> Jsonaf.t
 end
 
+module Commit : sig
+  (** The ordered publication delta. Retained IDs select exact existing live
+      entries in successor order. No copied history or note body travels here. *)
+  type t = private
+    { id : P.Id.Operation.t
+    ; expected : Expected.t
+    ; successor : P.Recovery_window.Scope.t
+    ; archive : Chatml_source.Digest.t
+    ; checkpoint : Receipt.checkpoint_quality
+    ; retain : P.History.Id.t list
+    }
+
+  val create
+    :  Intent.t
+    -> expected:Expected.t
+    -> successor:P.Recovery_window.Scope.t
+    -> archive:Chatml_source.Digest.t
+    -> checkpoint:Receipt.checkpoint_quality
+    -> retain:P.History.Id.t list
+    -> (t, P.Error.t) result
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, P.Error.t) result
+end
+
+module Settlement : sig
+  type t =
+    | Cancel
+    | Publish of
+        { checkpoint : Checkpoint.t option
+        ; retain : P.History.Id.t list
+        }
+end
+
 type t
 
 val find : t -> id:P.Id.Operation.t -> Receipt.t option
@@ -96,6 +162,7 @@ val previous
 module Change : sig
   type t =
     | Admit of Intent.t
+    | Record_checkpoint of Checkpoint.t
     | Settle of
         { id : P.Id.Operation.t
         ; terminal : Receipt.terminal
@@ -112,13 +179,33 @@ val apply
   :  t option
   -> active:P.Recovery_window.Scope.t
   -> revision:int64
+  -> history:P.History.entry list
+  -> catalog:Recovery_notes.Catalog.t option
   -> Change.t
+  -> (t, P.Error.t) result
+
+val check_checkpoint
+  :  t
+  -> Checkpoint.t
+  -> expected:Expected.t
+  -> history:P.History.entry list
+  -> catalog:Recovery_notes.Catalog.t option
+  -> (unit, P.Error.t) result
+
+val commit
+  :  t
+  -> Commit.t
+  -> active:P.Recovery_window.Scope.t
+  -> revision:int64
+  -> history:P.History.entry list
+  -> catalog:Recovery_notes.Catalog.t option
   -> (t, P.Error.t) result
 
 val validate_state
   :  t
   -> windows:Recovery_window_ledger.t option
   -> revision:int64
+  -> has_archive:(id:P.Id.Operation.t -> revision:int64 -> Chatml_source.Digest.t -> bool)
   -> (unit, P.Error.t) result
 
 val check_unchanged : t option -> incoming:t option -> (unit, P.Error.t) result

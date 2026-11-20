@@ -91,6 +91,29 @@ module Compaction_archive = struct
     ; invocation_dispositions : invocation_disposition list [@sexp.list]
     }
   [@@deriving sexp]
+
+  let of_rollover (change : Recovery_rollover.Commit.t) =
+    { operation_id = change.id
+    ; revision = change.expected.revision
+    ; sha256 = Chatml_source.Digest.to_hex change.archive
+    ; kind = Rollover
+    ; invocation_dispositions = []
+    }
+  ;;
+
+  let check_rollover_unchanged previous ~incoming =
+    let select = List.filter ~f:(fun t -> equal_kind t.kind Rollover) in
+    let equal left right =
+      Agent_protocol.Id.Operation.equal left.operation_id right.operation_id
+      && Int64.equal left.revision right.revision
+      && String.equal left.sha256 right.sha256
+      && List.is_empty left.invocation_dispositions
+      && List.is_empty right.invocation_dispositions
+    in
+    if List.equal equal (select previous) (select incoming)
+    then Ok ()
+    else Error (Agent_protocol.Error.invalid_request "replacement changed rollover archive custody")
+  ;;
 end
 
 module Conversation = struct
@@ -1134,7 +1157,18 @@ let validate_domain (t : t) ~recovery_revision =
       Recovery_rollover.validate_state
         ledger
         ~windows:t.recovery_windows
-        ~revision:recovery_revision)
+        ~revision:recovery_revision
+        ~has_archive:(fun ~id ~revision digest ->
+          let matching (archive : Compaction_archive.t) =
+            Compaction_archive.equal_kind archive.kind Rollover
+            && Agent_protocol.Id.Operation.equal archive.operation_id id
+          in
+          match List.filter t.conversation.compaction_archives ~f:matching with
+          | [ archive ] ->
+            Int64.equal archive.revision revision
+            && String.equal archive.sha256 (Chatml_source.Digest.to_hex digest)
+            && List.is_empty archive.invocation_dispositions
+          | _ -> false))
   in
   let seen_invocations = Hash_set.create (module Agent_protocol.Id.Invocation) in
   let%bind () =

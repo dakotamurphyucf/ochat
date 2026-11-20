@@ -171,6 +171,12 @@ let decode_state handle (reference : Session_state.Compaction_archive.t) state =
   else Error (error "compaction archive identity mismatch")
 ;;
 
+let max_frame_bytes max_payload_length =
+  if max_payload_length > Int.max_value - 52
+  then Int.max_value
+  else max_payload_length + 52
+;;
+
 let write_document ~env ~handle ~max_payload_length reference document =
   let open Result.Let_syntax in
   let%bind limits =
@@ -199,12 +205,24 @@ let write_document ~env ~handle ~max_payload_length reference document =
   in
   let%bind state = decode_document ~limits document in
   let%bind _ = decode_state handle reference state in
-  Store.Durable_file.replace
-    ~env
-    ~durability:Flush_file_and_directory
-    ~path:(path handle reference)
-    contents
-  |> Result.map_error ~f:store_error
+  let path = path handle reference in
+  let%bind () =
+    Store.Durable_file.replace ~env ~durability:Flush_file_and_directory ~path contents
+    |> Result.map_error ~f:store_error
+  in
+  match reference.kind with
+  | Rollover ->
+    let%bind readback =
+      Store.Durable_file.load_bounded
+        ~env
+        ~path
+        ~max_bytes:(max_frame_bytes max_payload_length)
+      |> Result.map_error ~f:store_error
+    in
+    if String.equal contents readback
+    then Ok ()
+    else Error (error "synced rollover frame differs from the verified archive")
+  | Compaction | Reset | Rebuild | Upgrade | Edit | Delete | Pending_input -> Ok ()
 ;;
 
 let write ~env ~handle ~max_payload_length reference state =
@@ -258,10 +276,7 @@ let read ~env ~handle ~max_payload_length reference =
     Store.Durable_file.load_bounded
       ~env
       ~path:(path handle reference)
-      ~max_bytes:
-        (if max_payload_length > Int.max_value - 52
-         then Int.max_value
-         else max_payload_length + 52)
+      ~max_bytes:(max_frame_bytes max_payload_length)
     |> Result.map_error ~f:store_error
   in
   decode_file ~handle ~max_payload_length reference contents
