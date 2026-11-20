@@ -157,9 +157,16 @@ with an extension conflict. Enabled documents mark the required recovery
 semantics, and the absent field keeps legacy and default-off sessions on their
 existing path. The codec admits up to 64 windows, 8,192 members and 2 MiB of
 encoded ledger data including retained fields. This storage contract carries
-canonical evidence. Actor transitions, logical
-visibility and admission of exact effective model-input sources are separate
-runtime capabilities. [Ledger interface](../../../lib/agent_session/recovery_window_ledger.mli),
+canonical evidence. A durable actor enables it explicitly with the current
+operator writer and the Store's host-qualified owner. Bootstrap records only
+the admitted canonical view. Ordinary appends and pending adoption reuse their
+existing journal changes. A summary compaction keeps the current window and
+relocates removed members to the exact prestate archive before publishing the
+replacement. A prestate file left by a failed commit supplies no membership.
+On reset or rebuild the selected generation starts a fresh root. Its
+administrative archive retains the preceding ledger as historical evidence.
+Logical visibility and exact effective model-input sources are separate runtime
+contracts. [Ledger interface](../../../lib/agent_session/recovery_window_ledger.mli),
 [local context recovery design](../../design/local-context-recovery.md).
 
 Original source access has its own retained directory owner, shared revocable

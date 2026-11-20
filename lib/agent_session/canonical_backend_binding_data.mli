@@ -18,6 +18,7 @@ val create
   -> recovery_note_owner:Agent_protocol.Session_ref.t option
   -> t
 
+val session_owner : t -> Agent_protocol.Session_ref.t option
 val recovery_note_owner : t -> Agent_protocol.Session_ref.t option
 
 (** Reject a foreign domain, physical commit closure or writer session before

@@ -5412,6 +5412,11 @@ end
 
 module Context_request = struct
   type _ t =
+    | Enable_recovery_windows :
+        Operator_authorization.t
+        * Agent_protocol.Id.Attachment.t
+        * (Session_state.t -> (unit, Agent_protocol.Error.t) result)
+        -> Agent_protocol.Recovery_window.Scope.t t
     | Recovery_note : 'a Recovery_note_request.t -> 'a t
     | Instruction_command :
         Instruction_admission.t
@@ -12475,6 +12480,8 @@ let rec deferred_execution_delta (previous : Session_state.t) (delta : Session_d
   | Workspace_changed _
   | Canonical_entries_appended _
   | Canonical_history_replaced _
+  | Recovery_window_enabled _
+  | Recovery_summary_compacted _
   | Authoring_references_forgotten _
   | Authoring_publication_changed _
   | Initial_prompt_count_changed _
@@ -25897,16 +25904,20 @@ let compaction_terminal_base_delta t operation = function
         ~previous:t.state.conversation.canonical_history
         history
     in
+    let history_changes : Session_delta.t list =
+      match t.state.recovery_windows with
+      | None -> [ Compaction_archived archive; Canonical_history_replaced history ]
+      | Some _ -> [ Recovery_summary_compacted (archive, history) ]
+    in
     let operation = operation_state t operation Agent_protocol.Operation.Completed in
     let lifecycle = terminal_lifecycle t in
     Ok
       ( Session_delta.Batch
-          [ Compaction_archived archive
-          ; Canonical_history_replaced history
-          ; Compaction_generation_changed generation
-          ; Active_operation_changed None
-          ; Lifecycle_changed lifecycle
-          ]
+          (history_changes
+           @ [ Compaction_generation_changed generation
+             ; Active_operation_changed None
+             ; Lifecycle_changed lifecycle
+             ])
       , [ Agent_protocol.Event.Durable.Payload.History_replaced
             (Session_state.history_window history)
         ; Operation_completed operation
@@ -48499,7 +48510,8 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Activate_queued_start
   | Update_organization _
   | Goal_request (Apply _)
-  | Context_request (Instruction_command _ | Recovery_note (Mutate _))
+  | Context_request
+      (Instruction_command _ | Recovery_note (Mutate _) | Enable_recovery_windows _)
   | Set_recurrence_controller _
   | Set_recurrence_planning_host _
   | Recurrence_due_ids
@@ -56423,6 +56435,87 @@ let recovery_note_mutation_identity t ~access ~effect_kind route =
   owner, identity
 ;;
 
+let enable_recovery_windows_internal t actor attachment_id authorize =
+  let module P = Agent_protocol in
+  let open Result.Let_syntax in
+  let scope ledger = Recovery_window_ledger.(Window.scope (active ledger)) in
+  let%bind owner =
+    Option.bind t.canonical_persistence ~f:Canonical_backend_binding_data.session_owner
+    |> Result.of_option
+         ~error:(error Invalid_state "durable recovery window storage is unavailable")
+  in
+  let check () =
+    let principal = Operator_authorization.principal actor in
+    let%bind () =
+      if
+        Operator_authorization.is_current actor
+        && P.Principal.has_scope principal Send_messages
+      then authorize t.state
+      else Error (error Permission_denied "recovery window writer authority expired")
+    in
+    let%bind attachment = write_attachment t attachment_id in
+    let lease_principal =
+      Option.bind attachment.owner_lease ~f:(fun lease -> lease.principal_id)
+    in
+    if
+      Option.exists lease_principal ~f:(fun id ->
+        not (P.Id.Principal.equal id principal.id))
+    then
+      Error
+        (error
+           Permission_denied
+           "recovery window writer attachment has another principal")
+    else Ok ()
+  in
+  let%bind () = check () in
+  match t.state.recovery_windows with
+  | Some ledger when P.Session_ref.equal owner (Recovery_window_ledger.owner ledger) ->
+    Ok (scope ledger)
+  | Some _ -> Error (error Invalid_state "recovery window owner differs from this host")
+  | None ->
+    let%bind () =
+      match t.state.runtime_initialization, t.state.active_operation with
+      | Ready, None -> Ok ()
+      | Pending _, _ | Ready, Some _ ->
+        Error (error Conflict "recovery window enablement requires settled history")
+    in
+    let previous = t.state in
+    let window = P.Id.Context_window.create () in
+    let run_preparation =
+      Option.map t.run_source_binding ~f:(fun binding ->
+        binding.Source_binding.preparation)
+    in
+    let%bind candidate =
+      prepare_transition
+        ?run_preparation
+        t
+        ~delta:(Recovery_window_enabled (owner, window))
+        ~payloads:[]
+    in
+    let%bind ledger =
+      Result.of_option
+        candidate.state.recovery_windows
+        ~error:(error Internal_error "recovery window candidate has no ledger")
+    in
+    let commit_observation =
+      Session_commit_observation.Owner.create_guarded
+        ~previous
+        ~candidate
+        ~check_at_writer:check
+    in
+    let%bind () =
+      persist_transition
+        ?run_preparation
+        t
+        candidate
+        ~check_before_commit:check
+        ~commit_observation
+    in
+    install_committed_transition ?run_preparation t candidate;
+    publish_committed_transition t candidate;
+    Ok (scope ledger)
+;;
+
 let handle_recovery_note
   : type a. t -> a Recovery_note_request.t -> (a, Agent_protocol.Error.t) result
   =
@@ -57567,6 +57660,8 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
     | Goal_request (Read (actor, authorize)) ->
       Goal_command_admission.read t.state ~actor ~authorize
     | Context_request (Recovery_note request) -> handle_recovery_note t request
+    | Context_request (Enable_recovery_windows (actor, attachment_id, authorize)) ->
+      enable_recovery_windows_internal t actor attachment_id authorize
     | Context_request (Instruction_command (admission, source, request)) ->
       let open Result.Let_syntax in
       let%bind decision =
@@ -58451,6 +58546,16 @@ let create_internal
       binding
       ~session_id:t.state.identity.session_id
       ~commit:t.persistence.commit);
+  Option.iter t.state.recovery_windows ~f:(fun ledger ->
+    let owner =
+      Option.bind t.canonical_persistence ~f:Canonical_backend_binding_data.session_owner
+    in
+    if
+      not
+        (Option.exists
+           owner
+           ~f:(Agent_protocol.Session_ref.equal (Recovery_window_ledger.owner ledger)))
+    then invalid_arg "recovery window state belongs to another canonical writer owner");
   sync_extension_clock t;
   (* A persisted actor outlives the tool/script that created it. Its future
      operations acquire their own budgets and delegated authority; inheriting
@@ -61468,6 +61573,10 @@ let goal_command t ~actor ~authorize ~session ~request =
 ;;
 
 let read_goals t ~actor ~authorize = call t (Goal_request (Read (actor, authorize)))
+
+let enable_recovery_windows t ~actor ~attachment_id ~authorize =
+  call t (Context_request (Enable_recovery_windows (actor, attachment_id, authorize)))
+;;
 
 let read_recovery_note t ~access selection =
   call t (Context_request (Recovery_note (Read (access, selection))))

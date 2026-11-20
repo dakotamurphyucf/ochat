@@ -50,6 +50,8 @@ let collect state ~delta ~limits =
       | Recurrence_catalog_changed _
       | Run_state_changed _
       | Canonical_history_replaced _
+      | Recovery_window_enabled _
+      | Recovery_summary_compacted _
       | Authoring_references_forgotten _
       | Authoring_publication_changed _
       | Initial_prompt_count_changed _

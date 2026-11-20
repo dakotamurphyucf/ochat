@@ -128,6 +128,7 @@ let prepare previous ~delta ~limits =
         | Recurrence_catalog_changed _
         | Run_state_changed _
         | Canonical_history_replaced _
+        | Recovery_window_enabled _
         | Authoring_references_forgotten _
         | Authoring_publication_changed _
         | Initial_prompt_count_changed _
@@ -169,6 +170,16 @@ let prepare previous ~delta ~limits =
           |> X.document_result
         in
         Ok (Transaction.with_value carrier state)
+      | Recovery_summary_compacted (archive, _) as delta ->
+        let%bind previous = Transaction.checkpoint carrier ~limits in
+        let%bind state =
+          Session_delta.apply ~limits (Transaction.value carrier) delta
+          |> X.document_result
+        in
+        let%bind admitted =
+          History_retirement.admit_summary previous ~archive ~next:state ~limits
+        in
+        Transaction.continue_after_history carrier ~admitted ~next:state ~limits
       | (History_deleted _ | History_edited _) as delta ->
         let open Result.Let_syntax in
         let%bind previous = Transaction.checkpoint carrier ~limits in
@@ -254,6 +265,8 @@ let prepare previous ~delta ~limits =
        | Workspace_changed _
        | Canonical_entries_appended _
        | Canonical_history_replaced _
+       | Recovery_window_enabled _
+       | Recovery_summary_compacted _
        | Authoring_references_forgotten _
        | Authoring_publication_changed _
        | Initial_prompt_count_changed _

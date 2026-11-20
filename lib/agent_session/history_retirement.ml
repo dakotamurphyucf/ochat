@@ -58,7 +58,7 @@ let create_plan previous ~edit ~(archive : S.Compaction_archive.t) ~limits =
   Ok { previous; edit; archive }
 ;;
 
-let apply t ~next ~limits =
+let stage t ~next ~limits =
   let open Result.Let_syntax in
   let previous = Session_state_document.value t.previous in
   let old = previous.conversation
@@ -96,7 +96,7 @@ let apply t ~next ~limits =
     then Error (invalid "candidate does not match admitted exact history retirement")
     else Ok ()
   in
-  let%bind admitted =
+  let%map admitted =
     match t.edit with
     | Edit plan ->
       Session_state_document.retire_canonical_suffix
@@ -108,13 +108,42 @@ let apply t ~next ~limits =
     | Delete plan ->
       Session_state_document.retire_canonical_deletion t.previous ~deletion:plan ~limits
   in
-  let candidate = Session_state_document.with_value admitted next in
+  Session_state_document.with_value admitted next
+;;
+
+let apply t ~next ~limits =
+  let open Result.Let_syntax in
+  let%bind candidate = stage t ~next ~limits in
   let%map _ = Session_state_document.encode candidate ~limits in
   candidate
 ;;
 
 let create previous ~edit ~archive ~limits =
   create_plan previous ~edit:(Edit edit) ~archive ~limits
+;;
+
+let admit_summary previous ~(archive : S.Compaction_archive.t) ~next ~limits =
+  let open Result.Let_syntax in
+  let state = Session_state_document.value previous in
+  let%bind document = Compaction_archive.archive_document previous ~limits in
+  let%bind () =
+    if
+      S.Compaction_archive.equal_kind archive.kind Compaction
+      && Int64.equal archive.revision state.counters.revision
+      && String.equal
+           archive.sha256
+           (Agent_store.Document_record.digest (D.Document.to_string document))
+    then Ok ()
+    else
+      Error (invalid "summary archive does not bind the exact previous admitted document")
+  in
+  let%map carrier =
+    Session_state_document.retire_canonical_compaction
+      previous
+      ~history:next.S.conversation.canonical_history
+      ~limits
+  in
+  Session_state_document.with_value carrier next
 ;;
 
 let admit previous ~delta ~next ~limits =
@@ -132,6 +161,8 @@ let admit previous ~delta ~next ~limits =
     | Workspace_changed _
     | Canonical_entries_appended _
     | Canonical_history_replaced _
+    | Recovery_window_enabled _
+    | Recovery_summary_compacted _
     | Authoring_references_forgotten _
     | Authoring_publication_changed _
     | Initial_prompt_count_changed _
@@ -208,6 +239,8 @@ let admit previous ~delta ~next ~limits =
       |> Persistence_codec.document_result
     in
     let%bind admission = create_plan previous ~edit:plan ~archive ~limits in
-    apply admission ~next ~limits
+    (match next.S.recovery_windows with
+     | None -> apply admission ~next ~limits
+     | Some _ -> stage admission ~next ~limits)
   | _ -> Error (invalid "a transaction may contain only one history mutation")
 ;;

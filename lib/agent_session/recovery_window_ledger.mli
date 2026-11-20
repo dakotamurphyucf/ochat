@@ -19,6 +19,7 @@ val create : owner:P.Session_ref.t -> Window.t list -> (t, P.Error.t) result
 
 val owner : t -> P.Session_ref.t
 val windows : t -> Window.t list
+val active : t -> Window.t
 
 (** Validate against the owning committed state and its exact summary archive
     references. [has_summary_archive] runs once per distinct archived root.

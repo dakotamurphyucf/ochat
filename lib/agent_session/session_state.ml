@@ -913,7 +913,7 @@ let validate_model_job_targets (t : t) =
     | Compaction -> Ok ())
 ;;
 
-let validate_domain (t : t) =
+let validate_domain (t : t) ~recovery_revision =
   let open Result.Let_syntax in
   let%bind () =
     Option.value_map t.recovery_notes ~default:(Ok ()) ~f:(fun catalog ->
@@ -1078,7 +1078,7 @@ let validate_domain (t : t) =
         ledger
         ~session_id:t.identity.session_id
         ~generation:t.identity.generation
-        ~revision:t.counters.revision
+        ~revision:recovery_revision
         ~history:t.conversation.canonical_history
         ~has_summary_archive
         ~has_summary_operation
@@ -1583,10 +1583,10 @@ module Native_validation = struct
     t
   ;;
 
-  let validate_remaining (t : t) ~policy_revision =
+  let validate_at (t : t) ~policy_revision ~recovery_revision =
     let open Result.Let_syntax in
     let%bind () = validate_goal_policy t ~session_revision:policy_revision in
-    let%bind () = validate_domain t in
+    let%bind () = validate_domain t ~recovery_revision in
     let instruction_clear =
       Option.value_map t.instruction_selection ~default:0 ~f:(fun selection ->
         let summary = Instruction_selection.summary selection in
@@ -1643,6 +1643,22 @@ module Native_validation = struct
       ~generation:t.identity.generation
     |> Result.map_error ~f:ledger_error
   ;;
+
+  let validate_remaining t ~policy_revision =
+    validate_at t ~policy_revision ~recovery_revision:t.counters.revision
+  ;;
+
+  let validate_ordered_prefix t ~policy_revision =
+    let revision = t.counters.revision in
+    if Option.is_none t.recovery_windows
+    then validate_remaining t ~policy_revision
+    else if Int64.equal revision Int64.max_value
+    then
+      Error
+        (Agent_protocol.Error.invalid_request
+           "recovery window publication revision exhausted")
+    else validate_at t ~policy_revision ~recovery_revision:(Int64.succ revision)
+  ;;
 end
 
 let validate (t : t) =
@@ -1653,7 +1669,7 @@ let validate (t : t) =
 let validate_administration_candidate t ~previous =
   let open Result.Let_syntax in
   let%bind () = validate previous in
-  let%bind () = validate_domain t in
+  let%bind () = validate_domain t ~recovery_revision:t.counters.revision in
   let%bind before =
     Inference_ledger.to_document previous.inference_ledger
     |> Result.map_error ~f:ledger_error

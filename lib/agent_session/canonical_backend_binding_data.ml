@@ -23,10 +23,12 @@ let create ~writer ~commit ~recovery_note_owner =
   { domain = (Stdlib.Domain.self () :> int); writer; commit; recovery_note_owner }
 ;;
 
-let recovery_note_owner t =
+let session_owner t =
   check_domain_exn t;
   t.recovery_note_owner
 ;;
+
+let recovery_note_owner = session_owner
 
 let validate_exn t ~session_id ~commit =
   check_domain_exn t;

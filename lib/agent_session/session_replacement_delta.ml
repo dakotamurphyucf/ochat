@@ -18,6 +18,8 @@ let classify = function
   | Workspace_changed _
   | Canonical_entries_appended _
   | Canonical_history_replaced _
+  | Recovery_window_enabled _
+  | Recovery_summary_compacted _
   | Authoring_references_forgotten _
   | Authoring_publication_changed _
   | Initial_prompt_count_changed _

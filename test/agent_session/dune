@@ -167,6 +167,7 @@
   job_artifact_retention_tests
   retained_history_tests
   recovery_window_ledger_tests
+  recovery_window_actor_tests
   replay_retention_tests
   job_progress_tests
   job_progress_authority_tests

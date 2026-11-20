@@ -353,6 +353,7 @@
   recovery_window_location
   recovery_window_record
   recovery_window_ledger
+  recovery_window_capture
   administration
   session_delta
   session_metadata_transition

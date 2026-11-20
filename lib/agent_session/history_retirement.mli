@@ -20,10 +20,21 @@ val apply
   -> (Session_state_document.t, Document_schema.Error.t) result
 
 (** Shared live/replay entry point. Exactly one edit or deletion intent may retire history in
-    a transaction. Ordinary deltas retain the existing strict preservation merge. *)
+    a transaction. Ordinary deltas retain the existing strict preservation merge.
+    With window tracking, the same transaction validates and stamps its new
+    source locators after this retirement prestate check. *)
 val admit
   :  Session_state_document.t
   -> delta:Session_delta.t
+  -> next:Session_state.t
+  -> limits:Document_schema.Limits.t
+  -> (Session_state_document.t, Document_schema.Error.t) result
+
+(** Move the exact pruned row envelopes into the checked compaction prestate;
+    final publication admits the supplied next State before writing. *)
+val admit_summary
+  :  Session_state_document.t
+  -> archive:Session_state.Compaction_archive.t
   -> next:Session_state.t
   -> limits:Document_schema.Limits.t
   -> (Session_state_document.t, Document_schema.Error.t) result

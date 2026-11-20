@@ -12,6 +12,10 @@ type t =
   | Workspace_changed of Workspace_instance.t
   | Canonical_entries_appended of Agent_protocol.History.entry list
   | Canonical_history_replaced of Agent_protocol.History.entry list
+  | Recovery_window_enabled of
+      Agent_protocol.Session_ref.t * Agent_protocol.Id.Context_window.t
+  | Recovery_summary_compacted of
+      Session_state.Compaction_archive.t * Agent_protocol.History.entry list
   | Authoring_references_forgotten of Agent_protocol.History.Id.t list
   | Authoring_publication_changed of Chat_response.Authoring_publication.context
   | Initial_prompt_count_changed of int
@@ -188,6 +192,8 @@ let rec contains_policy_usage = function
   | Workspace_changed _
   | Canonical_entries_appended _
   | Canonical_history_replaced _
+  | Recovery_window_enabled _
+  | Recovery_summary_compacted _
   | Authoring_references_forgotten _
   | Authoring_publication_changed _
   | Initial_prompt_count_changed _
@@ -265,6 +271,8 @@ let rec contains_goal_policy = function
   | Workspace_changed _
   | Canonical_entries_appended _
   | Canonical_history_replaced _
+  | Recovery_window_enabled _
+  | Recovery_summary_compacted _
   | Authoring_references_forgotten _
   | Authoring_publication_changed _
   | Initial_prompt_count_changed _
@@ -332,6 +340,35 @@ let requires_goal_policy_tracking delta ~previous ~canonical =
   Option.is_some previous || Option.is_some canonical || contains_goal_policy delta
 ;;
 
+let with_canonical_history (state : Session_state.t) canonical_history ~recovery_windows =
+  (* Observe the outgoing history as well. This bootstraps legacy authoring
+     references without scanning archives on each ordinary append. *)
+  let%map.Result authoring_reference_index =
+    remember_authoring state [ state.conversation.canonical_history; canonical_history ]
+  in
+  { state with
+    conversation =
+      { state.conversation with canonical_history; authoring_reference_index }
+  ; recovery_windows
+  }
+;;
+
+let replace_canonical_history state canonical_history ~retired =
+  let%bind.Result recovery_windows =
+    Recovery_window_capture.replace state ~history:canonical_history ~retired
+  in
+  with_canonical_history state canonical_history ~recovery_windows
+;;
+
+let attach_archive (state : Session_state.t) archive =
+  { state with
+    conversation =
+      { state.conversation with
+        compaction_archives = archive :: state.conversation.compaction_archives
+      }
+  }
+;;
+
 let rec apply ?(limits = native_limits) (state : Session_state.t) = function
   | Batch deltas -> List.fold_result deltas ~init:state ~f:(apply ~limits)
   | Created created ->
@@ -344,6 +381,13 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
         created
     in
     let%bind created = Session_state.upgrade_schema created in
+    let%bind () =
+      Recovery_window_capture.check_replacement_archive state ~incoming:created
+    in
+    let%bind recovery_windows =
+      Recovery_window_capture.replacement state ~incoming:created
+    in
+    let created = { created with recovery_windows } in
     let%bind () =
       Inference_ledger.validate_update
         state.inference_ledger
@@ -616,6 +660,7 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
     }
   | Canonical_entries_appended entries ->
     let open Result.Let_syntax in
+    let%bind recovery_windows = Recovery_window_capture.append state entries in
     let%map authoring_reference_index = remember_authoring state [ entries ] in
     { state with
       conversation =
@@ -623,19 +668,18 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
           canonical_history = state.conversation.canonical_history @ entries
         ; authoring_reference_index
         }
+    ; recovery_windows
     }
-  | Canonical_history_replaced canonical_history ->
+  | Canonical_history_replaced history ->
+    replace_canonical_history state history ~retired:[]
+  | Recovery_window_enabled (owner, window) ->
+    let%map.Result ledger = Recovery_window_capture.bootstrap state ~owner ~window in
+    { state with recovery_windows = Some ledger }
+  | Recovery_summary_compacted (archive, history) ->
     let open Result.Let_syntax in
-    (* Observe the outgoing history at the replacement boundary as well. This
-       bootstraps legacy snapshots without scanning archives or every old entry
-       on each ordinary append. Both changes are part of the same transaction. *)
-    let%map authoring_reference_index =
-      remember_authoring state [ state.conversation.canonical_history; canonical_history ]
-    in
-    { state with
-      conversation =
-        { state.conversation with canonical_history; authoring_reference_index }
-    }
+    let%bind ledger = Recovery_window_capture.summarize state ~archive ~history in
+    let%map next = with_canonical_history state history ~recovery_windows:(Some ledger) in
+    attach_archive next archive
   | Authoring_references_forgotten ids ->
     let open Result.Let_syntax in
     let%map index = Session_state.authoring_references state in
@@ -658,13 +702,16 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
         Error
           (Agent_protocol.Error.invalid_request "history deletion archive basis differs")
     in
+    let retired = History_deletion.retired_ids plan in
+    let%bind next =
+      replace_canonical_history state (History_deletion.canonical_history plan) ~retired
+    in
     let%bind next =
       apply
         ~limits
-        state
+        next
         (Batch
-           [ Canonical_history_replaced (History_deletion.canonical_history plan)
-           ; Authoring_references_forgotten (History_deletion.retired_ids plan)
+           [ Authoring_references_forgotten retired
            ; Initial_prompt_count_changed
                (History_deletion.initial_prompt_entry_count plan)
            ; Compaction_archived archive
@@ -685,26 +732,33 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
       else
         Error (Agent_protocol.Error.invalid_request "history edit archive basis differs")
     in
+    let retired = History_edit.retired_ids plan in
+    let%bind next =
+      replace_canonical_history
+        state
+        (History_edit.canonical_history plan)
+        ~retired:(Agent_protocol.History_edit.history_id edit :: retired)
+    in
     let%bind next =
       apply
         ~limits
-        state
+        next
         (Batch
-           [ Canonical_history_replaced (History_edit.canonical_history plan)
-           ; Authoring_references_forgotten (History_edit.retired_ids plan)
+           [ Authoring_references_forgotten retired
            ; Initial_prompt_count_changed (History_edit.initial_prompt_entry_count plan)
            ; Compaction_archived archive
            ])
     in
     retire_pending_dispositions next ~history_ids:(History_edit.retired_ids plan) ~limits
   | Compaction_archived archive ->
-    Ok
-      { state with
-        conversation =
-          { state.conversation with
-            compaction_archives = archive :: state.conversation.compaction_archives
-          }
-      }
+    if
+      Option.is_some state.recovery_windows
+      && Session_state.Compaction_archive.equal_kind archive.kind Compaction
+    then
+      Error
+        (Agent_protocol.Error.invalid_request
+           "enabled compaction requires exact window capture")
+    else Ok (attach_archive state archive)
   | Deferred_entries_enqueued entries ->
     let%bind.Result additions =
       List.map entries ~f:(fun entry ->
@@ -1467,21 +1521,22 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
       List.exists state.conversation.canonical_history ~f:(fun old ->
         History_entry.Id.equal old.id entry.id)
     then invalid "notification history identity already exists"
-    else
-      Ok
-        { state with
-          deliveries =
-            replace_by
-              Agent_protocol.Id.Delivery.compare
-              c.id
-              delivery
-              state.deliveries
-              ~id_of:(fun d -> d.Agent_protocol.Delivery.context.id)
-        ; conversation =
-            { state.conversation with
-              canonical_history = state.conversation.canonical_history @ [ entry ]
-            }
-        }
+    else (
+      let%map recovery_windows = Recovery_window_capture.append state [ entry ] in
+      { state with
+        recovery_windows
+      ; deliveries =
+          replace_by
+            Agent_protocol.Id.Delivery.compare
+            c.id
+            delivery
+            state.deliveries
+            ~id_of:(fun d -> d.Agent_protocol.Delivery.context.id)
+      ; conversation =
+          { state.conversation with
+            canonical_history = state.conversation.canonical_history @ [ entry ]
+          }
+      })
   | Delivery_wake_changed delivery ->
     let open Result.Let_syntax in
     let module P = Agent_protocol in
@@ -1750,6 +1805,11 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
            ~message:"session generation did not advance"
            ~retryable:false
            ())
+    else if Option.is_some state.recovery_windows
+    then
+      Error
+        (Agent_protocol.Error.invalid_request
+           "enabled recovery requires an archived administrative generation change")
     else
       let open Result.Let_syntax in
       let%bind inference_ledger =
@@ -1869,6 +1929,8 @@ let validate_goal_accounts delta ~(previous : Session_state.t) ~(next : Session_
     | Workspace_changed _
     | Canonical_entries_appended _
     | Canonical_history_replaced _
+    | Recovery_window_enabled _
+    | Recovery_summary_compacted _
     | Authoring_references_forgotten _
     | Authoring_publication_changed _
     | Initial_prompt_count_changed _
@@ -2017,6 +2079,8 @@ let validate_goal_descendants
     | Workspace_changed _
     | Canonical_entries_appended _
     | Canonical_history_replaced _
+    | Recovery_window_enabled _
+    | Recovery_summary_compacted _
     | Authoring_references_forgotten _
     | Authoring_publication_changed _
     | Initial_prompt_count_changed _
@@ -2116,6 +2180,8 @@ let rec validate_descendant_publication delta ~revision =
   | Workspace_changed _
   | Canonical_entries_appended _
   | Canonical_history_replaced _
+  | Recovery_window_enabled _
+  | Recovery_summary_compacted _
   | Authoring_references_forgotten _
   | Authoring_publication_changed _
   | Initial_prompt_count_changed _
@@ -2235,6 +2301,8 @@ let policy_usage_step delta ~(previous : Session_state.t) ~(next : Session_state
   | Workspace_changed _
   | Canonical_entries_appended _
   | Canonical_history_replaced _
+  | Recovery_window_enabled _
+  | Recovery_summary_compacted _
   | Authoring_references_forgotten _
   | Authoring_publication_changed _
   | Initial_prompt_count_changed _
@@ -2368,6 +2436,8 @@ let goal_policy_step delta ~(previous : Session_state.t) ~(next : Session_state.
   | Workspace_changed _
   | Canonical_entries_appended _
   | Canonical_history_replaced _
+  | Recovery_window_enabled _
+  | Recovery_summary_compacted _
   | Authoring_references_forgotten _
   | Authoring_publication_changed _
   | Initial_prompt_count_changed _

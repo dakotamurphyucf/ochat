@@ -14,6 +14,10 @@ type t =
   | Workspace_changed of Workspace_instance.t
   | Canonical_entries_appended of Agent_protocol.History.entry list
   | Canonical_history_replaced of Agent_protocol.History.entry list
+  | Recovery_window_enabled of
+      Agent_protocol.Session_ref.t * Agent_protocol.Id.Context_window.t
+  | Recovery_summary_compacted of
+      Session_state.Compaction_archive.t * Agent_protocol.History.entry list
   | Authoring_references_forgotten of Agent_protocol.History.Id.t list
   | Authoring_publication_changed of Chat_response.Authoring_publication.context
   (** Trusted model-input policy/context binding, retained for result publication

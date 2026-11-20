@@ -48,6 +48,7 @@ type t =
 
 let owner t = t.owner
 let windows t = t.windows
+let active t = t.active
 
 let to_jsonaf t =
   `Object

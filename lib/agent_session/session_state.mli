@@ -278,6 +278,13 @@ module Native_validation : sig
     :  t
     -> policy_revision:int64
     -> (unit, Agent_protocol.Error.t) Result.t
+
+  (** Private ordered document replay still has unstamped counters. The window
+      locators are allowed to bind the transaction's one next publication. *)
+  val validate_ordered_prefix
+    :  t
+    -> policy_revision:int64
+    -> (unit, Agent_protocol.Error.t) Result.t
 end
 
 (** Planning-only validation before retiring the actual resource graph. The

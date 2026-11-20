@@ -2837,17 +2837,29 @@ let retire_canonical_entries t ~retained_ids ~initial_count ~limits =
   let%bind payload = replace payload "conversation" conversation in
   let%bind raw = replace (D.Document.json document) "payload" payload in
   let%bind document = D.Document.inspect ~limits raw in
-  let%bind carrier =
-    D.Domain_codec.decode
-      (codec ~capture:None ~limits ~presence:Session_state_presence.authored)
-      document
+  let presence = Session_state_presence.authored in
+  let%bind retirement_codec =
+    match previous.recovery_windows with
+    | None -> Ok (codec ~capture:None ~limits ~presence)
+    | Some _ ->
+      (* The filtered carrier temporarily retains the previous ledger. Its
+         checked replacement is installed before full State admission. *)
+      D.Domain_codec.create
+        ~limits
+        ~kind:"session.state"
+        ~version:current_version
+        ~shape
+        ~supported_semantics:Session_storage_semantics.supported
+        ~decode:(fun json -> X.document_result (state_fields_of_jsonaf ~limits json))
+        ~encode:(fun state -> X.document_result (state_to_jsonaf state ~limits ~presence))
   in
-  let%map state =
-    Pending_carrier_admission.rehydrate
-      (D.Extension_carrier.value carrier)
-      ~document
-      ~limits
+  let%bind carrier = D.Domain_codec.decode retirement_codec document in
+  let rehydrate =
+    match previous.recovery_windows with
+    | None -> Pending_carrier_admission.rehydrate
+    | Some _ -> Pending_carrier_admission.rehydrate_transaction_prefix
   in
+  let%map state = rehydrate (D.Extension_carrier.value carrier) ~document ~limits in
   { carrier = D.Extension_carrier.with_value carrier state
   ; lifecycle_basis = t.lifecycle_basis
   ; original = t.original
@@ -2885,6 +2897,26 @@ let retire_canonical_suffix t ~retained_ids ~limits =
            previous.conversation.initial_prompt_entry_count
            (List.length retained_ids))
       ~limits
+;;
+
+let retire_canonical_compaction t ~history ~limits =
+  let canonical = (value t).conversation.canonical_history in
+  let ids =
+    List.map history ~f:(fun (entry : P.History.entry) -> entry.id)
+    |> Hash_set.of_list (module P.History.Id)
+  in
+  let retained_ids =
+    List.filter_map canonical ~f:(fun entry ->
+      Option.some_if (Hash_set.mem ids entry.id) entry.id)
+  in
+  retire_canonical_entries
+    t
+    ~retained_ids
+    ~initial_count:
+      (Int.min
+         (value t).conversation.initial_prompt_entry_count
+         (List.length retained_ids))
+    ~limits
 ;;
 
 let retire_canonical_deletion t ~deletion ~limits =
@@ -3051,6 +3083,9 @@ let transfer_pending_internal
     then Ok ()
     else Error (invalid "pending custody transfer differs from pure candidate")
   in
+  let incoming =
+    with_value incoming { incoming_value with recovery_windows = next.recovery_windows }
+  in
   Ok
     { incoming with
       ordered_goal_accounts = t.ordered_goal_accounts
@@ -3196,7 +3231,8 @@ let encode_ordered_prefix_with_evidence t ~limits =
   in
   let%bind native = S.Native_validation.create (value t) |> X.document_result in
   let%bind () =
-    S.Native_validation.validate_remaining native ~policy_revision |> X.document_result
+    S.Native_validation.validate_ordered_prefix native ~policy_revision
+    |> X.document_result
   in
   encode_prefix_fields_with_evidence t ~limits
 ;;
@@ -3602,7 +3638,12 @@ module Transaction = struct
         invalid
           "history continuation changed its exact candidate or accounting projection"
     in
-    let%map _ = encode admitted ~limits in
+    let encode_next =
+      match next.recovery_windows with
+      | None -> encode
+      | Some _ -> encode_prefix
+    in
+    let%map _ = encode_next admitted ~limits in
     { staged = admitted }
   ;;
 

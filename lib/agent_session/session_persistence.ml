@@ -168,7 +168,7 @@ let snapshot_at_payload
   | Some snapshot -> args (Store.Snapshot.update snapshot)
 ;;
 
-let admit_recovery_note_storage
+let admit_recovery_storage
       t
       ~snapshot_payload_limit
       ~previous
@@ -178,15 +178,16 @@ let admit_recovery_note_storage
   =
   let open Result.Let_syntax in
   let state = transition.Session_transition.state in
-  if Option.equal phys_equal previous.Session_state.recovery_notes state.recovery_notes
+  if
+    Option.equal phys_equal previous.Session_state.recovery_notes state.recovery_notes
+    && Option.equal phys_equal previous.recovery_windows state.recovery_windows
   then Ok ()
   else (
     let%bind snapshot_payload_limit =
       match snapshot_payload_limit with
       | Some limit -> Ok limit
       | None ->
-        Error
-          (Store.Store_error.Corrupt "recovery note writer has no bound snapshot profile")
+        Error (Store.Store_error.Corrupt "recovery writer has no bound snapshot profile")
     in
     let%bind limits =
       Persistence_codec.limits ~max_bytes:snapshot_payload_limit
@@ -203,8 +204,7 @@ let admit_recovery_note_storage
     if
       String.length (Store.Transaction.encode transaction)
       > Store.Commit_writer.max_payload_length t.writer
-    then
-      Error (document_error (D.Error.Limit_exceeded "recovery note transaction payload"))
+    then Error (document_error (D.Error.Limit_exceeded "recovery transaction payload"))
     else Ok ())
 ;;
 
@@ -272,7 +272,7 @@ let commit_with_profile
     |> Result.map_error ~f:protocol_error
   in
   let%bind () =
-    admit_recovery_note_storage
+    admit_recovery_storage
       t
       ~snapshot_payload_limit
       ~previous

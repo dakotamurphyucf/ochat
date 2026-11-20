@@ -162,6 +162,15 @@ val retire_canonical_suffix
   -> limits:Document_schema.Limits.t
   -> (t, Document_schema.Error.t) result
 
+(** Filter only old canonical rows leaving an independently archive-admitted
+    ordinary compaction. Original retained entry envelopes keep their fields.
+    The caller must attach the checked replacement before further admission. *)
+val retire_canonical_compaction
+  :  t
+  -> history:Agent_protocol.History.entry list
+  -> limits:Document_schema.Limits.t
+  -> (t, Document_schema.Error.t) result
+
 (** Internal custody transfer for a validated ordinary deletion. Rechecks its exact
     basis and preserves the full ordered retained subsequence. Callers must admit
     the exact previous archive before using this carrier. *)
@@ -341,7 +350,8 @@ module Transaction : sig
       Requires the identical issued private accounting cursor, exact pure next
       value and unchanged catalog/account/ledger projection; it cannot rebase or
       import another snapshot's evidence. History/archive custody is checked by
-      the actual history owner before this call. *)
+      the actual history owner before this call. Any next-publication window
+      locators are fully validated after the committed revision is stamped. *)
   val continue_after_history
     :  t
     -> admitted:document

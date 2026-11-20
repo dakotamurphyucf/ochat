@@ -297,9 +297,12 @@ let expired_dispositions t = t.expired_dispositions
 let requires_archive t = t.requires_archive
 
 let apply t state =
-  let%map.Result () = validate_basis t state in
+  let open Result.Let_syntax in
+  let%bind () = validate_basis t state in
+  let%map recovery_windows = Recovery_window_capture.append state t.adopted_entries in
   { state with
-    conversation =
+    recovery_windows
+  ; conversation =
       { state.conversation with
         canonical_history = state.conversation.canonical_history @ t.adopted_entries
       ; deferred_user_entries = t.pending
