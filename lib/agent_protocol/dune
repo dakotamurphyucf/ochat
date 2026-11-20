@@ -28,6 +28,9 @@
   authoring_guidance
   authoring_reference
   history
+  recovery_wire
+  recovery_item_version
+  recovery_window
   history_edit
   search_term
   search_snippet
@@ -193,6 +196,7 @@
   stream_error
   inference_query)
  (private_modules
+  recovery_wire
   recurrence_wire
   recurrence_query_definition
   recurrence_query_evidence

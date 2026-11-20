@@ -1,0 +1,6 @@
+(library
+ (name recovery_window_tests)
+ (libraries core jsonaf ochat.agent_protocol ochat.chatml_source)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))

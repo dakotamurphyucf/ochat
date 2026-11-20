@@ -35,6 +35,7 @@ end
 
 module Server : S
 module Session : S
+module Context_window : S
 module Run : S
 module Goal : S
 

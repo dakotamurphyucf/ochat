@@ -77,6 +77,10 @@ module Session = Make (struct
     let prefix = "ses"
   end)
 
+module Context_window = Make (struct
+    let prefix = "win"
+  end)
+
 module Run = Make (struct
     let prefix = "run"
   end)
