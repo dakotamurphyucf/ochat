@@ -20,3 +20,11 @@ val create : Session_state.t -> owner:P.Session_ref.t -> (t, P.Error.t) result
     withdrawal, and the source's current moderator tombstones. Selection does
     not open an archive, access a blob, or authorize model delivery. *)
 val select : t -> P.Recovery_window.Citation.t -> selection
+
+(** A retained preparation establishes effective membership. Check that member's
+    present window and expiry, exact canonical base when known, and moderator suppression
+    before following either a live or archived source. *)
+val check_effective
+  :  t
+  -> P.Recovery_window.Citation.t
+  -> (unit, [ `Unavailable | `Withdrawn | `Expired ]) result

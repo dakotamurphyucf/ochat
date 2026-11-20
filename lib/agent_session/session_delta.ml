@@ -17,7 +17,9 @@ type t =
       Agent_protocol.Session_ref.t * Agent_protocol.Id.Context_window.t
   | Recovery_effective_prepared of (Recovery_effective_record.t[@sexp.opaque])
   | Recovery_summary_compacted of
-      Session_state.Compaction_archive.t * Agent_protocol.History.entry list
+      Session_state.Compaction_archive.t
+      * Agent_protocol.History.entry list
+      * [ `Canonical | `Canonical_and_effective ]
   | Authoring_references_forgotten of Agent_protocol.History.Id.t list
   | Authoring_publication_changed of Chat_response.Authoring_publication.context
   | Initial_prompt_count_changed of int
@@ -706,11 +708,16 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
   | Recovery_effective_prepared record ->
     let%map.Result ledger = Recovery_effective_capture.apply state record in
     { state with recovery_effective = Some ledger }
-  | Recovery_summary_compacted (archive, history) ->
+  | Recovery_summary_compacted (archive, history, capture) ->
     let open Result.Let_syntax in
     let%bind ledger = Recovery_window_capture.summarize state ~archive ~history in
+    let%bind recovery_effective =
+      match capture with
+      | `Canonical -> Ok state.recovery_effective
+      | `Canonical_and_effective -> Recovery_effective_capture.relocate state ~archive
+    in
     let%map next = with_canonical_history state history ~recovery_windows:(Some ledger) in
-    attach_archive next archive
+    attach_archive { next with recovery_effective } archive
   | Authoring_references_forgotten ids ->
     let open Result.Let_syntax in
     let%map index = Session_state.authoring_references state in

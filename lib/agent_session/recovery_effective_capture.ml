@@ -6,6 +6,9 @@ module Ledger = Recovery_effective_ledger
 module Scope = P.Recovery_window.Scope
 module Projection = Recovery_effective_projection
 module Windows = Recovery_window_ledger
+module Archive = Record.Archive
+module Citation = P.Recovery_window.Citation
+module Version = P.Recovery_item_version
 
 let invalid reason = P.Error.invalid_request reason
 
@@ -70,7 +73,10 @@ let apply state record =
   let%bind scope = scope_for_operation state (Record.operation record) in
   let overlay_incarnation = incarnation state in
   if
-    (not (Scope.equal (Record.scope record) scope))
+    (match Record.custody record with
+     | Live -> false
+     | Lost | Archived _ -> true)
+    || (not (Scope.equal (Record.scope record) scope))
     || (not (Int64.equal state.counters.revision (Record.source_revision record)))
     || not (Int64.equal overlay_incarnation (Record.overlay_incarnation record))
   then Error (invalid "effective preparation source changed before admission")
@@ -120,39 +126,168 @@ let replacement (state : State.t) ~(incoming : State.t) =
       ~next:incoming.moderator
 ;;
 
+let resolve_record (state : State.t) ~source_revision =
+  Option.bind state.recovery_effective ~f:(fun ledger ->
+    List.find (Ledger.records ledger) ~f:(fun record ->
+      Int64.equal source_revision (Record.source_revision record)))
+;;
+
+let projection_revision ~revision record =
+  let source_revision = Record.source_revision record in
+  if Int64.equal revision (Int64.succ source_revision) then source_revision else revision
+;;
+
 let resolve_live (state : State.t) ~source_revision citation =
   let open Result.Let_syntax in
-  let recorded =
-    Option.bind state.recovery_effective ~f:(fun ledger ->
-      List.find (Ledger.records ledger) ~f:(fun record ->
-        Int64.equal source_revision (Record.source_revision record)))
-  in
-  match recorded with
-  | None -> Ok None
+  match resolve_record state ~source_revision with
   | Some record ->
-    let overlay_incarnation = Record.overlay_incarnation record in
-    let same_scope =
-      Option.exists (active_scope state) ~f:(Scope.equal (Record.scope record))
-    in
-    if
-      (not same_scope)
-      || (not
-            (Option.exists
-               (current_incarnation state)
-               ~f:(Int64.equal overlay_incarnation)))
-      || Int64.(state.counters.revision <= source_revision)
-    then Ok None
+    (match Record.custody record with
+     | Lost | Archived _ -> Ok None
+     | Live ->
+       let overlay_incarnation = Record.overlay_incarnation record in
+       let same_scope =
+         Option.exists (active_scope state) ~f:(Scope.equal (Record.scope record))
+       in
+       if
+         (not same_scope)
+         || (not
+               (Option.exists
+                  (current_incarnation state)
+                  ~f:(Int64.equal overlay_incarnation)))
+         || Int64.(state.counters.revision <= source_revision)
+       then Ok None
+       else (
+         let source_revision =
+           projection_revision ~revision:state.counters.revision record
+         in
+         let%map projection = projected state ~source_revision ~overlay_incarnation in
+         Option.bind projection ~f:(fun projection ->
+           Record.resolve record projection citation)))
+  | None -> Ok None
+;;
+
+let kind_of_archive = function
+  | State.Compaction_archive.Compaction -> Ok Archive.Summary
+  | Rollover -> Ok Archive.Rollover
+  | Reset | Rebuild | Upgrade | Edit | Delete | Pending_input ->
+    Error (invalid "effective source requires a compaction or rollover prestate")
+;;
+
+let same_projected_origin ~prestate_revision (prepared : Version.origin) projected =
+  match prepared, projected with
+  | Captured { session_revision }, Version.Captured _ ->
+    Int64.equal prestate_revision (Int64.succ session_revision)
+  | _ -> Version.equal_origin prepared projected
+;;
+
+let relocation_positions projection ~prestate_revision =
+  let cache = Hashtbl.create (module P.History.Id) in
+  let remaining_bytes = ref Inference_runtime.Recovery_input.max_projection_bytes in
+  let digest row =
+    Hashtbl.find_or_add cache (Projection.Row.occurrence row) ~default:(fun () ->
+      let version, bytes = Projection.Row.version row ~remaining_bytes:!remaining_bytes in
+      remaining_bytes := bytes;
+      match version with
+      | Some (Effective { digest; _ }) -> Some digest
+      | Some (Canonical _) | None -> None)
+  in
+  fun record ->
+    List.filter_map (Record.members record) ~f:(fun member ->
+      let citation = Record.Member.citation member in
+      match
+        ( Citation.version citation
+        , Projection.find projection (Citation.occurrence citation) )
+      with
+      | Effective { origin; digest = prepared }, Some row
+        when same_projected_origin ~prestate_revision origin (Projection.Row.origin row)
+             && Option.exists (digest row) ~f:(Chatml_source.Digest.equal prepared) ->
+        Some
+          (Archive.Position.create
+             ~request_ordinal:(Record.Member.request_ordinal member)
+             ~effective_ordinal:(Projection.Row.effective_ordinal row)
+             ~canonical_ordinal:(Projection.Row.canonical_ordinal row))
+      | _ -> None)
+    |> Result.all
+;;
+
+let relocate (previous : State.t) ~(archive : State.Compaction_archive.t) =
+  let open Result.Let_syntax in
+  match previous.recovery_effective with
+  | None -> Ok None
+  | Some ledger when not (Ledger.has_live_sources ledger) ->
+    Ok previous.recovery_effective
+  | Some ledger ->
+    let%bind kind = kind_of_archive archive.kind in
+    if not (Int64.equal archive.revision previous.counters.revision)
+    then Error (invalid "effective archive reference is not for the exact prestate")
     else (
-      let projection_revision =
-        match P.Recovery_window.Citation.version citation with
-        | Effective { origin = Captured _; _ }
-          when Int64.equal state.counters.revision (Int64.succ source_revision) ->
-          source_revision
-        | Canonical _ | Effective _ -> state.counters.revision
+      let%bind digest =
+        Chatml_source.Digest.of_hex archive.sha256
+        |> Result.map_error ~f:(fun _ -> invalid "effective archive digest is invalid")
       in
-      let%map projection =
-        projected state ~source_revision:projection_revision ~overlay_incarnation
+      let%bind present =
+        match active_scope previous, Ledger.current_incarnation ledger with
+        | Some scope, Some overlay_incarnation ->
+          let%map projection =
+            projected previous ~source_revision:archive.revision ~overlay_incarnation
+          in
+          Option.map projection ~f:(fun projection ->
+            ( scope
+            , overlay_incarnation
+            , relocation_positions projection ~prestate_revision:archive.revision ))
+        | _ -> Ok None
       in
-      Option.bind projection ~f:(fun projection ->
-        Record.resolve record projection citation))
+      let transfer record =
+        match Record.custody record, present with
+        | Live, Some (scope, epoch, positions)
+          when Scope.equal (Record.scope record) scope
+               && Int64.equal (Record.overlay_incarnation record) epoch ->
+          let%bind positions = positions record in
+          if List.is_empty positions
+          then Ok (Record.lose_live_source record)
+          else (
+            let%bind location =
+              Archive.create
+                ~kind
+                ~operation:archive.operation_id
+                ~revision:archive.revision
+                ~digest
+                positions
+            in
+            Record.archive record location)
+        | Live, _ -> Ok (Record.lose_live_source record)
+        | (Archived _ | Lost), _ -> Ok record
+      in
+      let%map next = Ledger.relocate ledger ~transfer in
+      Some next)
+;;
+
+let resolve_archived (archived : State.t) record citation =
+  let open Result.Let_syntax in
+  let source_revision = Record.source_revision record in
+  let archived_record = resolve_record archived ~source_revision in
+  let scope = Record.scope record in
+  match Record.custody record, archived_record with
+  | Archived location, Some admitted
+    when Int64.equal (Archive.revision location) archived.counters.revision
+         && Int.equal (Scope.generation scope) archived.identity.generation
+         && P.Id.Session.equal
+              archived.identity.session_id
+              (P.Session_ref.session_id (Scope.session scope))
+         && (match Record.custody admitted with
+             | Live -> true
+             | Lost | Archived _ -> false)
+         && Option.exists (active_scope archived) ~f:(Scope.equal scope)
+         && Option.exists
+              (current_incarnation archived)
+              ~f:(Int64.equal (Record.overlay_incarnation record))
+         && Record.equal_preparation record admitted ->
+    let source_revision =
+      projection_revision ~revision:archived.counters.revision record
+    in
+    let overlay_incarnation = Record.overlay_incarnation record in
+    let%map projection = projected archived ~source_revision ~overlay_incarnation in
+    Option.bind projection ~f:(fun projection ->
+      Record.resolve_archived record projection citation)
+  | _ -> Error (invalid "verified archive does not contain the exact preparation source")
 ;;

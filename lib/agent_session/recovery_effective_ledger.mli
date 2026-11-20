@@ -21,10 +21,19 @@ val add_if_room : t option -> Record.t -> (t option, P.Error.t) result
 (** Replay an actually committed addition. Exceeding any bound is invalid. *)
 val add : t option -> Record.t -> (t, P.Error.t) result
 
+val has_live_sources : t -> bool
+
+(** Persist one source transfer while preserving all pre-existing facts. *)
+val relocate
+  :  t
+  -> transfer:(Record.t -> (Record.t, P.Error.t) result)
+  -> (t, P.Error.t) result
+
 val validate_state
   :  t
   -> windows:Recovery_window_ledger.t option
   -> publication_revision:int64
+  -> has_archive:(Record.Archive.t -> bool)
   -> (unit, P.Error.t) result
 
 val to_jsonaf : t -> Jsonaf.t

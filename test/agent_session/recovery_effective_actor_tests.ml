@@ -34,6 +34,290 @@ let set_effective_replacement actor (source : P.History.entry) ~change ~text =
   snapshot
 ;;
 
+module Source = A.Recovery_source_reader
+module Effective_archive = A.Recovery_effective_archive
+
+let journal_transactions journal =
+  let scan = Store.Journal.scan journal |> store_ok in
+  List.filter_map scan.entries ~f:(fun entry ->
+    match Store.Frame.flags entry.frame with
+    | 0 -> Some (Store.Transaction.decode (Store.Frame.payload entry.frame) |> store_ok)
+    | _ -> None)
+;;
+
+let member_for record id =
+  List.find_exn (Effective_record.members record) ~f:(fun member ->
+    P.History.Id.equal id (Citation.occurrence (Effective_record.Member.citation member)))
+;;
+
+let read_effective fixture record member ~current ~project =
+  Source.read_effective
+    fixture.sessions
+    ~handle:fixture.handle
+    ~current
+    ~max_frame_bytes:payload_limit
+    ~source_revision:(Effective_record.source_revision record)
+    (Effective_record.Member.citation member)
+    ~project
+;;
+
+let archived_location record =
+  match Effective_record.custody record with
+  | Archived location -> location
+  | Live | Lost ->
+    failwith "an eligible preparation did not move into the verified archive"
+;;
+
+let prepend_before_archive actor (snapshot : Session.Moderator_state.Identity_snapshot.t) =
+  let entry = history 90 "inserted after preparation" in
+  let value = A.History_codec.of_protocol entry |> protocol_ok |> History_entry.payload in
+  let item =
+    Session.Moderator_state.Identity_snapshot.Inserted.
+      { entry_id = entry.id
+      ; change_id = snapshot.next_change_id
+      ; value
+      ; script_label = None
+      }
+  in
+  let new_snapshot =
+    { snapshot with
+      revision = snapshot.revision + 1
+    ; next_change_id = snapshot.next_change_id + 1
+    ; prepended_items = [ item ]
+    }
+  in
+  Actor.change_moderator
+    actor
+    (Some (A.Runtime_builder.encode_moderator_snapshot new_snapshot))
+  |> protocol_ok
+  |> ignore
+;;
+
+let check_rollover_source fixture (prestate : State.t) =
+  let predecessor = scope prestate in
+  let successor =
+    Scope.create
+      ~session:fixture.owner
+      ~generation:prestate.identity.generation
+      ~window:(P.Id.Context_window.create ())
+    |> protocol_ok
+  in
+  let document = A.Session_state_document.authored prestate in
+  let archive =
+    Archive.reference_for
+      document
+      ~limits:document_limits
+      ~kind:Rollover
+      (P.Id.Operation.create ())
+    |> protocol_ok
+  in
+  Archive.write
+    ~env:fixture.env
+    ~handle:fixture.handle
+    ~max_payload_length:payload_limit
+    archive
+    document
+  |> protocol_ok;
+  let recovery_windows =
+    A.Recovery_window_seal.prepare prestate ~predecessor ~successor ~archive ~retained:[]
+    |> protocol_ok
+  in
+  let recovery_effective = Effective_capture.relocate prestate ~archive |> protocol_ok in
+  let counters =
+    { prestate.counters with revision = Int64.succ prestate.counters.revision }
+  in
+  let conversation =
+    { prestate.conversation with
+      canonical_history = []
+    ; compaction_archives = [ archive ]
+    }
+  in
+  let sealed =
+    { prestate with
+      counters
+    ; conversation
+    ; recovery_windows = Some recovery_windows
+    ; recovery_effective
+    }
+  in
+  let record = List.last_exn (effective_records sealed) in
+  let target = (history 50 "").id in
+  let member = member_for record target in
+  assert (
+    Effective_archive.equal_kind
+      (Effective_archive.kind (archived_location record))
+      Rollover);
+  (match
+     read_effective
+       fixture
+       record
+       member
+       ~current:(fun () -> Ok sealed)
+       ~project:(fun row -> Ok row.id)
+   with
+   | Error failure -> failwith (Sexp.to_string_hum (Source.sexp_of_error failure))
+   | Ok id -> assert (P.History.Id.equal id target));
+  let expired =
+    { sealed with
+      recovery_windows = Some (Ledger.expire recovery_windows predecessor |> protocol_ok)
+    }
+  in
+  let projected = ref false in
+  let expire_during_projection () = Ok (if !projected then expired else sealed) in
+  (match
+     read_effective
+       fixture
+       record
+       member
+       ~current:expire_during_projection
+       ~project:(fun row ->
+         projected := true;
+         Ok row.id)
+   with
+   | Error Expired -> assert !projected
+   | Error _ | Ok _ -> failwith "expiry did not revoke the selected source");
+  let file =
+    Filename.concat
+      (Store.Session_store.Handle.archive_directory fixture.handle)
+      (Archive.filename archive)
+  in
+  Eio.Path.unlink Eio.Path.(Eio.Stdenv.fs fixture.env / file);
+  match
+    read_effective
+      fixture
+      record
+      member
+      ~current:(fun () -> Ok expired)
+      ~project:(fun _ -> failwith "expired source reached projection")
+  with
+  | Error Expired -> ()
+  | Error _ | Ok _ -> failwith "expiry did not precede physical archive access"
+;;
+
+let check_snapshot (state : State.t) =
+  let module Codec = A.Session_state_document in
+  let module Raw = Recovery_window_ledger_tests in
+  let marker = P.Session_storage_semantics.recovery_effective_archive in
+  let document =
+    Codec.encode (Codec.authored state) ~limits:document_limits |> document_ok
+  in
+  assert (List.mem (D.Document.required_semantics document) marker ~equal:String.equal);
+  let read = Raw.decode document |> document_ok |> Codec.value in
+  let shelf state =
+    Option.value_exn state.State.recovery_effective |> Effective_ledger.to_jsonaf
+  in
+  assert (D.Json.equal (shelf read) (shelf state));
+  let missing_fence =
+    Raw.update_object (D.Document.json document) ~field:"required_semantics" ~f:(function
+      | `Array values ->
+        `Array
+          (List.filter values ~f:(function
+             | `String value -> not (String.equal value marker)
+             | _ -> true))
+      | _ -> assert false)
+    |> Raw.inspect
+  in
+  assert (Result.is_error (Raw.decode missing_fence))
+;;
+
+let check_archived_source fixture (replayed : State.t) =
+  let target = (history 50 "").id in
+  let records = effective_records replayed in
+  let first = List.hd_exn records in
+  let live_member = member_for first target in
+  let latest = List.last_exn records in
+  let selected = member_for latest target in
+  let current () = Ok replayed in
+  let project row = Ok row in
+  let expect reason = function
+    | Error actual when Source.equal_error actual reason -> ()
+    | Error actual -> failwith (Sexp.to_string_hum (Source.sexp_of_error actual))
+    | Ok _ -> failwith "an unavailable archive yielded a source"
+  in
+  read_effective fixture first live_member ~current ~project |> expect Unavailable;
+  let recovered =
+    match read_effective fixture latest selected ~current ~project with
+    | Ok row -> row
+    | Error failure -> failwith (Sexp.to_string_hum (Source.sexp_of_error failure))
+  in
+  assert (
+    String.is_substring (Jsonaf.to_string recovered.payload) ~substring:"new version");
+  assert (P.History.equal_provenance recovered.provenance (Moderator_replaced target));
+  let location = archived_location latest in
+  let position =
+    Effective_archive.find
+      location
+      ~request_ordinal:(Effective_record.Member.request_ordinal selected)
+    |> Option.value_exn
+  in
+  [%test_eq: int]
+    (Effective_record.Member.effective_ordinal selected + 1)
+    (Effective_archive.Position.effective_ordinal position);
+  let suppressed =
+    let checkpoint = Option.value_exn replayed.moderator in
+    let snapshot =
+      A.Moderator_checkpoint.decode (Some checkpoint) |> protocol_ok |> Option.value_exn
+    in
+    let tombstone =
+      Session.Moderator_state.Identity_snapshot.Tombstone.
+        { target_id = target; change_id = snapshot.next_change_id }
+    in
+    let snapshot =
+      { snapshot with
+        revision = snapshot.revision + 1
+      ; next_change_id = snapshot.next_change_id + 1
+      ; replacements = []
+      ; tombstones = [ tombstone ]
+      }
+    in
+    { replayed with
+      moderator = Some (A.Runtime_builder.encode_moderator_snapshot snapshot)
+    }
+  in
+  let current_after_projection =
+    let projected = ref false in
+    let current () = Ok (if !projected then suppressed else replayed) in
+    let project row =
+      projected := true;
+      Ok row
+    in
+    read_effective fixture latest selected ~current ~project |> expect Withdrawn;
+    !projected
+  in
+  assert current_after_projection;
+  let reference =
+    List.find_exn replayed.conversation.compaction_archives ~f:(fun reference ->
+      P.Id.Operation.equal reference.operation_id (Effective_archive.operation location))
+  in
+  let path_for reference =
+    Filename.concat
+      (Store.Session_store.Handle.archive_directory fixture.handle)
+      (Archive.filename reference)
+  in
+  let path = path_for reference in
+  let adjacent = List.hd_exn replayed.conversation.compaction_archives in
+  assert (not (reference_eq reference adjacent));
+  let replacement =
+    Eio.Path.load Eio.Path.(Eio.Stdenv.fs fixture.env / path_for adjacent)
+  in
+  let file = Eio.Path.(Eio.Stdenv.fs fixture.env / path) in
+  let saved = Eio.Path.(Eio.Stdenv.fs fixture.env / (path ^ ".fixture-backup")) in
+  Eio.Path.rename file saved;
+  Exn.protect
+    ~finally:(fun () -> Eio.Path.rename saved file)
+    ~f:(fun () ->
+      read_effective fixture latest selected ~current ~project |> expect Missing;
+      read_effective
+        fixture
+        latest
+        selected
+        ~current:(fun () -> Ok suppressed)
+        ~project:(fun _ -> failwith "withdrawn source reached projection")
+      |> expect Withdrawn;
+      Eio.Path.save ~create:(`Exclusive 0o600) file replacement;
+      read_effective fixture latest selected ~current ~project |> expect Corrupt)
+;;
+
 let%test_unit "actual root preparation retains only exact neutral sources and replays" =
   with_actor_workspace (fun env workspace_instance ->
     Eio.Switch.run (fun sw ->
@@ -92,11 +376,27 @@ let%test_unit "actual root preparation retains only exact neutral sources and re
       in
       let initial = Persistence.Restored.authored state_before in
       let active_journal = journal fixture Store.Journal.create in
-      let archive =
+      let write_archive =
         Archive.write_document
           ~env
           ~handle:fixture.handle
           ~max_payload_length:payload_limit
+      in
+      let fail_next_archive = ref false in
+      let orphan = ref None in
+      let archive reference document =
+        let%bind.Result () = write_archive reference document in
+        if !fail_next_archive
+        then (
+          fail_next_archive := false;
+          orphan := Some reference;
+          Error
+            (P.Error.create
+               Persistence_error
+               ~message:"effective archive synced before the fixture stopped publication"
+               ~retryable:false
+               ()))
+        else Ok ()
       in
       let after =
         Eio.Switch.run (fun sw ->
@@ -348,6 +648,7 @@ let%test_unit "actual root preparation retains only exact neutral sources and re
                  (List.rev !prepared_models);
                [%test_eq: int] 3 !allocated;
                invalid_target := false;
+               mismatch := false;
                repeats := 64;
                let saturated = turn 56 in
                [%test_eq: int] 67 (List.length !prepared_models);
@@ -357,16 +658,55 @@ let%test_unit "actual root preparation retains only exact neutral sources and re
                assert (
                  Effective_record.to_jsonaf (List.hd_exn records)
                  |> D.Json.equal (Effective_record.to_jsonaf first));
-               saturated))
+               prepend_before_archive actor (Option.value_exn !snapshot);
+               check_rollover_source fixture (state actor);
+               Inference_ports.install_compaction_runtime actor |> protocol_ok;
+               fail_next_archive := true;
+               let unchanged = compact fixture actor writer in
+               let orphan = Option.value_exn !orphan in
+               let written = read_archive fixture orphan |> protocol_ok in
+               let retained state = Option.value_exn state.State.recovery_effective in
+               assert (
+                 D.Json.equal
+                   (Effective_ledger.to_jsonaf (retained unchanged))
+                   (Effective_ledger.to_jsonaf (retained saturated)));
+               assert (
+                 D.Json.equal
+                   (Effective_ledger.to_jsonaf (retained written))
+                   (Effective_ledger.to_jsonaf (retained saturated)));
+               assert (List.is_empty unchanged.conversation.compaction_archives);
+               let compacted = compact fixture actor writer in
+               let terminal =
+                 List.find_exn
+                   (journal_transactions active_journal)
+                   ~f:(fun transaction ->
+                     Int64.equal
+                       transaction.transaction_sequence
+                       compacted.counters.transaction_sequence)
+               in
+               assert (
+                 List.mem
+                   (delta_kinds terminal)
+                   "recovery_summary_compacted"
+                   ~equal:String.equal);
+               assert (
+                 List.mem
+                   (D.Document.required_semantics terminal.delta)
+                   P.Session_storage_semantics.recovery_effective_archive
+                   ~equal:String.equal);
+               let compacted_again = compact fixture actor writer in
+               [%test_eq: int]
+                 2
+                 (List.length compacted_again.conversation.compaction_archives);
+               assert (
+                 D.Json.equal
+                   (Effective_ledger.to_jsonaf (retained compacted))
+                   (Effective_ledger.to_jsonaf (retained compacted_again)));
+               compacted_again))
       in
       let replay_journal = journal fixture Store.Journal.open_existing in
-      let scan = Store.Journal.scan replay_journal |> store_ok in
       let prepared_deltas =
-        List.filter_map scan.entries ~f:(fun entry ->
-          match Store.Frame.flags entry.frame with
-          | 0 ->
-            Some (Store.Transaction.decode (Store.Frame.payload entry.frame) |> store_ok)
-          | _ -> None)
+        journal_transactions replay_journal
         |> List.filter ~f:(fun transaction ->
           List.mem
             (delta_kinds transaction)
@@ -400,26 +740,8 @@ let%test_unit "actual root preparation retains only exact neutral sources and re
       in
       let replayed = Persistence.Restored.state recovered.state in
       assert (D.Json.equal (shelf after) (shelf replayed));
-      let first = List.hd_exn (effective_records replayed) in
-      let members = Effective_record.members first in
-      assert (not (List.is_empty members));
-      let source_id = (history 50 "").id in
-      let resolves member =
-        Effective_capture.resolve_live
-          replayed
-          ~source_revision:(Effective_record.source_revision first)
-          (Effective_record.Member.citation member)
-        |> protocol_ok
-        |> Option.is_some
-      in
-      let target =
-        List.find_exn members ~f:(fun member ->
-          P.History.Id.equal
-            source_id
-            (Citation.occurrence (Effective_record.Member.citation member)))
-      in
-      assert (not (resolves target));
-      assert (List.exists members ~f:resolves)))
+      check_snapshot replayed;
+      check_archived_source fixture replayed))
 ;;
 
 let%test_unit

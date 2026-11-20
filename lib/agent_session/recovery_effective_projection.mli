@@ -9,6 +9,7 @@ module Row : sig
   type t
 
   val occurrence : t -> P.History.Id.t
+  val origin : t -> P.Recovery_item_version.origin
   val effective_ordinal : t -> int
   val canonical_ordinal : t -> int option
   val version : t -> remaining_bytes:int -> P.Recovery_item_version.t option * int

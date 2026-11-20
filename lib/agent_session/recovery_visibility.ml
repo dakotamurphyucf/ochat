@@ -63,3 +63,57 @@ let select t citation =
       then Withdrawn
       else Eligible member)
 ;;
+
+let check_effective t citation =
+  let open Result.Let_syntax in
+  let scope = Citation.scope citation in
+  if
+    (not (P.Session_ref.equal t.owner (Scope.session scope)))
+    || not (Int.equal t.generation (Scope.generation scope))
+  then Error `Unavailable
+  else (
+    let%bind window =
+      Hashtbl.find t.windows (Scope.window scope) |> Result.of_option ~error:`Unavailable
+    in
+    let%bind () =
+      match Window.state window with
+      | Expired -> Error `Expired
+      | Open | Sealed -> Ok ()
+    in
+    let occurrence = Citation.occurrence citation in
+    if Hash_set.mem t.suppressed occurrence
+    then Error `Withdrawn
+    else (
+      let canonical revision =
+        let%bind citation =
+          Citation.create
+            scope
+            ~occurrence
+            ~version:(P.Recovery_item_version.canonical revision)
+          |> Result.map_error ~f:(fun _ -> `Unavailable)
+        in
+        match select t citation with
+        | Unavailable -> Error `Unavailable
+        | Withdrawn -> Error `Withdrawn
+        | Expired -> Error `Expired
+        | Eligible _ -> Ok ()
+      in
+      match Citation.version citation with
+      | Canonical _ -> Error `Unavailable
+      | Effective { origin = Inserted _; _ } -> Ok ()
+      | Effective { origin = Unchanged revision | Replaced { base = revision; _ }; _ } ->
+        canonical revision
+      | Effective { origin = Captured _; _ } ->
+        (* The legacy witness had a canonical position, but no base revision.
+           A withdrawal for any matching occurrence makes that witness unsafe. *)
+        let%bind found =
+          Window.fold_members window ~init:false ~f:(fun found member ->
+            let id = Citation.occurrence (Ledger.Member.citation member) in
+            if not (P.History.Id.equal id occurrence)
+            then Ok found
+            else if Ledger.Member.is_withdrawn member
+            then Error `Withdrawn
+            else Ok true)
+        in
+        if found then Ok () else Error `Unavailable))
+;;

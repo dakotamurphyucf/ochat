@@ -1116,7 +1116,18 @@ let validate_domain (t : t) ~recovery_revision =
       Recovery_effective_ledger.validate_state
         ledger
         ~windows:t.recovery_windows
-        ~publication_revision:recovery_revision)
+        ~publication_revision:recovery_revision
+        ~has_archive:(fun reference ->
+          let module Source = Recovery_effective_archive in
+          let kind = Compaction_archive.of_recovery_source (Source.kind reference) in
+          let operation = Source.operation reference in
+          let revision = Source.revision reference in
+          let sha256 = Chatml_source.Digest.to_hex (Source.digest reference) in
+          List.exists t.conversation.compaction_archives ~f:(fun archive ->
+            Compaction_archive.equal_kind archive.kind kind
+            && Agent_protocol.Id.Operation.equal archive.operation_id operation
+            && Int64.equal archive.revision revision
+            && String.equal archive.sha256 sha256)))
   in
   let%bind () =
     Option.value_map t.recovery_rollover ~default:(Ok ()) ~f:(fun ledger ->

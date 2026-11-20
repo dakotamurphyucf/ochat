@@ -26178,7 +26178,16 @@ let compaction_terminal_base_delta t operation = function
     let history_changes : Session_delta.t list =
       match t.state.recovery_windows with
       | None -> [ Compaction_archived archive; Canonical_history_replaced history ]
-      | Some _ -> [ Recovery_summary_compacted (archive, history) ]
+      | Some _ ->
+        let capture =
+          if
+            Option.exists
+              t.state.recovery_effective
+              ~f:Recovery_effective_ledger.has_live_sources
+          then `Canonical_and_effective
+          else `Canonical
+        in
+        [ Recovery_summary_compacted (archive, history, capture) ]
     in
     let operation = operation_state t operation Agent_protocol.Operation.Completed in
     let lifecycle = terminal_lifecycle t in

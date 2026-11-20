@@ -19,7 +19,9 @@ type t =
       Agent_protocol.Session_ref.t * Agent_protocol.Id.Context_window.t
   | Recovery_effective_prepared of (Recovery_effective_record.t[@sexp.opaque])
   | Recovery_summary_compacted of
-      Session_state.Compaction_archive.t * Agent_protocol.History.entry list
+      Session_state.Compaction_archive.t
+      * Agent_protocol.History.entry list
+      * [ `Canonical | `Canonical_and_effective ]
   | Authoring_references_forgotten of Agent_protocol.History.Id.t list
   | Authoring_publication_changed of Chat_response.Authoring_publication.context
   (** Trusted model-input policy/context binding, retained for result publication

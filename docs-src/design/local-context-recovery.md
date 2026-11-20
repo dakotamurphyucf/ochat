@@ -175,6 +175,22 @@ canonical base64 and the media signature. Text that happens to contain an
 image URL remains text. [Canonical source reader](../../lib/agent_session/recovery_source_reader.mli),
 [inline image reader](../../lib/agent_session/recovery_image.mli).
 
+An effective read starts with an exact durable preparation and citation.
+Ordinary summary compaction qualifies that preparation's still-visible
+members against the checked prestate. It commits the archive identity and the
+verified source positions with the history replacement. Positions in the
+prepared request stay fixed even when later overlay insertions change the
+source positions. Earlier verified archive locators keep their original
+custody. An exact member without a verified position is unavailable after
+transfer.
+
+The reader applies current scope and visibility before opening the archive
+and again before disclosing the result. The archived prestate must contain
+the original preparation, and the selected position must reproduce its
+exact occurrence, effective version and digest. A preparation record and its
+archive locator establish the prepared source. Provider submission requires
+its own durable evidence.
+
 ### Logical visibility and physical custody
 
 Commit the visibility change and the edit, deletion, redaction, or window

@@ -948,6 +948,58 @@ let recovery_effective_delta_requires payload =
   | Absent | Null | Value _ -> false
 ;;
 
+let recovery_effective_archive_name =
+  Agent_protocol.Session_storage_semantics.recovery_effective_archive
+;;
+
+let state_has_effective_transfer payload =
+  match D.Json.field payload ~name:"recovery_effective" with
+  | Value ledger ->
+    (match D.Json.field ledger ~name:"preparations" with
+     | Value (`Array records) ->
+       List.exists records ~f:(fun record ->
+         match D.Json.field record ~name:"archive" with
+         | Absent -> false
+         | Null | Value _ -> true)
+     | Absent | Null | Value _ -> false)
+  | Absent | Null -> false
+;;
+
+let delta_has_effective_transfer payload =
+  match D.Json.field payload ~name:"changes" with
+  | Value (`Array changes) ->
+    List.exists changes ~f:(fun change ->
+      match D.Json.field change ~name:"kind" with
+      | Value (`String "recovery_summary_compacted") ->
+        (match D.Json.field change ~name:"effective_transfer" with
+         | Absent -> false
+         | Null | Value _ -> true)
+      | Value (`String "created") ->
+        (match D.Json.field change ~name:"state" with
+         | Value state ->
+           (match D.Json.field state ~name:"payload" with
+            | Value payload -> state_has_effective_transfer payload
+            | Absent | Null -> false)
+         | Absent | Null -> false)
+      | _ -> false)
+  | Absent | Null | Value _ -> false
+;;
+
+let require_effective_archive document ~limits ~requires =
+  require
+    document
+    ~name:recovery_effective_archive_name
+    ~required:(requires (D.Document.payload document))
+    ~limits
+;;
+
+let check_effective_archive document ~requires =
+  check
+    document
+    ~name:recovery_effective_archive_name
+    ~required:(requires (D.Document.payload document))
+;;
+
 let require_state_without_effective = require_state
 let check_state_without_effective = check_state
 let require_delta_without_effective = require_delta
@@ -955,6 +1007,9 @@ let check_delta_without_effective = check_delta
 
 let require_state document ~limits =
   let%bind.Result document = require_state_without_effective document ~limits in
+  let%bind.Result document =
+    require_effective_archive document ~limits ~requires:state_has_effective_transfer
+  in
   require
     document
     ~name:recovery_effective_name
@@ -964,6 +1019,9 @@ let require_state document ~limits =
 
 let check_state document =
   let%bind.Result () = check_state_without_effective document in
+  let%bind.Result () =
+    check_effective_archive document ~requires:state_has_effective_transfer
+  in
   check
     document
     ~name:recovery_effective_name
@@ -972,6 +1030,9 @@ let check_state document =
 
 let require_delta document ~limits =
   let%bind.Result document = require_delta_without_effective document ~limits in
+  let%bind.Result document =
+    require_effective_archive document ~limits ~requires:delta_has_effective_transfer
+  in
   require
     document
     ~name:recovery_effective_name
@@ -981,6 +1042,9 @@ let require_delta document ~limits =
 
 let check_delta document =
   let%bind.Result () = check_delta_without_effective document in
+  let%bind.Result () =
+    check_effective_archive document ~requires:delta_has_effective_transfer
+  in
   check
     document
     ~name:recovery_effective_name

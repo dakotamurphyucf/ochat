@@ -27,3 +27,16 @@ val read
   -> P.Recovery_window.Citation.t
   -> project:(P.History.entry -> ('a, error) result)
   -> ('a, error) result
+
+(** Resolve one exact effective preparation member. [source_revision] identifies
+    the durable preparation rather than the archive revision. The same current
+    authority and visibility checks surround opening the source and projection. *)
+val read_effective
+  :  Agent_store.Session_store.t
+  -> handle:Agent_store.Session_store.Handle.t
+  -> current:(unit -> (Session_state.t, P.Error.t) result)
+  -> max_frame_bytes:int
+  -> source_revision:int64
+  -> P.Recovery_window.Citation.t
+  -> project:(P.History.entry -> ('a, error) result)
+  -> ('a, error) result

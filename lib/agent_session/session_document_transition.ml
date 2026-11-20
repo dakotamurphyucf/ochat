@@ -174,7 +174,7 @@ let prepare previous ~delta ~limits =
           |> X.document_result
         in
         Ok (Transaction.with_value carrier state)
-      | Recovery_summary_compacted (archive, _) as delta ->
+      | Recovery_summary_compacted (archive, _, _) as delta ->
         let%bind previous = Transaction.checkpoint carrier ~limits in
         let%bind state =
           Session_delta.apply ~limits (Transaction.value carrier) delta

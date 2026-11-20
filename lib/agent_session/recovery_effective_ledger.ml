@@ -3,6 +3,7 @@ module P = Agent_protocol
 module D = Document_schema
 module X = Persistence_codec
 module Record = Recovery_effective_record
+module Archive = Record.Archive
 module Scope = P.Recovery_window.Scope
 module Windows = Recovery_window_ledger
 
@@ -10,17 +11,24 @@ let invalid reason = Error (P.Error.invalid_request reason)
 let max_preparations = 64
 let max_members = 8192
 
-let limits =
+let limits ~archive_budget =
   D.Limits.create
-    ~max_bytes:(2 * 1024 * 1024)
+    ~max_bytes:((2 * 1024 * 1024) + archive_budget)
     ~max_depth:32
-    ~max_fields:(16 * max_members)
-    ~max_nodes:(22 * max_members)
+    ~max_fields:
+      ((16 * max_members) + if archive_budget > 0 then 6 * max_preparations else 0)
+    ~max_nodes:((22 * max_members) + if archive_budget > 0 then 5 * max_members else 0)
   |> Result.map_error ~f:(fun error -> Error.create_s [%sexp (error : D.Error.t)])
   |> Or_error.ok_exn
 ;;
 
-let validate_encoded = D.Json.validate ~limits
+let preparation_limits = limits ~archive_budget:0
+
+(* A single grouped archive header per preparation and at most one triple of
+   bounded decimal positions per member. Reserve their encoded growth
+   separately so a qualified transfer cannot consume preparation capacity. *)
+let storage_limits = limits ~archive_budget:(256 * 1024)
+let validate_encoded = D.Json.validate ~limits:storage_limits
 
 type t =
   { current_incarnation : int64 option
@@ -36,12 +44,21 @@ let rotate_incarnation t =
   | Some _ -> { t with current_incarnation = None }
 ;;
 
-let to_jsonaf t =
+let encode t ~record =
   `Object
     [ "version", `Number "1"
     ; "current_incarnation", X.option_json X.int64_json t.current_incarnation
-    ; "preparations", X.list_json Record.to_jsonaf t.records
+    ; "preparations", X.list_json record t.records
     ]
+;;
+
+let to_jsonaf t = encode t ~record:Record.to_jsonaf
+
+let has_live_sources t =
+  List.exists t.records ~f:(fun record ->
+    match Record.custody record with
+    | Live -> true
+    | Lost | Archived _ -> false)
 ;;
 
 type admission_error =
@@ -80,12 +97,17 @@ let admit t =
       | Some _, (None | Some _) ->
         fail "effective preparation incarnation is not committed"
     in
-    let%map () =
-      validate_encoded (to_jsonaf t)
-      |> Result.map_error ~f:(function
-        | Limit_exceeded _ -> Capacity
-        | _ -> Invalid (P.Error.invalid_request "invalid effective preparation encoding"))
+    let classify = function
+      | D.Error.Limit_exceeded _ -> Capacity
+      | _ -> Invalid (P.Error.invalid_request "invalid effective preparation encoding")
     in
+    let%bind () =
+      D.Json.validate
+        ~limits:preparation_limits
+        (encode t ~record:Record.to_preparation_jsonaf)
+      |> Result.map_error ~f:classify
+    in
+    let%map () = validate_encoded (to_jsonaf t) |> Result.map_error ~f:classify in
     t)
 ;;
 
@@ -117,15 +139,35 @@ let add previous record =
   Result.of_option added ~error:capacity_error
 ;;
 
-let validate_state t ~windows ~publication_revision =
+let relocate t ~transfer =
+  let open Result.Let_syntax in
+  if not (has_live_sources t)
+  then Ok t
+  else (
+    let%bind records = List.map t.records ~f:transfer |> Result.all in
+    admit { t with records }
+    |> Result.map_error ~f:(function
+      | Capacity -> capacity_error
+      | Invalid error -> error))
+;;
+
+let validate_state t ~windows ~publication_revision ~has_archive =
   match windows with
   | None -> invalid "effective preparation requires its window ledger"
   | Some windows ->
     let scopes = List.map (Windows.windows windows) ~f:Windows.Window.scope in
     List.fold_result t.records ~init:() ~f:(fun () record ->
+      let archive_ok =
+        match Record.custody record with
+        | Live | Lost -> true
+        | Archived reference ->
+          Int64.(Archive.revision reference < publication_revision)
+          && has_archive reference
+      in
       if
         Int64.(Record.source_revision record < publication_revision)
         && List.mem scopes (Record.scope record) ~equal:Scope.equal
+        && archive_ok
       then Ok ()
       else invalid "effective preparation names an unrelated window or uncommitted source")
 ;;

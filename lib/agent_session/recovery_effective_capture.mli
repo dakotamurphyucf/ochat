@@ -31,3 +31,21 @@ val resolve_live
   -> source_revision:int64
   -> P.Recovery_window.Citation.t
   -> (P.History.entry option, P.Error.t) result
+
+val resolve_record : Session_state.t -> source_revision:int64 -> Record.t option
+
+(** Redirect still-live effective evidence to the exact ordinary compaction or
+    rollover prestate. Already proven archive locators remain immutable. The
+    owning transaction must independently verify and publish the archive. *)
+val relocate
+  :  Session_state.t
+  -> archive:Session_state.Compaction_archive.t
+  -> (Ledger.t option, P.Error.t) result
+
+(** Reconstruct one selected version after the host has verified the exact
+    reachable archive frame and current visibility and authorization. *)
+val resolve_archived
+  :  Session_state.t
+  -> Record.t
+  -> P.Recovery_window.Citation.t
+  -> (P.History.entry option, P.Error.t) result

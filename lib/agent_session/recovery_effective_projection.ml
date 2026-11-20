@@ -27,6 +27,7 @@ module Row = struct
     | Applied entry -> History_entry.id entry
   ;;
 
+  let origin t = t.origin
   let effective_ordinal t = t.effective_ordinal
   let canonical_ordinal t = t.canonical_ordinal
   let max_decode_bytes = 64 * 1024

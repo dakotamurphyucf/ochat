@@ -10,6 +10,7 @@ module Citation = P.Recovery_window.Citation
 module Version = P.Recovery_item_version
 module Digest = Chatml_source.Digest
 module Operation = P.Id.Operation
+module Archive = Recovery_effective_archive
 
 let invalid reason = Error (P.Error.invalid_request reason)
 
@@ -26,22 +27,38 @@ module Member = struct
   let effective_ordinal t = t.effective_ordinal
   let canonical_ordinal t = t.canonical_ordinal
 
-  let source t projection ~remaining_bytes =
-    match Projection.at projection ~ordinal:t.effective_ordinal with
+  let matches_origin t row =
+    match Citation.version t.citation with
+    | Canonical _ -> false
+    | Effective { origin; _ } -> Version.equal_origin origin (Projection.Row.origin row)
+  ;;
+
+  let source_at t projection ~effective_ordinal ~canonical_ordinal ~remaining_bytes =
+    match Projection.at projection ~ordinal:effective_ordinal with
     | Some row
       when P.History.Id.equal
              (Citation.occurrence t.citation)
              (Projection.Row.occurrence row)
            && Option.equal
                 Int.equal
-                t.canonical_ordinal
-                (Projection.Row.canonical_ordinal row) ->
+                canonical_ordinal
+                (Projection.Row.canonical_ordinal row)
+           && matches_origin t row ->
       let version, remaining_bytes = Projection.Row.version row ~remaining_bytes in
       ( Option.some_if
           (Option.exists version ~f:(Version.equal (Citation.version t.citation)))
           row
       , remaining_bytes )
     | Some _ | None -> None, remaining_bytes
+  ;;
+
+  let source t projection ~remaining_bytes =
+    source_at
+      t
+      projection
+      ~effective_ordinal:t.effective_ordinal
+      ~canonical_ordinal:t.canonical_ordinal
+      ~remaining_bytes
   ;;
 
   let to_jsonaf t =
@@ -83,6 +100,11 @@ module Member = struct
   ;;
 end
 
+type custody =
+  | Live
+  | Lost
+  | Archived of Archive.t
+
 type t =
   { preparation_id : string
   ; configuration_digest : Digest.t
@@ -92,6 +114,7 @@ type t =
   ; overlay_incarnation : int64
   ; input_count : int
   ; members : Member.t list
+  ; custody : custody
   }
 
 let preparation_id t = t.preparation_id
@@ -101,6 +124,7 @@ let source_revision t = t.source_revision
 let overlay_incarnation t = t.overlay_incarnation
 let input_count t = t.input_count
 let members t = t.members
+let custody t = t.custody
 
 let valid_preparation_id id =
   Result.is_ok (Inference.Observation.Observation_id.of_string id)
@@ -125,7 +149,7 @@ let create t =
     let positions = Int.Hash_set.create () in
     let max_members = Recovery_window_record.max_members in
     let valid_position ordinal = ordinal >= 0 && ordinal < max_members in
-    let%map _ =
+    let%bind _ =
       List.fold_result t.members ~init:(-1) ~f:(fun previous member ->
         let ordinal = Member.request_ordinal member in
         let effective = Member.effective_ordinal member in
@@ -161,7 +185,39 @@ let create t =
           Hash_set.add positions effective;
           Ok ordinal))
     in
+    let%map () =
+      match t.custody with
+      | Live | Lost -> Ok ()
+      | Archived archive ->
+        if Int64.(Archive.revision archive <= t.source_revision)
+        then invalid "effective archive precedes preparation publication"
+        else (
+          let by_request = Int.Table.create () in
+          List.iter t.members ~f:(fun member ->
+            Hashtbl.set by_request ~key:(Member.request_ordinal member) ~data:member);
+          List.fold_result (Archive.positions archive) ~init:() ~f:(fun () position ->
+            let key = Archive.Position.request_ordinal position in
+            match Hashtbl.find by_request key with
+            | Some member
+              when Bool.equal
+                     (Option.is_some (Member.canonical_ordinal member))
+                     (Option.is_some (Archive.Position.canonical_ordinal position)) ->
+              Ok ()
+            | Some _ | None -> invalid "effective archive position lacks an exact member"))
+    in
     t)
+;;
+
+let archive t locator =
+  match t.custody with
+  | Live -> create { t with custody = Archived locator }
+  | Lost | Archived _ -> Ok t
+;;
+
+let lose_live_source t =
+  match t.custody with
+  | Live -> { t with custody = Lost }
+  | Lost | Archived _ -> t
 ;;
 
 let capture input ~projection ~scope ~operation ~source_revision ~overlay_incarnation =
@@ -200,6 +256,7 @@ let capture input ~projection ~scope ~operation ~source_revision ~overlay_incarn
     ; overlay_incarnation
     ; input_count = I.input_count input
     ; members = List.rev members
+    ; custody = Live
     }
 ;;
 
@@ -215,30 +272,67 @@ let validate_source t projection =
   |> Result.map ~f:ignore
 ;;
 
+let find_member t citation =
+  List.find t.members ~f:(fun member -> Citation.equal citation (Member.citation member))
+;;
+
 let resolve t projection citation =
   let open Option.Let_syntax in
-  let%bind member =
-    List.find t.members ~f:(fun member ->
-      Citation.equal citation (Member.citation member))
-  in
+  let%bind member = find_member t citation in
   let%bind row =
     fst (Member.source member projection ~remaining_bytes:I.max_projection_bytes)
   in
   Projection.Row.entry row
 ;;
 
+let resolve_archived t projection citation =
+  let open Option.Let_syntax in
+  let%bind member = find_member t citation in
+  let%bind archive =
+    match t.custody with
+    | Archived archive -> Some archive
+    | Live | Lost -> None
+  in
+  let%bind position =
+    Archive.find archive ~request_ordinal:(Member.request_ordinal member)
+  in
+  let%bind row =
+    fst
+      (Member.source_at
+         member
+         projection
+         ~effective_ordinal:(Archive.Position.effective_ordinal position)
+         ~canonical_ordinal:(Archive.Position.canonical_ordinal position)
+         ~remaining_bytes:I.max_projection_bytes)
+  in
+  Projection.Row.entry row
+;;
+
+let preparation_fields t =
+  [ "id", `String (key t)
+  ; "preparation_id", `String t.preparation_id
+  ; "configuration_sha256", `String (Digest.to_hex t.configuration_digest)
+  ; "scope", Scope.to_json t.scope
+  ; "operation", Operation.to_json t.operation
+  ; "source_revision", X.int64_json t.source_revision
+  ; "overlay_incarnation", X.int64_json t.overlay_incarnation
+  ; "input_count", X.host_counter_to_json t.input_count
+  ; "members", X.list_json Member.to_jsonaf t.members
+  ]
+;;
+
+let to_preparation_jsonaf t = `Object (preparation_fields t)
+
+let equal_preparation t other =
+  Jsonaf.exactly_equal (to_preparation_jsonaf t) (to_preparation_jsonaf other)
+;;
+
 let to_jsonaf t =
-  `Object
-    [ "id", `String (key t)
-    ; "preparation_id", `String t.preparation_id
-    ; "configuration_sha256", `String (Digest.to_hex t.configuration_digest)
-    ; "scope", Scope.to_json t.scope
-    ; "operation", Operation.to_json t.operation
-    ; "source_revision", X.int64_json t.source_revision
-    ; "overlay_incarnation", X.int64_json t.overlay_incarnation
-    ; "input_count", X.host_counter_to_json t.input_count
-    ; "members", X.list_json Member.to_jsonaf t.members
-    ]
+  let fields = preparation_fields t in
+  match t.custody with
+  | Live -> `Object fields
+  | Lost -> `Object (fields @ [ "archive", `Null ])
+  | Archived archive -> `Object (fields @ [ "archive", Archive.to_jsonaf archive ])
 ;;
 
 let digest_of_json json =
@@ -275,6 +369,12 @@ let of_jsonaf json =
     | _ -> invalid "effective preparation members must be an array"
   in
   let%bind members = X.required fields "members" decode_members in
+  let%bind custody =
+    match D.Json.field json ~name:"archive" with
+    | Absent -> Ok Live
+    | Null -> Ok Lost
+    | Value raw -> Result.map (Archive.of_jsonaf raw) ~f:(fun archive -> Archived archive)
+  in
   create
     { preparation_id
     ; configuration_digest
@@ -284,6 +384,7 @@ let of_jsonaf json =
     ; overlay_incarnation
     ; input_count
     ; members
+    ; custody
     }
 ;;
 
@@ -302,6 +403,7 @@ let shape =
     ; "source_revision", D.Shape.value
     ; "overlay_incarnation", D.Shape.value
     ; "input_count", D.Shape.value
+    ; "archive", D.Shape.nullable Archive.shape
     ; "members", X.array_shape_exn ~identity_field:"occurrence" Member.shape
     ]
 ;;

@@ -156,13 +156,19 @@ let atom_to_jsonaf ~limits ~state_document delta =
           [ "kind", `String "recovery_effective_prepared"
           ; "record", Recovery_effective_record.to_jsonaf record
           ])
-  | Recovery_summary_compacted (archive, history) ->
+  | Recovery_summary_compacted (archive, history, capture) ->
+    let additions =
+      match capture with
+      | `Canonical -> []
+      | `Canonical_and_effective -> [ "effective_transfer", `True ]
+    in
     Ok
       (`Object
-          [ "kind", `String "recovery_summary_compacted"
+         ([ "kind", `String "recovery_summary_compacted"
           ; "archive", Session_state_document.archive_reference_to_jsonaf archive
           ; "entries", X.list_json P.History.entry_to_json history
-          ])
+          ]
+          @ additions))
   | Deferred_entries_enqueued value ->
     Ok
       (`Object
@@ -602,8 +608,14 @@ let atom_of_jsonaf ~limits json =
     let%bind archive =
       X.required fields "archive" Session_state_document.archive_reference_of_jsonaf
     in
-    let%map history = X.required fields "entries" (X.list P.History.entry_of_json) in
-    Delta.Recovery_summary_compacted (archive, history)
+    let%bind history = X.required fields "entries" (X.list P.History.entry_of_json) in
+    let%map capture =
+      match J.optional fields "effective_transfer" with
+      | None -> Ok `Canonical
+      | Some `True -> Ok `Canonical_and_effective
+      | Some _ -> Error (P.Error.invalid_request "invalid summary effective transfer")
+    in
+    Delta.Recovery_summary_compacted (archive, history, capture)
   | "deferred_entries_enqueued" ->
     Result.map
       (X.required fields "entries" (X.list P.History.entry_of_json))
@@ -951,6 +963,7 @@ let shape =
              ; ( "recovery_summary_compacted"
                , X.shape_exn
                    [ "kind", D.Shape.value
+                   ; "effective_transfer", D.Shape.value
                    ; "archive", Session_state_document.archive_reference_shape
                    ; ( "entries"
                      , X.array_shape_exn
