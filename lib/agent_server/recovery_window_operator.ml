@@ -42,7 +42,9 @@ let enable t (entry : Session_registry.entry) ~on_release (request : Q.Enable.t)
          && P.Id.Session.equal state.identity.session_id session_id
          && Connection_context.owns_attachment t.context ~session_id ~attachment_id
          && P.Principal.has_scope principal View_session_transcript
-         && Authorization.session_visible_to principal (A.Session_state.summary state))
+         && Authorization.session_creator_visible_to
+              principal
+              ~creator:state.identity.creating_principal)
     then Error (error Permission_denied "recovery activation authority expired")
     else if state.identity.generation <> request.expected_generation
     then Error (error Conflict "recovery activation generation changed")

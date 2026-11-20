@@ -806,6 +806,47 @@ module Resource_observation : sig
 
 end
 
+(** Exact authority to list or search retained history on this observed
+    physical actor. Every page needs a current operator proof or its own
+    model-native admission. Model delivery is tied to the original still-live
+    foreground owner and can outlive the individual tool callback. *)
+module Recovery_history_access : sig
+  type request
+  type proof
+
+  val operator : Operator_authorization.t -> request
+
+  val model
+    :  Native_tool_invocation.Admission.t
+    -> binding:Chat_response.Tool_capability.binding
+    -> request
+
+  val requires_release_check : request -> bool
+
+  val principal
+    :  request
+    -> query:Recovery_history_query.t
+    -> (Agent_protocol.Principal.t, Agent_protocol.Error.t) result
+
+  val capture
+    :  Resource_observation.t
+    -> request
+    -> query:Recovery_history_query.t
+    -> (proof, Agent_protocol.Error.t) result
+
+  val check_current : proof -> (Session_state.t, Agent_protocol.Error.t) result
+
+  val read_cursor
+    :  proof
+    -> Agent_protocol.Page.Cursor.t
+    -> (Recovery_history_query.Continuation.t, Agent_protocol.Error.t) result
+
+  val seal_cursor
+    :  proof
+    -> Recovery_history_query.Continuation.t
+    -> (string, Agent_protocol.Error.t) result
+end
+
 (** Observes accepted State through this Actor's mailbox. May yield. The host
     calls this after its existing request admission. Capturing the observation
     creates no admission and activates no runtime. *)

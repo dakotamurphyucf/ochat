@@ -219,8 +219,12 @@ let authorize ?(installed_authoring = false) principal command =
   | _ -> Ok ()
 ;;
 
-let session_visible_to principal (session : Agent_protocol.Session.t) =
+let session_creator_visible_to principal ~creator =
   Agent_protocol.Principal.has_scope principal Administer_configuration
-  || Option.exists session.creator ~f:(fun creator ->
+  || Option.exists creator ~f:(fun creator ->
     Agent_protocol.Id.Principal.equal creator principal.Agent_protocol.Principal.id)
+;;
+
+let session_visible_to principal (session : Agent_protocol.Session.t) =
+  session_creator_visible_to principal ~creator:session.creator
 ;;

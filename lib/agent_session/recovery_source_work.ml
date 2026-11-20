@@ -3,10 +3,16 @@ module Store = Agent_store.Session_store
 module Reader = Agent_store.Retention_reader
 module D = Document_schema
 
+type source =
+  | Physical of
+      { store : Store.t
+      ; handle : Store.Handle.t
+      ; reader : Reader.t
+      }
+  | Metadata of int ref
+
 type t =
-  { store : Store.t
-  ; handle : Store.Handle.t
-  ; reader : Reader.t
+  { source : source
   ; check_host : unit -> unit
   ; owner_domain : int
   ; mutable active : bool
@@ -24,7 +30,12 @@ exception Inactive
 let in_owner_domain t = Int.equal t.owner_domain (Stdlib.Domain.self () :> int)
 
 let is_active t =
-  in_owner_domain t && t.active && Store.retained_lifecycle_available t.store t.handle
+  in_owner_domain t
+  && t.active
+  &&
+  match t.source with
+  | Physical { store; handle; _ } -> Store.retained_lifecycle_available store handle
+  | Metadata _ -> true
 ;;
 
 let checkpoint t =
@@ -56,9 +67,7 @@ let with_scope
       |> Result.map_error ~f:(fun _ -> Denied)
     in
     let t =
-      { store
-      ; handle
-      ; reader
+      { source = Physical { store; handle; reader }
       ; check_host = checkpoint
       ; owner_domain = (Stdlib.Domain.self () :> int)
       ; active = true
@@ -73,17 +82,38 @@ let borrow t store ~handle ~f =
   if
     (not (is_active t))
     || t.borrowed
-    || not (phys_equal t.store store && phys_equal t.handle handle)
+    ||
+    match t.source with
+    | Physical current ->
+      not (phys_equal current.store store && phys_equal current.handle handle)
+    | Metadata _ -> true
   then None
   else (
     t.borrowed <- true;
     Some (Exn.protect ~f ~finally:(fun () -> t.borrowed <- false)))
 ;;
 
+let with_metadata_scope ~checkpoint ~f =
+  let t =
+    { source = Metadata (ref (64 * 1024 * 1024))
+    ; check_host = checkpoint
+    ; owner_domain = (Stdlib.Domain.self () :> int)
+    ; active = true
+    ; borrowed = true
+    ; remaining_selected_bytes = 0
+    }
+  in
+  Exn.protect ~f:(fun () -> f t) ~finally:(fun () -> t.active <- false)
+;;
+
 let charge_source t bytes =
   if bytes < 0 then invalid_arg "negative recovery source work";
   checkpoint t;
-  if Result.is_error (Reader.charge_bytes t.reader bytes) then raise Exhausted
+  match t.source with
+  | Physical { reader; _ } ->
+    if Result.is_error (Reader.charge_bytes reader bytes) then raise Exhausted
+  | Metadata remaining ->
+    if bytes > !remaining then raise Exhausted else remaining := !remaining - bytes
 ;;
 
 let charge_selected t bytes =
@@ -112,7 +142,12 @@ let read_archive t ~filename ~max_bytes =
     then Ok ()
     else Error (Agent_store.Store_error.Corrupt "invalid recovery archive filename")
   in
-  let%bind bounded = Reader.with_local_limits t.reader ~max_entries:1 ~max_bytes in
+  let reader =
+    match t.source with
+    | Physical { reader; _ } -> reader
+    | Metadata _ -> raise Inactive
+  in
+  let%bind bounded = Reader.with_local_limits reader ~max_entries:1 ~max_bytes in
   Reader.read_promised_file_with_checkpoint
     bounded
     ~path:(Filename.concat "archive" filename)

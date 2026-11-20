@@ -39,6 +39,7 @@ val source : t -> P.Session_ref.t
 val family : t -> family
 val scope : t -> scope
 val view : t -> Text.view
+val action : t -> action
 val digest : t -> Chatml_source.Digest.t
 
 module Continuation : sig
@@ -60,6 +61,29 @@ module Continuation : sig
   val to_json : t -> Jsonaf.t
 
   val of_json : Jsonaf.t -> (t, P.Error.t) Result.t
+end
+
+(** The admitted prefix and exact selections represented by a released page.
+    Checks use only bounded accepted-state metadata, including current source
+    and visibility coordinates. The host supplies fresh origin and owner
+    checks and guards the physical write after this returns. *)
+module Release : sig
+  type t
+
+  (** Recheck the bounded selections on the exact state already validated by
+      the host. Used after source custody is released and before returning. *)
+  val authorize_selections
+    :  t
+    -> state:Session_state.t
+    -> authorize:(Session_state.t -> Text.selection -> Text.view -> (unit, 'e) Result.t)
+    -> (unit, 'e) Result.t
+
+  val check
+    :  t
+    -> current:(unit -> (Session_state.t, unit) Result.t)
+    -> authorize:(Session_state.t -> Text.selection -> Text.view -> (unit, unit) Result.t)
+    -> checkpoint:(unit -> unit)
+    -> (unit, unit) Result.t
 end
 
 type error =
@@ -85,6 +109,7 @@ val run
   -> max_payload_bytes:int
   -> ?checkpoint:(unit -> unit)
   -> ?continuation:Continuation.t
+  -> ?on_release:(Release.t -> unit)
   -> sign:(Continuation.t -> (string, P.Error.t) Result.t)
   -> unit
   -> (Jsonaf.t, error) Result.t

@@ -99,6 +99,114 @@ let expect_error error = function
 
 let image = Base64.decode_exn "R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=="
 
+let check_history_query factory entry ~attachment_id ~authenticate scope =
+  let module History = Agent_server.Session_factory.Recovery_history in
+  let module Query = A.Recovery_history_query in
+  let module Access = Actor.Recovery_history_access in
+  let append sequence =
+    let id =
+      History_entry.Id.create ~namespace:"history-query-fixture" ~sequence
+      |> Result.ok_or_failwith
+    in
+    let text = sprintf "history page fixture row %d" sequence in
+    let item = A.History_codec.user_text ~id text |> A.History_codec.to_protocol in
+    Actor.append_history entry.Agent_server.Session_registry.actor ~attachment_id [ item ]
+    |> protocol_ok
+    |> ignore;
+    text
+  in
+  let first = append 0 in
+  let second = append 1 in
+  let query ?(view = A.Recovery_item_text.Ordinary) term =
+    Query.create
+      ~source:(P.Recovery_window.Scope.session scope)
+      ~scope:(Window scope)
+      ~family:Canonical
+      ~view
+      ~limit:1
+      (Search (P.Search_term.create term |> protocol_ok))
+    |> protocol_ok
+  in
+  let selected = query "history page fixture" in
+  let run ?cursor ?on_release ?authorize_view actor query =
+    History.query factory ~access:(Access.operator actor) ?authorize_view ?cursor ?on_release query
+  in
+  let field json name =
+    P.Json_codec.fields json
+    |> protocol_ok
+    |> fun fields -> P.Json_codec.required fields name |> protocol_ok
+  in
+  let snippets page =
+    P.Json_codec.list Result.return (field page "rows")
+    |> protocol_ok
+    |> List.map ~f:(fun row ->
+      P.Search_snippet.of_json (field row "snippet")
+      |> protocol_ok
+      |> P.Search_snippet.text)
+  in
+  let token page = P.Page.Cursor.of_json (field page "next") |> protocol_ok in
+  let live = ref true in
+  let actor =
+    Operator_authorization.restrict (authenticate ()) ~is_current:(fun () -> !live)
+  in
+  let released = ref None in
+  let page =
+    run actor ~on_release:(fun check -> released := Some check) selected |> protocol_ok
+  in
+  let check = Option.value_exn !released in
+  require (List.equal String.equal (snippets page) [ first ]) "wrong first history page";
+  let cursor = token page in
+  let repeated = run actor selected |> protocol_ok |> token in
+  require (not (P.Page.Cursor.equal cursor repeated)) "history cursor reused its nonce";
+  let expect code = function
+    | Error actual when P.Error.equal_code code actual.P.Error.code -> ()
+    | _ -> failwith "history query admitted an invalid continuation or view"
+  in
+  let foreign =
+    Operator_authorization.trusted_local (Operator_authorization.principal actor)
+  in
+  expect Cursor_expired (run ~cursor foreign selected);
+  expect Cursor_expired (run ~cursor actor (query "irrelevant"));
+  expect
+    Permission_denied
+    (run actor (query ~view:Selected_developer "history page fixture"));
+  let blocked = ref None in
+  let authorize_view _principal _state _view ~selection =
+    match selection, !blocked with
+    | Some (A.Recovery_item_text.Canonical actual), Some expected
+      when P.Recovery_window.Citation.equal actual expected ->
+      Error (P.Error.create Permission_denied ~message:"item permission revoked" ~retryable:false ())
+    | _ -> Ok ()
+  in
+  let item_release = ref None in
+  let guarded =
+    run actor selected ~authorize_view ~on_release:(fun check -> item_release := Some check)
+    |> protocol_ok
+  in
+  let row = P.Json_codec.list Result.return (field guarded "rows") |> protocol_ok |> List.hd_exn in
+  blocked := Some (P.Recovery_window.Citation.of_json (field row "citation") |> protocol_ok);
+  let item_check = Option.value_exn !item_release in
+  require (not (item_check ())) "delivery ignored revocation for the selected item";
+  expect Permission_denied (run ~authorize_view actor selected);
+  let tampered =
+    let text = P.Page.Cursor.to_string cursor in
+    let first = if Char.equal text.[0] 'A' then "B" else "A" in
+    P.Page.Cursor.of_string (first ^ String.drop_prefix text 1) |> protocol_ok
+  in
+  expect Cursor_expired (run ~cursor:tampered actor selected);
+  ignore (append 2 : string);
+  require (check ()) "an ordinary append invalidated released history";
+  let resumed = run ~cursor (authenticate ()) selected |> protocol_ok in
+  require
+    (List.equal String.equal (snippets resumed) [ second ]
+     && Document_schema.Json.equal (field resumed "next") `Null)
+    "history cursor did not preserve the exact append-stable highwater";
+  live := false;
+  require
+    (not (check ()))
+    "the delivery proof ignored revocation of its original credential"
+;;
+
 let archive_only entry proof attachment_id authorize scope =
   let module R = A.Recovery_rollover in
   let host =
@@ -445,6 +553,7 @@ let run env environment =
        && List.length next.items = 1
        && A.Recovery_window_record.equal_state (List.hd_exn next.items).state Open)
       "a new authentication of the same credential must resume after an append";
+    check_history_query factory entry ~attachment_id ~authenticate (List.hd_exn next.items).scope;
     let archived = state entry in
     require
       (Option.is_none

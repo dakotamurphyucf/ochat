@@ -58,6 +58,7 @@ let source t = t.source
 let scope t = t.scope
 let family t = t.family
 let view t = t.view
+let action t = t.action
 let digest t = t.digest
 
 let wire_limits max_bytes =
@@ -409,6 +410,61 @@ let visit t basis ~start ~checkpoint ~read =
   loop { reversed = []; count = 0; bytes = 0; next = start; reason = None }
 ;;
 
+module Release = struct
+  type query = t
+
+  type t =
+    { query : query
+    ; highwater : Basis.Highwater.t
+    ; fingerprint : Digest.t
+    ; selections : Text.selection list
+    }
+
+  let create query basis rows =
+    { query
+    ; highwater = Basis.highwater basis
+    ; fingerprint = Basis.digest basis
+    ; selections = List.map rows ~f:(fun row -> row.selection)
+    }
+  ;;
+
+  let authorize_selections t ~state ~authorize =
+    List.fold_result t.selections ~init:() ~f:(fun () selection ->
+      authorize state selection t.query.view)
+  ;;
+
+  let check t ~current ~authorize ~checkpoint =
+    let open Result.Let_syntax in
+    let check work =
+      let%bind initial = current () in
+      let query = t.query in
+      let%bind basis =
+        Basis.create
+          work
+          initial
+          ~owner:query.source
+          ~scope:query.scope
+          ~family:query.family
+          ~ordinals:query.ordinals
+          ~highwater:(Some t.highwater)
+        |> Result.map_error ~f:(fun _ -> ())
+      in
+      if not (Digest.equal t.fingerprint (Basis.digest basis))
+      then Error ()
+      else (
+        let%bind () =
+          authorize_selections t ~state:initial ~authorize:(fun state selection view ->
+            Work.checkpoint work;
+            authorize state selection view)
+        in
+        let%bind fresh = current () in
+        if phys_equal fresh initial then Ok () else Error ())
+    in
+    try Work.with_metadata_scope ~checkpoint ~f:check with
+    | Work.Exhausted | Work.Inactive -> Error ()
+  ;;
+end
+
 let run
       t
       store
@@ -419,6 +475,7 @@ let run
       ~max_payload_bytes
       ?(checkpoint = fun () -> ())
       ?continuation
+      ?on_release
       ~sign
       ()
   =
@@ -508,7 +565,7 @@ let run
             authorize fresh row.selection t.view
             |> Result.map_error ~f:(fun _ -> Source Source.Denied))
         in
-        json
+        json, Option.map on_release ~f:(fun _ -> Release.create t basis rows)
       with
       | Work.Exhausted -> Error (Source Source.Limit)
       | Work.Inactive -> Error (Source Source.Denied)
@@ -520,5 +577,8 @@ let run
       |> Result.join
     in
     let%bind _ = check_basis () in
-    result)
+    let%map json, release = result in
+    Option.iter (Option.both on_release release) ~f:(fun (register, proof) ->
+      register proof);
+    json)
 ;;

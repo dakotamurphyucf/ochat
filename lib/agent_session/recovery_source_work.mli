@@ -9,6 +9,10 @@ type open_error =
   | Denied
   | Invalid_limits
 
+(** Bounded in-memory recheck of admitted structural metadata. This scope has
+    no Store, archive, or selected-text capability and closes on return. *)
+val with_metadata_scope : checkpoint:(unit -> unit) -> f:(t -> 'a) -> 'a
+
 (** Only raised by bounded charge operations in the active source scope. *)
 exception Exhausted
 

@@ -759,6 +759,28 @@ module Recovery_history : sig
          , Agent_protocol.Error.t )
          result
 
+  (** List or search one explicit canonical or prepared-effective text family
+      using current authenticated operator or native model admission. Ordinary
+      user and assistant text is the default authorized view. Other views
+      require a trusted host [authorize_view] decision. [selection = None]
+      admits the requested view. [Some selection] checks the exact item before
+      reading and again before returning its contents. Queued model delivery
+      requires registration of the nonyielding [on_release] proof and its use
+      at the actual write cut. *)
+  val query
+    :  t
+    -> access:Agent_session.Session_actor.Recovery_history_access.request
+    -> ?authorize_view:
+         (Agent_protocol.Principal.t
+          -> Agent_session.Session_state.t
+          -> Text.view
+          -> selection:Text.selection option
+          -> (unit, Agent_protocol.Error.t) result)
+    -> ?cursor:Agent_protocol.Page.Cursor.t
+    -> ?on_release:((unit -> bool) -> unit)
+    -> Agent_session.Recovery_history_query.t
+    -> (Jsonaf.t, Agent_protocol.Error.t) result
+
   val read_text
     :  t
     -> authorize:

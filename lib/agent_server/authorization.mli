@@ -24,3 +24,10 @@ val authorize
     creator must equal this authenticated principal. No attachment, root path,
     receipt or prior inspection grants visibility. Pure; no runtime activation. *)
 val session_visible_to : Agent_protocol.Principal.t -> Agent_protocol.Session.t -> bool
+
+(** The same rule using just the accepted creator coordinate. Useful when
+    examining retained Actor state without constructing a session summary. *)
+val session_creator_visible_to
+  :  Agent_protocol.Principal.t
+  -> creator:Agent_protocol.Id.Principal.t option
+  -> bool

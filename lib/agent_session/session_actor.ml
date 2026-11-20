@@ -6738,6 +6738,7 @@ and t =
   ; mutable state : Session_state.t
   ; mutable stopped : bool
   ; recovery_window_cursor : Recovery_window_page.signer Lazy.t
+  ; recovery_query_cursor : Recovery_query_cursor.t Lazy.t
   ; mutable protected_source_custody : unit ref option
   ; mutable canonical_write_in_progress : bool
     (* Synchronous share publication observes only an installed durable state. *)
@@ -60209,6 +60210,7 @@ let create_internal
     ; state = initial_state
     ; stopped = false
     ; recovery_window_cursor = lazy (Recovery_window_page.create ())
+    ; recovery_query_cursor = lazy (Recovery_query_cursor.create ())
     ; protected_source_custody = None
     ; canonical_write_in_progress = false
     ; command_audit = None
@@ -60386,6 +60388,179 @@ let snapshot t = call t Snapshot
 let observe t = call t Observe
 let state t = call t State
 let observe_resource_state t = call t Observe_resource_state
+
+module Recovery_history_access = struct
+  module P = Agent_protocol
+  module Query = Recovery_history_query
+  module Admission = Native_tool_invocation.Admission
+
+  type request =
+    | Operator of Operator_authorization.t
+    | Model of Admission.t * Chat_response.Tool_capability.binding
+
+  type proof =
+    { check_current : unit -> (Session_state.t, P.Error.t) result
+    ; read_cursor : P.Page.Cursor.t -> (Query.Continuation.t, P.Error.t) result
+    ; seal_cursor : Query.Continuation.t -> (string, P.Error.t) result
+    }
+
+  let operator actor = Operator actor
+  let model admission ~binding = Model (admission, binding)
+
+  let requires_release_check = function
+    | Model _ -> true
+    | Operator _ -> false
+  ;;
+  let denied () = error Permission_denied "recovery history authority is unavailable"
+
+  let tool_name = function
+    | Query.List_items -> "context_list_items"
+    | Search _ -> "context_search"
+  ;;
+
+  let check_credential actor =
+    let principal = Operator_authorization.principal actor in
+    if
+      Operator_authorization.is_current actor
+      && P.Principal.has_scope principal View_session_transcript
+    then Ok actor
+    else Error (denied ())
+  ;;
+
+  let credential request ~query =
+    let open Result.Let_syntax in
+    match request with
+    | Operator actor -> check_credential actor
+    | Model (admission, binding) ->
+      let%bind () = Admission.check_now admission ~binding in
+      let expected = tool_name (Query.action query) in
+      let invocation = Admission.invocation admission in
+      if
+        (not
+           (String.equal expected (Chat_response.Tool_capability.reference binding).name))
+        || not (String.equal expected invocation.context.tool_name)
+      then Error (denied ())
+      else (
+        match invocation.context.origin, invocation.context.call_entry_id with
+        | Model, Some _ ->
+          let%bind actor =
+            Result.of_option (Admission.actor admission) ~error:(denied ())
+          in
+          check_credential actor
+        | _ -> Error (denied ()))
+  ;;
+
+  let principal request ~query =
+    credential request ~query |> Result.map ~f:Operator_authorization.principal
+  ;;
+
+  let model_owner (observation : Resource_observation.t) ~invocation ~origin =
+    let open Result.Let_syntax in
+    let t = observation.actor in
+    let%bind execution =
+      List.find t.invocation_executions ~f:(fun execution ->
+        P.Invocation.equal execution.dispatched invocation)
+      |> Result.of_option ~error:(denied ())
+    in
+    let%bind id =
+      match execution.owner with
+      | Foreground id when Atomic.get execution.authority_live -> Ok id
+      | _ -> Error (denied ())
+    in
+    let%bind producer =
+      authorized_native_child_basis t (Inference_invocation execution)
+    in
+    let%bind () = producer.check_current () in
+    let%bind original =
+      match t.operation_agent_custody with
+      | Some owner when P.Id.Operation.equal owner.operation_id id -> Ok owner
+      | _ -> Error (denied ())
+    in
+    let check (state : Session_state.t) =
+      let%bind operation = running_operation t id in
+      if
+        (not (Int.equal operation.generation state.identity.generation))
+        || not (Option.exists t.operation_agent_custody ~f:(phys_equal original))
+      then Error (denied ())
+      else (
+        let%bind () = check_agent_admission original.admission in
+        let%bind actor = operation_agent_actor t id in
+        let%bind actor = Result.of_option actor ~error:(denied ()) in
+        if not (Int.equal origin (Operator_authorization.origin actor))
+        then Error (denied ())
+        else Result.map (check_credential actor) ~f:ignore)
+    in
+    (* The retained cut contains only the exact foreground owner. It does not
+       keep the admission or invocation alive after the native function exits. *)
+    Ok (Some id, check)
+  ;;
+
+  let capture (observation : Resource_observation.t) request ~query =
+    let open Result.Let_syntax in
+    let%bind credential = credential request ~query in
+    let%bind state = Resource_observation.check_current observation in
+    let source = Query.source query in
+    let session = state.identity.session_id in
+    let generation = state.identity.generation in
+    let origin = Operator_authorization.origin credential in
+    let%bind () =
+      if P.Id.Session.equal session (P.Session_ref.session_id source)
+      then Ok ()
+      else Error (denied ())
+    in
+    let%bind operation, check_audience =
+      match request with
+      | Operator actor -> Ok (None, fun _ -> Result.map (check_credential actor) ~f:ignore)
+      | Model (admission, _) ->
+        let invocation = Admission.invocation admission in
+        if
+          P.Id.Session.equal invocation.context.session_id session
+          && Int.equal invocation.context.generation generation
+        then model_owner observation ~invocation ~origin
+        else Error (denied ())
+    in
+    let audience =
+      [%sexp
+        (P.Session_ref.to_json source |> Jsonaf.to_string : string)
+      , (Chatml_source.Digest.to_hex (Query.digest query) : string)
+      , (origin : int)
+      , (operation : P.Id.Operation.t option)
+      , (generation : int)
+      , (state.spec.prompt_revision_id : P.Id.Prompt_revision.t)
+      , (state.spec.configuration_revision : int64)
+      , (state.counters.owner_lease_generation : int64)
+      , (state.stop_epoch : int64)
+      , (state.parent_stop_epoch : int64 option)]
+      |> Sexp.to_string_mach
+    in
+    let check_current () =
+      let%bind current = Resource_observation.check_current observation in
+      let%map () = check_audience current in
+      current
+    in
+    let t = observation.actor in
+    let with_cursor f =
+      let%bind _ = check_current () in
+      f (Lazy.force t.recovery_query_cursor) ~now:(t.services.monotonic_now ()) ~audience
+    in
+    let%map _ = check_current () in
+    { check_current
+    ; read_cursor =
+        (fun cursor ->
+          with_cursor (fun t ~now ~audience ->
+            Recovery_query_cursor.read t ~now ~audience cursor))
+    ; seal_cursor =
+        (fun cursor ->
+          with_cursor (fun t ~now ~audience ->
+            Recovery_query_cursor.seal t ~now ~audience cursor))
+    }
+  ;;
+
+  let check_current t = t.check_current ()
+  let read_cursor t cursor = t.read_cursor cursor
+  let seal_cursor t cursor = t.seal_cursor cursor
+end
+
 let due_schedules t = call t Due_schedules
 
 let commit_extensions t ~generation ~expected_revision changes =

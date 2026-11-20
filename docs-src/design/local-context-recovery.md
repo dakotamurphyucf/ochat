@@ -484,6 +484,20 @@ opening source files. The 256-position scan ceiling addresses candidate visits
 in the current page. A separate ledger bound limits the structural verification
 that makes duplicate checks and refresh possible without rereading plaintext.
 
+The Factory uses an opaque, authenticated continuation with a five-minute
+lifetime and a key private to the physical actor. Every page independently
+checks current transcript authority and the exact source, query and view.
+A trusted host authorizes the view and each selected citation separately.
+Revoking an item after the page is prepared prevents its deferred delivery.
+An operator resumes only through the same originating credential. A model
+must enter through a freshly admitted `context_list_items` or `context_search`
+invocation in the original foreground operation. Such a cursor can survive
+completed provider attempts within that operation. A later foreground
+operation starts its own query. A deferred delivery rechecks the originally
+registered source, current authority and the pinned visibility and source
+coordinates without reopening archives. It may outlive its tool callback
+while that original foreground operation remains alive.
+
 Use the following initial ceilings for qualification. Stricter host document
 and transport limits apply.
 

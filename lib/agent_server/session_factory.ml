@@ -14563,12 +14563,12 @@ module Recovery_history = struct
       Operator_authorization.is_current actor
       && P.Principal.has_scope principal View_session_transcript
     in
-    let authorize current =
+    let authorize (current : Agent_session.Session_state.t) =
       if
         admitted ()
-        && Authorization.session_visible_to
+        && Authorization.session_creator_visible_to
              principal
-             (Agent_session.Session_state.summary current)
+             ~creator:current.identity.creating_principal
       then Ok ()
       else Error (denied ())
     in
@@ -14606,6 +14606,19 @@ module Recovery_history = struct
         |> Result.map_error ~f:(fun _ -> denied ())
       in
       result)
+  ;;
+
+  let query t ~access ?authorize_view ?cursor ?on_release query =
+    Recovery_history_host.query
+      t.store
+      ~now:(fun () -> Eio.Time.Mono.now (Eio.Stdenv.mono_clock t.env))
+      ~max_payload_bytes:t.limits.max_journal_payload
+      ~with_source:(Recovery_source_host.with_observed_source t)
+      ~access
+      ?authorize_view
+      ?cursor
+      ?on_release
+      query
   ;;
 
   let read_text t ~authorize selection ~view ~part ~start ~stop ?max_bytes () =
