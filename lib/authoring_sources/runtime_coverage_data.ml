@@ -948,7 +948,7 @@ let implementation_sources =
   ; ( "lib/agent_session/run_state.mli"
     , "6293ace6a1162a861309252c911a59b8cc52d4b904e3b9001fb2b4b17008b915" )
   ; ( "lib/agent_session/session_state.mli"
-    , "77865f6f7c8a52f4e36ce8c20390b1e9933855ef9791a622a1b914a816837405" )
+    , "0f59cbb7e1433b5db6eab9c372f71f5d4ce77a94776f281d351ea61607b161e0" )
   ; ( "lib/agent_server/session_retention.ml"
     , "0a8fa0865eb44be8e2a01be44d219ef0e01bc9c3d4f879712dc06e829ae9c828" )
   ; ( "lib/agent_server/session_retention.mli"
@@ -1118,7 +1118,7 @@ let implementation_sources =
   ; ( "lib/agent_session/legacy_moderator_checkpoint.ml"
     , "e541ee7532b2a3e96d7c06c539cd1637c0ddaa1c55d7f1c51cec24b6d9c4f399" )
   ; ( "lib/agent_session/session_state.ml"
-    , "247b88b6e45223d130ef756d5c6baea9f4d9cd9eda6ef4665a9f532e59284beb" )
+    , "f571993b097e7fdf3e9fe5b44188a6935fe0747b05962390aad95222e3837c71" )
   ; ( "lib/agent_session/script_tool_calls.ml"
     , "d4e76071089c2b309174cb9f033d4c9c51941c75ddfd32b0990d1eb90c96034a" )
   ; ( "lib/chat_response/agent_guidance.ml"
