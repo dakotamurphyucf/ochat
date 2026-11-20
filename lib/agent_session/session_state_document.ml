@@ -835,6 +835,8 @@ let project_fields_with_presence
      ]
      @ Option.value_map t.recovery_windows ~default:[] ~f:(fun ledger ->
        [ "recovery_windows", Recovery_window_ledger.to_jsonaf ledger ])
+     @ Option.value_map t.recovery_effective ~default:[] ~f:(fun ledger ->
+       [ "recovery_effective", Recovery_effective_ledger.to_jsonaf ledger ])
      @ run_state_fields run_state_field t.run_state
      @ goal_catalog_fields
      @ goal_accounts_fields
@@ -940,6 +942,13 @@ let state_fields_of_jsonaf ?capture ~limits json =
     | Absent -> Ok None
     | Null -> Error (P.Error.invalid_request "recovery_windows must be a ledger")
     | Value ledger -> Recovery_window_ledger.of_jsonaf ledger |> Result.map ~f:Option.some
+  in
+  let%bind recovery_effective =
+    match D.Json.field json ~name:"recovery_effective" with
+    | Absent -> Ok None
+    | Null -> Error (P.Error.invalid_request "recovery_effective must be a ledger")
+    | Value ledger ->
+      Recovery_effective_ledger.of_jsonaf ledger |> Result.map ~f:Option.some
   in
   let%bind permissions = X.required fields "permissions" (X.list P.Permission.of_json) in
   let%bind grants = X.required fields "grants" (X.list P.Grant.of_json) in
@@ -1100,6 +1109,7 @@ let state_fields_of_jsonaf ?capture ~limits json =
     ; active_operation
     ; automatic_turn_budget
     ; recovery_windows
+    ; recovery_effective
     ; permissions
     ; grants
     ; jobs
@@ -1157,6 +1167,7 @@ let state_shape =
     ; "active_operation", X.nullable_shape Shapes.operation
     ; "automatic_turn_budget", X.nullable_shape Automatic_turn_budget.shape
     ; "recovery_windows", Recovery_window_ledger.shape
+    ; "recovery_effective", Recovery_effective_ledger.shape
     ; "permissions", X.array_shape_exn ~identity_field:"id" Shapes.permission
     ; "grants", X.array_shape_exn ~identity_field:"id" Shapes.grant
     ; "jobs", X.array_shape_exn ~identity_field:"id" Shapes.job
@@ -1277,6 +1288,13 @@ let validate_run_capacity_only (state : S.t) document =
             { path = [ "run_state" ]; reason = "admitted run index is missing" }))
 ;;
 
+let validate_raw_effective_capacity document =
+  match D.Json.field (D.Document.payload document) ~name:"recovery_effective" with
+  | Absent -> Ok ()
+  | Null -> Error (D.Error.Malformed "recovery_effective must be a ledger")
+  | Value ledger -> Recovery_effective_ledger.validate_encoded ledger
+;;
+
 let validate_raw_recovery_window_capacity document =
   match D.Json.field (D.Document.payload document) ~name:"recovery_windows" with
   | Absent -> Ok ()
@@ -1323,6 +1341,7 @@ let validate_run_capacity basis document ~limits =
   let state = Capacity_basis.state basis in
   let open Result.Let_syntax in
   let%bind () = validate_raw_recovery_window_capacity document in
+  let%bind () = validate_raw_effective_capacity document in
   let%bind () = validate_raw_recovery_note_share_capacity document in
   let%bind () = validate_raw_queue_capacity document in
   let%bind () =
@@ -2082,6 +2101,7 @@ let decode_with_evidence ?previous ~limits document =
   let%bind document = upgrade document ~limits in
   let%bind () = check_storage_semantics document in
   let%bind () = validate_raw_recovery_window_capacity document in
+  let%bind () = validate_raw_effective_capacity document in
   let%bind () = validate_raw_recovery_note_share_capacity document in
   let%bind () = validate_raw_queue_capacity document in
   let capture = Decode_evidence.Capture.create ?previous ~limits () in
@@ -3276,6 +3296,7 @@ let decode_prefix ?previous ~limits document =
   let open Result.Let_syntax in
   let%bind () = check_storage_semantics document in
   let%bind () = validate_raw_recovery_window_capacity document in
+  let%bind () = validate_raw_effective_capacity document in
   let%bind () = validate_raw_recovery_note_share_capacity document in
   let%bind () = validate_raw_queue_capacity document in
   let capture = Decode_evidence.Capture.create ?previous ~limits () in

@@ -16,6 +16,7 @@ type t =
   | Canonical_history_replaced of Agent_protocol.History.entry list
   | Recovery_window_enabled of
       Agent_protocol.Session_ref.t * Agent_protocol.Id.Context_window.t
+  | Recovery_effective_prepared of (Recovery_effective_record.t[@sexp.opaque])
   | Recovery_summary_compacted of
       Session_state.Compaction_archive.t * Agent_protocol.History.entry list
   | Authoring_references_forgotten of Agent_protocol.History.Id.t list

@@ -700,37 +700,49 @@ module Identity_overlay = struct
     }
   ;;
 
-  let apply t entries =
-    let deleted = List.map t.tombstones ~f:(fun tombstone -> tombstone.target_id) in
-    let replacement id =
-      List.find t.replacements ~f:(fun replacement ->
-        History_entry.Id.equal replacement.target_id id)
-    in
-    let inserted ({ entry; change_id; _ } : inserted) =
-      Effective_entry.{ entry; provenance = Moderator_inserted { change_id } }
-    in
+  type 'entry source =
+    | Unchanged of 'entry
+    | Inserted of inserted
+    | Replaced of 'entry * replacement
+
+  let sources t entries ~occurrence =
+    let deleted = Hash_set.create (module History_entry.Id) in
+    List.iter t.tombstones ~f:(fun tombstone -> Hash_set.add deleted tombstone.target_id);
+    let replacements = Hashtbl.create (module History_entry.Id) in
+    List.iter t.replacements ~f:(fun replacement ->
+      (* Preserve the first matching replacement in an in-memory overlay. *)
+      ignore
+        (Hashtbl.add replacements ~key:replacement.target_id ~data:replacement
+         : [ `Ok | `Duplicate ]));
     let canonical =
       List.filter_map entries ~f:(fun entry ->
-        let id = History_entry.id entry in
-        if List.mem deleted id ~equal:History_entry.Id.equal
+        let id = occurrence entry in
+        if Hash_set.mem deleted id
         then None
-        else (
-          match replacement id with
-          | None -> Some Effective_entry.{ entry; provenance = Canonical }
-          | Some replacement ->
-            Some
-              Effective_entry.
-                { entry = History_entry.with_payload entry replacement.item
-                ; provenance =
-                    Moderator_replacement
-                      { target_id = replacement.target_id
-                      ; change_id = replacement.change_id
-                      }
-                }))
+        else
+          Some
+            (match Hashtbl.find replacements id with
+             | None -> Unchanged entry
+             | Some replacement -> Replaced (entry, replacement)))
     in
-    List.map t.prepended_items ~f:inserted
+    List.map t.prepended_items ~f:(fun inserted -> Inserted inserted)
     @ canonical
-    @ List.map t.appended_items ~f:inserted
+    @ List.map t.appended_items ~f:(fun inserted -> Inserted inserted)
+  ;;
+
+  let apply t entries =
+    sources t entries ~occurrence:History_entry.id
+    |> List.map ~f:(function
+      | Unchanged entry -> Effective_entry.{ entry; provenance = Canonical }
+      | Inserted { entry; change_id; _ } ->
+        Effective_entry.{ entry; provenance = Moderator_inserted { change_id } }
+      | Replaced (entry, replacement) ->
+        Effective_entry.
+          { entry = History_entry.with_payload entry replacement.item
+          ; provenance =
+              Moderator_replacement
+                { target_id = replacement.target_id; change_id = replacement.change_id }
+          })
   ;;
 end
 

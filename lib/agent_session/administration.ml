@@ -96,7 +96,10 @@ let plan_reset state options =
     let%bind recovery_windows =
       Recovery_window_capture.replacement state ~incoming:candidate
     in
-    let candidate = { candidate with recovery_windows } in
+    let recovery_effective =
+      Recovery_effective_capture.replacement state ~incoming:candidate
+    in
+    let candidate = { candidate with recovery_windows; recovery_effective } in
     let%bind run_state =
       match state.run_state with
       | None -> Ok None
@@ -198,7 +201,10 @@ let plan_rebuild state revision =
   let%bind recovery_windows =
     Recovery_window_capture.replacement previous ~incoming:candidate
   in
-  let candidate = { candidate with recovery_windows } in
+  let recovery_effective =
+    Recovery_effective_capture.replacement previous ~incoming:candidate
+  in
+  let candidate = { candidate with recovery_windows; recovery_effective } in
   let%map () = Session_state.validate_administration_candidate candidate ~previous in
   candidate
 ;;
@@ -230,6 +236,7 @@ let archive ~archive_reference ~previous (candidate : Session_state.t) kind =
           { previous with
             Session_state.conversation = candidate.conversation
           ; recovery_windows = None
+          ; recovery_effective = None
           }
         in
         let%bind plan =
@@ -278,7 +285,10 @@ let archive ~archive_reference ~previous (candidate : Session_state.t) kind =
   let%bind recovery_windows =
     Recovery_window_capture.replacement previous ~incoming:candidate
   in
-  let candidate = { candidate with recovery_windows } in
+  let recovery_effective =
+    Recovery_effective_capture.replacement previous ~incoming:candidate
+  in
+  let candidate = { candidate with recovery_windows; recovery_effective } in
   let%bind reference =
     archive_reference ~previous ~kind (Agent_protocol.Id.Operation.create ())
   in

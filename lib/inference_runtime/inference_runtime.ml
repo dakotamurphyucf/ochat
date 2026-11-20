@@ -5,6 +5,7 @@ module Observation = Inference.Observation
 module Session = Session
 module Context_capacity = Context_capacity
 module Protected_delivery = Protected_delivery
+module Recovery_input = Recovery_input
 
 module Submission_guard = struct
   type t = Protected_delivery.Materialized.submission list
@@ -602,6 +603,15 @@ module Prepared = struct
   let configuration t = t.plan.configuration
   let fingerprint t = t.plan.fingerprint
   let binding_guard t = t.binding_guard
+
+  let recovery_input t =
+    Recovery_input.capture
+      t.plan.request
+      ~configuration:t.plan.configuration
+      ~omit:(fun id ->
+        Option.exists t.protected_input ~f:(fun input ->
+          Protected_delivery.Materialized.protects input id))
+  ;;
 
   let assess_capacity ?policy t =
     Context_capacity.Binding.assess ?policy t.capacity_binding

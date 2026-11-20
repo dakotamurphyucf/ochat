@@ -568,6 +568,14 @@ val effective_entries_of_snapshot
   -> History_entry.t list
   -> (Moderation.Effective_entry.t list, string) result
 
+(** Coordinate-only version using the same committed overlay and effective
+    order. The caller chooses when to read original canonical payloads. *)
+val effective_sources_of_snapshot
+  :  Session.Moderator_state.Identity_snapshot.t
+  -> 'entry list
+  -> occurrence:('entry -> History_entry.Id.t)
+  -> ('entry Moderation.Identity_overlay.source list, string) result
+
 (** [effective_items t history] applies the durable moderator overlay to the
     projected canonical history. *)
 val effective_items : t -> Res.Item.t list -> Moderation.Item.t list

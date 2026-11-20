@@ -144,6 +144,12 @@ let atom_to_jsonaf ~limits ~state_document delta =
           ; "owner", P.Session_ref.to_json owner
           ; "window", P.Id.Context_window.to_json window
           ])
+  | Recovery_effective_prepared record ->
+    Ok
+      (`Object
+          [ "kind", `String "recovery_effective_prepared"
+          ; "record", Recovery_effective_record.to_jsonaf record
+          ])
   | Recovery_summary_compacted (archive, history) ->
     Ok
       (`Object
@@ -578,6 +584,9 @@ let atom_of_jsonaf ~limits json =
     let%bind owner = X.required fields "owner" P.Session_ref.of_json in
     let%map window = X.required fields "window" P.Id.Context_window.of_json in
     Delta.Recovery_window_enabled (owner, window)
+  | "recovery_effective_prepared" ->
+    let%map record = X.required fields "record" Recovery_effective_record.of_jsonaf in
+    Delta.Recovery_effective_prepared record
   | "recovery_summary_compacted" ->
     let%bind archive =
       X.required fields "archive" Session_state_document.archive_reference_of_jsonaf
@@ -920,6 +929,9 @@ let shape =
                    ; "owner", Recovery_window_ledger.Source.owner_shape
                    ; "window", D.Shape.value
                    ] )
+             ; ( "recovery_effective_prepared"
+               , X.shape_exn
+                   [ "kind", D.Shape.value; "record", Recovery_effective_record.shape ] )
              ; ( "recovery_summary_compacted"
                , X.shape_exn
                    [ "kind", D.Shape.value

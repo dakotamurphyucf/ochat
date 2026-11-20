@@ -897,6 +897,11 @@ let identity_overlay_of_snapshot (snapshot : Session.Moderator_state.Identity_sn
       }
 ;;
 
+let effective_sources_of_snapshot snapshot history ~occurrence =
+  Result.map (identity_overlay_of_snapshot snapshot) ~f:(fun overlay ->
+    Moderation.Identity_overlay.sources overlay history ~occurrence)
+;;
+
 let effective_entries_of_snapshot snapshot history =
   Result.map (identity_overlay_of_snapshot snapshot) ~f:(fun overlay ->
     Moderation.Identity_overlay.apply overlay history)

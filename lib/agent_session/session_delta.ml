@@ -14,6 +14,7 @@ type t =
   | Canonical_history_replaced of Agent_protocol.History.entry list
   | Recovery_window_enabled of
       Agent_protocol.Session_ref.t * Agent_protocol.Id.Context_window.t
+  | Recovery_effective_prepared of (Recovery_effective_record.t[@sexp.opaque])
   | Recovery_summary_compacted of
       Session_state.Compaction_archive.t * Agent_protocol.History.entry list
   | Authoring_references_forgotten of Agent_protocol.History.Id.t list
@@ -194,6 +195,7 @@ let rec contains_policy_usage = function
   | Canonical_entries_appended _
   | Canonical_history_replaced _
   | Recovery_window_enabled _
+  | Recovery_effective_prepared _
   | Recovery_summary_compacted _
   | Authoring_references_forgotten _
   | Authoring_publication_changed _
@@ -274,6 +276,7 @@ let rec contains_goal_policy = function
   | Canonical_entries_appended _
   | Canonical_history_replaced _
   | Recovery_window_enabled _
+  | Recovery_effective_prepared _
   | Recovery_summary_compacted _
   | Authoring_references_forgotten _
   | Authoring_publication_changed _
@@ -390,7 +393,10 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
     let%bind recovery_windows =
       Recovery_window_capture.replacement state ~incoming:created
     in
-    let created = { created with recovery_windows } in
+    let recovery_effective =
+      Recovery_effective_capture.replacement state ~incoming:created
+    in
+    let created = { created with recovery_windows; recovery_effective } in
     let%bind () =
       Inference_ledger.validate_update
         state.inference_ledger
@@ -683,6 +689,9 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
   | Recovery_window_enabled (owner, window) ->
     let%map.Result ledger = Recovery_window_capture.bootstrap state ~owner ~window in
     { state with recovery_windows = Some ledger }
+  | Recovery_effective_prepared record ->
+    let%map.Result ledger = Recovery_effective_capture.apply state record in
+    { state with recovery_effective = Some ledger }
   | Recovery_summary_compacted (archive, history) ->
     let open Result.Let_syntax in
     let%bind ledger = Recovery_window_capture.summarize state ~archive ~history in
@@ -1768,7 +1777,13 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
     let%map.Result () =
       Moderator_checkpoint.validate_update ~previous:state.moderator moderator
     in
-    { state with moderator }
+    let recovery_effective =
+      Recovery_effective_capture.moderator_changed
+        state.recovery_effective
+        ~previous:state.moderator
+        ~next:moderator
+    in
+    { state with moderator; recovery_effective }
   | Shell_changed shell -> Ok { state with shell }
   | History_block_reserved reserved_history_through ->
     if
@@ -1948,6 +1963,7 @@ let validate_goal_accounts delta ~(previous : Session_state.t) ~(next : Session_
     | Canonical_entries_appended _
     | Canonical_history_replaced _
     | Recovery_window_enabled _
+    | Recovery_effective_prepared _
     | Recovery_summary_compacted _
     | Authoring_references_forgotten _
     | Authoring_publication_changed _
@@ -2099,6 +2115,7 @@ let validate_goal_descendants
     | Canonical_entries_appended _
     | Canonical_history_replaced _
     | Recovery_window_enabled _
+    | Recovery_effective_prepared _
     | Recovery_summary_compacted _
     | Authoring_references_forgotten _
     | Authoring_publication_changed _
@@ -2201,6 +2218,7 @@ let rec validate_descendant_publication delta ~revision =
   | Canonical_entries_appended _
   | Canonical_history_replaced _
   | Recovery_window_enabled _
+  | Recovery_effective_prepared _
   | Recovery_summary_compacted _
   | Authoring_references_forgotten _
   | Authoring_publication_changed _
@@ -2323,6 +2341,7 @@ let policy_usage_step delta ~(previous : Session_state.t) ~(next : Session_state
   | Canonical_entries_appended _
   | Canonical_history_replaced _
   | Recovery_window_enabled _
+  | Recovery_effective_prepared _
   | Recovery_summary_compacted _
   | Authoring_references_forgotten _
   | Authoring_publication_changed _
@@ -2459,6 +2478,7 @@ let goal_policy_step delta ~(previous : Session_state.t) ~(next : Session_state.
   | Canonical_entries_appended _
   | Canonical_history_replaced _
   | Recovery_window_enabled _
+  | Recovery_effective_prepared _
   | Recovery_summary_compacted _
   | Authoring_references_forgotten _
   | Authoring_publication_changed _

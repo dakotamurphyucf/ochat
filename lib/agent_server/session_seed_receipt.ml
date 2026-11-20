@@ -52,6 +52,7 @@ let created_document transaction ~limits =
   | Canonical_entries_appended _
   | Canonical_history_replaced _
   | Recovery_window_enabled _
+  | Recovery_effective_prepared _
   | Recovery_summary_compacted _
   | Authoring_references_forgotten _
   | Authoring_publication_changed _

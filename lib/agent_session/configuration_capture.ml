@@ -58,6 +58,8 @@ module Token = struct
     ; target : Inference.Request.Target.t
     ; policy : Configuration_policy.t
     ; capacity : Capacity_basis.t option
+    ; recovery_scope : Agent_protocol.Recovery_window.Scope.t option
+    ; capture_recovery : bool
     ; assessment : Capacity_observation.t option
     ; configuration : Inference.Observation.Configuration.t option
     }
@@ -69,7 +71,17 @@ type t = { mutable current : (Token.t * C.phase) option }
 
 let create () = { current = None }
 
-let begin_capture ?capacity t ~operation_id ~generation ~revision ~target ~policy =
+let begin_capture
+      ?capacity
+      ?recovery_scope
+      ~capture_recovery
+      t
+      ~operation_id
+      ~generation
+      ~revision
+      ~target
+      ~policy
+  =
   let token : Token.t =
     { identity = ref ()
     ; operation_id
@@ -78,6 +90,8 @@ let begin_capture ?capacity t ~operation_id ~generation ~revision ~target ~polic
     ; target
     ; policy
     ; capacity
+    ; recovery_scope
+    ; capture_recovery
     ; assessment = None
     ; configuration = None
     }
@@ -89,6 +103,17 @@ let begin_capture ?capacity t ~operation_id ~generation ~revision ~target ~polic
 let owns t token =
   Option.exists t.current ~f:(fun (current, _) ->
     phys_equal current.Token.identity token.Token.identity)
+;;
+
+let check_recovery t token ~scope =
+  match t.current with
+  | Some (current, Preparing)
+    when owns t token
+         && current.capture_recovery
+         && Option.exists
+              current.recovery_scope
+              ~f:(Agent_protocol.Recovery_window.Scope.equal scope) -> Ok ()
+  | _ -> Error (Agent_protocol.Error.invalid_request "root preparation custody changed")
 ;;
 
 let mark t token configuration =
@@ -210,7 +235,7 @@ let require = function
   | Error error -> raise (Native_tool_dispatch.Dispatch_error error)
 ;;
 
-let root_port ~begin_capture ~publish_capacity ~mark ~finish =
+let root_port ~begin_capture ~publish_capacity ~publish_recovery ~mark ~finish =
   Chat_response.Root_context.
     { with_context =
         (fun ~previous ~history f ->
@@ -227,6 +252,16 @@ let root_port ~begin_capture ~publish_capacity ~mark ~finish =
                 "captured target cannot retain current history")
             |> require;
             let on_prepared prepared =
+              (if token.capture_recovery && Option.is_some token.recovery_scope
+               then (
+                let module Prepared = Inference_runtime.Prepared in
+                let binding_is_current = Prepared.binding_guard prepared in
+                if
+                  Inference.Request.Target.equal token.target (Prepared.target prepared)
+                  && binding_is_current ()
+                then
+                  Option.iter (Prepared.recovery_input prepared) ~f:(fun input ->
+                    publish_recovery token input ~binding_is_current |> require)));
               Option.iter token.capacity ~f:(fun capacity ->
                 let module Prepared = Inference_runtime.Prepared in
                 let policy = Capacity.Selection.policy capacity.selection in

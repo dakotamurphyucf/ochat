@@ -24,6 +24,8 @@ val create : unit -> t
 
 val begin_capture
   :  ?capacity:Capacity_basis.t
+  -> ?recovery_scope:Agent_protocol.Recovery_window.Scope.t
+  -> capture_recovery:bool
   -> t
   -> operation_id:Agent_protocol.Id.Operation.t
   -> generation:int
@@ -31,6 +33,12 @@ val begin_capture
   -> target:Inference.Request.Target.t
   -> policy:Configuration_policy.t
   -> Token.t
+
+val check_recovery
+  :  t
+  -> Token.t
+  -> scope:Agent_protocol.Recovery_window.Scope.t
+  -> (unit, Agent_protocol.Error.t) Result.t
 
 val mark
   :  t
@@ -69,6 +77,11 @@ val root_port
   :  begin_capture:(unit -> (Token.t, Agent_protocol.Error.t) Result.t)
   -> publish_capacity:
        (Token.t -> Capacity_observation.t -> (unit, Agent_protocol.Error.t) Result.t)
+  -> publish_recovery:
+       (Token.t
+        -> Inference_runtime.Recovery_input.t
+        -> binding_is_current:(unit -> bool)
+        -> (unit, Agent_protocol.Error.t) Result.t)
   -> mark:
        (Token.t
         -> Inference.Observation.Configuration.t

@@ -253,6 +253,13 @@ module Materialized = struct
 
   let find t id = Map.find t.contents id
   let has_live_results t = not (List.is_empty t.sources)
+
+  let protects t id =
+    List.exists t.sources ~f:(fun source ->
+      Id.equal id (History_entry.id source.call)
+      || Id.equal id (History_entry.id source.output))
+  ;;
+
   let release_contents t = t.contents <- Map.empty (module Id)
 
   type submission =

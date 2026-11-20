@@ -145,6 +145,7 @@ type 'spec fields =
   ; active_operation : Agent_protocol.Operation.t option
   ; automatic_turn_budget : Automatic_turn_budget.t option [@sexp.option]
   ; recovery_windows : (Recovery_window_ledger.t option[@sexp.opaque])
+  ; recovery_effective : (Recovery_effective_ledger.t option[@sexp.opaque])
   ; permissions : Agent_protocol.Permission.t list
   ; grants : Agent_protocol.Grant.t list
   ; jobs : Agent_protocol.Job.t list
@@ -759,6 +760,7 @@ let create_fields ~(identity : Identity.t) ~spec ~desired ~initial_history =
   ; active_operation = None
   ; automatic_turn_budget = None
   ; recovery_windows = None
+  ; recovery_effective = None
   ; permissions = []
   ; grants = []
   ; jobs = []
@@ -1099,6 +1101,13 @@ let validate_domain (t : t) ~recovery_revision =
         ~history:t.conversation.canonical_history
         ~has_summary_archive
         ~has_summary_operation
+  in
+  let%bind () =
+    Option.value_map t.recovery_effective ~default:(Ok ()) ~f:(fun ledger ->
+      Recovery_effective_ledger.validate_state
+        ledger
+        ~windows:t.recovery_windows
+        ~publication_revision:recovery_revision)
   in
   let seen_invocations = Hash_set.create (module Agent_protocol.Id.Invocation) in
   let%bind () =

@@ -175,6 +175,25 @@ source state, including moderator tombstones, before reading and again before
 releasing bytes after a wait. [Recovery selection interface](../../../lib/agent_session/recovery_visibility.mli). [Ledger interface](../../../lib/agent_session/recovery_window_ledger.mli),
 [local context recovery design](../../design/local-context-recovery.md).
 
+An enabled root preparation records body-free effective source coordinates
+after the runtime accepts the final neutral request. The actor checks the
+original operation and durable window owner, then matches each eligible request
+position to the exact committed moderator projection by occurrence and semantic
+digest. The durable record includes distinct request, effective and optional
+canonical ordinals. Protected tool delivery, unsupported payloads and synthetic
+positions without an exact source supply no recoverable member. Evidence is
+bounded before digesting. The shared moderator ordering pass uses occurrence
+identities. Recovery decodes canonical payloads only at matched, bounded source
+positions. Oversized coordinate views yield no observation. The per-generation
+ledger admits up to 64 preparations, 8,192 members and 2 MiB. Saturation preserves
+prior records and allows ordinary turns to continue.
+Readers require the exact retained source revision, window, overlay incarnation,
+occurrence, origin and digest, as well as current visibility and authorization.
+The required journal semantics cover preparation and source proof validation on
+replay. The prepare hook runs before attempt allocation or provider I/O.
+Historical source relocation and provider submission reconciliation have separate
+lifecycles. See the [effective preparation interface](../../../lib/agent_session/recovery_effective_capture.mli).
+
 Original source access has its own retained directory owner, shared revocable
 catalog policy and runtime loan. Captured prompt revisions remain immutable when
 that access is unavailable or revoked. See [original source ownership](../../../lib/agent_session/original_sources.md)

@@ -5451,6 +5451,11 @@ module Context_request = struct
 
   type _ t =
     | Capacity : 'a Capacity.t -> 'a t
+    | Recovery_effective :
+        Configuration_capture.Token.t
+        * Inference_runtime.Recovery_input.t
+        * (unit -> bool)
+        -> unit t
     | Enable_recovery_windows :
         Operator_authorization.t
         * Agent_protocol.Id.Attachment.t
@@ -12525,6 +12530,7 @@ let rec deferred_execution_delta (previous : Session_state.t) (delta : Session_d
   | Canonical_entries_appended _
   | Canonical_history_replaced _
   | Recovery_window_enabled _
+  | Recovery_effective_prepared _
   | Recovery_summary_compacted _
   | Authoring_references_forgotten _
   | Authoring_publication_changed _
@@ -25265,6 +25271,16 @@ let read_context_capacity t operation_id =
     ~current:(current_context_capacity_basis t)
 ;;
 
+let current_recovery_preparation_scope t =
+  let open Option.Let_syntax in
+  let%bind storage = t.canonical_persistence in
+  let%bind owner = Canonical_backend_binding_data.session_owner storage in
+  let%bind windows = t.state.recovery_windows in
+  if Agent_protocol.Session_ref.equal owner (Recovery_window_ledger.owner windows)
+  then Some (Recovery_window_ledger.Window.scope (Recovery_window_ledger.active windows))
+  else None
+;;
+
 let begin_configuration_capture t operation_id =
   let open Result.Let_syntax in
   let%bind _ = running_operation t operation_id in
@@ -25277,6 +25293,8 @@ let begin_configuration_capture t operation_id =
   in
   Configuration_capture.begin_capture
     ?capacity:(context_capacity_basis t target)
+    ?recovery_scope:(current_recovery_preparation_scope t)
+    ~capture_recovery:(Recovery_effective_ledger.has_record_capacity t.state.recovery_effective)
     t.configuration_capture
     ~operation_id
     ~generation:t.state.identity.generation
@@ -25308,11 +25326,68 @@ let mark_context_capacity t capture observation =
     observation
 ;;
 
+let capture_recovery_preparation t capture input ~binding_is_current =
+  let open Result.Let_syntax in
+  let operation = Configuration_capture.Token.operation_id capture in
+  let check () =
+    let%bind _ = running_operation t operation in
+    let%bind () = require_runtime_admission t in
+    let%bind () =
+      if binding_is_current ()
+      then Ok ()
+      else Error (error Conflict "actual prepared adapter binding is unavailable")
+    in
+    let%bind admission = operation_agent_admission t operation in
+    let%bind () = Option.value_map admission ~default:(Ok ()) ~f:check_agent_admission in
+    let%bind scope =
+      Result.of_option
+        (current_recovery_preparation_scope t)
+        ~error:(error Conflict "actual durable recovery window is unavailable")
+    in
+    Configuration_capture.check_recovery t.configuration_capture capture ~scope
+  in
+  let%bind () = check () in
+  let%bind prepared = Recovery_effective_capture.prepare t.state ~operation input in
+  match prepared with
+  | None -> Ok ()
+  | Some record ->
+    let previous = t.state in
+    let run_preparation =
+      Option.map t.run_source_binding ~f:(fun binding -> binding.Source_binding.preparation)
+    in
+    let%bind candidate =
+      prepare_transition
+        ?run_preparation
+        t
+        ~delta:(Recovery_effective_prepared record)
+        ~payloads:[]
+    in
+    let commit_observation =
+      Session_commit_observation.Owner.create_guarded
+        ~previous
+        ~candidate
+        ~check_at_writer:check
+    in
+    let%bind () =
+      persist_transition
+        ?run_preparation
+        t
+        candidate
+        ~check_before_commit:check
+        ~commit_observation
+    in
+    install_committed_transition ?run_preparation t candidate;
+    publish_committed_transition t candidate;
+    Ok ()
+;;
+
 let root_configuration_context t operation_id =
   Configuration_capture.root_port
     ~begin_capture:(fun () -> call t (Begin_configuration_capture operation_id))
     ~publish_capacity:(fun capture observation ->
       call t (Context_request (Capacity (Publish (capture, observation)))))
+    ~publish_recovery:(fun capture input ~binding_is_current ->
+      call t (Context_request (Recovery_effective (capture, input, binding_is_current))))
     ~mark:(fun capture configuration ->
       call t (Mark_configuration_capture (capture, configuration)))
     ~finish:(fun capture ~success ->
@@ -48550,6 +48625,7 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Set_organization_admission _
   | Set_configuration_policy _
   | Context_request (Capacity (Set_host _))
+  | Context_request (Recovery_effective _)
   | Prepare_configuration_update _
   | Commit_configuration_update _
   | Begin_configuration_capture _
@@ -57324,6 +57400,8 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
       mark_configuration_capture t capture configuration
     | Context_request (Capacity (Publish (capture, observation))) ->
       mark_context_capacity t capture observation
+    | Context_request (Recovery_effective (capture, input, binding_is_current)) ->
+      capture_recovery_preparation t capture input ~binding_is_current
     | Finish_configuration_capture (capture, success) ->
       finish_configuration_capture t capture success
     | Snapshot -> Ok (current_snapshot t)

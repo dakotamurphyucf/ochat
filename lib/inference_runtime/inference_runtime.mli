@@ -2,6 +2,30 @@ open! Core
 module Context_capacity = Context_capacity
 module Protected_delivery = Protected_delivery
 
+module Recovery_input : sig
+  type t
+
+  type row = private
+    { ordinal : int
+    ; occurrence : History_entry.Id.t
+    ; digest : Chatml_source.Digest.t
+    }
+
+  val preparation_id : t -> string
+  val configuration_digest : t -> Chatml_source.Digest.t
+  val input_count : t -> int
+  val rows : t -> row list
+  val max_input_count : int
+  val max_projection_bytes : int
+
+  (** Use only for an already admitted neutral source row. Protected occurrence
+      filtering precedes digests on [Prepared.recovery_input]. *)
+  val projected_digest
+    :  History_entry.t
+    -> remaining_bytes:int
+    -> Chatml_source.Digest.t option * int
+end
+
 (** Trusted per-attempt application-submission checkpoint. A guard contains a
     host-owned [refresh] callback, not authority created by this module. Refresh
     may yield to read the real owner/Claim and returns a fresh, attempt-local
@@ -289,6 +313,12 @@ module Prepared : sig
   val preparation_id : t -> string
   val configuration : t -> Inference.Observation.Configuration.t
   val fingerprint : t -> string
+
+  (** Inspect final positions in the admitted neutral request, excluding both
+      ends of protected tool delivery before computing evidence. No request
+      body, authority or provider materialization can escape. Oversized
+      history yields no evidence. A preparation does not prove submission. *)
+  val recovery_input : t -> Recovery_input.t option
 
   (** Nonyielding check of the same adapter/profile binding and resource owner.
       The returned closure retains no prepared request or source-count input. *)

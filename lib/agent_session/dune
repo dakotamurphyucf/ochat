@@ -359,6 +359,10 @@
   recovery_window_record
   recovery_window_ledger
   recovery_window_capture
+  recovery_effective_projection
+  recovery_effective_record
+  recovery_effective_ledger
+  recovery_effective_capture
   recovery_visibility
   recovery_source_reader
   recovery_image

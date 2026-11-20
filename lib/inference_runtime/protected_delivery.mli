@@ -87,6 +87,9 @@ module Materialized : sig
 
   val has_live_results : t -> bool
 
+  (** Identifies positions to omit before any recovery digest is computed. *)
+  val protects : t -> History_entry.Id.t -> bool
+
   (** Drop the projection inputs when adapter preparation returns. The
       submitted wire preparation and authority checks retain their own state. *)
   val release_contents : t -> unit
