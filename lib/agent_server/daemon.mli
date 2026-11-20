@@ -293,6 +293,9 @@ type options =
   ; reviewer_resolver : Catalog_builder.reviewer_resolver option
   ; policy_evaluator_resolver : Catalog_builder.policy_evaluator_resolver option
   ; inference_policy : Session_factory.inference_policy
+  ; context_capacity_host : Agent_session.Session_context_capacity.Host.t
+    (** Explicit durable-session and exact-target qualification. Disabled by
+        default. No provider limit or counter is inferred from the model. *)
   ; qualify_chatml_extensions : bool
     (** Enable the shared extension runtime; true by default. False is an explicit
         embedding compatibility override and suppresses extension discovery.

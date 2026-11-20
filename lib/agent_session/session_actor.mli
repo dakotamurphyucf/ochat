@@ -3705,6 +3705,21 @@ val set_configuration_policy
   -> Configuration_policy.t
   -> (unit, Agent_protocol.Error.t) Result.t
 
+(** Trusted host startup policy. An actor without its actual durable writer
+    owner always reports disabled capacity. *)
+val set_context_capacity_host
+  :  t
+  -> Session_context_capacity.Host.t
+  -> (unit, Agent_protocol.Error.t) Result.t
+
+(** Safe status bound to an exact running operation of this local owner.
+    Reading after retirement fails. The native caller must separately admit
+    the invoking tool and recheck any durable transition claim. *)
+val context_capacity
+  :  t
+  -> operation_id:Agent_protocol.Id.Operation.t
+  -> Session_context_capacity.Port.t
+
 val configuration
   :  t
   -> (Agent_protocol.Session_configuration.t, Agent_protocol.Error.t) Result.t

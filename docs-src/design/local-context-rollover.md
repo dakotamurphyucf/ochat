@@ -75,6 +75,16 @@ identities, so having the same displayed preparation ID cannot authorize
 reuse. With no policy the accessor returns `Policy_missing` and does no
 counting. Assessment neither changes dispatch nor acknowledges a wake.
 
+The host installs an exact-target registry and a session opt-in through
+`Daemon.options.context_capacity_host`. The default is disabled. The session's
+actual canonical writer identity supplies the host-qualified session reference.
+The actor's capacity port reads the latest finalized root preparation for
+one running operation. A changed target, source revision, active window, host
+policy or provider binding makes that preparation stale. A retained assessment
+describes the request that just finished in that operation. Each subsequent
+request needs its own assessment. The port grants no authority to start a window
+transition. [Host and status contract](../../lib/agent_session/session_context_capacity.mli).
+
 The OpenAI Responses adapter offers a versioned O200k estimate over compact
 JSON of the finished request. It includes the finalized text, instructions,
 guidance, tool schemas and framing. The 1 MiB bound is checked on the
@@ -82,6 +92,9 @@ immutable JSON before scanning content coverage or encoding the request
 for the tokenizer. A preparation retains its bounded numeric reading or
 closed coverage result across explicit assessments. Policy and threshold
 decisions are recalculated separately.
+Argument isolation still permits measuring that request's cache-omitted
+wire. Requests carrying live protected tool results have no capacity count
+source, so their private content does not affect the reported estimate.
 Images, documents, opaque reasoning, unknown retained item shapes and
 requests beyond the bound return a typed unknown. A host must qualify
 the estimator and choose its safety margin for the actual target. Real

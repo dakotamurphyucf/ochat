@@ -310,7 +310,15 @@ let run_stream
   |> ok
 ;;
 
-let create_internal ~request_guidance ~on_prepare ~namespace ~default_model ~post_stream =
+let create_internal
+      ~request_guidance
+      ~on_prepare
+      ~capacity_source
+      ~binding_is_current
+      ~namespace
+      ~default_model
+      ~post_stream
+  =
   let source = Transcript.Source_id.of_string namespace |> ok in
   let sequence = Atomic.make 0 in
   let next () = Atomic.fetch_and_add sequence 1 |> Int.to_string in
@@ -341,7 +349,10 @@ let create_internal ~request_guidance ~on_prepare ~namespace ~default_model ~pos
       && String.equal (R.Target.profile target) "selected"
       && Option.is_none (R.Target.account target)
       && String.equal (R.Target.endpoint target) "fixture://responses"
-    then Ok ()
+    then
+      if binding_is_current ()
+      then Ok ()
+      else Error Runtime.Preparation_error.Target_unavailable
     else Error Runtime.Preparation_error.Target_mismatch
   in
   let adapter =
@@ -363,11 +374,16 @@ let create_internal ~request_guidance ~on_prepare ~namespace ~default_model ~pos
             ~limits:O.Admission.observation
           |> Result.map_error ~f:(fun _ -> Runtime.Preparation_error.Invalid_preparation)
         in
-        Runtime.Plan.create
-          ~request
-          ~configuration
-          ~fingerprint:preparation_id
-          ~run:(run_stream ~request_guidance post_stream request))
+        let%map plan =
+          Runtime.Plan.create
+            ~request
+            ~configuration
+            ~fingerprint:preparation_id
+            ~run:(run_stream ~request_guidance post_stream request)
+        in
+        match capacity_source request with
+        | None -> plan
+        | Some source -> Runtime.Plan.with_capacity_source plan source)
       ()
     |> ok
   in
@@ -378,6 +394,8 @@ let create_with_observer ~on_prepare ~namespace ~default_model ~post_stream =
   create_internal
     ~request_guidance:false
     ~on_prepare
+    ~capacity_source:(fun _ -> None)
+    ~binding_is_current:(fun () -> true)
     ~namespace
     ~default_model
     ~post_stream
@@ -387,6 +405,8 @@ let create_with_request_guidance ~on_prepare ~namespace ~default_model ~post_str
   create_internal
     ~request_guidance:true
     ~on_prepare
+    ~capacity_source:(fun _ -> None)
+    ~binding_is_current:(fun () -> true)
     ~namespace
     ~default_model
     ~post_stream
@@ -394,6 +414,23 @@ let create_with_request_guidance ~on_prepare ~namespace ~default_model ~post_str
 
 let create ~namespace ~default_model ~post_stream =
   create_with_observer ~on_prepare:ignore ~namespace ~default_model ~post_stream
+;;
+
+let create_with_capacity
+      ~capacity_source
+      ~binding_is_current
+      ~namespace
+      ~default_model
+      ~post_stream
+  =
+  create_internal
+    ~request_guidance:false
+    ~on_prepare:ignore
+    ~capacity_source:(fun request -> Some (capacity_source request))
+    ~binding_is_current
+    ~namespace
+    ~default_model
+    ~post_stream
 ;;
 
 let capture_config t config =

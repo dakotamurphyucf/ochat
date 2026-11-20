@@ -5411,7 +5411,17 @@ module Recovery_note_request = struct
 end
 
 module Context_request = struct
+  module Capacity = struct
+    type _ t =
+      | Set_host : Session_context_capacity.Host.t -> unit t
+      | Read : Agent_protocol.Id.Operation.t -> Session_context_capacity.status t
+      | Publish :
+          Configuration_capture.Token.t * Configuration_capture.Capacity_observation.t
+          -> unit t
+  end
+
   type _ t =
+    | Capacity : 'a Capacity.t -> 'a t
     | Enable_recovery_windows :
         Operator_authorization.t
         * Agent_protocol.Id.Attachment.t
@@ -6482,6 +6492,7 @@ and t =
   ; mutable lifecycle_fence : Lifecycle_fence.t option
   ; mutable organization_admission : Session_organization_admission.t option
   ; mutable configuration_policy : Configuration_policy.t option
+  ; mutable context_capacity_host : Session_context_capacity.Host.t
   ; mutable recurrence_controller : Recurrence_controller.t option
   ; recurrence_runtime : Recurrence_runtime.t
   ; recurrence_creation_owner : unit ref
@@ -25165,6 +25176,30 @@ let commit_configuration_update t validated =
   configuration_view t
 ;;
 
+let context_capacity_basis t target =
+  Option.bind
+    (Option.bind t.canonical_persistence ~f:Canonical_backend_binding_data.session_owner)
+    ~f:(fun owner ->
+      Session_context_capacity.Selection.select t.context_capacity_host ~owner ~target
+      |> Option.map ~f:(fun selection ->
+        Configuration_capture.Capacity_basis.capture t.state ~selection))
+;;
+
+let current_context_capacity_basis t =
+  Result.ok (Configuration_transition.target t.state)
+  |> Option.bind ~f:(context_capacity_basis t)
+;;
+
+let read_context_capacity t operation_id =
+  let open Result.Let_syntax in
+  let%bind _ = running_operation ~allow_waiting_permission:true t operation_id in
+  let%map () = require_runtime_admission t in
+  Configuration_capture.capacity_status
+    t.configuration_capture
+    ~operation_id
+    ~current:(current_context_capacity_basis t)
+;;
+
 let begin_configuration_capture t operation_id =
   let open Result.Let_syntax in
   let%bind _ = running_operation t operation_id in
@@ -25176,6 +25211,7 @@ let begin_configuration_capture t operation_id =
       ~error:(error Invalid_state "root configuration policy is unavailable")
   in
   Configuration_capture.begin_capture
+    ?capacity:(context_capacity_basis t target)
     t.configuration_capture
     ~operation_id
     ~generation:t.state.identity.generation
@@ -25196,9 +25232,22 @@ let finish_configuration_capture t capture success =
   Ok ()
 ;;
 
+let mark_context_capacity t capture observation =
+  let open Result.Let_syntax in
+  let%bind _ = running_operation t (Configuration_capture.Token.operation_id capture) in
+  let%map () = require_runtime_admission t in
+  Configuration_capture.mark_capacity
+    t.configuration_capture
+    capture
+    ~current:(current_context_capacity_basis t)
+    observation
+;;
+
 let root_configuration_context t operation_id =
   Configuration_capture.root_port
     ~begin_capture:(fun () -> call t (Begin_configuration_capture operation_id))
+    ~publish_capacity:(fun capture observation ->
+      call t (Context_request (Capacity (Publish (capture, observation)))))
     ~mark:(fun capture configuration ->
       call t (Mark_configuration_capture (capture, configuration)))
     ~finish:(fun capture ~success ->
@@ -48301,6 +48350,7 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Finish_moderator_invocation _
   | Set_idle_moderator_cancel _
   | Configuration
+  | Context_request (Capacity (Read _ | Publish _))
   | Finish_configuration_capture _
   | Lifecycle_state _
   | Retire_lifecycle _
@@ -48433,6 +48483,7 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Commit_extensions _
   | Set_organization_admission _
   | Set_configuration_policy _
+  | Context_request (Capacity (Set_host _))
   | Prepare_configuration_update _
   | Commit_configuration_update _
   | Begin_configuration_capture _
@@ -56955,12 +57006,19 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
     | Set_configuration_policy policy ->
       t.configuration_policy <- Some policy;
       Ok ()
+    | Context_request (Capacity (Set_host host)) ->
+      t.context_capacity_host <- host;
+      Ok ()
+    | Context_request (Capacity (Read operation_id)) ->
+      read_context_capacity t operation_id
     | Prepare_configuration_update request -> prepare_configuration_update t request
     | Commit_configuration_update validated -> commit_configuration_update t validated
     | Begin_configuration_capture operation_id ->
       begin_configuration_capture t operation_id
     | Mark_configuration_capture (capture, configuration) ->
       mark_configuration_capture t capture configuration
+    | Context_request (Capacity (Publish (capture, observation))) ->
+      mark_context_capacity t capture observation
     | Finish_configuration_capture (capture, success) ->
       finish_configuration_capture t capture success
     | Snapshot -> Ok (current_snapshot t)
@@ -58461,6 +58519,7 @@ let create_internal
     ; permission_waiters = ref Map.Poly.empty
     ; organization_admission = None
     ; configuration_policy = None
+    ; context_capacity_host = Session_context_capacity.Host.off
     ; recurrence_controller = None
     ; recurrence_runtime = Recurrence_runtime.create ~origin:(services.monotonic_now ())
     ; recurrence_creation_owner = ref ()
@@ -61530,6 +61589,12 @@ let update_metadata t ?command_audit ~attachment_id ~expected_metadata_revision 
 
 let configuration t = call t Configuration
 let set_configuration_policy t policy = call t (Set_configuration_policy policy)
+let set_context_capacity_host t host = call t (Context_request (Capacity (Set_host host)))
+
+let context_capacity t ~operation_id =
+  Session_context_capacity.Port.create ~read:(fun () ->
+    call t (Context_request (Capacity (Read operation_id))))
+;;
 
 let update_configuration t ?command_audit request =
   let open Result.Let_syntax in

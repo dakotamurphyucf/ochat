@@ -48,6 +48,8 @@ module Materialized : sig
   (** Trusted adapter only. By exact committed host occurrence. *)
   val find : t -> History_entry.Id.t -> History_entry.Payload.Output.t option
 
+  val has_live_results : t -> bool
+
   (** Drop the projection inputs when adapter preparation returns. The
       submitted wire preparation and authority checks retain their own state. *)
   val release_contents : t -> unit

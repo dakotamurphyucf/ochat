@@ -2331,7 +2331,7 @@ let run_turn (root_ctx : ctx) ~sw ~(history : History_entry.t list) =
       in
       c.neutral_items <- Map.empty (module Transcript.Item.Key);
       c.transcript_live <- None;
-      let run_request inference_context ~on_dispatch =
+      let run_request inference_context ~on_prepared ~on_dispatch =
         let c = { c with inference_context } in
         let admitted_attempt = ref None in
         let request =
@@ -2364,7 +2364,9 @@ let run_turn (root_ctx : ctx) ~sw ~(history : History_entry.t list) =
                  ~identity:c.inference_identity
                  ~relation:c.transcript_relation
                  ~request
-                 ~before_dispatch:c.before_inference_dispatch
+                 ~before_dispatch:(fun prepared ->
+                   on_prepared prepared;
+                   c.before_inference_dispatch prepared)
                  ~on_attempt:(fun attempt ->
                    on_dispatch (Inference_runtime.Attempt.configuration attempt);
                    c.on_inference_attempt attempt;
@@ -2405,7 +2407,7 @@ let run_turn (root_ctx : ctx) ~sw ~(history : History_entry.t list) =
       in
       let c, receipt =
         match c.root_context with
-        | None -> run_request c.inference_context ~on_dispatch:(fun _ -> ())
+        | None -> run_request c.inference_context ~on_prepared:ignore ~on_dispatch:ignore
         | Some source ->
           source.with_context ~previous:c.inference_context ~history:inputs run_request
       in

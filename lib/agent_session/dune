@@ -166,6 +166,7 @@
   configuration_transition
   configuration_update
   configuration_capture
+  session_context_capacity
   configuration_policy
   queue_provenance_semantics
   session_storage_semantics

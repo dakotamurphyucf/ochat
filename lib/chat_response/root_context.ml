@@ -7,6 +7,7 @@ type t =
       previous:Inference_runtime.Context.t
       -> history:History_entry.t list
       -> (Inference_runtime.Context.t
+          -> on_prepared:(Inference_runtime.Prepared.t -> unit)
           -> on_dispatch:(Inference.Observation.Configuration.t -> unit)
           -> 'a)
       -> 'a

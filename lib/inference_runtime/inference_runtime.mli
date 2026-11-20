@@ -168,7 +168,7 @@ module Plan : sig
     -> (t, Preparation_error.t) Result.t
 
   (** Trusted protected adapter. Configuration reflects omission of optional
-      prompt-cache settings. Capacity is withheld for isolated preparations. *)
+      prompt-cache settings. Capacity is withheld when live results are present. *)
   val create_isolated
     :  request:Inference.Request.t
     -> configuration:Inference.Observation.Configuration.t
@@ -286,6 +286,10 @@ module Prepared : sig
   val preparation_id : t -> string
   val configuration : t -> Inference.Observation.Configuration.t
   val fingerprint : t -> string
+
+  (** Nonyielding check of the same adapter/profile binding and resource owner.
+      The returned closure retains no prepared request or source-count input. *)
+  val binding_guard : t -> unit -> bool
 
   (** Explicit, local assessment of this accepted prepared request under the
       host policy. It allocates no attempt, does not authorize dispatch, and

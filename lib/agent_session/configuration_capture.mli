@@ -4,6 +4,16 @@ open! Core
     stored here. The actor serializes every mutation after its ownership checks. *)
 type t
 
+module Capacity_basis : sig
+  type t
+
+  val capture : Session_state.t -> selection:Session_context_capacity.Selection.t -> t
+end
+
+module Capacity_observation : sig
+  type t
+end
+
 module Token : sig
   type t
 
@@ -13,7 +23,8 @@ end
 val create : unit -> t
 
 val begin_capture
-  :  t
+  :  ?capacity:Capacity_basis.t
+  -> t
   -> operation_id:Agent_protocol.Id.Operation.t
   -> generation:int
   -> revision:int64
@@ -26,6 +37,19 @@ val mark
   -> Token.t
   -> Inference.Observation.Configuration.t
   -> (unit, Agent_protocol.Error.t) Result.t
+
+val mark_capacity
+  :  t
+  -> Token.t
+  -> current:Capacity_basis.t option
+  -> Capacity_observation.t
+  -> unit
+
+val capacity_status
+  :  t
+  -> operation_id:Agent_protocol.Id.Operation.t
+  -> current:Capacity_basis.t option
+  -> Session_context_capacity.status
 
 val finish : t -> Token.t -> success:bool -> unit
 
@@ -43,6 +67,8 @@ val view
     successful completion retains a historical projection, never an active one. *)
 val root_port
   :  begin_capture:(unit -> (Token.t, Agent_protocol.Error.t) Result.t)
+  -> publish_capacity:
+       (Token.t -> Capacity_observation.t -> (unit, Agent_protocol.Error.t) Result.t)
   -> mark:
        (Token.t
         -> Inference.Observation.Configuration.t

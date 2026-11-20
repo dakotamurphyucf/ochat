@@ -302,6 +302,7 @@ type t =
   ; tool_dir : string
   ; home : string option
   ; inference_policy : inference_policy
+  ; context_capacity_host : Agent_session.Session_context_capacity.Host.t
   ; qualify_chatml_extensions : bool
   ; session_helpers : Agent_session.Session_management_channel.grant list
   ; independent_lifetime_policy : string option
@@ -12618,6 +12619,9 @@ let create_unloaded_entry
     let%bind () =
       Agent_session.Session_actor.set_configuration_policy actor (configuration_policy t)
     in
+    let%bind () =
+      Agent_session.Session_actor.set_context_capacity_host actor t.context_capacity_host
+    in
     let policy_resource = Session_policy_resource.create () in
     let native_routing = Native_constructor_routing.create () in
     let source_target () =
@@ -18931,6 +18935,7 @@ let create
       ~tool_dir
       ~home
       ~inference_policy
+      ~context_capacity_host
       ~qualify_chatml_extensions
       ~session_helpers
       ~independent_lifetime_policy
@@ -18997,6 +19002,7 @@ let create
     ; tool_dir
     ; home
     ; inference_policy
+    ; context_capacity_host
     ; qualify_chatml_extensions
     ; session_helpers
     ; independent_lifetime_policy

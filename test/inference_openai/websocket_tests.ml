@@ -1186,7 +1186,7 @@ let%test_unit
          let context =
            protected_context ~cache_settings env ~sw ~policy:Require_websocket endpoint
          in
-         let execute ?relation ?(isolated = true) prepared id =
+         let execute ?relation ?(isolated = true) ?(private_input = false) prepared id =
            let module C = O.Configuration in
            let config = Runtime.Prepared.configuration prepared in
            let cache_setting name =
@@ -1203,8 +1203,10 @@ let%test_unit
               in
               let assessment = Runtime.Prepared.assess_capacity prepared ~policy in
               assert (
-                match Runtime.Context_capacity.Assessment.view assessment with
-                | Unavailable Source_missing -> true
+                match
+                  private_input, Runtime.Context_capacity.Assessment.view assessment
+                with
+                | true, Unavailable Source_missing | false, Assessed _ -> true
                 | _ -> false)
             | false, Value (Cache_retention `Hours_24), Withheld ->
               assert (C.withheld_settings config = 1)
@@ -1264,7 +1266,7 @@ let%test_unit
          in
          assert (
            String.equal (Runtime.Prepared.fingerprint consuming) "isolated:consuming");
-         execute consuming "consuming";
+         execute ~private_input:true consuming "consuming";
          Delivery.retire plan;
          let next =
            Agent_session.History_codec.user_text

@@ -35,6 +35,7 @@ type options =
   ; reviewer_resolver : Catalog_builder.reviewer_resolver option
   ; policy_evaluator_resolver : Catalog_builder.policy_evaluator_resolver option
   ; inference_policy : Session_factory.inference_policy
+  ; context_capacity_host : Agent_session.Session_context_capacity.Host.t
   ; qualify_chatml_extensions : bool
   ; session_helpers : Agent_session.Session_management_channel.grant list
   ; independent_lifetime_policy : string option
@@ -242,6 +243,7 @@ let default_options =
       }
   ; reviewer_resolver = None
   ; policy_evaluator_resolver = None
+  ; context_capacity_host = Agent_session.Session_context_capacity.Host.off
   ; inference_policy =
       { capture_inference_target =
           (fun ~prompt_revision_id:_ ~config:_ ->
@@ -1358,6 +1360,7 @@ let compose
       ~tool_dir
       ~home
       ~inference_policy:options.inference_policy
+      ~context_capacity_host:options.context_capacity_host
       ~qualify_chatml_extensions:options.qualify_chatml_extensions
       ~session_helpers:options.session_helpers
       ~independent_lifetime_policy:options.independent_lifetime_policy

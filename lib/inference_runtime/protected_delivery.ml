@@ -213,6 +213,7 @@ module Materialized = struct
   ;;
 
   let find t id = Map.find t.contents id
+  let has_live_results t = not (List.is_empty t.sources)
   let release_contents t = t.contents <- Map.empty (module Id)
 
   let bind t ~scope =

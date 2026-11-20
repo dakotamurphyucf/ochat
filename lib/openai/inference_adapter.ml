@@ -366,7 +366,10 @@ let create
           Option.iter session ~f:D.Websocket_session.invalidate;
           raise exn)
     |> Result.map ~f:(fun plan ->
-      if isolated
+      if
+        Option.exists
+          materialized
+          ~f:Inference_runtime.Protected_delivery.Materialized.has_live_results
       then plan
       else
         Inference_runtime.Plan.with_capacity_source

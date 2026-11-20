@@ -47,6 +47,8 @@ module Policy : sig
     -> allowance:allowance
     -> estimate:estimate option
     -> (t, error) Result.t
+
+  val target : t -> Inference.Request.Target.t
 end
 
 module Source : sig

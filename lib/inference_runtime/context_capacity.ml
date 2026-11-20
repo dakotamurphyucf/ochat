@@ -64,6 +64,7 @@ module Policy = struct
   [@@deriving equal, sexp_of]
 
   let allowed_total ~total t = cap (cap total t.host_total) t.session_total
+  let target t = t.target
 
   let create ~target ~encoder ~model_limit ~allowance ~estimate =
     let { host_total

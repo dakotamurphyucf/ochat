@@ -93,8 +93,11 @@ let with_context t ~resolved ~f =
 let wrap t (source : Root_context.t) : Root_context.t =
   { with_context =
       (fun ~previous ~history f ->
-        source.with_context ~previous ~history (fun resolved ~on_dispatch ->
-          match with_context t ~resolved ~f:(fun context -> f context ~on_dispatch) with
+        source.with_context ~previous ~history (fun resolved ~on_prepared ~on_dispatch ->
+          match
+            with_context t ~resolved ~f:(fun context ->
+              f context ~on_prepared ~on_dispatch)
+          with
           | Ok result -> result
           | Error error -> raise_s [%sexp (error : Runtime.Preparation_error.t)]))
   }

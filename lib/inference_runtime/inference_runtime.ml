@@ -562,6 +562,7 @@ module Prepared = struct
     { plan : Plan.t
     ; limits : Limits.t
     ; capacity_binding : Context_capacity.Binding.t
+    ; binding_guard : unit -> bool
     ; protected_input : Protected_delivery.Materialized.t option
     }
 
@@ -569,6 +570,7 @@ module Prepared = struct
   let preparation_id t = Observation.Configuration.preparation_id t.plan.configuration
   let configuration t = t.plan.configuration
   let fingerprint t = t.plan.fingerprint
+  let binding_guard t = t.binding_guard
 
   let assess_capacity ?policy t =
     Context_capacity.Binding.assess ?policy t.capacity_binding
@@ -891,9 +893,24 @@ module Context = struct
           Context_capacity.Binding.create
             ~target:(Request.target request)
             ~configuration:plan.configuration
-            ~source:(if plan.isolated then None else plan.capacity_source)
+            ~source:
+              (if List.is_empty protected_delivery then plan.capacity_source else None)
         in
-        Ok { Prepared.plan; limits = t.adapter.limits; capacity_binding; protected_input }))
+        let binding_guard =
+          let bind = t.adapter.bind in
+          let target = t.target in
+          let session = t.session in
+          fun () ->
+            (not (Option.exists session ~f:Session.is_closed))
+            && Result.is_ok (bind target)
+        in
+        Ok
+          { Prepared.plan
+          ; limits = t.adapter.limits
+          ; capacity_binding
+          ; binding_guard
+          ; protected_input
+          }))
   ;;
 
   let prepare
