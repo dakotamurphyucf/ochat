@@ -603,7 +603,8 @@ type extension_services =
   ; notification_input :
       source:Agent_protocol.Invocation.observer option
       -> tools:Script_tool_calls.t
-      -> operation_id:Agent_protocol.Id.Operation.t
+      -> consume:
+           Notification_delivery.t Operation_worker.Capabilities.notification_consumer
       -> unit
       -> ( Chat_response.In_memory_stream.Safe_point_input.batch
            , Agent_protocol.Error.t )
@@ -611,7 +612,8 @@ type extension_services =
   ; initial_notification_input :
       source:Agent_protocol.Invocation.observer option
       -> tools:Script_tool_calls.t
-      -> operation_id:Agent_protocol.Id.Operation.t
+      -> consume:
+           Notification_delivery.idle Operation_worker.Capabilities.notification_consumer
       -> unit
       -> ( Chat_response.In_memory_stream.Safe_point_input.batch
            , Agent_protocol.Error.t )

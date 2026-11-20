@@ -375,10 +375,10 @@ let run ctx input = Task.bind(Tool.call("run_chatml", `Object([
             ; lifecycle_started = (fun _ -> false)
             ; idle_notifications = (fun ~source:_ ~tools:_ () -> Ok false)
             ; notification_input =
-                (fun ~source:_ ~tools:_ ~operation_id:_ () ->
+                (fun ~source:_ ~tools:_ ~consume:_ () ->
                   Ok Chat_response.In_memory_stream.Safe_point_input.empty)
             ; initial_notification_input =
-                (fun ~source:_ ~tools:_ ~operation_id:_ () ->
+                (fun ~source:_ ~tools:_ ~consume:_ () ->
                   Ok Chat_response.In_memory_stream.Safe_point_input.empty)
             ; claim_lifecycle =
                 (fun ~event ->

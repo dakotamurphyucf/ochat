@@ -89,7 +89,8 @@ type extension_services =
   ; notification_input :
       source:Agent_protocol.Invocation.observer option
       -> tools:Script_tool_calls.t
-      -> operation_id:Agent_protocol.Id.Operation.t
+      -> consume:
+           Notification_delivery.t Operation_worker.Capabilities.notification_consumer
       -> unit
       -> ( Chat_response.In_memory_stream.Safe_point_input.batch
            , Agent_protocol.Error.t )
@@ -97,7 +98,8 @@ type extension_services =
   ; initial_notification_input :
       source:Agent_protocol.Invocation.observer option
       -> tools:Script_tool_calls.t
-      -> operation_id:Agent_protocol.Id.Operation.t
+      -> consume:
+           Notification_delivery.idle Operation_worker.Capabilities.notification_consumer
       -> unit
       -> ( Chat_response.In_memory_stream.Safe_point_input.batch
            , Agent_protocol.Error.t )
@@ -2260,12 +2262,11 @@ let guarded_services authority (services : extension_services) =
         checked (fun () -> services.claim_lifecycle ~event ~snapshot f))
   ; run_actions = (fun executing -> checked (fun () -> services.run_actions executing))
   ; notification_input =
-      (fun ~source ~tools ~operation_id () ->
-        checked (fun () -> services.notification_input ~source ~tools ~operation_id ()))
+      (fun ~source ~tools ~consume () ->
+        checked (fun () -> services.notification_input ~source ~tools ~consume ()))
   ; initial_notification_input =
-      (fun ~source ~tools ~operation_id () ->
-        checked (fun () ->
-          services.initial_notification_input ~source ~tools ~operation_id ()))
+      (fun ~source ~tools ~consume () ->
+        checked (fun () -> services.initial_notification_input ~source ~tools ~consume ()))
   ; idle_notifications =
       (fun ~source ~tools () ->
         checked (fun () -> services.idle_notifications ~source ~tools ()))
@@ -4768,22 +4769,22 @@ let build_product_attachment
     match extension_services, script_tools with
     | Some services, Some tools ->
       Some
-        (fun ~input ->
+        (fun ~(capabilities : Operation_worker.Capabilities.t) ->
           services.notification_input
             ~source:notification_source
             ~tools
-            ~operation_id:input.Operation_worker.Input.operation.id)
+            ~consume:capabilities.consume_notifications)
     | _ -> None
   in
   let initial_notification_input =
     match extension_services, script_tools with
     | Some services, Some tools ->
       Some
-        (fun ~input ->
+        (fun ~(capabilities : Operation_worker.Capabilities.t) ->
           services.initial_notification_input
             ~source:notification_source
             ~tools
-            ~operation_id:input.Operation_worker.Input.operation.id)
+            ~consume:capabilities.consume_initial_notifications)
     | _ -> None
   in
   let idle_notifications =

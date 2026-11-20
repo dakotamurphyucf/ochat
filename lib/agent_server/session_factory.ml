@@ -2756,9 +2756,9 @@ let extension_services
             | Completed _ -> true
             | Running | Failed _ | Interrupted _ -> false))
     ; notification_input =
-        (fun ~source ~tools ~operation_id () ->
+        (fun ~source ~tools ~consume () ->
           let open Result.Let_syntax in
-          let%bind actor, current = notification_snapshot () in
+          let%bind _, current = notification_snapshot () in
           let%bind plan =
             Agent_session.Notification_delivery.prepare_for_runtime
               ~state:current
@@ -2768,17 +2768,14 @@ let extension_services
               ~policy:execution_request_policy
               ~max_count:t.limits.notifications.max_per_source
           in
-          match
-            Eio.Cancel.protect (fun () ->
-              A.consume_notifications actor ~operation_id plan)
-          with
+          match consume plan with
           | Error { code = Conflict; _ } ->
             Ok Chat_response.In_memory_stream.Safe_point_input.empty
           | result -> result)
     ; initial_notification_input =
-        (fun ~source ~tools ~operation_id () ->
+        (fun ~source ~tools ~consume () ->
           let open Result.Let_syntax in
-          let%bind actor, current = notification_snapshot () in
+          let%bind _, current = notification_snapshot () in
           let%bind plan =
             Agent_session.Notification_delivery.prepare_idle_for_runtime
               ~state:current
@@ -2788,10 +2785,7 @@ let extension_services
               ~policy:execution_request_policy
               ~max_count:t.limits.notifications.max_per_source
           in
-          match
-            Eio.Cancel.protect (fun () ->
-              A.consume_initial_notifications actor ~operation_id plan)
-          with
+          match consume plan with
           | Error { code = Conflict; _ } ->
             Ok Chat_response.In_memory_stream.Safe_point_input.empty
           | result -> result)
@@ -14587,15 +14581,15 @@ module Recovery_note_shares = struct
 
   let unavailable () = Error (Share.unavailable ())
   let hide_denial result = Result.map_error result ~f:(fun _ -> Share.unavailable ())
-
   let session = recovery_share_session
-
   let check_owner = check_recovery_source_owner
 
   let management_revision t ~(source : Session_registry.entry) ~access =
     let open Result.Let_syntax in
     let%bind session = session t source in
+
     Actor.management_revision
+
       source.actor
       ~access
       ~check_owner:(check_owner t source ~session)

@@ -351,7 +351,7 @@ let run
     match ended (), initial_notification_input with
     | true, _ | _, None -> []
     | false, Some prepare ->
-      (prepare ~input () |> require_ok)
+      (prepare ~capabilities () |> require_ok)
         .Chat_response.In_memory_stream.Safe_point_input.entries
   in
   let history = input.Operation_worker.Input.history @ initial_entries in
@@ -427,7 +427,7 @@ let run
         ~safe_point_input:
           (safe_point_input
              ?notification_input:
-               (Option.map notification_input ~f:(fun make -> make ~input))
+               (Option.map notification_input ~f:(fun make -> make ~capabilities))
              capabilities)
         ~sw
         ()

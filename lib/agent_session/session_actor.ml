@@ -1674,6 +1674,54 @@ module Operation_completion = struct
   ;;
 end
 
+module Foreground_publication = struct
+  module P = Agent_protocol
+  module Scope = P.Recovery_window.Scope
+
+  type t =
+    { launch : unit ref
+    ; session : P.Id.Session.t
+    ; generation : int
+    ; window : Scope.t option
+    ; operation : P.Operation.t
+    ; live : bool Atomic.t
+    ; completion : Operation_completion.t option
+    }
+
+  let scope (state : Session_state.t) =
+    Option.map state.recovery_windows ~f:(fun ledger ->
+      Recovery_window_ledger.(Window.scope (active ledger)))
+  ;;
+
+  let capture (state : Session_state.t) ~operation ~completion =
+    { launch = ref ()
+    ; session = state.identity.session_id
+    ; generation = state.identity.generation
+    ; window = scope state
+    ; operation
+    ; live = Atomic.make true
+    ; completion
+    }
+  ;;
+
+  let matches t ~(selected : t option) ~(state : Session_state.t) =
+    Option.exists selected ~f:(fun current -> phys_equal t.launch current.launch)
+    && P.Id.Session.equal t.session state.identity.session_id
+    && Int.equal t.generation state.identity.generation
+    && Option.equal Scope.equal t.window (scope state)
+    && Option.exists state.active_operation ~f:(fun operation ->
+      P.Id.Operation.equal t.operation.id operation.id
+      && Int.equal t.operation.generation operation.generation
+      && P.Operation.equal_kind t.operation.kind operation.kind)
+  ;;
+end
+
+module Worker_readiness = struct
+  type t =
+    | Foreground of Foreground_publication.t
+    | Compaction of Agent_protocol.Id.Operation.t
+end
+
 module Pending_runtime_operation = struct
   type t =
     { operation_id : Agent_protocol.Id.Operation.t
@@ -5702,7 +5750,7 @@ type _ request =
   | Finish_queued_event : Queued_callback_finish.t -> unit request
   | Set_queued_event_cancel : queued_event_borrow * (unit -> unit) -> unit request
   | Commit_invocation_call :
-      Agent_protocol.Id.Operation.t * Agent_protocol.Invocation.t * History_entry.t
+      Foreground_publication.t * Agent_protocol.Invocation.t * History_entry.t
       -> unit request
   | Claim_invocation :
       Agent_protocol.Id.Operation.t * Agent_protocol.Invocation.t
@@ -6210,23 +6258,22 @@ type _ request =
       Agent_protocol.Id.Attachment.t * int64 * Agent_protocol.History.Id.t
       -> Agent_protocol.Session.t request
   | Adopt_deferred : Agent_protocol.Session.t request
-  | Reserve_history_block : int -> History_id_source.reservation request
-  | Commit_worker_entry : Agent_protocol.Id.Operation.t * History_entry.t -> unit request
+  | Reserve_history_block :
+      Foreground_publication.t option * int -> History_id_source.reservation request
+  | Commit_worker_entry : Foreground_publication.t * History_entry.t -> unit request
   | Prepare_authoring_input :
-      Agent_protocol.Id.Operation.t
+      Foreground_publication.t
       * Chat_response.Authoring_materialization.t
       * History_entry.t list
       * Chat_response.Moderation.Effective_entry.t list
       -> History_entry.t list request
   | Publish_invocation_output :
-      Agent_protocol.Id.Operation.t * Agent_protocol.Id.Invocation.t * History_entry.t
+      Foreground_publication.t * Agent_protocol.Id.Invocation.t * History_entry.t
       -> unit request
-  | Commit_worker_moderator :
-      Agent_protocol.Id.Operation.t * Jsonaf.t option
-      -> unit request
-  | Consume_deferred : Agent_protocol.Id.Operation.t -> History_entry.t list request
+  | Commit_worker_moderator : Foreground_publication.t * Jsonaf.t option -> unit request
+  | Consume_deferred : Foreground_publication.t -> History_entry.t list request
   | Consume_notifications :
-      Agent_protocol.Id.Operation.t * Notification_delivery.t
+      Foreground_publication.t * Notification_delivery.t
       -> Chat_response.In_memory_stream.Safe_point_input.batch request
   | Admit_standalone_delivery : Standalone_delivery.t -> unit request
   | Retire_obsolete_moderator_delivery : int64 * Agent_protocol.Job.t -> bool request
@@ -6237,13 +6284,13 @@ type _ request =
       * Chat_response.One_off_request.policy
       -> unit request
   | Consume_initial_notifications :
-      Agent_protocol.Id.Operation.t * Notification_delivery.idle
+      Foreground_publication.t * Notification_delivery.idle
       -> Chat_response.In_memory_stream.Safe_point_input.batch request
   | Has_writer_attachment : bool request
   | Invocation_granted : string * string -> bool request
-  | Worker_ready : Agent_protocol.Id.Operation.t * (unit -> unit) -> unit request
+  | Worker_ready : Worker_readiness.t * (unit -> unit) -> unit request
   | Worker_terminal :
-      Agent_protocol.Id.Operation.t * Operation_worker.outcome * agent_custody option
+      Foreground_publication.t * Operation_worker.outcome * agent_custody option
       -> unit request
   | Compaction_terminal :
       Agent_protocol.Id.Operation.t * compaction_outcome
@@ -6619,6 +6666,7 @@ and t =
   ; subscriber_capacity : int
   ; schedule_permission_timeouts : bool
   ; mutable owner_timer_cancel : unit Eio.Promise.u option
+  ; mutable foreground_publication : Foreground_publication.t option
   ; mutable active_cancel : (unit -> unit) option
   ; mutable runtime_retirement : runtime_retirement option
   ; mutable idle_moderator_borrowed : bool
@@ -16490,9 +16538,8 @@ let retire_runtime_worker_with_cleanup_internal (t : t) ~closing =
     Error (error Invalid_state "runtime retirement election lost its original owner")
 ;;
 
-let with_runtime_terminal t operation_id f =
-  let completion = capture_operation_completion t operation_id in
-  Option.iter completion ~f:(fun completion ->
+let record_runtime_terminal t operation_id (completion : Operation_completion.t option) f =
+  Option.iter completion ~f:(fun (completion : Operation_completion.t) ->
     Callback_cleanup_data.Host.end_operation_registration completion.callback_cleanup);
   let finish result =
     let retained =
@@ -16509,6 +16556,10 @@ let with_runtime_terminal t operation_id f =
     let backtrace = Stdlib.Printexc.get_raw_backtrace () in
     finish (Error (exn, backtrace));
     Exn.raise_with_original_backtrace exn backtrace
+;;
+
+let with_runtime_terminal t operation_id f =
+  record_runtime_terminal t operation_id (capture_operation_completion t operation_id) f
 ;;
 
 let validate_runtime_worker t worker inference moderator_manager =
@@ -16685,12 +16736,13 @@ let set_runtime_worker
       installed := true)
 ;;
 
-let change_moderator t moderator =
+let change_moderator ?check_before_commit t moderator =
   if moderator_is_borrowed t
   then Error (error Conflict "moderator invocation owns the moderator checkpoint")
   else (
     let state = { t.state with moderator } in
     transition
+      ?check_before_commit
       t
       ~delta:(Session_delta.Moderator_changed moderator)
       ~payloads:
@@ -17289,8 +17341,9 @@ let stop_managed_internal t reference key mode generation max_receipts =
     receipt
 ;;
 
-let append_history t entries =
+let append_history ?check_before_commit t entries =
   transition
+    ?check_before_commit
     t
     ~delta:(Session_delta.Canonical_entries_appended entries)
     ~payloads:[ Agent_protocol.Event.Durable.Payload.History_appended entries ]
@@ -19221,7 +19274,7 @@ let adopt_deferred t =
       ~payloads:[ Agent_protocol.Event.Durable.Payload.History_appended entries ])
 ;;
 
-let reserve_history_block ?run_preparation t count =
+let reserve_history_block ?run_preparation ?check_before_commit t count =
   if count <= 0
   then Error (error Invalid_request "history reservation count must be positive")
   else if Int64.(t.state.conversation.next_history_sequence > max_value - of_int count)
@@ -19233,6 +19286,7 @@ let reserve_history_block ?run_preparation t count =
     let%map _ =
       transition
         ?run_preparation
+        ?check_before_commit
         t
         ~delta:(Session_delta.History_block_reserved reserved_through)
         ~payloads:[]
@@ -19246,6 +19300,35 @@ let current_operation t operation_id =
     -> Ok operation
   | Some _ -> Error (error Conflict "a different foreground operation is active")
   | None -> Error (error Operation_not_found "foreground operation is not active")
+;;
+
+let foreground_publication_matches t publication =
+  Foreground_publication.matches
+    publication
+    ~selected:t.foreground_publication
+    ~state:t.state
+;;
+
+let check_foreground_publication t publication =
+  if foreground_publication_matches t publication
+  then Ok ()
+  else Error (error Conflict "foreground worker no longer owns this context window")
+;;
+
+let check_live_foreground_publication t (publication : Foreground_publication.t) =
+  let open Result.Let_syntax in
+  let%bind () = check_foreground_publication t publication in
+  let%bind operation = current_operation t publication.operation.id in
+  match operation.state with
+  | (Starting | Running) when Atomic.get publication.live -> Ok ()
+  | Starting | Running | Cancelling | Completed | Failed _ | Cancelled | Interrupted _ ->
+    Error (error Conflict "foreground worker publication has ended")
+;;
+
+let with_foreground_publication t (publication : Foreground_publication.t) f =
+  let check () = check_live_foreground_publication t publication in
+  let%bind.Result () = check () in
+  f publication.operation.id ~check
 ;;
 
 let running_operation
@@ -19391,7 +19474,12 @@ let invocation_admission_deltas
   | Some _ -> Error (error Conflict "invocation identity is already admitted")
 ;;
 
-let commit_invocation_call t operation_id (invocation : Agent_protocol.Invocation.t) entry
+let commit_invocation_call
+      t
+      operation_id
+      ~check
+      (invocation : Agent_protocol.Invocation.t)
+      entry
   =
   let open Result.Let_syntax in
   let%bind operation = current_operation t operation_id in
@@ -19463,6 +19551,7 @@ let commit_invocation_call t operation_id (invocation : Agent_protocol.Invocatio
   then Ok ()
   else
     transition
+      ~check_before_commit:check
       t
       ~delta:
         (Session_delta.Batch
@@ -25151,7 +25240,7 @@ let lifecycle_for_compaction t operation_id =
     { desired = t.state.lifecycle.desired; observed = Compacting operation_id }
 ;;
 
-let commit_worker_entry t operation_id entry =
+let commit_worker_entry t operation_id ~check entry =
   let open Result.Let_syntax in
   let%bind _ = current_operation t operation_id in
   let protocol_entry =
@@ -25162,7 +25251,7 @@ let commit_worker_entry t operation_id entry =
       History_entry.Id.equal existing.id protocol_entry.id)
   with
   | None ->
-    let%map _ = append_history t [ protocol_entry ] in
+    let%map _ = append_history ~check_before_commit:check t [ protocol_entry ] in
     ()
   | Some existing ->
     if
@@ -25173,7 +25262,7 @@ let commit_worker_entry t operation_id entry =
     else Error (error Conflict "history ID was committed with a different payload")
 ;;
 
-let prepare_authoring_input t operation_id materialization history effective =
+let prepare_authoring_input t operation_id ~check materialization history effective =
   let module M = Chat_response.Authoring_materialization in
   let open Result.Let_syntax in
   let%bind _ = running_operation t operation_id in
@@ -25253,6 +25342,7 @@ let prepare_authoring_input t operation_id materialization history effective =
     let%bind returned = History_codec.all_of_protocol entries in
     let%map _ =
       transition
+        ~check_before_commit:check
         t
         ~delta:
           (Session_delta.Batch
@@ -25272,7 +25362,7 @@ let prepare_authoring_input t operation_id materialization history effective =
     returned
 ;;
 
-let publish_invocation_output t operation_id invocation_id entry =
+let publish_invocation_output t operation_id ~check invocation_id entry =
   let open Result.Let_syntax in
   (* A completed tool may publish while a sibling waits for permission. Publishing
      its already-resolved result does not authorize or execute another tool. *)
@@ -25334,6 +25424,7 @@ let publish_invocation_output t operation_id invocation_id entry =
     in
     let%map _ =
       transition
+        ~check_before_commit:check
         t
         ~delta:
           (Session_delta.Batch
@@ -25343,7 +25434,7 @@ let publish_invocation_output t operation_id invocation_id entry =
     ()
 ;;
 
-let commit_worker_moderator t operation_id moderator =
+let commit_worker_moderator t operation_id ~check moderator =
   let open Result.Let_syntax in
   let%bind _ = running_operation ~allow_stopping:true t operation_id in
   if moderator_is_borrowed t
@@ -25387,7 +25478,10 @@ let commit_worker_moderator t operation_id moderator =
       in
       if Option.equal Jsonaf.exactly_equal t.state.moderator acknowledged
       then Ok ()
-      else Result.map (change_moderator t acknowledged) ~f:(fun _ -> ()))
+      else
+        Result.map
+          (change_moderator ~check_before_commit:check t acknowledged)
+          ~f:(fun _ -> ()))
 ;;
 
 let configuration_view t =
@@ -25624,7 +25718,7 @@ let root_configuration_context t operation_id =
       call t (Finish_configuration_capture (capture, success)))
 ;;
 
-let consume_deferred t operation_id =
+let consume_deferred t operation_id ~check =
   if not (runtime_admission_open t)
   then Ok []
   else
@@ -25645,6 +25739,7 @@ let consume_deferred t operation_id =
     else (
       let%map _ =
         transition
+          ~check_before_commit:check
           t
           ~delta:(Pending_transition.delta prepared)
           ~payloads:[ Agent_protocol.Event.Durable.Payload.History_appended entries ]
@@ -25872,6 +25967,7 @@ let notification_payloads = function
 ;;
 
 let consume_notifications_internal
+      ~check
       ?(wakes = [])
       ?(discarded_wakes = [])
       t
@@ -25923,6 +26019,7 @@ let consume_notifications_internal
         | [] -> Ok ()
         | _ ->
           transition
+            ~check_before_commit:check
             t
             ~delta:(Session_delta.Batch deltas)
             ~payloads:(notification_payloads entries)
@@ -25977,7 +26074,7 @@ let notification_wake_deltas t operation_id ~accept =
   |> Result.all
 ;;
 
-let worker_ready t operation_id cancel =
+let worker_ready ?check_before_commit t operation_id cancel =
   match t.state.active_operation with
   | None ->
     cancel ();
@@ -26002,6 +26099,7 @@ let worker_ready t operation_id cancel =
         let open Result.Let_syntax in
         let%map _ =
           transition
+            ?check_before_commit
             t
             ~delta:(Session_delta.Active_operation_changed (Some operation))
             ~payloads:
@@ -26513,7 +26611,7 @@ let run_compaction t operation selection port installed allocator history =
   try
     Eio.Switch.run (fun operation_switch ->
       let cancel () = Eio.Switch.fail operation_switch Compaction_cancel_requested in
-      match call t ~priority:Priority (Worker_ready (operation_id, cancel)) with
+      match call t ~priority:Priority (Worker_ready (Compaction operation_id, cancel)) with
       | Error failure -> Compaction_failed failure
       | Ok () ->
         Eio.Switch.check operation_switch;
@@ -26897,13 +26995,21 @@ let foreground_terminal_requests t operation_id outcome =
     follow_up_deltas t plan
 ;;
 
-let worker_terminal ?idle_completion t operation_id outcome compaction_custody =
+let worker_terminal
+      ?idle_completion
+      ?check_before_commit
+      t
+      operation_id
+      outcome
+      compaction_custody
+  =
   match t.state.active_operation with
   | None -> Ok ()
   | Some operation when Agent_protocol.Id.Operation.compare operation.id operation_id <> 0
     -> Ok ()
   | Some operation ->
     let open Result.Let_syntax in
+    let publication = t.foreground_publication in
     let belongs operation =
       Option.exists operation ~f:(Agent_protocol.Id.Operation.equal operation_id)
     in
@@ -26991,6 +27097,7 @@ let worker_terminal ?idle_completion t operation_id outcome compaction_custody =
     let%bind job_custody = prepare_terminal_job_custody t jobs in
     let%bind _ =
       transition
+        ?check_before_commit
         ?idle_completion_step:
           (Option.map idle_completion ~f:(fun completion ->
              completion, Idle_completion_write.Kind.Retire_turn))
@@ -27018,6 +27125,8 @@ let worker_terminal ?idle_completion t operation_id outcome compaction_custody =
     t.idle_moderator_borrowed <- Option.is_some idle_completion || moderator_is_borrowed t;
     t.invocation_executions <- independent;
     t.active_cancel <- None;
+    if Option.equal phys_equal publication t.foreground_publication
+    then t.foreground_publication <- None;
     (match t.state.lifecycle.desired, t.state.halted with
      | Stopped, _ | _, true -> cancel_independent_moderator t
      | Running, false -> ());
@@ -27035,6 +27144,40 @@ let worker_terminal ?idle_completion t operation_id outcome compaction_custody =
     then
       Result.map (start_compaction ?agent_custody:compaction_custody t) ~f:(fun _ -> ())
     else Ok ()
+;;
+
+let worker_publication_terminal
+      t
+      (publication : Foreground_publication.t)
+      outcome
+      compaction_custody
+  =
+  let operation_id = publication.operation.id in
+  if foreground_publication_matches t publication
+  then (
+    let cancelled =
+      Option.exists t.state.active_operation ~f:(fun operation ->
+        match operation.state with
+        | Cancelling -> true
+        | Starting | Running | Completed | Failed _ | Cancelled | Interrupted _ -> false)
+    in
+    let outcome =
+      match cancelled, outcome with
+      | true, Operation_worker.Completed _ ->
+        Operation_worker.Cancelled { reason = "operation cancelled" }
+      | _ -> outcome
+    in
+    record_runtime_terminal t operation_id publication.completion (fun () ->
+      let check_before_commit () = check_foreground_publication t publication in
+      worker_terminal ~check_before_commit t operation_id outcome compaction_custody))
+  else (
+    (* A displaced worker still owns its original factual return. In particular,
+       a stale result cannot close a completion slot reused by the successor. *)
+    match publication.completion with
+    | Some original
+      when not (Option.exists t.operation_completion ~f:(phys_equal original)) ->
+      record_runtime_terminal t operation_id (Some original) (fun () -> Ok ())
+    | Some _ | None -> Ok ())
 ;;
 
 let cancel_operation_internal t attachment_id operation_id =
@@ -29046,7 +29189,8 @@ let with_idle_moderator_observation_tools t ~observer f =
       true)
 ;;
 
-let worker_capabilities t operation completion live id_source buffer =
+let worker_capabilities t (publication : Foreground_publication.t) id_source buffer =
+  let { Foreground_publication.operation; live; completion; _ } = publication in
   let operation_id = operation.Agent_protocol.Operation.id in
   Operation_worker.Capabilities.
     { id_source =
@@ -29089,23 +29233,23 @@ let worker_capabilities t operation completion live id_source buffer =
               else Error (error Conflict "delegated policy operation owner ended")))
     ; original_agent_actor =
         (fun () -> call t (Borrow_operation_agent_actor operation_id))
-    ; commit_entry = (fun entry -> call t (Commit_worker_entry (operation_id, entry)))
+    ; commit_entry = (fun entry -> call t (Commit_worker_entry (publication, entry)))
     ; prepare_authoring_input =
         (fun materialization ~history ~effective ->
           Eio.Cancel.protect (fun () ->
             call
               t
-              (Prepare_authoring_input (operation_id, materialization, history, effective))))
+              (Prepare_authoring_input (publication, materialization, history, effective))))
     ; commit_invocation_call =
         (fun ~invocation entry ->
           Eio.Cancel.protect (fun () ->
-            call t (Commit_invocation_call (operation_id, invocation, entry))))
+            call t (Commit_invocation_call (publication, invocation, entry))))
     ; publish_invocation_output =
         (fun ~invocation_id entry ->
           Eio.Cancel.protect (fun () ->
-            call t (Publish_invocation_output (operation_id, invocation_id, entry))))
+            call t (Publish_invocation_output (publication, invocation_id, entry))))
     ; commit_moderator =
-        (fun snapshot -> call t (Commit_worker_moderator (operation_id, snapshot)))
+        (fun snapshot -> call t (Commit_worker_moderator (publication, snapshot)))
     ; with_moderator_invocation = with_moderator_invocation t operation_id
     ; with_moderator_observation = with_moderator_observation t operation_id
     ; with_next_moderator_observation = with_next_moderator_observation t operation_id
@@ -29127,7 +29271,15 @@ let worker_capabilities t operation completion live id_source buffer =
     ; root_context =
         Option.map t.configuration_policy ~f:(fun _ ->
           root_configuration_context t operation_id)
-    ; consume_deferred = (fun () -> call t (Consume_deferred operation_id))
+    ; consume_deferred = (fun () -> call t (Consume_deferred publication))
+    ; consume_notifications =
+        (fun plan ->
+          Eio.Cancel.protect (fun () ->
+            call t (Consume_notifications (publication, plan))))
+    ; consume_initial_notifications =
+        (fun plan ->
+          Eio.Cancel.protect (fun () ->
+            call t (Consume_initial_notifications (publication, plan))))
     ; request_permission =
         (fun ~permission ~timeout_seconds ~fallback ~review_on_timeout ->
           request_permission_with_review_internal
@@ -29146,7 +29298,11 @@ let worker_capabilities t operation completion live id_source buffer =
           call t (Invocation_granted (tool_name, identity_digest))
           |> Result.ok
           |> Option.value ~default:false)
-    ; publish_live = publish_worker_live t buffer
+    ; publish_live =
+        (fun payload ->
+          match check_live_foreground_publication t publication with
+          | Ok () -> publish_worker_live t buffer payload
+          | Error _ -> ())
     }
 ;;
 
@@ -29306,28 +29462,33 @@ let run_worker_operation ?held ?descendant_guard t worker input capabilities can
   | `Cancelled -> Operation_worker.Cancelled { reason = "operation cancelled" }
 ;;
 
-let run_worker ?held ?descendant_guard ~completion t worker operation live history =
+let run_worker
+      ?held
+      ?descendant_guard
+      t
+      worker
+      (publication : Foreground_publication.t)
+      history
+  =
+  let operation = publication.operation in
   let operation_id = operation.Agent_protocol.Operation.id in
   let id_source =
     History_id_source.create
-      ~namespace:(Agent_protocol.Id.Session.to_string t.state.identity.session_id)
+      ~namespace:(Agent_protocol.Id.Session.to_string publication.session)
       ~block_size:64
-      ~reserve:(fun ~count -> call t (Reserve_history_block count))
+      ~reserve:(fun ~count -> call t (Reserve_history_block (Some publication, count)))
   in
   match id_source with
   | Error failure -> Operation_worker.Failed failure
   | Ok id_source ->
     let buffer =
-      Live_event_buffer.create
-        ~capacity:2_048
-        ~session_id:t.state.identity.session_id
-        ~operation_id
+      Live_event_buffer.create ~capacity:2_048 ~session_id:publication.session ~operation_id
     in
-    let capabilities = worker_capabilities t operation completion live id_source buffer in
+    let capabilities = worker_capabilities t publication id_source buffer in
     let input =
       Operation_worker.Input.
-        { session_id = t.state.identity.session_id
-        ; session_generation = t.state.identity.generation
+        { session_id = publication.session
+        ; session_generation = publication.generation
         ; operation
         ; history
         }
@@ -29335,7 +29496,9 @@ let run_worker ?held ?descendant_guard ~completion t worker operation live histo
     let cancelled, cancel_resolver = Eio.Promise.create () in
     let cancel () = ignore (Eio.Promise.try_resolve cancel_resolver ()) in
     (try
-       match call t ~priority:Priority (Worker_ready (operation_id, cancel)) with
+       match
+         call t ~priority:Priority (Worker_ready (Foreground publication, cancel))
+       with
        | Error failure -> Operation_worker.Failed failure
        | Ok () ->
          run_worker_operation
@@ -29384,24 +29547,27 @@ let launch_worker t operation =
       then owner.descendant_guard
       else None)
   in
-  let inference_live = Atomic.make true in
-  let retire_authority () =
-    Atomic.set inference_live false;
-    Option.iter custody ~f:retire_agent_admission;
-    Option.iter held ~f:Held_operation.retire;
-    Option.iter descendant_guard ~f:Operation_descendant_guard.retire
-  in
   let history =
     let open Result.Let_syntax in
     let%bind () = reconcile_foreground_invocations t in
     History_codec.all_of_protocol t.state.conversation.canonical_history
+  in
+  (* Select ownership alongside the actual reconciled history, before forking.
+     A later launch can replace the slot but cannot rewrite this capture. *)
+  let publication = Foreground_publication.capture t.state ~operation ~completion in
+  t.foreground_publication <- Some publication;
+  let retire_authority () =
+    Atomic.set publication.live false;
+    Option.iter custody ~f:retire_agent_admission;
+    Option.iter held ~f:Held_operation.retire;
+    Option.iter descendant_guard ~f:Operation_descendant_guard.retire
   in
   match history with
   | Error failure ->
     retire_authority ();
     Eio.Fiber.fork ~sw:t.sw (fun () ->
       ignore
-        (call t ~priority:Priority (Worker_terminal (operation_id, Failed failure, None))
+        (call t ~priority:Priority (Worker_terminal (publication, Failed failure, None))
          : (unit, Agent_protocol.Error.t) result))
   | Ok history ->
     Eio.Fiber.fork ~sw:t.sw (fun () ->
@@ -29411,15 +29577,7 @@ let launch_worker t operation =
           let outcome =
             match worker with
             | Some worker ->
-              run_worker
-                ?held
-                ?descendant_guard
-                ~completion
-                t
-                worker
-                operation
-                inference_live
-                history
+              run_worker ?held ?descendant_guard t worker publication history
             | None ->
               Operation_worker.Failed
                 (error Invalid_state "session has no foreground operation worker")
@@ -29450,7 +29608,7 @@ let launch_worker t operation =
             (call
                t
                ~priority:Priority
-               (Worker_terminal (operation_id, outcome, !compaction_custody))
+               (Worker_terminal (publication, outcome, !compaction_custody))
              : (unit, Agent_protocol.Error.t) result))
         ~finally:(fun () -> Option.iter !compaction_custody ~f:retire_agent_custody))
 ;;
@@ -56006,6 +56164,7 @@ let retire_execution_custody t =
         ~f:retire_agent_admission
     | Waiting | Activated _ | Callback_acknowledged _ | Released -> ());
   t.operation_completion <- None;
+  t.foreground_publication <- None;
   retire_descendant_host t;
   List.iter t.descendant_policy_cells ~f:Goal_root_policy.retire;
   t.descendant_policy_cells <- [];
@@ -57869,8 +58028,9 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
     | Set_queued_event_cancel (borrow, cancel) ->
       Result.map (queued_event_can_commit t borrow) ~f:(fun () ->
         borrow.cancel <- Some cancel)
-    | Commit_invocation_call (operation_id, invocation, entry) ->
-      commit_invocation_call t operation_id invocation entry
+    | Commit_invocation_call (publication, invocation, entry) ->
+      with_foreground_publication t publication (fun operation_id ~check ->
+        commit_invocation_call t operation_id ~check invocation entry)
     | Claim_invocation (operation_id, invocation) ->
       claim_invocation t operation_id invocation
     | Claim_idle_invocation (borrow, invocation) ->
@@ -59291,38 +59451,59 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
     | Delete_history (attachment_id, revision, history_id) ->
       delete_history_internal t attachment_id revision history_id
     | Adopt_deferred -> adopt_deferred t
-    | Reserve_history_block count -> reserve_history_block t count
-    | Commit_worker_entry (operation_id, entry) ->
-      commit_worker_entry t operation_id entry
-    | Prepare_authoring_input (operation_id, materialization, history, effective) ->
-      prepare_authoring_input t operation_id materialization history effective
-    | Publish_invocation_output (operation_id, invocation_id, entry) ->
-      publish_invocation_output t operation_id invocation_id entry
-    | Consume_deferred operation_id -> consume_deferred t operation_id
-    | Consume_notifications (operation_id, plan) ->
-      consume_notifications_internal t operation_id plan
+    | Reserve_history_block (None, count) -> reserve_history_block t count
+    | Reserve_history_block (Some publication, count) ->
+      with_foreground_publication t publication (fun _ ~check ->
+        reserve_history_block ~check_before_commit:check t count)
+    | Commit_worker_entry (publication, entry) ->
+      with_foreground_publication t publication (fun operation_id ~check ->
+        commit_worker_entry t operation_id ~check entry)
+    | Prepare_authoring_input (publication, materialization, history, effective) ->
+      with_foreground_publication t publication (fun operation_id ~check ->
+        prepare_authoring_input t operation_id ~check materialization history effective)
+    | Publish_invocation_output (publication, invocation_id, entry) ->
+      with_foreground_publication t publication (fun operation_id ~check ->
+        publish_invocation_output t operation_id ~check invocation_id entry)
+    | Consume_deferred publication ->
+      with_foreground_publication t publication (consume_deferred t)
+    | Consume_notifications (publication, plan) ->
+      with_foreground_publication t publication (fun operation_id ~check ->
+        consume_notifications_internal ~check t operation_id plan)
     | Admit_standalone_delivery plan -> admit_standalone_delivery_internal t plan
     | Retire_obsolete_moderator_delivery (revision, job) ->
       retire_obsolete_moderator_delivery_internal t revision job
     | Deliver_standalone_completion (revision, job, capabilities, policy) ->
       deliver_standalone_completion_internal t revision job capabilities policy
-    | Consume_initial_notifications (operation_id, proposal) ->
-      consume_notifications_internal
-        ~wakes:proposal.wakes
-        ~discarded_wakes:proposal.discarded_wakes
-        t
-        operation_id
-        proposal.pending
-    | Commit_worker_moderator (operation_id, snapshot) ->
-      commit_worker_moderator t operation_id snapshot
+    | Consume_initial_notifications (publication, proposal) ->
+      with_foreground_publication t publication (fun operation_id ~check ->
+        consume_notifications_internal
+          ~check
+          ~wakes:proposal.wakes
+          ~discarded_wakes:proposal.discarded_wakes
+          t
+          operation_id
+          proposal.pending)
+    | Commit_worker_moderator (publication, snapshot) ->
+      with_foreground_publication t publication (fun operation_id ~check ->
+        commit_worker_moderator t operation_id ~check snapshot)
     | Has_writer_attachment -> Ok (has_writer_attachment t)
     | Authorize_writer attachment_id -> with_writer t attachment_id (fun () -> Ok ())
     | Invocation_granted (tool_name, identity_digest) ->
       Ok (invocation_granted t ~tool_name ~identity_digest)
-    | Worker_ready (operation_id, cancel) -> worker_ready t operation_id cancel
-    | Worker_terminal (operation_id, outcome, compaction_custody) ->
-      with_runtime_terminal t operation_id (fun () ->
-        worker_terminal t operation_id outcome compaction_custody)
+    | Worker_ready (Compaction operation_id, cancel) -> worker_ready t operation_id cancel
+    | Worker_ready (Foreground publication, cancel) ->
+      if foreground_publication_matches t publication
+      then
+        worker_ready
+          t
+          publication.operation.id
+          ~check_before_commit:(fun () -> check_live_foreground_publication t publication)
+          cancel
+      else (
+        cancel ();
+        Ok ())
+    | Worker_terminal (publication, outcome, compaction_custody) ->
+      worker_publication_terminal t publication outcome compaction_custody
     | Compaction_terminal (operation_id, outcome) ->
       with_runtime_terminal t operation_id (fun () ->
         compaction_terminal t operation_id outcome)
@@ -59713,6 +59894,7 @@ let create_internal
     ; subscriber_capacity
     ; schedule_permission_timeouts
     ; owner_timer_cancel = None
+    ; foreground_publication = None
     ; active_cancel = None
     ; lifecycle_owner = ref ()
     ; lifecycle_fence = None
@@ -61913,17 +62095,7 @@ let open_policy_restoration_inference_owner t ~restoration ~source =
   call t (Policy_restoration (Open_graph (restoration, source)))
 ;;
 
-let reserve_history_block t ~count = call t (Reserve_history_block count)
-
-let commit_worker_entry t ~operation_id entry =
-  call t (Commit_worker_entry (operation_id, entry))
-;;
-
-let consume_deferred t ~operation_id = call t (Consume_deferred operation_id)
-
-let consume_notifications t ~operation_id plan =
-  call t (Consume_notifications (operation_id, plan))
-;;
+let reserve_history_block t ~count = call t (Reserve_history_block (None, count))
 
 let deliver_idle_notifications t plan =
   submit_turn_input t (Inherited_turn.Input.Idle (Notifications plan))
@@ -61941,10 +62113,6 @@ let retire_obsolete_moderator_delivery t ~revision ~job =
 let deliver_standalone_completion t ~revision ~job ~current_capabilities ~policy =
   Eio.Cancel.protect (fun () ->
     call t (Deliver_standalone_completion (revision, job, current_capabilities, policy)))
-;;
-
-let consume_initial_notifications t ~operation_id plan =
-  call t (Consume_initial_notifications (operation_id, plan))
 ;;
 
 let cancel_operation t ~attachment_id ~operation_id =
@@ -62740,6 +62908,36 @@ let commit_ingress_submission t proposal ~before ~snapshot =
 ;;
 
 module For_testing = struct
+  let with_stale_foreground t ~window f =
+    let sealed_predecessor =
+      Option.exists t.state.recovery_windows ~f:(fun ledger ->
+        List.exists (Recovery_window_ledger.windows ledger) ~f:(fun candidate ->
+          let module Window = Recovery_window_ledger.Window in
+          Window.equal_state (Window.state candidate) Sealed
+          && Agent_protocol.Recovery_window.Scope.equal (Window.scope candidate) window))
+    in
+    match t.foreground_publication with
+    | Some current when sealed_predecessor && foreground_publication_matches t current ->
+      (* Exercise the same physical-operation slot so that only the stale window
+         distinguishes this callback from the still-running fixture worker. *)
+      f { current with window = Some window }
+    | Some _ | None -> Error (error Invalid_state "fixture requires a sealed predecessor")
+  ;;
+
+  let deliver_stale_foreground_entry t ~window entry =
+    with_stale_foreground t ~window (fun publication ->
+      call t (Commit_worker_entry (publication, entry)))
+  ;;
+
+  let deliver_stale_foreground_result t ~window ~history =
+    let outcome =
+      Operation_worker.Completed
+        { final_history = history; moderator_snapshot = None; runtime_requests = [] }
+    in
+    with_stale_foreground t ~window (fun publication ->
+      call t ~priority:Priority (Worker_terminal (publication, outcome, None)))
+  ;;
+
   let deliver_compaction_result t ~operation_id ~history =
     call t ~priority:Priority (Compaction_terminal (operation_id, Compacted history))
   ;;

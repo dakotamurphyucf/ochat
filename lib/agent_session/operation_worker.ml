@@ -10,6 +10,12 @@ module Input = struct
 end
 
 module Capabilities = struct
+  type 'plan notification_consumer =
+    'plan
+    -> ( Chat_response.In_memory_stream.Safe_point_input.batch
+         , Agent_protocol.Error.t )
+         result
+
   type event_handler =
     executing:Agent_protocol.Moderator_execution.t
     -> policy_caller:Delegated_policy_caller.t option
@@ -114,6 +120,8 @@ module Capabilities = struct
     ; admit_notification_turn : unit -> (unit, Agent_protocol.Error.t) result
     ; root_context : Chat_response.Root_context.t option
     ; consume_deferred : unit -> (History_entry.t list, Agent_protocol.Error.t) result
+    ; consume_notifications : Notification_delivery.t notification_consumer
+    ; consume_initial_notifications : Notification_delivery.idle notification_consumer
     ; request_permission :
         permission:Agent_protocol.Permission.t
         -> timeout_seconds:float option

@@ -69,13 +69,13 @@ val create
              , Agent_protocol.Error.t )
              result)
   -> ?notification_input:
-       (input:Operation_worker.Input.t
+       (capabilities:Operation_worker.Capabilities.t
         -> unit
         -> ( Chat_response.In_memory_stream.Safe_point_input.batch
              , Agent_protocol.Error.t )
              result)
   -> ?initial_notification_input:
-       (input:Operation_worker.Input.t
+       (capabilities:Operation_worker.Capabilities.t
         -> unit
         -> ( Chat_response.In_memory_stream.Safe_point_input.batch
              , Agent_protocol.Error.t )

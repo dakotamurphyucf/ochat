@@ -307,9 +307,14 @@ old and new IDs, cut/revision, archive identity, trigger and checkpoint
 quality. The actor publishes the new window after this transaction and
 serves authorized status from the journal. The runtime continuation receives
 the new window's versioned projection or returns to the actor scheduler.
-A worker returning old history can never reinstall the previous active
-projection. Advance the logical window ID independently of session copy,
-generation and existing summary-compaction counters.
+Capture the exact active window with the foreground launch and its history.
+The actor checks this ownership when the worker publishes history or returns
+a terminal result, then checks it again before persistence. An empty successor
+or a retained common prefix can satisfy a history prefix check, so the window
+identity remains part of the fence. Cancellation closes the worker's history
+publication while its terminal acknowledgement settles the same operation.
+Advance the logical window ID independently of session copy, generation and
+existing summary-compaction counters.
 
 An idle actor can settle an intent through its owning writer at an exact
 window and revision. The writer can record an explicit checkpoint recipe

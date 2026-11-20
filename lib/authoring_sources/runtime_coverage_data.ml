@@ -921,7 +921,7 @@ let implementation_sources =
   ; ( "lib/agent_session/close_observation.mli"
     , "ec4ed234561b3337766d1172057e7daddde5fb54a2d2d2dcbd4cfbd25c566ac5" )
   ; ( "lib/agent_session/runtime_builder.mli"
-    , "febad5950ffb372c70754357caaed5fa844fa84157b793cf32ffc3c3c0c82f63" )
+    , "ea84df56282637dff91c2073fbbd925a0e0d32ccd73d8aa671d1e56c27e7142e" )
   ; ( "lib/agent_server/session_policy_resource.mli"
     , "c744590e865c71a18c6e265ba830ec481771063421eaec587e9bb8eccf59e9dc" )
   ; ( "lib/agent_session/canonical_backend_binding_data.ml"
@@ -933,7 +933,7 @@ let implementation_sources =
   ; ( "lib/agent_session/failed_startup_data.mli"
     , "30a8caafe8f5ffb683f9a00a934110545ef2457ad6829383473738f5b379683f" )
   ; ( "lib/agent_session/session_actor.mli"
-    , "fd9ab8b3e271ef50966fb323c61f0fcaa04221093d55c9541af162a0641b01fb" )
+    , "adc84a5eb584ae153ef544c5ccb772b0db8c848f78c9938e07ee4367dcfb0d6f" )
   ; ( "lib/agent_session/session_persistence.mli"
     , "b5a69b807ca80235776abc20fbac71af706625ac2a480a52955e072516a7c905" )
   ; ( "lib/agent_session/policy_restore_basis.ml"
@@ -1147,7 +1147,7 @@ let implementation_sources =
   ; ( "lib/agent_session/runtime_unmoderated_source.ml"
     , "18779ed765c2ecf7ac429a1376f8e2708a9b419f779350652342f3362513a6b6" )
   ; ( "lib/agent_session/runtime_builder.ml"
-    , "7997f562898da72667ca14c3d45b6383621f37e14e8413d1cf4536cfa231885e" )
+    , "cadd74749302922e3a6c707611206ab23f1cda771d788680d2ae680cb5e89bf9" )
   ; ( "lib/context_compaction/compactor.ml"
     , "7b11eae5ce4d929bf1ab4702111d03f70fe97cfe8543135c73782c2b92391ff0" )
   ; ( "lib/agent_session/session_transition.ml"
@@ -1193,7 +1193,7 @@ let implementation_sources =
   ; ( "lib/agent_server/descendant_accounting_host.ml"
     , "3baff14cf9c606e899c08f95805cc3ca9f070827b46ec531e1c230314820b0fd" )
   ; ( "lib/agent_server/session_factory.ml"
-    , "ab10e3b15f8789fc40075fc168caf7a1193b138d5ec591806646d5a2de47d917" )
+    , "681f5e78748414f97c5fc24907c3d57888340f4a86ce3fe6bb2ad7b7b52b3b7d" )
   ; ( "bin/inference_composition.ml"
     , "1f57451d5543a5fe8f2f23dc0e593374b64946d088cba164acd1c087a7cdce18" )
   ; ( "lib/agent_protocol/developer_command_id.ml"
@@ -1477,7 +1477,7 @@ let implementation_sources =
   ; ( "lib/agent_session/product_callback_data.mli"
     , "b981c51b31151bcfe467e03d818142c75ca4d3cf2a1ed5e5536eaf3dbcce3b76" )
   ; ( "lib/agent_session/operation_worker.ml"
-    , "4baaa9a8c7416bf097ba3028f8e0c0a6b436acb077059d0db1ac9886cda2f7a4" )
+    , "0367493a53906df87a225f00ba09f6f4a523f68fd51aa40630fc7e5a40aa03ee" )
   ; ( "lib/agent_session/notification_delivery.ml"
     , "9f18c6eb7561b0afda29cd706214ddf2a376c54b9f28980ce536079ae5b7b45e" )
   ; ( "lib/agent_session/notification_history.ml"
@@ -1509,7 +1509,7 @@ let implementation_sources =
   ; ( "lib/agent_session/goal_continuation_phase.ml"
     , "e24a210492bfcc9e94c7bf472603531eb053eb7654de7c6100083464da9b1b51" )
   ; ( "lib/agent_session/session_actor.ml"
-    , "a59596158500fdf26a233d59ccab465ec6b42739247e94d6863889ccc8d9d881" )
+    , "66263695d9266cbc048577c42d86b3dbd96d34c3cefb28c7a19b04b9dbf95d1f" )
   ; ( "lib/agent_session/idle_completion_write.ml"
     , "d427fa80c4346b64f3f9bf4d5025ad2218403278816ade76ff17ba1adaa426d9" )
   ; ( "lib/agent_session/goal_descendant_admission_custody.ml"

@@ -87,6 +87,7 @@ let journal fixture make =
 ;;
 
 let with_actor
+      ?operation_worker
       ?(state_committed = fun _ _ -> ())
       ?(snapshot_payload_limit = payload_limit)
       ?before_commit
@@ -147,7 +148,7 @@ let with_actor
           ~compaction_env:None
           ~initial_state
           ~persistence:backend
-          ~operation_worker:None
+          ~operation_worker
           ~services:
             { now = (fun () -> timestamp)
             ; monotonic_now = (fun () -> Mtime.min_stamp)

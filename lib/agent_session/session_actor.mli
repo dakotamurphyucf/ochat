@@ -661,6 +661,21 @@ end
 
 (** Mailbox-level regression support; not exposed by any wire method. *)
 module For_testing : sig
+  (** Use the currently selected physical launch identity with a sealed window
+      in the fixture ledger. Both deliveries use the real publication mailbox.
+      A fixture need not add a separate active rollover implementation. *)
+  val deliver_stale_foreground_entry
+    :  t
+    -> window:Agent_protocol.Recovery_window.Scope.t
+    -> History_entry.t
+    -> (unit, Agent_protocol.Error.t) result
+
+  val deliver_stale_foreground_result
+    :  t
+    -> window:Agent_protocol.Recovery_window.Scope.t
+    -> history:History_entry.t list
+    -> (unit, Agent_protocol.Error.t) result
+
   (** Deliver a completed worker result through the real priority mailbox.
       Returning acknowledges actor consumption, including rejection of stale IDs. *)
   val deliver_compaction_result
@@ -2447,28 +2462,6 @@ val reserve_history_block
   -> count:int
   -> (History_id_source.reservation, Agent_protocol.Error.t) result
 
-val commit_worker_entry
-  :  t
-  -> operation_id:Agent_protocol.Id.Operation.t
-  -> History_entry.t
-  -> (unit, Agent_protocol.Error.t) result
-
-val consume_deferred
-  :  t
-  -> operation_id:Agent_protocol.Id.Operation.t
-  -> (History_entry.t list, Agent_protocol.Error.t) result
-
-(** Commit a disclosure-checked proposal at this foreground operation's input
-    boundary. Saves delivery/history atomically and retains consumed wake IDs for
-    the next actual model admission or terminal disposition. *)
-val consume_notifications
-  :  t
-  -> operation_id:Agent_protocol.Id.Operation.t
-  -> Notification_delivery.t
-  -> ( Chat_response.In_memory_stream.Safe_point_input.batch
-       , Agent_protocol.Error.t )
-       result
-
 (** Commit eligible idle data and settle its requested wake with actual operation
     admission, or with budget rejection. Existing pending wake receipts never
     insert a second history entry. Stop/compaction intent takes precedence. *)
@@ -2509,18 +2502,6 @@ val deliver_standalone_completion
   -> current_capabilities:Chat_response.Tool_capability.t
   -> policy:Chat_response.One_off_request.policy
   -> (unit, Agent_protocol.Error.t) result
-
-(** Before the first provider call, claim eligible restored wakes for this
-    already-started operation and insert ready new data. The worker appends only
-    returned new entries to its input snapshot. Actual before-model admission
-    settles the claims; terminal cleanup discards any unadmitted requests. *)
-val consume_initial_notifications
-  :  t
-  -> operation_id:Agent_protocol.Id.Operation.t
-  -> Notification_delivery.idle
-  -> ( Chat_response.In_memory_stream.Safe_point_input.batch
-       , Agent_protocol.Error.t )
-       result
 
 val cancel_operation
   :  t

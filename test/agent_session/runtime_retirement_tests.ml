@@ -160,7 +160,7 @@ let%expect_test "retirement joins worker cleanup without adopting deferred input
     let never, _ = Eio.Promise.create () in
     let dispatched = ref 0 in
     let worker =
-      Worker.create ~run:(fun ~sw:_ ~input:_ _ ->
+      Worker.create ~run:(fun ~sw:_ ~input:_ capabilities ->
         Int.incr dispatched;
         Exn.protect
           ~finally:(fun () ->
@@ -168,19 +168,18 @@ let%expect_test "retirement joins worker cleanup without adopting deferred input
               Eio.Promise.resolve cleaning_u ();
               Eio.Promise.await release_cleanup))
           ~f:(fun () ->
-            Eio.Promise.resolve entered_u ();
+            Eio.Promise.resolve entered_u capabilities;
             Eio.Promise.await never))
     in
     install actor worker;
-    let first =
-      A.submit_message
-        ~submitting_principal:principal_id
-        actor
-        ~attachment_id:writer.id
-        (user_entry actor "first")
-      |> protocol_ok
-    in
-    Eio.Promise.await entered;
+    A.submit_message
+      ~submitting_principal:principal_id
+      actor
+      ~attachment_id:writer.id
+      (user_entry actor "first")
+    |> protocol_ok
+    |> ignore;
+    let capabilities = Eio.Promise.await entered in
     let deferred = user_entry actor "second" in
     let second =
       A.submit_message
@@ -215,10 +214,7 @@ let%expect_test "retirement joins worker cleanup without adopting deferred input
       assert (C.Snapshot.equal_progress (C.Snapshot.progress pending_cleanup) Pending);
       assert (List.is_empty (C.Snapshot.failures pending_cleanup));
       assert (not (A.Runtime_retirement.is_finished join));
-      let consumed =
-        A.consume_deferred actor ~operation_id:(Option.value_exn first.operation_id)
-        |> protocol_ok
-      in
+      let consumed = capabilities.consume_deferred () |> protocol_ok in
       assert (List.is_empty consumed);
       assert_conflict (A.adopt_deferred actor);
       let pending = A.state actor |> protocol_ok in

@@ -14,6 +14,12 @@ module Input : sig
 end
 
 module Capabilities : sig
+  type 'plan notification_consumer =
+    'plan
+    -> ( Chat_response.In_memory_stream.Safe_point_input.batch
+         , Agent_protocol.Error.t )
+         result
+
   type event_handler =
     executing:Agent_protocol.Moderator_execution.t
     -> policy_caller:Delegated_policy_caller.t option
@@ -221,6 +227,10 @@ module Capabilities : sig
           A failed save prevents provider dispatch. *)
     ; root_context : Chat_response.Root_context.t option
     ; consume_deferred : unit -> (History_entry.t list, Agent_protocol.Error.t) result
+    ; consume_notifications : Notification_delivery.t notification_consumer
+      (** These consumers retain the physical launch's window ownership. Delivery
+          preparation may yield before invoking them. *)
+    ; consume_initial_notifications : Notification_delivery.idle notification_consumer
     ; request_permission :
         permission:Agent_protocol.Permission.t
         -> timeout_seconds:float option
