@@ -29,7 +29,8 @@ val select : t -> P.Recovery_window.Citation.t -> selection
     present window and expiry, exact canonical base when known, and moderator suppression
     before following either a live or archived source. *)
 val check_effective
-  :  t
+  :  ?work:Recovery_source_work.t
+  -> t
   -> P.Recovery_window.Citation.t
   -> (unit, [ `Unavailable | `Withdrawn | `Expired ]) result
 

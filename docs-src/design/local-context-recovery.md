@@ -465,6 +465,25 @@ byte range. An item read selects a bounded
 UTF-8 range in one immutable original part or a separately authorized artifact
 bounded in raw bytes. The matcher's snippet remains a window into its part.
 
+The local history query engine selects one family and one authorized view per
+request. Canonical entries follow window and manifest order. Prepared entries
+follow window, preparation source revision and original request ordinal.
+Ordinary includes both user and assistant. Effective rows can include the
+exact retained attempt phase and delivery evidence when available. A
+preparation revision alone establishes no delivery evidence. A known
+unretained effective position cannot suppress a later eligible exact version.
+The final page reports unavailable-source coverage if the selected prefix
+had such a gap. A missing or corrupt promised archive fails the request.
+
+A continuation pins the finite window and preparation prefix present when the
+search began. Appending rows or preparations beyond its highwater leaves that
+prefix intact. Edits, withdrawal, expiry, changed source custody and applicable
+overlay changes can require a fresh query. The engine verifies the bounded
+structural prefix and its visibility under the same source allowance before
+opening source files. The 256-position scan ceiling addresses candidate visits
+in the current page. A separate ledger bound limits the structural verification
+that makes duplicate checks and refresh possible without rereading plaintext.
+
 Use the following initial ceilings for qualification. Stricter host document
 and transport limits apply.
 

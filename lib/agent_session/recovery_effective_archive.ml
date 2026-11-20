@@ -71,8 +71,9 @@ let revision t = t.revision
 let digest t = t.digest
 let positions t = t.positions
 
-let find t ~request_ordinal =
+let find ?work t ~request_ordinal =
   List.find t.positions ~f:(fun position ->
+    Option.iter work ~f:(fun work -> Recovery_source_work.charge_source work 1);
     Int.equal request_ordinal (Position.request_ordinal position))
 ;;
 

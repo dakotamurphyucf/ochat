@@ -428,6 +428,19 @@ let check_archived_source fixture (replayed : State.t) =
     ~project:(fun _ -> failwith "denied original reached projection")
   |> expect Unavailable;
   check_mixed_allowance fixture replayed latest selected;
+  let module Query = Recovery_history_query_tests in
+  let ordinal = Effective_record.Member.request_ordinal selected in
+  let query =
+    Query.make
+      fixture
+      ~family:Effective
+      ~ordinals:(ordinal, ordinal + 1)
+      ~scope:(Window (Citation.scope citation))
+      (Query.search "new version")
+  in
+  let snippets, coverage = Query.all_snippets fixture query ~current in
+  [%test_eq: string list] snippets [ "new version" ];
+  [%test_eq: string] coverage "source_unavailable";
   let location = archived_location latest in
   let position =
     Effective_archive.find
@@ -853,6 +866,24 @@ let%test_unit "actual root preparation retains only exact neutral sources and re
                [%test_eq: int] 67 !allocated;
                let records = effective_records saturated in
                [%test_eq: int] 64 (List.length records);
+               let module Query = Recovery_history_query_tests in
+               let latest = List.last_exn records in
+               let ordinal =
+                 Effective_record.Member.request_ordinal (member_for latest canonical.id)
+               in
+               let query =
+                 Query.make
+                   fixture
+                   ~family:Effective
+                   ~ordinals:(ordinal, ordinal + 1)
+                   ~scope:(Window (scope saturated))
+                   (Query.search "new version")
+               in
+               let snippets, coverage =
+                 Query.all_snippets fixture query ~current:(fun () -> Ok saturated)
+               in
+               [%test_eq: string list] snippets [ "new version" ];
+               [%test_eq: string] coverage "source_unavailable";
                assert (
                  Effective_record.to_jsonaf (List.hd_exn records)
                  |> D.Json.equal (Effective_record.to_jsonaf first));

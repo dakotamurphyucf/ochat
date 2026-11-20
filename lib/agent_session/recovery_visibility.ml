@@ -68,7 +68,7 @@ let select t citation =
       else Eligible member)
 ;;
 
-let check_effective t citation =
+let check_effective ?work t citation =
   let open Result.Let_syntax in
   let scope = Citation.scope citation in
   if
@@ -112,6 +112,7 @@ let check_effective t citation =
            A withdrawal for any matching occurrence makes that witness unsafe. *)
         let%bind found =
           Window.fold_members window ~init:false ~f:(fun found member ->
+            Option.iter work ~f:(fun work -> Recovery_source_work.charge_source work 1);
             let id = Citation.occurrence (Ledger.Member.citation member) in
             if not (P.History.Id.equal id occurrence)
             then Ok found

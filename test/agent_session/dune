@@ -173,6 +173,7 @@
   retained_history_tests
   recovery_window_ledger_tests
   recovery_window_actor_tests
+  recovery_history_query_tests
   recovery_worker_window_tests
   recovery_effective_actor_tests
   recovery_effective_attempt_tests

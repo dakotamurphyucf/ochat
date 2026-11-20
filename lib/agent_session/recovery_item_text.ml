@@ -110,7 +110,7 @@ let project work ~limits ~view ~max_text_bytes row =
   { role; parts }
 ;;
 
-let resolve
+let resolve_selected
       ?allowance
       ?(max_text_bytes = max_item_text_bytes)
       store
@@ -151,6 +151,12 @@ let resolve
           ~view
           ~max_text_bytes:(Int.min max_item_text_bytes max_text_bytes)
       in
+      let selected row =
+        match project row with
+        | Ok projected -> Ok (Some projected)
+        | Error Source.Unavailable -> Ok None
+        | Error _ as error -> error
+      in
       match selection with
       | Canonical citation ->
         Source.read
@@ -161,21 +167,53 @@ let resolve
           ~current
           ~max_frame_bytes
           citation
-          ~project
+          ~project:selected
       | Prepared { citation; source_revision } ->
+        let original_selected = ref true in
+        let check_replaced_source row =
+          Result.map (selected row) ~f:(fun source ->
+            original_selected := Option.is_some source)
+        in
         Source.read_effective
           ~allowance
           ~visible
-          ~check_replaced_source:(fun row -> Result.map (project row) ~f:ignore)
+          ~check_replaced_source
           store
           ~handle
           ~current
           ~max_frame_bytes
           ~source_revision
           citation
-          ~project
+          ~project:(fun row -> if !original_selected then selected row else Ok None)
     in
     match allowance with
     | Some allowance -> resolve allowance
     | None -> Source.with_allowance store ~handle ~f:resolve
+;;
+
+let resolve
+      ?allowance
+      ?max_text_bytes
+      store
+      ~handle
+      ~current
+      ~max_frame_bytes
+      ~max_payload_bytes
+      selection
+      ~view
+  =
+  let open Result.Let_syntax in
+  let%bind selected =
+    resolve_selected
+      ?allowance
+      ?max_text_bytes
+      store
+      ~handle
+      ~current
+      ~max_frame_bytes
+      ~max_payload_bytes
+      selection
+      ~view
+  in
+  Result.of_option selected ~error:Source.Unavailable
 ;;

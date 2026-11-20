@@ -33,7 +33,11 @@ val resolve_live
   -> P.Recovery_window.Citation.t
   -> (P.History.entry option, P.Error.t) result
 
-val resolve_record : Session_state.t -> source_revision:int64 -> Record.t option
+val resolve_record
+  :  ?work:Recovery_source_work.t
+  -> Session_state.t
+  -> source_revision:int64
+  -> Record.t option
 
 (** Redirect still-live effective evidence to the exact ordinary compaction or
     rollover prestate. Already proven archive locators remain immutable. The

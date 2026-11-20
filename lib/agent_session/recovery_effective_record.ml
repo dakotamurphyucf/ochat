@@ -341,13 +341,15 @@ let validate_source t projection =
   |> Result.map ~f:ignore
 ;;
 
-let find_member t citation =
-  List.find t.members ~f:(fun member -> Citation.equal citation (Member.citation member))
+let find_member ?work t citation =
+  List.find t.members ~f:(fun member ->
+    Option.iter work ~f:(fun work -> Recovery_source_work.charge_source work 1);
+    Citation.equal citation (Member.citation member))
 ;;
 
 let resolve ?work t projection citation =
   let open Option.Let_syntax in
-  let%bind member = find_member t citation in
+  let%bind member = find_member ?work t citation in
   let%bind row =
     Member.locate
       member
@@ -360,14 +362,14 @@ let resolve ?work t projection citation =
 
 let resolve_archived ?work t projection citation =
   let open Option.Let_syntax in
-  let%bind member = find_member t citation in
+  let%bind member = find_member ?work t citation in
   let%bind archive =
     match t.custody with
     | Archived archive -> Some archive
     | Live | Lost -> None
   in
   let%bind position =
-    Archive.find archive ~request_ordinal:(Member.request_ordinal member)
+    Archive.find ?work archive ~request_ordinal:(Member.request_ordinal member)
   in
   let%bind row =
     Member.locate

@@ -134,9 +134,10 @@ let replacement (state : State.t) ~(incoming : State.t) =
       ~next:incoming.moderator
 ;;
 
-let resolve_record (state : State.t) ~source_revision =
+let resolve_record ?work (state : State.t) ~source_revision =
   Option.bind state.recovery_effective ~f:(fun ledger ->
     List.find (Ledger.records ledger) ~f:(fun record ->
+      Option.iter work ~f:(fun work -> Recovery_source_work.charge_source work 1);
       Int64.equal source_revision (Record.source_revision record)))
 ;;
 
@@ -147,7 +148,7 @@ let projection_revision ~revision record =
 
 let resolve_live ?work (state : State.t) ~source_revision citation =
   let open Result.Let_syntax in
-  match resolve_record state ~source_revision with
+  match resolve_record ?work state ~source_revision with
   | Some record ->
     (match Record.custody record with
      | Lost | Archived _ -> Ok None

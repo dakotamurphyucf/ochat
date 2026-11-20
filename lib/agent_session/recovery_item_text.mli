@@ -51,3 +51,17 @@ val resolve
   -> selection
   -> view:view
   -> (t, Recovery_source_reader.error) result
+
+(** [None] is a successfully verified exact source whose semantic role or
+    provenance does not enter this view. Physical source errors stay distinct. *)
+val resolve_selected
+  :  ?allowance:Recovery_source_reader.Allowance.t
+  -> ?max_text_bytes:int
+  -> Agent_store.Session_store.t
+  -> handle:Agent_store.Session_store.Handle.t
+  -> current:(selection -> view -> (Session_state.t, P.Error.t) result)
+  -> max_frame_bytes:int
+  -> max_payload_bytes:int
+  -> selection
+  -> view:view
+  -> (t option, Recovery_source_reader.error) result

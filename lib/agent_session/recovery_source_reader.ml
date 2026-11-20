@@ -258,14 +258,14 @@ let read_effective_using
   let select () =
     let%bind state, view = current_view () in
     let%bind record =
-      Effective_capture.resolve_record state ~source_revision
+      Effective_capture.resolve_record ~work state ~source_revision
       |> Result.of_option ~error:Unavailable
     in
     let%bind member =
-      Effective.find_member record citation |> Result.of_option ~error:Unavailable
+      Effective.find_member ~work record citation |> Result.of_option ~error:Unavailable
     in
     let%map () =
-      Recovery_visibility.check_effective view citation
+      Recovery_visibility.check_effective ~work view citation
       |> Result.map_error ~f:(function
         | `Unavailable -> Unavailable
         | `Withdrawn -> Withdrawn
@@ -303,6 +303,7 @@ let read_effective_using
         | Archived location ->
           let%bind position =
             Effective.Archive.find
+              ~work
               location
               ~request_ordinal:(Effective.Member.request_ordinal member)
             |> Result.of_option ~error:Unavailable

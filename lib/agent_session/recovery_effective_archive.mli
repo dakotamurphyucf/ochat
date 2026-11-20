@@ -40,7 +40,7 @@ val operation : t -> P.Id.Operation.t
 val revision : t -> int64
 val digest : t -> Chatml_source.Digest.t
 val positions : t -> Position.t list
-val find : t -> request_ordinal:int -> Position.t option
+val find : ?work:Recovery_source_work.t -> t -> request_ordinal:int -> Position.t option
 val equal : t -> t -> bool
 val to_jsonaf : t -> Jsonaf.t
 val of_jsonaf : Jsonaf.t -> (t, P.Error.t) result
