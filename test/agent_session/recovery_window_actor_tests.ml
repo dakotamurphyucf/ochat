@@ -352,7 +352,7 @@ let walk fixture sw ~fault ~initial =
        after)
 ;;
 
-let save_edit actor writer =
+let save_edit actor writer ~owner =
   let original = history 2 "canonical text before edit" in
   ignore (Actor.append_history actor ~attachment_id:writer [ original ] |> protocol_ok);
   let before = state actor in
@@ -382,6 +382,22 @@ let save_edit actor writer =
   let entry = List.last_exn after.conversation.canonical_history in
   assert (P.History.Id.equal original.id entry.id);
   let member = member_for after entry in
+  let view = A.Recovery_visibility.create after ~owner |> protocol_ok in
+  (match
+     ( A.Recovery_visibility.select view (Ledger.Member.citation before_member)
+     , A.Recovery_visibility.select view (Ledger.Member.citation member) )
+   with
+   | Withdrawn, Eligible _ -> ()
+   | _ -> failwith "edit did not withdraw the old citation and expose the new revision");
+  assert (
+    P.Recovery_window.ordinal
+      (Ledger.Window.manifest (Ledger.active (ledger before)))
+      (Ledger.Member.citation before_member)
+    |> Option.equal
+         Int.equal
+         (P.Recovery_window.ordinal
+            (Ledger.Window.manifest (Ledger.active (ledger after)))
+            (Ledger.Member.citation before_member)));
   assert (
     not
       (Citation.equal
@@ -395,7 +411,7 @@ let save_edit actor writer =
 
 let reopen fixture sw ~initial ~after ~fault =
   let journal = journal fixture Store.Journal.open_existing in
-  let recovered =
+  let replay () =
     Store.Recovery.load
       ~env:fixture.env
       ~journal
@@ -409,6 +425,7 @@ let reopen fixture sw ~initial ~after ~fault =
       ~validate:Persistence.validate
     |> store_ok
   in
+  let recovered = replay () in
   let restored = Persistence.Restored.state recovered.state in
   assert (same_ledger after restored);
   assert (
@@ -443,7 +460,15 @@ let reopen fixture sw ~initial ~after ~fault =
        if not fault
        then (
          Actor.stop actor ~attachment_id:writer ~mode:Cancel |> protocol_ok |> ignore;
-         let edited = save_edit actor writer in
+         let edited = save_edit actor writer ~owner:fixture.owner in
+         let edit_frame = data_transaction journal edited in
+         assert (
+           List.mem
+             (D.Document.required_semantics edit_frame.delta)
+             P.Session_storage_semantics.recovery_withdrawals
+             ~equal:String.equal);
+         let replayed = Persistence.Restored.state (replay ()).state in
+         assert (same_ledger edited replayed);
          Actor.reset
            actor
            ~attachment_id:writer

@@ -100,6 +100,16 @@ let transaction t ~state_document ~command_audit previous transition =
       ~state_document:(Session_state_document.with_value state_document)
     |> Result.map_error ~f:document_error
   in
+  let contains_withdrawal (state : Session_state.t) =
+    Option.exists state.recovery_windows ~f:Recovery_window_ledger.has_withdrawals
+  in
+  let%bind delta =
+    Session_storage_semantics.require_recovery_withdrawals
+      (Session_delta_document.document delta)
+      ~required:(contains_withdrawal previous || contains_withdrawal transition.state)
+      ~limits:t.limits
+    |> Result.map_error ~f:document_error
+  in
   let%bind events =
     List.map transition.events ~f:(fun event ->
       Durable_event_document.create event ~limits:t.limits)
@@ -119,7 +129,7 @@ let transaction t ~state_document ~command_audit previous transition =
       ~last_event_sequence
       ~accepted_at_ns:(accepted_at_ns transition.state)
       ~command_audit
-      ~delta:(Session_delta_document.document delta)
+      ~delta
       ~durable_events:(List.map events ~f:Durable_event_document.document)
   in
   transaction, events

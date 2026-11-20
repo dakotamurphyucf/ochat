@@ -33,6 +33,7 @@ val manifest : t -> P.Recovery_window.t
 val origin : t -> origin
 val state : t -> state
 val length : t -> int
+val has_withdrawals : t -> bool
 val at : t -> ordinal:int -> Member.t option
 val scope : t -> P.Recovery_window.Scope.t
 val id : t -> P.Id.Context_window.t

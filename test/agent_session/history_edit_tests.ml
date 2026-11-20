@@ -1079,6 +1079,50 @@ let%expect_test "middle paired deletion transfers only archived unknown custody"
       }
     in
     let limits = Document_schema.Limits.default in
+    (* The exact same pair must lose recovery visibility together. Its original
+       positions remain meaningful to archived citations and paging cursors. *)
+    let owner =
+      P.Session_ref.create
+        ~server_id:(P.Id.Server.of_string "srv_recovery" |> protocol_ok)
+        ~session_id
+    in
+    let ledger =
+      A.Recovery_window_capture.bootstrap
+        state
+        ~owner
+        ~window:(P.Id.Context_window.create ())
+      |> protocol_ok
+    in
+    let enabled = { state with recovery_windows = Some ledger } in
+    let archive =
+      A.Compaction_archive.reference_for
+        (A.Session_state_document.authored enabled)
+        ~limits
+        ~kind:Delete
+        operation_id
+      |> protocol_ok
+    in
+    let deleted =
+      A.Session_delta.apply enabled (History_deleted (output.id, archive)) |> protocol_ok
+    in
+    let visibility = A.Recovery_visibility.create deleted ~owner |> protocol_ok in
+    let original =
+      A.Recovery_window_ledger.active ledger |> A.Recovery_window_ledger.Window.manifest
+    in
+    List.iteri [ before; call; middle; output; after ] ~f:(fun ordinal expected ->
+      let citation = P.Recovery_window.at original ~ordinal |> Option.value_exn in
+      match A.Recovery_visibility.select visibility citation with
+      | Withdrawn ->
+        assert (
+          P.History.Id.equal call.id expected.id
+          || P.History.Id.equal output.id expected.id)
+      | Eligible current ->
+        assert (
+          not
+            (P.History.Id.equal call.id expected.id
+             || P.History.Id.equal output.id expected.id));
+        assert (A.Recovery_window_ledger.Member.matches current expected)
+      | Unavailable -> failwith "paired deletion lost membership evidence");
     let raw =
       A.Session_state_document.authored state
       |> fun document ->

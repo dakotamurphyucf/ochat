@@ -165,8 +165,14 @@ relocates removed members to the exact prestate archive before publishing the
 replacement. A prestate file left by a failed commit supplies no membership.
 On reset or rebuild the selected generation starts a fresh root. Its
 administrative archive retains the preceding ledger as historical evidence.
-Logical visibility and exact effective model-input sources are separate runtime
-contracts. [Ledger interface](../../../lib/agent_session/recovery_window_ledger.mli),
+Editing an occurrence withdraws its previous revision and discarded suffix.
+Deleting a bound tool result withdraws its paired call. Each withdrawn citation
+keeps its original window ordinal, including copies in overlapping windows.
+The new edit revision receives its own citation. The journal marks the changed
+visibility semantics so a reader that predates withdrawal support rejects that
+transaction. Authorized retrieval must resolve a citation against the current
+source state, including moderator tombstones, before reading and again before
+releasing bytes after a wait. [Recovery selection interface](../../../lib/agent_session/recovery_visibility.mli). [Ledger interface](../../../lib/agent_session/recovery_window_ledger.mli),
 [local context recovery design](../../design/local-context-recovery.md).
 
 Original source access has its own retained directory owner, shared revocable

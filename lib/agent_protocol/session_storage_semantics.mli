@@ -17,6 +17,9 @@ val moderator_lifecycle : string
 (** Typed source-bound local recovery ledger, independent of ordinary history. *)
 val recovery_windows : string
 
+(** Exact membership survives withdrawal. Older reducers must reject even a journal-only edit or deletion. *)
+val recovery_withdrawals : string
+
 (** Durable immutable Goal association on a captured recurrence definition. *)
 val recurrence_controller_goal : string
 

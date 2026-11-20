@@ -710,10 +710,33 @@ let recovery_window_delta_requires payload =
   | Absent | Null | Value _ -> false
 ;;
 
+let require_recovery_withdrawals document ~required ~limits =
+  require
+    document
+    ~name:Agent_protocol.Session_storage_semantics.recovery_withdrawals
+    ~required
+    ~limits
+;;
+
+let state_has_withdrawals document =
+  match D.Json.field (D.Document.payload document) ~name:"recovery_windows" with
+  | Value ledger ->
+    (match D.Json.field ledger ~name:"version" with
+     | Value (`Number "2") -> true
+     | Value _ | Null | Absent -> false)
+  | Null | Absent -> false
+;;
+
 let require_state_without_recovery_windows = require_state
 
 let require_state document ~limits =
   let%bind.Result document = require_state_without_recovery_windows document ~limits in
+  let%bind.Result document =
+    require_recovery_withdrawals
+      document
+      ~required:(state_has_withdrawals document)
+      ~limits
+  in
   require
     document
     ~name:recovery_window_name
@@ -725,6 +748,12 @@ let check_state_without_recovery_windows = check_state
 
 let check_state document =
   let%bind.Result () = check_state_without_recovery_windows document in
+  let%bind.Result () =
+    check
+      document
+      ~name:Agent_protocol.Session_storage_semantics.recovery_withdrawals
+      ~required:(state_has_withdrawals document)
+  in
   check
     document
     ~name:recovery_window_name

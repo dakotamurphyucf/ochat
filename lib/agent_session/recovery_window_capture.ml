@@ -160,8 +160,9 @@ let refresh_open window ~history ~revision ~index ~retired ~archive =
     Window.fold_members window ~init:[] ~f:(fun kept member ->
       let id = occurrence member in
       match Member.source member with
+      | _ when Member.is_withdrawn member -> Ok (member :: kept)
+      | _ when Hash_set.mem retired id -> Ok (Member.withdraw member :: kept)
       | Summary_archive _ -> Ok (member :: kept)
-      | Live _ when Hash_set.mem retired id -> Ok kept
       | Live _ ->
         (match Hashtbl.find index id with
          | Some (ordinal, entry) when Member.matches member entry ->
@@ -173,7 +174,7 @@ let refresh_open window ~history ~revision ~index ~retired ~archive =
              member :: kept)
          | Some _ | None ->
            (match archive with
-            | None -> Ok kept
+            | None -> Ok (Member.withdraw member :: kept)
             | Some (source, _) ->
               let%map member =
                 rebind member ~source ~source_ordinal:(Member.source_ordinal member)
@@ -203,12 +204,41 @@ let refresh_open window ~history ~revision ~index ~retired ~archive =
   with_members window (List.rev_append kept added)
 ;;
 
-let replace_at ledger ~history ~revision ~retired =
+let replace_at ledger ~previous ~history ~revision ~retired =
   let open Result.Let_syntax in
   let%bind index = index_history history in
   let retired = Hash_set.of_list (module History_id) retired in
-  update_active ledger ~f:(fun window ->
-    refresh_open window ~history ~revision ~index ~retired ~archive:None)
+  (* A generic same-generation replacement may also remove or edit live
+     history. It must fence every archived copy of the affected occurrence. *)
+  let%bind () =
+    List.fold_result previous ~init:() ~f:(fun () (entry : P.History.entry) ->
+      match Hashtbl.find index entry.id with
+      | Some (_, next)
+        when P.History.Content_revision.equal entry.content_revision next.content_revision
+        ->
+        if P.History.equal_entry entry next
+        then Ok ()
+        else invalid "canonical recovery content changed without a new version"
+      | Some _ | None ->
+        Hash_set.add retired entry.id;
+        Ok ())
+  in
+  let%bind windows =
+    List.map (Ledger.windows ledger) ~f:(fun window ->
+      match Window.state window with
+      | Open -> refresh_open window ~history ~revision ~index ~retired ~archive:None
+      | Sealed when Hash_set.is_empty retired -> Ok window
+      | Sealed ->
+        let members =
+          List.map (members window) ~f:(fun member ->
+            if Hash_set.mem retired (occurrence member)
+            then Member.withdraw member
+            else member)
+        in
+        with_members window members)
+    |> Result.all
+  in
+  Ledger.create ~owner:(Ledger.owner ledger) windows
 ;;
 
 let replace (state : S.t) ~history ~retired =
@@ -217,7 +247,14 @@ let replace (state : S.t) ~history ~retired =
   | None -> Ok None
   | Some ledger ->
     let%bind revision = next_revision state in
-    let%map ledger = replace_at ledger ~history ~revision ~retired in
+    let%map ledger =
+      replace_at
+        ledger
+        ~previous:state.conversation.canonical_history
+        ~history
+        ~revision
+        ~retired
+    in
     Some ledger
 ;;
 
@@ -299,7 +336,12 @@ let replacement (state : S.t) ~(incoming : S.t) =
       then Ok (Some ledger)
       else (
         let%map ledger =
-          replace_at ledger ~history ~revision:incoming.counters.revision ~retired:[]
+          replace_at
+            ledger
+            ~previous:state.conversation.canonical_history
+            ~history
+            ~revision:incoming.counters.revision
+            ~retired:[]
         in
         Some ledger))
     else (

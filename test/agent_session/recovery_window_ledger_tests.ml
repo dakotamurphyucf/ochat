@@ -380,3 +380,90 @@ let%expect_test "window ledger rejects foreign sources, duplicates and broken li
     print_endline "foreign sources, conflicting archive rows and invalid lineage rejected");
   [%expect {| foreign sources, conflicting archive rows and invalid lineage rejected |}]
 ;;
+
+let%expect_test "withdrawal preserves ordinals and cannot be bypassed by a carried copy" =
+  with_ledger (fun _ current _ root active ->
+    let at w pos = Ledger.Window.at w ~ordinal:pos |> Option.value_exn in
+    let first = at root 0 in
+    let second = at root 1 in
+    let rebuild window members =
+      Ledger.Window.create
+        (Ledger.Window.scope window)
+        ~origin:(Ledger.Window.origin window)
+        ~state:(Ledger.Window.state window)
+        members
+      |> protocol_ok
+    in
+    let source = Ledger.Member.source first in
+    let carried =
+      member
+        (Ledger.Window.scope active)
+        ~source
+        ~ordinal:0
+        ~provenance:(Carried_from (Ledger.Window.id root))
+        (entry 2)
+      |> protocol_ok
+    in
+    let root = rebuild root [ Ledger.Member.withdraw first; second ] in
+    let active_with carry = rebuild active [ carry; at active 0 ] in
+    assert (Result.is_error (Ledger.create ~owner [ root; active_with carried ]));
+    let active = active_with (Ledger.Member.withdraw carried) in
+    let ledger = Ledger.create ~owner [ root; active ] |> protocol_ok in
+    let json = Ledger.to_jsonaf ledger in
+    assert (
+      Result.is_error
+        (Ledger.of_jsonaf (update_object json ~field:"version" ~f:(fun _ -> `Number "1"))));
+    let state =
+      state_document { current with recovery_windows = Some ledger }
+      |> decode
+      |> document_ok
+      |> Codec.value
+    in
+    let view = A.Recovery_visibility.create state ~owner |> protocol_ok in
+    let select m = A.Recovery_visibility.select view (Ledger.Member.citation m) in
+    List.iter [ first; carried ] ~f:(fun m ->
+      match select m with
+      | Withdrawn -> ()
+      | Eligible _ | Unavailable -> failwith "lost withdrawal");
+    (match select second with
+     | Eligible found -> assert (Ledger.Member.same_version found second)
+     | Withdrawn | Unavailable -> failwith "unrelated member suppressed");
+    let snapshot = handoff_snapshot 0 in
+    let tombstone : Session.Moderator_state.Identity_snapshot.Tombstone.t =
+      { target_id = Citation.occurrence (Ledger.Member.citation second); change_id = 0 }
+    in
+    let moderator =
+      A.Moderator_checkpoint.encode
+        { snapshot with revision = 1; next_change_id = 1; tombstones = [ tombstone ] }
+    in
+    let masked =
+      A.Recovery_visibility.create { state with moderator = Some moderator } ~owner
+      |> protocol_ok
+    in
+    (match A.Recovery_visibility.select masked (Ledger.Member.citation second) with
+     | Withdrawn -> ()
+     | Eligible _ | Unavailable ->
+       failwith "current moderator tombstone did not suppress archived text");
+    let unknown =
+      Citation.create
+        (Ledger.Window.scope root)
+        ~occurrence:(entry 100).id
+        ~version:(Citation.version (Ledger.Member.citation first))
+      |> protocol_ok
+    in
+    (match A.Recovery_visibility.select view unknown with
+     | Unavailable -> ()
+     | Eligible _ | Withdrawn -> failwith "invented membership");
+    assert (
+      Option.equal
+        Int.equal
+        (P.Recovery_window.ordinal
+           (Ledger.Window.manifest root)
+           (Ledger.Member.citation second))
+        (Some 1));
+    print_endline
+      "withdrawn in both windows; unaffected neighbour retains ordinal 1; unknown \
+       remains unavailable");
+  [%expect
+    {| withdrawn in both windows; unaffected neighbour retains ordinal 1; unknown remains unavailable |}]
+;;

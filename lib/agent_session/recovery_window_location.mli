@@ -55,6 +55,11 @@ module Member : sig
     -> provenance:provenance
     -> (t, P.Error.t) result
 
+  (** A committed withdrawal preserves the original citation and position. Its
+      former source is evidence only and must never be dereferenced for recovery. *)
+  val withdraw : t -> t
+
+  val is_withdrawn : t -> bool
   val citation : t -> P.Recovery_window.Citation.t
   val source : t -> Source.t
   val source_ordinal : t -> int

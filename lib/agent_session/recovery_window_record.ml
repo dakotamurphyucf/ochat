@@ -42,6 +42,7 @@ let create scope ~origin ~state members =
     let%bind () =
       List.fold_result members ~init:() ~f:(fun () member ->
         match state, Member.source member with
+        | Sealed, Source.Live _ when Member.is_withdrawn member -> Ok ()
         | Sealed, Source.Live _ -> invalid "sealed recovery window contains a live member"
         | Open, (Live _ | Summary_archive _) | Sealed, Summary_archive _ -> Ok ())
     in
@@ -53,6 +54,7 @@ let manifest t = t.manifest
 let origin t = t.origin
 let state t = t.state
 let length t = Array.length t.members
+let has_withdrawals t = Array.exists t.members ~f:Member.is_withdrawn
 
 let at t ~ordinal =
   if ordinal < 0 || ordinal >= length t then None else Some t.members.(ordinal)

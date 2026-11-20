@@ -121,6 +121,7 @@ module Member = struct
     ; source : Source.t
     ; source_ordinal : int
     ; provenance : provenance
+    ; withdrawn : bool
     }
 
   let create citation ~source ~source_ordinal ~provenance =
@@ -136,10 +137,12 @@ module Member = struct
     else (
       match Citation.version citation with
       | Canonical revision ->
-        Ok { citation; revision; source; source_ordinal; provenance }
+        Ok { citation; revision; source; source_ordinal; provenance; withdrawn = false }
       | Effective _ -> invalid "effective member requires an admitted prepared source")
   ;;
 
+  let withdraw t = { t with withdrawn = true }
+  let is_withdrawn t = t.withdrawn
   let citation t = t.citation
   let source t = t.source
   let source_ordinal t = t.source_ordinal
@@ -188,13 +191,14 @@ module Member = struct
 
   let to_jsonaf t =
     `Object
-      [ "key", `String (key t)
-      ; "occurrence", P.History.Id.to_json (Citation.occurrence t.citation)
-      ; "revision", P.History.Content_revision.to_json t.revision
-      ; "source", Source.to_jsonaf t.source
-      ; "source_ordinal", X.host_counter_to_json t.source_ordinal
-      ; "provenance", provenance_to_jsonaf t.provenance
-      ]
+      ([ "key", `String (key t)
+       ; "occurrence", P.History.Id.to_json (Citation.occurrence t.citation)
+       ; "revision", P.History.Content_revision.to_json t.revision
+       ; "source", Source.to_jsonaf t.source
+       ; "source_ordinal", X.host_counter_to_json t.source_ordinal
+       ; "provenance", provenance_to_jsonaf t.provenance
+       ]
+       @ if t.withdrawn then [ "withdrawn", `True ] else [])
   ;;
 
   let of_jsonaf scope json =
@@ -213,9 +217,13 @@ module Member = struct
         ~version:(P.Recovery_item_version.canonical revision)
     in
     let%bind member = create citation ~source ~source_ordinal ~provenance in
-    if String.equal encoded_key (key member)
-    then Ok member
-    else invalid "recovery member key is not canonical"
+    if not (String.equal encoded_key (key member))
+    then invalid "recovery member key is not canonical"
+    else (
+      match J.optional fields "withdrawn" with
+      | None -> Ok member
+      | Some `True -> Ok (withdraw member)
+      | Some _ -> invalid "invalid recovery withdrawal marker")
   ;;
 
   let shape =
@@ -223,6 +231,7 @@ module Member = struct
       [ "key", D.Shape.value
       ; "occurrence", D.Shape.value
       ; "revision", D.Shape.value
+      ; "withdrawn", D.Shape.value
       ; "source", Source.shape
       ; "source_ordinal", D.Shape.value
       ; ( "provenance"

@@ -44,15 +44,20 @@ type t =
   { owner : P.Session_ref.t
   ; windows : Window.t list
   ; active : Window.t
+  ; has_withdrawals : bool
   }
 
 let owner t = t.owner
 let windows t = t.windows
 let active t = t.active
+let has_withdrawals t = t.has_withdrawals
+
+(* Older readers must reject any ledger that contains a visibility fence. *)
+let version t = if has_withdrawals t then 2 else 1
 
 let to_jsonaf t =
   `Object
-    [ "version", `Number "1"
+    [ "version", `Number (Int.to_string (version t))
     ; "owner", P.Session_ref.to_json t.owner
     ; "windows", `Array (List.map t.windows ~f:Window.to_jsonaf)
     ]
@@ -100,6 +105,35 @@ let validate_carry previous member =
      | _ -> invalid "carried recovery member names a foreign predecessor")
 ;;
 
+module Occurrence_version = struct
+  module T = struct
+    type t = int * P.History.Id.t * P.Recovery_item_version.t
+    [@@deriving compare, sexp_of]
+  end
+
+  include T
+  include Comparator.Make (T)
+end
+
+let check_withdrawals windows =
+  let%map.Result _ =
+    List.fold_result
+      windows
+      ~init:(Map.empty (module Occurrence_version))
+      ~f:(fun statuses window ->
+        let generation = Scope.generation (Window.scope window) in
+        Window.fold_members window ~init:statuses ~f:(fun statuses member ->
+          let citation = Member.citation member in
+          let key = generation, Citation.occurrence citation, Citation.version citation in
+          let withdrawn = Member.is_withdrawn member in
+          match Map.find statuses key with
+          | Some previous when Bool.equal previous withdrawn -> Ok statuses
+          | Some _ -> invalid "conflicting recovery withdrawal across windows"
+          | None -> Ok (Map.set statuses ~key ~data:withdrawn)))
+  in
+  ()
+;;
+
 let create ~owner windows =
   let open Result.Let_syntax in
   if Stdlib.List.compare_length_with windows max_windows > 0
@@ -133,7 +167,9 @@ let create ~owner windows =
           in
           Some window, total))
     in
-    let t = { owner; windows; active } in
+    let has_withdrawals = List.exists windows ~f:Window.has_withdrawals in
+    let t = { owner; windows; active; has_withdrawals } in
+    let%bind () = if has_withdrawals then check_withdrawals windows else Ok () in
     let%map () = validate_encoded (to_jsonaf t) |> Result.map_error ~f:document_error in
     t)
 ;;
@@ -197,8 +233,8 @@ let validate_state
           let ordinal = Member.source_ordinal member in
           if
             Int64.(basis.revision <= revision)
-            && ordinal < Array.length live
-            && Member.matches member live.(ordinal)
+            && (Member.is_withdrawn member
+                || (ordinal < Array.length live && Member.matches member live.(ordinal)))
           then Ok ()
           else invalid "live recovery source no longer matches its exact occurrence"
         | Summary_archive archive -> bind_archive archive member)))
@@ -208,13 +244,16 @@ let of_jsonaf json =
   let open Result.Let_syntax in
   let%bind () = validate_encoded json |> Result.map_error ~f:document_error in
   let%bind fields = X.object_ json in
-  let%bind _ = X.required fields "version" (J.bounded_int ~min:1 ~max:1) in
+  let%bind encoded_version = X.required fields "version" (J.bounded_int ~min:1 ~max:2) in
   let%bind owner = X.required fields "owner" P.Session_ref.of_json in
   let%bind windows =
     X.required fields "windows" (bounded_list ~name:"recovery windows" ~max:max_windows)
   in
   let%bind windows = List.map windows ~f:(Window.of_jsonaf owner) |> Result.all in
-  create ~owner windows
+  let%bind t = create ~owner windows in
+  if Int.equal (version t) encoded_version
+  then Ok t
+  else invalid "recovery ledger version does not match its withdrawal semantics"
 ;;
 
 let shape =
