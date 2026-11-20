@@ -4,6 +4,7 @@ module Effective = Chat_response.Moderation.Effective_entry
 module Overlay = Chat_response.Moderation.Identity_overlay
 module D = Document_schema
 module Version = P.Recovery_item_version
+module Work = Recovery_source_work
 
 let invalid reason = P.Error.invalid_request reason
 
@@ -32,7 +33,7 @@ module Row = struct
   let canonical_ordinal t = t.canonical_ordinal
   let max_decode_bytes = 64 * 1024
 
-  let projected t ~remaining_bytes =
+  let projected ?work t ~remaining_bytes =
     match t.payload with
     | Applied entry -> Some entry, remaining_bytes
     | Stored entry ->
@@ -46,7 +47,13 @@ module Row = struct
             ~max_nodes:4096
           |> Result.ok
         in
-        let%bind bytes = D.Json.validate_and_measure entry.payload ~limits |> Result.ok in
+        let%bind bytes =
+          (match work with
+           | None -> D.Json.validate_and_measure entry.payload ~limits
+           | Some work -> Work.measure_json work ~limits entry.payload)
+          |> Result.ok
+        in
+        Option.iter work ~f:(fun work -> Work.charge_source work bytes);
         let%map decoded = History_codec.of_protocol entry |> Result.ok in
         decoded, bytes
       in
@@ -55,15 +62,21 @@ module Row = struct
        | Some (entry, bytes) -> Some entry, remaining_bytes - bytes)
   ;;
 
-  let versioned t ~remaining_bytes =
+  let versioned ?work t ~remaining_bytes =
     if remaining_bytes <= 0 || Option.exists t.canonical ~f:(fun entry -> entry.redacted)
     then None, remaining_bytes
     else (
-      match projected t ~remaining_bytes with
+      match projected ?work t ~remaining_bytes with
       | None, remaining_bytes -> None, remaining_bytes
       | Some entry, remaining_bytes ->
         let digest, remaining_bytes =
-          Inference_runtime.Recovery_input.projected_digest entry ~remaining_bytes
+          let charge_work = Option.map work ~f:Work.charge_source in
+          let checkpoint = Option.map work ~f:(fun work () -> Work.checkpoint work) in
+          Inference_runtime.Recovery_input.projected_digest
+            ?charge_work
+            ?checkpoint
+            entry
+            ~remaining_bytes
         in
         let qualified =
           let open Option.Let_syntax in
@@ -79,11 +92,15 @@ module Row = struct
     Option.map matched ~f:fst, remaining_bytes
   ;;
 
-  let entry t =
+  let entry ?work t ~version =
     let max_bytes = Inference_runtime.Recovery_input.max_projection_bytes in
-    Option.map
-      (fst (versioned t ~remaining_bytes:max_bytes))
-      ~f:(fun (_, entry) ->
+    let matched, remaining_bytes = versioned ?work t ~remaining_bytes:max_bytes in
+    Option.bind matched ~f:(fun (actual, entry) ->
+      if not (Version.equal version actual)
+      then None
+      else (
+        Option.iter work ~f:(fun work ->
+          Work.charge_source work (max_bytes - remaining_bytes));
         let provenance : P.History.provenance =
           match
             Option.map t.canonical ~f:(fun e -> e.P.History.provenance), t.provenance
@@ -107,7 +124,7 @@ module Row = struct
         let projected =
           History_codec.to_protocol ~provenance (History_entry.with_payload entry payload)
         in
-        { projected with content_revision })
+        Some { projected with content_revision }))
   ;;
 end
 
@@ -140,10 +157,21 @@ let origin ~source_revision ~overlay_incarnation canonical provenance =
     Error (invalid "effective projection origin is inconsistent")
 ;;
 
-let create ~source_revision ~overlay_incarnation ~history ~moderator =
+let create_projection ?work ~source_revision ~overlay_incarnation ~history ~moderator () =
   let open Result.Let_syntax in
   let max_members = Recovery_window_record.max_members in
-  let too_many values = Stdlib.List.compare_length_with values max_members > 0 in
+  let too_many values =
+    match work with
+    | None -> Stdlib.List.compare_length_with values max_members > 0
+    | Some work ->
+      let rec count remaining = function
+        | [] -> false
+        | _ :: rest ->
+          Work.charge_source work 1;
+          if remaining = 0 then true else count (remaining - 1) rest
+      in
+      count max_members values
+  in
   let oversized =
     too_many history
     || Option.exists
@@ -220,4 +248,12 @@ let create ~source_revision ~overlay_incarnation ~history ~moderator =
         |> Result.all
       in
       Some { rows = Array.of_list rows; by_occurrence }))
+;;
+
+let create ~source_revision ~overlay_incarnation ~history ~moderator =
+  create_projection ~source_revision ~overlay_incarnation ~history ~moderator ()
+;;
+
+let create_for_read work ~source_revision ~overlay_incarnation ~history ~moderator =
+  create_projection ~work ~source_revision ~overlay_incarnation ~history ~moderator ()
 ;;

@@ -1,6 +1,7 @@
 open! Core
 module P = Agent_protocol
 module Source = Recovery_source_reader
+module Work = Recovery_source_work
 module Payload = History_entry.Payload
 module D = Document_schema
 
@@ -33,21 +34,25 @@ let role t = t.role
 let parts t = t.parts
 let max_item_text_bytes = 1_048_576
 
-let admit_part ~index ~remaining text =
-  if String.length text > remaining
+let admit_part work ~index ~remaining text =
+  let bytes = String.length text in
+  if bytes > remaining
   then Error Source.Limit
-  else P.History_text.create ~index ~text |> Result.map_error ~f:(fun _ -> Source.Corrupt)
+  else (
+    Work.charge_selected work bytes;
+    P.History_text.create ~index ~text |> Result.map_error ~f:(fun _ -> Source.Corrupt))
 ;;
 
-let text_parts parts ~max_text_bytes =
+let text_parts work parts ~max_text_bytes =
   let rec loop parts ~index ~remaining ~reversed =
     match parts with
     | [] -> Ok (List.rev reversed)
     | _ :: _ when index >= 4096 -> Error Source.Limit
     | part :: rest ->
+      Work.charge_source work 1;
       (match part with
        | Payload.Content.Text { text; _ } | Refusal text ->
-         (match admit_part ~index ~remaining text with
+         (match admit_part work ~index ~remaining text with
           | Error _ as error -> error
           | Ok selected ->
             loop
@@ -60,19 +65,20 @@ let text_parts parts ~max_text_bytes =
   loop parts ~index:0 ~remaining:max_text_bytes ~reversed:[]
 ;;
 
-let classify ~limits ~view (row : P.History.entry) =
+let classify work ~limits ~view (row : P.History.entry) =
   let open Result.Let_syntax in
   let%bind () =
     match row.provenance with
     | Runtime_notification _ | Runtime_authoring _ -> Error Source.Unavailable
     | Canonical | Moderator_inserted | Moderator_replaced _ -> Ok ()
   in
-  let%bind () =
-    D.Json.validate ~limits row.payload
+  let%bind bytes =
+    Work.measure_json work ~limits row.payload
     |> Result.map_error ~f:(function
       | D.Error.Limit_exceeded _ -> Source.Limit
       | _ -> Corrupt)
   in
+  Work.charge_source work bytes;
   let%bind entry =
     History_codec.of_protocol row |> Result.map_error ~f:(fun _ -> Source.Corrupt)
   in
@@ -92,19 +98,20 @@ let classify ~limits ~view (row : P.History.entry) =
       Error Source.Unavailable)
 ;;
 
-let project ~limits ~view ~max_text_bytes row =
+let project work ~limits ~view ~max_text_bytes row =
   let open Result.Let_syntax in
-  let%bind role, output = classify ~limits ~view row in
+  let%bind role, output = classify work ~limits ~view row in
   let%map parts =
     match output with
-    | Payload.Output.Content values -> text_parts values ~max_text_bytes
+    | Payload.Output.Content values -> text_parts work values ~max_text_bytes
     | Text value ->
-      Result.map (admit_part ~index:0 ~remaining:max_text_bytes value) ~f:List.return
+      Result.map (admit_part work ~index:0 ~remaining:max_text_bytes value) ~f:List.return
   in
   { role; parts }
 ;;
 
 let resolve
+      ?allowance
       ?(max_text_bytes = max_item_text_bytes)
       store
       ~handle
@@ -136,22 +143,39 @@ let resolve
         (Option.exists state.recovery_windows ~f:(fun ledger ->
            Recovery_window_ledger.is_derived_summary ledger citation))
     in
-    let project =
-      project ~limits ~view ~max_text_bytes:(Int.min max_item_text_bytes max_text_bytes)
+    let resolve allowance =
+      let project =
+        project
+          allowance
+          ~limits
+          ~view
+          ~max_text_bytes:(Int.min max_item_text_bytes max_text_bytes)
+      in
+      match selection with
+      | Canonical citation ->
+        Source.read
+          ~allowance
+          ~visible
+          store
+          ~handle
+          ~current
+          ~max_frame_bytes
+          citation
+          ~project
+      | Prepared { citation; source_revision } ->
+        Source.read_effective
+          ~allowance
+          ~visible
+          ~check_replaced_source:(fun row -> Result.map (project row) ~f:ignore)
+          store
+          ~handle
+          ~current
+          ~max_frame_bytes
+          ~source_revision
+          citation
+          ~project
     in
-    match selection with
-    | Canonical citation ->
-      Source.read ~visible store ~handle ~current ~max_frame_bytes citation ~project
-    | Prepared { citation; source_revision } ->
-      Source.read_effective
-        ~visible
-        ~check_replaced_source:(fun row ->
-          Result.map (classify ~limits ~view row) ~f:ignore)
-        store
-        ~handle
-        ~current
-        ~max_frame_bytes
-        ~source_revision
-        citation
-        ~project
+    match allowance with
+    | Some allowance -> resolve allowance
+    | None -> Source.with_allowance store ~handle ~f:resolve
 ;;

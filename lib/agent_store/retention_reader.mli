@@ -94,12 +94,23 @@ val list_with_checkpoint_and_names
 val read : t -> path:string -> max_bytes:int -> (string, Store_error.t) result
 
 (** Same bounded regular-file read. An absent final component yields [Missing]
-    and a file larger than the allowance yields [Admission_capacity]. An
-    unsupported path, unexpected growth or an I/O failure is distinct. *)
+    and an exhausted entry or shared byte allowance yields [Admission_capacity].
+    A file beyond the intrinsic [max_bytes] yields [Document (Limit_exceeded _)].
+    Missing and invalid paths consume an entry before probing any directory. *)
 val read_promised_file
   :  t
   -> path:string
   -> max_bytes:int
+  -> (string, Store_error.t) result
+
+(** The same promised-file read, with calling-domain checkpoints before
+    filesystem probes and between bounded chunks. Callback exceptions and
+    cancellation propagate unchanged. *)
+val read_promised_file_with_checkpoint
+  :  t
+  -> path:string
+  -> max_bytes:int
+  -> checkpoint:(unit -> unit)
   -> (string, Store_error.t) result
 
 (** The same bounded read, with calling-domain checkpoints between bounded

@@ -35,7 +35,7 @@ let supported_parts content =
   && List.for_all content ~f:supported_part
 ;;
 
-let measure_projection entry ~remaining_bytes =
+let measure_projection ?charge_work ~checkpoint entry ~remaining_bytes =
   let semantic = Payload.semantic (History_entry.payload entry) in
   let supported =
     match Payload.Semantic.view semantic with
@@ -59,14 +59,28 @@ let measure_projection entry ~remaining_bytes =
       |> Result.ok
     in
     let json = Payload.to_json (Payload.authored semantic) in
-    let%map size = Document_schema.Json.validate_and_measure json ~limits |> Result.ok in
+    let%map size =
+      (match charge_work with
+       | None -> Document_schema.Json.validate_and_measure json ~limits
+       | Some charge_work ->
+         Document_schema.Json.validate_and_measure_with_work
+           json
+           ~limits
+           ~checkpoint
+           ~charge_work)
+      |> Result.ok
+    in
     json, size
 ;;
 
-let projected_digest entry ~remaining_bytes =
-  match measure_projection entry ~remaining_bytes with
+let projected_digest ?charge_work ?(checkpoint = fun () -> ()) entry ~remaining_bytes =
+  match measure_projection ?charge_work ~checkpoint entry ~remaining_bytes with
   | None -> None, Int.max 0 (remaining_bytes - max_member_bytes)
-  | Some (json, bytes) -> Some (digest json), remaining_bytes - bytes
+  | Some (json, bytes) ->
+    Option.iter charge_work ~f:(fun charge -> charge bytes);
+    let encoded = Jsonaf.to_string json in
+    Option.iter charge_work ~f:(fun charge -> charge (String.length encoded));
+    Some (Digest.of_contents encoded ~checkpoint), remaining_bytes - bytes
 ;;
 
 let capture request ~configuration ~omit =

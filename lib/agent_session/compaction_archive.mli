@@ -52,9 +52,11 @@ end
 val filename : Session_state.Compaction_archive.t -> string
 
 (** Decode bytes supplied by a bounded reader, using the same checksum, session,
-    revision and disposition validation as read, without further filesystem IO. *)
+    revision and disposition validation as read, without further filesystem IO.
+    [charge_work] reserves each operation before processing its known input. *)
 val decode_file
-  :  handle:Agent_store.Session_store.Handle.t
+  :  ?charge_work:(int -> unit)
+  -> handle:Agent_store.Session_store.Handle.t
   -> max_payload_length:int
   -> Session_state.Compaction_archive.t
   -> string

@@ -17,9 +17,16 @@ let active_scope (state : State.t) =
     Windows.Window.scope (Windows.active windows))
 ;;
 
-let projected (state : State.t) ~source_revision ~overlay_incarnation =
-  let%bind.Result moderator = Moderator_checkpoint.decode state.moderator in
-  Projection.create
+let projected ?work (state : State.t) ~source_revision ~overlay_incarnation =
+  let moderator, project =
+    match work with
+    | None -> Moderator_checkpoint.decode state.moderator, Projection.create
+    | Some work ->
+      ( Moderator_checkpoint.decode_for_recovery work state.moderator
+      , Projection.create_for_read work )
+  in
+  let%bind.Result moderator = moderator in
+  project
     ~source_revision
     ~overlay_incarnation
     ~history:state.conversation.canonical_history
@@ -138,7 +145,7 @@ let projection_revision ~revision record =
   if Int64.equal revision (Int64.succ source_revision) then source_revision else revision
 ;;
 
-let resolve_live (state : State.t) ~source_revision citation =
+let resolve_live ?work (state : State.t) ~source_revision citation =
   let open Result.Let_syntax in
   match resolve_record state ~source_revision with
   | Some record ->
@@ -161,9 +168,11 @@ let resolve_live (state : State.t) ~source_revision citation =
          let source_revision =
            projection_revision ~revision:state.counters.revision record
          in
-         let%map projection = projected state ~source_revision ~overlay_incarnation in
+         let%map projection =
+           projected ?work state ~source_revision ~overlay_incarnation
+         in
          Option.bind projection ~f:(fun projection ->
-           Record.resolve record projection citation)))
+           Record.resolve ?work record projection citation)))
   | None -> Ok None
 ;;
 
@@ -263,7 +272,7 @@ let relocate (previous : State.t) ~(archive : State.Compaction_archive.t) =
       Some next)
 ;;
 
-let resolve_archived (archived : State.t) record citation =
+let resolve_archived ?work (archived : State.t) record citation =
   let open Result.Let_syntax in
   let source_revision = Record.source_revision record in
   let archived_record = resolve_record archived ~source_revision in
@@ -287,8 +296,8 @@ let resolve_archived (archived : State.t) record citation =
       projection_revision ~revision:archived.counters.revision record
     in
     let overlay_incarnation = Record.overlay_incarnation record in
-    let%map projection = projected archived ~source_revision ~overlay_incarnation in
+    let%map projection = projected ?work archived ~source_revision ~overlay_incarnation in
     Option.bind projection ~f:(fun projection ->
-      Record.resolve_archived record projection citation)
+      Record.resolve_archived ?work record projection citation)
   | _ -> Error (invalid "verified archive does not contain the exact preparation source")
 ;;

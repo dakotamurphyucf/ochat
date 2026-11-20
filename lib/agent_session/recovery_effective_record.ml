@@ -34,7 +34,7 @@ module Member = struct
     | Effective { origin; _ } -> Version.equal_origin origin (Projection.Row.origin row)
   ;;
 
-  let source_at t projection ~effective_ordinal ~canonical_ordinal ~remaining_bytes =
+  let locate t projection ~effective_ordinal ~canonical_ordinal =
     match Projection.at projection ~ordinal:effective_ordinal with
     | Some row
       when P.History.Id.equal
@@ -44,13 +44,19 @@ module Member = struct
                 Int.equal
                 canonical_ordinal
                 (Projection.Row.canonical_ordinal row)
-           && matches_origin t row ->
+           && matches_origin t row -> Some row
+    | Some _ | None -> None
+  ;;
+
+  let source_at t projection ~effective_ordinal ~canonical_ordinal ~remaining_bytes =
+    match locate t projection ~effective_ordinal ~canonical_ordinal with
+    | Some row ->
       let version, remaining_bytes = Projection.Row.version row ~remaining_bytes in
       ( Option.some_if
           (Option.exists version ~f:(Version.equal (Citation.version t.citation)))
           row
       , remaining_bytes )
-    | Some _ | None -> None, remaining_bytes
+    | None -> None, remaining_bytes
   ;;
 
   let source t projection ~remaining_bytes =
@@ -339,16 +345,20 @@ let find_member t citation =
   List.find t.members ~f:(fun member -> Citation.equal citation (Member.citation member))
 ;;
 
-let resolve t projection citation =
+let resolve ?work t projection citation =
   let open Option.Let_syntax in
   let%bind member = find_member t citation in
   let%bind row =
-    fst (Member.source member projection ~remaining_bytes:I.max_projection_bytes)
+    Member.locate
+      member
+      projection
+      ~effective_ordinal:(Member.effective_ordinal member)
+      ~canonical_ordinal:(Member.canonical_ordinal member)
   in
-  Projection.Row.entry row
+  Projection.Row.entry ?work row ~version:(Citation.version citation)
 ;;
 
-let resolve_archived t projection citation =
+let resolve_archived ?work t projection citation =
   let open Option.Let_syntax in
   let%bind member = find_member t citation in
   let%bind archive =
@@ -360,15 +370,13 @@ let resolve_archived t projection citation =
     Archive.find archive ~request_ordinal:(Member.request_ordinal member)
   in
   let%bind row =
-    fst
-      (Member.source_at
-         member
-         projection
-         ~effective_ordinal:(Archive.Position.effective_ordinal position)
-         ~canonical_ordinal:(Archive.Position.canonical_ordinal position)
-         ~remaining_bytes:I.max_projection_bytes)
+    Member.locate
+      member
+      projection
+      ~effective_ordinal:(Archive.Position.effective_ordinal position)
+      ~canonical_ordinal:(Archive.Position.canonical_ordinal position)
   in
-  Projection.Row.entry row
+  Projection.Row.entry ?work row ~version:(Citation.version citation)
 ;;
 
 let preparation_fields t =

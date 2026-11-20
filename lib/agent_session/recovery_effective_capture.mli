@@ -27,7 +27,8 @@ val replacement : Session_state.t -> incoming:Session_state.t -> Ledger.t option
 (** Defense-in-depth source check for a preauthorized live read. The recovery
     service must still apply current visibility and disclose under its gate. *)
 val resolve_live
-  :  Session_state.t
+  :  ?work:Recovery_source_work.t
+  -> Session_state.t
   -> source_revision:int64
   -> P.Recovery_window.Citation.t
   -> (P.History.entry option, P.Error.t) result
@@ -45,7 +46,8 @@ val relocate
 (** Reconstruct one selected version after the host has verified the exact
     reachable archive frame and current visibility and authorization. *)
 val resolve_archived
-  :  Session_state.t
+  :  ?work:Recovery_source_work.t
+  -> Session_state.t
   -> Record.t
   -> P.Recovery_window.Citation.t
   -> (P.History.entry option, P.Error.t) result

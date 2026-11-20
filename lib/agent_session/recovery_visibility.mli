@@ -14,7 +14,11 @@ type selection =
 
 (** Require the runtime host's source session identity. A malformed moderator
     checkpoint prevents selection, including reads of archived members. *)
-val create : Session_state.t -> owner:P.Session_ref.t -> (t, P.Error.t) result
+val create
+  :  ?work:Recovery_source_work.t
+  -> Session_state.t
+  -> owner:P.Session_ref.t
+  -> (t, P.Error.t) result
 
 (** Consult exact membership, the active source generation, a committed
     withdrawal, and the source's current moderator tombstones. Selection does

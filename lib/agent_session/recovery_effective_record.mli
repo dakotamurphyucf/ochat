@@ -58,13 +58,15 @@ val validate_source : t -> Recovery_effective_projection.t -> (unit, P.Error.t) 
 (** Verify the original source ordinal and version. The caller first establishes
     current visibility and a matching live or retained source owner. *)
 val resolve
-  :  t
+  :  ?work:Recovery_source_work.t
+  -> t
   -> Recovery_effective_projection.t
   -> P.Recovery_window.Citation.t
   -> P.History.entry option
 
 val resolve_archived
-  :  t
+  :  ?work:Recovery_source_work.t
+  -> t
   -> Recovery_effective_projection.t
   -> P.Recovery_window.Citation.t
   -> P.History.entry option

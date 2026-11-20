@@ -43,15 +43,23 @@ let checked_digest bytes = function
       else Error (Error.Digest_mismatch { expected; actual }))
 ;;
 
-let of_frame frame ~limits ~expected_digest =
+let of_frame_with_work ?charge_work frame ~limits ~expected_digest =
   let open Result.Let_syntax in
   let stored_bytes = Frame.payload frame in
+  let bytes = String.length stored_bytes in
+  Option.iter charge_work ~f:(fun charge -> charge bytes);
   let%bind stored_digest = checked_digest stored_bytes expected_digest in
+  (* The complete payload is parsed and then measured as an admitted JSON tree. *)
+  Option.iter charge_work ~f:(fun charge -> charge (2 * bytes));
   let%map document =
     Document_schema.Document.decode ~limits stored_bytes
     |> Result.map_error ~f:(fun error -> Error.Document error)
   in
   { stored_bytes; stored_digest; document; flags = Frame.flags frame }
+;;
+
+let of_frame frame ~limits ~expected_digest =
+  of_frame_with_work frame ~limits ~expected_digest
 ;;
 
 let of_document document ~limits =
@@ -64,7 +72,8 @@ let of_document document ~limits =
   { stored_bytes; stored_digest = digest stored_bytes; document; flags = 0 }
 ;;
 
-let decode_frame ~limits ~contents ~offset ~expected_digest =
+let decode_frame_with_work ?charge_work ~limits ~offset ~expected_digest contents =
+  Option.iter charge_work ~f:(fun charge -> charge (String.length contents - offset));
   let open Result.Let_syntax in
   let%bind decoded =
     Frame.decode
@@ -76,14 +85,18 @@ let decode_frame ~limits ~contents ~offset ~expected_digest =
   match decoded with
   | Incomplete_tail _ -> Error Error.Incomplete_frame
   | Complete { frame; next_offset } ->
-    let%map record = of_frame frame ~limits ~expected_digest in
+    let%map record = of_frame_with_work ?charge_work frame ~limits ~expected_digest in
     record, next_offset
 ;;
 
-let decode_file ~limits ~expected_digest contents =
+let decode_frame ~limits ~contents ~offset ~expected_digest =
+  decode_frame_with_work ~limits ~offset ~expected_digest contents
+;;
+
+let decode_file ?charge_work ~limits ~expected_digest contents =
   let open Result.Let_syntax in
   let%bind record, next_offset =
-    decode_frame ~limits ~contents ~offset:0 ~expected_digest
+    decode_frame_with_work ?charge_work ~limits ~offset:0 ~expected_digest contents
   in
   if next_offset <> String.length contents then Error Error.Trailing_bytes else Ok record
 ;;

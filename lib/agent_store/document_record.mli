@@ -48,9 +48,12 @@ val decode_frame
   -> expected_digest:string option
   -> (t * int, Error.t) Result.t
 
-(** Snapshot helper additionally rejects trailing bytes. *)
+(** Snapshot helper additionally rejects trailing bytes. [charge_work] can
+    reserve the known byte extent before framing/checksum, address hashing,
+    and syntax parse plus admitted JSON validation. *)
 val decode_file
-  :  limits:Document_schema.Limits.t
+  :  ?charge_work:(int -> unit)
+  -> limits:Document_schema.Limits.t
   -> expected_digest:string option
   -> string
   -> (t, Error.t) Result.t

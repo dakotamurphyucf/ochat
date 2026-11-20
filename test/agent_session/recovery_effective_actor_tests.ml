@@ -50,8 +50,9 @@ let member_for record id =
     P.History.Id.equal id (Citation.occurrence (Effective_record.Member.citation member)))
 ;;
 
-let read_effective fixture record member ~current ~project =
+let read_effective ?allowance fixture record member ~current ~project =
   Source.read_effective
+    ?allowance
     fixture.sessions
     ~handle:fixture.handle
     ~current
@@ -220,6 +221,155 @@ let check_snapshot (state : State.t) =
   assert (Result.is_error (Raw.decode missing_fence))
 ;;
 
+let check_mixed_allowance fixture (replayed : State.t) latest selected =
+  let module Text = A.Recovery_item_text in
+  let citation = Effective_record.Member.citation selected in
+  let scope = Citation.scope citation in
+  let window =
+    ledger replayed
+    |> Ledger.windows
+    |> List.find_exn ~f:(fun window -> Scope.equal (Ledger.Window.scope window) scope)
+  in
+  let canonical =
+    Ledger.Window.fold_members window ~init:None ~f:(fun found member ->
+      let candidate = Ledger.Member.citation member in
+      if P.History.Id.equal (Citation.occurrence candidate) (Citation.occurrence citation)
+      then (
+        match Ledger.Member.source member with
+        | Archive _ -> Ok (Some candidate)
+        | Live _ -> failwith "fixture canonical source did not use a physical archive")
+      else Ok found)
+    |> protocol_ok
+    |> Option.value_exn
+  in
+  let read allowance selection =
+    Text.resolve
+      ~allowance
+      fixture.sessions
+      ~handle:fixture.handle
+      ~current:(fun _ _ -> Ok replayed)
+      ~max_frame_bytes:payload_limit
+      ~max_payload_bytes:payload_limit
+      selection
+      ~view:Ordinary
+  in
+  let live_text = "live after compaction" in
+  let live =
+    membership replayed
+    |> List.find_exn ~f:(fun member ->
+      Ledger.Member.matches member (history 97 live_text))
+  in
+  (match Ledger.Member.source live with
+   | Live _ -> ()
+   | Archive _ -> failwith "the newly appended canonical source must still be live");
+  let live = Text.Canonical (Ledger.Member.citation live) in
+  let canonical_selection = Text.Canonical canonical in
+  let effective =
+    Text.Prepared { citation; source_revision = Effective_record.source_revision latest }
+  in
+  let expect_error reason result =
+    assert (Option.equal Source.equal_error (Result.error result) (Some reason))
+  in
+  let admitted text result =
+    let item = Result.ok result |> Option.value_exn in
+    [%test_eq: string list]
+      [ text ]
+      (List.map (Text.parts item) ~f:(fun part -> part.text))
+  in
+  let original = "original canonical body" in
+  let projected = "new version" in
+  let exact_bytes =
+    String.length live_text + (2 * String.length original) + String.length projected
+  in
+  let whole_call ~opens ~bytes f =
+    Source.with_allowance
+      fixture.sessions
+      ~handle:fixture.handle
+      ~max_source_opens:opens
+      ~max_text_bytes:bytes
+      ~f
+    |> Result.ok
+    |> Option.value_exn
+  in
+  whole_call ~opens:2 ~bytes:exact_bytes (fun allowance ->
+    admitted live_text (read allowance live);
+    admitted original (read allowance canonical_selection);
+    admitted projected (read allowance effective);
+    expect_error Budget_exhausted (read allowance canonical_selection);
+    Ok ());
+  whole_call ~opens:2 ~bytes:(exact_bytes - 1) (fun allowance ->
+    admitted live_text (read allowance live);
+    admitted original (read allowance canonical_selection);
+    expect_error Budget_exhausted (read allowance effective);
+    Ok ());
+  let expired = whole_call ~opens:2 ~bytes:exact_bytes Result.return in
+  expect_error Denied (read expired canonical_selection);
+  let with_source_bytes max_source_bytes f =
+    Source.with_allowance fixture.sessions ~handle:fixture.handle ~max_source_bytes ~f
+  in
+  let archive_read ?(max_frame_bytes = payload_limit) allowance =
+    Source.read
+      ~allowance
+      fixture.sessions
+      ~handle:fixture.handle
+      ~current:(fun () -> Ok replayed)
+      ~max_frame_bytes
+      canonical
+      ~project:Result.return
+  in
+  (* Find the exact physical read threshold without depending on the random
+     archived IDs or duplicating the decoder's measured contributions. The
+     second exact read must pay the same full source work again. *)
+  let rec threshold lower upper =
+    if lower >= upper
+    then lower
+    else (
+      let midpoint = lower + ((upper - lower) / 2) in
+      match with_source_bytes midpoint (archive_read ?max_frame_bytes:None) with
+      | Ok _ -> threshold lower midpoint
+      | Error Budget_exhausted -> threshold (midpoint + 1) upper
+      | Error error -> failwith (Sexp.to_string_hum (Source.sexp_of_error error)))
+  in
+  let single = threshold 1 (32 * 1024 * 1024) in
+  let borrowed =
+    with_source_bytes (2 * single) (fun allowance ->
+      Source.read
+        ~allowance
+        fixture.sessions
+        ~handle:fixture.handle
+        ~current:(fun () -> Ok replayed)
+        ~max_frame_bytes:payload_limit
+        canonical
+        ~project:(fun row ->
+          expect_error Denied (archive_read allowance);
+          Ok row))
+  in
+  assert (Result.is_ok borrowed);
+  let read_twice max_source_bytes expected =
+    let result =
+      with_source_bytes max_source_bytes (fun allowance ->
+        assert (Result.is_ok (archive_read allowance));
+        archive_read allowance)
+    in
+    match expected with
+    | None -> assert (Result.is_ok result)
+    | Some expected -> expect_error expected result
+  in
+  read_twice (2 * single) None;
+  read_twice ((2 * single) - 1) (Some Budget_exhausted);
+  expect_error Limit (with_source_bytes (2 * single) (archive_read ~max_frame_bytes:1));
+  let checkpoint () = raise Eio.Time.Timeout in
+  match
+    Source.with_allowance
+      fixture.sessions
+      ~handle:fixture.handle
+      ~checkpoint
+      ~f:(fun allowance -> read allowance canonical_selection)
+  with
+  | exception Eio.Time.Timeout -> ()
+  | _ -> failwith "the host deadline did not cancel the source read"
+;;
+
 let check_archived_source fixture (replayed : State.t) =
   let target = (history 50 "").id in
   let records = effective_records replayed in
@@ -258,11 +408,16 @@ let check_archived_source fixture (replayed : State.t) =
     |> Result.ok
     |> Option.value_exn
   in
-  [%test_eq: string list] [ "new version" ] (List.map (Text.parts item) ~f:(fun part -> part.text));
+  [%test_eq: string list]
+    [ "new version" ]
+    (List.map (Text.parts item) ~f:(fun part -> part.text));
   Source.read_effective
     ~check_replaced_source:(fun original ->
       assert (P.History.Id.equal original.id target);
-      assert (String.is_substring (Jsonaf.to_string original.payload) ~substring:"original canonical body");
+      assert (
+        String.is_substring
+          (Jsonaf.to_string original.payload)
+          ~substring:"original canonical body");
       Error Source.Unavailable)
     fixture.sessions
     ~handle:fixture.handle
@@ -272,6 +427,7 @@ let check_archived_source fixture (replayed : State.t) =
     citation
     ~project:(fun _ -> failwith "denied original reached projection")
   |> expect Unavailable;
+  check_mixed_allowance fixture replayed latest selected;
   let location = archived_location latest in
   let position =
     Effective_archive.find
@@ -335,16 +491,29 @@ let check_archived_source fixture (replayed : State.t) =
   Exn.protect
     ~finally:(fun () -> Eio.Path.rename saved file)
     ~f:(fun () ->
-      read_effective fixture latest selected ~current ~project |> expect Missing;
-      read_effective
-        fixture
-        latest
-        selected
-        ~current:(fun () -> Ok suppressed)
-        ~project:(fun _ -> failwith "withdrawn source reached projection")
-      |> expect Withdrawn;
-      Eio.Path.save ~create:(`Exclusive 0o600) file replacement;
-      read_effective fixture latest selected ~current ~project |> expect Corrupt)
+      Source.with_allowance
+        ~max_source_opens:2
+        fixture.sessions
+        ~handle:fixture.handle
+        ~f:(fun allowance ->
+          let read () =
+            read_effective ~allowance fixture latest selected ~current ~project
+          in
+          read () |> expect Missing;
+          read_effective
+            ~allowance
+            fixture
+            latest
+            selected
+            ~current:(fun () -> Ok suppressed)
+            ~project:(fun _ -> failwith "withdrawn source reached projection")
+          |> expect Withdrawn;
+          Eio.Path.save ~create:(`Exclusive 0o600) file replacement;
+          read () |> expect Corrupt;
+          read () |> expect Budget_exhausted;
+          Ok ())
+      |> Result.ok
+      |> Option.value_exn)
 ;;
 
 let%test_unit "actual root preparation retains only exact neutral sources and replays" =
@@ -731,7 +900,13 @@ let%test_unit "actual root preparation retains only exact neutral sources and re
                  D.Json.equal
                    (Effective_ledger.to_jsonaf (retained compacted))
                    (Effective_ledger.to_jsonaf (retained compacted_again)));
-               compacted_again))
+               Actor.append_history
+                 actor
+                 ~attachment_id:writer
+                 [ history 97 "live after compaction" ]
+               |> protocol_ok
+               |> ignore;
+               state actor))
       in
       let replay_journal = journal fixture Store.Journal.open_existing in
       let prepared_deltas =

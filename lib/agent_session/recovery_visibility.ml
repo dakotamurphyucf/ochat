@@ -19,7 +19,7 @@ type selection =
   | Expired
   | Eligible of Ledger.Member.t
 
-let create (state : Session_state.t) ~owner =
+let create ?work (state : Session_state.t) ~owner =
   let open Result.Let_syntax in
   if
     (not (P.Id.Session.equal state.identity.session_id (P.Session_ref.session_id owner)))
@@ -27,7 +27,11 @@ let create (state : Session_state.t) ~owner =
       not (P.Session_ref.equal (Ledger.owner ledger) owner))
   then Error (P.Error.invalid_request "recovery visibility owner differs from source")
   else (
-    let%map overlay = Moderator_checkpoint.decode state.moderator in
+    let%map overlay =
+      match work with
+      | None -> Moderator_checkpoint.decode state.moderator
+      | Some work -> Moderator_checkpoint.decode_for_recovery work state.moderator
+    in
     let suppressed = Hash_set.create (module History_entry.Id) in
     Option.iter overlay ~f:(fun snapshot ->
       List.iter snapshot.tombstones ~f:(fun (item : Tombstone.t) ->

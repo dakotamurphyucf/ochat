@@ -318,7 +318,7 @@ module Json = struct
     ;;
   end
 
-  let validate_and_measure_internal ?capture ~limits ~checkpoint t =
+  let validate_and_measure_internal ?capture ?charge_work ~limits ~checkpoint t =
     (* Keep the per-node walk allocation-light. This private escape preserves the
        first validation error without allocating Result callbacks at every field;
        callers still receive the same bounded byte count or structured error. *)
@@ -330,6 +330,7 @@ module Json = struct
       let fields_seen = ref 0 in
       let nodes_seen = ref 0 in
       let bytes_seen = ref 0 in
+      let charge_work count = Option.iter charge_work ~f:(fun charge -> charge count) in
       let charge_bytes count =
         if count > limits.Limits.max_bytes - !bytes_seen
         then fail (Error.Limit_exceeded "bytes");
@@ -345,6 +346,7 @@ module Json = struct
           charge_bytes encoded_bytes;
           seen_bits land 0x80 = 0)
         else (
+          if index land 0xfff = 0 then charge_work (Int.min 4096 (length - index));
           let byte = String.get text index in
           let seen_bits = seen_bits lor Char.to_int byte in
           let width =
@@ -366,10 +368,16 @@ module Json = struct
       let charge_string text =
         let available = limits.Limits.max_bytes - !bytes_seen in
         if available < 2 then fail (Error.Limit_exceeded "bytes");
+        charge_work 2;
         let length = String.length text in
         scan_string text length available 0 2 0
       in
+      let check_utf8 text =
+        charge_work (String.length text);
+        valid_utf8_with_checkpoint text ~checkpoint
+      in
       let rec walk t depth rev_path =
+        charge_work 1;
         incr nodes_seen;
         if !nodes_seen land 0xff = 0 then checkpoint ();
         if depth > limits.Limits.max_depth then fail (Error.Limit_exceeded "depth");
@@ -385,7 +393,7 @@ module Json = struct
             incr fields_seen;
             charge_bytes (if Set.is_empty !seen then 1 else 2);
             let is_ascii = charge_string key in
-            if not (is_ascii || valid_utf8_with_checkpoint key ~checkpoint)
+            if not (is_ascii || check_utf8 key)
             then
               invalid (Measurement_path.Field (key, rev_path)) "invalid UTF-8 object key";
             if !fields_seen > limits.max_fields then fail (Error.Limit_exceeded "fields");
@@ -424,11 +432,12 @@ module Json = struct
             walk value (depth + 1) (Measurement_path.Index (index, rev_path)))
         | `Number number ->
           charge_bytes (String.length number);
+          charge_work (String.length number);
           if not (valid_number number ~checkpoint)
           then invalid rev_path "invalid JSON number"
         | `String text ->
           let is_ascii = charge_string text in
-          if not (is_ascii || valid_utf8_with_checkpoint text ~checkpoint)
+          if not (is_ascii || check_utf8 text)
           then invalid rev_path "invalid UTF-8 string"
         | `True | `Null -> charge_bytes 4
         | `False -> charge_bytes 5
@@ -447,6 +456,10 @@ module Json = struct
 
   let validate_and_measure_with_checkpoint ~limits ~checkpoint t =
     validate_and_measure_internal ~limits ~checkpoint t
+  ;;
+
+  let validate_and_measure_with_work ~limits ~checkpoint ~charge_work t =
+    validate_and_measure_internal ~limits ~checkpoint ~charge_work t
   ;;
 
   type measured_payload =

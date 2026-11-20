@@ -36,10 +36,13 @@ val parts : t -> P.History_text.t list
 
 (** Bounds apply before decoding the neutral payload. [current] is called
     before source I/O and after projection. [max_text_bytes] lowers the 1 MiB
-    aggregate across all text parts of the item. A later transport handoff must
-    refresh the original authority at its own write boundary. *)
+    aggregate across all text parts of the item. A host passes its one
+    [allowance] to all reads in a call. The projection charges source work and
+    all examined selected text, including the original of a replacement and
+    parts that produce no match. A later transport handoff must refresh the original authority at its own write boundary. *)
 val resolve
-  :  ?max_text_bytes:int
+  :  ?allowance:Recovery_source_reader.Allowance.t
+  -> ?max_text_bytes:int
   -> Agent_store.Session_store.t
   -> handle:Agent_store.Session_store.Handle.t
   -> current:(selection -> view -> (Session_state.t, P.Error.t) result)

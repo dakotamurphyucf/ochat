@@ -109,12 +109,13 @@ let path handle reference =
     (filename reference)
 ;;
 
-let decode_document ~limits document =
+let decode_document ?(charge_decode = fun () -> ()) ~limits document =
   let open Result.Let_syntax in
   let%bind document =
     Persistence_codec.upgrade document ~limits ~kind:"session.compaction_archive"
     |> Result.map_error ~f:document_error
   in
+  charge_decode ();
   let%bind () =
     Persistence_codec.validate_document
       document
@@ -124,9 +125,11 @@ let decode_document ~limits document =
   in
   let%bind fields = Agent_protocol.Json_codec.fields (D.Document.payload document) in
   let%bind json = Agent_protocol.Json_codec.required fields "state" in
+  charge_decode ();
   let%bind child =
     D.Document.inspect ~limits json |> Result.map_error ~f:document_error
   in
+  charge_decode ();
   Session_state_document.decode ~limits child |> Result.map_error ~f:document_error
 ;;
 
@@ -237,14 +240,14 @@ let write ~env ~handle ~max_payload_length reference state =
   write_document ~env ~handle ~max_payload_length reference document
 ;;
 
-let decode_record ~max_payload_length ~expected_digest contents =
+let decode_record_with_work ?charge_work ~max_payload_length ~expected_digest contents =
   let open Result.Let_syntax in
   let%bind limits =
     Persistence_codec.limits ~max_bytes:max_payload_length
     |> Result.map_error ~f:document_error
   in
   let%bind record =
-    Store.Document_record.decode_file ~limits ~expected_digest contents
+    Store.Document_record.decode_file ?charge_work ~limits ~expected_digest contents
     |> Result.map_error ~f:(fun e ->
       error (Sexp.to_string_hum (Store.Document_record.Error.sexp_of_t e)))
   in
@@ -253,11 +256,22 @@ let decode_record ~max_payload_length ~expected_digest contents =
     then Ok ()
     else Error (error "unknown archive frame flags")
   in
-  let%map state = decode_document ~limits (Store.Document_record.document record) in
+  let charge_decode () =
+    Option.iter charge_work ~f:(fun charge ->
+      charge (String.length (Store.Document_record.stored_bytes record)))
+  in
+  let%map state =
+    decode_document ~charge_decode ~limits (Store.Document_record.document record)
+  in
   record, state
 ;;
 
+let decode_record ~max_payload_length ~expected_digest contents =
+  decode_record_with_work ~max_payload_length ~expected_digest contents
+;;
+
 let decode_file
+      ?charge_work
       ~handle
       ~max_payload_length
       (reference : Session_state.Compaction_archive.t)
@@ -265,7 +279,11 @@ let decode_file
   =
   let open Result.Let_syntax in
   let%bind _, state =
-    decode_record ~max_payload_length ~expected_digest:(Some reference.sha256) contents
+    decode_record_with_work
+      ?charge_work
+      ~max_payload_length
+      ~expected_digest:(Some reference.sha256)
+      contents
   in
   decode_state handle reference state
 ;;

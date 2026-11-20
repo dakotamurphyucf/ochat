@@ -97,6 +97,18 @@ module Json : sig
     -> t
     -> (int, Error.t) Result.t
 
+  (** Meter an admitted validation without materializing encoded output. Charge
+      each examined node, each bounded chunk of string or key bytes and the
+      bytes of number and UTF-8 scans before that work begins. A failed
+      validation retains charges for work already admitted. [charge_work] and
+      [checkpoint] may abort with their original exception. *)
+  val validate_and_measure_with_work
+    :  limits:Limits.t
+    -> checkpoint:(unit -> unit)
+    -> charge_work:(int -> unit)
+    -> t
+    -> (int, Error.t) Result.t
+
   (** Lookup on a validated tree preserves absence separately from explicit null. *)
   val field : t -> name:string -> presence
 

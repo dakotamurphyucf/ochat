@@ -15,7 +15,11 @@ module Row : sig
   val version : t -> remaining_bytes:int -> P.Recovery_item_version.t option * int
 
   (** Only an exact supported, non-redacted neutral projection is addressable. *)
-  val entry : t -> P.History.entry option
+  val entry
+    :  ?work:Recovery_source_work.t
+    -> t
+    -> version:P.Recovery_item_version.t
+    -> P.History.entry option
 end
 
 type t
@@ -24,6 +28,14 @@ type t
     An oversized canonical or overlay coordinate view yields [None]. *)
 val create
   :  source_revision:int64
+  -> overlay_incarnation:int64
+  -> history:P.History.entry list
+  -> moderator:Session.Moderator_state.Identity_snapshot.t option
+  -> (t option, P.Error.t) Result.t
+
+val create_for_read
+  :  Recovery_source_work.t
+  -> source_revision:int64
   -> overlay_incarnation:int64
   -> history:P.History.entry list
   -> moderator:Session.Moderator_state.Identity_snapshot.t option

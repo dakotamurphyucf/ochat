@@ -436,6 +436,21 @@ and transport limits apply.
 | Source work | 8 bounded source opens and 64 MiB cumulative source work, including encoded bytes read and decoded output. Charge validation, decompression, hashing and rereads under the same allowance and host deadline. |
 | Assets | Existing blob admission and transport limits, charged to the same source and encoded reply budgets. |
 
+The host creates one source allowance under the current Store and Handle.
+Canonical and effective reads share it until the call returns. Every physical
+archive attempt consumes an open, including missing or corrupt files and
+rereads of the same archive. File chunks consume the shared source bytes.
+Framing and checksum reserve the observed frame size. Address verification,
+JSON parsing and validation, outer archive validation, child inspection and
+typed state decode reserve the known payload extent before their own work.
+A corrupt frame consumes work through the stage that detects it. Live source validation
+charges bounded JSON traversal, decoding and digest work without rendering a
+copy to count the input. Selected plaintext consumes the aggregate examined
+allowance before text validation. A moderator replacement consumes allowance
+for both its original selected text and its effective text. Exact source reads
+distinguish exhausted call allowance from an intrinsic item limit.
+[Source allowance](../../lib/agent_session/recovery_source_reader.mli).
+
 Charge work from the first lookup through final visibility checks and result
 encoding, with cooperative cancellation. A permanently oversized first
 candidate produces a typed limit or unsupported result. If a later candidate

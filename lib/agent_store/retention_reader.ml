@@ -246,51 +246,92 @@ let list t ~directory =
     Error (Store_error.of_exn ~operation:"enumerate retention roots" ~path:directory exn)
 ;;
 
-let read_file t ~path:relative ~max_bytes ~checkpoint ~missing ~oversized =
+type read_kind =
+  | Scan
+  | Promised
+
+let capacity reason =
+  Store_error.Admission_capacity (Document_schema.Error.Limit_exceeded reason)
+;;
+
+let read_file t ~path:relative ~max_bytes ~checkpoint ~kind =
   with_checkpoint ~checkpoint ~f:(fun checkpoint ->
     let open Result.Let_syntax in
+    let charge () =
+      charge_entry t
+      |> Result.map_error ~f:(fun error ->
+        match kind with
+        | Scan -> error
+        | Promised -> capacity "retained source open allowance")
+    in
+    let size_error ~aggregate =
+      match kind with
+      | Scan -> Store_error.Corrupt "retention root exceeds its byte budget"
+      | Promised when aggregate -> capacity "retained source byte allowance"
+      | Promised ->
+        Store_error.Document (Document_schema.Error.Limit_exceeded "retained source size")
+    in
     try
+      checkpoint ();
+      let%bind () =
+        match kind with
+        | Promised -> charge ()
+        | Scan -> Ok ()
+      in
       let%bind path = resolve t relative ~directory:false in
-      let%bind () = charge_entry t in
+      let%bind () =
+        match kind with
+        | Promised -> Ok ()
+        | Scan -> charge ()
+      in
       let file = eio_path t path in
       let%bind () =
-        match Eio.Path.kind ~follow:false file with
-        | `Regular_file -> Ok ()
-        | `Not_found -> Error (missing relative)
+        match Eio.Path.kind ~follow:false file, kind with
+        | `Regular_file, _ -> Ok ()
+        | `Not_found, Promised -> Error (Store_error.Missing relative)
         | _ -> corrupt "retention root is not a regular file"
       in
-      let size = (Eio.Path.stat ~follow:false file).size |> Optint.Int63.to_int64 in
-      let limit = Int.min max_bytes (remaining_bytes t) in
+      let before = Eio.Path.stat ~follow:false file in
+      let size = Optint.Int63.to_int64 before.size in
       let%bind () =
-        match limit >= 0 && Int64.(size >= zero && size <= of_int limit) with
-        | true -> Ok ()
-        | false -> Error oversized
+        if Int64.(size < zero || size > of_int max_bytes)
+        then Error (size_error ~aggregate:false)
+        else if Int64.(size > of_int (remaining_bytes t))
+        then Error (size_error ~aggregate:true)
+        else Ok ()
       in
+      let size = Int64.to_int_exn size in
       Eio.Path.with_open_in file (fun input ->
-        let buffer = Buffer.create (Int.min 8192 limit) in
+        let unchanged () =
+          let actual = Eio.File.stat input in
+          match actual.kind with
+          | `Regular_file
+            when Int64.equal before.dev actual.dev
+                 && Int64.equal before.ino actual.ino
+                 && Optint.Int63.equal before.size actual.size -> Ok ()
+          | _ -> corrupt "retention root changed identity or length during the scan"
+        in
+        let%bind () = unchanged () in
+        let buffer = Buffer.create (Int.min 8192 size) in
         let chunk = Cstruct.create 8192 in
         let rec loop () =
           checkpoint ();
-          let remaining = limit - Buffer.length buffer in
-          let count =
-            try
-              Eio.Flow.single_read
-                input
-                (Cstruct.sub chunk 0 (if remaining >= 8192 then 8192 else remaining + 1))
-            with
-            | End_of_file -> 0
-          in
-          match count with
-          | 0 ->
-            (match Int64.equal size (Int64.of_int (Buffer.length buffer)) with
-             | true -> Ok (Buffer.contents buffer)
-             | false -> corrupt "retention root changed length during the scan")
-          | count when count > remaining ->
-            corrupt "retention root grew beyond its byte budget"
-          | count ->
-            let%bind () = charge_bytes t count in
-            Buffer.add_string buffer (Cstruct.to_string (Cstruct.sub chunk 0 count));
-            loop ()
+          let remaining = size - Buffer.length buffer in
+          if remaining = 0
+          then Result.map (unchanged ()) ~f:(fun () -> Buffer.contents buffer)
+          else (
+            let count =
+              try
+                Eio.Flow.single_read input (Cstruct.sub chunk 0 (Int.min 8192 remaining))
+              with
+              | End_of_file -> 0
+            in
+            if count = 0
+            then corrupt "retention root changed length during the scan"
+            else (
+              let%bind () = charge_bytes t count in
+              Buffer.add_string buffer (Cstruct.to_string (Cstruct.sub chunk 0 count));
+              loop ()))
         in
         loop ())
     with
@@ -299,25 +340,15 @@ let read_file t ~path:relative ~max_bytes ~checkpoint ~missing ~oversized =
 ;;
 
 let read_with_checkpoint t ~path ~max_bytes ~checkpoint =
-  read_file
-    t
-    ~path
-    ~max_bytes
-    ~checkpoint
-    ~missing:(fun _ -> Store_error.Corrupt "retention root is not a regular file")
-    ~oversized:(Store_error.Corrupt "retention root exceeds its byte budget")
+  read_file t ~path ~max_bytes ~checkpoint ~kind:Scan
+;;
+
+let read_promised_file_with_checkpoint t ~path ~max_bytes ~checkpoint =
+  read_file t ~path ~max_bytes ~checkpoint ~kind:Promised
 ;;
 
 let read_promised_file t ~path ~max_bytes =
-  read_file
-    t
-    ~path
-    ~max_bytes
-    ~checkpoint:(fun () -> ())
-    ~missing:(fun path -> Store_error.Missing path)
-    ~oversized:
-      (Store_error.Admission_capacity
-         (Document_schema.Error.Limit_exceeded "retained source byte allowance"))
+  read_promised_file_with_checkpoint t ~path ~max_bytes ~checkpoint:(fun () -> ())
 ;;
 
 let read t ~path ~max_bytes =

@@ -18,7 +18,9 @@ val max_projection_bytes : int
 (** Digest the supported neutral semantic projection without encoding the raw
     provider envelope. Callers must have already excluded protected material. *)
 val projected_digest
-  :  History_entry.t
+  :  ?charge_work:(int -> unit)
+  -> ?checkpoint:(unit -> unit)
+  -> History_entry.t
   -> remaining_bytes:int
   -> Chatml_source.Digest.t option * int
 

@@ -1,6 +1,10 @@
 open! Core
 module P = Agent_protocol
 
+module Allowance : sig
+  type t = Recovery_source_work.t
+end
+
 (** One exact canonical citation in the owning Store. [current] checks the
     original caller's current source authority and returns the current actor
     state. [project] is a trusted, synchronous bounded projection. It must apply
@@ -17,12 +21,30 @@ type error =
   | Corrupt
   | Unsupported
   | Limit
+  | Budget_exhausted
 [@@deriving equal, sexp_of]
+
+(** Mint one private source allowance for the whole host call. Supply the
+    same value to every exact read. Defaults are hard ceilings. [checkpoint]
+    can enforce the host deadline and must be nonyielding. Cancellation
+    propagates and the allowance is invalidated when [f] exits. A caller
+    receiving [Budget_exhausted] has not processed that candidate. [Limit]
+    describes an intrinsic item bound. *)
+val with_allowance
+  :  ?max_source_opens:int
+  -> ?max_source_bytes:int
+  -> ?max_text_bytes:int
+  -> ?checkpoint:(unit -> unit)
+  -> Agent_store.Session_store.t
+  -> handle:Agent_store.Session_store.Handle.t
+  -> f:(Allowance.t -> ('a, error) result)
+  -> ('a, error) result
 
 (** [visible] can further narrow the admitted source. A false result hides
     the selection before I/O and after projection. *)
 val read
-  :  ?visible:(Session_state.t -> bool)
+  :  ?allowance:Allowance.t
+  -> ?visible:(Session_state.t -> bool)
   -> Agent_store.Session_store.t
   -> handle:Agent_store.Session_store.Handle.t
   -> current:(unit -> (Session_state.t, P.Error.t) result)
@@ -37,7 +59,8 @@ val read
     [check_replaced_source] can require that the original canonical row also
     qualifies for the requested disclosure when a moderator replaced it. *)
 val read_effective
-  :  ?visible:(Session_state.t -> bool)
+  :  ?allowance:Allowance.t
+  -> ?visible:(Session_state.t -> bool)
   -> ?check_replaced_source:(P.History.entry -> (unit, error) result)
   -> Agent_store.Session_store.t
   -> handle:Agent_store.Session_store.Handle.t
@@ -54,7 +77,8 @@ val read_effective
     local Store I/O, and the source is checked again after [f] returns.
     Neither the check nor the unprotected row may escape the callback. *)
 val with_entry
-  :  ?visible:(Session_state.t -> bool)
+  :  ?allowance:Allowance.t
+  -> ?visible:(Session_state.t -> bool)
   -> Agent_store.Session_store.t
   -> handle:Agent_store.Session_store.Handle.t
   -> current:(unit -> (Session_state.t, P.Error.t) result)

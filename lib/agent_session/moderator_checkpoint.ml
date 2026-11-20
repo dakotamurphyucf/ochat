@@ -55,15 +55,22 @@ let encode_with_queue snapshot ~queue =
     ]
 ;;
 
-let decode = function
+let decode_with ?work = function
   | None -> Ok None
   | Some json ->
     let open Result.Let_syntax in
-    let%bind () =
-      Document_schema.Json.validate ~limits:Document_schema.Limits.default json
+    let limits = Document_schema.Limits.default in
+    let measured =
+      match work with
+      | None -> Document_schema.Json.validate_and_measure ~limits json
+      | Some work -> Recovery_source_work.measure_json work ~limits json
+    in
+    let%bind size =
+      measured
       |> Result.map_error ~f:(fun error ->
         failed (Sexp.to_string_hum ([%sexp_of: Document_schema.Error.t] error)))
     in
+    Option.iter work ~f:(fun work -> Recovery_source_work.charge_source work size);
     (match Document_schema.Json.field json ~name:"identity_snapshot" with
      | Value snapshot ->
        let%bind snapshot =
@@ -78,6 +85,9 @@ let decode = function
        Some snapshot
      | Absent | Null -> Error (failed "moderator snapshot is missing identity state"))
 ;;
+
+let decode json = decode_with json
+let decode_for_recovery work json = decode_with ~work json
 
 let observer snapshot =
   Result.map

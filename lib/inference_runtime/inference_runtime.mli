@@ -21,7 +21,9 @@ module Recovery_input : sig
   (** Use only for an already admitted neutral source row. Protected occurrence
       filtering precedes digests on [Prepared.recovery_input]. *)
   val projected_digest
-    :  History_entry.t
+    :  ?charge_work:(int -> unit)
+    -> ?checkpoint:(unit -> unit)
+    -> History_entry.t
     -> remaining_bytes:int
     -> Chatml_source.Digest.t option * int
 end
