@@ -654,6 +654,34 @@ let test_recovery_assets env environment =
     in
     expect_error Stale (capture old second);
     let factory = Agent_server.Daemon.factory daemon in
+    let module History = Agent_server.Session_factory.Recovery_history in
+    let read ~authorize =
+      History.read_text
+        factory
+        ~authorize
+        (Canonical old)
+        ~view:Ordinary
+        ~part:0
+        ~start:0
+        ~stop:9
+        ~max_bytes:5
+        ()
+    in
+    let exact selection view state =
+      match selection, view with
+      | A.Recovery_item_text.Canonical selected, A.Recovery_item_text.Ordinary
+        when P.Recovery_window.Citation.equal selected old -> authorize state
+      | _ -> Error (P.Error.invalid_request "unexpected selection")
+    in
+    (match read ~authorize:exact with
+     | Ok slice ->
+       require
+         (String.equal slice.text "ident" && Option.equal Int.equal slice.next_offset (Some 5))
+         "exact text read lost its original byte position"
+     | Error error -> raise_s [%sexp "exact text read", (error : History.error)]);
+    (match read ~authorize:(fun _ _ _ -> Error (P.Error.invalid_request "no source access")) with
+     | Error (Source Denied) -> ()
+     | _ -> failwith "unavailable source authority admitted a text read");
     let publish ~authorize attribution =
       Factory.publish_converted_file
         factory

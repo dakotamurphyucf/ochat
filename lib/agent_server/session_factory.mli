@@ -732,9 +732,35 @@ val check_registered_entry
   -> session:Agent_protocol.Session_ref.t
   -> (unit, Agent_protocol.Error.t) result
 
-(** Source-owned durable sharing on this Factory's actual same-host Store and
-    Registry. Existing source visibility/management authority and scoped recipient
-    read authority enter through their distinct original access proofs. *)
+(** Exact recovery of a bounded UTF-8 range under the current Factory's
+    physical source custody. The host reauthorizes the exact selection and
+    view before reading and at release. A later delivery must reauthorize
+    at its own write boundary. *)
+module Recovery_history : sig
+  module Text = Agent_session.Recovery_item_text
+
+  type error =
+    | Source of Agent_session.Recovery_source_reader.error
+    | Range of Agent_protocol.Error.t
+  [@@deriving sexp_of]
+
+  val read_text
+    :  t
+    -> authorize:
+         (Text.selection
+          -> Text.view
+          -> Agent_session.Session_state.t
+          -> (unit, Agent_protocol.Error.t) result)
+    -> Text.selection
+    -> view:Text.view
+    -> part:int
+    -> start:int
+    -> stop:int
+    -> ?max_bytes:int
+    -> unit
+    -> (Agent_protocol.History_text.Slice.t, error) result
+end
+
 module Recovery_assets : sig
   (** The actual local Factory captures the retained Registry entry and actor,
       and holds source exclusion across bounded private I/O. [authorize] is
@@ -792,6 +818,9 @@ module Recovery_assets : sig
          result
 end
 
+(** Source-owned durable sharing on this Factory's actual same-host Store and
+    Registry. Existing source visibility/management authority and scoped recipient
+    read authority enter through their distinct original access proofs. *)
 module Recovery_note_shares : sig
   val management_revision
     :  t

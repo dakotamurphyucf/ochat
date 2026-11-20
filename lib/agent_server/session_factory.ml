@@ -14479,22 +14479,15 @@ let check_registered_entry t entry ~session =
   else Ok ()
 ;;
 
-module Recovery_assets = struct
+module Recovery_source_host = struct
   module P = Agent_protocol
-  module A = Agent_session
-  module Asset = A.Recovery_asset
-  module Source = A.Recovery_source_reader
-  module Actor = A.Session_actor
+  module Source = Agent_session.Recovery_source_reader
+  module Actor = Agent_session.Session_actor
   module Observation = Actor.Resource_observation
 
-  type authorize = A.Session_state.t -> (unit, P.Error.t) result
+  let denied () = P.Error.invalid_request "recovery source is unavailable"
 
-  let denied () = P.Error.invalid_request "recovery asset source is unavailable"
-
-  let with_source t citation ~authorize ~f =
-    let source =
-      P.Recovery_window.Citation.scope citation |> P.Recovery_window.Scope.session
-    in
+  let with_source t source ~authorize ~f =
     if
       not
         (P.Id.Server.equal
@@ -14526,14 +14519,7 @@ module Recovery_assets = struct
                      let%map () = authorize state in
                      state)
                  in
-                 let%bind asset =
-                   Asset.create
-                     t.blob_store
-                     ~sessions:t.store
-                     ~handle
-                     ~max_frame_bytes:t.limits.max_journal_payload
-                 in
-                 f asset ~current))
+                 f handle ~current))
       in
       try
         match Eio.Time.Timeout.run_exn timeout run with
@@ -14541,6 +14527,89 @@ module Recovery_assets = struct
         | Ok outcome -> outcome
       with
       | Eio.Time.Timeout -> Error Source.Unavailable)
+  ;;
+end
+
+module Recovery_history = struct
+  module P = Agent_protocol
+  module Text = Agent_session.Recovery_item_text
+  module Source = Agent_session.Recovery_source_reader
+
+  type error =
+    | Source of Source.error
+    | Range of P.Error.t
+  [@@deriving sexp_of]
+
+  let read_text t ~authorize selection ~view ~part ~start ~stop ?max_bytes () =
+    let citation =
+      match selection with
+      | Text.Canonical citation | Prepared { citation; _ } -> citation
+    in
+    let source =
+      P.Recovery_window.Citation.scope citation |> P.Recovery_window.Scope.session
+    in
+    let authorize = authorize selection view in
+    let clock = Eio.Stdenv.mono_clock t.env in
+    let started = Eio.Time.Mono.now clock in
+    let checkpoint () =
+      if
+        Mtime.Span.compare
+          (Mtime.span started (Eio.Time.Mono.now clock))
+          (Mtime.Span.of_uint64_ns 5_000_000_000L)
+        >= 0
+      then raise Eio.Time.Timeout
+    in
+    let open Result.Let_syntax in
+    let%bind range =
+      Recovery_source_host.with_source t source ~authorize ~f:(fun handle ~current ->
+        Source.with_allowance ~checkpoint t.store ~handle ~f:(fun allowance ->
+          let%bind item =
+            Text.resolve
+              ~allowance
+              t.store
+              ~handle
+              ~current:(fun _ _ -> current ())
+              ~max_frame_bytes:t.limits.max_journal_payload
+              ~max_payload_bytes:t.limits.max_journal_payload
+              selection
+              ~view
+          in
+          let%bind selected =
+            List.find (Text.parts item) ~f:(fun candidate ->
+              Int.equal candidate.index part)
+            |> Result.of_option ~error:Source.Unavailable
+          in
+          let range = P.History_text.read ?max_bytes selected ~start ~stop in
+          checkpoint ();
+          let%map _ = current () |> Result.map_error ~f:(fun _ -> Source.Denied) in
+          range))
+      |> Result.map_error ~f:(fun e -> Source e)
+    in
+    Result.map_error range ~f:(fun e -> Range e)
+  ;;
+end
+
+module Recovery_assets = struct
+  module P = Agent_protocol
+  module A = Agent_session
+  module Asset = A.Recovery_asset
+
+  type authorize = A.Session_state.t -> (unit, P.Error.t) result
+
+  let with_source t citation ~authorize ~f =
+    let source =
+      P.Recovery_window.Citation.scope citation |> P.Recovery_window.Scope.session
+    in
+    Recovery_source_host.with_source t source ~authorize ~f:(fun handle ~current ->
+      let open Result.Let_syntax in
+      let%bind asset =
+        Asset.create
+          t.blob_store
+          ~sessions:t.store
+          ~handle
+          ~max_frame_bytes:t.limits.max_journal_payload
+      in
+      f asset ~current)
   ;;
 
   let read t ~sw ~authorize citation ~part ~max_bytes =

@@ -409,6 +409,16 @@ are excluded from the ordinary text projection. A moderator replacement must
 qualify under both the original source and its effective content.
 [Exact item text](../../lib/agent_session/recovery_item_text.mli).
 
+The daemon Factory can read a byte range from one original text part. It
+checks the caller's permission for the exact citation and view, acquires
+the owning session's read lease, and resolves the part under one source
+allowance. A successful read returns text and, when the byte limit cuts
+the range short, the next UTF-8 byte offset. For example, reading bytes
+0 through 9 (exclusive) of `identical` with a five-byte limit returns
+`ident` and offset 5. A later transport or provider write must check the
+caller's current authority again.
+[Factory recovery API](../../lib/agent_server/session_factory.mli).
+
 First-slice search walks the selected visible positions in ascending window,
 member and part order. Take one hit per exact owner, occurrence and version
 within the selected family, attributed to its earliest eligible window in
