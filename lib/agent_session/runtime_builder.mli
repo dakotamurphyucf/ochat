@@ -775,7 +775,8 @@ type t =
     (** Host wall clock shared by foreground, idle and delegated moderation and
         persisted workflow deadlines. Monotonic execution limits are separate. *)
   ; parse_user_content :
-      id:History_entry.Id.t
+      ?asset_capture:Chat_response.Converter_asset_capture.t
+      -> id:History_entry.Id.t
       -> Agent_protocol.Session.Message_content.t
       -> (History_entry.t, Agent_protocol.Error.t) result
   ; parse_prepared_input :

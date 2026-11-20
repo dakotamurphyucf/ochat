@@ -816,6 +816,23 @@ module Recovery_assets : sig
     -> ( Agent_store.Recovery_asset_reference.t
          , Agent_session.Recovery_source_reader.error )
          result
+
+  (** Optional local originals for an actual authenticated daemon send. The
+      supplied callback arms the exact converted row before Actor submission.
+      Original ownership ends with the submitting writer or the finite local
+      reservation. Once adopted, access is through the protected reader. *)
+  val with_submission
+    :  t
+    -> entry:Session_registry.entry
+    -> actor:Operator_authorization.t
+    -> attachment_id:Agent_protocol.Id.Attachment.t
+    -> connection_current:(unit -> bool)
+    -> f:
+         ((Chat_response.Converter_asset_capture.t
+          * (Agent_protocol.History.entry -> unit))
+            option
+          -> ('a, Agent_protocol.Error.t) result)
+    -> ('a, Agent_protocol.Error.t) result
 end
 
 (** Source-owned durable sharing on this Factory's actual same-host Store and

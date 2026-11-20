@@ -222,7 +222,7 @@ let rec string_of_items
 
     Local paths are converted to data-URIs through {!Io.Base64.file_to_data_uri} so that the resulting JSON can be sent verbatim to OpenAI without further processing.
 *)
-and convert_basic_item ?source ~ctx (b : CM.basic_content_item)
+and convert_basic_item ?source ?asset_capture ~ctx (b : CM.basic_content_item)
   : Res.Input_message.content_item
   =
   let dir = Ctx.dir ctx in
@@ -231,7 +231,15 @@ and convert_basic_item ?source ~ctx (b : CM.basic_content_item)
     let final =
       match source with
       | Some source -> source_result (Converter_source.image source b)
-      | None -> if b.is_local then Io.Base64.file_to_data_uri ~dir url else url
+      | None ->
+        if b.is_local
+        then (
+          Ctx.check_effect ctx;
+          let uri = Io.Base64.file_to_data_uri ~dir url in
+          Option.iter asset_capture ~f:(fun (capture, part) ->
+            Converter_asset_capture.record_image capture ~part);
+          uri)
+        else url
     in
     Image { image_url = final; detail = "auto"; _type = "input_image" }
   | _, Some doc ->
@@ -244,26 +252,49 @@ and convert_basic_item ?source ~ctx (b : CM.basic_content_item)
          | _, true, true ->
            let env = Ctx.env ctx in
            Webpage_markdown.Driver.(
-             convert_html_file Eio.Path.(Eio.Stdenv.fs env / doc) |> Markdown.to_string)
+             (match asset_capture with
+              | None ->
+                convert_html_file Eio.Path.(Eio.Stdenv.fs env / doc) |> Markdown.to_string
+              | Some (capture, part) ->
+                Ctx.check_effect ctx;
+                let original = Eio.Path.(load (Eio.Stdenv.fs env / doc)) in
+                let rendered = html_to_markdown_string original |> Markdown.to_string in
+                Converter_asset_capture.record_document
+                  capture
+                  ~part
+                  ~media_type:"text/html"
+                  ~contents:original;
+                rendered))
          | _, true, false ->
            let net = Ctx.net ctx in
            let env = Ctx.env ctx in
            Webpage_markdown.Driver.(fetch_and_convert ~env ~net doc |> Markdown.to_string)
          | false, false, _ -> Fetch.get ~ctx doc ~is_local:b.is_local)
     in
+    (match source, asset_capture with
+     | None, Some (capture, part) when b.is_local && (b.cleanup_html || not b.markdown) ->
+       (* Local Fetch passes the bytes through verbatim, including its local
+          cleanup flag behavior. The captured content is that same read. *)
+       Converter_asset_capture.record_document
+         capture
+         ~part
+         ~media_type:(if b.cleanup_html then "text/html" else "application/octet-stream")
+         ~contents:txt
+     | _ -> ());
     Text { text = txt; _type = "input_text" }
   | _ -> Text { text = Option.value ~default:"" b.text; _type = "input_text" }
 
 and convert_content_item
       ?source
       ?agent_source_runner
+      ?asset_capture
       ~ctx
       ~run_agent
       (ci : CM.content_item)
   : Res.Input_message.content_item
   =
   match ci with
-  | CM.Basic b -> convert_basic_item ?source ~ctx b
+  | CM.Basic b -> convert_basic_item ?source ?asset_capture ~ctx b
   | CM.Agent agent ->
     let txt = run_content_agent ?source ?agent_source_runner ~ctx ~run_agent agent in
     Text { text = txt; _type = "input_text" }
@@ -398,7 +429,13 @@ and convert_developer_msg
   Res.Item.Input_message
     { role = Res.Input_message.Developer; content = content_items; _type = "message" }
 
-and convert_user_msg ?source ?agent_source_runner ~ctx ~run_agent (m : CM.user_msg)
+and convert_user_msg
+      ?source
+      ?agent_source_runner
+      ?asset_capture
+      ~ctx
+      ~run_agent
+      (m : CM.user_msg)
   : Res.Item.t
   =
   let content_items : Res.Input_message.content_item list =
@@ -406,7 +443,15 @@ and convert_user_msg ?source ?agent_source_runner ~ctx ~run_agent (m : CM.user_m
     | None -> []
     | Some (CM.Text t) -> [ Res.Input_message.Text { text = t; _type = "input_text" } ]
     | Some (CM.Items lst) ->
-      List.map lst ~f:(convert_content_item ?source ?agent_source_runner ~ctx ~run_agent)
+      List.mapi lst ~f:(fun part item ->
+        let asset_capture = Option.map asset_capture ~f:(fun capture -> capture, part) in
+        convert_content_item
+          ?source
+          ?agent_source_runner
+          ?asset_capture
+          ~ctx
+          ~run_agent
+          item)
   in
   Res.Item.Input_message
     { role = Res.Input_message.User; content = content_items; _type = "message" }

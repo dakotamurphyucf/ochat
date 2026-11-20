@@ -960,7 +960,8 @@ let%expect_test "runtime owner drains observation batches and applies durable te
                       ~message:"fixture has no held input parser"
                       ~retryable:false
                       ()))
-           ; parse_user_content = (fun ~id:_ _ -> failwith "unexpected input")
+           ; parse_user_content =
+               (fun ?asset_capture:_ ~id:_ _ -> failwith "unexpected input")
            ; initial_history = []
            ; initial_prompt_entry_count = 0
            ; reserved_history_through = 0
@@ -1432,7 +1433,8 @@ let%expect_test
                           ~message:"fixture has no held input parser"
                           ~retryable:false
                           ()))
-               ; parse_user_content = (fun ~id:_ _ -> failwith "unexpected input")
+               ; parse_user_content =
+                   (fun ?asset_capture:_ ~id:_ _ -> failwith "unexpected input")
                ; initial_history = []
                ; initial_prompt_entry_count = 0
                ; reserved_history_through = 0

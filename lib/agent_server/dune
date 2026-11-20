@@ -227,6 +227,7 @@
   session_seed_receipt
   session_seed_command
   session_factory
+  recovery_asset_submission
   session_policy_resource runtime_resource_testing constructor_inference_graph native_cleanup_observation native_resource_lifetime native_resource_lifetime_tests native_resource_authority native_resource_authority_tests runtime_native_scope runtime_native_scope_tests
   retained_job_artifacts
   local_storage

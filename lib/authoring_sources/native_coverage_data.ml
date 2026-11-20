@@ -380,7 +380,7 @@ let implementation_sources =
   ; ( "lib/agent_server/authorization.ml"
     , "0b234316e15bf6f4a7135669ea08169a826db01a765e5d915e2ddb3396a2961b" )
   ; ( "lib/agent_server/command_handler.ml"
-    , "0a331dc88614547715edd4eb016ebacb478df3053bdf18190673a42ed26ca203" )
+    , "9014016542d1f6d886ea883ab06f980c14d53d561e0ffd7b89ae8e2483b7db3c" )
   ; ( "lib/agent_server/daemon.ml"
     , "c4e74260ee1e6167ed31b346c2fbd623a970d526b8238121133262237d4a7317" )
   ; ( "lib/agent_server/instruction_operator_service.ml"
@@ -442,7 +442,7 @@ let implementation_sources =
   ; ( "lib/agent_server/descendant_accounting_host.ml"
     , "3baff14cf9c606e899c08f95805cc3ca9f070827b46ec531e1c230314820b0fd" )
   ; ( "lib/agent_server/session_factory.ml"
-    , "fc80696c82466556f5da2ed7fa45b48855cc34c93ee44be2266d6a841871491e" )
+    , "f8f55bf271a48904844ef630b349c901e58cda6c04e7d7d703cb71597a42a288" )
   ; ( "lib/agent_session/authoring_context_tool.ml"
     , "6e318b45f799b485f802dc6d5e4d8bc031721e379cc8800f6ed484d59694840d" )
   ; ( "lib/agent_session/authoring_reference_scope.ml"
@@ -510,7 +510,7 @@ let implementation_sources =
   ; ( "lib/agent_session/prompt_catalog.ml"
     , "a6b86884830197ff69113d8989280ef72bd33b61ccfa10d2e1b91bffbfc82505" )
   ; ( "lib/agent_session/runtime_builder.ml"
-    , "cadd74749302922e3a6c707611206ab23f1cda771d788680d2ae680cb5e89bf9" )
+    , "423836dbc980843e69f8771bc87d204085d4d6193b03011415d90ca8488cf650" )
   ; ( "lib/agent_session/authored_source_preparation.ml"
     , "d8eea801d69ffa262cfc1d0a9bee45123ce8d4b08f74c25c67df450cd247600c" )
   ; ( "lib/agent_store/prompt_source_receipt.ml"

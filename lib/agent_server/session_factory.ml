@@ -293,6 +293,7 @@ type t =
       -> Agent_session.Session_actor.t option ref
       -> Agent_session.Goal_native_metadata_service.t
   ; protected_source_authority : Inference_runtime.Protected_delivery.Lease.Authority.t
+  ; recovery_asset_submissions : Recovery_asset_submission.t
   ; generated_creation_mutex : Eio.Mutex.t
   ; idempotency_store : Agent_store.Idempotency_store.t
   ; blob_store : Agent_store.Blob_store.t
@@ -10658,7 +10659,12 @@ let actor_services
           unload_stopped_runtime t runtime_owner state events;
           ignore
             (persist_metadata t handle state : (unit, Agent_store.Store_error.t) result);
-          if snapshot_due state then install_snapshot state)
+          if snapshot_due state then install_snapshot state;
+          Recovery_asset_submission.committed
+            t.recovery_asset_submissions
+            ~handle
+            state
+            events)
     }
 ;;
 
@@ -14594,6 +14600,12 @@ module Recovery_assets = struct
   module A = Agent_session
   module Asset = A.Recovery_asset
 
+  module Source = A.Recovery_source_reader
+  module Actor = A.Session_actor
+  module Observation = Actor.Resource_observation
+
+  let denied = Recovery_source_host.denied
+
   type authorize = A.Session_state.t -> (unit, P.Error.t) result
 
   let with_source t citation ~authorize ~f =
@@ -14638,6 +14650,174 @@ module Recovery_assets = struct
         ~now
         ~max_bytes
         attribution)
+  ;;
+
+  module Capture = Chat_response.Converter_asset_capture
+  module Submission = Recovery_asset_submission
+
+  let submission_max_bytes = 1_048_576
+
+  let owner_writer ~(state : A.Session_state.t) ~principal ~attachment_id ~now =
+    let open Result.Let_syntax in
+    let%bind attachment = A.Writer_attachment.require state ~attachment_id ~now in
+    let owner =
+      match attachment.mode, attachment.owner_lease, state.spec.protocol.liveness with
+      | Owner_read_write, Some lease, Owner_bound _ -> lease.principal_id
+      | Owner_read_write, None, Detached -> state.identity.creating_principal
+      | _ -> None
+    in
+    if Option.exists owner ~f:(P.Id.Principal.equal principal)
+    then Ok ()
+    else Error (denied ())
+  ;;
+
+  let submit_originals t ~authorize ~principal reservation row originals =
+    let authorize state =
+      if Submission.idle state then authorize state else Error (denied ())
+    in
+    let clock = Eio.Stdenv.mono_clock t.env in
+    let timeout = Eio.Time.Timeout.seconds clock 120. in
+    Eio.Fiber.fork ~sw:t.sw (fun () ->
+      Exn.protect
+        ~finally:(fun () -> Submission.release t.recovery_asset_submissions reservation)
+        ~f:(fun () ->
+          try
+            match
+              Eio.Time.Timeout.run_exn timeout (fun () -> Submission.await reservation)
+            with
+            | None -> ()
+            | Some citation ->
+              Eio.Switch.run (fun sw ->
+                with_source t citation ~authorize ~f:(fun asset ~current ->
+                  List.iter originals ~f:(fun original ->
+                    let now = now t in
+                    let result =
+                      match original with
+                      | Capture.Local_image { part } ->
+                        Asset.publish_inline
+                          asset
+                          ~sw
+                          ~current
+                          citation
+                          ~part
+                          ~principal
+                          ~now
+                          ~max_bytes:submission_max_bytes
+                      | Local_document { part; media_type; contents } ->
+                        let open Result.Let_syntax in
+                        let%bind attribution =
+                          Asset.Attribution.create
+                            citation
+                            ~part
+                            ~row
+                            ~media_type
+                            ~original:contents
+                        in
+                        Asset.publish_converted_file
+                          asset
+                          ~sw
+                          ~current
+                          ~principal
+                          ~now
+                          ~max_bytes:submission_max_bytes
+                          attribution
+                    in
+                    ignore
+                      (result
+                       : (Agent_store.Recovery_asset_reference.t, Source.error) result));
+                  Ok ())
+                |> ignore)
+          with
+          | Eio.Time.Timeout | Eio.Io _ -> ()))
+  ;;
+
+  let with_submission
+        t
+        ~(entry : Session_registry.entry)
+        ~actor
+        ~attachment_id
+        ~connection_current
+        ~f
+    =
+    let select () =
+      let open Result.Let_syntax in
+      let%bind handle = Result.of_option entry.store_handle ~error:(denied ()) in
+      let%bind observation = Actor.observe_resource_state entry.actor in
+      let original = Observation.state observation in
+      let principal = Operator_authorization.principal actor in
+      let session_id = original.identity.session_id in
+      let session =
+        P.Session_ref.create
+          ~server_id:(Agent_store.Session_store.server_id t.store)
+          ~session_id
+      in
+      let clock = Eio.Stdenv.mono_clock t.env in
+      let deadline =
+        Mtime.add_span
+          (Eio.Time.Mono.now clock)
+          (Mtime.Span.of_uint64_ns 120_000_000_000L)
+      in
+      let authorize state =
+        let%bind () =
+          if
+            connection_current ()
+            && Operator_authorization.is_current actor
+            && P.Principal.has_scope principal Send_messages
+            && Option.exists deadline ~f:(fun deadline ->
+              Mtime.is_earlier (Eio.Time.Mono.now clock) ~than:deadline)
+          then check_recovery_source_owner t entry ~session ()
+          else Error (denied ())
+        in
+        let%bind _ = Observation.check_current observation in
+        let%bind () =
+          owner_writer ~state ~principal:principal.id ~attachment_id ~now:(fun () ->
+            now t)
+        in
+        match state.recovery_windows with
+        | Some ledger
+          when P.Session_ref.equal (A.Recovery_window_ledger.owner ledger) session ->
+          Ok ()
+        | Some _ | None -> Error (denied ())
+      in
+      let%map () = authorize original in
+      handle, authorize, observation, principal.id
+    in
+    match select () with
+    | Error _ -> f None
+    | Ok (handle, authorize, observation, principal) ->
+      (match Submission.reserve t.recovery_asset_submissions ~handle ~authorize with
+       | None -> f None
+       | Some reservation ->
+         let armed = ref false in
+         let capture =
+           Capture.create
+             ~max_parts:8
+             ~max_bytes:submission_max_bytes
+             ~is_current:(fun () ->
+               Result.bind (Observation.check_current observation) ~f:authorize
+               |> Result.is_ok)
+         in
+         let arm row =
+           let originals = Capture.take capture in
+           if (not (List.is_empty originals)) && Submission.arm reservation row
+           then (
+             submit_originals t ~authorize ~principal reservation row originals;
+             armed := true)
+         in
+         Exn.protect
+           ~finally:(fun () ->
+             if not !armed
+             then Submission.release t.recovery_asset_submissions reservation)
+           ~f:(fun () ->
+             match f (Some (capture, arm)) with
+             | result ->
+               if Result.is_error result then armed := false;
+               result
+             | exception exn ->
+               armed := false;
+               Exn.raise_with_original_backtrace
+                 exn
+                 (Stdlib.Printexc.get_raw_backtrace ())))
   ;;
 end
 
@@ -19495,6 +19675,7 @@ let create
     ; goal_metadata_service =
         (fun profile actor_ref -> goal_metadata_service t profile actor_ref)
     ; protected_source_authority = Inference_runtime.Protected_delivery.Lease.Authority.create ()
+    ; recovery_asset_submissions = Recovery_asset_submission.create ()
     ; generated_creation_mutex = Eio.Mutex.create ()
     ; idempotency_store
     ; blob_store

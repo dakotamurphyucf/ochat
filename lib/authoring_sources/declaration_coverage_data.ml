@@ -291,7 +291,7 @@ let implementation_sources =
   ; ( "lib/meta_prompting/preprocessor.ml"
     , "5eedb68b3db23b16a8769522104d2f4e6f9f2e3cce2e11e40c92dc5c2ad879b8" )
   ; ( "lib/chat_response/converter.ml"
-    , "c6cdff248b4433655daa72064ce42e90d9522a7e2a632b78f555f86961bc0b0e" )
+    , "07ace7b0cb72020017b7ea0d5ce182a7407fb62eb26b80501c01450639a6fc5e" )
   ; ( "lib/chat_response/fetch.ml"
     , "4a05211b42c66f2191cbf264002358f8eda48794c10ccc6bd40923b5f0cb3907" )
   ; ( "lib/chat_response/mcp_discovery_cache.ml"

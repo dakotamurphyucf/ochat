@@ -5,6 +5,7 @@
   cache
   config
   converter
+  converter_asset_capture
   converter_source
   ctx
   effect_rejection

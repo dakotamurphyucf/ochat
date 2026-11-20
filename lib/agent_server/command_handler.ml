@@ -2090,7 +2090,15 @@ let run_start_result = function
   | Rejected failure | Uncertain failure -> Error failure
 ;;
 
-let handle_send_message t ~agent_actor ?prepared_writer context command_audit request =
+let handle_send_message
+      t
+      ~actor
+      ~agent_actor
+      ?prepared_writer
+      context
+      command_audit
+      request
+  =
   let open Result.Let_syntax in
   let%bind () = check_original_agent_actor agent_actor in
   let content = request.Agent_protocol.Session.Send_message_request.content in
@@ -2107,59 +2115,78 @@ let handle_send_message t ~agent_actor ?prepared_writer context command_audit re
     ~attachment_id:request.attachment_id
     (fun entry ->
        let%bind () = require_connection_writer context request.attachment_id in
-       let%bind history_entry =
-         Runtime_owner.with_loaded_runtime entry.runtime (fun runtime ->
-           let%bind history_id =
-             Agent_session.History_id_source.allocate entry.history_ids
-           in
-           runtime.parse_user_content ~id:history_id content)
+       let submit asset_submission =
+         let asset_capture = Option.map asset_submission ~f:fst in
+         let%bind history_entry =
+           Runtime_owner.with_loaded_runtime entry.runtime (fun runtime ->
+             let%bind history_id =
+               Agent_session.History_id_source.allocate entry.history_ids
+             in
+             runtime.parse_user_content ?asset_capture ~id:history_id content)
+         in
+         let history_entry = Agent_session.History_codec.to_protocol history_entry in
+         Option.iter asset_submission ~f:(fun (_, arm) -> arm history_entry);
+         let%bind submission =
+           actor_command
+             command_audit
+             ~plain:(fun () ->
+               match agent_actor with
+               | Some actor ->
+                 Agent_session.Session_actor.submit_message_authenticated
+                   entry.actor
+                   ~actor
+                   ~timing:request.timing
+                   ~attachment_id:request.attachment_id
+                   history_entry
+               | None ->
+                 Agent_session.Session_actor.submit_message
+                   entry.actor
+                   ~submitting_principal:(Connection_context.principal context).id
+                   ~timing:request.timing
+                   ~attachment_id:request.attachment_id
+                   history_entry)
+             ~audited:(fun command_audit ->
+               match agent_actor with
+               | Some actor ->
+                 Agent_session.Session_actor
+                 .submit_message_authenticated_with_command_audit
+                   entry.actor
+                   ~actor
+                   ~command_audit
+                   ~timing:request.timing
+                   ~attachment_id:request.attachment_id
+                   history_entry
+               | None ->
+                 Agent_session.Session_actor.submit_message_with_command_audit
+                   entry.actor
+                   ~submitting_principal:(Connection_context.principal context).id
+                   ~command_audit
+                   ~timing:request.timing
+                   ~attachment_id:request.attachment_id
+                   history_entry)
+         in
+         Ok
+           (Agent_protocol.Method_result.Session_send_message
+              { history_id = submission.history_id
+              ; disposition = submission.disposition
+              ; operation_id = submission.operation_id
+              ; mutation = mutation submission.session
+              })
        in
-       let history_entry = Agent_session.History_codec.to_protocol history_entry in
-       let%bind submission =
-         actor_command
-           command_audit
-           ~plain:(fun () ->
-             match agent_actor with
-             | Some actor ->
-               Agent_session.Session_actor.submit_message_authenticated
-                 entry.actor
-                 ~actor
-                 ~timing:request.timing
-                 ~attachment_id:request.attachment_id
-                 history_entry
-             | None ->
-               Agent_session.Session_actor.submit_message
-                 entry.actor
-                 ~submitting_principal:(Connection_context.principal context).id
-                 ~timing:request.timing
-                 ~attachment_id:request.attachment_id
-                 history_entry)
-           ~audited:(fun command_audit ->
-             match agent_actor with
-             | Some actor ->
-               Agent_session.Session_actor.submit_message_authenticated_with_command_audit
-                 entry.actor
-                 ~actor
-                 ~command_audit
-                 ~timing:request.timing
-                 ~attachment_id:request.attachment_id
-                 history_entry
-             | None ->
-               Agent_session.Session_actor.submit_message_with_command_audit
-                 entry.actor
-                 ~submitting_principal:(Connection_context.principal context).id
-                 ~command_audit
-                 ~timing:request.timing
-                 ~attachment_id:request.attachment_id
-                 history_entry)
-       in
-       Ok
-         (Agent_protocol.Method_result.Session_send_message
-            { history_id = submission.history_id
-            ; disposition = submission.disposition
-            ; operation_id = submission.operation_id
-            ; mutation = mutation submission.session
-            }))
+       match content.kind, t.seed_factory with
+       | Chatmd, Some factory ->
+         Session_factory.Recovery_assets.with_submission
+           factory
+           ~entry
+           ~actor
+           ~attachment_id:request.attachment_id
+           ~connection_current:(fun () ->
+             Connection_context.owns_attachment
+               context
+               ~session_id:request.session_id
+               ~attachment_id:request.attachment_id)
+           ~f:submit
+       | (Plain_text | Chatmd), _ -> submit None)
 ;;
 
 let render_export request snapshot entries =
@@ -3220,7 +3247,14 @@ let dispatch_authorized
   | Session_run_start request ->
     handle_run_start t ~actor context command_audit request |> run_start_result
   | Session_send_message request ->
-    handle_send_message t ~agent_actor ?prepared_writer context command_audit request
+    handle_send_message
+      t
+      ~actor
+      ~agent_actor
+      ?prepared_writer
+      context
+      command_audit
+      request
   | Session_runs request -> handle_runs t ~actor context request
   | Session_run request -> handle_run t ~actor context request
   | Session_pending_inputs request -> handle_pending_inputs t context request

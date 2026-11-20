@@ -363,11 +363,9 @@ module Base64 = struct
   let filename_extension (fname : string) : string =
     (* First, strip any directory paths; keep only the final component. *)
     let base = Filename.basename fname in
-    print_endline base;
     match String.rindex base '.' with
     | None -> ""
     | Some i ->
-      print_endline (string_of_int i);
       if i = 0
       then
         (* The file name starts with a dot and has nothing else
@@ -391,10 +389,8 @@ module Base64 = struct
         let without_dot = String.drop_prefix ext 1 in
         String.lowercase without_dot
     in
-    print_endline extension;
     (* Determine the MIME type from the extension. *)
     let mime_type = mime_type_of_extension extension in
-    print_endline mime_type;
     (* Construct the Data URI. *)
     Printf.sprintf "data:%s;base64,%s" mime_type base64_data
   ;;

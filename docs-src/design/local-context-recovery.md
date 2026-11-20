@@ -282,6 +282,21 @@ retain their existing canonical payload custody. The trusted converter attests
 to the exact realized row and part before handing off the original bytes.
 Identical rendered text cannot bind a different parser occurrence or
 original revision.
+For an authenticated daemon ChatMD send, enabling recovery windows lets the
+session's current owner writer retain originals from actual local image and
+document conversion. Each original stays associated with its own emitted part.
+The daemon keeps at most eight pending captures, with up to eight parts and
+one MiB of additional document bytes per capture. The reservation lasts up to
+two minutes and requires the original connection, credential and owner writer
+to remain current. Deferred inputs become eligible upon durable adoption into
+canonical history. Publication waits for the adopted operation to become idle
+so the optional storage write leaves normal history publication available.
+A daemon restart, expired reservation or lost writer
+authority can discard an outstanding original before adoption. Queued and
+adopted rendered text remain governed by ordinary session persistence.
+Installed captured documents retain their rendered content under the prompt
+revision's existing contract.
+
 [Publisher and collector](../../lib/agent_store/recovery_asset_store.mli),
 [exact source adapter](../../lib/agent_session/recovery_asset.mli).
 

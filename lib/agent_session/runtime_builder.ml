@@ -241,7 +241,8 @@ type t =
   ; inference_execution : Inference_client.Execution.t
   ; now : unit -> Agent_protocol.Timestamp.t
   ; parse_user_content :
-      id:History_entry.Id.t
+      ?asset_capture:Chat_response.Converter_asset_capture.t
+      -> id:History_entry.Id.t
       -> Agent_protocol.Session.Message_content.t
       -> (History_entry.t, Agent_protocol.Error.t) result
   ; parse_prepared_input :
@@ -1742,7 +1743,7 @@ let plain_user_item text =
     { role = User; content = [ Text { text; _type = "input_text" } ]; _type = "message" }
 ;;
 
-let chatmd_user_item ~ctx ~run_agent paths text =
+let chatmd_user_item ?asset_capture ~ctx ~run_agent paths text =
   let xml =
     if String.is_prefix (String.strip text) ~prefix:"<"
     then text
@@ -1752,7 +1753,7 @@ let chatmd_user_item ~ctx ~run_agent paths text =
     Prompt.Chat_markdown.parse_chat_inputs ~dir:paths.Runtime_paths.workspace xml
     |> List.find_map ~f:(function
       | Prompt.Chat_markdown.User message ->
-        Some (Converter.convert_user_msg ~ctx ~run_agent message)
+        Some (Converter.convert_user_msg ?asset_capture ~ctx ~run_agent message)
       | _ -> None)
     |> Result.of_option ~error:(failure "ChatMD input does not contain a user message")
   with
@@ -1777,12 +1778,18 @@ let parse_user_content ~ctx ~manifest_authorizer ~approval_provider ~response_di
       prompt
       items
   in
-  fun ~id content ->
+  fun ?asset_capture ~id content ->
     let open Result.Let_syntax in
     let%map item =
       match content.Agent_protocol.Session.Message_content.kind with
       | Plain_text -> Ok (plain_user_item content.text)
-      | Chatmd -> chatmd_user_item ~ctx ~run_agent:converter_runner paths content.text
+      | Chatmd ->
+        chatmd_user_item
+          ?asset_capture
+          ~ctx
+          ~run_agent:converter_runner
+          paths
+          content.text
     in
     Openai.Responses_history.create_with_id_exn ~id item
 ;;
@@ -4955,7 +4962,7 @@ let build_product_attachment
     | false ->
       parse_user_content ~ctx ~manifest_authorizer ~approval_provider ~response_dir paths
     | true ->
-      fun ~id content ->
+      fun ?asset_capture:_ ~id content ->
         (match
            content.Agent_protocol.Session.Message_content.kind, content.attachments
          with
