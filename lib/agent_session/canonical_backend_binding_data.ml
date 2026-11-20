@@ -11,6 +11,7 @@ type t =
   { domain : int
   ; writer : Agent_store.Commit_writer.t
   ; commit : commit
+  ; recovery_note_owner : Agent_protocol.Session_ref.t option
   }
 
 let check_domain_exn t =
@@ -18,7 +19,14 @@ let check_domain_exn t =
   then invalid_arg "canonical persistence binding belongs to another domain"
 ;;
 
-let create ~writer ~commit = { domain = (Stdlib.Domain.self () :> int); writer; commit }
+let create ~writer ~commit ~recovery_note_owner =
+  { domain = (Stdlib.Domain.self () :> int); writer; commit; recovery_note_owner }
+;;
+
+let recovery_note_owner t =
+  check_domain_exn t;
+  t.recovery_note_owner
+;;
 
 let validate_exn t ~session_id ~commit =
   check_domain_exn t;
@@ -29,7 +37,14 @@ let validate_exn t ~session_id ~commit =
       (Agent_protocol.Id.Session.equal
          session_id
          (Agent_store.Commit_writer.session_id t.writer))
-  then invalid_arg "canonical persistence binding has another session writer"
+  then invalid_arg "canonical persistence binding has another session writer";
+  Option.iter t.recovery_note_owner ~f:(fun owner ->
+    if
+      not
+        (Agent_protocol.Id.Session.equal
+           (Agent_protocol.Session_ref.session_id owner)
+           session_id)
+    then invalid_arg "canonical persistence has another recovery note owner")
 ;;
 
 let requires_recovery t =

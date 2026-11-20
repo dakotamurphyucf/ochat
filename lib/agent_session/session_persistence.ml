@@ -145,7 +145,77 @@ let admit_state_document state_document ~limits =
   payload, state_document
 ;;
 
-let commit t ?observation ~command_audit ~(previous : Session_state.t) transition =
+let snapshot_at_payload
+      restored
+      ~limits
+      ~transaction_hash
+      (state : Session_state.t)
+      payload
+  =
+  let args create =
+    create
+      ~limits
+      ~transaction_sequence:state.Session_state.counters.transaction_sequence
+      ~transaction_hash
+      ~event_sequence:state.counters.event_sequence
+      ~created_at:state.identity.updated_at
+      ~prompt_artifact:(P.Id.Prompt_revision.to_string state.spec.prompt_revision_id)
+      ~workspace_identity:state.spec.workspace_instance.conflict_domain
+      ~payload
+  in
+  match restored.Restored.snapshot with
+  | None -> args (Store.Snapshot.create ~session_id:state.identity.session_id)
+  | Some snapshot -> args (Store.Snapshot.update snapshot)
+;;
+
+let admit_recovery_note_storage
+      t
+      ~snapshot_payload_limit
+      ~previous
+      ~transition
+      ~admitted
+      transaction
+  =
+  let open Result.Let_syntax in
+  let state = transition.Session_transition.state in
+  if Option.equal phys_equal previous.Session_state.recovery_notes state.recovery_notes
+  then Ok ()
+  else (
+    let%bind snapshot_payload_limit =
+      match snapshot_payload_limit with
+      | Some limit -> Ok limit
+      | None ->
+        Error
+          (Store.Store_error.Corrupt "recovery note writer has no bound snapshot profile")
+    in
+    let%bind limits =
+      Persistence_codec.limits ~max_bytes:snapshot_payload_limit
+      |> Result.map_error ~f:document_error
+    in
+    let%bind _ =
+      snapshot_at_payload
+        t.restored
+        ~limits
+        ~transaction_hash:(Some (Store.Transaction.hash transaction))
+        state
+        (Session_state_document.Admitted.document admitted)
+    in
+    if
+      String.length (Store.Transaction.encode transaction)
+      > Store.Commit_writer.max_payload_length t.writer
+    then
+      Error (document_error (D.Error.Limit_exceeded "recovery note transaction payload"))
+    else Ok ())
+;;
+
+let commit_with_profile
+      t
+      ~snapshot_payload_limit
+      ?observation
+      ~command_audit
+      ~(previous : Session_state.t)
+      transition
+  =
   let open Result.Let_syntax in
   let%bind observation =
     Option.value_map observation ~default:(Ok None) ~f:(fun observation ->
@@ -199,6 +269,16 @@ let commit t ?observation ~command_audit ~(previous : Session_state.t) transitio
   in
   let%bind transaction, events =
     transaction t ~state_document ~command_audit previous transition
+    |> Result.map_error ~f:protocol_error
+  in
+  let%bind () =
+    admit_recovery_note_storage
+      t
+      ~snapshot_payload_limit
+      ~previous
+      ~transition
+      ~admitted
+      transaction
     |> Result.map_error ~f:protocol_error
   in
   let references =
@@ -277,20 +357,45 @@ let commit t ?observation ~command_audit ~(previous : Session_state.t) transitio
     t.command_accepted encoded committed.sequence)
 ;;
 
-let actor_persistence t =
+let commit t ?observation ~command_audit ~previous transition =
+  commit_with_profile
+    t
+    ~snapshot_payload_limit:None
+    ?observation
+    ~command_audit
+    ~previous
+    transition
+;;
+
+let actor_persistence_with_profile t ~snapshot_payload_limit =
   Session_actor.
     { commit =
         (fun ?observation ~command_audit ~previous transition ->
-          commit t ?observation ~command_audit ~previous transition)
+          commit_with_profile
+            t
+            ~snapshot_payload_limit
+            ?observation
+            ~command_audit
+            ~previous
+            transition)
     ; archive_reference =
         (fun ~previous ~kind id -> archive_reference t ~previous ~kind id)
     }
 ;;
 
-let actor_persistence_with_startup_disposal t =
-  let persistence = actor_persistence t in
+let actor_persistence t = actor_persistence_with_profile t ~snapshot_payload_limit:None
+
+let actor_persistence_with_startup_disposal ?recovery_notes t =
+  let persistence =
+    actor_persistence_with_profile
+      t
+      ~snapshot_payload_limit:(Option.map recovery_notes ~f:snd)
+  in
   let binding =
-    Canonical_backend_binding_data.create ~writer:t.writer ~commit:persistence.commit
+    Canonical_backend_binding_data.create
+      ~writer:t.writer
+      ~commit:persistence.commit
+      ~recovery_note_owner:(Option.map recovery_notes ~f:fst)
   in
   persistence, binding
 ;;
@@ -321,21 +426,8 @@ let prepare_restored_snapshot restored ~max_payload_length ~transaction_hash sta
     |> Result.map_error ~f:document_error
   in
   let restored = { restored with state_document } in
-  let args create =
-    create
-      ~limits
-      ~transaction_sequence:state.Session_state.counters.transaction_sequence
-      ~transaction_hash
-      ~event_sequence:state.counters.event_sequence
-      ~created_at:state.identity.updated_at
-      ~prompt_artifact:(P.Id.Prompt_revision.to_string state.spec.prompt_revision_id)
-      ~workspace_identity:state.spec.workspace_instance.conflict_domain
-      ~payload
-  in
   let%bind snapshot =
-    match restored.snapshot with
-    | None -> args (Store.Snapshot.create ~session_id:state.identity.session_id)
-    | Some snapshot -> args (Store.Snapshot.update snapshot)
+    snapshot_at_payload restored ~limits ~transaction_hash state payload
   in
   Ok (restored, snapshot)
 ;;

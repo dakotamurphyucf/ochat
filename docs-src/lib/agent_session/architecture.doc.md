@@ -142,6 +142,26 @@ authority/revision/lifecycle and retains the previous state before replacement.
 See [archive storage](compaction_archive.doc.md) and
 [operator initializer restrictions](../../agent-server/operations.md#reset-rebuild-and-upgrade-initializers).
 
+The optional `recovery_windows` state field stores ordered context-window
+membership and physical source coordinates. Each ledger has one host-qualified
+owner and a single open window at the end of its chain. A sealed window locates
+each canonical member in a checksummed summary archive by exact reference and
+source ordinal. Live locations are checked against the selected occurrence and
+content revision in canonical state. Archive bytes still require an
+authorized, fully verified read. A citation and its membership never confer
+read authority.
+
+The named-field codec preserves unknown window, member and source fields.
+A change that would move an unknown field to a different source kind fails
+with an extension conflict. Enabled documents mark the required recovery
+semantics, and the absent field keeps legacy and default-off sessions on their
+existing path. The codec admits up to 64 windows, 8,192 members and 2 MiB of
+encoded ledger data including retained fields. This storage contract carries
+canonical evidence. Actor transitions, logical
+visibility and admission of exact effective model-input sources are separate
+runtime capabilities. [Ledger interface](../../../lib/agent_session/recovery_window_ledger.mli),
+[local context recovery design](../../design/local-context-recovery.md).
+
 Original source access has its own retained directory owner, shared revocable
 catalog policy and runtime loan. Captured prompt revisions remain immutable when
 that access is unavailable or revoked. See [original source ownership](../../../lib/agent_session/original_sources.md)

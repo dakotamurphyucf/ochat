@@ -12571,8 +12571,19 @@ let create_unloaded_entry
            Error
              (unavailable Conflict "target has not been selected for ordinary execution"))
     in
+    let recovery_note_owner =
+      Agent_protocol.Session_ref.create
+        ~server_id:(Agent_store.Session_store.server_id t.store)
+        ~session_id:state.identity.session_id
+    in
+    let%bind () =
+      Agent_session.Recovery_note_session.check_owner
+        state.recovery_notes
+        ~owner:recovery_note_owner
+    in
     let actor_persistence, canonical_persistence =
       Agent_session.Session_persistence.actor_persistence_with_startup_disposal
+        ~recovery_notes:(recovery_note_owner, t.limits.snapshot_payload_limit)
         persistence
     in
     let actor =
@@ -16180,7 +16191,9 @@ let create_recurrence_child t ~parent ~permit =
               && (not (Session_registry.lifecycle_reserved t.registry parent_id))
               && workspace_allowed
               && Recurrence_parent_configuration.matches captured state.spec
-              && String.equal profile.revision_digest (Parent.permission_profile_digest captured)
+              && String.equal
+                   profile.revision_digest
+                   (Parent.permission_profile_digest captured)
             then Ok ()
             else
               Error

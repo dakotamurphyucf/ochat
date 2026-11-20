@@ -230,6 +230,9 @@
   instruction_selection_capacity
   instruction_selection_record
   instruction_selection
+  recovery_note_access
+  recovery_note_change
+  recovery_note_session
   instruction_transition
   goal_command_transition
   goal_control_transition
@@ -344,6 +347,9 @@
   native_tool_moderation
   script_tool_calls
   compaction_archive
+  recovery_window_location
+  recovery_window_record
+  recovery_window_ledger
   administration
   session_delta
   session_metadata_transition
@@ -483,6 +489,7 @@
   ochat.chatml_git_host
   ochat.agent_protocol
   ochat.operator_authorization
+  ochat.recovery_notes
   ochat.agent_store
   chatmd
   chat_response

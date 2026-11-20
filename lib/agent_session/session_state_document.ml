@@ -785,6 +785,13 @@ let project_fields_with_presence
       Instruction_selection.to_jsonaf selection
       |> Result.map ~f:(fun raw -> [ "instruction_selection", raw ])
   in
+  let%bind recovery_note_fields =
+    match t.recovery_notes with
+    | None -> Ok []
+    | Some catalog ->
+      let%map raw = Recovery_note_session.to_json catalog in
+      [ "recovery_notes", raw ]
+  in
   let%map recurrence_catalog_fields =
     match t.recurrence_catalog with
     | None ->
@@ -819,6 +826,8 @@ let project_fields_with_presence
        , (X.list_json Managed_submission.to_jsonaf) t.managed_submissions )
      ; "managed_stops", (X.list_json Managed_stop.to_jsonaf) t.managed_stops
      ]
+     @ Option.value_map t.recovery_windows ~default:[] ~f:(fun ledger ->
+       [ "recovery_windows", Recovery_window_ledger.to_jsonaf ledger ])
      @ run_state_fields run_state_field t.run_state
      @ goal_catalog_fields
      @ goal_accounts_fields
@@ -828,6 +837,7 @@ let project_fields_with_presence
      @ policy_canonical_usage_fields
      @ goal_policy_contributions_fields
      @ instruction_selection_fields
+     @ recovery_note_fields
      @ recurrence_catalog_fields
      @ [ ( "moderator_executions"
          , (X.list_json P.Moderator_execution.to_json) t.moderator_executions )
@@ -916,6 +926,12 @@ let state_fields_of_jsonaf ?capture ~limits json =
   in
   let%bind automatic_turn_budget =
     X.required fields "automatic_turn_budget" (X.nullable Automatic_turn_budget.of_jsonaf)
+  in
+  let%bind recovery_windows =
+    match D.Json.field json ~name:"recovery_windows" with
+    | Absent -> Ok None
+    | Null -> Error (P.Error.invalid_request "recovery_windows must be a ledger")
+    | Value ledger -> Recovery_window_ledger.of_jsonaf ledger |> Result.map ~f:Option.some
   in
   let%bind permissions = X.required fields "permissions" (X.list P.Permission.of_json) in
   let%bind grants = X.required fields "grants" (X.list P.Grant.of_json) in
@@ -1020,6 +1036,12 @@ let state_fields_of_jsonaf ?capture ~limits json =
       (X.nullable Instruction_selection.of_jsonaf)
     |> Result.map ~f:Option.join
   in
+  let%bind recovery_notes =
+    J.optional_as
+      fields
+      "recovery_notes"
+      (Recovery_note_session.of_json ~session_id:identity.session_id)
+  in
   let%bind recurrence_catalog =
     J.optional_as fields "recurrence_catalog" (X.nullable Recurrence_catalog.of_jsonaf)
     |> Result.map ~f:Option.join
@@ -1063,6 +1085,7 @@ let state_fields_of_jsonaf ?capture ~limits json =
     ; conversation
     ; active_operation
     ; automatic_turn_budget
+    ; recovery_windows
     ; permissions
     ; grants
     ; jobs
@@ -1082,6 +1105,7 @@ let state_fields_of_jsonaf ?capture ~limits json =
     ; policy_canonical_usage
     ; goal_policy_contributions
     ; instruction_selection
+    ; recovery_notes
     ; recurrence_catalog
     ; subscriptions
     ; deliveries
@@ -1117,6 +1141,7 @@ let state_shape =
     ; "conversation", conversation_shape
     ; "active_operation", X.nullable_shape Shapes.operation
     ; "automatic_turn_budget", X.nullable_shape Automatic_turn_budget.shape
+    ; "recovery_windows", Recovery_window_ledger.shape
     ; "permissions", X.array_shape_exn ~identity_field:"id" Shapes.permission
     ; "grants", X.array_shape_exn ~identity_field:"id" Shapes.grant
     ; "jobs", X.array_shape_exn ~identity_field:"id" Shapes.job
@@ -1136,6 +1161,7 @@ let state_shape =
     ; "policy_canonical_usage", D.Shape.value
     ; "goal_policy_contributions", D.Shape.value
     ; "instruction_selection", X.nullable_shape Instruction_selection.shape
+    ; "recovery_notes", D.Shape.value
     ; "recurrence_catalog", X.nullable_shape Recurrence_catalog.shape
     ; "managed_stops", X.array_shape_exn ~identity_field:"id" Managed_stop.shape
     ; ( "moderator_executions"
@@ -1235,6 +1261,13 @@ let validate_run_capacity_only (state : S.t) document =
             { path = [ "run_state" ]; reason = "admitted run index is missing" }))
 ;;
 
+let validate_raw_recovery_window_capacity document =
+  match D.Json.field (D.Document.payload document) ~name:"recovery_windows" with
+  | Absent -> Ok ()
+  | Null -> Error (D.Error.Malformed "recovery_windows must be a ledger")
+  | Value ledger -> Recovery_window_ledger.validate_encoded ledger
+;;
+
 let validate_raw_queue_capacity document =
   let raw_moderator =
     match D.Json.field (D.Document.payload document) ~name:"moderator" with
@@ -1266,6 +1299,7 @@ end
 let validate_run_capacity basis document ~limits =
   let state = Capacity_basis.state basis in
   let open Result.Let_syntax in
+  let%bind () = validate_raw_recovery_window_capacity document in
   let%bind () = validate_raw_queue_capacity document in
   let%bind () =
     match D.Json.field (D.Document.payload document) ~name:"ingress_registrations" with
@@ -2023,6 +2057,7 @@ let decode_with_evidence ?previous ~limits document =
   let open Result.Let_syntax in
   let%bind document = upgrade document ~limits in
   let%bind () = check_storage_semantics document in
+  let%bind () = validate_raw_recovery_window_capacity document in
   let%bind () = validate_raw_queue_capacity document in
   let capture = Decode_evidence.Capture.create ?previous ~limits () in
   let%bind carrier =
@@ -2714,6 +2749,12 @@ let adopt previous ~limits incoming =
   let%bind () = validate_instruction_carrier previous in
   let%bind () = validate_instruction_carrier incoming in
   let%bind () =
+    Recovery_note_session.check_unchanged
+      (value previous).recovery_notes
+      ~incoming:(value incoming).recovery_notes
+    |> X.document_result
+  in
+  let%bind () =
     validate_instruction_update
       (value previous).instruction_selection
       (value incoming).instruction_selection
@@ -3167,6 +3208,7 @@ let encode_ordered_prefix t ~limits =
 let decode_prefix ?previous ~limits document =
   let open Result.Let_syntax in
   let%bind () = check_storage_semantics document in
+  let%bind () = validate_raw_recovery_window_capacity document in
   let%bind () = validate_raw_queue_capacity document in
   let capture = Decode_evidence.Capture.create ?previous ~limits () in
   let%bind carrier =

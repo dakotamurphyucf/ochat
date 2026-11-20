@@ -5397,6 +5397,29 @@ module Recurrence_read_request = struct
     | Planning : Operator_authorization.t * authorize -> Recurrence_planning_read.t t
 end
 
+module Recovery_note_request = struct
+  module C = Recovery_notes.Catalog
+
+  type mutation_route =
+    | Operator_key of Agent_protocol.Idempotency_key.t
+    | Native_invocation
+
+  type _ t =
+    | Read : Recovery_note_access.t * C.selection -> C.Content.t t
+    | List : Recovery_note_access.t -> (C.Catalog_revision.t * C.metadata list) t
+    | Mutate : Recovery_note_access.t * mutation_route * C.mutation -> C.Receipt.t t
+end
+
+module Context_request = struct
+  type _ t =
+    | Recovery_note : 'a Recovery_note_request.t -> 'a t
+    | Instruction_command :
+        Instruction_admission.t
+        * Instruction_command_admission.Source.t option
+        * Instruction_command.t
+        -> Instruction_command.Receipt.t t
+end
+
 module Goal_request = struct
   type authorize = Session_state.t -> (unit, Agent_protocol.Error.t) result
 
@@ -5966,11 +5989,7 @@ type _ request =
       Recurrence_creation.t * Recurrence_child_link.t * int * int
       -> Recurrence_child_association.t request
   | Recurrence_read : 'a Recurrence_read_request.t -> 'a request
-  | Apply_instruction_command :
-      Instruction_admission.t
-      * Instruction_command_admission.Source.t option
-      * Instruction_command.t
-      -> Instruction_command.Receipt.t request
+  | Context_request : 'a Context_request.t -> 'a request
   | Update_metadata :
       Agent_protocol.Id.Attachment.t * int64 * Agent_protocol.Session_metadata.Patch.t
       -> Agent_protocol.Session.t request
@@ -12497,6 +12516,7 @@ let rec deferred_execution_delta (previous : Session_state.t) (delta : Session_d
   | Goal_catalog_changed _
   | Goal_accounts_changed _
   | Instruction_selection_changed _
+  | Recovery_note_changed _
   | Recurrence_catalog_changed _
   | Run_state_changed _
   | Moderator_changed _
@@ -48275,6 +48295,7 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Retire_lifecycle _
   | Abort_lifecycle _
   | Goal_request (Read _)
+  | Context_request (Recovery_note (Read _ | List _))
   | State
   | Observe_resource_state
   | Snapshot
@@ -48478,7 +48499,7 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Activate_queued_start
   | Update_organization _
   | Goal_request (Apply _)
-  | Apply_instruction_command _
+  | Context_request (Instruction_command _ | Recovery_note (Mutate _))
   | Set_recurrence_controller _
   | Set_recurrence_planning_host _
   | Recurrence_due_ids
@@ -56340,6 +56361,135 @@ let startup_disposal_request_allowed : type a. t -> a request -> bool =
     | _ -> false)
 ;;
 
+let recovery_note_access t ~access ~effect_kind =
+  let open Result.Let_syntax in
+  let%bind owner =
+    Option.bind
+      t.canonical_persistence
+      ~f:Canonical_backend_binding_data.recovery_note_owner
+    |> Result.of_option
+         ~error:(error Invalid_state "durable recovery notes are unavailable")
+  in
+  let%bind () = Recovery_note_session.check_owner t.state.recovery_notes ~owner in
+  let%bind checked = Recovery_note_access.check_now access t.state ~owner ~effect_kind in
+  match checked with
+  | Operator _ -> Ok (owner, checked)
+  | Native invocation ->
+    let%bind execution =
+      List.find t.invocation_executions ~f:(fun execution ->
+        Agent_protocol.Invocation.equal execution.dispatched invocation)
+      |> Result.of_option
+           ~error:(error Permission_denied "recovery note invocation is not executing")
+    in
+    let%bind () =
+      if Atomic.get execution.authority_live
+      then Ok ()
+      else Error (error Permission_denied "recovery note invocation authority is closed")
+    in
+    let%bind current = authorized_native_child_basis t (Inference_invocation execution) in
+    let%map () = current.check_current () in
+    owner, checked
+;;
+
+let recovery_note_mutation_identity t ~access ~effect_kind route =
+  let open Result.Let_syntax in
+  let%bind owner, checked = recovery_note_access t ~access ~effect_kind in
+  let%map identity =
+    match route, checked with
+    | ( Recovery_note_request.Operator_key key
+      , Operator { principal; attachment_id = Some attachment_id } ) ->
+      let%bind attachment = write_attachment t attachment_id in
+      let lease_principal =
+        Option.bind attachment.owner_lease ~f:(fun lease -> lease.principal_id)
+      in
+      if
+        Option.exists lease_principal ~f:(fun id ->
+          not (Agent_protocol.Id.Principal.equal id principal))
+      then
+        Error
+          (error
+             Permission_denied
+             "recovery note writer attachment belongs to another principal")
+      else Ok (Recovery_notes.Catalog.Mutation_identity.Client { principal; key })
+    | Native_invocation, Native invocation ->
+      Ok (Recovery_notes.Catalog.Mutation_identity.Native invocation.context.id)
+    | Operator_key _, (Operator { attachment_id = None; _ } | Native _)
+    | Native_invocation, Operator _ ->
+      Error
+        (error
+           Permission_denied
+           "recovery note mutation requires its original writer route")
+  in
+  owner, identity
+;;
+
+let handle_recovery_note
+  : type a. t -> a Recovery_note_request.t -> (a, Agent_protocol.Error.t) result
+  =
+  fun t request ->
+  let module C = Recovery_notes.Catalog in
+  let open Result.Let_syntax in
+  let catalog ~access ~effect_kind =
+    let%bind owner, _ = recovery_note_access t ~access ~effect_kind in
+    Recovery_note_session.for_owner t.state.recovery_notes ~owner
+  in
+  match request with
+  | Read (access, selection) ->
+    let%bind catalog = catalog ~access ~effect_kind:Read in
+    (match C.read catalog selection with
+     | Ok content -> Ok content
+     | Error Note_not_found -> Error (error Conflict "recovery note is unavailable")
+     | Error (Stale_note_revision _) ->
+       Error (error Conflict "recovery note revision changed"))
+  | List access ->
+    let%map catalog = catalog ~access ~effect_kind:List in
+    C.revision catalog, C.list catalog
+  | Mutate (access, route, operation) ->
+    let effect_kind = Recovery_note_access.Effect.of_mutation operation in
+    let check () = recovery_note_mutation_identity t ~access ~effect_kind route in
+    let%bind owner, identity = check () in
+    let change = Recovery_note_change.create ~owner ~identity operation in
+    let previous = t.state in
+    let%bind outcome =
+      Recovery_note_change.evaluate
+        change
+        ~previous:previous.recovery_notes
+        ~session_id:previous.identity.session_id
+    in
+    (match outcome with
+     | Replayed receipt -> Ok receipt
+     | Applied (_, receipt) ->
+       let run_preparation =
+         Option.map t.run_source_binding ~f:(fun binding ->
+           binding.Source_binding.preparation)
+       in
+       let%bind candidate =
+         prepare_transition
+           ?run_preparation
+           t
+           ~delta:(Recovery_note_changed change)
+           ~payloads:[]
+       in
+       let check_before_commit () = Result.map (check ()) ~f:ignore in
+       let commit_observation =
+         Session_commit_observation.Owner.create_guarded
+           ~previous
+           ~candidate
+           ~check_at_writer:check_before_commit
+       in
+       let%bind () =
+         persist_transition
+           ?run_preparation
+           t
+           candidate
+           ~check_before_commit
+           ~commit_observation
+       in
+       install_committed_transition ?run_preparation t candidate;
+       publish_committed_transition t candidate;
+       Ok receipt)
+;;
+
 let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
   fun t request ->
   if not (startup_disposal_request_allowed t request)
@@ -57416,7 +57566,8 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
       Recurrence_command_admission.receipt prepared
     | Goal_request (Read (actor, authorize)) ->
       Goal_command_admission.read t.state ~actor ~authorize
-    | Apply_instruction_command (admission, source, request) ->
+    | Context_request (Recovery_note request) -> handle_recovery_note t request
+    | Context_request (Instruction_command (admission, source, request)) ->
       let open Result.Let_syntax in
       let%bind decision =
         Instruction_command_admission.prepare_admitted
@@ -61318,6 +61469,20 @@ let goal_command t ~actor ~authorize ~session ~request =
 
 let read_goals t ~actor ~authorize = call t (Goal_request (Read (actor, authorize)))
 
+let read_recovery_note t ~access selection =
+  call t (Context_request (Recovery_note (Read (access, selection))))
+;;
+
+let list_recovery_notes t ~access = call t (Context_request (Recovery_note (List access)))
+
+let mutate_recovery_note_operator t ~access ~key operation =
+  call t (Context_request (Recovery_note (Mutate (access, Operator_key key, operation))))
+;;
+
+let mutate_recovery_note_native t ~access operation =
+  call t (Context_request (Recovery_note (Mutate (access, Native_invocation, operation))))
+;;
+
 let instruction_selection_current t (basis : Session_state.t) =
   (not t.stopped)
   && Int.equal t.state.identity.generation basis.identity.generation
@@ -61327,7 +61492,7 @@ let instruction_selection_current t (basis : Session_state.t) =
 let instruction_command_admitted t ~admission ~source ~request =
   (* Instruction receipts are journaled with selection state. They are not
      external server-request idempotency records and cannot mint command_audit. *)
-  call t (Apply_instruction_command (admission, source, request))
+  call t (Context_request (Instruction_command (admission, source, request)))
 ;;
 
 let instruction_command t ~admission ~source ~request =

@@ -144,6 +144,7 @@ type 'spec fields =
   ; conversation : Conversation.t
   ; active_operation : Agent_protocol.Operation.t option
   ; automatic_turn_budget : Automatic_turn_budget.t option [@sexp.option]
+  ; recovery_windows : (Recovery_window_ledger.t option[@sexp.opaque])
   ; permissions : Agent_protocol.Permission.t list
   ; grants : Agent_protocol.Grant.t list
   ; jobs : Agent_protocol.Job.t list
@@ -163,6 +164,7 @@ type 'spec fields =
   ; policy_canonical_usage : (Policy_canonical_usage.t option[@sexp.opaque])
   ; goal_policy_contributions : (Goal_policy_contributions.t option[@sexp.opaque])
   ; instruction_selection : Instruction_selection.t option [@sexp.option]
+  ; recovery_notes : (Recovery_note_session.t[@sexp.opaque]) option [@sexp.option]
   ; recurrence_catalog : Recurrence_catalog.t option [@sexp.option]
   ; subscriptions : Agent_protocol.Subscription.t list [@sexp.list]
   ; deliveries : Agent_protocol.Delivery.t list [@sexp.list]
@@ -755,6 +757,7 @@ let create_fields ~(identity : Identity.t) ~spec ~desired ~initial_history =
       }
   ; active_operation = None
   ; automatic_turn_budget = None
+  ; recovery_windows = None
   ; permissions = []
   ; grants = []
   ; jobs = []
@@ -774,6 +777,7 @@ let create_fields ~(identity : Identity.t) ~spec ~desired ~initial_history =
   ; policy_canonical_usage = None
   ; goal_policy_contributions = None
   ; instruction_selection = None
+  ; recovery_notes = None
   ; recurrence_catalog = None
   ; subscriptions = []
   ; deliveries = []
@@ -912,6 +916,10 @@ let validate_model_job_targets (t : t) =
 let validate_domain (t : t) =
   let open Result.Let_syntax in
   let%bind () =
+    Option.value_map t.recovery_notes ~default:(Ok ()) ~f:(fun catalog ->
+      Recovery_note_session.validate catalog ~session_id:t.identity.session_id)
+  in
+  let%bind () =
     if Int64.(t.spec.configuration_revision < 0L)
     then Error (Agent_protocol.Error.invalid_request "negative configuration revision")
     else Ok ()
@@ -1044,6 +1052,36 @@ let validate_domain (t : t) =
     match t.automatic_turn_budget with
     | None -> Ok ()
     | Some budget -> Automatic_turn_budget.validate budget
+  in
+  let%bind () =
+    match t.recovery_windows with
+    | None -> Ok ()
+    | Some ledger ->
+      let summaries = Hashtbl.create (module Agent_protocol.Id.Operation) in
+      List.iter t.conversation.compaction_archives ~f:(fun archive ->
+        if Compaction_archive.equal_kind archive.kind Compaction
+        then Hashtbl.add_multi summaries ~key:archive.operation_id ~data:archive);
+      let summary_reference operation ~f =
+        match Hashtbl.find summaries operation with
+        | None -> false
+        | Some references -> List.exists references ~f
+      in
+      let has_summary_archive (source : Recovery_window_ledger.Source.archive) =
+        summary_reference source.operation ~f:(fun archive ->
+          Int64.equal archive.revision source.basis.revision
+          && String.equal archive.sha256 (Chatml_source.Digest.to_hex source.digest))
+      in
+      let has_summary_operation operation =
+        summary_reference operation ~f:(fun _ -> true)
+      in
+      Recovery_window_ledger.validate_state
+        ledger
+        ~session_id:t.identity.session_id
+        ~generation:t.identity.generation
+        ~revision:t.counters.revision
+        ~history:t.conversation.canonical_history
+        ~has_summary_archive
+        ~has_summary_operation
   in
   let seen_invocations = Hash_set.create (module Agent_protocol.Id.Invocation) in
   let%bind () =

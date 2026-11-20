@@ -62,6 +62,7 @@ let classify = function
   | Delivery_committed _
   | Delivery_wake_changed _
   | Instruction_selection_changed _
+  | Recovery_note_changed _
   | Goal_accounts_changed _
   | Goal_catalog_changed _
   | Recurrence_catalog_changed _

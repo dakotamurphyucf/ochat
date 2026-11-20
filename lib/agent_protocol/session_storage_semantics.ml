@@ -6,7 +6,9 @@ let goal_policy_contributions = "session.goal-policy-contributions.v1"
 let ingress_provenance = "runtime.ingress-provenance.v1"
 let queue_occurrence_producer = "runtime.queue-occurrence-producer.v1"
 let moderator_lifecycle = "session.moderator-lifecycle.v1"
+let recovery_windows = "session.recovery-windows.v1"
 let recurrence_controller_goal = "recurrence.controller-goal.v1"
+let recovery_notes = "session.recovery-notes.v1"
 
 let supported_children =
   [ Schedule_provenance.persistence_semantics
@@ -20,6 +22,8 @@ let supported_children =
   ; policy_canonical_usage
   ; goal_policy_contributions
   ; moderator_lifecycle
+  ; recovery_windows
   ; recurrence_controller_goal
+  ; recovery_notes
   ]
 ;;

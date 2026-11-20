@@ -328,6 +328,12 @@ let atom_to_jsonaf ~limits ~state_document delta =
           [ "kind", `String "invocation_reconciled"
           ; "value", P.Invocation.Storage.to_json value
           ])
+  | Recovery_note_changed change ->
+    Ok
+      (`Object
+          [ "kind", `String "recovery_note_changed"
+          ; "value", Recovery_note_change.to_json change
+          ])
   | Instruction_selection_changed value ->
     let%map.Result json = Instruction_selection.to_jsonaf value in
     `Object [ "kind", `String "instruction_selection_changed"; "value", json ]
@@ -716,6 +722,9 @@ let atom_of_jsonaf ~limits json =
   | "invocation_reconciled" ->
     Result.map (X.required fields "value" P.Invocation.Storage.of_json) ~f:(fun value ->
       Delta.Invocation_reconciled value)
+  | "recovery_note_changed" ->
+    let%map.Result change = X.required fields "value" Recovery_note_change.of_json in
+    Delta.Recovery_note_changed change
   | "instruction_selection_changed" ->
     let%map.Result value = X.required fields "value" Instruction_selection.of_jsonaf in
     Delta.Instruction_selection_changed value
@@ -973,6 +982,9 @@ let shape =
              ; ( "invocation_reconciled"
                , X.shape_exn
                    [ "kind", D.Shape.value; "value", Session_record_shapes.invocation ] )
+             ; ( "recovery_note_changed"
+               , X.shape_exn
+                   [ "kind", D.Shape.value; "value", Recovery_note_change.shape ] )
              ; ( "instruction_selection_changed"
                , X.shape_exn
                    [ "kind", D.Shape.value; "value", Instruction_selection.shape ] )

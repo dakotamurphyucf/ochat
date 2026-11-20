@@ -3828,6 +3828,41 @@ val read_goals
   -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
   -> (Agent_protocol.Goal.t list, Agent_protocol.Error.t) result
 
+(** The bound durable actor checks original owned-session authority in its mailbox.
+    Exact note bytes travel only on this requested result. Listing pairs metadata
+    with the current catalog revision needed by a subsequent create. *)
+val read_recovery_note
+  :  t
+  -> access:Recovery_note_access.t
+  -> Recovery_notes.Catalog.selection
+  -> (Recovery_notes.Catalog.Content.t, Agent_protocol.Error.t) result
+
+val list_recovery_notes
+  :  t
+  -> access:Recovery_note_access.t
+  -> ( Recovery_notes.Catalog.Catalog_revision.t * Recovery_notes.Catalog.metadata list
+       , Agent_protocol.Error.t )
+       result
+
+(** A current writer and original host visibility are checked before receipt
+    lookup and at the actual writer. The receipt is returned after the publish
+    boundary. A replay performs no Store mutation. *)
+val mutate_recovery_note_operator
+  :  t
+  -> access:Recovery_note_access.t
+  -> key:Agent_protocol.Idempotency_key.t
+  -> Recovery_notes.Catalog.mutation
+  -> (Recovery_notes.Catalog.Receipt.t, Agent_protocol.Error.t) result
+
+(** Uses the actual checked native invocation identity as the receipt key.
+    A current token for the selected effect and the actor's physical executing
+    invocation are required. *)
+val mutate_recovery_note_native
+  :  t
+  -> access:Recovery_note_access.t
+  -> Recovery_notes.Catalog.mutation
+  -> (Recovery_notes.Catalog.Receipt.t, Agent_protocol.Error.t) result
+
 (** Actual admitted native effect and original execution epoch are checked in
     the mailbox before CAS and immediately before persistence. Replacement needs
     a genuine live source-use capture; current-root-only retries may return only

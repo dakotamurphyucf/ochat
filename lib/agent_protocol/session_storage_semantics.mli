@@ -14,5 +14,10 @@ val supported_children : string list
 (** Captured current-installation lifecycle pointer; no execution authority. *)
 val moderator_lifecycle : string
 
+(** Typed source-bound local recovery ledger, independent of ordinary history. *)
+val recovery_windows : string
+
 (** Durable immutable Goal association on a captured recurrence definition. *)
 val recurrence_controller_goal : string
+
+val recovery_notes : string

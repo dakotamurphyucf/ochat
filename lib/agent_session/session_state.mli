@@ -172,6 +172,9 @@ type 'spec fields =
   ; automatic_turn_budget : Automatic_turn_budget.t option [@sexp.option]
     (** Qualified host scheduling accounting. Historical absence is preserved
         until the host explicitly enables it; runtime reload cannot reset it. *)
+  ; recovery_windows : (Recovery_window_ledger.t option[@sexp.opaque])
+    (** The absent field disables local window accounting. Canonical history
+        and physical archive custody continue to use their existing owners. *)
   ; permissions : Agent_protocol.Permission.t list
   ; grants : Agent_protocol.Grant.t list
   ; jobs : Agent_protocol.Job.t list
@@ -201,6 +204,7 @@ type 'spec fields =
   ; instruction_selection : Instruction_selection.t option [@sexp.option]
     (** Exact inert captured instruction custody and immutable mutation receipts.
         No transcript entry, source grant or provider activation is implied. *)
+  ; recovery_notes : (Recovery_note_session.t[@sexp.opaque]) option [@sexp.option]
   ; recurrence_catalog : Recurrence_catalog.t option [@sexp.option]
   ; subscriptions : Agent_protocol.Subscription.t list [@sexp.list]
   ; deliveries : Agent_protocol.Delivery.t list [@sexp.list]

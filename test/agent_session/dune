@@ -46,6 +46,7 @@
   descendant_physical_recovery_tests
   instruction_selection_tests
   instruction_selection_persistence_tests
+  recovery_note_actor_tests
   instruction_clear_capacity_tests
   goal_run_tests
   goal_root_policy_tests
@@ -164,6 +165,7 @@
   job_artifact_fixtures
   job_artifact_retention_tests
   retained_history_tests
+  recovery_window_ledger_tests
   replay_retention_tests
   job_progress_tests
   job_progress_authority_tests
@@ -203,7 +205,7 @@
   standalone_tests
   root_invocation_tests
   state_tests)
- (libraries session_commit_attempt_test_support goal_root_policy_test_support agent_server_test_support developer_root_owner_test_suite developer_run_store_test_suite inference_fixture ochat.transcript core eio eio_main mirage-crypto-rng.unix ochat.agent_session ochat.instruction_content ochat.agent_server ochat.agent_store)
+ (libraries session_commit_attempt_test_support goal_root_policy_test_support agent_server_test_support developer_root_owner_test_suite developer_run_store_test_suite inference_fixture ochat.transcript core eio eio_main mirage-crypto-rng.unix ochat.agent_session ochat.recovery_notes ochat.instruction_content ochat.agent_server ochat.agent_store)
  (inline_tests)
  (preprocess
   (pps ppx_jane ppx_expect)))

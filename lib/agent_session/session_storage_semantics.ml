@@ -687,6 +687,69 @@ let recurrence_goal_delta_requires payload =
   | Absent | Null | Value _ -> false
 ;;
 
+let recovery_window_name = Agent_protocol.Session_storage_semantics.recovery_windows
+
+let recovery_window_state_requires payload =
+  match D.Json.field payload ~name:"recovery_windows" with
+  | Absent -> false
+  | Null | Value _ -> true
+;;
+
+let recovery_window_delta_requires payload =
+  match D.Json.field payload ~name:"changes" with
+  | Value (`Array changes) ->
+    List.exists changes ~f:(fun change ->
+      match D.Json.field change ~name:"kind", D.Json.field change ~name:"state" with
+      | Value (`String "created"), Value state ->
+        (match D.Json.field state ~name:"payload" with
+         | Value payload -> recovery_window_state_requires payload
+         | Absent | Null -> false)
+      | _ -> false)
+  | Absent | Null | Value _ -> false
+;;
+
+let require_state_without_recovery_windows = require_state
+
+let require_state document ~limits =
+  let%bind.Result document = require_state_without_recovery_windows document ~limits in
+  require
+    document
+    ~name:recovery_window_name
+    ~required:(recovery_window_state_requires (D.Document.payload document))
+    ~limits
+;;
+
+let check_state_without_recovery_windows = check_state
+
+let check_state document =
+  let%bind.Result () = check_state_without_recovery_windows document in
+  check
+    document
+    ~name:recovery_window_name
+    ~required:(recovery_window_state_requires (D.Document.payload document))
+;;
+
+let require_delta_without_recovery_windows = require_delta
+
+let require_delta document ~limits =
+  let%bind.Result document = require_delta_without_recovery_windows document ~limits in
+  require
+    document
+    ~name:recovery_window_name
+    ~required:(recovery_window_delta_requires (D.Document.payload document))
+    ~limits
+;;
+
+let check_delta_without_recovery_windows = check_delta
+
+let check_delta document =
+  let%bind.Result () = check_delta_without_recovery_windows document in
+  check
+    document
+    ~name:recovery_window_name
+    ~required:(recovery_window_delta_requires (D.Document.payload document))
+;;
+
 let require_state_without_lifecycle = require_state
 
 let require_state document ~limits =
@@ -757,4 +820,68 @@ let check_delta document =
     document
     ~name:recurrence_goal_name
     ~required:(recurrence_goal_delta_requires payload)
+;;
+
+let recovery_notes_name = Agent_protocol.Session_storage_semantics.recovery_notes
+
+let recovery_notes_state_requires payload =
+  match D.Json.field payload ~name:"recovery_notes" with
+  | Absent -> false
+  | Null | Value _ -> true
+;;
+
+let recovery_notes_delta_requires payload =
+  match D.Json.field payload ~name:"changes" with
+  | Value (`Array changes) ->
+    List.exists changes ~f:(fun change ->
+      match D.Json.field change ~name:"kind" with
+      | Value (`String "recovery_note_changed") -> true
+      | Value (`String "created") ->
+        (match D.Json.field change ~name:"state" with
+         | Value state ->
+           (match D.Json.field state ~name:"payload" with
+            | Value payload -> recovery_notes_state_requires payload
+            | Absent | Null -> false)
+         | Absent | Null -> false)
+      | Value _ | Absent | Null -> false)
+  | Value _ | Absent | Null -> false
+;;
+
+let require_state_without_recovery_notes = require_state
+let check_state_without_recovery_notes = check_state
+let require_delta_without_recovery_notes = require_delta
+let check_delta_without_recovery_notes = check_delta
+
+let require_state document ~limits =
+  let%bind.Result document = require_state_without_recovery_notes document ~limits in
+  require
+    document
+    ~limits
+    ~name:recovery_notes_name
+    ~required:(recovery_notes_state_requires (D.Document.payload document))
+;;
+
+let check_state document =
+  let%bind.Result () = check_state_without_recovery_notes document in
+  check
+    document
+    ~name:recovery_notes_name
+    ~required:(recovery_notes_state_requires (D.Document.payload document))
+;;
+
+let require_delta document ~limits =
+  let%bind.Result document = require_delta_without_recovery_notes document ~limits in
+  require
+    document
+    ~limits
+    ~name:recovery_notes_name
+    ~required:(recovery_notes_delta_requires (D.Document.payload document))
+;;
+
+let check_delta document =
+  let%bind.Result () = check_delta_without_recovery_notes document in
+  check
+    document
+    ~name:recovery_notes_name
+    ~required:(recovery_notes_delta_requires (D.Document.payload document))
 ;;

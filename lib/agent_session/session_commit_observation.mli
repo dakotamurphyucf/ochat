@@ -13,6 +13,14 @@ module Owner : sig
   (** Retain SAME physical previous State and complete candidate before commit. *)
   val create : previous:Session_state.t -> candidate:Session_transition.t -> t
 
+  (** As [create], with a nonyielding recheck at the actual journal boundary.
+      A failed guard leaves progress at [Before_writer]. *)
+  val create_guarded
+    :  previous:Session_state.t
+    -> candidate:Session_transition.t
+    -> check_at_writer:(unit -> (unit, Agent_protocol.Error.t) result)
+    -> t
+
   (** Invoke the actual persistence callback once, preserving its original Error
       or exception/backtrace. Unobserved failure is unknown. Unobserved success
       preserves the existing trusted host contract, without inventing a journal

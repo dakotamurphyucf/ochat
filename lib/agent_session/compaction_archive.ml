@@ -13,6 +13,14 @@ let store_error value = error (Sexp.to_string_hum (Store.Store_error.sexp_of_t v
 
 let archive_document state ~limits =
   let open Result.Let_syntax in
+  (* A history capture must not become a second store for private note bodies. *)
+  let value = Session_state_document.value state in
+  let state =
+    match value.recovery_notes with
+    | None -> state
+    | Some _ ->
+      Session_state_document.with_value state { value with recovery_notes = None }
+  in
   let%bind state = Session_state_document.encode state ~limits in
   (* Admit the encoded child without replacing its captured JSON representation. *)
   let%bind _ = Session_state_document.decode ~limits state in
