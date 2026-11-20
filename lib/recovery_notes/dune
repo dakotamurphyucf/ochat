@@ -1,0 +1,6 @@
+(library
+ (name recovery_notes)
+ (public_name ochat.recovery_notes)
+ (private_modules catalog_state catalog_document)
+ (libraries core digestif jsonaf ochat.agent_protocol ochat.document_schema)
+ (preprocess (pps ppx_jane)))

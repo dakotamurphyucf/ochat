@@ -1,0 +1,5 @@
+(library
+ (name recovery_notes_tests)
+ (libraries core expect_test_helpers_core jsonaf ochat.agent_protocol ochat.document_schema ochat.recovery_notes)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))
