@@ -35,6 +35,7 @@
   search_term
   search_snippet
   history_text
+  inline_image
   search_query
   search_hit
   search_page

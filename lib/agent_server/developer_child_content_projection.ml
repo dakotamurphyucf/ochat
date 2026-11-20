@@ -385,29 +385,12 @@ let read_bytes t (item : CM.basic_content_item) =
   contents
 ;;
 
-let image_media_type contents =
-  if String.is_prefix contents ~prefix:"\x89PNG\r\n\x1a\n"
-  then Some "image/png"
-  else if String.is_prefix contents ~prefix:"\xff\xd8\xff"
-  then Some "image/jpeg"
-  else if
-    String.is_prefix contents ~prefix:"GIF87a"
-    || String.is_prefix contents ~prefix:"GIF89a"
-  then Some "image/gif"
-  else if
-    String.length contents >= 12
-    && String.is_prefix contents ~prefix:"RIFF"
-    && String.equal (String.sub contents ~pos:8 ~len:4) "WEBP"
-  then Some "image/webp"
-  else None
-;;
-
 let image t item =
   Budget.with_exclusive t.budget ~f:(fun () ->
     let open Result.Let_syntax in
     let%bind contents = read_bytes t item in
     let%bind media_type =
-      image_media_type contents
+      Agent_protocol.Inline_image.media_type_of_contents contents
       |> Result.of_option
            ~error:(error Invalid_request "child image bytes have an unsupported format")
     in
