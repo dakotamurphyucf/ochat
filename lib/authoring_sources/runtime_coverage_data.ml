@@ -1177,11 +1177,11 @@ let implementation_sources =
   ; ( "lib/agent_server/developer_startup_policy.ml"
     , "4f9bb9a387599ae65a60dff32f59e49bffd4e5a66dfa9181345ec344447699b8" )
   ; ( "lib/agent_server/config_validator.ml"
-    , "f044df15a366cad638a37934c6507ebd67a8e903a6810cb0cd3e3ba8005cf39f" )
+    , "1f9635dd9a39f0cc651a827fb767ef7886435b5590578c48c2e360d2f85e5cf5" )
   ; ( "lib/agent_server/embedded_local_template.ml"
     , "93691f37b0b11d3b5ef3303d2d6f35d7bdffe2ea2eb360db9d007ab841210e3e" )
   ; ( "lib/agent_server/embedded.ml"
-    , "ccd48d12c8fd3b45213081918d8c9b1403dbee597b6e0ef609587fc77aa0d51c" )
+    , "fa6a1f71ed55e2ee0e968184dc1980704b0a04cdb998d661fe32287140294726" )
   ; ( "bin/ochat_agent_stdio.ml"
     , "8d134cd11c7df2a60e6b4b77a5ff7f9ea0c28a8a2674a3dd9f573adaa7623902" )
   ; ( "lib/agent_server/native_resource_authority.ml"
@@ -1193,7 +1193,7 @@ let implementation_sources =
   ; ( "lib/agent_server/descendant_accounting_host.ml"
     , "3baff14cf9c606e899c08f95805cc3ca9f070827b46ec531e1c230314820b0fd" )
   ; ( "lib/agent_server/session_factory.ml"
-    , "e326865612abc4ab084040843b7e976eecb2708d8183a9565cd9aa9b683523cc" )
+    , "7a7f332d8b4106a29f81dc28eb81e09198eca39abffb04f725f47bd44ae8a032" )
   ; ( "bin/inference_composition.ml"
     , "1f57451d5543a5fe8f2f23dc0e593374b64946d088cba164acd1c087a7cdce18" )
   ; ( "lib/agent_protocol/developer_command_id.ml"
@@ -1271,7 +1271,7 @@ let implementation_sources =
   ; ( "lib/agent_server/developer_model_job_runner.ml"
     , "7604ff6140540e3b53720515526242e7bc1014c97d6895aacadbfb2909bda718" )
   ; ( "lib/agent_server/daemon.ml"
-    , "6b51fe74f22dcef27eb968ab9dc499e0b19fc05510dd02f98ca9a6408d950f3b" )
+    , "189c3de17e99c5e76499013bdfa25362f9a833cb37f5f95ba23d7a0712166ca1" )
   ; ( "lib/agent_session/developer_claimed_resource_owner.ml"
     , "fb251c6e022f9880820b15807018adc5cf240500050a0424321d7507d3e2bc41" )
   ; ( "lib/agent_server/developer_claim_deadline.ml"
@@ -1509,7 +1509,7 @@ let implementation_sources =
   ; ( "lib/agent_session/goal_continuation_phase.ml"
     , "e24a210492bfcc9e94c7bf472603531eb053eb7654de7c6100083464da9b1b51" )
   ; ( "lib/agent_session/session_actor.ml"
-    , "6c1e9bcbfc7c78a6c4e7007a7837081ca5dbf473e74bc2e4eeb9f8313b943c10" )
+    , "8fe48ec96d336476333d5c83db3dfdcd6017e4e83e4947e564f3d3610d8c4b77" )
   ; ( "lib/agent_session/idle_completion_write.ml"
     , "d427fa80c4346b64f3f9bf4d5025ad2218403278816ade76ff17ba1adaa426d9" )
   ; ( "lib/agent_session/goal_descendant_admission_custody.ml"

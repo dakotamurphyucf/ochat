@@ -5,7 +5,7 @@ module Mode = struct
   type t =
     | Manual
     | Automatic
-  [@@deriving equal, sexp_of]
+  [@@deriving compare, equal, sexp]
 end
 
 module Host = struct
@@ -13,15 +13,24 @@ module Host = struct
     { stamp : unit ref
     ; mode_for_session : Agent_protocol.Session_ref.t -> Mode.t option
     ; targets : (Capacity.Policy.t * [ `Manual | `Automatic ]) list
+    ; requires_window : bool
     }
 
   type error = Duplicate_target [@@deriving equal, sexp_of]
 
-  let off = { stamp = ref (); mode_for_session = (fun _ -> None); targets = [] }
+  let off =
+    { stamp = ref ()
+    ; mode_for_session = (fun _ -> None)
+    ; targets = []
+    ; requires_window = false
+    }
+  ;;
 
-  let create ~mode_for_session ~targets =
+  let is_off t = phys_equal t off
+
+  let create_host ~mode_for_session ~targets ~requires_window =
     let rec distinct seen = function
-      | [] -> Ok { stamp = ref (); mode_for_session; targets }
+      | [] -> Ok { stamp = ref (); mode_for_session; targets; requires_window }
       | (policy, _) :: other ->
         let target = Capacity.Policy.target policy in
         if List.mem seen target ~equal:Inference.Request.Target.equal
@@ -29,6 +38,17 @@ module Host = struct
         else distinct (target :: seen) other
     in
     distinct [] targets
+  ;;
+
+  let create ~mode_for_session ~targets =
+    create_host ~mode_for_session ~targets ~requires_window:false
+  ;;
+
+  let for_enabled_windows ~mode ~targets =
+    create_host
+      ~mode_for_session:(fun _ -> Some mode)
+      ~targets:(List.map targets ~f:(fun policy -> policy, `Manual))
+      ~requires_window:true
   ;;
 end
 
@@ -45,8 +65,10 @@ module Selection = struct
     ; policy : Capacity.Policy.t option
     }
 
-  let select (host : Host.t) ~owner ~target =
-    Option.map (host.mode_for_session owner) ~f:(fun requested ->
+  let select (host : Host.t) ~owner ~target ~opted_in =
+    Option.filter (host.mode_for_session owner) ~f:(fun _ ->
+      (not host.requires_window) || opted_in ())
+    |> Option.map ~f:(fun requested ->
       let target_policy =
         List.find host.targets ~f:(fun (policy, _) ->
           Inference.Request.Target.equal (Capacity.Policy.target policy) target)

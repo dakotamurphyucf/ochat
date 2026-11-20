@@ -2,7 +2,7 @@ open! Core
 module Observation = Inference.Observation
 
 module Encoder = struct
-  type t = Openai_responses_v1 [@@deriving equal, sexp_of]
+  type t = Openai_responses_v1 [@@deriving compare, equal, sexp]
 end
 
 let positive tokens = Int64.(tokens > zero)
@@ -66,7 +66,7 @@ module Policy = struct
   let allowed_total ~total t = cap (cap total t.host_total) t.session_total
   let target t = t.target
 
-  let create ~target ~encoder ~model_limit ~allowance ~estimate =
+  let validate ~model_limit ~allowance ~estimate =
     let { host_total
         ; session_total
         ; omitted_output_default
@@ -80,36 +80,36 @@ module Policy = struct
     let valid_bound total =
       Option.for_all ~f:(fun value -> positive value && Int64.(value <= total))
     in
-    let result =
-      if not (List.for_all [ host_total; session_total ] ~f:(Option.for_all ~f:positive))
-      then Error Invalid_limits
-      else if
-        not
-          (positive checkpoint_reserve
-           && positive warning_lead
-           && positive minimum_output
-           && Option.for_all estimate ~f:(fun e -> Int64.(e.margin >= zero)))
-      then Error Invalid_reservations
-      else (
-        match model_limit with
-        | Undeclared | Unbounded -> Ok ()
-        | Bounded { total; input; output } ->
-          if not (positive total && valid_bound total input && valid_bound total output)
-          then Error Invalid_limits
-          else if
-            (not
-               (Option.for_all output ~f:(fun limit -> Int64.(minimum_output <= limit))))
-            || Option.is_none
-                 (input_limits
-                    ~total:(allowed_total ~total allowance)
-                    ~provider_input:input
-                    ~output:minimum_output
-                    ~checkpoint_reserve
-                    ~warning_lead)
-          then Error Invalid_reservations
-          else Ok ())
-    in
-    Result.map result ~f:(fun () ->
+    if not (List.for_all [ host_total; session_total ] ~f:(Option.for_all ~f:positive))
+    then Error Invalid_limits
+    else if
+      not
+        (positive checkpoint_reserve
+         && positive warning_lead
+         && positive minimum_output
+         && Option.for_all estimate ~f:(fun e -> Int64.(e.margin >= zero)))
+    then Error Invalid_reservations
+    else (
+      match model_limit with
+      | Undeclared | Unbounded -> Ok ()
+      | Bounded { total; input; output } ->
+        if not (positive total && valid_bound total input && valid_bound total output)
+        then Error Invalid_limits
+        else if
+          (not (Option.for_all output ~f:(fun limit -> Int64.(minimum_output <= limit))))
+          || Option.is_none
+               (input_limits
+                  ~total:(allowed_total ~total allowance)
+                  ~provider_input:input
+                  ~output:minimum_output
+                  ~checkpoint_reserve
+                  ~warning_lead)
+        then Error Invalid_reservations
+        else Ok ())
+  ;;
+
+  let create ~target ~encoder ~model_limit ~allowance ~estimate =
+    Result.map (validate ~model_limit ~allowance ~estimate) ~f:(fun () ->
       { target; encoder; model_limit; allowance; estimate; stamp = ref () })
   ;;
 end

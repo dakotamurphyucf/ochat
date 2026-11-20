@@ -25611,7 +25611,13 @@ let context_capacity_basis t target =
   Option.bind
     (Option.bind t.canonical_persistence ~f:Canonical_backend_binding_data.session_owner)
     ~f:(fun owner ->
-      Session_context_capacity.Selection.select t.context_capacity_host ~owner ~target
+      Session_context_capacity.Selection.select
+        t.context_capacity_host
+        ~owner
+        ~target
+        ~opted_in:(fun () ->
+          Option.exists t.state.recovery_windows ~f:(fun ledger ->
+            Agent_protocol.Session_ref.equal owner (Recovery_window_ledger.owner ledger)))
       |> Option.map ~f:(fun selection ->
         Configuration_capture.Capacity_basis.capture t.state ~selection))
 ;;

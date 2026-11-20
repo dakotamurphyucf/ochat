@@ -41,6 +41,14 @@ from the specific host qualification. A missing numeric policy leaves
 automatic pressure handling inactive and preserves only the admitted manual
 actions for that host.
 
+The stock daemon loads the optional `server.recovery_capacity` policy at
+startup and uses the session's durable recovery-window opt-in. It qualifies
+the OpenAI Responses encoder against targets captured by the ordinary prompt
+and profile resolver. A stock request for automatic handling reports manual
+because stock startup supplies no qualified checkpoint and fallback recipe.
+The stock policy syntax and bounds are described in the agent server
+configuration guide.
+
 Use `Context_estimate` for pre-dispatch observations. Its opaque host
 preparation ID labels the exact candidate, and its public projection never
 contains the payload, instructions, tool names, credentials or a private

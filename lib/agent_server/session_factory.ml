@@ -233,6 +233,13 @@ type inference_policy =
       -> (runtime_inference_ports, Inference_runtime.Preparation_error.t) Result.t
   }
 
+let capture_prompt_inference_target policy revision =
+  let module Revision = Agent_session.Prompt_revision in
+  policy.capture_inference_target
+    ~prompt_revision_id:(Revision.id revision)
+    ~config:(Chat_response.Config.of_elements (Revision.elements revision))
+;;
+
 type model_job_inference =
   { context : Inference_runtime.Context.t
   ; capture_recipe_target :
@@ -13241,11 +13248,7 @@ let create_session_admitted
   in
   let%bind profile = permission_profile t definition.permission_profile in
   let%bind target =
-    t.inference_policy.capture_inference_target
-      ~prompt_revision_id:(Agent_session.Prompt_revision.id revision)
-      ~config:
-        (Chat_response.Config.of_elements
-           (Agent_session.Prompt_revision.elements revision))
+    capture_prompt_inference_target t.inference_policy revision
     |> Result.map_error ~f:(fun error ->
       unavailable
         Invalid_state

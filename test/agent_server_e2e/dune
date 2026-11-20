@@ -90,6 +90,12 @@
       shell-grants-redaction
       --case
       redaction.live-trace)
+     (run
+      %{exe:agent_server_e2e.exe}
+      --scenario
+      data-integrity
+      --case
+      daemon-recovery.configured-capacity)
      (run %{exe:agent_server_e2e.exe} --scenario fork-children))))))
 
 (alias

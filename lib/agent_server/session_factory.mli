@@ -93,6 +93,12 @@ type inference_policy =
       -> (runtime_inference_ports, Inference_runtime.Preparation_error.t) Result.t
   }
 
+(** Same immutable prompt target capture used by new durable sessions. *)
+val capture_prompt_inference_target
+  :  inference_policy
+  -> Agent_session.Prompt_revision.t
+  -> (Inference.Request.Target.t, Inference_runtime.Preparation_error.t) result
+
 type model_job_inference =
   { context : Inference_runtime.Context.t
   ; capture_recipe_target :

@@ -66,6 +66,9 @@ module Server : sig
 
   type t =
     { data_dir : string
+    ; recovery_capacity : Recovery_capacity_configuration.t option [@sexp.option]
+      (** Startup-owned capacity ceiling. Sessions opt in through their own
+          durable recovery window. Absence leaves capacity off. *)
     ; recurrence_automation : Recurrence_automation_configuration.t option [@sexp.option]
       (** Explicit restart-bound planning principal/controller grants and optional
           finite no-follow timezone directory. Absence disables automatic due

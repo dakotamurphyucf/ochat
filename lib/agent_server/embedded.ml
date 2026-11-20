@@ -90,6 +90,7 @@ let data_root env options =
 let server_config ~project_sources data_root =
   Config.Server.
     { data_dir = data_root
+    ; recovery_capacity = None
     ; recurrence_automation = None
     ; recurrence_execution = None
     ; session_helpers = []

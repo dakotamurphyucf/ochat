@@ -66,6 +66,7 @@ module Server = struct
 
   type t =
     { data_dir : string
+    ; recovery_capacity : Recovery_capacity_configuration.t option [@sexp.option]
     ; recurrence_automation : Recurrence_automation_configuration.t option [@sexp.option]
     ; recurrence_execution : Recurrence_execution_configuration.t option [@sexp.option]
     ; project_sources : Project_source_configuration.t option [@sexp.option]

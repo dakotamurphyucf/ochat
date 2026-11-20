@@ -1345,6 +1345,16 @@ let compose
   Option.iter
     recurrence_automation
     ~f:(Startup_cleanup.adopt_recurrence_host_exn startup_cleanup);
+  let%bind context_capacity_host =
+    match options.startup_mode, config.server.recovery_capacity with
+    | Operator_only, _ -> Ok Agent_session.Session_context_capacity.Host.off
+    | (Execute | On_demand), None -> Ok options.context_capacity_host
+    | (Execute | On_demand), Some configuration ->
+      Recovery_capacity_host.create
+        configuration
+        ~prompts
+        ~inference:options.inference_policy
+  in
   let factory =
     Session_factory.create
       ~sw
@@ -1362,7 +1372,7 @@ let compose
       ~tool_dir
       ~home
       ~inference_policy:options.inference_policy
-      ~context_capacity_host:options.context_capacity_host
+      ~context_capacity_host
       ~qualify_chatml_extensions:options.qualify_chatml_extensions
       ~session_helpers:options.session_helpers
       ~independent_lifetime_policy:options.independent_lifetime_policy
@@ -2241,6 +2251,19 @@ let start
   in
   let open Result.Let_syntax in
   let validate_startup_config (config : Config.t) =
+    let%bind () =
+      if
+        Option.is_some config.server.recovery_capacity
+        && not
+             (Agent_session.Session_context_capacity.Host.is_off
+                options.context_capacity_host)
+      then
+        Error
+          (Agent_protocol.Error.invalid_request
+             "configure recovery capacity through either daemon options or server \
+              configuration")
+      else Ok ()
+    in
     let%bind () =
       match options.developer, config.server.developer, options.startup_mode with
       | None, None, _ | _, _, (Execute | On_demand) -> Ok ()

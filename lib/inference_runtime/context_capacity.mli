@@ -2,7 +2,7 @@ open! Core
 
 module Encoder : sig
   (** Version of the adapter's model-facing encoding, including count coverage. *)
-  type t = Openai_responses_v1 [@@deriving equal, sexp_of]
+  type t = Openai_responses_v1 [@@deriving compare, equal, sexp]
 end
 
 module Policy : sig
@@ -47,6 +47,13 @@ module Policy : sig
     -> allowance:allowance
     -> estimate:estimate option
     -> (t, error) Result.t
+
+  (** The checked scalar declarations before the host resolves an exact target. *)
+  val validate
+    :  model_limit:model_limit
+    -> allowance:allowance
+    -> estimate:estimate option
+    -> (unit, error) Result.t
 
   val target : t -> Inference.Request.Target.t
 end

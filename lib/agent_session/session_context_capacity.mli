@@ -5,7 +5,7 @@ module Mode : sig
   type t =
     | Manual
     | Automatic
-  [@@deriving equal, sexp_of]
+  [@@deriving compare, equal, sexp]
 end
 
 module Host : sig
@@ -15,6 +15,8 @@ module Host : sig
   (** Startup default. No session policy is selected and no count runs. *)
   val off : t
 
+  val is_off : t -> bool
+
   (** Exact immutable targets and encoder policies supplied by the owning host.
       [mode_for_session] is a nonyielding lookup for the full durable session
       identity. None leaves that session disabled. [automatic] attests that the
@@ -22,6 +24,14 @@ module Host : sig
   val create
     :  mode_for_session:(Agent_protocol.Session_ref.t -> Mode.t option)
     -> targets:(Capacity.Policy.t * [ `Manual | `Automatic ]) list
+    -> (t, error) Result.t
+
+  (** Shipped policy. Only a session with its own durable recovery window can
+      use this policy. [mode] records the request; stock target rows qualify
+      Manual. A qualified embedded automatic recipe uses [create]. *)
+  val for_enabled_windows
+    :  mode:Mode.t
+    -> targets:Capacity.Policy.t list
     -> (t, error) Result.t
 end
 
@@ -35,6 +45,7 @@ module Selection : sig
     :  Host.t
     -> owner:Agent_protocol.Session_ref.t
     -> target:Inference.Request.Target.t
+    -> opted_in:(unit -> bool)
     -> t option
 
   val policy : t -> Capacity.Policy.t option

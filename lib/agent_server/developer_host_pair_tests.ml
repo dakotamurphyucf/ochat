@@ -389,6 +389,7 @@ let%test_module "retained Developer Host policy" =
         ; source_file = Filename.concat root "server.sexp"
         ; server =
             { data_dir = Option.value data_dir ~default:(Filename.concat root "data")
+            ; recovery_capacity = None
             ; recurrence_automation = None
             ; recurrence_execution = None
             ; session_helpers = []
