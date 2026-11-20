@@ -2392,6 +2392,20 @@ let recovery_note_native_service t actor_ref =
   Agent_session.Recovery_note_native_service.{ prepare; mutate }
 ;;
 
+let recovery_context_native_service actor_ref =
+  let module A = Agent_session.Session_actor in
+  let open Result.Let_syntax in
+  let remaining access =
+    let%bind actor = extension_actor actor_ref in
+    A.context_remaining_native actor ~access
+  in
+  let new_window access window =
+    let%bind actor = extension_actor actor_ref in
+    A.context_new_window_native actor ~access ~window
+  in
+  Agent_session.Recovery_context_service.{ remaining; new_window }
+;;
+
 let native_script_tools
       t
       profile
@@ -2478,6 +2492,10 @@ let native_script_tools
   Agent_session.Script_tool_calls.with_recovery_note_service
     tools
     (recovery_note_native_service t actor_ref)
+  |> fun tools ->
+  Agent_session.Script_tool_calls.with_recovery_context_service
+    tools
+    (recovery_context_native_service actor_ref)
   |> fun tools ->
   Agent_session.Script_tool_calls.with_recurrence_service
     tools

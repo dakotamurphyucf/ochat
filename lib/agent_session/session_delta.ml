@@ -76,6 +76,7 @@ type t =
   | Instruction_selection_changed of Instruction_selection.t
   | Recovery_note_changed of (Recovery_note_change.t[@sexp.opaque])
   | Recovery_note_share_changed of (Recovery_note_share_change.t[@sexp.opaque])
+  | Recovery_rollover_changed of (Recovery_rollover.Change.t[@sexp.opaque])
   | Recurrence_catalog_changed of Recurrence_catalog.t
   | Run_state_changed of Run_state.t
   | Moderator_changed of Jsonaf.t option
@@ -243,6 +244,7 @@ let rec contains_policy_usage = function
   | Instruction_selection_changed _
   | Recovery_note_changed _
   | Recovery_note_share_changed _
+  | Recovery_rollover_changed _
   | Recurrence_catalog_changed _
   | Run_state_changed _
   | Moderator_changed _
@@ -323,6 +325,7 @@ let rec contains_goal_policy = function
   | Instruction_selection_changed _
   | Recovery_note_changed _
   | Recovery_note_share_changed _
+  | Recovery_rollover_changed _
   | Recurrence_catalog_changed _
   | Run_state_changed _
   | Moderator_changed _
@@ -414,6 +417,9 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
       Recovery_note_share.check_unchanged
         state.recovery_note_shares
         ~incoming:created.recovery_note_shares
+    in
+    let%bind () =
+      Recovery_rollover.check_unchanged state.recovery_rollover ~incoming:created.recovery_rollover
     in
     let%bind () =
       match state.instruction_selection, created.instruction_selection with
@@ -1741,6 +1747,22 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
         ~session_id:state.identity.session_id
     in
     { state with recovery_notes = Some catalog }
+  | Recovery_rollover_changed change ->
+    let open Result.Let_syntax in
+    let%bind windows =
+      Result.of_option
+        state.recovery_windows
+        ~error:(Agent_protocol.Error.invalid_request "recovery window ledger is unavailable")
+    in
+    let active = Recovery_window_record.scope (Recovery_window_ledger.active windows) in
+    let%map ledger =
+      Recovery_rollover.apply
+        state.recovery_rollover
+        ~active
+        ~revision:state.counters.revision
+        change
+    in
+    { state with recovery_rollover = Some ledger }
   | Recovery_note_share_changed change ->
     let%map.Result shares =
       Recovery_note_share_change.apply
@@ -2011,6 +2033,7 @@ let validate_goal_accounts delta ~(previous : Session_state.t) ~(next : Session_
     | Instruction_selection_changed _
     | Recovery_note_changed _
     | Recovery_note_share_changed _
+    | Recovery_rollover_changed _
     | Recurrence_catalog_changed _
     | Run_state_changed _
     | Moderator_changed _
@@ -2152,6 +2175,7 @@ let validate_goal_descendants
     | Instruction_selection_changed _
     | Recovery_note_changed _
     | Recovery_note_share_changed _
+    | Recovery_rollover_changed _
     | Recurrence_catalog_changed _
     | Run_state_changed _
     | Moderator_changed _
@@ -2265,6 +2289,7 @@ let rec validate_descendant_publication delta ~revision =
   | Instruction_selection_changed _
   | Recovery_note_changed _
   | Recovery_note_share_changed _
+  | Recovery_rollover_changed _
   | Recurrence_catalog_changed _
   | Run_state_changed _
   | Moderator_changed _
@@ -2378,6 +2403,7 @@ let policy_usage_step delta ~(previous : Session_state.t) ~(next : Session_state
   | Instruction_selection_changed _
   | Recovery_note_changed _
   | Recovery_note_share_changed _
+  | Recovery_rollover_changed _
   | Recurrence_catalog_changed _
   | Shell_changed _
   | History_block_reserved _
@@ -2519,6 +2545,7 @@ let goal_policy_step delta ~(previous : Session_state.t) ~(next : Session_state.
   | Instruction_selection_changed _
   | Recovery_note_changed _
   | Recovery_note_share_changed _
+  | Recovery_rollover_changed _
   | Recurrence_catalog_changed _
   | Run_state_changed _
   | Moderator_changed _

@@ -94,6 +94,7 @@ type t =
   | Instruction_selection_changed of Instruction_selection.t
   | Recovery_note_changed of (Recovery_note_change.t[@sexp.opaque])
   | Recovery_note_share_changed of (Recovery_note_share_change.t[@sexp.opaque])
+  | Recovery_rollover_changed of (Recovery_rollover.Change.t[@sexp.opaque])
   | Recurrence_catalog_changed of Recurrence_catalog.t
   | Run_state_changed of Run_state.t
   | Moderator_changed of Jsonaf.t option

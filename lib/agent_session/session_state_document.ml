@@ -835,6 +835,8 @@ let project_fields_with_presence
        , (X.list_json Managed_submission.to_jsonaf) t.managed_submissions )
      ; "managed_stops", (X.list_json Managed_stop.to_jsonaf) t.managed_stops
      ]
+     @ Option.value_map t.recovery_rollover ~default:[] ~f:(fun ledger ->
+       [ "recovery_rollover", Recovery_rollover.to_json ledger ])
      @ Option.value_map t.recovery_windows ~default:[] ~f:(fun ledger ->
        [ "recovery_windows", Recovery_window_ledger.to_jsonaf ledger ])
      @ Option.value_map t.recovery_effective ~default:[] ~f:(fun ledger ->
@@ -1061,6 +1063,12 @@ let state_fields_of_jsonaf ?capture ~limits json =
       "recovery_notes"
       (Recovery_note_session.of_json ~session_id:identity.session_id)
   in
+  let%bind recovery_rollover =
+    match D.Json.field json ~name:"recovery_rollover" with
+    | Absent -> Ok None
+    | Null -> Error (P.Error.invalid_request "recovery_rollover must be a ledger")
+    | Value raw -> Result.map (Recovery_rollover.of_json raw) ~f:Option.some
+  in
   let%bind recovery_note_shares =
     J.optional_as
       fields
@@ -1133,6 +1141,7 @@ let state_fields_of_jsonaf ?capture ~limits json =
     ; instruction_selection
     ; recovery_notes
     ; recovery_note_shares
+    ; recovery_rollover
     ; recurrence_catalog
     ; subscriptions
     ; deliveries
@@ -1191,6 +1200,7 @@ let state_shape =
     ; "instruction_selection", X.nullable_shape Instruction_selection.shape
     ; "recovery_notes", D.Shape.value
     ; "recovery_note_shares", D.Shape.value
+    ; "recovery_rollover", D.Shape.value
     ; "recurrence_catalog", X.nullable_shape Recurrence_catalog.shape
     ; "managed_stops", X.array_shape_exn ~identity_field:"id" Managed_stop.shape
     ; ( "moderator_executions"
@@ -2805,6 +2815,12 @@ let adopt previous ~limits incoming =
     Recovery_note_share.check_unchanged
       (value previous).recovery_note_shares
       ~incoming:(value incoming).recovery_note_shares
+    |> X.document_result
+  in
+  let%bind () =
+    Recovery_rollover.check_unchanged
+      (value previous).recovery_rollover
+      ~incoming:(value incoming).recovery_rollover
     |> X.document_result
   in
   let%bind () =

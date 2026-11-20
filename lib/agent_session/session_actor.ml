@@ -3572,6 +3572,8 @@ type invocation_execution =
   { owner : invocation_owner
   ; policy_source : Policy_standalone_source.Classification.t
   ; mutable native_goal : (Goal_native_actions.Entry.t * int option) option
+  ; context_rollover_basis :
+      (Configuration_capture.Native_window.t * Recovery_rollover.Expected.t) option
   ; dispatched : Agent_protocol.Invocation.t
   ; mutable accepts_children : bool
   ; authority_live : bool Atomic.t
@@ -5447,6 +5449,27 @@ module Recovery_note_share_request = struct
         -> S.Receipt.t t
 end
 
+module Recovery_rollover_request = struct
+  module P = Agent_protocol
+  module R = Recovery_rollover
+
+  type authorize = Session_state.t -> (unit, P.Error.t) result
+
+  type _ t =
+    | Native_remaining :
+        Recovery_context_service.access -> Recovery_context_service.observation t
+    | Native_new_window :
+        Recovery_context_service.access * P.Id.Context_window.t -> R.Receipt.t t
+    | Operator_request :
+        Operator_authorization.t
+        * P.Id.Attachment.t
+        * authorize
+        * authorize option
+        * P.Idempotency_key.t
+        * R.Expected.t
+        -> R.Receipt.t t
+end
+
 module Context_request = struct
   module Capacity = struct
     type _ t =
@@ -5471,6 +5494,7 @@ module Context_request = struct
         -> Agent_protocol.Recovery_window.Scope.t t
     | Recovery_note : 'a Recovery_note_request.t -> 'a t
     | Recovery_note_share : 'a Recovery_note_share_request.t -> 'a t
+    | Rollover : 'a Recovery_rollover_request.t -> 'a t
     | Instruction_command :
         Instruction_admission.t
         * Instruction_command_admission.Source.t option
@@ -12583,6 +12607,7 @@ let rec deferred_execution_delta (previous : Session_state.t) (delta : Session_d
   | Instruction_selection_changed _
   | Recovery_note_changed _
   | Recovery_note_share_changed _
+  | Recovery_rollover_changed _
   | Recurrence_catalog_changed _
   | Run_state_changed _
   | Moderator_changed _
@@ -19762,10 +19787,42 @@ let claim_invocation t operation_id (invocation : Agent_protocol.Invocation.t) =
       ~delta:(Session_delta.Batch (admission @ [ Invocation_changed dispatched ]))
       ~payloads:[]
   in
+  let context_rollover_basis =
+    let module P = Agent_protocol in
+    let open Option.Let_syntax in
+    let context = dispatched.P.Invocation.context in
+    let%bind () =
+      if
+        String.equal context.tool_name
+          (Recovery_context_service.name Recovery_context_service.New_window)
+        &&
+        (match context.origin with
+         | Model -> Option.is_some context.call_entry_id
+         | Script -> Option.is_some context.parent_invocation
+         | Moderator | Delegated_agent | External_adapter -> false)
+      then Some ()
+      else None
+    in
+    let%bind target = Configuration_transition.target t.state |> Result.ok in
+    let%bind preparation =
+      Configuration_capture.native_window
+        t.configuration_capture
+        ~operation_id
+        ~configuration_revision:t.state.spec.configuration_revision
+        ~target
+    in
+    let scope = Configuration_capture.Native_window.scope preparation in
+    let%map expected =
+      Recovery_rollover.Expected.create scope ~revision:t.state.counters.revision
+      |> Result.ok
+    in
+    preparation, expected
+  in
   let execution =
     { owner
     ; policy_source
     ; native_goal = None
+    ; context_rollover_basis
     ; dispatched
     ; accepts_children = true
     ; authority_live = Atomic.make true
@@ -22074,6 +22131,7 @@ let claim_event_invocation t borrow (invocation : Agent_protocol.Invocation.t) =
     { owner = Event_moderator borrow
     ; policy_source
     ; native_goal = None
+    ; context_rollover_basis = None
     ; dispatched
     ; accepts_children = true
     ; authority_live = Atomic.make true
@@ -24809,6 +24867,7 @@ let claim_idle_invocation t borrow (invocation : Agent_protocol.Invocation.t) =
     { owner = Invocation_moderator borrow
     ; policy_source
     ; native_goal = None
+    ; context_rollover_basis = None
     ; dispatched
     ; accepts_children = true
     ; authority_live = Atomic.make true
@@ -34778,6 +34837,7 @@ let claim_job_invocation t scope (invocation : Agent_protocol.Invocation.t) =
     { owner = Background_job scope
     ; policy_source
     ; native_goal = None
+    ; context_rollover_basis = None
     ; dispatched
     ; accepts_children = true
     ; authority_live = Atomic.make true
@@ -48499,6 +48559,7 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Set_idle_moderator_cancel _
   | Configuration
   | Context_request (Capacity (Read _ | Publish _))
+  | Context_request (Rollover (Native_remaining _))
   | Finish_configuration_capture _
   | Lifecycle_state _
   | Retire_lifecycle _
@@ -48714,6 +48775,7 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Context_request
       (Instruction_command _ | Recovery_note (Mutate _) | Enable_recovery_windows _)
   | Context_request (Recovery_note_share (Establish_target _ | Create _ | Revoke _))
+  | Context_request (Rollover (Native_new_window _ | Operator_request _))
   | Set_recurrence_controller _
   | Set_recurrence_planning_host _
   | Recurrence_due_ids
@@ -56808,6 +56870,156 @@ let prepare_recovery_note_delivery t ~source ~(invocation : Agent_protocol.Invoc
   | (Model | Moderator | Script | Delegated_agent | External_adapter), _ -> unavailable ()
 ;;
 
+let active_rollover_window t =
+  let module P = Agent_protocol in
+  let module L = Recovery_window_ledger in
+  let open Option.Let_syntax in
+  let%bind storage = t.canonical_persistence in
+  let%bind owner = Canonical_backend_binding_data.session_owner storage in
+  let%bind ledger = t.state.recovery_windows in
+  if
+    Canonical_backend_binding_data.is_available storage
+    && P.Session_ref.equal owner (L.owner ledger)
+  then Some (L.Window.scope (L.active ledger))
+  else None
+;;
+
+let admit_recovery_rollover ?(check_basis = fun () -> Ok ()) t ~check ~expected =
+  let module R = Recovery_rollover in
+  let module P = Agent_protocol in
+  let open Result.Let_syntax in
+  let%bind requester = check () in
+  let%bind retained = R.previous t.state.recovery_rollover ~requester ~expected in
+  match retained with
+  | Some receipt -> Ok receipt
+  | None ->
+    let check_policy () =
+      let%bind _ =
+        Result.of_option (current_context_capacity_basis t)
+          ~error:(error Invalid_state "local context mode is disabled")
+      in
+      let%map _ =
+        Result.of_option (active_rollover_window t)
+          ~error:(error Invalid_state "recovery window ledger is unavailable")
+      in
+      ()
+    in
+    let%bind () = check_policy () in
+    let%bind () = check_basis () in
+    let id = P.Id.Operation.create () in
+    let intent =
+      R.Intent.create ~id ~expected ~requester ~admitted_at:(t.services.now ())
+    in
+    let check_before_commit () =
+      let%bind () = check_policy () in
+      let%bind () = check_basis () in
+      let%bind current = check () in
+      if R.Requester.equal current requester
+      then Ok ()
+      else Error (error Permission_denied "rollover requester authority changed")
+    in
+    let%bind () =
+      persist_recovery_delta t
+        ~delta:(Recovery_rollover_changed (Admit intent))
+        ~check_before_commit
+    in
+    Option.bind t.state.recovery_rollover ~f:(fun ledger -> R.find ledger ~id)
+    |> Result.of_option ~error:(error Internal_error "durable rollover receipt missing")
+;;
+
+let context_native_execution t ~access ~effect_kind =
+  let module P = Agent_protocol in
+  let open Result.Let_syntax in
+  let%bind principal, invocation =
+    Recovery_context_service.check_now access t.state ~effect_kind
+  in
+  let%bind execution =
+    List.find t.invocation_executions ~f:(fun execution ->
+      P.Invocation.equal execution.dispatched invocation)
+    |> Result.of_option ~error:(error Permission_denied "context invocation is not active")
+  in
+  let%bind operation_id =
+    match execution.owner with
+    | Foreground operation_id when Atomic.get execution.authority_live -> Ok operation_id
+    | _ -> Error (error Permission_denied "context tools require a live foreground invocation")
+  in
+  let%bind current = authorized_native_child_basis t (Inference_invocation execution) in
+  let%map () = current.check_current () in
+  principal, execution, operation_id
+;;
+
+let handle_recovery_rollover
+  : type a. t -> a Recovery_rollover_request.t -> (a, Agent_protocol.Error.t) result
+  =
+  fun t request ->
+  let module P = Agent_protocol in
+  let module R = Recovery_rollover in
+  let open Result.Let_syntax in
+  match request with
+  | Native_remaining access ->
+    let%bind _, _, operation_id = context_native_execution t ~access ~effect_kind:Remaining in
+    let%map capacity = read_context_capacity t operation_id in
+    Recovery_context_service.
+      { window = active_rollover_window t; revision = t.state.counters.revision; capacity }
+  | Native_new_window (access, window) ->
+    let%bind _, execution, operation_id =
+      context_native_execution t ~access ~effect_kind:New_window
+    in
+    let%bind preparation, expected =
+      Result.of_option execution.context_rollover_basis
+        ~error:(error Conflict "rollover has no captured foreground window")
+    in
+    let%bind () =
+      if P.Id.Context_window.equal window (P.Recovery_window.Scope.window expected.scope)
+      then Ok ()
+      else Error (error Conflict "expected recovery window changed")
+    in
+    let check () =
+      let%bind principal, current, operation =
+        context_native_execution t ~access ~effect_kind:New_window
+      in
+      if phys_equal execution current
+      then
+        Ok (R.Requester.Native { principal; operation; invocation = current.dispatched.context.id })
+      else Error (error Permission_denied "rollover invocation authority changed")
+    in
+    let check_basis () =
+      let changed () = Error (error Conflict "rollover prepared window changed") in
+      let%bind capacity = read_context_capacity t operation_id in
+      match capacity with
+      | Current _ ->
+        let%bind target = Configuration_transition.target t.state in
+        let current =
+          Configuration_capture.native_window
+            t.configuration_capture
+            ~operation_id
+            ~configuration_revision:t.state.spec.configuration_revision
+            ~target
+        in
+        if
+          Option.exists current
+            ~f:(Configuration_capture.Native_window.same_preparation preparation)
+          && Int64.equal t.state.counters.revision expected.revision
+        then Ok ()
+        else changed ()
+      | Disabled | Stale_preparation _ | Awaiting_preparation _ -> changed ()
+    in
+    admit_recovery_rollover t ~check ~check_basis ~expected
+  | Operator_request (actor, attachment_id, authorize, force, key, expected) ->
+    let check () =
+      let principal = Operator_authorization.principal actor in
+      let%bind () =
+        if Operator_authorization.is_current actor && P.Principal.has_scope principal Send_messages
+        then authorize t.state
+        else Error (error Permission_denied "rollover operator authority expired")
+      in
+      let%bind () = require_recovery_owner_writer t ~principal:principal.id ~attachment_id in
+      let%map () = Option.value_map force ~default:(Ok ()) ~f:(fun check -> check t.state) in
+      R.Requester.Operator { principal = principal.id; key; force = Option.is_some force }
+    in
+    admit_recovery_rollover t ~check ~expected
+;;
+
 let handle_recovery_note
   : type a. t -> a Recovery_note_request.t -> (a, Agent_protocol.Error.t) result
   =
@@ -58176,6 +58388,7 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
       Recurrence_command_admission.receipt prepared
     | Goal_request (Read (actor, authorize)) ->
       Goal_command_admission.read t.state ~actor ~authorize
+    | Context_request (Rollover request) -> handle_recovery_rollover t request
     | Context_request (Recovery_note request) -> handle_recovery_note t request
     | Context_request (Recovery_note_share request) ->
       handle_recovery_note_share t request
@@ -62101,6 +62314,19 @@ let goal_command t ~actor ~authorize ~session ~request =
 ;;
 
 let read_goals t ~actor ~authorize = call t (Goal_request (Read (actor, authorize)))
+
+let context_remaining_native t ~access =
+  call t (Context_request (Rollover (Native_remaining access)))
+;;
+
+let context_new_window_native t ~access ~window =
+  call t (Context_request (Rollover (Native_new_window (access, window))))
+;;
+
+let request_context_rollover t ~actor ~attachment_id ~authorize ?authorize_force ~key expected =
+  call t
+    (Context_request (Rollover (Operator_request (actor, attachment_id, authorize, authorize_force, key, expected))))
+;;
 
 let enable_recovery_windows t ~actor ~attachment_id ~authorize =
   call t (Context_request (Enable_recovery_windows (actor, attachment_id, authorize)))

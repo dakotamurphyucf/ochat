@@ -206,8 +206,9 @@ type continuation =
   | Finish
 
 type status =
-  | Scheduled of Rollover_id.t
+  | Pending of Rollover_id.t
   | Committed of Rollover_receipt.t
+  | Superseded of Supersession_reason.t
   | Rejected of Rollover_rejection.t
   | Interrupted of Recovery_disposition.t
 ```
@@ -231,10 +232,22 @@ actual capability selection and visibility rules determine what runs.
 Operator requests use the same actor service with separately verified
 operator authority. [Native dispatch](../../lib/agent_session/native_tool_dispatch.mli).
 
+ChatMD selects `context_remaining` and `context_new_window` individually with
+`<tool name="…"/>`. The former requires the original transcript scope and
+reports the current window, canonical revision and prepared capacity status.
+The latter requires the original send scope and takes `expected_window`. Its
+own committed dispatch acknowledgement pins the canonical revision and the
+window from the exact foreground preparation. Admission rechecks preparation
+identity and current authority at the journal writer. Model and operator
+requests require an enabled local mode. An operator supplies the full expected
+scope and revision and uses the current owner writer. Force uses a second
+trusted authorization check. A `pending` receipt records durable admission.
+Only the archive and successor transaction can publish `committed`.
+
 **Admission.** The model tool, operator or internal capacity controller
 submits a cause, expected old window, revision and private scoped
 idempotency identity through the current host authority. A tool returns
-`Scheduled` only after durable intent admission. The same key plus
+`Pending` only after durable intent admission. The same key plus
 normalized arguments returns the same operation and current status. Reusing
 the key with different arguments yields a conflict. A separate intent against
 a superseded window can observe the authorized prior receipt or conflict,

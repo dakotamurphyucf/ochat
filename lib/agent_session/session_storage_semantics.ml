@@ -857,6 +857,7 @@ let recovery_note_fields =
   let module Semantics = Agent_protocol.Session_storage_semantics in
   [ Semantics.recovery_notes, "recovery_notes", "recovery_note_changed"
   ; Semantics.recovery_note_shares, "recovery_note_shares", "recovery_note_share_changed"
+  ; Semantics.recovery_rollover, "recovery_rollover", "recovery_rollover_changed"
   ]
 ;;
 

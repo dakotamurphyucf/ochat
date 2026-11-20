@@ -173,6 +173,7 @@ type 'spec fields =
   ; instruction_selection : Instruction_selection.t option [@sexp.option]
   ; recovery_notes : (Recovery_note_session.t[@sexp.opaque]) option [@sexp.option]
   ; recovery_note_shares : (Recovery_note_share.t[@sexp.opaque]) option [@sexp.option]
+  ; recovery_rollover : (Recovery_rollover.t[@sexp.opaque]) option [@sexp.option]
   ; recurrence_catalog : Recurrence_catalog.t option [@sexp.option]
   ; subscriptions : Agent_protocol.Subscription.t list [@sexp.list]
   ; deliveries : Agent_protocol.Delivery.t list [@sexp.list]
@@ -788,6 +789,7 @@ let create_fields ~(identity : Identity.t) ~spec ~desired ~initial_history =
   ; instruction_selection = None
   ; recovery_notes = None
   ; recovery_note_shares = None
+  ; recovery_rollover = None
   ; recurrence_catalog = None
   ; subscriptions = []
   ; deliveries = []
@@ -1115,6 +1117,13 @@ let validate_domain (t : t) ~recovery_revision =
         ledger
         ~windows:t.recovery_windows
         ~publication_revision:recovery_revision)
+  in
+  let%bind () =
+    Option.value_map t.recovery_rollover ~default:(Ok ()) ~f:(fun ledger ->
+      Recovery_rollover.validate_state
+        ledger
+        ~windows:t.recovery_windows
+        ~revision:recovery_revision)
   in
   let seen_invocations = Hash_set.create (module Agent_protocol.Id.Invocation) in
   let%bind () =

@@ -242,6 +242,9 @@
   recovery_note_share_document
   recovery_note_share
   recovery_note_share_change
+  recovery_rollover
+  recovery_context_service
+  recovery_context_native_tool
   instruction_transition
   goal_command_transition
   goal_control_transition

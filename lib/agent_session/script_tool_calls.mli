@@ -28,6 +28,8 @@ val instruction_service : t -> Instruction_service.t option
 val with_recovery_note_service : t -> Recovery_note_native_service.t -> t
 val recovery_note_service : t -> Recovery_note_native_service.t option
 
+val with_recovery_context_service : t -> Recovery_context_service.t -> t
+val recovery_context_service : t -> Recovery_context_service.t option
 (** Actual invoking session's recurrence metadata consumer. Installation grants
     no selected tool, source, controller or execution authority. *)
 val with_recurrence_service : t -> Recurrence_service.t -> t

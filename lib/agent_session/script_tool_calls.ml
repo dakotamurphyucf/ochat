@@ -82,6 +82,7 @@ type t =
   ; managed_session_service : Managed_session_service.t option
   ; instruction_service : Instruction_service.t option
   ; recovery_note_service : Recovery_note_native_service.t option
+  ; recovery_context_service : Recovery_context_service.t option
   ; recurrence_service : Recurrence_service.t option
   ; goal_metadata_service : Goal_native_metadata_service.t option
   ; inference_tracking : Inference_tracking.t option
@@ -509,6 +510,7 @@ let create
   ; managed_session_service = None
   ; instruction_service = None
   ; recovery_note_service = None
+  ; recovery_context_service = None
   ; recurrence_service = None
   ; goal_metadata_service = None
   ; inference_tracking = None
@@ -524,6 +526,11 @@ let instruction_service t = t.instruction_service
 let with_recovery_note_service t service = { t with recovery_note_service = Some service }
 let recovery_note_service t = t.recovery_note_service
 
+let with_recovery_context_service t service =
+  { t with recovery_context_service = Some service }
+;;
+
+let recovery_context_service t = t.recovery_context_service
 let with_recurrence_service t service = { t with recurrence_service = Some service }
 let recurrence_service t = t.recurrence_service
 let with_goal_metadata_service t service = { t with goal_metadata_service = Some service }

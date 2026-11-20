@@ -354,6 +354,8 @@ let atom_to_jsonaf ~limits ~state_document delta =
           [ "kind", `String "recovery_note_changed"
           ; "value", Recovery_note_change.to_json change
           ])
+  | Recovery_rollover_changed change ->
+    Ok (`Object [ "kind", `String "recovery_rollover_changed"; "value", Recovery_rollover.Change.to_json change ])
   | Recovery_note_share_changed change ->
     Ok
       (`Object
@@ -764,6 +766,9 @@ let atom_of_jsonaf ~limits json =
   | "recovery_note_changed" ->
     let%map.Result change = X.required fields "value" Recovery_note_change.of_json in
     Delta.Recovery_note_changed change
+  | "recovery_rollover_changed" ->
+    let%map.Result change = X.required fields "value" Recovery_rollover.Change.of_json in
+    Delta.Recovery_rollover_changed change
   | "recovery_note_share_changed" ->
     let%map.Result change =
       X.required fields "value" Recovery_note_share_change.of_json
@@ -1050,6 +1055,8 @@ let shape =
              ; ( "recovery_note_share_changed"
                , X.shape_exn
                    [ "kind", D.Shape.value; "value", Recovery_note_share_change.shape ] )
+             ; ( "recovery_rollover_changed"
+               , X.shape_exn [ "kind", D.Shape.value; "value", D.Shape.value ] )
              ; ( "instruction_selection_changed"
                , X.shape_exn
                    [ "kind", D.Shape.value; "value", Instruction_selection.shape ] )

@@ -179,6 +179,29 @@ let capacity_status t ~operation_id ~current =
      | _ -> Capacity.Awaiting_preparation availability)
 ;;
 
+module Native_window = struct
+  type t =
+    { identity : unit ref
+    ; scope : Agent_protocol.Recovery_window.Scope.t
+    }
+
+  let scope t = t.scope
+  let same_preparation a b = phys_equal a.identity b.identity
+end
+
+let native_window t ~operation_id ~configuration_revision ~target =
+  match t.current with
+  | Some (token, (C.Effective | Retained))
+    when Agent_protocol.Id.Operation.equal token.operation_id operation_id
+         && Int64.equal token.revision configuration_revision
+         && Inference.Request.Target.equal token.target target
+         && Option.is_some token.configuration
+         && Option.exists token.assessment ~f:(fun observation -> observation.binding_is_current ()) ->
+    Option.map token.recovery_scope ~f:(fun selected_scope ->
+      Native_window.{ identity = token.identity; scope = selected_scope })
+  | _ -> None
+;;
+
 let finish t token ~success =
   if owns t token
   then

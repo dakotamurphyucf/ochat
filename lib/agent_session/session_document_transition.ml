@@ -126,6 +126,7 @@ let prepare previous ~delta ~limits =
         | Instruction_selection_changed _
         | Recovery_note_changed _
         | Recovery_note_share_changed _
+        | Recovery_rollover_changed _
         | Recurrence_catalog_changed _
         | Run_state_changed _
         | Canonical_history_replaced _
@@ -309,6 +310,7 @@ let prepare previous ~delta ~limits =
        | Instruction_selection_changed _
        | Recovery_note_changed _
        | Recovery_note_share_changed _
+       | Recovery_rollover_changed _
        | Recurrence_catalog_changed _
        | Run_state_changed _
        | Moderator_changed _

@@ -51,6 +51,7 @@ let collect state ~delta ~limits =
       | Recurrence_catalog_changed _
       | Run_state_changed _
       | Canonical_history_replaced _
+      | Recovery_rollover_changed _
       | Recovery_window_enabled _
       | Recovery_effective_prepared _
       | Recovery_summary_compacted _

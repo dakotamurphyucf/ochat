@@ -161,6 +161,7 @@ let admit previous ~delta ~next ~limits =
     | Workspace_changed _
     | Canonical_entries_appended _
     | Canonical_history_replaced _
+    | Recovery_rollover_changed _
     | Recovery_window_enabled _
     | Recovery_effective_prepared _
     | Recovery_summary_compacted _

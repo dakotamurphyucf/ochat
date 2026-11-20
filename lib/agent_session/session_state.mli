@@ -210,6 +210,7 @@ type 'spec fields =
         No transcript entry, source grant or provider activation is implied. *)
   ; recovery_notes : (Recovery_note_session.t[@sexp.opaque]) option [@sexp.option]
   ; recovery_note_shares : (Recovery_note_share.t[@sexp.opaque]) option [@sexp.option]
+  ; recovery_rollover : (Recovery_rollover.t[@sexp.opaque]) option [@sexp.option]
   ; recurrence_catalog : Recurrence_catalog.t option [@sexp.option]
   ; subscriptions : Agent_protocol.Subscription.t list [@sexp.list]
   ; deliveries : Agent_protocol.Delivery.t list [@sexp.list]

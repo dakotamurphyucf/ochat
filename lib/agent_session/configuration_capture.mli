@@ -59,6 +59,22 @@ val capacity_status
   -> current:Capacity_basis.t option
   -> Session_context_capacity.status
 
+(** Window of the actual finalized root preparation for this operation. A
+    retained same-operation observation still requires live Actor checks. *)
+module Native_window : sig
+  type t
+
+  val scope : t -> Agent_protocol.Recovery_window.Scope.t
+  val same_preparation : t -> t -> bool
+end
+
+val native_window
+  :  t
+  -> operation_id:Agent_protocol.Id.Operation.t
+  -> configuration_revision:int64
+  -> target:Inference.Request.Target.t
+  -> Native_window.t option
+
 val finish : t -> Token.t -> success:bool -> unit
 
 val view

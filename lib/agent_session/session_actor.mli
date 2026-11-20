@@ -3843,6 +3843,31 @@ val read_goals
   -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
   -> (Agent_protocol.Goal.t list, Agent_protocol.Error.t) result
 
+(** The current guarded native route publishes prepared capacity evidence and
+    admits only a pending rollover for the original foreground window. *)
+val context_remaining_native
+  :  t
+  -> access:Recovery_context_service.access
+  -> (Recovery_context_service.observation, Agent_protocol.Error.t) result
+
+val context_new_window_native
+  :  t
+  -> access:Recovery_context_service.access
+  -> window:Agent_protocol.Id.Context_window.t
+  -> (Recovery_rollover.Receipt.t, Agent_protocol.Error.t) result
+
+(** Request under the current writer attachment. Force requires a separate
+    trusted authorization check and still binds the exact expected revision. *)
+val request_context_rollover
+  :  t
+  -> actor:Operator_authorization.t
+  -> attachment_id:Agent_protocol.Id.Attachment.t
+  -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> ?authorize_force:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> key:Agent_protocol.Idempotency_key.t
+  -> Recovery_rollover.Expected.t
+  -> (Recovery_rollover.Receipt.t, Agent_protocol.Error.t) result
+
 (** Opt in with the original current writer and host visibility check. The
     actor records exactly the settled canonical view under its durable Store's
     actual host-qualified owner. Repeating enablement returns the current scope
