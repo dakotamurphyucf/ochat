@@ -29,6 +29,7 @@ type t =
   ; output_digest : string
   ; input_bytes : int
   ; contents : string
+  ; original : string option
   ; accounting : B.Accounting.t
   }
 
@@ -39,9 +40,10 @@ let input_digest t = t.input_digest
 let output_digest t = t.output_digest
 let input_bytes t = t.input_bytes
 let contents t = t.contents
+let original t = t.original
 let accounting t = t.accounting
 
-let create parsed ~occurrence ~source ~limits ~checkpoint =
+let create ?(retain_original = false) parsed ~occurrence ~source ~limits ~checkpoint =
   let open Result.Let_syntax in
   let range = Occurrence.range occurrence in
   let invalid message = Error (B.Error.invalid ~range message) in
@@ -154,6 +156,10 @@ let create parsed ~occurrence ~source ~limits ~checkpoint =
     ; output_digest
     ; input_bytes = C.Accounting.input_bytes a
     ; contents
+    ; original =
+        (match source with
+         | Source.Local { contents; _ } when retain_original -> Some contents
+         | Source.Local _ | Source.Builtin _ -> None)
     ; accounting = B.accounting budget
     }
 ;;

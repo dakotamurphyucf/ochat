@@ -97,6 +97,7 @@
   audit_evidence_document
   audit_store
   prompt_program_bundle
+  installed_document_originals
   prompt_source_receipt
   prompt_manifest
   prompt_manifest_document

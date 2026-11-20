@@ -20,6 +20,7 @@ end
 module Manifest = Prompt_manifest
 module Publication = Prompt_manifest_document.Publication
 module Program_bundle = Prompt_program_bundle
+module Originals = Installed_document_originals
 
 module Artifact = struct
   type t =
@@ -36,6 +37,7 @@ module Artifact = struct
     ; shell_manifest_sha256 : string option
     ; program_bundle : Program_bundle.t option
     ; content_bundle : Program_bundle.t option
+    ; originals_sha256 : string option
     ; manifest_sha256 : string
     ; manifest_publication : Publication.t
     ; created_at : Agent_protocol.Timestamp.t
@@ -57,6 +59,7 @@ module Artifact = struct
     ; shell_manifest_sha256 = artifact.shell_manifest_sha256
     ; program_bundle = Option.map artifact.program_bundle ~f:Program_bundle.manifest
     ; content_bundle = Option.map artifact.content_bundle ~f:Program_bundle.manifest
+    ; originals_sha256 = artifact.originals_sha256
     ; created_at = artifact.created_at
     }
   ;;
@@ -77,6 +80,7 @@ module Artifact = struct
       ; shell_manifest_sha256 = known.shell_manifest_sha256
       ; program_bundle
       ; content_bundle
+      ; originals_sha256 = known.originals_sha256
       ; manifest_sha256 = Publication.sha256 publication
       ; manifest_publication = publication
       ; created_at = known.created_at
@@ -110,7 +114,13 @@ module Artifact = struct
     Manifest.equal (manifest a) { (manifest b) with created_at = a.created_at }
   ;;
 
-  let check_inventory_budget ~root_chatmd ~sources ~program_payloads ~content_payloads =
+  let check_inventory_budget
+        ~root_chatmd
+        ~sources
+        ~program_payloads
+        ~content_payloads
+        ~original_payloads
+    =
     let module B = Program_bundle in
     let open Result.Let_syntax in
     let invalid () =
@@ -136,7 +146,7 @@ module Artifact = struct
         charge total (String.length source.Source.contents))
     in
     List.fold_result
-      [ program_payloads; content_payloads ]
+      [ program_payloads; content_payloads; original_payloads ]
       ~init:total
       ~f:(fun total pool ->
         List.fold_result pool ~init:total ~f:(fun total payload ->
@@ -144,7 +154,13 @@ module Artifact = struct
     |> Result.map ~f:(fun _ -> ())
   ;;
 
-  let check_payload_budget ~root_chatmd ~sources ~program_bundle ~content_bundle =
+  let check_payload_budget
+        ~root_chatmd
+        ~sources
+        ~program_bundle
+        ~content_bundle
+        ~original_payloads
+    =
     check_inventory_budget
       ~root_chatmd
       ~sources
@@ -152,6 +168,7 @@ module Artifact = struct
         (Option.value_map program_bundle ~default:[] ~f:Program_bundle.payloads)
       ~content_payloads:
         (Option.value_map content_bundle ~default:[] ~f:Program_bundle.payloads)
+      ~original_payloads
   ;;
 
   let restore ~publication ~root_chatmd ~sources ~program_payloads ~content_payloads =
@@ -162,6 +179,7 @@ module Artifact = struct
         ~sources
         ~program_payloads:(Option.value program_payloads ~default:[])
         ~content_payloads:(Option.value content_payloads ~default:[])
+        ~original_payloads:[]
     in
     let known = Prompt_manifest_document.value (Publication.document publication) in
     let bundle expected actual =
@@ -190,12 +208,18 @@ module Artifact = struct
         ?shell_manifest_sha256
         ?program_bundle
         ?content_bundle
+        ?originals_sha256
         ~created_at
         ()
     =
     let open Result.Let_syntax in
     let%bind () =
-      check_payload_budget ~root_chatmd ~sources ~program_bundle ~content_bundle
+      check_payload_budget
+        ~root_chatmd
+        ~sources
+        ~program_bundle
+        ~content_bundle
+        ~original_payloads:[]
     in
     let known : Manifest.t =
       { version = 1
@@ -214,6 +238,7 @@ module Artifact = struct
       ; shell_manifest_sha256
       ; program_bundle = Option.map program_bundle ~f:Program_bundle.manifest
       ; content_bundle = Option.map content_bundle ~f:Program_bundle.manifest
+      ; originals_sha256
       ; created_at
       }
     in
@@ -331,7 +356,11 @@ let ensure_parent t path =
   Eio.Path.mkdirs ~exists_ok:true ~perm:0o700 (eio_path t (Filename.dirname path))
 ;;
 
-let install_files t directory artifact =
+let originals_pool = "originals"
+let originals_manifest_file = Filename.concat originals_pool "manifest"
+let original_payload_file digest = Filename.concat originals_pool digest
+
+let install_files t directory artifact ~originals =
   save_file t (Filename.concat directory "root.chatmd") artifact.Artifact.root_chatmd;
   let tree_root = Filename.concat directory "tree" in
   let tree_root_file = Filename.concat tree_root artifact.root_relative_path in
@@ -358,6 +387,16 @@ let install_files t directory artifact =
           in
           ensure_parent t path;
           save_file t path (Program_bundle.Payload.contents payload))));
+  Option.iter originals ~f:(fun originals ->
+    let path relative = Filename.concat directory relative in
+    let manifest = path originals_manifest_file in
+    ensure_parent t manifest;
+    save_file t manifest (Originals.Manifest.bytes (Originals.manifest originals));
+    List.iter (Originals.payloads originals) ~f:(fun payload ->
+      save_file
+        t
+        (path (original_payload_file (Program_bundle.Payload.sha256 payload)))
+        (Program_bundle.Payload.contents payload)));
   let encoded_manifest = Publication.bytes artifact.Artifact.manifest_publication in
   save_file t (Filename.concat directory "manifest.sexp") encoded_manifest;
   save_file
@@ -394,6 +433,30 @@ let validate_artifact artifact =
   else Error (Store_error.Corrupt "prompt artifact manifest digest is invalid")
 ;;
 
+let validate_originals artifact originals =
+  let open Result.Let_syntax in
+  match artifact.Artifact.originals_sha256, originals with
+  | None, None -> Ok ()
+  | Some expected, Some originals ->
+    let manifest = Originals.manifest originals in
+    if
+      (not (String.equal expected (Originals.Manifest.sha256 manifest)))
+      || String.length (Originals.Manifest.bytes manifest)
+         > Prompt_manifest_document.max_bytes
+           - String.length (Publication.bytes artifact.manifest_publication)
+    then Error (Store_error.Corrupt "installed originals differ from prompt publication")
+    else
+      Artifact.check_payload_budget
+        ~root_chatmd:artifact.root_chatmd
+        ~sources:artifact.sources
+        ~program_bundle:artifact.program_bundle
+        ~content_bundle:artifact.content_bundle
+        ~original_payloads:(Originals.payloads originals)
+  | Some _, None | None, Some _ ->
+    Error
+      (Store_error.Corrupt "installed originals presence differs from prompt publication")
+;;
+
 let rec sync_staging t path =
   let open Result.Let_syntax in
   match Eio.Path.kind ~follow:false (eio_path t path) with
@@ -419,9 +482,10 @@ let rec remove_staging t path =
   | _ -> raise_s [%sexp "invalid private prompt cleanup entry", (path : string)]
 ;;
 
-let install ?(before_publish = fun () -> ()) t ~transaction_id artifact =
+let install ?(before_publish = fun () -> ()) ?originals t ~transaction_id artifact =
   let open Result.Let_syntax in
   let%bind () = validate_artifact artifact in
+  let%bind () = validate_originals artifact originals in
   let destination = revision_directory t artifact.Artifact.revision_id in
   match Eio.Path.kind ~follow:false (eio_path t destination) with
   | `Not_found ->
@@ -450,7 +514,7 @@ let install ?(before_publish = fun () -> ()) t ~transaction_id artifact =
           Eio.Cancel.protect (fun () ->
             Eio.Path.mkdir ~perm:0o700 (eio_path t staging);
             created := true);
-          install_files t staging artifact;
+          install_files t staging artifact ~originals;
           sync_staging t staging)
       in
       Eio.Fiber.check ();
@@ -499,6 +563,70 @@ let load_manifest t directory revision_id =
     Retention_reader.read reader ~path:"manifest.sha256" ~max_bytes:128
   in
   Publication.of_bytes encoded ~revision_id ~expected_sha256:(String.strip checksum)
+;;
+
+let read_original t artifact ~occurrence ~max_bytes ~checkpoint =
+  let open Result.Let_syntax in
+  if max_bytes < 0 || max_bytes > Program_bundle.max_payload_bytes
+  then Error (Store_error.Corrupt "invalid installed original read allowance")
+  else (
+    let%bind expected_sha256 =
+      Result.of_option
+        artifact.Artifact.originals_sha256
+        ~error:(Store_error.Missing "installed document originals")
+    in
+    let directory = revision_directory t artifact.revision_id in
+    checkpoint ();
+    let%bind publication = load_manifest t directory artifact.revision_id in
+    if not (String.equal (Publication.sha256 publication) artifact.manifest_sha256)
+    then
+      Error (Store_error.Corrupt "installed original belongs to a different publication")
+    else (
+      let%bind reader =
+        Retention_reader.create
+          ~env:t.env
+          ~root:directory
+          ~max_entries:16
+          ~max_bytes:(Originals.Manifest.max_bytes + max_bytes)
+      in
+      let%bind bytes =
+        Retention_reader.read_promised_file_with_checkpoint
+          reader
+          ~path:originals_manifest_file
+          ~max_bytes:Originals.Manifest.max_bytes
+          ~checkpoint
+      in
+      let%bind manifest = Originals.Manifest.of_bytes bytes ~expected_sha256 in
+      let%bind entry =
+        Result.of_option
+          (Originals.Manifest.find manifest ~occurrence)
+          ~error:(Store_error.Missing "installed document original occurrence")
+      in
+      let length = Originals.Entry.byte_length entry in
+      let digest = Originals.Entry.sha256 entry in
+      if length > max_bytes
+      then
+        Error
+          (Store_error.Document
+             (Document_schema.Error.Limit_exceeded "installed document original bytes"))
+      else (
+        let%bind contents =
+          Retention_reader.read_promised_file_with_checkpoint
+            reader
+            ~path:(original_payload_file digest)
+            ~max_bytes:length
+            ~checkpoint
+        in
+        if
+          not
+            (Int.equal (String.length contents) length
+             && String.equal (sha256 contents) digest)
+        then
+          Error
+            (Store_error.Corrupt "installed document original differs from descriptor")
+        else (
+          checkpoint ();
+          Ok (entry, contents)))))
 ;;
 
 let load_source reader source =
@@ -708,6 +836,7 @@ let load t revision_id =
             ~sources
             ~program_bundle
             ~content_bundle
+            ~original_payloads:[]
         in
         let%bind artifact =
           Artifact.of_publication
@@ -724,10 +853,11 @@ let load t revision_id =
     | exn -> Error (Store_error.of_exn ~operation:"load root ChatMD" ~path:root_path exn))
 ;;
 
-let install_or_reuse t ~transaction_id candidate ~checkpoint =
+let install_or_reuse ?originals t ~transaction_id candidate ~checkpoint =
   let open Result.Let_syntax in
   checkpoint ();
   let%bind () = validate_artifact candidate in
+  let%bind () = validate_originals candidate originals in
   let destination = revision_directory t candidate.Artifact.revision_id in
   let destination_kind () =
     try Ok (Eio.Path.kind ~follow:false (eio_path t destination)) with
@@ -752,7 +882,7 @@ let install_or_reuse t ~transaction_id candidate ~checkpoint =
   | `Directory -> verified_retained ()
   | `Not_found ->
     checkpoint ();
-    (match install ~before_publish:checkpoint t ~transaction_id candidate with
+    (match install ~before_publish:checkpoint ?originals t ~transaction_id candidate with
      | Ok () -> verified_retained ()
      | Error original ->
        (* A competing publisher, or uncertainty after our rename, is resolved
@@ -815,9 +945,15 @@ let verify_retained t ~reader ~revision_id ~manifest_sha256 =
     | `Directory ->
       let%bind names = R.list reader ~directory:relative in
       List.fold_result names ~init:seen ~f:(fun seen name ->
-        visit
-          (if String.equal relative "." then name else Filename.concat relative name)
-          seen)
+        if
+          String.equal relative "."
+          && String.equal name originals_pool
+          && Option.is_some manifest.originals_sha256
+        then Ok seen
+        else
+          visit
+            (if String.equal relative "." then name else Filename.concat relative name)
+            seen)
     | `File ->
       let%bind wanted =
         Map.find expected relative

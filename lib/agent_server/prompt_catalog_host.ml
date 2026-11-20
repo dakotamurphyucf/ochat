@@ -188,7 +188,7 @@ let attempt_checkpoint t checkpoint =
     if Float.(elapsed /. 1e9 >= seconds) then raise Deadline_exceeded
 ;;
 
-let prepare t ~mode ~created_at ~checkpoint definitions =
+let prepare t ?retain_document_originals ~mode ~created_at ~checkpoint definitions =
   let checkpoint = attempt_checkpoint t checkpoint in
   let prepared = ref None in
   let cleanup () =
@@ -203,6 +203,7 @@ let prepare t ~mode ~created_at ~checkpoint definitions =
         let result =
           Publication.prepare
             t.publication
+            ?retain_document_originals
             ~sources
             ~sw:t.sw
             ~env:t.env

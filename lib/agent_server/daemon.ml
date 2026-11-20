@@ -632,6 +632,7 @@ let build_catalog
   let%bind prepared =
     Prompt_catalog_host.prepare
       host
+      ~retain_document_originals:built.retain_document_originals
       ~mode:Build
       ~created_at:(timestamp env)
       ~checkpoint:Eio.Fiber.check
@@ -1037,6 +1038,7 @@ let config_watcher
       let%bind revisions =
         Prompt_catalog_host.prepare
           project_catalog
+          ~retain_document_originals:built.retain_document_originals
           ~mode
           ~created_at:(timestamp env)
           ~checkpoint

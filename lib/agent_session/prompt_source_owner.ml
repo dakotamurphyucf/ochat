@@ -788,7 +788,7 @@ module Scope = struct
       ~checkpoint
   ;;
 
-  let capture_documents t ~capture ~limits ~checkpoint =
+  let capture_documents ?retain_root_originals t ~capture ~limits ~checkpoint =
     run t (fun () ->
       if not (capture_matches t capture)
       then Error (Error.create Foreign_capture)
@@ -814,6 +814,7 @@ module Scope = struct
           in
           match
             Chatmd_content_capture.run
+              ?retain_root_originals
               t.owner.local
               ~parsed_contexts:contexts
               ~limits

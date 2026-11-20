@@ -294,8 +294,13 @@ so the optional storage write leaves normal history publication available.
 A daemon restart, expired reservation or lost writer
 authority can discard an outstanding original before adoption. Queued and
 adopted rendered text remain governed by ordinary session persistence.
-Installed captured documents retain their rendered content under the prompt
-revision's existing contract.
+Installed captured documents retain rendered content by default. An operator
+can opt in to original retention per installed definition. The catalog binds
+the actual local capture occurrence to exact original bytes in a private
+immutable prompt-revision pool. Missing or revoked originals leave rendered
+text available. An installed original is a potential source for independent
+session adoption under the current owner writer and exact window member.
+Installation alone grants no session recovery visibility.
 
 [Publisher and collector](../../lib/agent_store/recovery_asset_store.mli),
 [exact source adapter](../../lib/agent_session/recovery_asset.mli).

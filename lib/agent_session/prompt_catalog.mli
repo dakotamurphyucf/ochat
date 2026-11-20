@@ -57,6 +57,27 @@ val find_by_name : t -> string -> entry option
 (** Previously built revisions remain addressable after catalog reload. *)
 val find_revision : t -> Agent_protocol.Id.Prompt_revision.t -> Prompt_revision.t option
 
+(** Trusted host borrow of an installed original. The current installed selection
+    and the caller's independent authorization must survive the bounded physical
+    read. [authorize] and the lent [check] are nonyielding. The borrower must
+    check again at the final dependent write and must never expose raw bytes or
+    retain the witness outside its lexical scope. Opaque historical revisions
+    and a captured/transported artifact cannot mint this authorization. *)
+val with_installed_original
+  :  t
+  -> definition:Agent_protocol.Id.Prompt_definition.t
+  -> revision:Agent_protocol.Id.Prompt_revision.t
+  -> occurrence:Agent_store.Installed_document_originals.Occurrence.t
+  -> max_bytes:int
+  -> authorize:(unit -> (unit, Agent_protocol.Error.t) result)
+  -> checkpoint:(unit -> unit)
+  -> f:
+       (check:(unit -> (unit, Agent_protocol.Error.t) result)
+        -> Agent_store.Installed_document_originals.Entry.t
+        -> string
+        -> ('a, Agent_protocol.Error.t) result)
+  -> ('a, Agent_protocol.Error.t) result
+
 (** [prune_unreferenced_artifacts t ~additional] retains every revision cached
     by the catalog plus [additional] durable-session revisions. *)
 val prune_unreferenced_artifacts

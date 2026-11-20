@@ -382,7 +382,7 @@ let implementation_sources =
   ; ( "lib/agent_server/command_handler.ml"
     , "9014016542d1f6d886ea883ab06f980c14d53d561e0ffd7b89ae8e2483b7db3c" )
   ; ( "lib/agent_server/daemon.ml"
-    , "c4e74260ee1e6167ed31b346c2fbd623a970d526b8238121133262237d4a7317" )
+    , "6217f0cceb2ef1d3f4090075cf009d28f8b30392229fad1548039796c9732f29" )
   ; ( "lib/agent_server/instruction_operator_service.ml"
     , "7bcfd6d6f88f311b50c50af7a300b9b94bbcf32641b54aeef9900f902a2d0bc8" )
   ; ( "lib/agent_server/instruction_operator_service.mli"
@@ -504,11 +504,11 @@ let implementation_sources =
   ; ( "lib/chat_response/one_off_script.ml"
     , "cffac7c805a03e71b84b168d7686b0bac019db7c4d431210d4560331a8f43986" )
   ; ( "lib/agent_session/prompt_source_owner.ml"
-    , "8f3f7aa842dd09a1aa299e8ff67ed8b6b771d8308b396d20f1a2e07ecb5c9ad9" )
+    , "dfcdd3b0ac3beb8890329dcb39478245bfec0b6ce6b8f895ea705ad094517340" )
   ; ( "lib/agent_session/prompt_source_lease.ml"
     , "7413c0ed3e84375cd7e95343ceb83d9485c02b4d378ff940336beb449680dbe0" )
   ; ( "lib/agent_session/prompt_catalog.ml"
-    , "a6b86884830197ff69113d8989280ef72bd33b61ccfa10d2e1b91bffbfc82505" )
+    , "b5ed640a9576fad616b3ff41198d8a1d7555671b6730343c594efe6495a76bde" )
   ; ( "lib/agent_session/runtime_builder.ml"
     , "423836dbc980843e69f8771bc87d204085d4d6193b03011415d90ca8488cf650" )
   ; ( "lib/agent_session/authored_source_preparation.ml"

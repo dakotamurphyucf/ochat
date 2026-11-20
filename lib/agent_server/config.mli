@@ -169,6 +169,11 @@ module Workspace : sig
 end
 
 module Prompt : sig
+  type document_originals =
+    | Rendered_only
+    | Retain
+  [@@deriving compare, equal, sexp]
+
   type t =
     { id : string
     ; path : string
@@ -181,6 +186,10 @@ module Prompt : sig
           The config atom is [standard] or [developer_model_spawn]; absence
           defaults to Standard. An unknown atom is a configuration error, never
           a fallback. This is not execution permission or provider selection. *)
+    ; document_originals : document_originals
+      (** An administrator may select [retain] for private original custody of
+          the installed root's actual local captures. Defaults to [rendered_only].
+          This setting is not carried by a public prompt definition. *)
     ; enabled : bool
     }
   [@@deriving compare, equal, sexp]

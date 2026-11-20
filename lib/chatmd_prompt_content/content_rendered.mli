@@ -24,7 +24,8 @@ end
 type t
 
 val create
-  :  Parsed.t
+  :  ?retain_original:bool
+  -> Parsed.t
   -> occurrence:Occurrence.t
   -> source:Source.t
   -> limits:B.Limits.t
@@ -38,4 +39,5 @@ val input_digest : t -> string
 val output_digest : t -> string
 val input_bytes : t -> int
 val contents : t -> string
+val original : t -> string option
 val accounting : t -> B.Accounting.t

@@ -141,6 +141,11 @@ module Workspace = struct
 end
 
 module Prompt = struct
+  type document_originals =
+    | Rendered_only
+    | Retain
+  [@@deriving compare, equal, sexp]
+
   type t =
     { id : string
     ; path : string
@@ -149,6 +154,7 @@ module Prompt = struct
     ; permission_profile : string
     ; runtime_policy : string option
     ; tool_contract : Chatml_compilation.Tool_contract.t
+    ; document_originals : document_originals
     ; enabled : bool
     }
   [@@deriving compare, equal, sexp]

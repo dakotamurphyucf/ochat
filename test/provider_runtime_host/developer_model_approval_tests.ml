@@ -159,6 +159,7 @@ let run ctx input =
               id = "stage.prompt"
             ; path = stage
             ; tool_contract = Chatml_compilation.Tool_contract.Developer_model_spawn
+            ; document_originals = Rendered_only
             }
         in
         { base with

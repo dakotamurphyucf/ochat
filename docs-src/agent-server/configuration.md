@@ -389,6 +389,17 @@ permission profile revision. Restart uses the pinned artifact, not whatever
 currently exists at the live source path. Catalog reload affects future
 sessions; explicit prompt upgrade or rebuild changes an existing session.
 
+A prompt administrator can set `(document_originals retain)` in a prompt entry
+to retain original bytes for that definition's installed local captured
+documents. The default, `(document_originals rendered_only)`, preserves the
+rendered text of `<doc local capture>` without storing the original. The
+setting applies to the installed root and its imported message declarations.
+Originals are stored in a private pool owned by the immutable prompt revision.
+They are outside the authored source tree and the public prompt and blob APIs.
+Their optional custody failures leave the rendered revision readable. Removing
+the setting on catalog reload denies new reads of that revision's originals.
+This setting does not enable session recovery windows.
+
 The operator is responsible for exposing only prompt/workspace combinations
 whose declarations and permission profiles are safe together. Selecting a
 workspace does not grant filesystem, process, network, or tool authority.

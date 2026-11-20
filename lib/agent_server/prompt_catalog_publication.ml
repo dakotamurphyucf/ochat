@@ -202,8 +202,14 @@ let validate_mode t mode snapshot definitions ~checkpoint =
           | Some _ -> Ok (Set.add selected (Id.to_string id))))
 ;;
 
-let capture_content ~checkpoint limits scope capture =
-  Owner.Scope.capture_documents scope ~capture ~limits ~checkpoint
+let capture_content ~retain_document_originals ~checkpoint limits scope capture =
+  let definition =
+    Agent_store.Prompt_source_receipt.definition_id (Owner.Capture.receipt capture)
+  in
+  let retain_root_originals =
+    List.mem retain_document_originals definition ~equal:Id.equal
+  in
+  Owner.Scope.capture_documents ~retain_root_originals scope ~capture ~limits ~checkpoint
   |> Result.map_error ~f:(fun error ->
     [ Builder.Diagnostic.
         { code = "prompt.document_capture"
@@ -213,7 +219,17 @@ let capture_content ~checkpoint limits scope capture =
     ])
 ;;
 
-let prepare t ~sources ~sw ~env ~mode ~created_at ~checkpoint definitions =
+let prepare
+      t
+      ?(retain_document_originals = [])
+      ~sources
+      ~sw
+      ~env
+      ~mode
+      ~created_at
+      ~checkpoint
+      definitions
+  =
   let open Result.Let_syntax in
   let%bind () = reserve t in
   let token = ref () in
@@ -303,7 +319,9 @@ let prepare t ~sources ~sw ~env ~mode ~created_at ~checkpoint definitions =
           t.catalog
           ~prepare_programs
           ?prepare_content:
-            (Option.map t.content_limits ~f:(capture_content ~checkpoint:poll))
+            (Option.map
+               t.content_limits
+               ~f:(capture_content ~retain_document_originals ~checkpoint:poll))
           ~sw
           ~source_limits:t.policy.source_limits
           ~max_roots:t.policy.max_roots

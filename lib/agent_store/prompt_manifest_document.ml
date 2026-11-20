@@ -54,6 +54,7 @@ let of_json json =
   let%bind content_bundle =
     optional json "content_bundle" Prompt_program_bundle.Manifest.of_json
   in
+  let%bind originals_sha256 = optional json "originals_sha256" F.digest in
   let initial =
     1
     + Option.value_map program_bundle ~default:0 ~f:(fun value ->
@@ -97,6 +98,7 @@ let of_json json =
       ; shell_manifest_sha256
       ; program_bundle
       ; content_bundle
+      ; originals_sha256
       ; created_at
       }
   in
@@ -137,6 +139,7 @@ let to_json (t : M.t) =
          ; optional "canonical_source" t.canonical_source ~f:(fun text -> `String text)
          ; optional "shell_manifest_sha256" t.shell_manifest_sha256 ~f:(fun text ->
              `String text)
+         ; optional "originals_sha256" t.originals_sha256 ~f:(fun text -> `String text)
          ])
 ;;
 
@@ -161,12 +164,14 @@ let shape =
     ; "shell_manifest_sha256", D.Shape.value
     ; "program_bundle", Prompt_program_bundle.Manifest.shape
     ; "content_bundle", Prompt_program_bundle.Manifest.shape
+    ; "originals_sha256", D.Shape.value
     ; "created_at", D.Shape.value
     ]
 ;;
 
 let program_semantics = "prompt.program-bundle.v1"
 let content_semantics = "prompt.content-bundle.v1"
+let originals_semantics = "prompt.installed-document-originals.v1"
 
 let codec () =
   D.Domain_codec.create
@@ -174,7 +179,7 @@ let codec () =
     ~kind:"store.prompt_manifest"
     ~version:1
     ~shape
-    ~supported_semantics:[ program_semantics; content_semantics ]
+    ~supported_semantics:[ program_semantics; content_semantics; originals_semantics ]
     ~decode:of_json
     ~encode:(fun value ->
       let open Result.Let_syntax in
@@ -195,24 +200,20 @@ let of_document document =
   let%bind codec = codec () in
   let%bind carrier = D.Domain_codec.decode codec document in
   List.fold_result
-    [ (value carrier).program_bundle, program_semantics
-    ; (value carrier).content_bundle, content_semantics
+    [ Option.is_some (value carrier).program_bundle, program_semantics
+    ; Option.is_some (value carrier).content_bundle, content_semantics
+    ; Option.is_some (value carrier).originals_sha256, originals_semantics
     ]
     ~init:carrier
-    ~f:(fun carrier (bundle, semantics) ->
+    ~f:(fun carrier (present, semantics) ->
       if
-        Option.is_some bundle
+        present
         && not
              (List.mem
                 (D.Document.required_semantics document)
                 semantics
                 ~equal:String.equal)
-      then
-        F.invalid
-          "required_semantics"
-          (if String.equal semantics program_semantics
-           then "program bundle requires explicit execution semantics"
-           else "content bundle requires explicit execution semantics")
+      then F.invalid "required_semantics" ("manifest field requires " ^ semantics)
       else Ok carrier)
 ;;
 
@@ -223,11 +224,12 @@ let to_document t =
   let required = D.Document.required_semantics document in
   let additional =
     List.filter_map
-      [ (value t).program_bundle, program_semantics
-      ; (value t).content_bundle, content_semantics
+      [ Option.is_some (value t).program_bundle, program_semantics
+      ; Option.is_some (value t).content_bundle, content_semantics
+      ; Option.is_some (value t).originals_sha256, originals_semantics
       ]
-      ~f:(fun (bundle, semantics) ->
-        if Option.is_some bundle && not (List.mem required semantics ~equal:String.equal)
+      ~f:(fun (present, semantics) ->
+        if present && not (List.mem required semantics ~equal:String.equal)
         then Some semantics
         else None)
   in

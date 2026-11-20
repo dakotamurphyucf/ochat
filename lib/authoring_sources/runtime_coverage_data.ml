@@ -1177,11 +1177,11 @@ let implementation_sources =
   ; ( "lib/agent_server/developer_startup_policy.ml"
     , "4f9bb9a387599ae65a60dff32f59e49bffd4e5a66dfa9181345ec344447699b8" )
   ; ( "lib/agent_server/config_validator.ml"
-    , "15e95e01feb1c6b7d2626cfcf5067eb4bbb02ad1c96fab8c7df714ce16368ca1" )
+    , "f044df15a366cad638a37934c6507ebd67a8e903a6810cb0cd3e3ba8005cf39f" )
   ; ( "lib/agent_server/embedded_local_template.ml"
     , "93691f37b0b11d3b5ef3303d2d6f35d7bdffe2ea2eb360db9d007ab841210e3e" )
   ; ( "lib/agent_server/embedded.ml"
-    , "276e2b468ca6d04e014238dd025cc7d859db53449ecc51a1d5a967bfb26aa1ac" )
+    , "ccd48d12c8fd3b45213081918d8c9b1403dbee597b6e0ef609587fc77aa0d51c" )
   ; ( "bin/ochat_agent_stdio.ml"
     , "8d134cd11c7df2a60e6b4b77a5ff7f9ea0c28a8a2674a3dd9f573adaa7623902" )
   ; ( "lib/agent_server/native_resource_authority.ml"
@@ -1271,7 +1271,7 @@ let implementation_sources =
   ; ( "lib/agent_server/developer_model_job_runner.ml"
     , "7604ff6140540e3b53720515526242e7bc1014c97d6895aacadbfb2909bda718" )
   ; ( "lib/agent_server/daemon.ml"
-    , "c4e74260ee1e6167ed31b346c2fbd623a970d526b8238121133262237d4a7317" )
+    , "6217f0cceb2ef1d3f4090075cf009d28f8b30392229fad1548039796c9732f29" )
   ; ( "lib/agent_session/developer_claimed_resource_owner.ml"
     , "fb251c6e022f9880820b15807018adc5cf240500050a0424321d7507d3e2bc41" )
   ; ( "lib/agent_server/developer_claim_deadline.ml"

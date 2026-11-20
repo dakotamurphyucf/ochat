@@ -532,6 +532,7 @@ let config
           ; permission_profile = profile.id
           ; runtime_policy = None
           ; tool_contract = Chatml_compilation.Tool_contract.Standard
+          ; document_originals = Rendered_only
           ; enabled = true
           }
         ]

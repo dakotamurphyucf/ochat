@@ -27,12 +27,19 @@ val capture
   :  parsed_contexts:Parsed.t list
   -> rendered:R.t list
   -> budget:B.t
-  -> (t, B.Error.t) Result.t
+  -> (t * Agent_store.Installed_document_originals.t option, B.Error.t) Result.t
 
 val materialize
   :  t
   -> parsed:Parsed.t
   -> budget:B.t
   -> (Prompt.Chat_markdown.Document_projection.t, B.Error.t) Result.t
+
+val original_key
+  :  t
+  -> parsed:Parsed.t
+  -> occurrence:Prompt.Chat_markdown.Document_occurrence.t
+  -> budget:B.t
+  -> (Agent_store.Installed_document_originals.Occurrence.t, B.Error.t) Result.t
 
 val preserves : t -> previous:t -> budget:B.t -> (unit, B.Error.t) Result.t

@@ -156,7 +156,8 @@ val capture_with_loader
     canonical-source metadata derives solely from admitted selection receipt.
     Hook exceptions propagate unchanged; captured replay retains original wire. *)
 val build_captured
-  :  ?prepare_programs:
+  :  ?checkpoint:(unit -> unit)
+  -> ?prepare_programs:
        (Capture.t -> (Chatml_prompt_programs.t, Diagnostic.t list) Result.t)
   -> ?prepare_content:
        (Capture.t -> (Chatmd_content_capture.t, Diagnostic.t list) Result.t)

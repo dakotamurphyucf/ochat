@@ -6,6 +6,7 @@ let cases =
   ; "http.blob-bounds-digest-foreign-ownership", Support.Data_integrity_http.test_blobs
   ; "daemon-recovery.asset-publication", Support.Data_integrity_http.test_recovery_assets
   ; "daemon-recovery.converter-adoption", Support.Recovery_asset_converter.run
+  ; "daemon-recovery.installed-originals", Support.Installed_originals.run
   ; "http.export-atomic-success", Support.Data_integrity_http.test_export
   ; "http-peer.export-atomic-failures", Support.Data_integrity_download.run
   ; ( "http-peer.export-atomic-cancellation"

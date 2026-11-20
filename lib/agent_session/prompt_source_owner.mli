@@ -277,7 +277,8 @@ module Scope : sig
       Shared policy/cancellation checks bracket caller checkpoints and delivery.
       Complete native/conversion/metadata receipt is immutable and charged once. *)
   val capture_documents
-    :  t
+    :  ?retain_root_originals:bool
+    -> t
     -> capture:Capture.t
     -> limits:Chatmd_prompt_content.Limits.t
     -> checkpoint:(unit -> unit)

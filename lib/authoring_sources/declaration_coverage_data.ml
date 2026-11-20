@@ -334,7 +334,7 @@ let implementation_sources =
   ; ( "lib/chatmd/chatmd_owned_parser.ml"
     , "54814044e438ec34474351f6e0c7f8e4c926626013089c6c8183b2ac0717cf2b" )
   ; ( "lib/agent_session/prompt_revision_builder.ml"
-    , "eaa1553325dd9a63b75c7c15b4450bf23037774e567d75d898f11d1c819af0bf" )
+    , "37f45e9da3ac432191a9e1641332e399f623e0de4b26efdd2ebfb3c83bde22da" )
   ; ( "lib/agent_session/prompt_script_sources.ml"
     , "996751e15ce03b37c6d144c2e5fd576963b3e72d37803c31cefb9400fa1a34c6" )
   ]

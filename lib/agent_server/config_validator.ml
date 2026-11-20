@@ -1874,6 +1874,7 @@ let parse_prompt context index sexp =
     ; "permission_profile"
     ; "runtime_policy"
     ; "tool_contract"
+    ; "document_originals"
     ; "enabled"
     ]
   in
@@ -1914,6 +1915,16 @@ let parse_prompt context index sexp =
        | _ ->
          shape_error context (path ^ ".tool_contract") "standard or developer_model_spawn")
   in
+  let%bind document_originals =
+    match field fields "document_originals" with
+    | None -> Ok Config.Prompt.Rendered_only
+    | Some value ->
+      let%bind value = atom context (path ^ ".document_originals") value in
+      (match value with
+       | "rendered_only" -> Ok Config.Prompt.Rendered_only
+       | "retain" -> Ok Config.Prompt.Retain
+       | _ -> shape_error context (path ^ ".document_originals") "rendered_only or retain")
+  in
   let%map enabled =
     optional_value context path fields "enabled" parse_bool ~default:true
   in
@@ -1925,6 +1936,7 @@ let parse_prompt context index sexp =
     ; permission_profile
     ; runtime_policy
     ; tool_contract
+    ; document_originals
     ; enabled
     }
 ;;

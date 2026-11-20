@@ -316,11 +316,11 @@ let capture_limits () =
   |> Or_error.ok_exn
 ;;
 
-let install artifact_store ~transaction_id artifact ~checkpoint =
+let install ?originals artifact_store ~transaction_id artifact ~checkpoint =
   let module Store = Agent_store.Prompt_artifact_store in
   (* The returned artifact is the verified publication. Its original creation
      timestamp and digest may differ from this freshly authored candidate. *)
-  Store.install_or_reuse artifact_store ~transaction_id artifact ~checkpoint
+  Store.install_or_reuse ?originals artifact_store ~transaction_id artifact ~checkpoint
 ;;
 
 (* Use the same declaration/import semantics as restoration, without starting
@@ -669,6 +669,12 @@ let publish_capture
       let content =
         Option.map prepared_content ~f:Prompt_content_custody.Prepared.content
       in
+      let originals = Option.bind supplied_content ~f:Chatmd_content_capture.originals in
+      let originals_sha256 =
+        let module Originals = Agent_store.Installed_document_originals in
+        Option.map originals ~f:(fun value ->
+          Originals.Manifest.sha256 (Originals.manifest value))
+      in
       let canonical_source = canonical_source () in
       let shell_manifest_sha256 = Capture.shell_manifest_sha256 captured in
       let%bind programs_sha256 =
@@ -711,6 +717,11 @@ let publish_capture
           ^ "#source-selection:"
           ^ Agent_store.Prompt_source_receipt.fingerprint receipt
       in
+      let manifest =
+        match originals_sha256 with
+        | None -> manifest
+        | Some digest -> manifest ^ "#installed-document-originals.v1:" ^ digest
+      in
       let revision_id = revision_id manifest in
       let%bind source_values =
         artifact_sources ~checkpoint sources
@@ -730,6 +741,7 @@ let publish_capture
           ~shell_manifest_sha256
           ~program_bundle:(Chatml_prompt_programs.to_storage programs)
           ?content_bundle:(Option.map content ~f:Chatmd_prompt_content.to_storage)
+          ?originals_sha256
           ~created_at
           ()
         |> Result.map_error ~f:(fun e -> [ store_error e ])
@@ -746,7 +758,7 @@ let publish_capture
       in
       checkpoint ();
       let%bind artifact =
-        install artifact_store ~transaction_id artifact ~checkpoint
+        install ?originals artifact_store ~transaction_id artifact ~checkpoint
         |> Result.map_error ~f:(fun e -> [ store_error e ])
       in
       let replayed =
@@ -840,6 +852,7 @@ let publish_selected_capture
 ;;
 
 let build_captured
+      ?checkpoint
       ?prepare_programs
       ?prepare_content
       ~capture
@@ -850,6 +863,7 @@ let build_captured
       (definition : Prompt_definition.t)
   =
   publish_selected_capture
+    ?checkpoint
     ?prepare_programs
     ?prepare_content
     ~capture
