@@ -4,9 +4,11 @@ module J = P.Json_codec
 module Q = Recovery_note_query
 module C = Recovery_notes.Catalog
 module Effect = Recovery_note_access.Effect
+module Share = Recovery_note_share
 
 type t =
   | Query of Q.t
+  | Shared_read of Share.Reference.t * Q.Range.t
   | Mutate of C.mutation
 
 let invalid () = P.Error.invalid_request "invalid bounded recovery note arguments"
@@ -76,6 +78,28 @@ let range json =
   Q.Range.create ~start ~stop
 ;;
 
+let shared_reference json =
+  let open Result.Let_syntax in
+  let%bind f = fields json ~names:[ "source"; "nonce"; "id" ] in
+  let%bind _ = J.required_as f "source" (fields ~names:[ "server_id"; "session_id" ]) in
+  Share.Reference.of_json json
+;;
+
+let read_selection json range =
+  let open Result.Let_syntax in
+  let%bind f = J.fields json in
+  let%bind kind = J.required_as f "kind" J.string in
+  match kind with
+  | "local" ->
+    let%map selection = local_selection json in
+    Query (Q.Read (selection, range))
+  | "shared" ->
+    let%bind f = fields json ~names:[ "kind"; "reference" ] in
+    let%map reference = J.required_as f "reference" shared_reference in
+    Shared_read (reference, range)
+  | _ -> Error (invalid ())
+;;
+
 let cursor json =
   let open Result.Let_syntax in
   let%bind f = fields json ~names:[ "revision"; "after"; "query" ] in
@@ -140,9 +164,8 @@ let decode ~effect_kind json =
   let%bind f = fields json ~names:(fields_for_effect effect_kind) in
   match effect_kind with
   | Effect.Read ->
-    let%bind selection = J.required_as f "selection" local_selection in
-    let%map range = J.required_as f "range" range in
-    Query (Q.Read (selection, range))
+    let%bind range = J.required_as f "range" range in
+    J.required_as f "selection" (fun json -> read_selection json range)
   | List ->
     let%map page = page f in
     Query (Q.List page)
@@ -184,6 +207,23 @@ let object_ properties =
 let selection_fields = [ "id", text; "revision", text ]
 let exact = object_ selection_fields
 
+let read_selection_schema =
+  let reference =
+    object_
+      [ "source", object_ [ "server_id", text; "session_id", text ]
+      ; "nonce", text
+      ; "id", text
+      ]
+  in
+  `Object
+    [ ( "anyOf"
+      , `Array
+          [ object_ (("kind", enum [ "local" ]) :: selection_fields)
+          ; object_ [ "kind", enum [ "shared" ]; "reference", reference ]
+          ] )
+    ]
+;;
+
 let page_fields =
   [ "limit", integer
   ; "cursor", optional (object_ [ "revision", text; "after", text; "query", text ])
@@ -193,7 +233,7 @@ let page_fields =
 let parameters = function
   | Effect.Read ->
     object_
-      [ "selection", object_ (("kind", enum [ "local" ]) :: selection_fields)
+      [ "selection", read_selection_schema
       ; "range", object_ [ "start", integer; "stop", integer ]
       ]
   | List -> object_ page_fields

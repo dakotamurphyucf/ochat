@@ -1,4 +1,4 @@
-# Selected local recovery note tools
+# Selected recovery note tools
 
 Select the tools a durable session needs in its ChatMD prompt. Each declaration
 selects an existing host capability. The executing actor still checks the
@@ -67,6 +67,21 @@ text, paths and snippets stay outside durable invocation history and generic
 tool observations. The provider receives successfully disclosed note data as
 tool output.
 
+## Read a shared revision
+
+Use the same selected `recovery_note_read` tool with `selection.kind` set to
+`"shared"`. Set `selection.reference` to the exact reference supplied by the
+source owner. The reference carries `source` with its host and session IDs,
+the source incarnation `nonce`, and the grant `id`. Keep the same `range`
+shape and reuse the reference for each continuation.
+
+The source owner grants one pinned note revision to a particular session
+incarnation. The recipient can read only the granted revision and byte range.
+A missing, expired, revoked, edited or incorrectly addressed share returns
+`recovery.unavailable`. If the grant changes after the result is prepared, the
+submission stops before sending the protected output. Share management remains
+a source-owner control operation.
+
 ## A direct ChatML write
 
 For a host with its one-off tool enabled, add `<tool name="run_chatml"/>` and
@@ -102,4 +117,4 @@ Direct ChatML read, list and search require the root model's protected output
 route. Direct access from a moderator, a background job, the developer
 evaluator, a transient fork or an unbound local script is unavailable. Those
 contexts lack the operation-owned continuation. The explicit share route is a
-separate registration slice.
+selected root model read.

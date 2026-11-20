@@ -483,6 +483,7 @@ let cases =
   ; "moderator.wakeup-during-tool", test_wake
   ; "generated.provider-settings-restart", Generated_provider_scenario.test
   ; "recovery.notes-provider-write", Recovery_note_provider_scenario.test
+  ; "recovery.notes-shared-provider-write", Recovery_note_shared_provider_scenario.test
   ]
 ;;
 

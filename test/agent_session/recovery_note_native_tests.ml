@@ -105,7 +105,8 @@ let local_service actor =
   let mutate ~access operation =
     Actor.mutate_recovery_note_native actor ~access operation
   in
-  A.Recovery_note_native_service.{ prepare; mutate }
+  let prepare_shared ~access:_ _ _ = Error (A.Recovery_note_share.unavailable ()) in
+  A.Recovery_note_native_service.{ prepare; prepare_shared; mutate }
 ;;
 
 let script_registration env tools =

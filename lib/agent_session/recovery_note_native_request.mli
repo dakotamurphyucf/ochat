@@ -4,6 +4,7 @@ open! Core
     typed revisions, paths, ranges, page bounds and content before any access. *)
 type t =
   | Query of Recovery_note_query.t
+  | Shared_read of Recovery_note_share.Reference.t * Recovery_note_query.Range.t
   | Mutate of Recovery_notes.Catalog.mutation
 
 val decode

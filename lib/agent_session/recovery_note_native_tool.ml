@@ -27,9 +27,8 @@ let execute effect_kind json =
       P.Error.invalid_request "recovery note tool unselected")
   in
   let%bind token = N.Admission.capture borrowed ~binding in
-  let apply () =
+  let with_service f =
     let%bind access = A.native token ~binding ~effect_kind in
-    let%bind request = R.decode ~effect_kind json in
     let%bind services =
       Script_tool_calls.current_native_services ()
       |> Result.map_error ~f:P.Error.invalid_request
@@ -44,18 +43,33 @@ let execute effect_kind json =
                 ~retryable:false
                 ())
     in
+    f access service
+  in
+  let deliver (delivery : Recovery_note_native_service.delivery) =
+    Result_selection.deliver
+      token
+      ~binding
+      ~custody:delivery.custody
+      ~materialize:delivery.materialize
+      ~refresh:delivery.refresh
+  in
+  let apply () =
+    let%bind request = R.decode ~effect_kind json in
     match request with
     | R.Query query ->
-      let%bind delivery = service.prepare ~access query in
-      Result_selection.deliver
-        token
-        ~binding
-        ~custody:delivery.custody
-        ~materialize:delivery.materialize
-        ~refresh:delivery.refresh
+      with_service (fun access service ->
+        Result.bind (service.prepare ~access query) ~f:deliver)
+    | Shared_read (reference, range) ->
+      (match
+         with_service (fun access service ->
+           Result.bind (service.prepare_shared ~access reference range) ~f:deliver)
+       with
+       | Ok () -> Ok ()
+       | Error _ -> Result_selection.reject token ~binding Unavailable)
     | Mutate mutation ->
-      let%bind _receipt = service.mutate ~access mutation in
-      Result_selection.acknowledge token ~binding
+      with_service (fun access service ->
+        let%bind _receipt = service.mutate ~access mutation in
+        Result_selection.acknowledge token ~binding)
   in
   match apply () with
   | Ok () -> Ok ()
@@ -73,8 +87,8 @@ let registration effect_kind =
       Some
         (match effect_kind with
          | A.Effect.Read ->
-           "Read a half-open UTF-8 byte range at an exact local recovery note revision. \
-            Use the returned next_offset to continue."
+           "Read a half-open UTF-8 byte range of an exact local revision or an expressly \
+            granted shared recovery note. Use the returned next_offset to continue."
          | List ->
            "List up to 16 local recovery notes in path order and obtain the catalog \
             revision. Pass null cursor for the first page."
@@ -104,11 +118,15 @@ let registration effect_kind =
          ignore (execute effect_kind json : (unit, P.Error.t) result);
          Openai.Responses.Tool_output.Output.Text "")
   in
+  let revision =
+    match effect_kind with
+    | A.Effect.Read -> "ochat.recovery.notes.native.v2:"
+    | List | Search | Write | Append | Delete -> "ochat.recovery.notes.native.v1:"
+  in
   Chat_response.Agent_runtime.
     { implementation
     ; implementation_revision =
-        Chatmd_shell_spec.Source_ref.digest
-          ("ochat.recovery.notes.native.v1:" ^ A.Effect.name effect_kind)
+        Chatmd_shell_spec.Source_ref.digest (revision ^ A.Effect.name effect_kind)
     ; result_contract = Protected_recovery_v1
     ; source_requirement = Ordinary
     ; authoring_metadata = None

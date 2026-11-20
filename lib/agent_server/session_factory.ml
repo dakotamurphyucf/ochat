@@ -2355,11 +2355,116 @@ let recovery_note_source_custody t source =
   Delivery.Source (Lease.create t.protected_source_authority ~source ~scope:{ run })
 ;;
 
+let recovery_share_session t (entry : Session_registry.entry) =
+  let module P = Agent_protocol in
+  let module S = Agent_store.Session_store in
+  match entry.store_handle with
+  | None -> Error (Agent_session.Recovery_note_share.unavailable ())
+  | Some handle ->
+    Ok
+      (P.Session_ref.create
+         ~server_id:(S.server_id t.store)
+         ~session_id:(S.Handle.session_id handle))
+;;
+
+let with_recovery_note_source t ~source ~reader reference ~f =
+  let module Actor = Agent_session.Session_actor.Recovery_note_shares in
+  let open Result.Let_syntax in
+  Session_registry.with_loaded_read
+    t.registry
+    (Agent_protocol.Session_ref.session_id source)
+    (fun (entry : Session_registry.entry) ->
+       let lease_live = ref true in
+       let check_owner () =
+         if !lease_live
+         then check_recovery_source_owner t entry ~session:source ()
+         else Error (Agent_session.Recovery_note_share.unavailable ())
+       in
+       Exn.protect
+         ~finally:(fun () -> lease_live := false)
+         ~f:(fun () ->
+           let%bind disclosure =
+             Actor.select entry.actor ~check_owner ~reader reference
+           in
+           f disclosure))
+;;
+
+let prepare_recovery_note_operation_delivery
+      t
+      ~recipient
+      ~operation_id
+      reference
+      ~admit
+      ~render
+  =
+  let module P = Agent_protocol in
+  let module A = Agent_session in
+  let module Actor = A.Session_actor.Recovery_note_shares in
+  let module Share = A.Recovery_note_share in
+  let module Delivery = Inference_runtime.Protected_delivery in
+  let open Result.Let_syntax in
+  let unavailable () = Error (Share.unavailable ()) in
+  let hide_denial result = Result.map_error result ~f:(fun _ -> Share.unavailable ()) in
+  let source = Share.Reference.source reference in
+  let%bind recipient_session = recovery_share_session t recipient |> hide_denial in
+  if
+    (not
+       (P.Id.Server.equal
+          (Agent_store.Session_store.server_id t.store)
+          (P.Session_ref.server_id source)))
+    || P.Session_ref.equal source recipient_session
+  then unavailable ()
+  else (
+    let%bind reader =
+      Actor.reader_for_delivery
+        recipient.actor
+        ~operation_id
+        ~check_owner:(check_recovery_source_owner t recipient ~session:recipient_session)
+      |> hide_denial
+    in
+    let select ~f =
+      let timeout = Eio.Time.Timeout.seconds (Eio.Stdenv.mono_clock t.env) 5. in
+      try
+        Eio.Time.Timeout.run_exn timeout (fun () ->
+          with_recovery_note_source t ~source ~reader reference ~f:(fun disclosure ->
+            let%bind content = Actor.materialize disclosure in
+            f content))
+        |> hide_denial
+      with
+      | Eio.Time.Timeout -> unavailable ()
+    in
+    let%map () = select ~f:admit in
+    let materialize () =
+      select ~f:render |> Result.map_error ~f:(fun _ -> Delivery.Unavailable)
+    in
+    let refresh ~scope:_ =
+      let selected =
+        let%bind entry =
+          Session_registry.find t.registry (P.Session_ref.session_id source)
+          |> Result.of_option ~error:(Share.unavailable ())
+        in
+        Actor.select_for_delivery
+          entry.actor
+          ~check_owner:(check_recovery_source_owner t entry ~session:source)
+          ~reader
+          reference
+      in
+      fun () -> Result.bind selected ~f:Actor.materialize |> Result.is_ok
+    in
+    A.Recovery_note_native_service.
+      { custody = recovery_note_source_custody t source; materialize; refresh })
+;;
+
 let recovery_note_native_service t actor_ref =
   let module A = Agent_session.Session_actor in
+  let module Share = Agent_session.Recovery_note_share in
   let module P = Agent_protocol in
   let module Delivery = Inference_runtime.Protected_delivery in
   let open Result.Let_syntax in
+  let output value =
+    History_entry.Payload.Output.Text
+      (Jsonaf.to_string (P.Invocation.outcome_to_json (Complete value)))
+  in
   let prepare ~access query =
     let%bind actor = extension_actor actor_ref in
     let%map selected = A.prepare_recovery_note_query actor ~access query in
@@ -2375,21 +2480,33 @@ let recovery_note_native_service t actor_ref =
       then Error Delivery.Unavailable
       else (
         match selected.materialize () with
-        | Ok value ->
-          Ok
-            (History_entry.Payload.Output.Text
-               (Jsonaf.to_string (P.Invocation.outcome_to_json (Complete value))))
+        | Ok value -> Ok (output value)
         | Error _ -> Error Delivery.Unavailable)
     in
     let refresh ~scope:_ () = check_owner () && selected.check_current () in
     Agent_session.Recovery_note_native_service.
       { custody = recovery_note_source_custody t source; materialize; refresh }
   in
+  let prepare_shared ~access reference range =
+    let%bind actor = extension_actor actor_ref in
+    let%bind recipient, operation_id = A.shared_recovery_note_operation actor ~access in
+    match Session_registry.find t.registry (P.Session_ref.session_id recipient) with
+    | Some entry when phys_equal entry.actor actor ->
+      let read = Agent_session.Recovery_note_query.Range.read range in
+      prepare_recovery_note_operation_delivery
+        t
+        ~recipient:entry
+        ~operation_id
+        reference
+        ~admit:(fun content -> Result.map (read content) ~f:ignore)
+        ~render:(fun content -> Result.map (read content) ~f:output)
+    | Some _ | None -> Error (Share.unavailable ())
+  in
   let mutate ~access operation =
     let%bind actor = extension_actor actor_ref in
     A.mutate_recovery_note_native actor ~access operation
   in
-  Agent_session.Recovery_note_native_service.{ prepare; mutate }
+  Agent_session.Recovery_note_native_service.{ prepare; prepare_shared; mutate }
 ;;
 
 let recovery_context_native_service actor_ref =
@@ -14376,15 +14493,7 @@ module Recovery_note_shares = struct
   let unavailable () = Error (Share.unavailable ())
   let hide_denial result = Result.map_error result ~f:(fun _ -> Share.unavailable ())
 
-  let session t (entry : Session_registry.entry) =
-    match entry.store_handle with
-    | None -> unavailable ()
-    | Some handle ->
-      Ok
-        (P.Session_ref.create
-           ~server_id:(S.server_id t.store)
-           ~session_id:(S.Handle.session_id handle))
-  ;;
+  let session = recovery_share_session
 
   let check_owner = check_recovery_source_owner
 
@@ -14449,23 +14558,8 @@ module Recovery_note_shares = struct
         |> hide_denial
       in
       let%bind result =
-        Session_registry.with_loaded_read
-          t.registry
-          (P.Session_ref.session_id source)
-          (fun (entry : Session_registry.entry) ->
-             let lease_live = ref true in
-             let check_owner () =
-               if !lease_live
-               then check_owner t entry ~session:source ()
-               else unavailable ()
-             in
-             Exn.protect
-               ~finally:(fun () -> lease_live := false)
-               ~f:(fun () ->
-                 let%map disclosure =
-                   Actor.select entry.actor ~check_owner ~reader reference
-                 in
-                 f disclosure))
+        with_recovery_note_source t ~source ~reader reference ~f:(fun disclosure ->
+          Ok (f disclosure))
         |> hide_denial
       in
       result)
@@ -14492,72 +14586,23 @@ module Recovery_note_shares = struct
 
   module Delivery = Inference_runtime.Protected_delivery
 
-  let check_source t source =
-    P.Id.Server.equal (S.server_id t.store) (P.Session_ref.server_id source)
-  ;;
-
   let source_custody = recovery_note_source_custody
 
-  type operation_delivery =
+  type operation_delivery = A.Recovery_note_native_service.delivery =
     { custody : Delivery.custody
     ; materialize :
         unit -> (History_entry.Payload.Output.t, Delivery.error) result
     ; refresh : scope:Transcript.Scope.t -> unit -> bool
     }
 
-  let prepare_operation_delivery
-        t
-        ~(recipient : Session_registry.entry)
-        ~operation_id
-        reference
-        ~render
-  =
-    let open Result.Let_syntax in
-    let source = Share.Reference.source reference in
-    let%bind recipient_session = session t recipient |> hide_denial in
-    if (not (check_source t source)) || P.Session_ref.equal source recipient_session
-    then unavailable ()
-    else (
-      let%map reader =
-        Actor.reader_for_delivery
-          recipient.actor
-          ~operation_id
-          ~check_owner:(check_owner t recipient ~session:recipient_session)
-      in
-      let source_id = P.Session_ref.session_id source in
-      let materialize () =
-        let result =
-          Session_registry.with_loaded_read t.registry source_id (fun entry ->
-            let%bind disclosure =
-              Actor.select
-                entry.actor
-                ~check_owner:(check_owner t entry ~session:source)
-                ~reader
-                reference
-            in
-            let%map content = Actor.materialize disclosure in
-            render content)
-        in
-        match result with
-        | Ok output -> Ok output
-        | Error _ -> Error Delivery.Unavailable
-      in
-      let refresh ~scope:_ =
-        let selected =
-          let%bind entry =
-            Result.of_option
-              (Session_registry.find t.registry source_id)
-              ~error:(Share.unavailable ())
-          in
-          Actor.select_for_delivery
-            entry.actor
-            ~check_owner:(check_owner t entry ~session:source)
-            ~reader
-            reference
-        in
-        fun () -> Result.bind selected ~f:Actor.materialize |> Result.is_ok
-      in
-      { custody = source_custody t source; materialize; refresh })
+  let prepare_operation_delivery t ~recipient ~operation_id reference ~render =
+    prepare_recovery_note_operation_delivery
+      t
+      ~recipient
+      ~operation_id
+      reference
+      ~admit:(fun _ -> Ok ())
+      ~render:(fun content -> Ok (render content))
   ;;
 end
 

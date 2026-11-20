@@ -3921,6 +3921,16 @@ val prepare_recovery_note_query
   -> Recovery_note_query.t
   -> (recovery_note_delivery, Agent_protocol.Error.t) result
 
+(** Identify the host-qualified recipient and running foreground operation from
+    the actual protected model invocation. Fresh disclosure still requires
+    its original authority and a current, explicit source grant. *)
+val shared_recovery_note_operation
+  :  t
+  -> access:Recovery_note_access.t
+  -> ( Agent_protocol.Session_ref.t * Agent_protocol.Id.Operation.t
+       , Agent_protocol.Error.t )
+       result
+
 (** A current writer and original host visibility are checked before receipt
     lookup and at the actual writer. The receipt is returned after the publish
     boundary. A replay performs no Store mutation. *)

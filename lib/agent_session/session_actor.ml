@@ -5407,6 +5407,14 @@ type recovery_note_delivery =
 
 module Recovery_note_request = struct
   module C = Recovery_notes.Catalog
+  module P = Agent_protocol
+
+  type checked =
+    | Operator of
+        { principal : P.Id.Principal.t
+        ; attachment_id : P.Id.Attachment.t option
+        }
+    | Native of P.Invocation.t * P.Id.Operation.t
 
   type mutation_route =
     | Operator_key of Agent_protocol.Idempotency_key.t
@@ -5415,8 +5423,8 @@ module Recovery_note_request = struct
   type _ t =
     | Read : Recovery_note_access.t * C.selection -> C.Content.t t
     | List : Recovery_note_access.t -> (C.Catalog_revision.t * C.metadata list) t
-    | Query :
-        Recovery_note_access.t * Recovery_note_query.t -> recovery_note_delivery t
+    | Query : Recovery_note_access.t * Recovery_note_query.t -> recovery_note_delivery t
+    | Shared_operation : Recovery_note_access.t -> (P.Session_ref.t * P.Id.Operation.t) t
     | Mutate : Recovery_note_access.t * mutation_route * C.mutation -> C.Receipt.t t
 end
 
@@ -48572,7 +48580,7 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Retire_lifecycle _
   | Abort_lifecycle _
   | Goal_request (Read _)
-  | Context_request (Recovery_note (Read _ | List _ | Query _))
+  | Context_request (Recovery_note (Read _ | List _ | Query _ | Shared_operation _))
   | Context_request (Recovery_note_share (Management_revision _ | Select _))
   | State
   | Observe_resource_state
@@ -56656,7 +56664,8 @@ let recovery_note_access t ~access ~effect_kind =
   let%bind () = Recovery_note_session.check_owner t.state.recovery_notes ~owner in
   let%bind checked = Recovery_note_access.check_now access t.state ~owner ~effect_kind in
   match checked with
-  | Operator _ -> Ok (owner, checked)
+  | Operator { principal; attachment_id } ->
+    Ok (owner, Recovery_note_request.Operator { principal; attachment_id })
   | Native invocation ->
     let%bind execution =
       List.find t.invocation_executions ~f:(fun execution ->
@@ -56669,16 +56678,17 @@ let recovery_note_access t ~access ~effect_kind =
       then Ok ()
       else Error (error Permission_denied "recovery note invocation authority is closed")
     in
-    let%bind () =
+    let%bind operation_id =
       match execution.owner, invocation.context.origin with
       | Foreground operation_id, (Model | Script) ->
-        running_operation t operation_id |> Result.map ~f:ignore
+        running_operation t operation_id |> Result.map ~f:(fun _ -> operation_id)
       | _ ->
-        Error (error Permission_denied "recovery notes require a live foreground invocation")
+        Error
+          (error Permission_denied "recovery notes require a live foreground invocation")
     in
     let%bind current = authorized_native_child_basis t (Inference_invocation execution) in
     let%map () = current.check_current () in
-    owner, checked
+    owner, Recovery_note_request.Native (invocation, operation_id)
 ;;
 
 let recovery_note_mutation_identity t ~access ~effect_kind route =
@@ -56701,7 +56711,7 @@ let recovery_note_mutation_identity t ~access ~effect_kind route =
              Permission_denied
              "recovery note writer attachment belongs to another principal")
       else Ok (Recovery_notes.Catalog.Mutation_identity.Client { principal; key })
-    | Native_invocation, Native invocation ->
+    | Native_invocation, Native (invocation, _) ->
       Ok (Recovery_notes.Catalog.Mutation_identity.Native invocation.context.id)
     | Operator_key _, (Operator { attachment_id = None; _ } | Native _)
     | Native_invocation, Operator _ ->
@@ -57104,10 +57114,21 @@ let handle_recovery_note
     let effect_kind = Recovery_note_access.Effect.of_query query in
     let%bind source, checked = recovery_note_access t ~access ~effect_kind in
     (match checked with
-     | Operator _ -> Error (error Permission_denied "recovery note delivery requires a model invocation")
-     | Native invocation ->
-       let%bind catalog = Recovery_note_session.for_owner t.state.recovery_notes ~owner:source in
+     | Operator _ ->
+       Error
+         (error Permission_denied "recovery note delivery requires a model invocation")
+     | Native (invocation, _) ->
+       let%bind catalog =
+         Recovery_note_session.for_owner t.state.recovery_notes ~owner:source
+       in
        prepare_recovery_note_delivery t ~source ~invocation catalog query)
+  | Shared_operation access ->
+    let%bind recipient, checked = recovery_note_access t ~access ~effect_kind:Read in
+    (match checked with
+     | Native
+         ({ context = { origin = Model; call_entry_id = Some _; _ }; _ }, operation_id) ->
+       Ok (recipient, operation_id)
+     | Operator _ | Native _ -> Error (Recovery_note_share.unavailable ()))
   | Mutate (access, route, operation) ->
     let effect_kind = Recovery_note_access.Effect.of_mutation operation in
     let check () = recovery_note_mutation_identity t ~access ~effect_kind route in
@@ -62405,6 +62426,10 @@ let list_recovery_notes t ~access = call t (Context_request (Recovery_note (List
 
 let prepare_recovery_note_query t ~access query =
   call t (Context_request (Recovery_note (Query (access, query))))
+;;
+
+let shared_recovery_note_operation t ~access =
+  call t (Context_request (Recovery_note (Shared_operation access)))
 ;;
 
 let mutate_recovery_note_operator t ~access ~key operation =

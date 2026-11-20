@@ -808,8 +808,9 @@ module Recovery_note_shares : sig
   (** Prepare callbacks for the protected output of an actual recipient
       operation. The explicit share reference pins the revision. Bind these
       callbacks to that operation's committed call/output via the native
-      delivery port. The nonyielding renderer returns bounded tool data under
-      source admission during preparation. Later use requires fresh checks. *)
+      delivery port. Selection checks the explicit grant before returning the
+      callbacks. The nonyielding renderer returns bounded tool data under fresh
+      source admission when the output is materialized. *)
   val prepare_operation_delivery
     :  t
     -> recipient:Session_registry.entry

@@ -15,6 +15,11 @@ type t =
       access:Recovery_note_access.t
       -> Recovery_note_query.t
       -> (delivery, Agent_protocol.Error.t) result
+  ; prepare_shared :
+      access:Recovery_note_access.t
+      -> Recovery_note_share.Reference.t
+      -> Recovery_note_query.Range.t
+      -> (delivery, Agent_protocol.Error.t) result
   ; mutate :
       access:Recovery_note_access.t
       -> Recovery_notes.Catalog.mutation
