@@ -42,22 +42,50 @@ let reference state ~limits operation_id =
   reference_for state ~limits ~kind:Compaction operation_id
 ;;
 
-let prefix = function
-  | Session_state.Compaction_archive.Compaction -> "compaction"
-  | Reset -> "reset"
-  | Rebuild -> "rebuild"
-  | Upgrade -> "upgrade"
-  | Edit -> "edit"
-  | Delete -> "delete"
-  | Pending_input -> "pending-input"
-;;
+module Name = struct
+  module Operation = Agent_protocol.Id.Operation
+  module Archive = Session_state.Compaction_archive
 
-let filename reference =
-  prefix reference.Session_state.Compaction_archive.kind
-  ^ "-"
-  ^ Agent_protocol.Id.Operation.to_string
-      reference.Session_state.Compaction_archive.operation_id
-  ^ ".frame"
+  type t =
+    { kind : Archive.kind
+    ; operation_id : Operation.t
+    }
+
+  let prefix = function
+    | Archive.Compaction -> "compaction-"
+    | Reset -> "reset-"
+    | Rebuild -> "rebuild-"
+    | Upgrade -> "upgrade-"
+    | Edit -> "edit-"
+    | Delete -> "delete-"
+    | Pending_input -> "pending-input-"
+  ;;
+
+  let suffix = ".frame"
+
+  let to_string { kind; operation_id } =
+    prefix kind ^ Operation.to_string operation_id ^ suffix
+  ;;
+
+  let of_string name =
+    let open Result.Let_syntax in
+    let%bind kind, operation =
+      List.find_map Archive.all_of_kind ~f:(fun kind ->
+        String.chop_prefix name ~prefix:(prefix kind)
+        |> Option.map ~f:(fun operation -> kind, operation))
+      |> Result.of_option ~error:(error "unknown archive filename")
+    in
+    let%bind operation =
+      String.chop_suffix operation ~suffix
+      |> Result.of_option ~error:(error "invalid archive filename")
+    in
+    let%map operation_id = Operation.of_string operation in
+    { kind; operation_id }
+  ;;
+end
+
+let filename (reference : Session_state.Compaction_archive.t) =
+  Name.to_string { kind = reference.kind; operation_id = reference.operation_id }
 ;;
 
 let path handle reference =

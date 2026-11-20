@@ -67,7 +67,7 @@ module Compaction_archive = struct
     | Edit
     | Delete
     | Pending_input
-  [@@deriving equal, sexp]
+  [@@deriving equal, enumerate, sexp]
 
   type invocation_disposition =
     { invocation_id : Agent_protocol.Id.Invocation.t

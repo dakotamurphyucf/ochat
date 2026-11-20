@@ -34,6 +34,19 @@ val read
   -> Session_state.Compaction_archive.t
   -> (Session_state.t, Agent_protocol.Error.t) result
 
+(** Basename grammar shared by the archive writer and retention reader. Parsing
+    admits only known kinds, well-typed operation IDs and the final frame suffix.
+    It does not validate the file, authorize access, or admit temporary names. *)
+module Name : sig
+  type t = private
+    { kind : Session_state.Compaction_archive.kind
+    ; operation_id : Agent_protocol.Id.Operation.t
+    }
+
+  val to_string : t -> string
+  val of_string : string -> (t, Agent_protocol.Error.t) result
+end
+
 (** Stable archive filename for a typed reference. A bounded reader must still
     enforce path containment and validate the returned bytes with decode_file. *)
 val filename : Session_state.Compaction_archive.t -> string

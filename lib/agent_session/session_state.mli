@@ -70,7 +70,7 @@ module Compaction_archive : sig
     | Edit
     | Delete
     | Pending_input
-  [@@deriving equal, sexp]
+  [@@deriving equal, enumerate, sexp]
 
   (** Administrative reconciliation of an invocation in the checksummed archive.
       Original inputs and recorded outcomes remain in that archive, not copied

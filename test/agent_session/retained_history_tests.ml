@@ -16,7 +16,7 @@ let reference_checkpoint value =
     { (handoff_snapshot 0) with current_state = Session.Snapshot.String value }
 ;;
 
-let with_history f =
+let with_history ?(archive_kind = State.Compaction_archive.Compaction) f =
   with_actor_workspace (fun env workspace_instance ->
     Eio.Switch.run (fun sw ->
       let snapshot_id = P.Id.Blob.create ()
@@ -136,18 +136,20 @@ let with_history f =
             Agent_session.Session_state_document.authored orphan_state
           in
           let orphan =
-            Archive.reference
+            Archive.reference_for
               orphan_document
               ~limits:document_limits
+              ~kind:archive_kind
               (P.Id.Operation.create ())
             |> protocol_ok
           in
           Archive.write ~env ~handle ~max_payload_length:1048576 orphan orphan_document
           |> protocol_ok;
           let reference =
-            Archive.reference
+            Archive.reference_for
               (Agent_session.Session_state_document.authored !state)
               ~limits:document_limits
+              ~kind:archive_kind
               (P.Id.Operation.create ())
             |> protocol_ok
           in
@@ -187,6 +189,92 @@ let with_history f =
             reference
             [ snapshot_id; journal_id; archive_id ]
             scan)))
+;;
+
+let%expect_test "archive names round-trip every supported kind" =
+  let operation_id = P.Id.Operation.of_string "op_round-trip_id" |> protocol_ok in
+  List.iter State.Compaction_archive.all_of_kind ~f:(fun kind ->
+    let reference =
+      State.Compaction_archive.
+        { operation_id; revision = 0L; sha256 = ""; kind; invocation_dispositions = [] }
+    in
+    let name = Archive.filename reference in
+    let parsed = Archive.Name.of_string name |> protocol_ok in
+    assert (State.Compaction_archive.equal_kind kind parsed.kind);
+    assert (P.Id.Operation.equal operation_id parsed.operation_id);
+    [%test_eq: string] name (Archive.Name.to_string parsed);
+    print_endline name);
+  [%expect
+    {|
+    compaction-op_round-trip_id.frame
+    reset-op_round-trip_id.frame
+    rebuild-op_round-trip_id.frame
+    upgrade-op_round-trip_id.frame
+    edit-op_round-trip_id.frame
+    delete-op_round-trip_id.frame
+    pending-input-op_round-trip_id.frame
+    |}]
+;;
+
+let%expect_test
+    "retained pending-input frames protect references and reject invalid names"
+  =
+  with_history
+    ~archive_kind:Pending_input
+    (fun env handle _ _ _ _ reference expected scan ->
+       let directory =
+         Eio.Path.(Eio.Stdenv.fs env / S.Session_store.Handle.archive_directory handle)
+       in
+       let name = Archive.filename reference in
+       let original = Eio.Path.(directory / name) in
+       let original_bytes = Eio.Path.load original in
+       let check_scan () =
+         let found = scan () |> store_ok in
+         assert (
+           List.equal
+             P.Id.Blob.equal
+             (List.sort expected ~compare:P.Id.Blob.compare)
+             (List.sort found ~compare:P.Id.Blob.compare))
+       in
+       check_scan ();
+       print_endline "committed and orphan pending-input frames admitted";
+       let reject filename =
+         let path = Eio.Path.(directory / filename) in
+         Eio.Path.save ~create:(`Exclusive 0o600) path original_bytes;
+         (match scan () with
+          | Error (S.Store_error.Corrupt message) -> print_endline message
+          | _ -> failwith "invalid archive filename was not reported as corruption");
+         Eio.Path.unlink path
+       in
+       reject "other-op_invalid.frame";
+       reject "pending-input-op_invalid.bin";
+       reject "pending-input-job_invalid.frame";
+       reject "pending-input-op_bad!.frame";
+       let renamed =
+         Eio.Path.(directory / Archive.filename { reference with kind = Edit })
+       in
+       Eio.Path.rename original renamed;
+       (match scan () with
+        | Error (S.Store_error.Corrupt message) -> print_endline message
+        | _ -> failwith "wrong kind satisfied the committed archive reference");
+       Eio.Path.rename renamed original;
+       Eio.Path.save
+         ~create:(`Exclusive 0o600)
+         Eio.Path.(directory / (name ^ ".tmp-1-2"))
+         "partial temporary frame";
+       check_scan ();
+       [%test_eq: string] original_bytes (Eio.Path.load original);
+       print_endline "temporary file skipped, original bytes and reference proof intact");
+  [%expect
+    {|
+    committed and orphan pending-input frames admitted
+    unknown archive filename
+    invalid archive filename
+    identifier has the wrong type prefix
+    identifier contains an invalid character
+    referenced archive is missing
+    temporary file skipped, original bytes and reference proof intact
+    |}]
 ;;
 
 let%expect_test "history scan protects fallback, journal-only and archived references" =
