@@ -132,7 +132,12 @@ module Receipt = struct
     | Archive_only of archive_only_reason
   [@@deriving equal, sexp_of]
 
-  type continuation = Awaiting_after_commit of P.Id.Operation.t
+  type continuation =
+    | Awaiting_after_commit of P.Id.Operation.t
+    | Awaiting_settled_foreground of
+        { owner : P.Id.Operation.t
+        ; predecessor : P.Id.Operation.t
+        }
   [@@deriving equal, sexp_of]
 
   type committed =
@@ -197,19 +202,28 @@ module Receipt = struct
     | _ -> invalid "unknown rollover checkpoint quality"
   ;;
 
-  let continuation_to_json (Awaiting_after_commit id) =
-    `Object [ "kind", `String "awaiting_after_commit"; "id", P.Id.Operation.to_json id ]
+  let continuation_to_json = function
+    | Awaiting_after_commit id ->
+      `Object [ "kind", `String "awaiting_after_commit"; "id", P.Id.Operation.to_json id ]
+    | Awaiting_settled_foreground { owner; predecessor } ->
+      `Object
+        [ "kind", `String "awaiting_settled_foreground"
+        ; "id", P.Id.Operation.to_json owner
+        ; "predecessor", P.Id.Operation.to_json predecessor
+        ]
   ;;
 
   let continuation_of_json json =
     let open Result.Let_syntax in
     let%bind fields = J.fields json in
     let%bind kind = J.required_as fields "kind" J.string in
-    if String.equal kind "awaiting_after_commit"
-    then (
-      let%map id = J.required_as fields "id" P.Id.Operation.of_json in
-      Awaiting_after_commit id)
-    else invalid "unknown rollover continuation obligation"
+    let%bind owner = J.required_as fields "id" P.Id.Operation.of_json in
+    match kind with
+    | "awaiting_after_commit" -> Ok (Awaiting_after_commit owner)
+    | "awaiting_settled_foreground" ->
+      let%map predecessor = J.required_as fields "predecessor" P.Id.Operation.of_json in
+      Awaiting_settled_foreground { owner; predecessor }
+    | _ -> invalid "unknown rollover continuation obligation"
   ;;
 
   let status_to_json ?(public = false) t =
@@ -266,7 +280,18 @@ module Receipt = struct
     | Pending | Terminal (Superseded _) -> Ok ()
     | Terminal
         (Committed { successor; cut_revision; checkpoint; continuation; archive = _ }) ->
-      let (Awaiting_after_commit owner) = continuation in
+      let owner =
+        match continuation with
+        | Awaiting_after_commit owner | Awaiting_settled_foreground { owner; _ } -> owner
+      in
+      let continuation_binds_requester =
+        match continuation, t.intent.requester with
+        | Awaiting_after_commit _, _ -> true
+        | Awaiting_settled_foreground { predecessor; _ }, Native { operation; _ } ->
+          P.Id.Operation.equal predecessor operation
+        | Awaiting_settled_foreground { predecessor; _ }, Operator _ ->
+          not (P.Id.Operation.equal predecessor t.intent.id)
+      in
       let checkpoint_binds_cut =
         match checkpoint with
         | Checkpointed checkpoint ->
@@ -283,6 +308,7 @@ module Receipt = struct
         && (not (Scope.equal expected.scope successor))
         && Int64.(cut_revision > expected.revision)
         && P.Id.Operation.equal owner t.intent.id
+        && continuation_binds_requester
         && checkpoint_binds_cut
       then Ok ()
       else invalid "rollover terminal receipt differs from its admitted intent"
@@ -316,6 +342,7 @@ module Commit = struct
     ; archive : Chatml_source.Digest.t
     ; checkpoint : Receipt.checkpoint_quality
     ; retain : P.History.Id.t list
+    ; batch : Recovery_rollover_batch.t option
     }
 
   let validate_selection t =
@@ -332,7 +359,11 @@ module Commit = struct
       ; cut_revision = t.expected.revision
       ; archive = t.archive
       ; checkpoint = t.checkpoint
-      ; continuation = Awaiting_after_commit t.id
+      ; continuation =
+          (match t.batch with
+           | None -> Awaiting_after_commit t.id
+           | Some batch ->
+             Awaiting_settled_foreground { owner = t.id; predecessor = batch.operation })
       }
   ;;
 
@@ -345,11 +376,11 @@ module Commit = struct
     else conflict "rollover publication does not match the admitted intent"
   ;;
 
-  let create (intent : Intent.t) ~expected ~successor ~archive ~checkpoint ~retain =
+  let create ?batch (intent : Intent.t) ~expected ~successor ~archive ~checkpoint ~retain =
     let open Result.Let_syntax in
     let%bind t =
       validate_selection
-        { id = intent.id; expected; successor; archive; checkpoint; retain }
+        { id = intent.id; expected; successor; archive; checkpoint; retain; batch }
     in
     let%map () = check_intent t intent in
     t
@@ -357,13 +388,16 @@ module Commit = struct
 
   let to_json t =
     `Object
-      [ "id", P.Id.Operation.to_json t.id
-      ; "expected", Expected.to_json t.expected
-      ; "successor", Scope.to_json t.successor
-      ; "archive", `String (Chatml_source.Digest.to_hex t.archive)
-      ; "checkpoint", Receipt.checkpoint_to_json ~public:false t.checkpoint
-      ; "retain", `Array (List.map t.retain ~f:P.History.Id.to_json)
-      ]
+      ([ "id", P.Id.Operation.to_json t.id
+       ; "expected", Expected.to_json t.expected
+       ; "successor", Scope.to_json t.successor
+       ; "archive", `String (Chatml_source.Digest.to_hex t.archive)
+       ; "checkpoint", Receipt.checkpoint_to_json ~public:false t.checkpoint
+       ; "retain", `Array (List.map t.retain ~f:P.History.Id.to_json)
+       ]
+       @ Option.to_list
+           (Option.map t.batch ~f:(fun batch ->
+              "batch", Recovery_rollover_batch.to_json batch)))
   ;;
 
   let of_json json =
@@ -380,7 +414,8 @@ module Commit = struct
     in
     let%bind checkpoint = J.required_as fields "checkpoint" Receipt.checkpoint_of_json in
     let%bind retain = J.required_as fields "retain" (J.list P.History.Id.of_json) in
-    validate_selection { id; expected; successor; archive; checkpoint; retain }
+    let%bind batch = J.optional_as fields "batch" Recovery_rollover_batch.of_json in
+    validate_selection { id; expected; successor; archive; checkpoint; retain; batch }
   ;;
 end
 
@@ -408,6 +443,16 @@ let pending t =
     match receipt.Receipt.status with
     | Pending -> Some receipt.intent
     | Terminal _ -> None)
+;;
+
+let checkpoint t = t.checkpoint
+
+let awaiting_foreground t ~scope =
+  List.exists t.receipts ~f:(fun receipt ->
+    match receipt.status with
+    | Terminal (Committed { successor; continuation = Awaiting_settled_foreground _; _ })
+      -> Scope.equal successor scope
+    | Pending | Terminal _ -> false)
 ;;
 
 let previous t ~requester ~expected =
@@ -545,17 +590,19 @@ let apply previous_ledger ~active ~revision ~history ~catalog change =
   next
 ;;
 
-let check_checkpoint t selected ~expected ~history ~catalog =
+let check_checkpoint ?checkpoint_history t selected ~expected ~history ~catalog =
   match t.checkpoint with
   | Some checkpoint
     when Checkpoint.equal checkpoint selected
          && Scope.equal (Checkpoint.expected checkpoint).scope expected.Expected.scope
          && Int64.((Checkpoint.expected checkpoint).revision < expected.revision) ->
-    Checkpoint.check_contents checkpoint ~history ~catalog
+    (match Checkpoint.check_contents checkpoint ~history ~catalog, checkpoint_history with
+     | Error _, Some history -> Checkpoint.check_contents checkpoint ~history ~catalog
+     | result, _ -> result)
   | Some _ | None -> conflict "rollover checkpoint is not recorded for the current cut"
 ;;
 
-let commit t (change : Commit.t) ~active ~revision ~history ~catalog =
+let commit ?checkpoint_history t (change : Commit.t) ~active ~revision ~history ~catalog =
   let open Result.Let_syntax in
   let%bind intent =
     Result.of_option
@@ -574,7 +621,13 @@ let commit t (change : Commit.t) ~active ~revision ~history ~catalog =
   let%bind () =
     match change.checkpoint with
     | Checkpointed selected ->
-      check_checkpoint t selected ~expected:change.expected ~history ~catalog
+      check_checkpoint
+        ?checkpoint_history
+        t
+        selected
+        ~expected:change.expected
+        ~history
+        ~catalog
     | Archive_only _ -> Ok ()
   in
   let%bind t = settle t ~id:change.id ~terminal:(Commit.terminal change) in

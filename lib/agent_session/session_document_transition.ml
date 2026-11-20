@@ -192,8 +192,15 @@ let prepare previous ~delta ~limits =
           Session_delta.apply ~limits (Transaction.value carrier) delta
           |> X.document_result
         in
-        let%bind admitted = History_retirement.admit_rollover previous change ~next:state ~limits in
-        Transaction.continue_after_history carrier ~admitted ~next:state ~limits
+        let%bind admitted =
+          History_retirement.admit_rollover previous change ~next:state ~limits
+        in
+        let%bind candidate =
+          Transaction.continue_after_history carrier ~admitted ~next:state ~limits
+        in
+        (match change.batch with
+         | None -> Ok candidate
+         | Some _ -> Transaction.observe_descendants candidate (Active_operation None))
       | (History_deleted _ | History_edited _) as delta ->
         let open Result.Let_syntax in
         let%bind previous = Transaction.checkpoint carrier ~limits in

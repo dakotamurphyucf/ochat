@@ -127,6 +127,7 @@ type driver_pending_call_kind =
 type driver_pending_call =
   { seq : int
   ; call_entry : History_entry.t option
+  ; candidate_key : Transcript.Item.Key.t option
   ; call_id : string
   ; kind : driver_pending_call_kind
   ; name : string
@@ -240,6 +241,7 @@ type 'a prepared_turn =
 type ctx =
   { env : Eio_unix.Stdenv.base
   ; root_context : Root_context.t option
+  ; on_settled_batch : (Settled_tool_batch.t -> Settled_tool_batch.decision) option
   ; inference_context : Inference_runtime.Context.t
   ; fork_depth : int option
   ; inference_identity : Neutral_turn.Identity.t
@@ -312,6 +314,7 @@ type ctx =
 type args =
   { env : Eio_unix.Stdenv.base
   ; root_context : Root_context.t option
+  ; on_settled_batch : (Settled_tool_batch.t -> Settled_tool_batch.decision) option
   ; inference_context : Inference_runtime.Context.t
   ; fork_depth : int option
   ; inference_identity : Neutral_turn.Identity.t
@@ -1464,6 +1467,7 @@ let make_run_fork_admitted
     { ctx with
       allocator = child_allocator
     ; root_context = None
+    ; on_settled_batch = None
     ; take_protected_delivery = None
     ; inference_context = Inference_runtime.Context.detach ctx.inference_context
     ; fork_depth = Option.map ctx.fork_depth ~f:(fun depth -> depth + 1)
@@ -1550,9 +1554,12 @@ let add_pending
       ~(kind : [ `Function | `Custom ])
       ~(name : string)
       ?call_entry
+      ?candidate_key
       promise
   =
-  let pending = { seq = st.next_seq; call_entry; call_id; kind; name; promise } in
+  let pending =
+    { seq = st.next_seq; call_entry; candidate_key; call_id; kind; name; promise }
+  in
   { st with
     pending_calls_rev = pending :: st.pending_calls_rev
   ; next_seq = st.next_seq + 1
@@ -2120,6 +2127,7 @@ let accept_inference_candidate
       add_pending
         st
         ~call_entry:call
+        ~candidate_key:(Transcript.Item.key item)
         ~call_id
         ~kind:
           (match kind with
@@ -2136,12 +2144,12 @@ let await_calls (c : ctx) ~(hist : History_entry.t list) (st : stream_state) =
   in
   List.foldi
     sorted
-    ~init:(st.new_entries_rev, [])
+    ~init:(st.new_entries_rev, [], [])
     ~f:
       (fun
         _
-        (entries_rev, requests_rev)
-        { seq = _; call_entry; call_id; kind; name; promise }
+        (entries_rev, requests_rev, committed_rev)
+        { seq = _; call_entry; candidate_key; call_id; kind; name; promise }
       ->
       let completed = Eio.Promise.await_exn promise in
       let result = completed.Tool_dispatch.output in
@@ -2231,8 +2239,18 @@ let await_calls (c : ctx) ~(hist : History_entry.t list) (st : stream_state) =
       in
       let runtime_requests = completed.runtime_requests @ runtime_requests in
       List.iter runtime_requests ~f:c.on_runtime_request;
-      candidate_entry :: entries_rev, List.rev_append runtime_requests requests_rev)
-  |> fun (entries, requests_rev) -> entries, List.rev requests_rev
+      let committed_rev =
+        match c.on_settled_batch, candidate_key, call_entry with
+        | Some _, Some key, Some call ->
+          (key, Settled_tool_batch.{ call = History_entry.id call; output = id })
+          :: committed_rev
+        | _ -> committed_rev
+      in
+      ( candidate_entry :: entries_rev
+      , List.rev_append runtime_requests requests_rev
+      , committed_rev ))
+  |> fun (entries, requests_rev, committed_rev) ->
+  entries, List.rev requests_rev, List.rev committed_rev
 ;;
 
 let log_request (c : ctx) ~(inputs : Openai.Responses.Item.t list) =
@@ -2403,16 +2421,16 @@ let run_turn (root_ctx : ctx) ~sw ~(history : History_entry.t list) =
             Exn.protect ~f:run ~finally:(fun () ->
               List.iter protected_delivery ~f:Inference_runtime.Protected_delivery.retire)
         in
-        c, receipt
+        c, !admitted_attempt, receipt
       in
-      let c, receipt =
+      let c, attempt, receipt =
         match c.root_context with
         | None -> run_request c.inference_context ~on_prepared:ignore ~on_dispatch:ignore
         | Some source ->
           source.with_context ~previous:c.inference_context ~history:inputs run_request
       in
       let st = !st in
-      let new_entries_rev, tool_requests = await_calls c ~hist st in
+      let new_entries_rev, tool_requests, committed = await_calls c ~hist st in
       let completion =
         match
           Inference_runtime.Receipt.terminal receipt |> Inference.Event.Terminal.outcome
@@ -2430,9 +2448,26 @@ let run_turn (root_ctx : ctx) ~sw ~(history : History_entry.t list) =
        | Failed _ -> raise (Inference_failed (Inference_runtime.Receipt.terminal receipt))
        | Completed | Refused | Incomplete _ -> ());
       let hist = List.append hist (List.rev new_entries_rev) in
-      if Option.is_some (Runtime_semantics.should_end_session tool_requests)
-      then hist
-      else (
+      let decision =
+        if Option.is_some (Runtime_semantics.should_end_session tool_requests)
+        then Settled_tool_batch.Retire
+        else if
+          List.exists tool_requests ~f:(function
+            | Moderation.Runtime_request.Request_compaction -> true
+            | Request_turn | End_session _ -> false)
+        then Continue
+        else (
+          match c.on_settled_batch, attempt with
+          | Some settle, Some attempt ->
+            Option.value_map
+              (Settled_tool_batch.create attempt receipt committed)
+              ~default:Settled_tool_batch.Continue
+              ~f:settle
+          | _ -> Continue)
+      in
+      match decision with
+      | Retire -> hist
+      | Continue ->
         let deferred =
           consume_safe_point_entries ~safe_point:Turn_start_boundary c.safe_point_input
         in
@@ -2485,7 +2520,7 @@ let run_turn (root_ctx : ctx) ~sw ~(history : History_entry.t list) =
                    ~request_turn_budget
                  |> Result.ok_or_failwith
                in
-               turn_with_budget c hist ~request_turn_budget:next_budget))))
+               turn_with_budget c hist ~request_turn_budget:next_budget)))
   in
   turn_with_budget root_ctx history ~request_turn_budget:0
 ;;
@@ -2498,6 +2533,7 @@ let setup_ctx ~(sw : Eio.Switch.t) (a : args) =
   let c =
     { env = a.env
     ; root_context = a.root_context
+    ; on_settled_batch = a.on_settled_batch
     ; inference_context = a.inference_context
     ; fork_depth = a.fork_depth
     ; inference_identity = a.inference_identity
@@ -2575,6 +2611,7 @@ let run_completion_stream_in_memory_entries
       ~env
       ~inference_context
       ?root_context
+      ?on_settled_batch
       ~inference_identity
       ~on_inference_attempt
       ~on_inference_completion
@@ -2706,6 +2743,7 @@ let run_completion_stream_in_memory_entries
   let args =
     { env
     ; root_context
+    ; on_settled_batch
     ; inference_context
     ; fork_depth
     ; inference_identity

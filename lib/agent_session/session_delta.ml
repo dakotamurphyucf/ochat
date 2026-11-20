@@ -422,6 +422,16 @@ let rollover_retained_history
   |> Result.all
 ;;
 
+let awaiting_settled_foreground (state : Session_state.t) =
+  match state.recovery_windows, state.recovery_rollover with
+  | Some windows, Some receipts ->
+    let scope =
+      Recovery_window_ledger.active windows |> Recovery_window_ledger.Window.scope
+    in
+    Recovery_rollover.awaiting_foreground receipts ~scope
+  | _ -> false
+;;
+
 let require_quiescent_rollover_cut (state : Session_state.t) =
   match
     state.active_operation, state.runtime_initialization, state.lifecycle.observed
@@ -437,7 +447,6 @@ let apply_rollover (state : Session_state.t) (change : Recovery_rollover.Commit.
   let module P = Agent_protocol in
   let module R = Recovery_rollover in
   let module W = Recovery_window_ledger in
-  let%bind () = require_quiescent_rollover_cut state in
   let%bind windows =
     Result.of_option
       state.recovery_windows
@@ -450,8 +459,24 @@ let apply_rollover (state : Session_state.t) (change : Recovery_rollover.Commit.
   in
   let predecessor = W.Window.scope (W.active windows) in
   let history = state.conversation.canonical_history in
+  let%bind checkpoint_history =
+    match change.batch with
+    | None -> Result.map (require_quiescent_rollover_cut state) ~f:(fun () -> None)
+    | Some batch ->
+      let%bind intent =
+        R.pending receipts
+        |> Result.of_option
+             ~error:(P.Error.invalid_request "settled rollover has no intent")
+      in
+      Recovery_rollover_batch_cut.validate
+        state
+        ~scope:predecessor
+        ~requester:intent.requester
+        batch
+  in
   let%bind recovery_rollover =
     R.commit
+      ?checkpoint_history
       receipts
       change
       ~active:predecessor
@@ -483,6 +508,14 @@ let apply_rollover (state : Session_state.t) (change : Recovery_rollover.Commit.
       conversation = { next.conversation with initial_prompt_entry_count }
     ; recovery_rollover = Some recovery_rollover
     ; recovery_effective
+    ; active_operation =
+        (match change.batch with
+         | None -> next.active_operation
+         | Some _ -> None)
+    ; lifecycle =
+        (match change.batch with
+         | None -> next.lifecycle
+         | Some _ -> { next.lifecycle with observed = Idle })
     }
     archive
 ;;
@@ -501,6 +534,14 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
         created
     in
     let%bind created = Session_state.upgrade_schema created in
+    let%bind () =
+      if awaiting_settled_foreground state && Option.is_some created.active_operation
+      then
+        Error
+          (Agent_protocol.Error.invalid_request
+             "replacement cannot claim a pending foreground continuation")
+      else Ok ()
+    in
     let%bind () =
       Recovery_window_capture.check_replacement_archive state ~incoming:created
     in
@@ -961,6 +1002,14 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
             Option.to_list archive @ next.conversation.compaction_archives
         }
     }
+  | Active_operation_changed (Some _)
+    when Option.is_none state.active_operation && awaiting_settled_foreground state ->
+    Error
+      (Agent_protocol.Error.create
+         Conflict
+         ~message:"successor continuation must claim foreground admission"
+         ~retryable:true
+         ())
   | Active_operation_changed active_operation ->
     let automatic_turn_budget =
       match active_operation, state.active_operation with
@@ -2261,6 +2310,9 @@ let validate_goal_descendants
       accounts, cursor
     | Active_operation_changed operation ->
       let%map cursor = O.advance cursor (Active_operation operation) in
+      accounts, cursor
+    | Recovery_rollover_committed { batch = Some _; _ } ->
+      let%map cursor = O.advance cursor (Active_operation None) in
       accounts, cursor
     | Invocation_changed invocation | Invocation_reconciled invocation ->
       let%map cursor = O.advance cursor (Invocation invocation) in

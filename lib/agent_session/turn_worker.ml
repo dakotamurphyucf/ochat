@@ -391,6 +391,13 @@ let run
           (Option.map capabilities.root_context ~f:(fun source ->
              Option.value_map root_binding ~default:source ~f:(fun binding ->
                Chat_response.Root_binding.wrap binding source)))
+        ?on_settled_batch:
+          (Option.map capabilities.settle_tool_batch ~f:(fun settle batch ->
+             match settle batch |> require_ok with
+             | Chat_response.Settled_tool_batch.Retire ->
+               runtime_requests := [];
+               Chat_response.Settled_tool_batch.Retire
+             | Continue -> Chat_response.Settled_tool_batch.Continue))
         ~inference_identity:(config.inference_identity capabilities.allocate_inference)
         ~on_inference_attempt:config.on_inference_attempt
         ~on_inference_completion:config.on_inference_completion

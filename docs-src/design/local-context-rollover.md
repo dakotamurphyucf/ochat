@@ -330,6 +330,28 @@ bytes after sync before publishing the delta. While an intent is pending,
 each canonical write also verifies that the next journal transaction and
 snapshot can still represent a no-archive supersession.
 
+A live settlement compares the complete selected response's ordered call
+positions with the actor-acknowledged result occurrences before the worker
+asks for deferred input. The actor checks the original foreground launch,
+its actual acknowledged root attempt, the stored terminal receipt, and each
+canonical call/result relation. A cancelled tool whose outcome was published
+is included as that outcome. Cancellation before publication leaves the cut
+unavailable. The archive transaction retires the old active slot and records
+the predecessor operation in the pending continuation. Queued entries and
+wake dispositions keep their original identities. The successor scheduler
+claims that continuation under current authority before starting a new
+foreground operation.
+
+A native intent requires a recorded eligible checkpoint. A previous proof
+can cover the canonical prefix when the only additional occurrences are the
+exact, acknowledged Context control calls and results of this batch. A
+changed row or selected note invalidates that evidence. Explicit operator
+force may archive an uncovered batch if its original owner authorization
+is still current at the writer. Retrying an existing intent or reopening the
+session cannot attach live authority to that original foreground cut. An
+authorized owner can explicitly settle the pending intent at a later,
+quiescent cut.
+
 **Reconcile and resume.** Cancellation, stale configuration or history,
 revoked authority and storage failure before publication leave the old
 window authoritative. An unreferenced staged archive is eligible for

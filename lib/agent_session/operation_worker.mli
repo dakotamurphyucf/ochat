@@ -226,6 +226,10 @@ module Capabilities : sig
           accepts its consumed notification wakes, including without a moderator.
           A failed save prevents provider dispatch. *)
     ; root_context : Chat_response.Root_context.t option
+    ; settle_tool_batch :
+        (Chat_response.Settled_tool_batch.t
+         -> (Chat_response.Settled_tool_batch.decision, Agent_protocol.Error.t) result)
+          option
     ; consume_deferred : unit -> (History_entry.t list, Agent_protocol.Error.t) result
     ; consume_notifications : Notification_delivery.t notification_consumer
       (** These consumers retain the physical launch's window ownership. Delivery

@@ -137,6 +137,8 @@ val apply
 
 val validate_rollover_transaction : t -> (unit, Agent_protocol.Error.t) result
 
+val awaiting_settled_foreground : Session_state.t -> bool
+
 val rollover_retained_history
   :  Session_state.t
   -> Recovery_rollover.Commit.t

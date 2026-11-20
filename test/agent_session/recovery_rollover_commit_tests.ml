@@ -430,8 +430,9 @@ let%expect_test "archive sync and journal acknowledgement have distinct replay e
       in
       assert (Scope.equal terminal.successor (W.scope after));
       assert (not (Scope.equal (W.scope before) (W.scope after)));
-      let (Awaiting_after_commit owner) = terminal.continuation in
-      assert (P.Id.Operation.equal id owner);
+      (match terminal.continuation with
+       | Awaiting_after_commit owner -> assert (P.Id.Operation.equal id owner)
+       | Awaiting_settled_foreground _ -> failwith "idle cut acquired a live predecessor");
       let public = R.Receipt.to_public_json receipt |> Jsonaf.to_string in
       assert (not (String.is_substring public ~substring:"selection"));
       assert (not (String.is_substring public ~substring:"durable local checkpoint body"));

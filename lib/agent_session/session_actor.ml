@@ -1686,6 +1686,7 @@ module Foreground_publication = struct
     ; operation : P.Operation.t
     ; live : bool Atomic.t
     ; completion : Operation_completion.t option
+    ; mutable finished_root : Inference_runtime.Attempt.t option
     }
 
   let scope (state : Session_state.t) =
@@ -1701,6 +1702,7 @@ module Foreground_publication = struct
     ; operation
     ; live = Atomic.make true
     ; completion
+    ; finished_root = None
     }
   ;;
 
@@ -1714,6 +1716,17 @@ module Foreground_publication = struct
       && Int.equal t.operation.generation operation.generation
       && P.Operation.equal_kind t.operation.kind operation.kind)
   ;;
+end
+
+module Foreground_rollover = struct
+  module P = Agent_protocol
+
+  type t =
+    { id : P.Id.Operation.t
+    ; publication : Foreground_publication.t
+    ; check : unit -> (P.Principal.t, P.Error.t) result
+    ; authorize_force : (Session_state.t -> (unit, P.Error.t) result) option
+    }
 end
 
 module Worker_readiness = struct
@@ -5516,6 +5529,9 @@ module Recovery_rollover_request = struct
         Recovery_context_service.access -> Recovery_context_service.observation t
     | Native_new_window :
         Recovery_context_service.access * P.Id.Context_window.t -> R.Receipt.t t
+    | Worker_settled :
+        Foreground_publication.t * Chat_response.Settled_tool_batch.t
+        -> Chat_response.Settled_tool_batch.decision t
     | Operator_request :
         Operator_authorization.t
         * P.Id.Attachment.t
@@ -6639,6 +6655,7 @@ and t =
   ; mutable configuration_policy : Configuration_policy.t option
   ; mutable context_capacity_host : Session_context_capacity.Host.t
   ; mutable rollover_requires_recovery : bool
+  ; mutable live_operator_rollover : Foreground_rollover.t option
   ; mutable recurrence_controller : Recurrence_controller.t option
   ; recurrence_runtime : Recurrence_runtime.t
   ; recurrence_creation_owner : unit ref
@@ -14713,7 +14730,26 @@ let complete_inference ?owned_graph ?run_preparation t owner handle completion =
     then Ok ()
     else Error (error Conflict "completion is from another actual recovery attempt")
   in
-  commit_inference_ledger ?owned_graph ?run_preparation ~recovery_attempts t ledger
+  let%map () =
+    commit_inference_ledger ?owned_graph ?run_preparation ~recovery_attempts t ledger
+  in
+  (* A stored ordinal can be replayed as data. The live cut also requires the
+     same physical attempt whose completion the graph just acknowledged. *)
+  if not (List.is_empty recovery_attempts)
+  then
+    Option.iter t.foreground_publication ~f:(fun publication ->
+      let operation = Inference_ledger.Handle.operation_id handle in
+      if
+        Option.equal
+          Agent_protocol.Id.Operation.equal
+          operation
+          (Some publication.operation.id)
+        && Foreground_publication.matches
+             publication
+             ~selected:t.foreground_publication
+             ~state:t.state
+      then
+        publication.finished_root <- Some (Inference_client.Completion.attempt completion))
 ;;
 
 let interrupt_inference_row ledger handle ~delivery =
@@ -27134,7 +27170,9 @@ let worker_terminal
     t.invocation_executions <- independent;
     t.active_cancel <- None;
     if Option.equal phys_equal publication t.foreground_publication
-    then t.foreground_publication <- None;
+    then (
+      t.live_operator_rollover <- None;
+      t.foreground_publication <- None);
     (match t.state.lifecycle.desired, t.state.halted with
      | Stopped, _ | _, true -> cancel_independent_moderator t
      | Running, false -> ());
@@ -29278,6 +29316,9 @@ let worker_capabilities t (publication : Foreground_publication.t) id_source buf
     ; root_context =
         Option.map t.configuration_policy ~f:(fun _ ->
           root_configuration_context t operation_id)
+    ; settle_tool_batch =
+        Option.map (current_context_capacity_basis t) ~f:(fun _ batch ->
+          call t (Context_request (Rollover (Worker_settled (publication, batch)))))
     ; consume_deferred = (fun () -> call t (Consume_deferred publication))
     ; consume_notifications =
         (fun plan ->
@@ -31221,6 +31262,8 @@ let submit_authorized_message
   | false, Some _, _
   | false, None, (Running_turn _ | Compacting _ | Waiting_for_permission _) ->
     submit_deferred_message ?original_actor ~extra_deltas ~owner ~timing t entry
+  | false, None, Idle when Session_delta.awaiting_settled_foreground t.state ->
+    submit_deferred_message ?original_actor ~extra_deltas ~owner ~timing t entry
   | false, None, Idle ->
     submit_idle_message ?original_actor ~extra_deltas ~owner ~timing t entry
   | false, None, (Stopped | Queued_for_slot | Starting | Recovering | Stopping | Failed _)
@@ -31260,7 +31303,7 @@ let submit_message
     match
       t.idle_moderator_borrowed, t.state.active_operation, t.state.lifecycle.observed
     with
-    | false, None, Idle -> true
+    | false, None, Idle -> not (Session_delta.awaiting_settled_foreground t.state)
     | (true | false), (Some _ | None), _ -> false
   in
   let requirement = if idle then inherited_turn_required t.state else Ordinary in
@@ -49147,7 +49190,12 @@ let lifecycle_request_allowed : type a. a request -> bool = function
       (Instruction_command _ | Recovery_note (Mutate _) | Enable_recovery_windows _ | Expire_recovery_window _)
   | Context_request (Recovery_note_share (Establish_target _ | Create _ | Revoke _))
   | Context_request
-      (Rollover (Native_new_window _ | Operator_request _ | Operator_settle _ | Operator_checkpoint _))
+      (Rollover
+         ( Native_new_window _
+         | Worker_settled _
+         | Operator_request _
+         | Operator_settle _
+         | Operator_checkpoint _ ))
   | Set_recurrence_controller _
   | Set_recurrence_planning_host _
   | Recurrence_due_ids
@@ -56172,6 +56220,7 @@ let retire_execution_custody t =
     | Waiting | Activated _ | Callback_acknowledged _ | Released -> ());
   t.operation_completion <- None;
   t.foreground_publication <- None;
+  t.live_operator_rollover <- None;
   retire_descendant_host t;
   List.iter t.descendant_policy_cells ~f:Goal_root_policy.retire;
   t.descendant_policy_cells <- [];
@@ -57169,6 +57218,7 @@ let enable_recovery_windows_internal t actor attachment_id authorize =
 let persist_recovery_delta
       ?(rollover = false)
       ?(payloads = [])
+      ?(after_install = fun () -> ())
       t
       ~delta
       ~check_before_commit
@@ -57207,6 +57257,7 @@ let persist_recovery_delta
              t.rollover_requires_recovery <- true))
   in
   install_committed_transition ?run_preparation t candidate;
+  after_install ();
   publish_committed_transition t candidate;
   Ok ()
 ;;
@@ -57278,7 +57329,13 @@ let active_rollover_window t =
   else None
 ;;
 
-let admit_recovery_rollover ?(check_basis = fun () -> Ok ()) t ~check ~expected =
+let admit_recovery_rollover
+      ?(check_basis = fun () -> Ok ())
+      ?(after_admit = fun _ -> ())
+      t
+      ~check
+      ~expected
+  =
   let module R = Recovery_rollover in
   let module P = Agent_protocol in
   let open Result.Let_syntax in
@@ -57289,6 +57346,11 @@ let admit_recovery_rollover ?(check_basis = fun () -> Ok ()) t ~check ~expected 
   | Some receipt -> Ok receipt
   | None ->
     let check_policy () =
+      let%bind () =
+        if Session_delta.awaiting_settled_foreground t.state
+        then Error (error Conflict "the active window has a pending continuation")
+        else Ok ()
+      in
       let%bind _ =
         Result.of_option (current_context_capacity_basis t)
           ~error:(error Invalid_state "local context mode is disabled")
@@ -57317,6 +57379,7 @@ let admit_recovery_rollover ?(check_basis = fun () -> Ok ()) t ~check ~expected 
       persist_recovery_delta t
         ~rollover:true
         ~delta:(Recovery_rollover_changed (Admit intent))
+        ~after_install:(fun () -> after_admit intent)
         ~check_before_commit
     in
     Option.bind t.state.recovery_rollover ~f:(fun ledger -> R.find ledger ~id)
@@ -57355,8 +57418,12 @@ let rollover_operator t actor ~attachment_id ~authorize =
     then authorize t.state
     else Error (error Permission_denied "rollover operator authority expired")
   in
-  let%map () = require_recovery_owner_writer t ~principal:principal.id ~attachment_id in
-  principal
+  let%bind () =
+    if Operator_authorization.is_current actor
+    then require_recovery_owner_writer t ~principal:principal.id ~attachment_id
+    else Error (error Permission_denied "rollover operator authority expired")
+  in
+  Ok principal
 ;;
 
 let check_rollover_cut t ~previous ~(expected : Recovery_rollover.Expected.t) ~check =
@@ -57412,6 +57479,10 @@ let record_context_checkpoint_internal t ~check expected notes =
 ;;
 
 let settle_context_rollover_internal
+      ?batch
+      ?checkpoint_history
+      ?check_live_cut
+      ?after_commit_install
       t
       ~check
       ~authorize_force
@@ -57434,11 +57505,26 @@ let settle_context_rollover_internal
   | Terminal _ -> Ok receipt
   | Pending ->
     let previous = t.state in
-    let check_cut () = check_rollover_cut t ~previous ~expected ~check in
+    let check_cut () =
+      match check_live_cut with
+      | None -> check_rollover_cut t ~previous ~expected ~check
+      | Some validate ->
+        let%bind _ = check () in
+        let%bind () = require_runtime_admission t in
+        if phys_equal previous t.state
+        then validate ()
+        else Error (error Conflict "settled rollover prestate changed")
+    in
     let%bind () = check_cut () in
-    let persist ?(payloads = []) delta ~check_before_commit =
+    let persist ?(payloads = []) ?after_install delta ~check_before_commit =
       let%bind () =
-        persist_recovery_delta t ~rollover:true ~payloads ~delta ~check_before_commit
+        persist_recovery_delta
+          t
+          ~rollover:true
+          ~payloads
+          ?after_install
+          ~delta
+          ~check_before_commit
       in
       find ()
     in
@@ -57466,6 +57552,7 @@ let settle_context_rollover_internal
             let stored = Option.value_exn previous.recovery_rollover in
             (match
                R.check_checkpoint
+                 ?checkpoint_history
                  stored
                  checkpoint
                  ~expected
@@ -57498,7 +57585,12 @@ let settle_context_rollover_internal
               else Error (error Conflict "rollover target or policy changed")
             in
             match quality with
-            | R.Receipt.Archive_only _ -> check_force ()
+            | R.Receipt.Archive_only _ ->
+              let%bind () = check_force () in
+              Option.value_map check_live_cut ~default:(Ok ()) ~f:(fun validate ->
+                if phys_equal previous t.state
+                then validate ()
+                else Error (error Conflict "settled rollover prestate changed"))
             | Checkpointed _ ->
               (* The checked immutable checkpoint and note revisions are still at [previous]. *)
               Ok ()
@@ -57520,6 +57612,7 @@ let settle_context_rollover_internal
           in
           let%bind change =
             R.Commit.create
+              ?batch
               receipt.intent
               ~expected
               ~successor
@@ -57532,13 +57625,159 @@ let settle_context_rollover_internal
             [ P.Event.Durable.Payload.History_replaced
                 (Session_state.history_window retained)
             ]
+            @ Option.to_list
+                (Option.map batch ~f:(fun _ ->
+                   P.Event.Durable.Payload.Session_state_changed
+                     { desired_state = previous.lifecycle.desired; observed_state = Idle }))
           in
-          persist (Recovery_rollover_committed change) ~payloads ~check_before_commit
+          persist
+            (Recovery_rollover_committed change)
+            ~payloads
+            ?after_install:after_commit_install
+            ~check_before_commit
         in
         (match quality, receipt.intent.requester with
          | Ok quality, _ -> commit quality
          | Error reason, Operator { force = true; _ } -> commit (Archive_only reason)
          | Error _, (Operator _ | Native _) -> supersede Checkpoint_required))
+;;
+
+let settled_rollover_authority t publication (intent : Recovery_rollover.Intent.t) =
+  let module P = Agent_protocol in
+  let open Result.Let_syntax in
+  let operation = publication.Foreground_publication.operation.id in
+  match intent.requester with
+  | Operator _ ->
+    Option.bind t.live_operator_rollover ~f:(fun selected ->
+      Option.some_if
+        (P.Id.Operation.equal intent.id selected.id
+         && phys_equal selected.publication publication)
+        (selected.check, selected.authorize_force))
+  | Native requester when P.Id.Operation.equal requester.operation operation ->
+    let check () =
+      let%bind () = check_operation_descendant t operation in
+      let%bind admission = operation_agent_admission t operation in
+      let%bind admission =
+        Result.of_option
+          admission
+          ~error:(error Permission_denied "rollover requester is unavailable")
+      in
+      let%bind () = Execution_custody.Admission.check admission in
+      let%bind custody =
+        Execution_custody.Admission.custody admission
+        |> Result.of_option
+             ~error:
+               (error Permission_denied "rollover requester has no current authority")
+      in
+      let%bind actor = Execution_custody.actor custody in
+      let principal = Operator_authorization.principal actor in
+      if
+        P.Id.Principal.equal principal.id requester.principal
+        && P.Principal.has_scope principal Send_messages
+      then Ok principal
+      else Error (error Permission_denied "rollover requester authority changed")
+    in
+    Some (check, None)
+  | Native _ -> None
+;;
+
+let settle_foreground_tool_batch t (publication : Foreground_publication.t) live =
+  let module P = Agent_protocol in
+  let module R = Recovery_rollover in
+  let module B = Recovery_rollover_batch_cut in
+  let module S = Chat_response.Settled_tool_batch in
+  let open Result.Let_syntax in
+  let operation = publication.operation.id in
+  let admission =
+    let open Option.Let_syntax in
+    let%bind intent = Option.bind t.state.recovery_rollover ~f:R.pending in
+    let%map check, force = settled_rollover_authority t publication intent in
+    intent, check, force
+  in
+  match admission with
+  | _ when not (foreground_publication_matches t publication) -> Ok S.Retire
+  | None -> Ok S.Continue
+  | Some (intent, check, authorize_force) ->
+    let%bind () = check_live_foreground_publication t publication in
+    let%bind scope =
+      Result.of_option
+        (active_rollover_window t)
+        ~error:(error Conflict "settled batch window is unavailable")
+    in
+    let%bind () =
+      if P.Recovery_window.Scope.equal scope intent.expected.scope
+      then Ok ()
+      else Error (error Conflict "settled batch window changed")
+    in
+    let exact_attempt () =
+      if Option.exists publication.finished_root ~f:(phys_equal (S.attempt live))
+      then Ok ()
+      else Error (error Conflict "settled batch is not the worker's acknowledged attempt")
+    in
+    let%bind () =
+      match publication.finished_root with
+      | Some _ -> exact_attempt ()
+      | None -> Ok ()
+    in
+    (match B.capture t.state ~scope ~operation live with
+     | Error _ -> Ok S.Continue
+     | Ok batch ->
+       let%bind () = exact_attempt () in
+       let%bind checkpoint_history =
+         B.validate t.state ~scope ~requester:intent.requester batch
+       in
+       let check_live_cut () =
+         let%bind () = check_live_foreground_publication t publication in
+         let%bind () = exact_attempt () in
+         let%bind status = read_context_capacity t operation in
+         match status with
+         | Current _
+           when List.is_empty t.invocation_executions
+                && (not (moderator_is_borrowed t))
+                && (not t.idle_moderator_borrowed)
+                && not t.state.halted -> Ok ()
+         | Current _ | Disabled | Stale_preparation _ | Awaiting_preparation _ ->
+           Error
+             (error
+                Conflict
+                "settled batch has active ownership or its selected policy changed")
+       in
+       let%bind expected = R.Expected.create scope ~revision:t.state.counters.revision in
+       let checkpoint = Option.bind t.state.recovery_rollover ~f:R.checkpoint in
+       let retain =
+         List.take
+           t.state.conversation.canonical_history
+           t.state.conversation.initial_prompt_entry_count
+         |> List.map ~f:(fun entry -> entry.P.History.id)
+       in
+       let after_commit_install () =
+         if Option.exists t.foreground_publication ~f:(phys_equal publication)
+         then (
+           t.live_operator_rollover <- None;
+           t.foreground_publication <- None;
+           t.foreground_moderator <- None;
+           t.notification_inputs <- None;
+           t.active_cancel <- None)
+       in
+       let%map receipt =
+         settle_context_rollover_internal
+           ~batch
+           ~after_commit_install
+           ?checkpoint_history
+           ~check_live_cut
+           t
+           ~check
+           ~authorize_force
+           ~id:intent.id
+           expected
+           (Publish { checkpoint; retain })
+       in
+       (match receipt.status with
+        | Terminal (Committed _) -> S.Retire
+        | Terminal (Superseded _) ->
+          t.live_operator_rollover <- None;
+          S.Continue
+        | Pending -> S.Continue))
 ;;
 
 let handle_recovery_rollover
@@ -57598,16 +57837,43 @@ let handle_recovery_rollover
       | Disabled | Stale_preparation _ | Awaiting_preparation _ -> changed ()
     in
     admit_recovery_rollover t ~check ~check_basis ~expected
+  | Worker_settled (publication, live) -> settle_foreground_tool_batch t publication live
   | Operator_request (actor, attachment_id, authorize, force, key, expected) ->
+    let operator () = rollover_operator t actor ~attachment_id ~authorize in
+    let authorize_force =
+      Option.map force ~f:(fun authorize_force state ->
+        let%bind () = authorize_force state in
+        let principal = Operator_authorization.principal actor in
+        if Operator_authorization.is_current actor
+        then require_recovery_owner_writer t ~principal:principal.id ~attachment_id
+        else Error (error Permission_denied "rollover force authority expired"))
+    in
     let check () =
-      let%bind principal = rollover_operator t actor ~attachment_id ~authorize in
-      let%map () = Option.value_map force ~default:(Ok ()) ~f:(fun check -> check t.state) in
+      let%bind principal = operator () in
+      let%map () =
+        Option.value_map authorize_force ~default:(Ok ()) ~f:(fun check -> check t.state)
+      in
       R.Requester.Operator { principal = principal.id; key; force = Option.is_some force }
     in
-    admit_recovery_rollover t ~check ~expected
+    let publication = t.foreground_publication in
+    let after_admit (intent : R.Intent.t) =
+      Option.iter publication ~f:(fun publication ->
+        if foreground_publication_matches t publication
+        then
+          t.live_operator_rollover
+          <- Some { id = intent.id; publication; check = operator; authorize_force })
+    in
+    admit_recovery_rollover ~after_admit t ~check ~expected
   | Operator_settle (actor, attachment_id, authorize, authorize_force, id, expected, settlement) ->
     let check () = rollover_operator t actor ~attachment_id ~authorize in
-    settle_context_rollover_internal t ~check ~authorize_force ~id expected settlement
+    let%map receipt =
+      settle_context_rollover_internal t ~check ~authorize_force ~id expected settlement
+    in
+    (match receipt.status, t.live_operator_rollover with
+     | Terminal _, Some owner when Agent_protocol.Id.Operation.equal owner.id id ->
+       t.live_operator_rollover <- None
+     | _ -> ());
+    receipt
   | Operator_checkpoint (actor, attachment_id, authorize, expected, notes) ->
     let check () = rollover_operator t actor ~attachment_id ~authorize in
     record_context_checkpoint_internal t ~check expected notes
@@ -59874,6 +60140,7 @@ let create_internal
     ; configuration_policy = None
     ; context_capacity_host = Session_context_capacity.Host.off
     ; rollover_requires_recovery = false
+    ; live_operator_rollover = None
     ; recurrence_controller = None
     ; recurrence_runtime = Recurrence_runtime.create ~origin:(services.monotonic_now ())
     ; recurrence_creation_owner = ref ()

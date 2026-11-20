@@ -1013,6 +1013,93 @@ let check_delta document =
     ~required:(delta_has_rollover_commit (D.Document.payload document))
 ;;
 
+let rollover_batch_name = Agent_protocol.Session_storage_semantics.recovery_rollover_batch
+
+let state_has_rollover_batch payload =
+  let value json name =
+    match D.Json.field json ~name with
+    | Value json -> Some json
+    | Absent | Null -> None
+  in
+  let open Option.Let_syntax in
+  Option.value
+    ~default:false
+    (let%bind ledger = value payload "recovery_rollover" in
+     let%map receipts = value ledger "receipts" in
+     match receipts with
+     | `Array receipts ->
+       List.exists receipts ~f:(fun receipt ->
+         match value receipt "status" >>= fun status -> value status "continuation" with
+         | Some continuation ->
+           (match value continuation "kind" with
+            | Some (`String "awaiting_settled_foreground") -> true
+            | _ -> false)
+         | None -> false)
+     | _ -> false)
+;;
+
+let delta_has_rollover_batch payload =
+  match D.Json.field payload ~name:"changes" with
+  | Value (`Array changes) ->
+    List.exists changes ~f:(fun change ->
+      match D.Json.field change ~name:"kind" with
+      | Value (`String "recovery_rollover_committed") ->
+        (match D.Json.field change ~name:"value" with
+         | Value value ->
+           (match D.Json.field value ~name:"batch" with
+            | Absent -> false
+            | _ -> true)
+         | _ -> false)
+      | Value (`String "created") ->
+        (match D.Json.field change ~name:"state" with
+         | Value state ->
+           (match D.Json.field state ~name:"payload" with
+            | Value payload -> state_has_rollover_batch payload
+            | _ -> false)
+         | _ -> false)
+      | _ -> false)
+  | _ -> false
+;;
+
+let require_state_without_rollover_batch = require_state
+let check_state_without_rollover_batch = check_state
+let require_delta_without_rollover_batch = require_delta
+let check_delta_without_rollover_batch = check_delta
+
+let require_state document ~limits =
+  let%bind.Result document = require_state_without_rollover_batch document ~limits in
+  require
+    document
+    ~name:rollover_batch_name
+    ~required:(state_has_rollover_batch (D.Document.payload document))
+    ~limits
+;;
+
+let check_state document =
+  let%bind.Result () = check_state_without_rollover_batch document in
+  check
+    document
+    ~name:rollover_batch_name
+    ~required:(state_has_rollover_batch (D.Document.payload document))
+;;
+
+let require_delta document ~limits =
+  let%bind.Result document = require_delta_without_rollover_batch document ~limits in
+  require
+    document
+    ~name:rollover_batch_name
+    ~required:(delta_has_rollover_batch (D.Document.payload document))
+    ~limits
+;;
+
+let check_delta document =
+  let%bind.Result () = check_delta_without_rollover_batch document in
+  check
+    document
+    ~name:rollover_batch_name
+    ~required:(delta_has_rollover_batch (D.Document.payload document))
+;;
+
 let recovery_effective_name = Agent_protocol.Session_storage_semantics.recovery_effective
 
 let recovery_effective_state_requires payload =

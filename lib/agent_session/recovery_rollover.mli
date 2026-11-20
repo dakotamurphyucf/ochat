@@ -79,7 +79,12 @@ module Receipt : sig
     | Archive_only of archive_only_reason
   [@@deriving equal, sexp_of]
 
-  type continuation = Awaiting_after_commit of P.Id.Operation.t
+  type continuation =
+    | Awaiting_after_commit of P.Id.Operation.t
+    | Awaiting_settled_foreground of
+        { owner : P.Id.Operation.t
+        ; predecessor : P.Id.Operation.t
+        }
   [@@deriving equal, sexp_of]
 
   type committed =
@@ -122,10 +127,12 @@ module Commit : sig
     ; archive : Chatml_source.Digest.t
     ; checkpoint : Receipt.checkpoint_quality
     ; retain : P.History.Id.t list
+    ; batch : Recovery_rollover_batch.t option
     }
 
   val create
-    :  Intent.t
+    :  ?batch:Recovery_rollover_batch.t
+    -> Intent.t
     -> expected:Expected.t
     -> successor:P.Recovery_window.Scope.t
     -> archive:Chatml_source.Digest.t
@@ -150,6 +157,8 @@ type t
 
 val find : t -> id:P.Id.Operation.t -> Receipt.t option
 val pending : t -> Intent.t option
+val checkpoint : t -> Checkpoint.t option
+val awaiting_foreground : t -> scope:P.Recovery_window.Scope.t -> bool
 
 (** Exact normalized retries are resolved before comparing current head or
     revision. The caller separately checks current authority before lookup. *)
@@ -185,7 +194,8 @@ val apply
   -> (t, P.Error.t) result
 
 val check_checkpoint
-  :  t
+  :  ?checkpoint_history:P.History.entry list
+  -> t
   -> Checkpoint.t
   -> expected:Expected.t
   -> history:P.History.entry list
@@ -193,7 +203,8 @@ val check_checkpoint
   -> (unit, P.Error.t) result
 
 val commit
-  :  t
+  :  ?checkpoint_history:P.History.entry list
+  -> t
   -> Commit.t
   -> active:P.Recovery_window.Scope.t
   -> revision:int64

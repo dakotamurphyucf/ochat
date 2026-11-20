@@ -119,6 +119,10 @@ module Capabilities = struct
     ; admit_moderator_turn : unit -> (unit, Agent_protocol.Error.t) result
     ; admit_notification_turn : unit -> (unit, Agent_protocol.Error.t) result
     ; root_context : Chat_response.Root_context.t option
+    ; settle_tool_batch :
+        (Chat_response.Settled_tool_batch.t
+         -> (Chat_response.Settled_tool_batch.decision, Agent_protocol.Error.t) result)
+          option
     ; consume_deferred : unit -> (History_entry.t list, Agent_protocol.Error.t) result
     ; consume_notifications : Notification_delivery.t notification_consumer
     ; consume_initial_notifications : Notification_delivery.idle notification_consumer
