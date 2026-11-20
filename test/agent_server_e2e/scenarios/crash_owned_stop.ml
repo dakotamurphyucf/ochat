@@ -14,6 +14,10 @@ let rec has_stop_epoch (delta : Agent_session.Session_delta.t) =
   | Stop_epoch_changed _ -> true
   | Batch deltas -> List.exists deltas ~f:has_stop_epoch
   | Created _
+  | Recovery_window_enabled _
+  | Recovery_summary_compacted _
+  | Recovery_note_changed _
+  | Recovery_note_share_changed _
   | Lifecycle_changed _
   | Metadata_changed _
   | Organization_changed _

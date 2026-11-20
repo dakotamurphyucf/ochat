@@ -435,6 +435,10 @@ let assert_upload_rejection response message =
 
 let rejected_uploads environment daemon client token body =
   let before = temporary_files environment daemon in
+  let forged =
+    upload client token ~extra:[ "ochat-allowed-use", "recovery_asset:future" ] body
+  in
+  assert_upload_rejection forged "reserved blob use";
   let wrong = upload client token ~extra:[ "ochat-sha256", digest "wrong" ] body in
   assert_upload_rejection wrong "blob digest differs from the expected digest";
   let large = upload client token (body ^ "x") in
@@ -444,15 +448,94 @@ let rejected_uploads environment daemon client token body =
     "rejected HTTP upload leaked partial or metadata files"
 ;;
 
+let assert_recovery_blob_is_private ~sw fixture daemon owner token body =
+  let module P = Agent_protocol in
+  let module B = Agent_store.Blob_store in
+  let store_ok = function
+    | Ok value -> value
+    | Error error -> raise_s [%sexp (error : Agent_store.Store_error.t)]
+  in
+  let session, attachment = create owner "asset-privacy" in
+  let registry = Agent_server.Daemon.registry daemon in
+  let entry =
+    Agent_server.Session_registry.find registry session.id |> Option.value_exn
+  in
+  let handle = Option.value_exn entry.store_handle in
+  let blobs = Agent_server.Daemon.blob_store daemon in
+  let store = Agent_server.Daemon.store daemon in
+  let session_ref =
+    P.Session_ref.create
+      ~server_id:(Agent_store.Session_store.server_id store)
+      ~session_id:session.id
+  in
+  let scope =
+    P.Recovery_window.Scope.create
+      ~session:session_ref
+      ~generation:0
+      ~window:(P.Id.Context_window.create ())
+    |> protocol_ok
+  in
+  let citation =
+    P.Recovery_window.Citation.create
+      scope
+      ~occurrence:(History_entry.Id.create ~namespace:"asset" ~sequence:1 |> string_ok)
+      ~version:(P.Recovery_item_version.canonical P.History.Content_revision.zero)
+    |> protocol_ok
+  in
+  let allowed_use =
+    Agent_store.Blob_metadata.Recovery_use.for_part citation ~part:0 |> protocol_ok
+  in
+  let upload =
+    B.begin_upload
+      blobs
+      ~sw
+      ~id:(P.Id.Blob.create ())
+      ~creating_principal:(configured_principal fixture token)
+      ~target_session:(Some session.id)
+      ~kind:File
+      ~media_type:"text/plain"
+      ~display_name:None
+      ~allowed_use
+      ~created_at:(P.Timestamp.now ())
+      ~expires_at:None
+    |> store_ok
+  in
+  B.write_string upload body |> store_ok;
+  let adopted =
+    B.finish upload ~expected_digest:(Some (digest body))
+    |> store_ok
+    |> B.adopt blobs handle
+    |> store_ok
+  in
+  let blob = (B.Handle.metadata_checked adopted |> store_ok).blob in
+  assert_denied (fetch owner token blob);
+  match
+    Http_driver.request
+      owner
+      (Blob_read
+         { session_id = session.id
+         ; attachment_id = Some attachment.id
+         ; blob_id = blob.id
+         ; offset = 0L
+         ; max_bytes = 1
+         })
+  with
+  | Error error when P.Error.equal_code error.code Permission_denied -> ()
+  | Error _ | Ok _ ->
+    failwith "authorized session client could bypass the recovery reader"
+;;
+
 let test_blobs env environment =
   let fixture = fixture env environment "data-blobs" in
   restrict_public fixture;
-  let options = Agent_server.Daemon.default_options in
-  let options =
-    { options with
-      protocol_limits = { options.protocol_limits with max_request_bytes = 4096 }
-    }
+  let options = Daemon_host.with_offline_inference Agent_server.Daemon.default_options in
+  let protocol_limits = { options.protocol_limits with max_request_bytes = 4096 } in
+  let authoring =
+    Agent_server.Authoring_installation.Host_policy.basic_supplied
+      ~initialize_limits:protocol_limits
+    |> protocol_ok
   in
+  let options = { options with protocol_limits; authoring = Some authoring } in
   Daemon_host.with_ env fixture ~options (fun sw daemon ->
     let owner_token = Config_fixture.admin_token fixture in
     let foreign_token = Config_fixture.public_token fixture in
@@ -465,6 +548,7 @@ let test_blobs env environment =
     assert_http_status own_upload 201;
     assert_http_status (fetch foreign foreign_token (metadata own_upload)) 200;
     rejected_uploads environment daemon owner owner_token body;
+    assert_recovery_blob_is_private ~sw fixture daemon owner owner_token body;
     Http_driver.shutdown owner;
     Http_driver.shutdown foreign)
 ;;

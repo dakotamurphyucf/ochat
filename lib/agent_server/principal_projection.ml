@@ -380,7 +380,9 @@ let scope_identity principal =
 let export_use principal = "session_export:" ^ scope_identity principal
 
 let can_read_blob principal (metadata : Agent_store.Blob_store.Metadata.t) =
-  if String.is_prefix metadata.allowed_use ~prefix:"job_result:"
+  if Agent_store.Blob_metadata.Recovery_use.is_reserved metadata.allowed_use
+  then false
+  else if String.is_prefix metadata.allowed_use ~prefix:"job_result:"
   then has principal Send_messages
   else if String.is_prefix metadata.allowed_use ~prefix:"session_export:"
   then String.equal metadata.allowed_use (export_use principal)

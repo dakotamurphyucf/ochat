@@ -576,13 +576,19 @@ let upload_parameters request =
     | None -> Ok None
     | Some encoded -> Result.map (session_id encoded) ~f:Option.some
   in
-  Ok
-    ( media_type
-    , kind
-    , target_session
-    , P.Headers.get headers "ochat-display-name"
-    , Option.value (P.Headers.get headers "ochat-allowed-use") ~default:"message_input"
-    , P.Headers.get headers "ochat-sha256" )
+  let allowed_use =
+    Option.value (P.Headers.get headers "ochat-allowed-use") ~default:"message_input"
+  in
+  if Agent_store.Blob_metadata.Recovery_use.is_reserved allowed_use
+  then Error (protocol_error Invalid_request "reserved blob use")
+  else
+    Ok
+      ( media_type
+      , kind
+      , target_session
+      , P.Headers.get headers "ochat-display-name"
+      , allowed_use
+      , P.Headers.get headers "ochat-sha256" )
 ;;
 
 let write_upload_body request upload =

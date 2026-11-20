@@ -203,9 +203,8 @@ blob retention coordinator. Protect active reads, preparations and receipts as
 applicable. The collector charges bounded shared work and retains bytes if it
 cannot prove their absence from the admitted roots. A raw blob reference scan
 provides candidates, whose custody and authorization still require proof.
-Archive filename decoding must recognize every typed archive kind, including
-pending input. The existing writer recognizes it and the retained scan's
-prefix list omits it. [Retained-history interface](../../lib/agent_session/retained_history.mli),
+The archive writer and retention scanner share the same filename decoder,
+including the pending-input archive kind. [Retained-history interface](../../lib/agent_session/retained_history.mli),
 [archive writer](../../lib/agent_session/compaction_archive.ml#L45-L60),
 [retained scan](../../lib/agent_session/retained_history.ml#L256-L274),
 [blob reference scan](../../lib/agent_store/blob_reference_scan.mli).
@@ -223,7 +222,10 @@ validation and admission of exact bytes. Ordinary recovery initiates no remote
 fetch, OCR or automatic image resubmission.
 
 Lists, search and hints expose neither an asset URI nor a generic blob handle.
-A call through the general blob route requires its own authority. Qualify that
+Blobs reserved for recovery are private even to the session creator through
+HTTP download and the transport-independent blob read command. The public
+HTTP upload route rejects reserved use tags before opening an upload.
+A call through the general blob route for other content requires its own authority. Qualify that
 route's treatment of recovery-only metadata on each enabled transport before
 using it to store protected assets. Revoking a recovery citation affects future
 recovery disclosures, while independent grants for the same bytes follow their

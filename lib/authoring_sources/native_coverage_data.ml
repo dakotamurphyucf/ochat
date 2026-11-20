@@ -366,7 +366,7 @@ let implementation_sources =
   ; ( "lib/agent_server/instruction_operator_service.mli"
     , "68ea938a6334edf04432f1e340d5cc11309b603291e961aad8976f029167f31d" )
   ; ( "lib/agent_server/principal_projection.ml"
-    , "88426eadf12484ec05b9fb5cc7de2ed5f182422b5801a3b16b51195c28425b58" )
+    , "7eabda1b95fe2123085584c57dabe1ca2a3c16e3e29f9b797591018667ced1fe" )
   ; ( "lib/agent_server/authoring_instruction_sources.ml"
     , "5a43fd47d8b0c1916d562f79dd27dfbd3ceb019dfb3f974cede919fc16a83b8e" )
   ; ( "lib/agent_session/instruction_source_port.ml"

@@ -48,6 +48,23 @@ type t =
   }
 [@@deriving sexp]
 
+module Recovery_use = struct
+  let prefix = "recovery_asset:"
+  let is_reserved value = String.is_prefix value ~prefix
+
+  let for_part citation ~part =
+    if part < 0 || part >= 4096
+    then Error (P.Error.invalid_request "recovery part index is out of range")
+    else (
+      let identity =
+        `Array
+          [ P.Recovery_window.Citation.to_json citation; `Number (Int.to_string part) ]
+        |> Jsonaf.to_string
+      in
+      Ok (prefix ^ "v1:" ^ Digestif.SHA256.(digest_string identity |> to_hex)))
+  ;;
+end
+
 let blob_equal (a : P.Blob.Metadata.t) (b : P.Blob.Metadata.t) =
   P.Id.Blob.equal a.id b.id
   && P.Blob.equal_kind a.kind b.kind
