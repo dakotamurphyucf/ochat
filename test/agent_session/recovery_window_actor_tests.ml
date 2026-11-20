@@ -47,9 +47,9 @@ let same_ledger before after =
   D.Json.equal (Ledger.to_jsonaf (ledger before)) (Ledger.to_jsonaf (ledger after))
 ;;
 
-let actor_proof () =
+let actor_proof ?(id = principal_id) () =
   P.Principal.create
-    ~id:principal_id
+    ~id
     ~authentication_kind:"recovery.window.test"
     ~scopes:(P.Scope.Set.of_list [ Send_messages; View_session_transcript ])
     ~attributes:[]
@@ -63,7 +63,7 @@ let attach actor =
       actor
       ~principal_id:(Some principal_id)
       ~reclaim_token:None
-      ~mode:Read_write
+      ~mode:Owner_read_write
       ~subscribe:false
     |> protocol_ok
   in
@@ -255,6 +255,16 @@ let walk fixture sw ~fault ~initial =
        assert (
          Result.is_error
            (enable ~authorize:(fun _ -> Error (P.Error.invalid_request "fixture denied"))));
+       let unrelated = P.Id.Principal.of_string "pri_unrelated_writer" |> protocol_ok in
+       (match
+          Actor.enable_recovery_windows
+            actor
+            ~actor:(actor_proof ~id:unrelated ())
+            ~attachment_id:writer
+            ~authorize:(fun _ -> Ok ())
+        with
+        | Error failure -> assert (P.Error.equal_code failure.code Permission_denied)
+        | Ok _ -> failwith "an unrelated principal reused the creation-owner attachment");
        assert (Option.is_none (state actor).recovery_windows);
        let enable () = enable ~authorize:(fun _ -> Ok ()) |> protocol_ok in
        let active = enable () in

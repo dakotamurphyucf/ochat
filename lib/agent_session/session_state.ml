@@ -165,6 +165,7 @@ type 'spec fields =
   ; goal_policy_contributions : (Goal_policy_contributions.t option[@sexp.opaque])
   ; instruction_selection : Instruction_selection.t option [@sexp.option]
   ; recovery_notes : (Recovery_note_session.t[@sexp.opaque]) option [@sexp.option]
+  ; recovery_note_shares : (Recovery_note_share.t[@sexp.opaque]) option [@sexp.option]
   ; recurrence_catalog : Recurrence_catalog.t option [@sexp.option]
   ; subscriptions : Agent_protocol.Subscription.t list [@sexp.list]
   ; deliveries : Agent_protocol.Delivery.t list [@sexp.list]
@@ -778,6 +779,7 @@ let create_fields ~(identity : Identity.t) ~spec ~desired ~initial_history =
   ; goal_policy_contributions = None
   ; instruction_selection = None
   ; recovery_notes = None
+  ; recovery_note_shares = None
   ; recurrence_catalog = None
   ; subscriptions = []
   ; deliveries = []
@@ -918,6 +920,21 @@ let validate_domain (t : t) ~recovery_revision =
   let%bind () =
     Option.value_map t.recovery_notes ~default:(Ok ()) ~f:(fun catalog ->
       Recovery_note_session.validate catalog ~session_id:t.identity.session_id)
+  in
+  let%bind () =
+    match t.recovery_note_shares with
+    | None -> Ok ()
+    | Some shares ->
+      let owner = Recovery_note_share.owner shares in
+      if
+        Agent_protocol.Id.Session.equal
+          (Agent_protocol.Session_ref.session_id owner)
+          t.identity.session_id
+      then Recovery_note_session.check_owner t.recovery_notes ~owner
+      else
+        Error
+          (Agent_protocol.Error.invalid_request
+             "recovery note shares belong to another session")
   in
   let%bind () =
     if Int64.(t.spec.configuration_revision < 0L)

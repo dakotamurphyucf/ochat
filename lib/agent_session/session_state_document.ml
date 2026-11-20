@@ -792,6 +792,13 @@ let project_fields_with_presence
       let%map raw = Recovery_note_session.to_json catalog in
       [ "recovery_notes", raw ]
   in
+  let%bind recovery_note_share_fields =
+    match t.recovery_note_shares with
+    | None -> Ok []
+    | Some shares ->
+      let%map raw = Recovery_note_share.to_json shares in
+      [ "recovery_note_shares", raw ]
+  in
   let%map recurrence_catalog_fields =
     match t.recurrence_catalog with
     | None ->
@@ -838,6 +845,7 @@ let project_fields_with_presence
      @ goal_policy_contributions_fields
      @ instruction_selection_fields
      @ recovery_note_fields
+     @ recovery_note_share_fields
      @ recurrence_catalog_fields
      @ [ ( "moderator_executions"
          , (X.list_json P.Moderator_execution.to_json) t.moderator_executions )
@@ -1042,6 +1050,12 @@ let state_fields_of_jsonaf ?capture ~limits json =
       "recovery_notes"
       (Recovery_note_session.of_json ~session_id:identity.session_id)
   in
+  let%bind recovery_note_shares =
+    J.optional_as
+      fields
+      "recovery_note_shares"
+      (Recovery_note_share.of_json ~session_id:identity.session_id)
+  in
   let%bind recurrence_catalog =
     J.optional_as fields "recurrence_catalog" (X.nullable Recurrence_catalog.of_jsonaf)
     |> Result.map ~f:Option.join
@@ -1106,6 +1120,7 @@ let state_fields_of_jsonaf ?capture ~limits json =
     ; goal_policy_contributions
     ; instruction_selection
     ; recovery_notes
+    ; recovery_note_shares
     ; recurrence_catalog
     ; subscriptions
     ; deliveries
@@ -1162,6 +1177,7 @@ let state_shape =
     ; "goal_policy_contributions", D.Shape.value
     ; "instruction_selection", X.nullable_shape Instruction_selection.shape
     ; "recovery_notes", D.Shape.value
+    ; "recovery_note_shares", D.Shape.value
     ; "recurrence_catalog", X.nullable_shape Recurrence_catalog.shape
     ; "managed_stops", X.array_shape_exn ~identity_field:"id" Managed_stop.shape
     ; ( "moderator_executions"
@@ -1268,6 +1284,13 @@ let validate_raw_recovery_window_capacity document =
   | Value ledger -> Recovery_window_ledger.validate_encoded ledger
 ;;
 
+let validate_raw_recovery_note_share_capacity document =
+  match D.Json.field (D.Document.payload document) ~name:"recovery_note_shares" with
+  | Absent -> Ok ()
+  | Null -> Error (D.Error.Malformed "recovery_note_shares must be a ledger")
+  | Value ledger -> Recovery_note_share.validate_encoded ledger
+;;
+
 let validate_raw_queue_capacity document =
   let raw_moderator =
     match D.Json.field (D.Document.payload document) ~name:"moderator" with
@@ -1300,6 +1323,7 @@ let validate_run_capacity basis document ~limits =
   let state = Capacity_basis.state basis in
   let open Result.Let_syntax in
   let%bind () = validate_raw_recovery_window_capacity document in
+  let%bind () = validate_raw_recovery_note_share_capacity document in
   let%bind () = validate_raw_queue_capacity document in
   let%bind () =
     match D.Json.field (D.Document.payload document) ~name:"ingress_registrations" with
@@ -2058,6 +2082,7 @@ let decode_with_evidence ?previous ~limits document =
   let%bind document = upgrade document ~limits in
   let%bind () = check_storage_semantics document in
   let%bind () = validate_raw_recovery_window_capacity document in
+  let%bind () = validate_raw_recovery_note_share_capacity document in
   let%bind () = validate_raw_queue_capacity document in
   let capture = Decode_evidence.Capture.create ?previous ~limits () in
   let%bind carrier =
@@ -2755,6 +2780,12 @@ let adopt previous ~limits incoming =
     |> X.document_result
   in
   let%bind () =
+    Recovery_note_share.check_unchanged
+      (value previous).recovery_note_shares
+      ~incoming:(value incoming).recovery_note_shares
+    |> X.document_result
+  in
+  let%bind () =
     validate_instruction_update
       (value previous).instruction_selection
       (value incoming).instruction_selection
@@ -3245,6 +3276,7 @@ let decode_prefix ?previous ~limits document =
   let open Result.Let_syntax in
   let%bind () = check_storage_semantics document in
   let%bind () = validate_raw_recovery_window_capacity document in
+  let%bind () = validate_raw_recovery_note_share_capacity document in
   let%bind () = validate_raw_queue_capacity document in
   let capture = Decode_evidence.Capture.create ?previous ~limits () in
   let%bind carrier =

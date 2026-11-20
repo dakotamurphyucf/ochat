@@ -28,3 +28,6 @@ val validate_exn : t -> session_id:Agent_protocol.Id.Session.t -> commit:commit 
 (** Exact native Unavailable on SAME writer; not Closed or joined worker. Data
     alone is not proof that this startup attempted an uncertain root write. *)
 val requires_recovery : t -> bool
+
+(** Denial-only indication that the actual bound writer is available. *)
+val is_available : t -> bool

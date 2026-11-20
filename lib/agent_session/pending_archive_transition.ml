@@ -45,6 +45,7 @@ let collect state ~delta ~limits =
       | Canonical_entries_appended _
       | Instruction_selection_changed _
       | Recovery_note_changed _
+      | Recovery_note_share_changed _
       | Goal_accounts_changed _
       | Goal_catalog_changed _
       | Recurrence_catalog_changed _

@@ -5410,6 +5410,35 @@ module Recovery_note_request = struct
     | Mutate : Recovery_note_access.t * mutation_route * C.mutation -> C.Receipt.t t
 end
 
+module Recovery_note_share_request = struct
+  module P = Agent_protocol
+  module S = Recovery_note_share
+
+  type check_owner = unit -> (unit, P.Error.t) result
+
+  type witness =
+    { incarnation : S.Incarnation.t
+    ; check_current : check_owner
+    }
+
+  type reader = Reader of witness
+  type target = Target of witness
+
+  type disclosure =
+    | Disclosure of (unit -> (Recovery_notes.Catalog.Content.t, P.Error.t) result)
+
+  type _ t =
+    | Management_revision : Recovery_note_access.t * check_owner -> S.Revision.t t
+    | Establish_target : check_owner -> target t
+    | Select : check_owner * reader * S.Reference.t -> disclosure t
+    | Create :
+        Recovery_note_access.t * check_owner * target * P.Idempotency_key.t * S.create
+        -> S.Receipt.t t
+    | Revoke :
+        Recovery_note_access.t * check_owner * P.Idempotency_key.t * S.revoke
+        -> S.Receipt.t t
+end
+
 module Context_request = struct
   module Capacity = struct
     type _ t =
@@ -5428,6 +5457,7 @@ module Context_request = struct
         * (Session_state.t -> (unit, Agent_protocol.Error.t) result)
         -> Agent_protocol.Recovery_window.Scope.t t
     | Recovery_note : 'a Recovery_note_request.t -> 'a t
+    | Recovery_note_share : 'a Recovery_note_share_request.t -> 'a t
     | Instruction_command :
         Instruction_admission.t
         * Instruction_command_admission.Source.t option
@@ -6573,6 +6603,9 @@ and t =
   ; event_sequence : int64 Atomic.t
   ; mutable state : Session_state.t
   ; mutable stopped : bool
+  ; mutable protected_source_custody : bool
+  ; mutable canonical_write_in_progress : bool
+    (* Synchronous share publication observes only an installed durable state. *)
   ; mutable command_audit : Document_schema.Document.t option
   }
 
@@ -12535,6 +12568,7 @@ let rec deferred_execution_delta (previous : Session_state.t) (delta : Session_d
   | Goal_accounts_changed _
   | Instruction_selection_changed _
   | Recovery_note_changed _
+  | Recovery_note_share_changed _
   | Recurrence_catalog_changed _
   | Run_state_changed _
   | Moderator_changed _
@@ -12867,6 +12901,27 @@ module Startup_write = struct
   ;;
 end
 
+let check_protected_source_write t ~(requested : Session_transition.t) =
+  let previous = t.state in
+  let next = requested.state in
+  if
+    t.protected_source_custody
+    && (not (Int.equal previous.identity.generation next.identity.generation)
+        || not (phys_equal previous.recovery_notes next.recovery_notes)
+        || not (phys_equal previous.recovery_note_shares next.recovery_note_shares)
+        || not (phys_equal previous.recovery_windows next.recovery_windows)
+        || not (phys_equal previous.conversation.canonical_history next.conversation.canonical_history)
+        || not (phys_equal previous.conversation.compaction_archives next.conversation.compaction_archives))
+  then
+    Error
+      (Agent_protocol.Error.create
+         Conflict
+         ~message:"protected source is currently being disclosed"
+         ~retryable:true
+         ())
+  else Ok ()
+;;
+
 let persist_transition
       ?(causal_canonical_fence = Causal_canonical_custody.Fence.Unrestricted)
       ?commit_observation
@@ -12883,6 +12938,7 @@ let persist_transition
       (candidate : Session_transition.t)
   =
   let open Result.Let_syntax in
+  let%bind () = check_protected_source_write t ~requested:candidate in
   let%bind () =
     Causal_canonical_custody.check_fence t ~requested:candidate causal_canonical_fence
   in
@@ -12899,8 +12955,11 @@ let persist_transition
       Exn.raise_with_original_backtrace exn backtrace
   in
   let delegated = ref None in
+  let write_in_progress = t.canonical_write_in_progress in
+  t.canonical_write_in_progress <- true;
   Exn.protect
     ~finally:(fun () ->
+      t.canonical_write_in_progress <- write_in_progress;
       Option.iter !delegated ~f:Delegated_policy_custody.finish_writer;
       Constructor_model_custody.finish_writer fence;
       Causal_root_custody.finish_writer causal_fence)
@@ -48357,6 +48416,7 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Abort_lifecycle _
   | Goal_request (Read _)
   | Context_request (Recovery_note (Read _ | List _))
+  | Context_request (Recovery_note_share (Management_revision _ | Select _))
   | State
   | Observe_resource_state
   | Snapshot
@@ -48563,6 +48623,7 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Goal_request (Apply _)
   | Context_request
       (Instruction_command _ | Recovery_note (Mutate _) | Enable_recovery_windows _)
+  | Context_request (Recovery_note_share (Establish_target _ | Create _ | Revoke _))
   | Set_recurrence_controller _
   | Set_recurrence_planning_host _
   | Recurrence_due_ids
@@ -56486,6 +56547,22 @@ let recovery_note_mutation_identity t ~access ~effect_kind route =
   owner, identity
 ;;
 
+let require_recovery_owner_writer t ~principal ~attachment_id =
+  let module P = Agent_protocol in
+  let open Result.Let_syntax in
+  let%bind attachment = write_attachment t attachment_id in
+  let actual =
+    match attachment.mode, attachment.owner_lease, t.state.spec.protocol.liveness with
+    | Owner_read_write, Some lease, Owner_bound _ -> lease.principal_id
+    | Owner_read_write, None, Detached -> t.state.identity.creating_principal
+    | _ -> None
+  in
+  if Option.exists actual ~f:(P.Id.Principal.equal principal)
+  then Ok ()
+  else
+    Error (error Permission_denied "recovery management requires the source owner writer")
+;;
+
 let enable_recovery_windows_internal t actor attachment_id authorize =
   let module P = Agent_protocol in
   let open Result.Let_syntax in
@@ -56504,19 +56581,7 @@ let enable_recovery_windows_internal t actor attachment_id authorize =
       then authorize t.state
       else Error (error Permission_denied "recovery window writer authority expired")
     in
-    let%bind attachment = write_attachment t attachment_id in
-    let lease_principal =
-      Option.bind attachment.owner_lease ~f:(fun lease -> lease.principal_id)
-    in
-    if
-      Option.exists lease_principal ~f:(fun id ->
-        not (P.Id.Principal.equal id principal.id))
-    then
-      Error
-        (error
-           Permission_denied
-           "recovery window writer attachment has another principal")
-    else Ok ()
+    require_recovery_owner_writer t ~principal:principal.id ~attachment_id
   in
   let%bind () = check () in
   match t.state.recovery_windows with
@@ -56567,6 +56632,32 @@ let enable_recovery_windows_internal t actor attachment_id authorize =
     Ok (scope ledger)
 ;;
 
+let persist_recovery_delta t ~delta ~check_before_commit =
+  let open Result.Let_syntax in
+  let previous = t.state in
+  let run_preparation =
+    Option.map t.run_source_binding ~f:(fun binding -> binding.Source_binding.preparation)
+  in
+  let%bind candidate = prepare_transition ?run_preparation t ~delta ~payloads:[] in
+  let commit_observation =
+    Session_commit_observation.Owner.create_guarded
+      ~previous
+      ~candidate
+      ~check_at_writer:check_before_commit
+  in
+  let%bind () =
+    persist_transition
+      ?run_preparation
+      t
+      candidate
+      ~check_before_commit
+      ~commit_observation
+  in
+  install_committed_transition ?run_preparation t candidate;
+  publish_committed_transition t candidate;
+  Ok ()
+;;
+
 let handle_recovery_note
   : type a. t -> a Recovery_note_request.t -> (a, Agent_protocol.Error.t) result
   =
@@ -56603,35 +56694,243 @@ let handle_recovery_note
     (match outcome with
      | Replayed receipt -> Ok receipt
      | Applied (_, receipt) ->
-       let run_preparation =
-         Option.map t.run_source_binding ~f:(fun binding ->
-           binding.Source_binding.preparation)
-       in
-       let%bind candidate =
-         prepare_transition
-           ?run_preparation
+       let check_before_commit () = Result.map (check ()) ~f:ignore in
+       let%map () =
+         persist_recovery_delta
            t
            ~delta:(Recovery_note_changed change)
-           ~payloads:[]
-       in
-       let check_before_commit () = Result.map (check ()) ~f:ignore in
-       let commit_observation =
-         Session_commit_observation.Owner.create_guarded
-           ~previous
-           ~candidate
-           ~check_at_writer:check_before_commit
-       in
-       let%bind () =
-         persist_transition
-           ?run_preparation
-           t
-           candidate
            ~check_before_commit
-           ~commit_observation
        in
-       install_committed_transition ?run_preparation t candidate;
-       publish_committed_transition t candidate;
-       Ok receipt)
+       receipt)
+;;
+
+let recovery_share_owner t ~check_owner ~publication =
+  let module P = Agent_protocol in
+  let open Result.Let_syntax in
+  let unavailable () = Error (Recovery_note_share.unavailable ()) in
+  if
+    (not (Int.equal t.runtime_source_domain (Stdlib.Domain.self () :> int)))
+    || t.stopped
+    || (publication && t.canonical_write_in_progress)
+    || Option.is_some t.lifecycle_fence
+    || Failed_startup_release_data.Gate.is_closed t.startup_disposal
+  then unavailable ()
+  else (
+    let%bind () = check_owner () in
+    let%bind binding =
+      Result.of_option t.canonical_persistence ~error:(Recovery_note_share.unavailable ())
+    in
+    let%bind owner =
+      if Canonical_backend_binding_data.is_available binding
+      then
+        Result.of_option
+          (Canonical_backend_binding_data.session_owner binding)
+          ~error:(Recovery_note_share.unavailable ())
+      else unavailable ()
+    in
+    let%bind () = Recovery_note_session.check_owner t.state.recovery_notes ~owner in
+    if
+      Option.for_all t.state.recovery_note_shares ~f:(fun ledger ->
+        P.Session_ref.equal owner (Recovery_note_share.owner ledger))
+    then Ok owner
+    else unavailable ())
+;;
+
+let recovery_share_incarnation t ~check_owner =
+  let open Result.Let_syntax in
+  let%bind _ = recovery_share_owner t ~check_owner ~publication:true in
+  let%bind ledger =
+    Result.of_option
+      t.state.recovery_note_shares
+      ~error:(Recovery_note_share.unavailable ())
+  in
+  Recovery_note_share.incarnation ledger ~generation:t.state.identity.generation
+;;
+
+let recovery_share_unavailable result =
+  Result.map_error result ~f:(fun _ -> Recovery_note_share.unavailable ())
+;;
+
+let recovery_share_witness observe =
+  let open Result.Let_syntax in
+  let%map incarnation = observe () in
+  let check_current () =
+    let%bind current = observe () in
+    if Recovery_note_share.Incarnation.equal incarnation current
+    then Ok ()
+    else Error (Recovery_note_share.unavailable ())
+  in
+  Recovery_note_share_request.{ incarnation; check_current }
+;;
+
+let recovery_share_management t ~access ~check_owner =
+  let open Result.Let_syntax in
+  let%bind owner = recovery_share_owner t ~check_owner ~publication:false in
+  let%bind principal, attachment_id =
+    Recovery_note_access.check_management access t.state ~owner
+  in
+  let%map () = require_recovery_owner_writer t ~principal ~attachment_id in
+  owner, principal
+;;
+
+let recovery_share_new_ledger t ~owner =
+  let nonce = Agent_protocol.Id.Session_incarnation.create () in
+  let change = Recovery_note_share_change.establish ~owner ~nonce in
+  let%map.Result ledger =
+    Recovery_note_share_change.apply
+      change
+      ~previous:None
+      ~catalog:t.state.recovery_notes
+      ~session_id:t.state.identity.session_id
+      ~generation:t.state.identity.generation
+  in
+  ledger, Session_delta.Recovery_note_share_changed change
+;;
+
+let recovery_share_mutate t ~access ~check_owner ~check_target ~check_fresh make_change =
+  let module S = Recovery_note_share in
+  let module Change = Recovery_note_share_change in
+  let open Result.Let_syntax in
+  let check () =
+    let%bind owner, principal = recovery_share_management t ~access ~check_owner in
+    let%map () = check_target () in
+    owner, principal
+  in
+  let%bind owner, principal = check () in
+  let%bind ledger, establishment =
+    match t.state.recovery_note_shares with
+    | Some ledger -> Ok (ledger, None)
+    | None ->
+      let%map ledger, delta = recovery_share_new_ledger t ~owner in
+      ledger, Some delta
+  in
+  let%bind source = S.incarnation ledger ~generation:t.state.identity.generation in
+  let change = make_change ~source ~principal ~now:(t.services.now ()) in
+  let%bind outcome =
+    Change.evaluate
+      change
+      ~previous:(Some ledger)
+      ~catalog:t.state.recovery_notes
+      ~session_id:t.state.identity.session_id
+      ~generation:t.state.identity.generation
+  in
+  match outcome with
+  | Established _ -> Error (error Invalid_state "invalid recovery note share transition")
+  | Replayed receipt -> Ok receipt
+  | Applied (_, receipt) ->
+    let delta = Session_delta.Recovery_note_share_changed change in
+    let delta =
+      Option.value_map establishment ~default:delta ~f:(fun establish ->
+        Session_delta.Batch [ establish; delta ])
+    in
+    let check_before_commit () =
+      let%bind _ = check () in
+      check_fresh ()
+    in
+    let%map () = persist_recovery_delta t ~delta ~check_before_commit in
+    receipt
+;;
+
+let recovery_share_selection t ~check_owner ~reader ~reference =
+  let module S = Recovery_note_share in
+  let open Result.Let_syntax in
+  let unavailable () = S.unavailable () in
+  let%bind _ = recovery_share_owner t ~check_owner ~publication:true in
+  let%bind () = reader.Recovery_note_share_request.check_current () in
+  let%bind ledger =
+    Result.of_option t.state.recovery_note_shares ~error:(unavailable ())
+  in
+  let%bind catalog = Result.of_option t.state.recovery_notes ~error:(unavailable ()) in
+  let%map selection =
+    S.resolve
+      ledger
+      ~source_generation:t.state.identity.generation
+      ~recipient:reader.incarnation
+      ~reference
+      ~now:(t.services.now ())
+  in
+  catalog, selection
+;;
+
+let select_recovery_share t ~check_owner ~reader reference =
+  let module C = Recovery_notes.Catalog in
+  let open Result.Let_syntax in
+  let resolve () =
+    recovery_share_selection t ~check_owner ~reader ~reference
+    |> recovery_share_unavailable
+  in
+  let%bind catalog, selection = resolve () in
+  let%map _ = C.read catalog selection |> recovery_share_unavailable in
+  let materialize () =
+    let%bind catalog, selected = resolve () in
+    if
+      C.Note_id.equal selection.id selected.id
+      && C.Note_revision.equal selection.revision selected.revision
+    then C.read catalog selected |> recovery_share_unavailable
+    else Error (Recovery_note_share.unavailable ())
+  in
+  Recovery_note_share_request.Disclosure materialize
+;;
+
+let handle_recovery_note_share
+  : type a. t -> a Recovery_note_share_request.t -> (a, Agent_protocol.Error.t) result
+  =
+  fun t request ->
+  let module S = Recovery_note_share in
+  let open Result.Let_syntax in
+  match request with
+  | Management_revision (access, check_owner) ->
+    let%map _ = recovery_share_management t ~access ~check_owner in
+    Option.value_map
+      t.state.recovery_note_shares
+      ~default:S.Revision.initial
+      ~f:S.revision
+  | Establish_target check_owner ->
+    let observe () = recovery_share_incarnation t ~check_owner in
+    let%bind owner = recovery_share_owner t ~check_owner ~publication:false in
+    let%bind () =
+      match t.state.recovery_note_shares with
+      | Some _ -> Ok ()
+      | None ->
+        let%bind _, delta = recovery_share_new_ledger t ~owner in
+        let check_before_commit () =
+          Result.map (recovery_share_owner t ~check_owner ~publication:false) ~f:ignore
+        in
+        persist_recovery_delta t ~delta ~check_before_commit
+    in
+    let%map witness = recovery_share_witness observe in
+    Recovery_note_share_request.Target witness
+  | Select (check_owner, Reader reader, reference) ->
+    select_recovery_share t ~check_owner ~reader reference
+  | Create (access, check_owner, Target target, key, request) ->
+    let check_fresh () =
+      if Agent_protocol.Timestamp.compare (t.services.now ()) request.expires_at < 0
+      then Ok ()
+      else Error (error Invalid_request "recovery note share expiry elapsed")
+    in
+    recovery_share_mutate
+      t
+      ~access
+      ~check_owner
+      ~check_target:target.check_current
+      ~check_fresh
+      (fun ~source ~principal ~now ->
+         Recovery_note_share_change.create
+           ~source
+           ~recipient:target.incarnation
+           ~principal
+           ~key
+           ~now
+           request)
+  | Revoke (access, check_owner, key, request) ->
+    recovery_share_mutate
+      t
+      ~access
+      ~check_owner
+      ~check_target:(fun () -> Ok ())
+      ~check_fresh:(fun () -> Ok ())
+      (fun ~source ~principal ~now ->
+         Recovery_note_share_change.revoke ~source ~principal ~key ~now request)
 ;;
 
 let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
@@ -57718,6 +58017,8 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
     | Goal_request (Read (actor, authorize)) ->
       Goal_command_admission.read t.state ~actor ~authorize
     | Context_request (Recovery_note request) -> handle_recovery_note t request
+    | Context_request (Recovery_note_share request) ->
+      handle_recovery_note_share t request
     | Context_request (Enable_recovery_windows (actor, attachment_id, authorize)) ->
       enable_recovery_windows_internal t actor attachment_id authorize
     | Context_request (Instruction_command (admission, source, request)) ->
@@ -58597,6 +58898,8 @@ let create_internal
     ; event_sequence = Atomic.make initial_state.counters.event_sequence
     ; state = initial_state
     ; stopped = false
+    ; protected_source_custody = false
+    ; canonical_write_in_progress = false
     ; command_audit = None
     }
   in
@@ -61656,6 +61959,109 @@ let mutate_recovery_note_operator t ~access ~key operation =
 let mutate_recovery_note_native t ~access operation =
   call t (Context_request (Recovery_note (Mutate (access, Native_invocation, operation))))
 ;;
+
+module Recovery_note_shares = struct
+  type actor = t
+
+  open Recovery_note_share_request
+
+  type nonrec check_owner = check_owner
+  type nonrec reader = reader
+  type nonrec target = target
+  type nonrec disclosure = disclosure
+
+  let request t request = call t (Context_request (Recovery_note_share request))
+
+  let management_revision t ~access ~check_owner =
+    request t (Management_revision (access, check_owner))
+  ;;
+
+  let establish_target t ~check_owner = request t (Establish_target check_owner)
+
+  let create t ~access ~check_owner ~target ~key create =
+    request t (Create (access, check_owner, target, key, create))
+  ;;
+
+  let revoke t ~access ~check_owner ~key revoke =
+    request t (Revoke (access, check_owner, key, revoke))
+  ;;
+
+  let reader t ~access ~check_owner =
+    let open Result.Let_syntax in
+    let observe () =
+      let%bind incarnation = recovery_share_incarnation t ~check_owner in
+      let%map _ = recovery_note_access t ~access ~effect_kind:Read in
+      incarnation
+    in
+    let%map witness = recovery_share_witness observe |> recovery_share_unavailable in
+    Reader witness
+  ;;
+
+  let reader_for_delivery t ~operation_id ~check_owner =
+    let module P = Agent_protocol in
+    let open Result.Let_syntax in
+    let unavailable () = Error (Recovery_note_share.unavailable ()) in
+    let get_operation_owner () =
+      match t.operation_agent_custody with
+      | Some owner when P.Id.Operation.equal owner.operation_id operation_id -> Ok owner
+      | Some _ | None -> unavailable ()
+    in
+    let reader =
+      let%bind _ = recovery_share_incarnation t ~check_owner in
+      let%bind original = get_operation_owner () in
+      let observe () =
+        let%bind incarnation = recovery_share_incarnation t ~check_owner in
+        let%bind operation = running_operation t operation_id in
+        let%bind current = get_operation_owner () in
+        if
+          (not (phys_equal original current))
+          || not (Int.equal operation.generation t.state.identity.generation)
+        then unavailable ()
+        else (
+          let%bind () = check_agent_admission current.admission in
+          let%bind actor =
+            Result.bind (operation_agent_actor t operation_id) ~f:(fun actor ->
+              Result.of_option actor ~error:(Recovery_note_share.unavailable ()))
+          in
+          if
+            Operator_authorization.is_current actor
+            && P.Principal.has_scope
+                 (Operator_authorization.principal actor)
+                 View_session_transcript
+          then Ok incarnation
+          else unavailable ())
+      in
+      let%map witness = recovery_share_witness observe in
+      Reader witness
+    in
+    recovery_share_unavailable reader
+  ;;
+
+  let select t ~check_owner ~reader reference =
+    request t (Select (check_owner, reader, reference)) |> recovery_share_unavailable
+  ;;
+
+  let with_source_custody t ~check_owner ~f =
+    let current () =
+      recovery_share_owner t ~check_owner ~publication:true |> Result.is_ok
+    in
+    if t.protected_source_custody || not (current ())
+    then Error (Recovery_note_share.unavailable ())
+    else (
+      t.protected_source_custody <- true;
+      Exn.protect
+        ~finally:(fun () -> t.protected_source_custody <- false)
+        ~f:(fun () -> Ok (f (fun () -> t.protected_source_custody && current ()))))
+  ;;
+
+  let select_for_delivery t ~check_owner ~reader:(Reader reader) reference =
+    if t.protected_source_custody
+    then select_recovery_share t ~check_owner ~reader reference
+    else Error (Recovery_note_share.unavailable ())
+  ;;
+
+  let materialize (Disclosure disclose) = disclose ()
+end
 
 let instruction_selection_current t (basis : Session_state.t) =
   (not t.stopped)

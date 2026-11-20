@@ -77,6 +77,10 @@ module Session = Make (struct
     let prefix = "ses"
   end)
 
+module Session_incarnation = Make (struct
+    let prefix = "sic"
+  end)
+
 module Context_window = Make (struct
     let prefix = "win"
   end)

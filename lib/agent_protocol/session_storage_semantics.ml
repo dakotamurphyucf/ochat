@@ -10,6 +10,7 @@ let recovery_windows = "session.recovery-windows.v1"
 let recovery_withdrawals = "session.recovery-withdrawals.v1"
 let recurrence_controller_goal = "recurrence.controller-goal.v1"
 let recovery_notes = "session.recovery-notes.v1"
+let recovery_note_shares = "session.recovery-note-shares.v1"
 
 let supported_children =
   [ Schedule_provenance.persistence_semantics
@@ -27,5 +28,6 @@ let supported_children =
   ; recovery_withdrawals
   ; recurrence_controller_goal
   ; recovery_notes
+  ; recovery_note_shares
   ]
 ;;

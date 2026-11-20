@@ -3889,6 +3889,102 @@ val mutate_recovery_note_native
   -> Recovery_notes.Catalog.mutation
   -> (Recovery_notes.Catalog.Receipt.t, Agent_protocol.Error.t) result
 
+(** Canonical two-session note sharing. These functions are for the trusted host.
+    [check_owner] must be a nonyielding check of this exact physical Store and
+    Registry association on its creating domain. It supplies no caller authority. *)
+module Recovery_note_shares : sig
+  type actor = t
+  type check_owner = unit -> (unit, Agent_protocol.Error.t) result
+  type reader
+  type target
+  type disclosure
+
+  val management_revision
+    :  actor
+    -> access:Recovery_note_access.t
+    -> check_owner:check_owner
+    -> (Recovery_note_share.Revision.t, Agent_protocol.Error.t) result
+
+  (** Idempotently bind this actual durable target before entering the source
+      Actor. Establishes only an owner incarnation, never a local or incoming
+      grant. For a trusted host after source management admission. *)
+  val establish_target
+    :  actor
+    -> check_owner:check_owner
+    -> (target, Agent_protocol.Error.t) result
+
+  val create
+    :  actor
+    -> access:Recovery_note_access.t
+    -> check_owner:check_owner
+    -> target:target
+    -> key:Agent_protocol.Idempotency_key.t
+    -> Recovery_note_share.create
+    -> (Recovery_note_share.Receipt.t, Agent_protocol.Error.t) result
+
+  val revoke
+    :  actor
+    -> access:Recovery_note_access.t
+    -> check_owner:check_owner
+    -> key:Agent_protocol.Idempotency_key.t
+    -> Recovery_note_share.revoke
+    -> (Recovery_note_share.Receipt.t, Agent_protocol.Error.t) result
+
+  (** Capture the exact recipient, durable incarnation and original current
+      scoped authority without entering a second mailbox. *)
+  val reader
+    :  actor
+    -> access:Recovery_note_access.t
+    -> check_owner:check_owner
+    -> (reader, Agent_protocol.Error.t) result
+
+  (** Fresh protected provider-input admission for this actual running foreground
+      operation. Checks its physical current operation custody and original
+      authenticated transcript scope on each use, even after a native callback
+      ended. A persisted operation coordinate alone grants nothing. *)
+  val reader_for_delivery
+    :  actor
+    -> operation_id:Agent_protocol.Id.Operation.t
+    -> check_owner:check_owner
+    -> (reader, Agent_protocol.Error.t) result
+
+  (** Explicit one-grant selection on the source actor. The result is inert
+      until [materialize], and carries no plaintext. *)
+  val select
+    :  actor
+    -> check_owner:check_owner
+    -> reader:reader
+    -> Recovery_note_share.Reference.t
+    -> (disclosure, Agent_protocol.Error.t) result
+
+  (** Trusted Factory only. Run outside the source mailbox with actual Registry
+      read custody already held. A same-domain reservation excludes canonical
+      writes that change protected source state and rejects a pending writer.
+      The caller bounds the callback duration and releases Registry custody on
+      return, exception or cancellation. The supplied check is synchronous. *)
+  val with_source_custody
+    :  actor
+    -> check_owner:check_owner
+    -> f:((unit -> bool) -> 'a)
+    -> ('a, Agent_protocol.Error.t) result
+
+  (** Synchronous exact note selection within source custody. Entry,
+      recipient and grant admission are still checked on every use. *)
+  val select_for_delivery
+    :  actor
+    -> check_owner:check_owner
+    -> reader:reader
+    -> Recovery_note_share.Reference.t
+    -> (disclosure, Agent_protocol.Error.t) result
+
+  (** Final synchronous two-owner check and exact note lookup. Invoke within
+      the source's retained ownership lifetime immediately before publication
+      with no intervening yield or additional untrusted callback. *)
+  val materialize
+    :  disclosure
+    -> (Recovery_notes.Catalog.Content.t, Agent_protocol.Error.t) result
+end
+
 (** Actual admitted native effect and original execution epoch are checked in
     the mailbox before CAS and immediately before persistence. Replacement needs
     a genuine live source-use capture; current-root-only retries may return only

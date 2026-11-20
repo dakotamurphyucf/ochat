@@ -190,6 +190,7 @@ let admit_recovery_storage
   let state = transition.Session_transition.state in
   if
     Option.equal phys_equal previous.Session_state.recovery_notes state.recovery_notes
+    && Option.equal phys_equal previous.recovery_note_shares state.recovery_note_shares
     && Option.equal phys_equal previous.recovery_windows state.recovery_windows
   then Ok ()
   else (

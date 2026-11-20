@@ -121,6 +121,8 @@ let journal ?(max_payload_length = 1048576) create env directory =
 ;;
 
 let with_actor
+      ?(owner = owner)
+      ?(now = fun () -> timestamp)
       env
       sw
       journal
@@ -132,6 +134,7 @@ let with_actor
       ~state_committed
       f
   =
+  let session_id = P.Session_ref.session_id owner in
   let writer =
     Store.Commit_writer.create
       ~sw
@@ -182,7 +185,7 @@ let with_actor
           ~persistence:backend
           ~operation_worker:None
           ~services:
-            { now = (fun () -> timestamp)
+            { now
             ; monotonic_now = (fun () -> Mtime.min_stamp)
             ; create_attachment_id = P.Id.Attachment.create
             ; create_reclaim_token = (fun () -> "recovery-note-reclaim")

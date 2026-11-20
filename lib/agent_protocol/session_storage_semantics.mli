@@ -24,3 +24,4 @@ val recovery_withdrawals : string
 val recurrence_controller_goal : string
 
 val recovery_notes : string
+val recovery_note_shares : string

@@ -47,3 +47,13 @@ val check_now
   -> owner:Agent_protocol.Session_ref.t
   -> effect_kind:Effect.t
   -> (checked, Agent_protocol.Error.t) result
+
+(** Source management requires the original scoped operator connection and
+    exact attachment. The Actor checks its real current owner lease. *)
+val check_management
+  :  t
+  -> Session_state.t
+  -> owner:Agent_protocol.Session_ref.t
+  -> ( Agent_protocol.Id.Principal.t * Agent_protocol.Id.Attachment.t
+       , Agent_protocol.Error.t )
+       result

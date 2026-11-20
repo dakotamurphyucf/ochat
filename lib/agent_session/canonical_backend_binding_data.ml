@@ -53,3 +53,8 @@ let requires_recovery t =
   check_domain_exn t;
   Agent_store.Commit_writer.requires_recovery t.writer
 ;;
+
+let is_available t =
+  check_domain_exn t;
+  Agent_store.Commit_writer.is_available t.writer
+;;

@@ -14262,6 +14262,135 @@ let check_registered_entry t entry ~session =
   else Ok ()
 ;;
 
+module Recovery_note_shares = struct
+  module A = Agent_session
+  module Actor = A.Session_actor.Recovery_note_shares
+  module P = Agent_protocol
+  module S = Agent_store.Session_store
+  module Share = A.Recovery_note_share
+
+  let unavailable () = Error (Share.unavailable ())
+  let hide_denial result = Result.map_error result ~f:(fun _ -> Share.unavailable ())
+
+  let session t (entry : Session_registry.entry) =
+    match entry.store_handle with
+    | None -> unavailable ()
+    | Some handle ->
+      Ok
+        (P.Session_ref.create
+           ~server_id:(S.server_id t.store)
+           ~session_id:(S.Handle.session_id handle))
+  ;;
+
+  let check_owner t entry ~session () =
+    let open Result.Let_syntax in
+    let%bind () = check_registered_owner t entry ~session in
+    Session_registry.check_native_metadata_publication t.registry entry
+  ;;
+
+  let management_revision t ~(source : Session_registry.entry) ~access =
+    let open Result.Let_syntax in
+    let%bind session = session t source in
+    Actor.management_revision
+      source.actor
+      ~access
+      ~check_owner:(check_owner t source ~session)
+  ;;
+
+  let create t ~(source : Session_registry.entry) ~access ~recipient ~key request =
+    let open Result.Let_syntax in
+    let%bind source_session = session t source in
+    let source_owner = check_owner t source ~session:source_session in
+    let%bind _ =
+      Actor.management_revision source.actor ~access ~check_owner:source_owner
+    in
+    if
+      (not (P.Id.Server.equal (S.server_id t.store) (P.Session_ref.server_id recipient)))
+      || P.Session_ref.equal source_session recipient
+    then unavailable ()
+    else (
+      let%bind target =
+        Session_registry.with_loaded_read
+          t.registry
+          (P.Session_ref.session_id recipient)
+          (fun (entry : Session_registry.entry) ->
+             Actor.establish_target
+               entry.actor
+               ~check_owner:(check_owner t entry ~session:recipient))
+        |> hide_denial
+      in
+      Actor.create source.actor ~access ~check_owner:source_owner ~target ~key request)
+  ;;
+
+  let revoke t ~(source : Session_registry.entry) ~access ~key request =
+    let open Result.Let_syntax in
+    let%bind session = session t source in
+    Actor.revoke
+      source.actor
+      ~access
+      ~check_owner:(check_owner t source ~session)
+      ~key
+      request
+  ;;
+
+  let with_reader_disclosure t ~(recipient : Session_registry.entry) ~reader reference ~f =
+    let open Result.Let_syntax in
+    let source = Share.Reference.source reference in
+    let%bind recipient_session = session t recipient |> hide_denial in
+    if
+      (not (P.Id.Server.equal (S.server_id t.store) (P.Session_ref.server_id source)))
+      || P.Session_ref.equal recipient_session source
+    then unavailable ()
+    else (
+      let%bind reader =
+        reader
+          recipient.actor
+          ~check_owner:(check_owner t recipient ~session:recipient_session)
+        |> hide_denial
+      in
+      let%bind result =
+        Session_registry.with_loaded_read
+          t.registry
+          (P.Session_ref.session_id source)
+          (fun (entry : Session_registry.entry) ->
+             let lease_live = ref true in
+             let check_owner () =
+               if !lease_live
+               then check_owner t entry ~session:source ()
+               else unavailable ()
+             in
+             Exn.protect
+               ~finally:(fun () -> lease_live := false)
+               ~f:(fun () ->
+                 let%map disclosure =
+                   Actor.select entry.actor ~check_owner ~reader reference
+                 in
+                 f disclosure))
+        |> hide_denial
+      in
+      result)
+  ;;
+
+  let with_disclosure t ~recipient ~access reference ~f =
+    with_reader_disclosure
+      t
+      ~recipient
+      ~reader:(fun actor ~check_owner -> Actor.reader actor ~access ~check_owner)
+      reference
+      ~f
+  ;;
+
+  let with_operation_disclosure t ~recipient ~operation_id reference ~f =
+    with_reader_disclosure
+      t
+      ~recipient
+      ~reader:(fun actor ~check_owner ->
+        Actor.reader_for_delivery actor ~operation_id ~check_owner)
+      reference
+      ~f
+  ;;
+end
+
 let qualify_metadata_target t entry =
   let module S = Agent_store.Session_store in
   let open Result.Let_syntax in

@@ -16,10 +16,12 @@ let archive_document state ~limits =
   (* A history capture must not become a second store for private note bodies. *)
   let value = Session_state_document.value state in
   let state =
-    match value.recovery_notes with
-    | None -> state
-    | Some _ ->
-      Session_state_document.with_value state { value with recovery_notes = None }
+    match value.recovery_notes, value.recovery_note_shares with
+    | None, None -> state
+    | Some _, _ | None, Some _ ->
+      Session_state_document.with_value
+        state
+        { value with recovery_notes = None; recovery_note_shares = None }
   in
   let%bind state = Session_state_document.encode state ~limits in
   (* Admit the encoded child without replacing its captured JSON representation. *)

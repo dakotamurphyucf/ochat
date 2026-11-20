@@ -853,29 +853,51 @@ let check_delta document =
     ~required:(recurrence_goal_delta_requires payload)
 ;;
 
-let recovery_notes_name = Agent_protocol.Session_storage_semantics.recovery_notes
+let recovery_note_fields =
+  let module Semantics = Agent_protocol.Session_storage_semantics in
+  [ Semantics.recovery_notes, "recovery_notes", "recovery_note_changed"
+  ; Semantics.recovery_note_shares, "recovery_note_shares", "recovery_note_share_changed"
+  ]
+;;
 
-let recovery_notes_state_requires payload =
-  match D.Json.field payload ~name:"recovery_notes" with
+let recovery_note_state_requires ~field ~kind:_ payload =
+  match D.Json.field payload ~name:field with
   | Absent -> false
   | Null | Value _ -> true
 ;;
 
-let recovery_notes_delta_requires payload =
+let recovery_note_delta_requires ~field ~kind payload =
   match D.Json.field payload ~name:"changes" with
   | Value (`Array changes) ->
     List.exists changes ~f:(fun change ->
       match D.Json.field change ~name:"kind" with
-      | Value (`String "recovery_note_changed") -> true
       | Value (`String "created") ->
         (match D.Json.field change ~name:"state" with
          | Value state ->
            (match D.Json.field state ~name:"payload" with
-            | Value payload -> recovery_notes_state_requires payload
+            | Value payload -> recovery_note_state_requires ~field ~kind payload
             | Absent | Null -> false)
          | Absent | Null -> false)
+      | Value (`String change_kind) -> String.equal change_kind kind
       | Value _ | Absent | Null -> false)
   | Value _ | Absent | Null -> false
+;;
+
+let require_recovery_note_fields document ~limits ~requires =
+  List.fold_result
+    recovery_note_fields
+    ~init:document
+    ~f:(fun document (name, field, kind) ->
+      require
+        document
+        ~limits
+        ~name
+        ~required:(requires ~field ~kind (D.Document.payload document)))
+;;
+
+let check_recovery_note_fields document ~requires =
+  List.fold_result recovery_note_fields ~init:() ~f:(fun () (name, field, kind) ->
+    check document ~name ~required:(requires ~field ~kind (D.Document.payload document)))
 ;;
 
 let require_state_without_recovery_notes = require_state
@@ -885,34 +907,20 @@ let check_delta_without_recovery_notes = check_delta
 
 let require_state document ~limits =
   let%bind.Result document = require_state_without_recovery_notes document ~limits in
-  require
-    document
-    ~limits
-    ~name:recovery_notes_name
-    ~required:(recovery_notes_state_requires (D.Document.payload document))
+  require_recovery_note_fields document ~limits ~requires:recovery_note_state_requires
 ;;
 
 let check_state document =
   let%bind.Result () = check_state_without_recovery_notes document in
-  check
-    document
-    ~name:recovery_notes_name
-    ~required:(recovery_notes_state_requires (D.Document.payload document))
+  check_recovery_note_fields document ~requires:recovery_note_state_requires
 ;;
 
 let require_delta document ~limits =
   let%bind.Result document = require_delta_without_recovery_notes document ~limits in
-  require
-    document
-    ~limits
-    ~name:recovery_notes_name
-    ~required:(recovery_notes_delta_requires (D.Document.payload document))
+  require_recovery_note_fields document ~limits ~requires:recovery_note_delta_requires
 ;;
 
 let check_delta document =
   let%bind.Result () = check_delta_without_recovery_notes document in
-  check
-    document
-    ~name:recovery_notes_name
-    ~required:(recovery_notes_delta_requires (D.Document.payload document))
+  check_recovery_note_fields document ~requires:recovery_note_delta_requires
 ;;

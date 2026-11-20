@@ -732,6 +732,64 @@ val check_registered_entry
   -> session:Agent_protocol.Session_ref.t
   -> (unit, Agent_protocol.Error.t) result
 
+(** Source-owned durable sharing on this Factory's actual same-host Store and
+    Registry. Existing source visibility/management authority and scoped recipient
+    read authority enter through their distinct original access proofs. *)
+module Recovery_note_shares : sig
+  val management_revision
+    :  t
+    -> source:Session_registry.entry
+    -> access:Agent_session.Recovery_note_access.t
+    -> (Agent_session.Recovery_note_share.Revision.t, Agent_protocol.Error.t) result
+
+  val create
+    :  t
+    -> source:Session_registry.entry
+    -> access:Agent_session.Recovery_note_access.t
+    -> recipient:Agent_protocol.Session_ref.t
+    -> key:Agent_protocol.Idempotency_key.t
+    -> Agent_session.Recovery_note_share.create
+    -> (Agent_session.Recovery_note_share.Receipt.t, Agent_protocol.Error.t) result
+
+  val revoke
+    :  t
+    -> source:Session_registry.entry
+    -> access:Agent_session.Recovery_note_access.t
+    -> key:Agent_protocol.Idempotency_key.t
+    -> Agent_session.Recovery_note_share.revoke
+    -> (Agent_session.Recovery_note_share.Receipt.t, Agent_protocol.Error.t) result
+
+  (** Resolve a single explicit share. [f] owns a bounded source read lease
+      and calls synchronous [Session_actor.Recovery_note_shares.materialize]
+      immediately before publishing. Both original scopes and exact owner
+      tuples are rechecked at that point. A disclosure is invalid after this
+      callback ends and cannot be stored as a later provider final check.
+      Include the application's actual write admission in this callback.
+      Group multiple selectors for one source under one lease before composing
+      multiple sources. Reentering the same source lease can block indefinitely. *)
+  val with_disclosure
+    :  t
+    -> recipient:Session_registry.entry
+    -> access:Agent_session.Recovery_note_access.t
+    -> Agent_session.Recovery_note_share.Reference.t
+    -> f:
+         (Agent_session.Session_actor.Recovery_note_shares.disclosure
+          -> ('a, Agent_protocol.Error.t) result)
+    -> ('a, Agent_protocol.Error.t) result
+
+  (** Protected provider input uses the exact still-running recipient operation
+      and its live original custody instead of a completed native tool borrow. *)
+  val with_operation_disclosure
+    :  t
+    -> recipient:Session_registry.entry
+    -> operation_id:Agent_protocol.Id.Operation.t
+    -> Agent_session.Recovery_note_share.Reference.t
+    -> f:
+         (Agent_session.Session_actor.Recovery_note_shares.disclosure
+          -> ('a, Agent_protocol.Error.t) result)
+    -> ('a, Agent_protocol.Error.t) result
+end
+
 (** Rebuild missing-index projections through immutable owned reads without
     actors/providers. Retain the eager-recovery marker for actual Execute recovery. *)
 val rebuild_index_projections : t -> (unit, Agent_protocol.Error.t) Result.t

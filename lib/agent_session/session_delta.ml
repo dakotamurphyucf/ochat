@@ -74,6 +74,7 @@ type t =
   | Goal_accounts_changed of (Goal_accounts.t[@sexp.opaque])
   | Instruction_selection_changed of Instruction_selection.t
   | Recovery_note_changed of (Recovery_note_change.t[@sexp.opaque])
+  | Recovery_note_share_changed of (Recovery_note_share_change.t[@sexp.opaque])
   | Recurrence_catalog_changed of Recurrence_catalog.t
   | Run_state_changed of Run_state.t
   | Moderator_changed of Jsonaf.t option
@@ -239,6 +240,7 @@ let rec contains_policy_usage = function
   | Goal_accounts_changed _
   | Instruction_selection_changed _
   | Recovery_note_changed _
+  | Recovery_note_share_changed _
   | Recurrence_catalog_changed _
   | Run_state_changed _
   | Moderator_changed _
@@ -317,6 +319,7 @@ let rec contains_goal_policy = function
   | Goal_accounts_changed _
   | Instruction_selection_changed _
   | Recovery_note_changed _
+  | Recovery_note_share_changed _
   | Recurrence_catalog_changed _
   | Run_state_changed _
   | Moderator_changed _
@@ -400,6 +403,11 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
       Recovery_note_session.check_unchanged
         state.recovery_notes
         ~incoming:created.recovery_notes
+    in
+    let%bind () =
+      Recovery_note_share.check_unchanged
+        state.recovery_note_shares
+        ~incoming:created.recovery_note_shares
     in
     let%bind () =
       match state.instruction_selection, created.instruction_selection with
@@ -1724,6 +1732,16 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
         ~session_id:state.identity.session_id
     in
     { state with recovery_notes = Some catalog }
+  | Recovery_note_share_changed change ->
+    let%map.Result shares =
+      Recovery_note_share_change.apply
+        change
+        ~previous:state.recovery_note_shares
+        ~catalog:state.recovery_notes
+        ~session_id:state.identity.session_id
+        ~generation:state.identity.generation
+    in
+    { state with recovery_note_shares = Some shares }
   | Instruction_selection_changed selection ->
     let open Result.Let_syntax in
     let previous =
@@ -1976,6 +1994,7 @@ let validate_goal_accounts delta ~(previous : Session_state.t) ~(next : Session_
     | Delivery_wake_changed _
     | Instruction_selection_changed _
     | Recovery_note_changed _
+    | Recovery_note_share_changed _
     | Recurrence_catalog_changed _
     | Run_state_changed _
     | Moderator_changed _
@@ -2115,6 +2134,7 @@ let validate_goal_descendants
     | Delivery_wake_changed _
     | Instruction_selection_changed _
     | Recovery_note_changed _
+    | Recovery_note_share_changed _
     | Recurrence_catalog_changed _
     | Run_state_changed _
     | Moderator_changed _
@@ -2226,6 +2246,7 @@ let rec validate_descendant_publication delta ~revision =
   | Delivery_wake_changed _
   | Instruction_selection_changed _
   | Recovery_note_changed _
+  | Recovery_note_share_changed _
   | Recurrence_catalog_changed _
   | Run_state_changed _
   | Moderator_changed _
@@ -2337,6 +2358,7 @@ let policy_usage_step delta ~(previous : Session_state.t) ~(next : Session_state
   | Delivery_wake_changed _
   | Instruction_selection_changed _
   | Recovery_note_changed _
+  | Recovery_note_share_changed _
   | Recurrence_catalog_changed _
   | Shell_changed _
   | History_block_reserved _
@@ -2476,6 +2498,7 @@ let goal_policy_step delta ~(previous : Session_state.t) ~(next : Session_state.
   | Delivery_wake_changed _
   | Instruction_selection_changed _
   | Recovery_note_changed _
+  | Recovery_note_share_changed _
   | Recurrence_catalog_changed _
   | Run_state_changed _
   | Moderator_changed _
