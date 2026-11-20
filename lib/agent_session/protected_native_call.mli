@@ -1,13 +1,32 @@
 (** Process-local arguments and result selection for a single protected model
     invocation. Nothing here serializes or authorizes access to source data. *)
+type rejection =
+  | Missing
+  | Invalid
+  | Denied
+  | Conflict
+  | Limit
+  | Expired_cursor
+  | Unavailable
+
 type result_selection =
   | Acknowledged
+  | Rejected of rejection
   | Deliver of
       (call:History_entry.t
        -> output:History_entry.t
        -> Inference_runtime.Protected_delivery.t)
 
 val with_input
+  :  invocation:Agent_protocol.Invocation.t
+  -> binding:Chat_response.Tool_capability.binding
+  -> input:Jsonaf.t
+  -> (unit -> 'a)
+  -> 'a * result_selection option
+
+(** A selected direct authored mutation may acknowledge or reject, with no
+    provider result plan. Its owner must already have scrubbed the invocation. *)
+val with_ack_input
   :  invocation:Agent_protocol.Invocation.t
   -> binding:Chat_response.Tool_capability.binding
   -> input:Jsonaf.t
@@ -28,7 +47,7 @@ val select
   -> result_selection
   -> (unit, Agent_protocol.Error.t) result
 
-val selected
+val result
   :  Agent_protocol.Host_invocation.context
   -> binding:Chat_response.Tool_capability.binding
-  -> bool
+  -> result_selection option

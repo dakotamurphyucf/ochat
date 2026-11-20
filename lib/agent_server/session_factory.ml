@@ -2269,6 +2269,129 @@ let instruction_service t actor_ref =
       | Ok actor -> A.instruction_selection_current actor basis)
 ;;
 
+(* A registry reservation also protects ordinary reads. Claimed Jobs retain
+   their exact registered owner while such a read is in progress; the Actor's
+   execution scope still enforces lifecycle retirement and cancellation. New
+   admission additionally requires reservation exclusion below; an existing
+   execution instead retains its actual Actor fence and Owner source stage. *)
+let registered_owner_tuple t (entry : Session_registry.entry) ~session =
+  let module S = Agent_store.Session_store in
+  let module P = Agent_protocol in
+  let valid =
+    match entry.store_handle with
+    | None -> false
+    | Some handle ->
+      let id = S.Handle.session_id handle in
+      P.Session_ref.equal
+        session
+        (P.Session_ref.create ~server_id:(S.server_id t.store) ~session_id:id)
+      && S.owns_handle t.store handle
+      && Runtime_owner.belongs_to_actor entry.runtime entry.actor
+      && Option.exists (Session_registry.find t.registry id) ~f:(fun actual ->
+        phys_equal actual.actor entry.actor
+        && phys_equal actual.runtime entry.runtime
+        && Option.exists actual.store_handle ~f:(phys_equal handle))
+  in
+  valid
+;;
+
+let check_registered_owner t entry ~session =
+  if
+    registered_owner_tuple t entry ~session
+    && (not (Session_registry.is_closing t.registry))
+    && not
+         (Session_registry.has_pending_cleanup
+            t.registry
+            (Agent_protocol.Session_ref.session_id session))
+  then Ok ()
+  else
+    Error
+      (unavailable
+         Conflict
+         "recurrence entry is not this Factory's current registered owner")
+;;
+
+let check_recovery_source_owner t entry ~session () =
+  let open Result.Let_syntax in
+  let%bind () = check_registered_owner t entry ~session in
+  Session_registry.check_native_metadata_publication t.registry entry
+;;
+
+let recovery_note_source_custody t source =
+  let module P = Agent_protocol in
+  let module Delivery = Inference_runtime.Protected_delivery in
+  let module Lease = Delivery.Lease in
+  let run submit =
+    if
+      not
+        (P.Id.Server.equal
+           (Agent_store.Session_store.server_id t.store)
+           (P.Session_ref.server_id source))
+    then raise (Delivery.Rejected Unavailable);
+    let timeout = Eio.Time.Timeout.seconds (Eio.Stdenv.mono_clock t.env) 5. in
+    try
+      Eio.Time.Timeout.run_exn timeout (fun () ->
+        let acquired =
+          Session_registry.with_loaded_read
+            t.registry
+            (P.Session_ref.session_id source)
+            (fun (entry : Session_registry.entry) ->
+               Agent_session.Session_actor.Recovery_note_shares.with_source_custody
+                 entry.actor
+                 ~check_owner:(check_recovery_source_owner t entry ~session:source)
+                 ~f:submit)
+        in
+        match acquired with
+        | Ok value -> value
+        | Error _ -> raise (Delivery.Rejected Unavailable))
+    with
+    | Eio.Time.Timeout -> raise Delivery.Lease_timeout
+  in
+  let source =
+    Lease.Source.create
+      ~host:(P.Session_ref.server_id source |> P.Id.Server.to_string)
+      ~session:(P.Session_ref.session_id source |> P.Id.Session.to_string)
+  in
+  Delivery.Source (Lease.create t.protected_source_authority ~source ~scope:{ run })
+;;
+
+let recovery_note_native_service t actor_ref =
+  let module A = Agent_session.Session_actor in
+  let module P = Agent_protocol in
+  let module Delivery = Inference_runtime.Protected_delivery in
+  let open Result.Let_syntax in
+  let prepare ~access query =
+    let%bind actor = extension_actor actor_ref in
+    let%map selected = A.prepare_recovery_note_query actor ~access query in
+    let source = selected.source in
+    let check_owner () =
+      match Session_registry.find t.registry (P.Session_ref.session_id source) with
+      | Some entry when phys_equal entry.actor actor ->
+        check_recovery_source_owner t entry ~session:source () |> Result.is_ok
+      | Some _ | None -> false
+    in
+    let materialize () =
+      if not (check_owner ())
+      then Error Delivery.Unavailable
+      else (
+        match selected.materialize () with
+        | Ok value ->
+          Ok
+            (History_entry.Payload.Output.Text
+               (Jsonaf.to_string (P.Invocation.outcome_to_json (Complete value))))
+        | Error _ -> Error Delivery.Unavailable)
+    in
+    let refresh ~scope:_ () = check_owner () && selected.check_current () in
+    Agent_session.Recovery_note_native_service.
+      { custody = recovery_note_source_custody t source; materialize; refresh }
+  in
+  let mutate ~access operation =
+    let%bind actor = extension_actor actor_ref in
+    A.mutate_recovery_note_native actor ~access operation
+  in
+  Agent_session.Recovery_note_native_service.{ prepare; mutate }
+;;
+
 let native_script_tools
       t
       profile
@@ -2351,6 +2474,10 @@ let native_script_tools
   Agent_session.Script_tool_calls.with_instruction_service
     tools
     (instruction_service t actor_ref)
+  |> fun tools ->
+  Agent_session.Script_tool_calls.with_recovery_note_service
+    tools
+    (recovery_note_native_service t actor_ref)
   |> fun tools ->
   Agent_session.Script_tool_calls.with_recurrence_service
     tools
@@ -6972,48 +7099,6 @@ let legacy_construction
     ; history
     ; script_tools = native_script_tools t profile actor_ref ~state
     }
-;;
-
-(* A registry reservation also protects ordinary reads. Claimed Jobs retain
-   their exact registered owner while such a read is in progress; the Actor's
-   execution scope still enforces lifecycle retirement and cancellation. New
-   admission additionally requires reservation exclusion below; an existing
-   execution instead retains its actual Actor fence and Owner source stage. *)
-let registered_owner_tuple t (entry : Session_registry.entry) ~session =
-  let module S = Agent_store.Session_store in
-  let module P = Agent_protocol in
-  let valid =
-    match entry.store_handle with
-    | None -> false
-    | Some handle ->
-      let id = S.Handle.session_id handle in
-      P.Session_ref.equal
-        session
-        (P.Session_ref.create ~server_id:(S.server_id t.store) ~session_id:id)
-      && S.owns_handle t.store handle
-      && Runtime_owner.belongs_to_actor entry.runtime entry.actor
-      && Option.exists (Session_registry.find t.registry id) ~f:(fun actual ->
-        phys_equal actual.actor entry.actor
-        && phys_equal actual.runtime entry.runtime
-        && Option.exists actual.store_handle ~f:(phys_equal handle))
-  in
-  valid
-;;
-
-let check_registered_owner t entry ~session =
-  if
-    registered_owner_tuple t entry ~session
-    && (not (Session_registry.is_closing t.registry))
-    && not
-         (Session_registry.has_pending_cleanup
-            t.registry
-            (Agent_protocol.Session_ref.session_id session))
-  then Ok ()
-  else
-    Error
-      (unavailable
-         Conflict
-         "recurrence entry is not this Factory's current registered owner")
 ;;
 
 (* Genuine retained ACK/Set facts remain writable while shutdown preserves the
@@ -14283,11 +14368,7 @@ module Recovery_note_shares = struct
            ~session_id:(S.Handle.session_id handle))
   ;;
 
-  let check_owner t entry ~session () =
-    let open Result.Let_syntax in
-    let%bind () = check_registered_owner t entry ~session in
-    Session_registry.check_native_metadata_publication t.registry entry
-  ;;
+  let check_owner = check_recovery_source_owner
 
   let management_revision t ~(source : Session_registry.entry) ~access =
     let open Result.Let_syntax in
@@ -14397,36 +14478,7 @@ module Recovery_note_shares = struct
     P.Id.Server.equal (S.server_id t.store) (P.Session_ref.server_id source)
   ;;
 
-  let source_custody t source =
-    let module Lease = Delivery.Lease in
-    let run submit =
-      if not (check_source t source) then raise (Delivery.Rejected Unavailable);
-      let timeout = Eio.Time.Timeout.seconds (Eio.Stdenv.mono_clock t.env) 5. in
-      try
-        Eio.Time.Timeout.run_exn timeout (fun () ->
-          let acquired =
-            Session_registry.with_loaded_read
-              t.registry
-              (P.Session_ref.session_id source)
-              (fun (entry : Session_registry.entry) ->
-                 Actor.with_source_custody
-                   entry.actor
-                   ~check_owner:(check_owner t entry ~session:source)
-                   ~f:submit)
-          in
-          match acquired with
-          | Ok value -> value
-          | Error _ -> raise (Delivery.Rejected Unavailable))
-      with
-      | Eio.Time.Timeout -> raise Delivery.Lease_timeout
-    in
-    let source =
-      Lease.Source.create
-        ~host:(P.Session_ref.server_id source |> P.Id.Server.to_string)
-        ~session:(P.Session_ref.session_id source |> P.Id.Session.to_string)
-    in
-    Delivery.Source (Lease.create t.protected_source_authority ~source ~scope:{ run })
-  ;;
+  let source_custody = recovery_note_source_custody
 
   type operation_delivery =
     { custody : Delivery.custody

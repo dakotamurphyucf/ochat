@@ -3870,6 +3870,22 @@ val list_recovery_notes
        , Agent_protocol.Error.t )
        result
 
+(** Process-local result from an actual protected model call. It pins the
+    operation's physical custody and the exact note or catalog revision. The
+    callbacks do not retain the callback scope, body or catalog. The Factory
+    checks registry ownership and reserves the source for provider submission. *)
+type recovery_note_delivery = private
+  { source : Agent_protocol.Session_ref.t
+  ; materialize : unit -> (Jsonaf.t, Agent_protocol.Error.t) result
+  ; check_current : unit -> bool
+  }
+
+val prepare_recovery_note_query
+  :  t
+  -> access:Recovery_note_access.t
+  -> Recovery_note_query.t
+  -> (recovery_note_delivery, Agent_protocol.Error.t) result
+
 (** A current writer and original host visibility are checked before receipt
     lookup and at the actual writer. The receipt is returned after the publish
     boundary. A replay performs no Store mutation. *)

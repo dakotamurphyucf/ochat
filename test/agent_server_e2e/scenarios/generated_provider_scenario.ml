@@ -60,12 +60,11 @@ let create_child env root daemon parent ~model ~reasoning ~tokens ~marker =
   |> protocol_ok
 ;;
 
-let inference_policy env =
+let inference_policy env ~endpoint ~auth =
   let module D = Openai.Responses_driver in
   (* This case exercises the actual adapter over the isolated HTTP/SSE server.
      Capture the selected endpoint and credential explicitly at the fixture
      boundary; never replace the provider request assertions with a mock stream. *)
-  let endpoint = Sys.getenv_exn "API_URL" ^ "/v1/responses" in
   let capabilities =
     D.Capability.create
       ~baseline:
@@ -92,13 +91,12 @@ let inference_policy env =
   let driver =
     D.create ~net:(Eio.Stdenv.net env) ~clock:(Eio.Stdenv.clock env) () |> Or_error.ok_exn
   in
-  let lease = D.Auth.bearer "generated-local-fixture" in
   let host =
     Inference_host.create
       driver
       ~profile
       ~profile_revision:None
-      ~auth:(fun ~sw:_ _ -> lease)
+      ~auth
       ~default_model:"gpt-4.1"
       ~namespace:Agent_protocol.Id.Transaction.(create () |> to_string)
       ~limits:Inference_runtime.Limits.default
@@ -170,7 +168,12 @@ let run_child env root =
           ~process_start_identity:None
           ~options:
             { Daemon.default_options with
-              inference_policy = inference_policy env
+              inference_policy =
+                inference_policy
+                  env
+                  ~endpoint:(Sys.getenv_exn "API_URL" ^ "/v1/responses")
+                  ~auth:(fun ~sw:_ _ ->
+                    Openai.Responses_driver.Auth.bearer "generated-local-fixture")
             ; qualify_chatml_extensions = true
             }
           ()

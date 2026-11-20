@@ -6,12 +6,19 @@ module Effect : sig
   type t =
     | Read
     | List
+    | Search
     | Write
     | Append
     | Delete
-  [@@deriving equal]
+  [@@deriving enumerate, equal]
 
   val name : t -> string
+  val of_query : Recovery_note_query.t -> t
+
+  (** Only the exact protected binding selected by the original dispatch can
+      enter the direct authored acknowledgment path. *)
+  val is_mutation_binding : Chat_response.Tool_capability.binding -> bool
+
   val of_mutation : Recovery_notes.Catalog.mutation -> t
 end
 

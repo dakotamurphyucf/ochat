@@ -482,6 +482,7 @@ let cases =
   ; "moderator.self-trigger-budget", test_budget
   ; "moderator.wakeup-during-tool", test_wake
   ; "generated.provider-settings-restart", Generated_provider_scenario.test
+  ; "recovery.notes-provider-write", Recovery_note_provider_scenario.test
   ]
 ;;
 

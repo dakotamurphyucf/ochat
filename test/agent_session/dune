@@ -48,6 +48,7 @@
   instruction_selection_persistence_tests
   recovery_note_actor_tests
   recovery_note_share_tests
+  recovery_note_native_tests
   instruction_clear_capacity_tests
   goal_run_tests
   goal_root_policy_tests

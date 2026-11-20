@@ -234,6 +234,10 @@
   recovery_note_access
   recovery_note_change
   recovery_note_session
+  recovery_note_query
+  recovery_note_native_request
+  recovery_note_native_service
+  recovery_note_native_tool
   recovery_note_share_value
   recovery_note_share_document
   recovery_note_share

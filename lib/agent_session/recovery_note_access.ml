@@ -7,17 +7,35 @@ module Effect = struct
   type t =
     | Read
     | List
+    | Search
     | Write
     | Append
     | Delete
-  [@@deriving equal]
+  [@@deriving enumerate, equal]
 
   let name = function
     | Read -> "recovery_note_read"
     | List -> "recovery_note_list"
+    | Search -> "recovery_note_search"
     | Write -> "recovery_note_write"
     | Append -> "recovery_note_append"
     | Delete -> "recovery_note_delete"
+  ;;
+
+  let of_query = function
+    | Recovery_note_query.Read _ -> Read
+    | List _ -> List
+    | Search _ -> Search
+  ;;
+
+  let is_mutation_binding binding =
+    Chat_response.Tool_capability.equal_result_contract
+      (Chat_response.Tool_capability.result_contract binding)
+      Protected_recovery_v1
+    && List.exists [ Write; Append; Delete ] ~f:(fun effect_kind ->
+      String.equal
+        (Chat_response.Tool_capability.reference binding).name
+        (name effect_kind))
   ;;
 
   let of_mutation = function
@@ -27,7 +45,7 @@ module Effect = struct
   ;;
 
   let scope = function
-    | Read | List -> P.Scope.View_session_transcript
+    | Read | List | Search -> P.Scope.View_session_transcript
     | Write | Append | Delete -> Send_messages
   ;;
 end
@@ -65,9 +83,7 @@ let denied () =
 
 let current actor scope =
   let principal = Operator_authorization.principal actor in
-  if
-    Operator_authorization.is_current actor
-    && P.Principal.has_scope principal scope
+  if Operator_authorization.is_current actor && P.Principal.has_scope principal scope
   then Ok principal.id
   else denied ()
 ;;

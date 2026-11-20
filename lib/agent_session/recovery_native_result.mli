@@ -6,6 +6,23 @@ val acknowledge
   -> binding:Chat_response.Tool_capability.binding
   -> (unit, Agent_protocol.Error.t) result
 
+type rejection =
+  | Missing
+  | Invalid
+  | Denied
+  | Conflict
+  | Limit
+  | Expired_cursor
+  | Unavailable
+
+(** Select a fixed body-free failure. The handler supplies no message or
+    details to the durable invocation. *)
+val reject
+  :  Native_tool_invocation.Admission.t
+  -> binding:Chat_response.Tool_capability.binding
+  -> rejection
+  -> (unit, Agent_protocol.Error.t) result
+
 val deliver
   :  Native_tool_invocation.Admission.t
   -> binding:Chat_response.Tool_capability.binding

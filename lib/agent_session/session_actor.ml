@@ -5397,6 +5397,12 @@ module Recurrence_read_request = struct
     | Planning : Operator_authorization.t * authorize -> Recurrence_planning_read.t t
 end
 
+type recovery_note_delivery =
+  { source : Agent_protocol.Session_ref.t
+  ; materialize : unit -> (Jsonaf.t, Agent_protocol.Error.t) result
+  ; check_current : unit -> bool
+  }
+
 module Recovery_note_request = struct
   module C = Recovery_notes.Catalog
 
@@ -5407,6 +5413,8 @@ module Recovery_note_request = struct
   type _ t =
     | Read : Recovery_note_access.t * C.selection -> C.Content.t t
     | List : Recovery_note_access.t -> (C.Catalog_revision.t * C.metadata list) t
+    | Query :
+        Recovery_note_access.t * Recovery_note_query.t -> recovery_note_delivery t
     | Mutate : Recovery_note_access.t * mutation_route * C.mutation -> C.Receipt.t t
 end
 
@@ -48496,7 +48504,7 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Retire_lifecycle _
   | Abort_lifecycle _
   | Goal_request (Read _)
-  | Context_request (Recovery_note (Read _ | List _))
+  | Context_request (Recovery_note (Read _ | List _ | Query _))
   | Context_request (Recovery_note_share (Management_revision _ | Select _))
   | State
   | Observe_resource_state
@@ -56592,6 +56600,13 @@ let recovery_note_access t ~access ~effect_kind =
       then Ok ()
       else Error (error Permission_denied "recovery note invocation authority is closed")
     in
+    let%bind () =
+      match execution.owner, invocation.context.origin with
+      | Foreground operation_id, (Model | Script) ->
+        running_operation t operation_id |> Result.map ~f:ignore
+      | _ ->
+        Error (error Permission_denied "recovery notes require a live foreground invocation")
+    in
     let%bind current = authorized_native_child_basis t (Inference_invocation execution) in
     let%map () = current.check_current () in
     owner, checked
@@ -56740,6 +56755,59 @@ let persist_recovery_delta t ~delta ~check_before_commit =
   Ok ()
 ;;
 
+let prepare_recovery_note_delivery t ~source ~(invocation : Agent_protocol.Invocation.t) catalog query =
+  let module P = Agent_protocol in
+  let open Result.Let_syntax in
+  let unavailable () = Error (error Invalid_state "recovery note disclosure is unavailable") in
+  let%bind original = Result.of_option t.operation_agent_custody ~error:(error Invalid_state "recovery note has no live operation") in
+  let generation = invocation.context.generation in
+  let observe () =
+    if
+      t.stopped
+      || t.canonical_write_in_progress
+      || Option.is_some t.lifecycle_fence
+      || not (Int.equal t.runtime_source_domain (Stdlib.Domain.self () :> int))
+      || not (Option.exists t.operation_agent_custody ~f:(phys_equal original))
+    then unavailable ()
+    else (
+      let%bind binding =
+        Result.of_option t.canonical_persistence
+          ~error:(error Invalid_state "durable recovery notes are unavailable")
+      in
+      let%bind operation = running_operation t original.operation_id in
+      let%bind () =
+        if
+          Canonical_backend_binding_data.is_available binding
+          && Option.exists (Canonical_backend_binding_data.session_owner binding)
+               ~f:(P.Session_ref.equal source)
+          && Int.equal operation.generation generation
+          && Int.equal operation.generation t.state.identity.generation
+        then check_agent_admission original.admission
+        else unavailable ()
+      in
+      let%bind actor = operation_agent_actor t original.operation_id in
+      match actor with
+      | Some actor
+        when Operator_authorization.is_current actor
+             && P.Principal.has_scope
+                  (Operator_authorization.principal actor)
+                  View_session_transcript ->
+        Recovery_note_session.for_owner t.state.recovery_notes ~owner:source
+      | Some _ | None -> unavailable ())
+  in
+  match invocation.context.origin, invocation.context.call_entry_id with
+  | Model, Some _ ->
+    let%bind _ = observe () in
+    let%map plan = Recovery_note_query.prepare query catalog in
+    { source
+    ; materialize = (fun () -> Result.bind (observe ()) ~f:(Recovery_note_query.render plan))
+    ; check_current = (fun () -> (match observe () with
+       | Ok catalog -> Recovery_note_query.current plan catalog
+       | Error _ -> false))
+    }
+  | (Model | Moderator | Script | Delegated_agent | External_adapter), _ -> unavailable ()
+;;
+
 let handle_recovery_note
   : type a. t -> a Recovery_note_request.t -> (a, Agent_protocol.Error.t) result
   =
@@ -56761,6 +56829,14 @@ let handle_recovery_note
   | List access ->
     let%map catalog = catalog ~access ~effect_kind:List in
     C.revision catalog, C.list catalog
+  | Query (access, query) ->
+    let effect_kind = Recovery_note_access.Effect.of_query query in
+    let%bind source, checked = recovery_note_access t ~access ~effect_kind in
+    (match checked with
+     | Operator _ -> Error (error Permission_denied "recovery note delivery requires a model invocation")
+     | Native invocation ->
+       let%bind catalog = Recovery_note_session.for_owner t.state.recovery_notes ~owner:source in
+       prepare_recovery_note_delivery t ~source ~invocation catalog query)
   | Mutate (access, route, operation) ->
     let effect_kind = Recovery_note_access.Effect.of_mutation operation in
     let check () = recovery_note_mutation_identity t ~access ~effect_kind route in
@@ -62035,6 +62111,10 @@ let read_recovery_note t ~access selection =
 ;;
 
 let list_recovery_notes t ~access = call t (Context_request (Recovery_note (List access)))
+
+let prepare_recovery_note_query t ~access query =
+  call t (Context_request (Recovery_note (Query (access, query))))
+;;
 
 let mutate_recovery_note_operator t ~access ~key operation =
   call t (Context_request (Recovery_note (Mutate (access, Operator_key key, operation))))

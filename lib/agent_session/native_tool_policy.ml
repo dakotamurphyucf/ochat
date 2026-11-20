@@ -131,14 +131,30 @@ let run_policy
         let validate_output ~validate_work ~selected_jobs output =
           let%bind value =
             if protected
-            then
-              if Protected_native_call.selected call ~binding
-              then Ok `Null
-              else
+            then (
+              match Protected_native_call.result call ~binding with
+              | Some (Acknowledged | Deliver _) -> Ok `Null
+              | Some (Rejected Missing) ->
+                Error (fail "recovery.note_missing" "The recovery note is unavailable.")
+              | Some (Rejected Invalid) ->
+                Error (fail "recovery.invalid_request" "The recovery request is invalid.")
+              | Some (Rejected Denied) ->
+                Error
+                  (fail "recovery.permission_denied" "Recovery authority is unavailable.")
+              | Some (Rejected Conflict) ->
+                Error (fail "recovery.conflict" "The recovery note precondition changed.")
+              | Some (Rejected Limit) ->
+                Error
+                  (fail
+                     "recovery.resource_limit"
+                     "A recovery resource limit was reached.")
+              | Some (Rejected Expired_cursor) ->
+                Error (fail "recovery.cursor_expired" "The recovery note cursor expired.")
+              | Some (Rejected Unavailable) | None ->
                 Error
                   (fail
                      "recovery.unavailable"
-                     "Protected recovery result is unavailable.")
+                     "Protected recovery result is unavailable."))
             else
               checked
                 (fail
