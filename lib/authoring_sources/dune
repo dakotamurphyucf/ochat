@@ -490,6 +490,7 @@
     lib/agent_server/developer_background_job_runner.ml %{dep:../agent_server/developer_background_job_runner.ml}
     lib/agent_server/developer_child_agent_runner.ml %{dep:../agent_server/developer_child_agent_runner.ml}
     lib/agent_server/developer_child_content_projection.ml %{dep:../agent_server/developer_child_content_projection.ml}
+    lib/agent_protocol/inline_image.ml %{dep:../agent_protocol/inline_image.ml}
     lib/agent_server/developer_child_selection.ml %{dep:../agent_server/developer_child_selection.ml}
     lib/agent_server/developer_queued_issuer.ml %{dep:../agent_server/developer_queued_issuer.ml}
     lib/agent_server/developer_live_resources.ml %{dep:../agent_server/developer_live_resources.ml}

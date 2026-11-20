@@ -360,7 +360,7 @@ let implementation_sources =
   ; ( "lib/agent_server/command_handler.ml"
     , "0a331dc88614547715edd4eb016ebacb478df3053bdf18190673a42ed26ca203" )
   ; ( "lib/agent_server/daemon.ml"
-    , "23ae3e2d3de38ab5c2ce6d98dee2868f62b0a169196ae930fa5223681d0ca9e3" )
+    , "c4e74260ee1e6167ed31b346c2fbd623a970d526b8238121133262237d4a7317" )
   ; ( "lib/agent_server/instruction_operator_service.ml"
     , "7bcfd6d6f88f311b50c50af7a300b9b94bbcf32641b54aeef9900f902a2d0bc8" )
   ; ( "lib/agent_server/instruction_operator_service.mli"
@@ -420,7 +420,7 @@ let implementation_sources =
   ; ( "lib/agent_server/descendant_accounting_host.ml"
     , "3baff14cf9c606e899c08f95805cc3ca9f070827b46ec531e1c230314820b0fd" )
   ; ( "lib/agent_server/session_factory.ml"
-    , "fc0c5d9bde88195ddfa32fe376f524afff2e78c88fd8f34c029ec98daf39632a" )
+    , "d97c3e677db4e21d735a7c39599a21f86238f52ca5d8338165908f1bd44b22ae" )
   ; ( "lib/agent_session/authoring_context_tool.ml"
     , "6e318b45f799b485f802dc6d5e4d8bc031721e379cc8800f6ed484d59694840d" )
   ; ( "lib/agent_session/authoring_reference_scope.ml"

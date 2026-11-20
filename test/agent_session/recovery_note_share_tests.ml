@@ -738,13 +738,7 @@ let%expect_test "same-Store Factory retains source ownership through bounded dis
           ~tool_dir:root
           ~home:root
           ~process_start_identity:None
-          ~options:
-            { Host.Daemon.default_options with
-              inference_policy
-            ; qualify_chatml_extensions =
-                false
-                (* This Store/Registry fixture installs no authored tools or runtime. *)
-            }
+          ~options:{ Host.Daemon.default_options with inference_policy }
           ()
         |> protocol_ok
       in
