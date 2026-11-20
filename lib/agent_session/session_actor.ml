@@ -12984,6 +12984,7 @@ let check_protected_source_write t ~(requested : Session_transition.t) =
         || (not (phys_equal previous.recovery_notes next.recovery_notes))
         || (not (phys_equal previous.recovery_note_shares next.recovery_note_shares))
         || (not (phys_equal previous.recovery_windows next.recovery_windows))
+        || (not (phys_equal previous.moderator next.moderator))
         || (not
               (phys_equal
                  previous.conversation.canonical_history

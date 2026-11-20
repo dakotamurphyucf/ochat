@@ -735,6 +735,63 @@ val check_registered_entry
 (** Source-owned durable sharing on this Factory's actual same-host Store and
     Registry. Existing source visibility/management authority and scoped recipient
     read authority enter through their distinct original access proofs. *)
+module Recovery_assets : sig
+  (** The actual local Factory captures the retained Registry entry and actor,
+      and holds source exclusion across bounded private I/O. [authorize] is
+      a trusted nonyielding check of the original host/actor request. Future
+      protected output must acquire its own current delivery authority. *)
+  type authorize = Agent_session.Session_state.t -> (unit, Agent_protocol.Error.t) result
+
+  val read
+    :  t
+    -> sw:Eio.Switch.t
+    -> authorize:authorize
+    -> Agent_protocol.Recovery_window.Citation.t
+    -> part:int
+    -> max_bytes:int
+    -> ( Agent_store.Recovery_asset_reference.t * string
+         , Agent_session.Recovery_source_reader.error )
+         result
+
+  val resume
+    :  t
+    -> sw:Eio.Switch.t
+    -> authorize:authorize
+    -> Agent_protocol.Recovery_window.Citation.t
+    -> part:int
+    -> max_bytes:int
+    -> ( Agent_store.Recovery_asset_reference.t
+         , Agent_session.Recovery_source_reader.error )
+         result
+
+  val publish_inline
+    :  t
+    -> sw:Eio.Switch.t
+    -> authorize:authorize
+    -> Agent_protocol.Recovery_window.Citation.t
+    -> part:int
+    -> principal:Agent_protocol.Id.Principal.t
+    -> now:Agent_protocol.Timestamp.t
+    -> max_bytes:int
+    -> ( Agent_store.Recovery_asset_reference.t
+         , Agent_session.Recovery_source_reader.error )
+         result
+
+  (** Local converter integration supplies an exact original attribution.
+      This API performs no fetch. *)
+  val publish_converted_file
+    :  t
+    -> sw:Eio.Switch.t
+    -> authorize:authorize
+    -> principal:Agent_protocol.Id.Principal.t
+    -> now:Agent_protocol.Timestamp.t
+    -> max_bytes:int
+    -> Agent_session.Recovery_asset.Attribution.t
+    -> ( Agent_store.Recovery_asset_reference.t
+         , Agent_session.Recovery_source_reader.error )
+         result
+end
+
 module Recovery_note_shares : sig
   val management_revision
     :  t

@@ -28,3 +28,8 @@ val check_effective
   :  t
   -> P.Recovery_window.Citation.t
   -> (unit, [ `Unavailable | `Withdrawn | `Expired ]) result
+
+(** Custody retirement is irreversible only under a newer source generation
+    or the exact member's committed window expiry. Policy overlays and missing
+    membership never authorize physical reclamation. *)
+val irrevocably_retired : t -> P.Recovery_window.Citation.t -> bool

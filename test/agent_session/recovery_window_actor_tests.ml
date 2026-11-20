@@ -709,13 +709,14 @@ let%expect_test
         actor_state ~workspace_instance ~liveness:Detached ~start_immediately:false
       in
       let item = history 0 "original archived row" in
+      let image = image_message () in
       let base =
         { base with
           conversation =
             { base.conversation with
-              canonical_history = [ item ]
-            ; next_history_sequence = 1L
-            ; reserved_history_through = 1L
+              canonical_history = [ item; image ]
+            ; next_history_sequence = 2L
+            ; reserved_history_through = 2L
             }
         }
       in
@@ -754,7 +755,7 @@ let%expect_test
           ~predecessor
           ~successor
           ~archive
-          ~retained:[ item ]
+          ~retained:[ item; image ]
         |> protocol_ok
       in
       let starting =
@@ -803,6 +804,114 @@ let%expect_test
            assert (Result.is_error (expire (actor_proof ()) predecessor));
            assert (Result.is_error (expire manager successor));
            assert (Int64.equal prior.counters.revision (state actor).counters.revision);
+           let assets =
+             A.Recovery_asset.create
+               storage.blobs
+               ~sessions:fixture.sessions
+               ~handle:fixture.handle
+               ~max_frame_bytes:payload_limit
+             |> Result.ok
+             |> Option.value_exn
+           in
+           let original = "the retained original before conversion" in
+           let bytes = String.length original in
+           let publish citation =
+             let attribution =
+               A.Recovery_asset.Attribution.create
+                 citation
+                 ~part:0
+                 ~row:item
+                 ~media_type:"text/plain"
+                 ~original
+               |> Result.ok
+               |> Option.value_exn
+             in
+             A.Recovery_asset.publish_converted_file
+               assets
+               ~sw
+               ~current:(fun () -> Ok prior)
+               ~principal:principal_id
+               ~now:(P.Timestamp.now ())
+               ~max_bytes:bytes
+               attribution
+             |> Result.ok
+             |> Option.value_exn
+           in
+           let old_asset = publish old
+           and carried_asset = publish carried in
+           let image_citation =
+             Ledger.Window.at (Ledger.active sealed) ~ordinal:1
+             |> Option.value_exn
+             |> Ledger.Member.citation
+           in
+           let store_image part =
+             A.Recovery_asset.publish_inline
+               assets
+               ~sw
+               ~current:(fun () -> Ok prior)
+               image_citation
+               ~part
+               ~principal:principal_id
+               ~now:(P.Timestamp.now ())
+               ~max_bytes:34
+           in
+           let image_reference = store_image 1 |> Result.ok |> Option.value_exn in
+           List.iter [ 0; 2 ] ~f:(fun part ->
+             match store_image part with
+             | Error Unsupported -> ()
+             | _ -> failwith "text URI or remote image acquired original byte custody");
+           let image_bytes =
+             A.Recovery_asset.read
+               assets
+               ~sw
+               ~current:(fun () -> Ok prior)
+               image_citation
+               ~part:1
+               ~max_bytes:34
+             |> Result.ok
+             |> Option.value_exn
+             |> snd
+           in
+           [%test_eq: string]
+             "1e85ec81b9800b4c443d39caca0d0926089a3ac201120db1ceb45b93789480b8"
+             Digestif.SHA256.(digest_string image_bytes |> to_hex);
+           assert (
+             P.Blob.equal_kind
+               (Store.Recovery_asset_reference.blob image_reference).kind
+               Image);
+           let module Ref = Store.Recovery_asset_reference in
+           assert (
+             not (P.Id.Blob.equal (Ref.blob old_asset).id (Ref.blob carried_asset).id));
+           let asset_reader current citation =
+             A.Recovery_asset.read assets ~sw ~current citation ~part:0 ~max_bytes:bytes
+           in
+           let retire state =
+             let visibility =
+               A.Recovery_visibility.create ~owner:fixture.owner state |> protocol_ok
+             in
+             let reader =
+               Store.Session_store.retained_reader
+                 fixture.sessions
+                 ~handle:fixture.handle
+                 ~max_entries:100
+                 ~max_bytes:payload_limit
+               |> store_ok
+             in
+             let store =
+               Store.Recovery_asset_store.create
+                 storage.blobs
+                 ~sessions:fixture.sessions
+                 ~handle:fixture.handle
+               |> Result.ok
+               |> Option.value_exn
+             in
+             Store.Recovery_asset_store.collect
+               store
+               ~reader
+               ~retired:(A.Recovery_visibility.irrevocably_retired visibility)
+             |> store_ok
+           in
+           [%test_eq: int option] (retire prior) (Some 0);
            assert (
              P.History.Id.equal (read live old |> Result.ok |> Option.value_exn) item.id);
            expire manager predecessor |> protocol_ok;
@@ -834,6 +943,15 @@ let%expect_test
              P.History.Id.equal
                (read live carried |> Result.ok |> Option.value_exn)
                item.id);
+           (match asset_reader (fun () -> Ok replayed) old with
+            | Error Expired -> ()
+            | _ -> failwith "expired original asset escaped");
+           [%test_eq: int option] (retire replayed) (Some 1);
+           [%test_eq: int option] (retire replayed) (Some 0);
+           let actual, body =
+             asset_reader (fun () -> Ok replayed) carried |> Result.ok |> Option.value_exn
+           in
+           assert (Ref.equal actual carried_asset && String.equal original body);
            expire manager predecessor |> protocol_ok;
            assert (Int64.equal after.counters.revision (state actor).counters.revision))));
   print_endline

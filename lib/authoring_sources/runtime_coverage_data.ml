@@ -1193,7 +1193,7 @@ let implementation_sources =
   ; ( "lib/agent_server/descendant_accounting_host.ml"
     , "3baff14cf9c606e899c08f95805cc3ca9f070827b46ec531e1c230314820b0fd" )
   ; ( "lib/agent_server/session_factory.ml"
-    , "f6ac373e12252f370b4bf5974d24feb0baec027d9d32279b551fb8709c96daff" )
+    , "ab10e3b15f8789fc40075fc168caf7a1193b138d5ec591806646d5a2de47d917" )
   ; ( "bin/inference_composition.ml"
     , "1f57451d5543a5fe8f2f23dc0e593374b64946d088cba164acd1c087a7cdce18" )
   ; ( "lib/agent_protocol/developer_command_id.ml"
@@ -1509,7 +1509,7 @@ let implementation_sources =
   ; ( "lib/agent_session/goal_continuation_phase.ml"
     , "e24a210492bfcc9e94c7bf472603531eb053eb7654de7c6100083464da9b1b51" )
   ; ( "lib/agent_session/session_actor.ml"
-    , "48da03741ee5ffa9475e5cbc46887c0360975e3d90e357481fbff35d022e378b" )
+    , "14b67d3ce12c52c2aa325db2455540f62c38d425d617a53a212d719ee679cff3" )
   ; ( "lib/agent_session/idle_completion_write.ml"
     , "d427fa80c4346b64f3f9bf4d5025ad2218403278816ade76ff17ba1adaa426d9" )
   ; ( "lib/agent_session/goal_descendant_admission_custody.ml"

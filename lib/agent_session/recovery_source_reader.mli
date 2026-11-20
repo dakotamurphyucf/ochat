@@ -47,3 +47,18 @@ val read_effective
   -> P.Recovery_window.Citation.t
   -> project:(P.History.entry -> ('a, error) result)
   -> ('a, error) result
+
+(** Trusted retained-source operation on an admitted complete row. [check]
+    revalidates the same source coordinate without I/O; [current] must be an
+    issuer-bound nonyielding check. [f] may use the current scope for bounded
+    local Store I/O, and the source is checked again after [f] returns.
+    Neither the check nor the unprotected row may escape the callback. *)
+val with_entry
+  :  ?visible:(Session_state.t -> bool)
+  -> Agent_store.Session_store.t
+  -> handle:Agent_store.Session_store.Handle.t
+  -> current:(unit -> (Session_state.t, P.Error.t) result)
+  -> max_frame_bytes:int
+  -> P.Recovery_window.Citation.t
+  -> f:(P.History.entry -> check:(unit -> (unit, error) result) -> ('a, error) result)
+  -> ('a, error) result

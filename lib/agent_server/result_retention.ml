@@ -158,7 +158,32 @@ let auxiliary_roots ~reader ~handle ~candidates ~max_file_bytes =
   Scan.references scanner
 ;;
 
+let collect_recovery_assets ~sessions ~blobs ~handle ~reader state =
+  let module P = Agent_protocol in
+  let module S = Store.Session_store in
+  let module A = Store.Recovery_asset_store in
+  let module Visibility = Agent_session.Recovery_visibility in
+  let open Result.Let_syntax in
+  match%bind A.has_entries reader with
+  | false -> Ok (Some 0)
+  | true ->
+    let owner =
+      P.Session_ref.create
+        ~server_id:(S.server_id sessions)
+        ~session_id:(S.Handle.session_id handle)
+    in
+    let%bind visibility = Visibility.create state ~owner |> protocol in
+    let%bind assets =
+      A.create blobs ~sessions ~handle
+      |> Result.map_error ~f:(fun _ ->
+        Store.Store_error.Corrupt "recovery asset collector owner is unavailable")
+    in
+    A.collect assets ~reader ~retired:(Visibility.irrevocably_retired visibility)
+;;
+
 let collect
+      ~sessions
+      ~blobs
       ~runtime
       ~actor
       ~publisher
@@ -173,53 +198,74 @@ let collect
   =
   Runtime_owner.with_unloaded runtime (fun () ->
     Agent_session.Session_actor.with_quiescent_state actor ~f:(fun state ->
-      Publisher.collect
-        publisher
-        ~jobs:state.jobs
-        ~generation:state.identity.generation
-        ~limits
-        ~with_roots:(fun ~reader ~candidates ~f ->
-          let open Result.Let_syntax in
-          let%bind history =
-            Agent_session.Retained_history.scan
-              ~reader
-              ~handle
-              ~state:
-                (Agent_session.Session_state_document.with_value
-                   (Agent_session.Session_persistence.Restored.state_document
-                      (Agent_session.Session_persistence.restored persistence))
-                   state)
-              ~journal_current:(Store.Journal.current_segment journal)
-              ~transaction_hash:
-                (Agent_session.Session_persistence.transaction_hash persistence)
-              ~max_file_bytes:limits.max_file_bytes
-              ~max_frame_bytes
+      let open Result.Let_syntax in
+      let%bind reader =
+        Store.Session_store.retained_reader
+          sessions
+          ~handle
+          ~max_entries:limits.Publisher.max_entries
+          ~max_bytes:limits.Publisher.max_bytes
+        |> Result.map_error ~f:Store.Store_error.to_protocol_error
+      in
+      let%bind job_preparations =
+        Store.Job_result_intent.has_entries reader
+        |> Result.map_error ~f:Store.Store_error.to_protocol_error
+      in
+      let%bind recovery =
+        collect_recovery_assets ~sessions ~blobs ~handle ~reader state
+        |> Result.map_error ~f:Store.Store_error.to_protocol_error
+      in
+      match recovery, job_preparations with
+      | None, _ -> Ok None
+      | Some _, false -> Ok (Some { Publisher.discarded = 0; retired = 0; retained = 0 })
+      | Some _, true ->
+        Publisher.collect
+          publisher
+          ~jobs:state.jobs
+          ~generation:state.identity.generation
+          ~limits
+          ~with_roots:(fun ~reader ~candidates ~f ->
+            let open Result.Let_syntax in
+            let%bind history =
+              Agent_session.Retained_history.scan
+                ~reader
+                ~handle
+                ~state:
+                  (Agent_session.Session_state_document.with_value
+                     (Agent_session.Session_persistence.Restored.state_document
+                        (Agent_session.Session_persistence.restored persistence))
+                     state)
+                ~journal_current:(Store.Journal.current_segment journal)
+                ~transaction_hash:
+                  (Agent_session.Session_persistence.transaction_hash persistence)
+                ~max_file_bytes:limits.max_file_bytes
+                ~max_frame_bytes
+                ~candidates
+            in
+            let%bind replay =
+              Agent_session.Durable_event_log.retained_references
+                durable_events
+                ~session_id:state.identity.session_id
+                ~candidates
+                ~max_events
+                ~max_bytes:limits.max_bytes
+              |> protocol
+            in
+            let%bind auxiliary =
+              auxiliary_roots
+                ~reader
+                ~handle
+                ~candidates
+                ~max_file_bytes:limits.max_file_bytes
+            in
+            Store.Idempotency_store.with_retained_references
+              idempotency_store
               ~candidates
-          in
-          let%bind replay =
-            Agent_session.Durable_event_log.retained_references
-              durable_events
-              ~session_id:state.identity.session_id
-              ~candidates
-              ~max_events
+              ~max_records:limits.max_entries
               ~max_bytes:limits.max_bytes
-            |> protocol
-          in
-          let%bind auxiliary =
-            auxiliary_roots
-              ~reader
-              ~handle
-              ~candidates
-              ~max_file_bytes:limits.max_file_bytes
-          in
-          Store.Idempotency_store.with_retained_references
-            idempotency_store
-            ~candidates
-            ~max_records:limits.max_entries
-            ~max_bytes:limits.max_bytes
-            ~f:(fun cached -> f (history @ replay @ auxiliary @ cached))
-          |> Result.map ~f:Option.join)
-      |> Result.map_error ~f:Store.Store_error.to_protocol_error)
+              ~f:(fun cached -> f (history @ replay @ auxiliary @ cached))
+            |> Result.map ~f:Option.join)
+        |> Result.map_error ~f:Store.Store_error.to_protocol_error)
     |> Result.map ~f:Option.join)
   |> Result.map ~f:Option.join
 ;;

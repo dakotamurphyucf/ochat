@@ -385,6 +385,24 @@ val retained_lifecycle_available : t -> Handle.t -> bool
 
 (** Create a bounded reader beneath an owned live session directory using
     the issuing Store's filesystem. This does not grant transcript access. *)
+(** Serialize the private recovery asset journal for this actual retained
+    Handle. Check physical ownership before and after the borrow; [f] must not
+    recurse or await its owning actor. Acquire this borrow before Blob Store
+    admission. An application error inside [f] may be returned as a value. *)
+val with_recovery_assets
+  :  t
+  -> handle:Handle.t
+  -> f:(env:Eio_unix.Stdenv.base -> ('a, Store_error.t) result)
+  -> ('a, Store_error.t) result
+
+(** The collector defers instead of waiting behind an in-flight recovery
+    asset read or publication. The same physical retained Handle is checked. *)
+val try_with_recovery_assets
+  :  t
+  -> handle:Handle.t
+  -> f:(env:Eio_unix.Stdenv.base -> ('a, Store_error.t) result)
+  -> ('a option, Store_error.t) result
+
 val retained_reader
   :  t
   -> handle:Handle.t

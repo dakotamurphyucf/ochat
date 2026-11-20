@@ -253,6 +253,31 @@ requires a separately retained descriptor. Inline images need bounded
 validation and admission of exact bytes. Ordinary recovery initiates no remote
 fetch, OCR or automatic image resubmission.
 
+The owning session saves a private checksummed intent before staging or
+adopting bytes. The intent binds one immutable selection and a locally
+allocated blob identity. After adopting the bytes, the publisher verifies
+their complete digest and length, current source eligibility, and physical
+store custody. It then commits the matching descriptor in the private
+journal. Reads consider only exact committed records. If adoption completed
+before a failure or interruption, an exact retry can verify the same local
+bytes and finish the commit. An incomplete stage stays private. An original
+converter can retry it with the same bytes, and the collector can reclaim it
+after irreversible retirement.
+
+The collector holds the settled source and the blob retention coordinator.
+Active preparations and reads defer collection. An exact expired citation
+or a newer source generation can retire that citation's bytes. A current
+carried citation with its own admission remains eligible when its predecessor
+expires. Moderator suppression is reversible and does not retire physical
+custody. Private records contain descriptor metadata and checksums. The
+adopted copy lives in the owned stage and asset files. Inline image sources
+retain their existing canonical payload custody. The trusted converter attests
+to the exact realized row and part before handing off the original bytes.
+Identical rendered text cannot bind a different parser occurrence or
+original revision.
+[Publisher and collector](../../lib/agent_store/recovery_asset_store.mli),
+[exact source adapter](../../lib/agent_session/recovery_asset.mli).
+
 Lists, search and hints expose neither an asset URI nor a generic blob handle.
 Blobs reserved for recovery are private even to the session creator through
 HTTP download and the transport-independent blob read command. The public

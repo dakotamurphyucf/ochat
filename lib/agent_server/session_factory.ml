@@ -12349,6 +12349,8 @@ let collect_results t handle journal persistence durable_events services runtime
   | None -> Ok None
   | Some publisher ->
     Result_retention.collect
+      ~sessions:t.store
+      ~blobs:t.blob_store
       ~runtime
       ~actor
       ~publisher
@@ -14482,6 +14484,99 @@ let check_registered_entry t entry ~session =
          "recurrence entry is not this Factory's current registered owner")
   else Ok ()
 ;;
+
+module Recovery_assets = struct
+  module P = Agent_protocol
+  module A = Agent_session
+  module Asset = A.Recovery_asset
+  module Source = A.Recovery_source_reader
+  module Actor = A.Session_actor
+  module Observation = Actor.Resource_observation
+
+  type authorize = A.Session_state.t -> (unit, P.Error.t) result
+
+  let denied () = P.Error.invalid_request "recovery asset source is unavailable"
+
+  let with_source t citation ~authorize ~f =
+    let source =
+      P.Recovery_window.Citation.scope citation |> P.Recovery_window.Scope.session
+    in
+    if
+      not
+        (P.Id.Server.equal
+           (P.Session_ref.server_id source)
+           (Agent_store.Session_store.server_id t.store))
+    then Error Source.Denied
+    else (
+      let timeout = Eio.Time.Timeout.seconds (Eio.Stdenv.mono_clock t.env) 5. in
+      let run () =
+        Session_registry.with_loaded_read
+          t.registry
+          (P.Session_ref.session_id source)
+          (fun (entry : Session_registry.entry) ->
+             let open Result.Let_syntax in
+             let check_owner = check_recovery_source_owner t entry ~session:source in
+             let%bind () = check_owner () in
+             let%bind observation = Actor.observe_resource_state entry.actor in
+             let%bind () = authorize (Observation.state observation) in
+             let%bind handle = Result.of_option entry.store_handle ~error:(denied ()) in
+             Actor.Recovery_note_shares.with_source_custody
+               entry.actor
+               ~check_owner
+               ~f:(fun live ->
+                 let current () =
+                   if not (live ())
+                   then Error (denied ())
+                   else (
+                     let%bind state = Observation.check_current observation in
+                     let%map () = authorize state in
+                     state)
+                 in
+                 let%bind asset =
+                   Asset.create
+                     t.blob_store
+                     ~sessions:t.store
+                     ~handle
+                     ~max_frame_bytes:t.limits.max_journal_payload
+                 in
+                 f asset ~current))
+      in
+      try
+        match Eio.Time.Timeout.run_exn timeout run with
+        | Error _ -> Error Source.Denied
+        | Ok outcome -> outcome
+      with
+      | Eio.Time.Timeout -> Error Source.Unavailable)
+  ;;
+
+  let read t ~sw ~authorize citation ~part ~max_bytes =
+    with_source t citation ~authorize ~f:(fun asset ~current ->
+      Asset.read asset ~sw ~current citation ~part ~max_bytes)
+  ;;
+
+  let resume t ~sw ~authorize citation ~part ~max_bytes =
+    with_source t citation ~authorize ~f:(fun asset ~current ->
+      Asset.resume asset ~sw ~current citation ~part ~max_bytes)
+  ;;
+
+  let publish_inline t ~sw ~authorize citation ~part ~principal ~now ~max_bytes =
+    with_source t citation ~authorize ~f:(fun asset ~current ->
+      Asset.publish_inline asset ~sw ~current citation ~part ~principal ~now ~max_bytes)
+  ;;
+
+  let publish_converted_file t ~sw ~authorize ~principal ~now ~max_bytes attribution =
+    let citation = Asset.Attribution.citation attribution in
+    with_source t citation ~authorize ~f:(fun asset ~current ->
+      Asset.publish_converted_file
+        asset
+        ~sw
+        ~current
+        ~principal
+        ~now
+        ~max_bytes
+        attribution)
+  ;;
+end
 
 module Recovery_note_shares = struct
   module A = Agent_session

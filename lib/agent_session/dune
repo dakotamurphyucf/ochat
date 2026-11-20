@@ -379,6 +379,7 @@
   recovery_source_reader
   recovery_image
   recovery_item_text
+  recovery_asset
   administration
   session_delta
   session_metadata_transition

@@ -19,6 +19,7 @@ module Upload : sig
 end
 
 type t
+type store = t
 
 (** Physical storage root for a result. The developer constructor retains an
     opaque, live-Store-issued witness; IDs and native paths cannot construct it.
@@ -27,6 +28,18 @@ module Result_root : sig
   type t
 
   val conversation : Session_store.Handle.t -> t
+
+  (** Bind this session's retained assets to its live Store, actual filesystem
+      and this blob coordinator. Each subsequent operation rechecks this
+      relationship before and after filesystem I/O. This root addresses the two
+    private recovery asset directories below the session. The caller separately
+      authorizes the exact retained member and its disclosure. *)
+  val retained_conversation
+    :  store
+    -> sessions:Session_store.t
+    -> handle:Session_store.Handle.t
+    -> (t, Store_error.t) result
+
   val developer : Developer_run_store.Result_root.t -> t
 
   (** Comparison data for constructing a stage; [target] is never a grant. *)
@@ -331,6 +344,16 @@ val discard_staged_unreferenced
   :  retention
   -> reader:Retention_reader.t
   -> Session_store.Handle.t
+  -> stage:Blob_stage_documents.t
+  -> (unit, Store_error.t) result
+
+(** Remove the exact retired recovery stage under the same retention scope.
+    The owning publication collector proves retirement and preserves its private
+    marker until verified byte removal and directory sync succeed. *)
+val discard_recovery_stage
+  :  retention
+  -> Result_root.t
+  -> reader:Retention_reader.t
   -> stage:Blob_stage_documents.t
   -> (unit, Store_error.t) result
 

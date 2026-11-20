@@ -5,7 +5,9 @@
     corrupt, unknown, linked, incomplete or oversized roots reject the attempt.
     Workspaces and prompt source trees are user inputs, not managed artifact stores. *)
 val collect
-  :  runtime:Runtime_owner.t
+  :  sessions:Agent_store.Session_store.t
+  -> blobs:Agent_store.Blob_store.t
+  -> runtime:Runtime_owner.t
   -> actor:Agent_session.Session_actor.t
   -> publisher:Agent_store.Job_result_store.Publisher.t
   -> handle:Agent_store.Session_store.Handle.t

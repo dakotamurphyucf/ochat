@@ -5,4 +5,5 @@ open Core
 val test_audit : Eio_unix.Stdenv.base -> Temporary_environment.t -> unit
 
 val test_blobs : Eio_unix.Stdenv.base -> Temporary_environment.t -> unit
+val test_recovery_assets : Eio_unix.Stdenv.base -> Temporary_environment.t -> unit
 val test_export : Eio_unix.Stdenv.base -> Temporary_environment.t -> unit

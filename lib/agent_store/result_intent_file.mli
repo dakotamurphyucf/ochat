@@ -23,6 +23,20 @@ val conversation
   -> blob:Agent_protocol.Id.Blob.t
   -> t
 
+type recovery_phase =
+  | Intent
+  | Commit
+
+val recovery_asset_directory : recovery_phase -> string
+val valid_recovery_asset_filename : string -> bool
+
+val recovery_asset
+  :  env:Eio_unix.Stdenv.base
+  -> session:Session_store.Handle.t
+  -> phase:recovery_phase
+  -> filename:string
+  -> (t, Store_error.t) result
+
 val developer
   :  root:Developer_run_store.Result_root.t
   -> owner:Agent_protocol.Execution_owner.developer
@@ -52,7 +66,12 @@ val decode
     acknowledgement cannot prove the file absent. [max_frame_bytes] must be
     positive and at most the fixed internal 128 KiB ceiling; domain codecs
     impose their smaller limits independently. *)
-val save_exact : t -> max_frame_bytes:int -> string -> (unit, Store_error.t) result
+val save_exact
+  :  ?before_rename:(unit -> (unit, Store_error.t) result)
+  -> t
+  -> max_frame_bytes:int
+  -> string
+  -> (unit, Store_error.t) result
 
 (** [None] means the exact canonical filename is absent after an owner borrow.
     Invalid names, linked directories/files, oversized/incomplete frames and
@@ -60,6 +79,14 @@ val save_exact : t -> max_frame_bytes:int -> string -> (unit, Store_error.t) res
     the directory or assert that other intent files do not exist; full bounded
     startup inventory belongs to the recovery owner. *)
 val read_exact : t -> max_frame_bytes:int -> (string option, Store_error.t) result
+
+(** Re-establish the directory sync for an exact atomic publication before
+    using it as authoritative after an uncertain acknowledgement. *)
+val stabilize_exact
+  :  t
+  -> expected:string
+  -> max_frame_bytes:int
+  -> (unit, Store_error.t) result
 
 (** Remove/sync only an exact matching canonical framed file. Missing is
     idempotent, but differing bytes and uncertain writes retain custody. The

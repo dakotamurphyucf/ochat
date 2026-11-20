@@ -57,6 +57,10 @@
   local_operator
   blob_metadata
   blob_metadata_document
+  recovery_asset_inventory
+  recovery_asset_record
+  recovery_asset_reference
+  recovery_asset_store
   blob_stage_documents
   blob_developer_namespace
   job_result_intent_document
@@ -115,6 +119,8 @@
   developer_run_transition
   blob_developer_namespace
   result_intent_file
+  recovery_asset_inventory
+  recovery_asset_record
   developer_owner_document
   developer_result_intent_document
   developer_result_intent

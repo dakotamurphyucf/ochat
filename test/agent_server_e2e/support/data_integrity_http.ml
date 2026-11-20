@@ -144,13 +144,13 @@ let spec client =
   |> protocol_ok
 ;;
 
-let create client name =
+let create ?(mode = Agent_protocol.Session.Read_write) client name =
   match
     request_public
       client
       (Session_create
          { spec = spec client
-         ; requested_mode = Some Read_write
+         ; requested_mode = Some mode
          ; subscribe = false
          ; idempotency_key = key name
          })
@@ -551,6 +551,299 @@ let test_blobs env environment =
     assert_recovery_blob_is_private ~sw fixture daemon owner owner_token body;
     Http_driver.shutdown owner;
     Http_driver.shutdown foreign)
+;;
+
+let test_recovery_assets env environment =
+  let module P = Agent_protocol in
+  let module A = Agent_session in
+  let module Actor = A.Session_actor in
+  let module Reference = Agent_store.Recovery_asset_reference in
+  let module S = Agent_store.Session_store in
+  let module B = Agent_store.Blob_store in
+  let module Source = A.Recovery_source_reader in
+  let module Factory = Agent_server.Session_factory.Recovery_assets in
+  let options = Daemon_host.with_offline_inference Agent_server.Daemon.default_options in
+  let fixture = fixture env environment "data-recovery-assets" in
+  let token = Config_fixture.admin_token fixture in
+  let actor_auth daemon =
+    Agent_server.Daemon.authenticate_http_actor
+      daemon
+      { client_address = `Tcp (Eio.Net.Ipaddr.V4.loopback, 0); headers = [] }
+      (Some token)
+    |> protocol_ok
+  in
+  let asset_ok = function
+    | Ok value -> value
+    | Error error -> raise_s [%sexp "asset operation failed", (error : Source.error)]
+  in
+  let store_ok = function
+    | Ok value -> value
+    | Error error ->
+      raise_s [%sexp "asset store failed", (error : Agent_store.Store_error.t)]
+  in
+  let expect_error expected = function
+    | Error actual when Source.equal_error expected actual -> ()
+    | Error actual ->
+      raise_s
+        [%sexp
+          "unexpected asset error", (expected : Source.error), (actual : Source.error)]
+    | Ok _ -> failwith "unexpected asset disclosure"
+  in
+  let authorize proof (state : A.Session_state.t) =
+    if
+      Operator_authorization.is_current proof
+      && Option.equal
+           P.Id.Principal.equal
+           state.identity.creating_principal
+           (Some (Operator_authorization.principal proof).id)
+    then Ok ()
+    else Error (P.Error.invalid_request "fixture source authority expired")
+  in
+  let orphan_name = String.make 64 '0' ^ ".frame.tmp-1-1" in
+  let orphan handle =
+    let dir = Filename.concat (S.Handle.directory handle) "recovery-asset-intents" in
+    let path = Filename.concat dir orphan_name in
+    Eio.Path.(Eio.Stdenv.fs env / path)
+  in
+  let original = "private original file bytes; rendered text was separate" in
+  let max_bytes = String.length original in
+  let retained = ref None in
+  Daemon_host.with_ env fixture ~options (fun sw daemon ->
+    let client, principal = connect ~sw env fixture token in
+    let session, attachment = create ~mode:Owner_read_write client "asset-publication" in
+    let registry = Agent_server.Daemon.registry daemon in
+    let entry =
+      Agent_server.Session_registry.find registry session.id |> Option.value_exn
+    in
+    let handle = Option.value_exn entry.store_handle in
+    let sessions = Agent_server.Daemon.store daemon in
+    let proof = actor_auth daemon in
+    let authorize = authorize proof in
+    let attachment_id = attachment.id in
+    ignore (Actor.start entry.actor ~attachment_id |> protocol_ok : P.Session.t);
+    let row sequence =
+      let id = History_entry.Id.create ~namespace:"asset-e2e" ~sequence |> string_ok in
+      A.History_codec.user_text ~id "identical rendered text"
+      |> A.History_codec.to_protocol
+    in
+    let first = row 0
+    and second = row 1 in
+    ignore
+      (Actor.append_history entry.actor ~attachment_id [ first; second ] |> protocol_ok
+       : P.Session.t);
+    let scope =
+      Actor.enable_recovery_windows entry.actor ~actor:proof ~attachment_id ~authorize
+      |> protocol_ok
+    in
+    let citation (row : P.History.entry) =
+      P.Recovery_window.Citation.create
+        scope
+        ~occurrence:row.id
+        ~version:(P.Recovery_item_version.canonical row.content_revision)
+      |> protocol_ok
+    in
+    let old = citation first in
+    let pending = citation second in
+    let capture citation row =
+      A.Recovery_asset.Attribution.create
+        citation
+        ~part:0
+        ~row
+        ~media_type:"text/plain"
+        ~original
+    in
+    expect_error Stale (capture old second);
+    let factory = Agent_server.Daemon.factory daemon in
+    let publish ~authorize attribution =
+      Factory.publish_converted_file
+        factory
+        ~sw
+        ~authorize
+        ~principal
+        ~now:(P.Timestamp.now ())
+        ~max_bytes
+        attribution
+    in
+    let committed = publish ~authorize (capture old first |> asset_ok) |> asset_ok in
+    let id = (Reference.blob committed).id in
+    let get citation = Factory.read factory ~sw ~authorize citation ~part:0 ~max_bytes in
+    let restored, bytes = get old |> asset_ok in
+    require
+      (Reference.equal restored committed && String.equal bytes original)
+      "committed exact asset differs from the original";
+    require
+      (Reference.equal
+         committed
+         (publish ~authorize (capture old first |> asset_ok) |> asset_ok))
+      "exact retry created another asset";
+    let wrong =
+      A.Recovery_asset.Attribution.create
+        old
+        ~part:0
+        ~row:first
+        ~media_type:"text/plain"
+        ~original:"another original"
+      |> asset_ok
+    in
+    expect_error Stale (publish ~authorize wrong);
+    expect_error
+      Limit
+      (Factory.read factory ~sw ~authorize old ~part:0 ~max_bytes:(max_bytes - 1));
+    expect_error Unavailable (Factory.read factory ~sw ~authorize old ~part:1 ~max_bytes);
+    let wrong_authority _ = Error (P.Error.invalid_request "source scope denied") in
+    expect_error
+      Denied
+      (Factory.read factory ~sw ~authorize:wrong_authority old ~part:0 ~max_bytes);
+    let dir = Filename.concat (S.Handle.directory handle) "recovery-asset-blobs" in
+    let root =
+      B.Result_root.retained_conversation
+        (Agent_server.Daemon.blob_store daemon)
+        ~sessions
+        ~handle
+      |> store_ok
+    in
+    let blobs = Agent_server.Daemon.blob_store daemon in
+    let facade =
+      B.with_max_upload_bytes blobs ~max_upload_bytes:(Int64.of_int max_bytes) |> store_ok
+    in
+    ignore (B.open_result facade root id |> store_ok : B.Result_read.t);
+    let data_root = S.data_root sessions in
+    let other =
+      B.create
+        ~env
+        ~temporary_directory:(Agent_store.Data_root.temporary_blobs_path data_root)
+        ~durable_directory:(Agent_store.Data_root.durable_blobs_path data_root)
+        ~max_upload_bytes:(Int64.of_int max_bytes)
+      |> store_ok
+    in
+    require
+      (Result.is_error (B.open_result other root id))
+      "independent Blob coordinator accepted the retained root";
+    let public_blob = fetch client token (Reference.blob committed) in
+    assert_http_status public_blob 400;
+    require
+      (String.is_substring public_blob.body ~substring:"blob_unavailable")
+      "private asset was visible to the generic HTTP blob reader";
+    (match
+       Http_driver.request
+         client
+         (Blob_read
+            { session_id = session.id
+            ; attachment_id = Some attachment.id
+            ; blob_id = id
+            ; offset = 0L
+            ; max_bytes = 1
+            })
+     with
+     | Error error when P.Error.equal_code error.code Persistence_error -> ()
+     | Error _ | Ok _ -> failwith "private asset was visible to the generic blob command");
+    let blob_path = Filename.concat dir (P.Id.Blob.to_string id ^ ".blob") in
+    let eio_blob = Eio.Path.(Eio.Stdenv.fs env / blob_path) in
+    Eio.Path.save
+      ~create:(`Or_truncate 0o600)
+      eio_blob
+      (String.map original ~f:(fun _ -> 'X'));
+    expect_error Corrupt (get old);
+    Eio.Path.unlink eio_blob;
+    expect_error Missing (get old);
+    Eio.Path.save ~create:(`Exclusive 0o600) eio_blob original;
+    let collector =
+      Agent_store.Recovery_asset_store.create blobs ~sessions ~handle
+      |> Result.ok
+      |> Option.value_exn
+    in
+    let inventory_reader () =
+      S.retained_reader sessions ~handle ~max_entries:100 ~max_bytes:32768 |> store_ok
+    in
+    let reached_cut = ref false in
+    let after_cut state =
+      let open Result.Let_syntax in
+      let%bind () = authorize state in
+      let children = Array.to_list (Stdlib.Sys.readdir dir) in
+      if List.count children ~f:(String.is_suffix ~suffix:".sexp") = 1
+      then Ok ()
+      else (
+        if not !reached_cut
+        then (
+          reached_cut := true;
+          let result =
+            Agent_store.Recovery_asset_store.collect
+              collector
+              ~reader:(inventory_reader ())
+              ~retired:(fun _ -> false)
+            |> store_ok
+          in
+          require (Option.is_none result) "collection entered an in-flight publication");
+        Error (P.Error.invalid_request "fixture withdraws authority after real adoption"))
+    in
+    expect_error
+      Denied
+      (publish ~authorize:after_cut (capture pending second |> asset_ok));
+    expect_error Unavailable (get pending);
+    let pending_blob =
+      Array.to_list (Stdlib.Sys.readdir dir)
+      |> List.find_map_exn ~f:(fun name ->
+        match String.chop_suffix name ~suffix:".blob" with
+        | Some blob when not (String.equal blob (P.Id.Blob.to_string id)) -> Some blob
+        | _ -> None)
+    in
+    let intents = Filename.concat (S.Handle.directory handle) "recovery-asset-intents" in
+    let journal = Filename.concat (S.Handle.directory handle) "recovery-asset-commits" in
+    let names directory = Array.to_list (Stdlib.Sys.readdir directory) in
+    require
+      (List.length (names intents) = 2 && List.length (names journal) = 1)
+      "the cutpoint exposed a commit or lost its preparation";
+    let read_file path = Eio.Path.load Eio.Path.(Eio.Stdenv.fs env / path) in
+    List.iter [ intents; journal ] ~f:(fun directory ->
+      List.iter (names directory) ~f:(fun name ->
+        let frame = read_file (Filename.concat directory name) in
+        require
+          (not (String.is_substring frame ~substring:original))
+          "a private journal frame contained original bytes"));
+    Eio.Path.save ~create:(`Exclusive 0o600) (orphan handle) "OCHAT";
+    ignore
+      (Actor.stop entry.actor ~attachment_id ~mode:Graceful |> protocol_ok : P.Session.t);
+    Agent_server.Runtime_owner.unload_and_wait entry.runtime |> protocol_ok;
+    Http_driver.shutdown client;
+    retained := Some (session.id, old, committed, pending, pending_blob, bytes));
+  let session_id, citation, committed, pending, pending_blob, earlier_bytes =
+    Option.value_exn !retained
+  in
+  Daemon_host.with_ env fixture ~options (fun sw daemon ->
+    let module Registry = Agent_server.Session_registry in
+    let factory = Agent_server.Daemon.factory daemon in
+    let authorize = authorize (actor_auth daemon) in
+    let read citation = Factory.read factory ~sw ~authorize citation ~part:0 ~max_bytes in
+    let restored, bytes = read citation |> asset_ok in
+    require
+      (Reference.equal restored committed && String.equal bytes earlier_bytes)
+      "restarted Factory lost the committed descriptor or bytes";
+    expect_error Unavailable (read pending);
+    let entry =
+      Registry.find (Agent_server.Daemon.registry daemon) session_id |> Option.value_exn
+    in
+    let handle = Option.value_exn entry.store_handle in
+    require
+      (Eio.Path.is_file (orphan handle))
+      "fixture lost the interrupted atomic intent";
+    require
+      (Option.is_some (entry.collect_results () |> protocol_ok))
+      "quiescent Factory collector did not run";
+    require
+      (not (Eio.Path.is_file (orphan handle)))
+      "collector retained an orphan intent temporary";
+    expect_error Unavailable (read pending);
+    let resumed =
+      Factory.resume factory ~sw ~authorize pending ~part:0 ~max_bytes |> asset_ok
+    in
+    require
+      (String.equal pending_blob (P.Id.Blob.to_string (Reference.blob resumed).id))
+      "reconciliation rebound the originally selected blob identity";
+    let restored, bytes = read pending |> asset_ok in
+    require
+      (Reference.equal resumed restored && String.equal bytes original)
+      "restart did not reconcile the adopted pending asset";
+    ignore (read pending |> asset_ok : Reference.t * string))
 ;;
 
 let export_parent environment =

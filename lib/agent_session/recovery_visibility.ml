@@ -117,3 +117,13 @@ let check_effective t citation =
         in
         if found then Ok () else Error `Unavailable))
 ;;
+
+let irrevocably_retired t citation =
+  let scope = Citation.scope citation in
+  P.Session_ref.equal t.owner (Scope.session scope)
+  && (Scope.generation scope < t.generation
+      ||
+      match select t citation with
+      | Expired -> true
+      | Unavailable | Withdrawn | Eligible _ -> false)
+;;

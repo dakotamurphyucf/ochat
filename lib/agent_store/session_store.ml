@@ -128,6 +128,7 @@ module Handle = struct
     ; exports_directory : string
     ; archive_directory : string
     ; idempotency_directory : string
+    ; recovery_assets_lock : Eio.Mutex.t
     }
 
   let metadata t = t.metadata
@@ -378,6 +379,45 @@ let check_handle t handle =
 
 let retained_lifecycle_available t handle =
   owns_handle t handle && (not t.closed) && Handle.retained_available handle
+;;
+
+let recovery_assets_unavailable () =
+  Error (Store_error.Corrupt "recovery asset owner is unavailable")
+;;
+
+let with_current_recovery_assets t ~handle ~f =
+  if not (retained_lifecycle_available t handle)
+  then recovery_assets_unavailable ()
+  else (
+    let result = f ~env:t.env in
+    if retained_lifecycle_available t handle
+    then result
+    else recovery_assets_unavailable ())
+;;
+
+let with_recovery_assets t ~handle ~f =
+  if not (retained_lifecycle_available t handle)
+  then recovery_assets_unavailable ()
+  else (
+    let outcome =
+      Eio.Mutex.use_rw ~protect:false handle.Handle.recovery_assets_lock (fun () ->
+        try Ok (with_current_recovery_assets t ~handle ~f) with
+        | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ()))
+    in
+    match outcome with
+    | Ok result -> result
+    | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace)
+;;
+
+let try_with_recovery_assets t ~handle ~f =
+  if not (retained_lifecycle_available t handle)
+  then recovery_assets_unavailable ()
+  else if not (Eio.Mutex.try_lock handle.Handle.recovery_assets_lock)
+  then Ok None
+  else
+    Exn.protect
+      ~finally:(fun () -> Eio.Mutex.unlock handle.Handle.recovery_assets_lock)
+      ~f:(fun () -> Result.map (with_current_recovery_assets t ~handle ~f) ~f:Option.some)
 ;;
 
 let retained_reader t ~handle ~max_entries ~max_bytes =
@@ -1060,6 +1100,7 @@ let make_handle
   ; exports_directory = child "exports"
   ; archive_directory = child "archive"
   ; idempotency_directory = child "idempotency"
+  ; recovery_assets_lock = Eio.Mutex.create ()
   }
 ;;
 

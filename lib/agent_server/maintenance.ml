@@ -61,13 +61,8 @@ let has_preparations ~env session_store session_id =
     let%bind reader =
       Agent_store.Retention_reader.create ~env ~root ~max_entries:128 ~max_bytes:0
     in
-    let%bind names = Agent_store.Retention_reader.list reader ~directory:"." in
-    match List.mem names "result-preparations" ~equal:String.equal with
-    | false -> Ok false
-    | true ->
-      Result.map
-        (Agent_store.Retention_reader.list reader ~directory:"result-preparations")
-        ~f:(fun names -> not (List.is_empty names))
+    let%bind jobs = Agent_store.Job_result_intent.has_entries reader in
+    if jobs then Ok true else Agent_store.Recovery_asset_store.has_entries reader
   in
   (* The cheap probe supplies no deletion proof. Excess or unreadable entries
      must reach the full validated attempt rather than disappear from maintenance. *)

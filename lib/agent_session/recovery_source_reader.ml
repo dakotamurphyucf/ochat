@@ -106,14 +106,14 @@ let current_visibility store handle ~current ~visible =
       state, view))
 ;;
 
-let read
+let with_entry
       ?(visible = fun _ -> true)
       store
       ~handle
       ~current
       ~max_frame_bytes
       citation
-      ~project
+      ~f
   =
   let open Result.Let_syntax in
   let select () =
@@ -146,9 +146,20 @@ let read
     in
     let%bind () = recheck () in
     let%bind row = row in
-    let output = project row in
+    let output = f row ~check:recheck in
     let%bind () = recheck () in
     output)
+;;
+
+let read ?visible store ~handle ~current ~max_frame_bytes citation ~project =
+  with_entry
+    ?visible
+    store
+    ~handle
+    ~current
+    ~max_frame_bytes
+    citation
+    ~f:(fun row ~check:_ -> project row)
 ;;
 
 let read_effective

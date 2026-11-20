@@ -21,13 +21,38 @@ type store = t
 module Result_root = struct
   type t =
     | Conversation of Session_store.Handle.t
+    | Retained_conversation of
+        { sessions : Session_store.t
+        ; handle : Session_store.Handle.t
+        ; coordinator : coordination
+        }
     | Developer of Developer_run_store.Result_root.t
 
   let conversation session = Conversation session
+
+  let check_source store ~sessions ~handle ~coordinator =
+    if
+      phys_equal store.coordination coordinator
+      && Session_store.retained_lifecycle_available sessions handle
+    then
+      Session_store.validate_blob_storage
+        sessions
+        ~env:store.env
+        ~temporary_directory:store.temporary_directory
+        ~durable_directory:store.durable_directory
+    else Error (Store_error.Corrupt "retained blob source is unavailable")
+  ;;
+
+  let retained_conversation store ~sessions ~handle =
+    let coordinator = store.coordination in
+    let%map.Result () = check_source store ~sessions ~handle ~coordinator in
+    Retained_conversation { sessions; handle; coordinator }
+  ;;
+
   let developer root = Developer root
 
   let target = function
-    | Conversation session ->
+    | Conversation session | Retained_conversation { handle = session; _ } ->
       Metadata.Target.Session (Session_store.Handle.session_id session)
     | Developer root ->
       Metadata.Target.Developer
@@ -1084,11 +1109,11 @@ let retention_max_upload_bytes retention =
   else Error (Store_error.Corrupt "blob retention scope has ended")
 ;;
 
-let discard_staged_unreferenced retention ~reader session ~stage =
+let discard_stage_at retention ~reader session ~final_relative ~temporary_root ~stage =
   let metadata = Blob_metadata_document.value (Blob_stage_documents.temporary stage) in
   let open Result.Let_syntax in
   let invalid message = Error (Store_error.Corrupt message) in
-  let%bind session_root, temporary_root = retention_directories retention session in
+  let session_root = Session_store.Handle.directory session in
   let store = retention.store in
   let%bind _ =
     Agent_protocol.Blob.Metadata.of_json
@@ -1112,10 +1137,16 @@ let discard_staged_unreferenced retention ~reader session ~stage =
     | false -> invalid "staged discard ownership or reader mismatch"
   in
   let%bind temporary_reader = Retention_reader.at_root reader ~root:temporary_root in
-  let final_directory = Filename.concat session_root "blobs" in
+  let final_directory = Filename.concat session_root final_relative in
   let data_limit = Int64.to_int_exn metadata.blob.byte_length in
   let inspect_directory reader relative native ~durable =
-    let%bind names = Retention_reader.list reader ~directory:relative in
+    let%bind names =
+      let%bind () = Retention_reader.charge_entry reader in
+      match Eio.Path.kind ~follow:false (eio_path store native) with
+      | `Directory -> Retention_reader.list reader ~directory:relative
+      | `Not_found -> Ok []
+      | _ -> invalid "staged discard location is not a directory"
+    in
     let expected =
       if durable
       then Blob_stage_documents.durable_bytes stage
@@ -1164,7 +1195,9 @@ let discard_staged_unreferenced retention ~reader session ~stage =
       | _ -> invalid "staged discard encountered a non-regular file")
   in
   try
-    let%bind final = inspect_directory reader "blobs" final_directory ~durable:true in
+    let%bind final =
+      inspect_directory reader final_relative final_directory ~durable:true
+    in
     let%bind temporary =
       inspect_directory temporary_reader "." temporary_root ~durable:false
     in
@@ -1184,13 +1217,31 @@ let discard_staged_unreferenced retention ~reader session ~stage =
         | `Not_found -> Ok ()
         | _ -> invalid "staged discard path changed before removal")
     in
-    let%bind () = Durable_file.sync_directory ~env:store.env ~path:final_directory in
-    Durable_file.sync_directory ~env:store.env ~path:temporary_root
+    let sync path =
+      match Eio.Path.kind ~follow:false (eio_path store path) with
+      | `Directory -> Durable_file.sync_directory ~env:store.env ~path
+      | `Not_found -> Ok ()
+      | _ -> invalid "staged discard directory changed before sync"
+    in
+    let%bind () = sync final_directory in
+    sync temporary_root
   with
   | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
   | exn ->
     Error
       (Store_error.of_exn ~operation:"discard staged result files" ~path:session_root exn)
+;;
+
+let discard_staged_unreferenced retention ~reader session ~stage =
+  let open Result.Let_syntax in
+  let%bind _, temporary_root = retention_directories retention session in
+  discard_stage_at
+    retention
+    ~reader
+    session
+    ~final_relative:"blobs"
+    ~temporary_root
+    ~stage
 ;;
 
 let coordinated store f =
@@ -1620,6 +1671,19 @@ let result_directories store root ~create =
       ( Filename.concat (Session_store.Handle.directory session) "blobs"
       , Session_store.Handle.directory session
       , store.temporary_directory )
+  | Retained_conversation { handle; _ } ->
+    let parent = Session_store.Handle.directory handle in
+    let child name =
+      if create
+      then ensure_child_directory store ~parent ~name
+      else (
+        let path = Filename.concat parent name in
+        let%map () = checked_or_missing_directory store path in
+        path)
+    in
+    let%bind directory = child "recovery-asset-blobs" in
+    let%map temporary = child "recovery-asset-stages" in
+    directory, parent, temporary
   | Developer developer ->
     let name =
       Agent_protocol.Id.Developer_run.to_string
@@ -1665,13 +1729,22 @@ let result_directories store root ~create =
 ;;
 
 let with_result_root store root ~reader ~create ~f =
-  match root with
-  | Result_root.Conversation _ ->
+  let in_conversation () =
     let open Result.Let_syntax in
     let%bind directory, parent_directory, temporary_directory =
       result_directories store root ~create
     in
     f ~directory ~parent_directory ~temporary_directory
+  in
+  match root with
+  | Result_root.Conversation _ -> in_conversation ()
+  | Retained_conversation { sessions; handle; coordinator } ->
+    let open Result.Let_syntax in
+    let check () = Result_root.check_source store ~sessions ~handle ~coordinator in
+    let%bind () = check () in
+    let result = in_conversation () in
+    let%bind () = check () in
+    result
   | Developer developer ->
     (match store.coordination.developer_binding with
      | None -> Error (Store_error.Corrupt "developer blob root is not bound")
@@ -1856,6 +1929,28 @@ let with_result_retention_root retention root ~reader ~f =
       ~create:false
       ~f:(fun ~directory ~parent_directory:_ ~temporary_directory ->
         f ~durable_directory:directory ~temporary_directory)
+;;
+
+let discard_recovery_stage retention root ~reader ~stage =
+  if not (Retention_reader.uses_filesystem reader ~env:retention.store.env)
+  then Error (Store_error.Corrupt "recovery collection reader has another filesystem")
+  else (
+    match root with
+    | Result_root.Conversation _ | Developer _ ->
+      Error (Store_error.Corrupt "recovery collection requires an exact retained root")
+    | Retained_conversation { handle; _ } ->
+      with_result_retention_root
+        retention
+        root
+        ~reader
+        ~f:(fun ~durable_directory:_ ~temporary_directory ->
+          discard_stage_at
+            retention
+            ~reader
+            handle
+            ~final_relative:"recovery-asset-blobs"
+            ~temporary_root:temporary_directory
+            ~stage))
 ;;
 
 type developer_retention_presence =
