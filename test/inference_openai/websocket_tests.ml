@@ -995,17 +995,16 @@ module Payload = History_entry.Payload
 
 let protected_text = "private fixture text"
 
-let protected_history =
+let protected_pair ~sequence ~alias =
   let id sequence = History_entry.Id.create ~namespace:"protected-wire" ~sequence |> ok in
   let entry sequence view =
-    let metadata = { Payload.Metadata.empty with call_id = Value "call-protected" } in
+    let metadata = { Payload.Metadata.empty with call_id = Value alias } in
     let semantic = Payload.Semantic.create view ~metadata |> ok in
     History_entry.create_with_id ~id:(id sequence) (Payload.authored semantic)
   in
-  let initial = Agent_session.History_codec.user_text ~id:(id 0) "initial" in
   let call =
     entry
-      1
+      sequence
       (Call
          { kind = Function
          ; name = "read_note"
@@ -1016,19 +1015,27 @@ let protected_history =
   in
   let output =
     entry
-      2
+      (sequence + 1)
       (Result
          { kind = Function
          ; relation = Bound (History_entry.id call)
          ; output = Text "safe receipt"
          })
   in
+  call, output
+;;
+
+let protected_history =
+  let id = History_entry.Id.create ~namespace:"protected-wire" ~sequence:0 |> ok in
+  let initial = Agent_session.History_codec.user_text ~id "initial" in
+  let call, output = protected_pair ~sequence:1 ~alias:"call-protected" in
   initial, [ initial; call; output ], call, output
 ;;
 
 let protected_context
       ?(check_current = fun () -> Ok ())
       ?(cache_settings = [])
+      ?transport
       env
       ~sw
       ~policy
@@ -1066,7 +1073,7 @@ let protected_context
   in
   let adapter =
     Openai.Inference_adapter.create
-      (driver env)
+      (Option.value_or_thunk transport ~default:(fun () -> driver env))
       ~profile
       ~profile_revision:None
       ~auth:
@@ -1125,8 +1132,13 @@ let protected_attempt prepared ~scope =
   Runtime.Prepared.start prepared ~scope ~accounting_id:Adapter_tests.accounting_id |> ok
 ;;
 
-let protected_plan ~call ~output ~refresh =
-  Delivery.create ~call ~output ~materialize:(fun () -> Ok (Text protected_text)) ~refresh
+let protected_plan ?(custody = Delivery.Local) ~call ~output ~refresh () =
+  Delivery.create
+    ~call
+    ~output
+    ~materialize:(fun () -> Ok (Text protected_text))
+    ~custody
+    ~refresh
 ;;
 
 let verify_private_body body =
@@ -1256,10 +1268,14 @@ let%test_unit
            "nested";
          let refreshes = ref 0 in
          let plan =
-           protected_plan ~call ~output ~refresh:(fun ~scope ->
-             assert (Transcript.Scope.equal scope (protected_scope "consuming"));
-             incr refreshes;
-             fun () -> true)
+           protected_plan
+             ~call
+             ~output
+             ~refresh:(fun ~scope ->
+               assert (Transcript.Scope.equal scope (protected_scope "consuming"));
+               incr refreshes;
+               fun () -> true)
+             ()
          in
          let consuming =
            prepare_protected context ~id:"consuming" ~protected_delivery:[ plan ] history
@@ -1342,14 +1358,18 @@ let%test_unit
              let current = ref true in
              let refreshes = ref 0 in
              let plan =
-               protected_plan ~call ~output ~refresh:(fun ~scope:_ ->
-                 incr refreshes;
-                 (match change with
-                  | `Revoke_auth ->
-                    Eio.Fiber.yield ();
-                    auth_current := false
-                  | `Revoke_source | `Cancel -> ());
-                 fun () -> !current)
+               protected_plan
+                 ~call
+                 ~output
+                 ~refresh:(fun ~scope:_ ->
+                   incr refreshes;
+                   (match change with
+                    | `Revoke_auth ->
+                      Eio.Fiber.yield ();
+                      auth_current := false
+                    | `Revoke_source | `Cancel -> ());
+                   fun () -> !current)
+                 ()
              in
              let prepared =
                prepare_protected
@@ -1420,6 +1440,238 @@ let%test_unit
              Delivery.retire plan))))
 ;;
 
+let intercepted_writes env ~before_write =
+  let underlying = Eio.Stdenv.net env in
+  let module Socket = struct
+    type tag = [ `Generic ]
+
+    type t =
+      { read : Cstruct.t -> int
+      ; write : Cstruct.t list -> int
+      ; shutdown : Eio.Flow.shutdown_command -> unit
+      ; close : unit -> unit
+      }
+
+    let read_methods = []
+    let single_read t = t.read
+
+    let single_write t buffers =
+      before_write ();
+      t.write buffers
+    ;;
+
+    let copy t ~src = Eio.Flow.Pi.simple_copy ~single_write t ~src
+    let shutdown t = t.shutdown
+    let close t = t.close ()
+  end
+  in
+  let module Net = struct
+    type tag = [ `Generic ]
+    type t = unit
+
+    let listen () ~reuse_addr:_ ~reuse_port:_ ~backlog:_ ~sw:_ _ = assert false
+    let datagram_socket () ~reuse_addr:_ ~reuse_port:_ ~sw:_ _ = assert false
+    let getaddrinfo () ~service host = Eio.Net.getaddrinfo underlying ~service host
+    let getnameinfo () address = Eio.Net.getnameinfo underlying address
+
+    let connect () ~sw address =
+      let flow = Eio.Net.connect ~sw underlying address in
+      Eio.Resource.T
+        ( { Socket.read = Eio.Flow.single_read flow
+          ; write = Eio.Flow.single_write flow
+          ; shutdown = Eio.Flow.shutdown flow
+          ; close = (fun () -> Eio.Flow.close flow)
+          }
+        , Eio.Net.Pi.stream_socket (module Socket) )
+    ;;
+  end
+  in
+  let net = Eio.Resource.T ((), Eio.Net.Pi.network (module Net)) in
+  D.create ~net ~clock:(Eio.Stdenv.clock env) ~timeout_seconds:2. () |> ok
+;;
+
+let%test_unit
+    "one source custody holds through both outputs at the first HTTP and WebSocket write"
+  =
+  run_env (fun env ->
+    List.iter [ O.Transport_policy.Http_sse; Require_websocket ] ~f:(fun policy ->
+      List.iter [ `Write; `Cancelled; `Revoked ] ~f:(fun case ->
+        let _, history, call, output = protected_history in
+        let second_call, second_output = protected_pair ~sequence:3 ~alias:"second" in
+        let history = history @ [ second_call; second_output ] in
+        let websocket = O.Transport_policy.equal policy Require_websocket in
+        let received = ref false in
+        let done_, resolve_done = Eio.Promise.create () in
+        let source_lock = Eio.Mutex.create () in
+        let authority = Delivery.Lease.Authority.create () in
+        let source = Delivery.Lease.Source.create ~host:"actual-host" ~session:"source" in
+        let source_current = ref true in
+        let selected_transport = ref false in
+        let acquires = ref 0 in
+        let held = ref false in
+        let write_started, resolve_write_started = Eio.Promise.create () in
+        let revocation_checked, resolve_revocation_checked = Eio.Promise.create () in
+        let before_write () =
+          (* The WS upgrade is transport setup. The test checks the actual
+             header or application-frame write separately. *)
+          if !selected_transport
+          then (
+            assert !held;
+            if Eio.Promise.try_resolve resolve_write_started ()
+            then (
+              match case with
+              | `Write -> Eio.Promise.await revocation_checked
+              | `Cancelled -> Eio.Fiber.await_cancel ()
+              | `Revoked -> assert false))
+        in
+        with_server
+          env
+          (fun flow ->
+             Exn.protect
+               ~finally:(fun () -> Eio.Promise.resolve resolve_done ())
+               ~f:(fun () ->
+                 let reader = Eio.Buf_read.of_flow flow ~max_size:1_000_000 in
+                 let body =
+                   if websocket
+                   then (
+                     let _, fields = headers reader in
+                     upgrade flow fields;
+                     client_message reader)
+                   else (
+                     let _, fields = headers reader in
+                     let length =
+                       List.Assoc.find_exn fields ~equal:String.equal "content-length"
+                       |> Int.of_string
+                     in
+                     Eio.Buf_read.take length reader |> Jsonaf.of_string)
+                 in
+                 received := true;
+                 let inputs = Jsonaf.member "input" body |> Option.value_exn in
+                 (match inputs with
+                  | `Array inputs ->
+                    assert (
+                      List.count inputs ~f:(fun item ->
+                        match Jsonaf.member "output" item with
+                        | Some (`String output) -> String.equal output protected_text
+                        | _ -> false)
+                      = 2)
+                  | _ -> assert false);
+                 let result =
+                   if websocket
+                   then server_frame completed
+                   else (
+                     let body = "data: " ^ completed ^ "\n\n" in
+                     sprintf
+                       "HTTP/1.1 200 OK\r\n\
+                        Content-Type: text/event-stream\r\n\
+                        Content-Length: %d\r\n\
+                        \r\n\
+                        %s"
+                       (String.length body)
+                       body)
+                 in
+                 Eio.Flow.copy_string result flow))
+          (fun sw endpoint ->
+             let transport = intercepted_writes env ~before_write in
+             let context = protected_context ~transport env ~sw ~policy endpoint in
+             let scope = protected_scope "two-output" in
+             let refreshes = ref 0 in
+             let plan call output =
+               let run submit =
+                 Eio.Mutex.use_ro source_lock (fun () ->
+                   incr acquires;
+                   held := true;
+                   Exn.protect
+                     ~finally:(fun () -> held := false)
+                     ~f:(fun () -> submit (fun () -> !source_current)))
+               in
+               let custody =
+                 Delivery.Source (Delivery.Lease.create authority ~source ~scope:{ run })
+               in
+               protected_plan
+                 ~custody
+                 ~call
+                 ~output
+                 ~refresh:(fun ~scope:actual ->
+                   assert (Transcript.Scope.equal scope actual);
+                   assert !held;
+                   incr refreshes;
+                   fun () -> !held)
+                 ()
+             in
+             let prepared =
+               prepare_protected
+                 context
+                 ~id:"two-output"
+                 ~protected_delivery:[ plan call output; plan second_call second_output ]
+                 history
+             in
+             let attempt = protected_attempt prepared ~scope in
+             let selected, resolve_selected = Eio.Promise.create () in
+             let run () =
+               Runtime.Attempt.run
+                 attempt
+                 ~sw
+                 ~on_event:ignore
+                 ~on_observation:(fun obs ->
+                   match O.payload obs, case with
+                   | Transport_selection _, `Revoked ->
+                     selected_transport := true;
+                     Eio.Promise.resolve resolve_selected ();
+                     Eio.Promise.await revocation_checked
+                   | Transport_selection _, _ -> selected_transport := true
+                   | _ -> ())
+               |> ok
+             in
+             let revoke () =
+               if Eio.Mutex.try_lock source_lock
+               then (
+                 source_current := false;
+                 Eio.Mutex.unlock source_lock;
+                 true)
+               else false
+             in
+             (match case with
+              | `Write ->
+                let receipt, () =
+                  Eio.Fiber.pair run (fun () ->
+                    Eio.Promise.await write_started;
+                    assert (not (revoke ()));
+                    Eio.Promise.resolve resolve_revocation_checked ())
+                in
+                assert (
+                  Inference.Event.Terminal.equal_outcome
+                    (Inference.Event.Terminal.outcome (Runtime.Receipt.terminal receipt))
+                    Completed)
+              | `Cancelled ->
+                Eio.Fiber.first
+                  (fun () -> ignore (run () : Runtime.Receipt.t))
+                  (fun () ->
+                     Eio.Promise.await write_started;
+                     assert (not (revoke ())))
+              | `Revoked ->
+                Eio.Fiber.both
+                  (fun () ->
+                     try
+                       ignore (run () : Runtime.Receipt.t);
+                       assert false
+                     with
+                     | Delivery.Rejected Unavailable -> ())
+                  (fun () ->
+                     Eio.Promise.await selected;
+                     assert (revoke ());
+                     Eio.Promise.resolve resolve_revocation_checked ()));
+             Eio.Promise.await done_;
+             assert (
+               Bool.equal
+                 !received
+                 (match case with
+                  | `Write -> true
+                  | _ -> false));
+             assert (Int.equal !acquires 1 && Int.equal !refreshes 2);
+             assert ((not !held) && revoke ())))))
+;;
+
 let%test_unit
     "protected fallback is allowed before the application write and never after it"
   =
@@ -1468,9 +1720,13 @@ let%test_unit
            let refreshes = ref 0 in
            let context = protected_context env ~sw ~policy:Prefer_websocket endpoint in
            let plan =
-             protected_plan ~call ~output ~refresh:(fun ~scope:_ ->
-               incr refreshes;
-               fun () -> true)
+             protected_plan
+               ~call
+               ~output
+               ~refresh:(fun ~scope:_ ->
+                 incr refreshes;
+                 fun () -> true)
+               ()
            in
            let prepared =
              prepare_protected

@@ -6603,7 +6603,7 @@ and t =
   ; event_sequence : int64 Atomic.t
   ; mutable state : Session_state.t
   ; mutable stopped : bool
-  ; mutable protected_source_custody : bool
+  ; mutable protected_source_custody : unit ref option
   ; mutable canonical_write_in_progress : bool
     (* Synchronous share publication observes only an installed durable state. *)
   ; mutable command_audit : Document_schema.Document.t option
@@ -12905,13 +12905,19 @@ let check_protected_source_write t ~(requested : Session_transition.t) =
   let previous = t.state in
   let next = requested.state in
   if
-    t.protected_source_custody
-    && (not (Int.equal previous.identity.generation next.identity.generation)
-        || not (phys_equal previous.recovery_notes next.recovery_notes)
-        || not (phys_equal previous.recovery_note_shares next.recovery_note_shares)
-        || not (phys_equal previous.recovery_windows next.recovery_windows)
-        || not (phys_equal previous.conversation.canonical_history next.conversation.canonical_history)
-        || not (phys_equal previous.conversation.compaction_archives next.conversation.compaction_archives))
+    Option.is_some t.protected_source_custody
+    && ((not (Int.equal previous.identity.generation next.identity.generation))
+        || (not (phys_equal previous.recovery_notes next.recovery_notes))
+        || (not (phys_equal previous.recovery_note_shares next.recovery_note_shares))
+        || (not (phys_equal previous.recovery_windows next.recovery_windows))
+        || (not
+              (phys_equal
+                 previous.conversation.canonical_history
+                 next.conversation.canonical_history))
+        || not
+             (phys_equal
+                previous.conversation.compaction_archives
+                next.conversation.compaction_archives))
   then
     Error
       (Agent_protocol.Error.create
@@ -58898,7 +58904,7 @@ let create_internal
     ; event_sequence = Atomic.make initial_state.counters.event_sequence
     ; state = initial_state
     ; stopped = false
-    ; protected_source_custody = false
+    ; protected_source_custody = None
     ; canonical_write_in_progress = false
     ; command_audit = None
     }
@@ -62045,19 +62051,34 @@ module Recovery_note_shares = struct
     let current () =
       recovery_share_owner t ~check_owner ~publication:true |> Result.is_ok
     in
-    if t.protected_source_custody || not (current ())
+    if (not (current ())) || Option.is_some t.protected_source_custody
     then Error (Recovery_note_share.unavailable ())
     else (
-      t.protected_source_custody <- true;
+      let lease = ref () in
+      t.protected_source_custody <- Some lease;
       Exn.protect
-        ~finally:(fun () -> t.protected_source_custody <- false)
-        ~f:(fun () -> Ok (f (fun () -> t.protected_source_custody && current ()))))
+        ~finally:(fun () -> t.protected_source_custody <- None)
+        ~f:(fun () ->
+          Ok
+            (f (fun () ->
+               Option.exists t.protected_source_custody ~f:(phys_equal lease)
+               && current ()))))
   ;;
 
   let select_for_delivery t ~check_owner ~reader:(Reader reader) reference =
-    if t.protected_source_custody
-    then select_recovery_share t ~check_owner ~reader reference
-    else Error (Recovery_note_share.unavailable ())
+    let unavailable () = Error (Recovery_note_share.unavailable ()) in
+    if not (Int.equal t.runtime_source_domain (Stdlib.Domain.self () :> int))
+    then unavailable ()
+    else (
+      match t.protected_source_custody with
+      | None -> unavailable ()
+      | Some lease ->
+        let check_owner () =
+          if Option.exists t.protected_source_custody ~f:(phys_equal lease)
+          then check_owner ()
+          else unavailable ()
+        in
+        select_recovery_share t ~check_owner ~reader reference)
   ;;
 
   let materialize (Disclosure disclose) = disclose ()

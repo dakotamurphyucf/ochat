@@ -292,6 +292,7 @@ type t =
       Agent_session.Permission_policy.t
       -> Agent_session.Session_actor.t option ref
       -> Agent_session.Goal_native_metadata_service.t
+  ; protected_source_authority : Inference_runtime.Protected_delivery.Lease.Authority.t
   ; generated_creation_mutex : Eio.Mutex.t
   ; idempotency_store : Agent_store.Idempotency_store.t
   ; blob_store : Agent_store.Blob_store.t
@@ -14389,6 +14390,105 @@ module Recovery_note_shares = struct
       reference
       ~f
   ;;
+
+  module Delivery = Inference_runtime.Protected_delivery
+
+  let check_source t source =
+    P.Id.Server.equal (S.server_id t.store) (P.Session_ref.server_id source)
+  ;;
+
+  let source_custody t source =
+    let module Lease = Delivery.Lease in
+    let run submit =
+      if not (check_source t source) then raise (Delivery.Rejected Unavailable);
+      let timeout = Eio.Time.Timeout.seconds (Eio.Stdenv.mono_clock t.env) 5. in
+      try
+        Eio.Time.Timeout.run_exn timeout (fun () ->
+          let acquired =
+            Session_registry.with_loaded_read
+              t.registry
+              (P.Session_ref.session_id source)
+              (fun (entry : Session_registry.entry) ->
+                 Actor.with_source_custody
+                   entry.actor
+                   ~check_owner:(check_owner t entry ~session:source)
+                   ~f:submit)
+          in
+          match acquired with
+          | Ok value -> value
+          | Error _ -> raise (Delivery.Rejected Unavailable))
+      with
+      | Eio.Time.Timeout -> raise Delivery.Lease_timeout
+    in
+    let source =
+      Lease.Source.create
+        ~host:(P.Session_ref.server_id source |> P.Id.Server.to_string)
+        ~session:(P.Session_ref.session_id source |> P.Id.Session.to_string)
+    in
+    Delivery.Source (Lease.create t.protected_source_authority ~source ~scope:{ run })
+  ;;
+
+  type operation_delivery =
+    { custody : Delivery.custody
+    ; materialize :
+        unit -> (History_entry.Payload.Output.t, Delivery.error) result
+    ; refresh : scope:Transcript.Scope.t -> unit -> bool
+    }
+
+  let prepare_operation_delivery
+        t
+        ~(recipient : Session_registry.entry)
+        ~operation_id
+        reference
+        ~render
+  =
+    let open Result.Let_syntax in
+    let source = Share.Reference.source reference in
+    let%bind recipient_session = session t recipient |> hide_denial in
+    if (not (check_source t source)) || P.Session_ref.equal source recipient_session
+    then unavailable ()
+    else (
+      let%map reader =
+        Actor.reader_for_delivery
+          recipient.actor
+          ~operation_id
+          ~check_owner:(check_owner t recipient ~session:recipient_session)
+      in
+      let source_id = P.Session_ref.session_id source in
+      let materialize () =
+        let result =
+          Session_registry.with_loaded_read t.registry source_id (fun entry ->
+            let%bind disclosure =
+              Actor.select
+                entry.actor
+                ~check_owner:(check_owner t entry ~session:source)
+                ~reader
+                reference
+            in
+            let%map content = Actor.materialize disclosure in
+            render content)
+        in
+        match result with
+        | Ok output -> Ok output
+        | Error _ -> Error Delivery.Unavailable
+      in
+      let refresh ~scope:_ =
+        let selected =
+          let%bind entry =
+            Result.of_option
+              (Session_registry.find t.registry source_id)
+              ~error:(Share.unavailable ())
+          in
+          Actor.select_for_delivery
+            entry.actor
+            ~check_owner:(check_owner t entry ~session:source)
+            ~reader
+            reference
+        in
+        fun () -> Result.bind selected ~f:Actor.materialize |> Result.is_ok
+      in
+      { custody = source_custody t source; materialize; refresh })
+  ;;
 end
 
 let qualify_metadata_target t entry =
@@ -19121,6 +19221,7 @@ let create
         (fun profile actor_ref -> recurrence_service t profile actor_ref)
     ; goal_metadata_service =
         (fun profile actor_ref -> goal_metadata_service t profile actor_ref)
+    ; protected_source_authority = Inference_runtime.Protected_delivery.Lease.Authority.create ()
     ; generated_creation_mutex = Eio.Mutex.create ()
     ; idempotency_store
     ; blob_store

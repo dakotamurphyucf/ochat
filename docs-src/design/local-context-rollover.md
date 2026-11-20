@@ -75,8 +75,9 @@ identities, so having the same displayed preparation ID cannot authorize
 reuse. With no policy the accessor returns `Policy_missing` and does no
 counting. Assessment neither changes dispatch nor acknowledges a wake.
 
-The host installs an exact-target registry and a session opt-in through
-`Daemon.options.context_capacity_host`. The default is disabled. The session's
+Startup configuration in `Daemon.options.context_capacity_host` supplies one
+numeric policy per exact target. The host selects the mode separately for each
+session, and the default is disabled. The session's
 actual canonical writer identity supplies the host-qualified session reference.
 The actor's capacity port reads the latest finalized root preparation for
 one running operation. A changed target, source revision, active window, host

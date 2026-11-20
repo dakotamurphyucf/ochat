@@ -9,11 +9,16 @@ let select token ~binding selection =
 
 let acknowledge token ~binding = select token ~binding Acknowledged
 
-let deliver token ~binding ~materialize ~refresh =
+let deliver token ~binding ~materialize ~custody ~refresh =
   select
     token
     ~binding
     (Deliver
        (fun ~call ~output ->
-         Inference_runtime.Protected_delivery.create ~call ~output ~materialize ~refresh))
+         Inference_runtime.Protected_delivery.create
+           ~call
+           ~output
+           ~materialize
+           ~custody
+           ~refresh))
 ;;

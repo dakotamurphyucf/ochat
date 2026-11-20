@@ -14,5 +14,6 @@ val deliver
         -> ( History_entry.Payload.Output.t
              , Inference_runtime.Protected_delivery.error )
              result)
+  -> custody:Inference_runtime.Protected_delivery.custody
   -> refresh:(scope:Transcript.Scope.t -> unit -> bool)
   -> (unit, Agent_protocol.Error.t) result

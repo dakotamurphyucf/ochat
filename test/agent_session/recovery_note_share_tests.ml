@@ -423,20 +423,39 @@ let%expect_test "two physical actors recheck share authority at the disclosure c
                 unavailable (Shares.materialize hit);
                 let reader = read_target target recipient (reader_proof ()) in
                 let hit = select source reader first |> protocol_ok in
+                let expected_revision = S.Receipt.revision first in
+                let reference = S.Receipt.reference first in
+                let revoke () =
+                  Shares.revoke
+                    source
+                    ~access:manager
+                    ~check_owner
+                    ~key:(key "revoke-first")
+                    S.{ expected_revision; reference }
+                in
+                let stale_check =
+                  Shares.with_source_custody source ~check_owner ~f:(fun current ->
+                    let selected =
+                      Shares.select_for_delivery source ~check_owner ~reader reference
+                      |> protocol_ok
+                    in
+                    assert (current ());
+                    (match revoke () with
+                     | Error { code = Conflict; retryable = true; _ } -> ()
+                     | Ok _ | Error _ -> failwith "revocation crossed source custody");
+                    ignore (Shares.materialize selected |> protocol_ok : C.Content.t);
+                    current)
+                  |> protocol_ok
+                in
+                assert (not (stale_check ()));
+                Shares.with_source_custody source ~check_owner ~f:(fun _ ->
+                  (* A witness from an earlier lease cannot revive on the same actor. *)
+                  assert (not (stale_check ())))
+                |> protocol_ok;
                 let entered, entered_u = Eio.Promise.create () in
                 let release, release_u = Eio.Promise.create () in
                 gate := Some (entered_u, release);
-                let expected_revision = S.Receipt.revision first in
-                let reference = S.Receipt.reference first in
-                let revocation =
-                  Eio.Fiber.fork_promise ~sw (fun () ->
-                    Shares.revoke
-                      source
-                      ~access:manager
-                      ~check_owner
-                      ~key:(key "revoke-first")
-                      S.{ expected_revision; reference })
-                in
+                let revocation = Eio.Fiber.fork_promise ~sw revoke in
                 Exn.protect
                   ~finally:(fun () -> Eio.Promise.resolve release_u ())
                   ~f:(fun () ->

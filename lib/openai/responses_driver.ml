@@ -1022,6 +1022,14 @@ let io f =
 
 exception Auth_invalidated of Auth.error
 
+let with_application_write submission_guard ~submitted ~f =
+  try Inference_runtime.Submission_guard.with_submission submission_guard ~f with
+  | Inference_runtime.Protected_delivery.Lease_timeout ->
+    if !submitted
+    then transport_failure Timeout
+    else raise (Inference_runtime.Protected_delivery.Rejected Expired)
+;;
+
 module Http_rejection = struct
   module H = Inference.Observation.Diagnostic.Http_rejection
 
@@ -1202,10 +1210,6 @@ let dispatch
    | Ok () -> ()
    | Error error -> raise (Auth_invalidated error));
   on_selected ();
-  Inference_runtime.Submission_guard.check submission_guard;
-  (match lease.Auth.check_current () with
-   | Ok () -> ()
-   | Error error -> raise (Auth_invalidated error));
   let header =
     sprintf
       "POST %s HTTP/1.1\r\n\
@@ -1222,10 +1226,14 @@ let dispatch
       additional_headers
       (String.length body)
   in
-  submitted := true;
-  io (fun () ->
-    Eio.Flow.copy_string header flow;
-    Eio.Flow.copy_string body flow);
+  with_application_write submission_guard ~submitted ~f:(fun () ->
+    (match lease.Auth.check_current () with
+     | Ok () -> ()
+     | Error error -> raise (Auth_invalidated error));
+    submitted := true;
+    io (fun () ->
+      Eio.Flow.copy_string header flow;
+      Eio.Flow.copy_string body flow));
   let reader =
     Eio.Buf_read.of_flow
       flow
@@ -1776,14 +1784,14 @@ let websocket_dispatch
   if String.length body > t.max_request_bytes then transport_failure Body_limit;
   check_auth lease;
   on_selected Inference.Observation.Transport_selection.Websocket None;
-  Inference_runtime.Submission_guard.check submission_guard;
-  check_auth lease;
-  (* From this point cancellation or partial write is uncertain; no resend. *)
-  Responses_websocket.begin_response channel.websocket;
-  submitted := true;
-  (match Responses_websocket.write_text channel.websocket body with
-   | Ok () -> ()
-   | Error _ -> transport_failure Protocol);
+  with_application_write submission_guard ~submitted ~f:(fun () ->
+    check_auth lease;
+    (* From this point cancellation or partial write is uncertain; no resend. *)
+    Responses_websocket.begin_response channel.websocket;
+    submitted := true;
+    match Responses_websocket.write_text channel.websocket body with
+    | Ok () -> ()
+    | Error _ -> transport_failure Protocol);
   channel.cache <- None;
   let profile = Prepared.profile prepared in
   let origin =

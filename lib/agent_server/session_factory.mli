@@ -764,9 +764,7 @@ module Recovery_note_shares : sig
       immediately before publishing. Both original scopes and exact owner
       tuples are rechecked at that point. A disclosure is invalid after this
       callback ends and cannot be stored as a later provider final check.
-      Include the application's actual write admission in this callback.
-      Group multiple selectors for one source under one lease before composing
-      multiple sources. Reentering the same source lease can block indefinitely. *)
+      For a yielding provider write, use [prepare_operation_delivery]. *)
   val with_disclosure
     :  t
     -> recipient:Session_registry.entry
@@ -788,6 +786,37 @@ module Recovery_note_shares : sig
          (Agent_session.Session_actor.Recovery_note_shares.disclosure
           -> ('a, Agent_protocol.Error.t) result)
     -> ('a, Agent_protocol.Error.t) result
+
+  (** Retain one actual same-host source session through a bounded provider
+      application write. Each output must independently revalidate authority
+      for its original source and recipient. *)
+  val source_custody
+    :  t
+    -> Agent_protocol.Session_ref.t
+    -> Inference_runtime.Protected_delivery.custody
+
+  type operation_delivery =
+    { custody : Inference_runtime.Protected_delivery.custody
+    ; materialize :
+        unit
+        -> ( History_entry.Payload.Output.t
+             , Inference_runtime.Protected_delivery.error )
+             result
+    ; refresh : scope:Transcript.Scope.t -> unit -> bool
+    }
+
+  (** Prepare callbacks for the protected output of an actual recipient
+      operation. The explicit share reference pins the revision. Bind these
+      callbacks to that operation's committed call/output via the native
+      delivery port. The nonyielding renderer returns bounded tool data under
+      source admission during preparation. Later use requires fresh checks. *)
+  val prepare_operation_delivery
+    :  t
+    -> recipient:Session_registry.entry
+    -> operation_id:Agent_protocol.Id.Operation.t
+    -> Agent_session.Recovery_note_share.Reference.t
+    -> render:(Recovery_notes.Catalog.Content.t -> History_entry.Payload.Output.t)
+    -> (operation_delivery, Agent_protocol.Error.t) result
 end
 
 (** Rebuild missing-index projections through immutable owned reads without

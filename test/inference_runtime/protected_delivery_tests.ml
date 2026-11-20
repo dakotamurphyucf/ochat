@@ -53,6 +53,7 @@ let%expect_test "protected preparation consumes only a matching bound output onc
       ~materialize:(fun () ->
         incr materializations;
         Ok (Text private_bytes))
+      ~custody:Local
       ~refresh:(fun ~scope:_ () -> true)
   in
   let prepare plan history = Delivery.Materialized.prepare [ plan ] ~history in
@@ -83,8 +84,8 @@ let%expect_test "protected preparation consumes only a matching bound output onc
   let accepted = new_plan () in
   let history = [ older_call; older_output; call; output "receipt" ] in
   let materialized = prepare accepted history |> ok in
-  let refresh = Delivery.Materialized.bind materialized ~scope |> ok in
-  let final = refresh () in
+  let submission = Delivery.Materialized.bind materialized ~scope |> ok in
+  let final = submission.refresh () in
   final ();
   (try
      final ();
@@ -115,5 +116,69 @@ let%expect_test "protected preparation consumes only a matching bound output onc
     Expired
     Limit_exceeded
     materializations=2
+    |}]
+;;
+
+let%expect_test
+    "source custody orders keys, deduplicates and rejects mixed host authority"
+  =
+  let acquired = ref [] in
+  let authority = Delivery.Lease.Authority.create () in
+  let plan ?(authority = authority) ~source ~sequence () =
+    let call = call_at sequence () in
+    let output = output_for ~call ~sequence:(sequence + 1) "receipt" in
+    let run f =
+      acquired := ("+" ^ source) :: !acquired;
+      Exn.protect
+        ~finally:(fun () -> acquired := ("-" ^ source) :: !acquired)
+        ~f:(fun () -> f (fun () -> true))
+    in
+    let source = Delivery.Lease.Source.create ~host:"one-host" ~session:source in
+    let custody =
+      Delivery.Source (Delivery.Lease.create authority ~source ~scope:{ run })
+    in
+    let pending =
+      Delivery.create
+        ~call
+        ~output
+        ~materialize:(fun () -> Ok (Text "fixture"))
+        ~custody
+        ~refresh:(fun ~scope:_ () -> true)
+    in
+    pending, [ call; output ]
+  in
+  let bind plans =
+    let pending, entries = List.unzip plans in
+    let materialized =
+      Delivery.Materialized.prepare pending ~history:(List.concat entries) |> ok
+    in
+    Delivery.Materialized.bind materialized ~scope
+  in
+  let submission =
+    bind
+      [ plan ~source:"b" ~sequence:5 ()
+      ; plan ~source:"a" ~sequence:7 ()
+      ; plan ~source:"a" ~sequence:9 ()
+      ]
+    |> ok
+  in
+  let lease = Option.value_exn submission.custody in
+  lease.run (fun current ->
+    assert (current ());
+    submission.refresh () ();
+    acquired := "write" :: !acquired);
+  print_s [%sexp (List.rev !acquired : string list)];
+  (match
+     bind
+       [ plan ~source:"a" ~sequence:0 ()
+       ; plan ~authority:(Delivery.Lease.Authority.create ()) ~source:"a" ~sequence:2 ()
+       ]
+   with
+   | Error error -> print_s [%sexp (error : Delivery.error)]
+   | Ok _ -> assert false);
+  [%expect
+    {|
+    (+a +b write -b -a)
+    Unavailable
     |}]
 ;;

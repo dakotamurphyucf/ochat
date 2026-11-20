@@ -40,6 +40,7 @@ let%expect_test
            ~materialize:(fun () ->
              Int.incr materializations;
              Ok (Text body))
+           ~custody:Local
            ~refresh:(fun ~scope:_ () -> true)
          |> protocol_ok;
          assert (

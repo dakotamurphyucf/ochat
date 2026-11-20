@@ -7,15 +7,46 @@ module Context_capacity = Context_capacity
 module Protected_delivery = Protected_delivery
 
 module Submission_guard = struct
-  type t = (unit -> unit -> unit) list
+  type t = Protected_delivery.Materialized.submission list
 
   let empty = []
-  let create ~refresh = [ refresh ]
+  let create ~refresh =
+    [ { Protected_delivery.Materialized.refresh = refresh; custody = None } ]
+  ;;
+
   let compose parent child = List.append parent child
 
+  let check_all t source_checks =
+    let final_checks =
+      List.map t ~f:(fun (guard : Protected_delivery.Materialized.submission) ->
+        guard.refresh ())
+    in
+    List.iter source_checks ~f:(fun check ->
+      if not (check ()) then raise (Protected_delivery.Rejected Unavailable));
+    List.iter final_checks ~f:(fun check -> check ())
+  ;;
+
+  let scopes t =
+    List.filter_map t ~f:(fun (guard : Protected_delivery.Materialized.submission) ->
+      guard.custody)
+  ;;
+
   let check t =
-    let final_checks = List.map t ~f:(fun refresh -> refresh ()) in
-    List.iter final_checks ~f:(fun check_now -> check_now ())
+    if not (List.is_empty (scopes t)) then raise (Protected_delivery.Rejected Unavailable);
+    check_all t []
+  ;;
+
+  let with_submission t ~f =
+    let rec wrap (scopes : Protected_delivery.Lease.scope list) checks =
+      match scopes with
+      | [] ->
+        Eio.Fiber.check ();
+        check_all t checks;
+        Eio.Fiber.check ();
+        f ()
+      | scope :: rest -> scope.run (fun check -> wrap rest (check :: checks))
+    in
+    wrap (scopes t) []
   ;;
 end
 
@@ -586,11 +617,10 @@ module Prepared = struct
       match t.protected_input with
       | None -> Ok t.plan
       | Some materialized ->
-        let%map refresh =
+        let%map protected_guard =
           Protected_delivery.Materialized.bind materialized ~scope
           |> Result.map_error ~f:(fun error -> Preparation_error.Protected_delivery error)
         in
-        let guard = Submission_guard.create ~refresh in
         let run
               ~sw
               ~scope
@@ -607,7 +637,7 @@ module Prepared = struct
             ~note_delivery
             ~on_event
             ~on_observation
-            ~submission_guard:(Submission_guard.compose submission_guard guard)
+            ~submission_guard:(Submission_guard.compose submission_guard [ protected_guard ])
         in
         { t.plan with Plan.run }
     in

@@ -11,9 +11,11 @@ module Protected_delivery = Protected_delivery
     nonyielding final check. No refreshed witness is stored on a shared Context,
     so concurrent sibling attempts cannot overwrite one another. Exceptions
     and cancellation retain their original cause.
-    The selected backend invokes [check] after auth/transport waits and immediately
-    before entering model-request submission. A later revocation may race an
-    already admitted request. *)
+    The selected backend invokes [with_submission] after transport selection.
+    It holds any source custody for the application write only. After acquisition,
+    every refresh precedes the synchronous final checks, followed immediately by
+    the actual write. [check] remains available to ordinary backends and rejects
+    guarded source custody before running any callbacks. *)
 module Submission_guard : sig
   type t
 
@@ -21,6 +23,7 @@ module Submission_guard : sig
   val create : refresh:(unit -> unit -> unit) -> t
   val compose : t -> t -> t
   val check : t -> unit
+  val with_submission : t -> f:(unit -> 'a) -> 'a
 end
 
 (** Effectful inference boundary. A prepared value owns its actual adapter and

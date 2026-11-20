@@ -15,6 +15,44 @@ type error =
 [@@deriving equal, sexp_of]
 
 exception Rejected of error
+exception Lease_timeout
+
+module Lease = struct
+  module Source = struct
+    module T = struct
+      type t =
+        { host : string
+        ; session : string
+        }
+      [@@deriving compare, sexp_of]
+    end
+
+    include T
+    include Comparator.Make (T)
+
+    let create ~host ~session = { host; session }
+  end
+
+  module Authority = struct
+    type t = unit ref
+
+    let create () = ref ()
+  end
+
+  type scope = { run : 'a. ((unit -> bool) -> 'a) -> 'a }
+
+  type t =
+    { authority : Authority.t
+    ; source : Source.t
+    ; scope : scope
+    }
+
+  let create authority ~source ~scope = { authority; source; scope }
+end
+
+type custody =
+  | Local
+  | Source of Lease.t
 
 type state =
   | Pending
@@ -25,12 +63,13 @@ type t =
   { call : History_entry.t
   ; output : History_entry.t
   ; materialize : unit -> (Payload.Output.t, error) result
+  ; custody : custody
   ; refresh : scope:Transcript.Scope.t -> unit -> bool
   ; state : state Atomic.t
   }
 
-let create ~call ~output ~materialize ~refresh =
-  { call; output; materialize; refresh; state = Atomic.make Pending }
+let create ~call ~output ~materialize ~custody ~refresh =
+  { call; output; materialize; custody; refresh; state = Atomic.make Pending }
 ;;
 
 let retire t = Atomic.set t.state Retired
@@ -216,7 +255,35 @@ module Materialized = struct
   let has_live_results t = not (List.is_empty t.sources)
   let release_contents t = t.contents <- Map.empty (module Id)
 
+  type submission =
+    { refresh : unit -> unit -> unit
+    ; custody : Lease.scope option
+    }
+
+  let source_leases sources =
+    List.fold_result
+      sources
+      ~init:(Map.empty (module Lease.Source))
+      ~f:(fun leases (source : pending) ->
+        match source.custody with
+        | Local -> Ok leases
+        | Source lease ->
+          (match Map.find leases lease.source with
+           | None -> Ok (Map.set leases ~key:lease.source ~data:lease)
+           | Some current when phys_equal current.authority lease.authority -> Ok leases
+           | Some _ -> Error Unavailable))
+    |> Result.map ~f:Map.data
+  ;;
+
+  let rec with_sources leases checks submit =
+    match leases with
+    | [] -> submit (fun () -> List.for_all checks ~f:(fun check -> check ()))
+    | (lease : Lease.t) :: rest ->
+      lease.scope.run (fun check -> with_sources rest (check :: checks) submit)
+  ;;
+
   let bind t ~scope =
+    let open Result.Let_syntax in
     if
       (not (List.for_all t.sources ~f:preparing))
       || not (Atomic.compare_and_set t.started false true)
@@ -225,16 +292,23 @@ module Materialized = struct
       match scope.Transcript.Scope.relation with
       | Nested _ when not (List.is_empty t.sources) -> Error Unavailable
       | Root | Nested _ ->
-        Ok
-          (fun () ->
-            if (not (List.for_all t.sources ~f:preparing)) || Atomic.get t.submitted
+        let%map leases = source_leases t.sources in
+        let custody =
+          match leases with
+          | [] -> None
+          | _ -> Some { Lease.run = (fun submit -> with_sources leases [] submit) }
+        in
+        let refresh () =
+          if (not (List.for_all t.sources ~f:preparing)) || Atomic.get t.submitted
+          then raise (Rejected Expired);
+          let checks = List.map t.sources ~f:(fun source -> source.refresh ~scope) in
+          fun () ->
+            if not (Atomic.compare_and_set t.submitted false true)
             then raise (Rejected Expired);
-            let checks = List.map t.sources ~f:(fun source -> source.refresh ~scope) in
-            fun () ->
-              if not (Atomic.compare_and_set t.submitted false true)
-              then raise (Rejected Expired);
-              if not (List.for_all t.sources ~f:preparing) then raise (Rejected Expired);
-              if not (List.for_all checks ~f:(fun check -> check ()))
-              then raise (Rejected Unavailable)))
+            if not (List.for_all t.sources ~f:preparing) then raise (Rejected Expired);
+            if not (List.for_all checks ~f:(fun check -> check ()))
+            then raise (Rejected Unavailable)
+        in
+        { refresh; custody })
   ;;
 end
