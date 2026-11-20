@@ -246,7 +246,7 @@ let list t ~directory =
     Error (Store_error.of_exn ~operation:"enumerate retention roots" ~path:directory exn)
 ;;
 
-let read_with_checkpoint t ~path:relative ~max_bytes ~checkpoint =
+let read_file t ~path:relative ~max_bytes ~checkpoint ~missing ~oversized =
   with_checkpoint ~checkpoint ~f:(fun checkpoint ->
     let open Result.Let_syntax in
     try
@@ -256,6 +256,7 @@ let read_with_checkpoint t ~path:relative ~max_bytes ~checkpoint =
       let%bind () =
         match Eio.Path.kind ~follow:false file with
         | `Regular_file -> Ok ()
+        | `Not_found -> Error (missing relative)
         | _ -> corrupt "retention root is not a regular file"
       in
       let size = (Eio.Path.stat ~follow:false file).size |> Optint.Int63.to_int64 in
@@ -263,7 +264,7 @@ let read_with_checkpoint t ~path:relative ~max_bytes ~checkpoint =
       let%bind () =
         match limit >= 0 && Int64.(size >= zero && size <= of_int limit) with
         | true -> Ok ()
-        | false -> corrupt "retention root exceeds its byte budget"
+        | false -> Error oversized
       in
       Eio.Path.with_open_in file (fun input ->
         let buffer = Buffer.create (Int.min 8192 limit) in
@@ -295,6 +296,28 @@ let read_with_checkpoint t ~path:relative ~max_bytes ~checkpoint =
     with
     | (Eio.Io _ | Core_unix.Unix_error _) as exn ->
       Error (Store_error.of_exn ~operation:"read retention root" ~path:relative exn))
+;;
+
+let read_with_checkpoint t ~path ~max_bytes ~checkpoint =
+  read_file
+    t
+    ~path
+    ~max_bytes
+    ~checkpoint
+    ~missing:(fun _ -> Store_error.Corrupt "retention root is not a regular file")
+    ~oversized:(Store_error.Corrupt "retention root exceeds its byte budget")
+;;
+
+let read_promised_file t ~path ~max_bytes =
+  read_file
+    t
+    ~path
+    ~max_bytes
+    ~checkpoint:(fun () -> ())
+    ~missing:(fun path -> Store_error.Missing path)
+    ~oversized:
+      (Store_error.Admission_capacity
+         (Document_schema.Error.Limit_exceeded "retained source byte allowance"))
 ;;
 
 let read t ~path ~max_bytes =

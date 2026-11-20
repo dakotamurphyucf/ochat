@@ -93,6 +93,15 @@ val list_with_checkpoint_and_names
     including growth after stat. Every error invalidates the collection attempt. *)
 val read : t -> path:string -> max_bytes:int -> (string, Store_error.t) result
 
+(** Same bounded regular-file read. An absent final component yields [Missing]
+    and a file larger than the allowance yields [Admission_capacity]. An
+    unsupported path, unexpected growth or an I/O failure is distinct. *)
+val read_promised_file
+  :  t
+  -> path:string
+  -> max_bytes:int
+  -> (string, Store_error.t) result
+
 (** The same bounded read, with calling-domain checkpoints between bounded
     chunks. Callback exceptions and cancellation propagate unchanged. *)
 val read_with_checkpoint

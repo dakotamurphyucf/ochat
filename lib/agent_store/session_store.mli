@@ -383,6 +383,15 @@ val owns_handle : t -> Handle.t -> bool
     Store/Handle ownership, locks, existing uncertainty and publication health. *)
 val retained_lifecycle_available : t -> Handle.t -> bool
 
+(** Create a bounded reader beneath an owned live session directory using
+    the issuing Store's filesystem. This does not grant transcript access. *)
+val retained_reader
+  :  t
+  -> handle:Handle.t
+  -> max_entries:int
+  -> max_bytes:int
+  -> (Retention_reader.t, Store_error.t) result
+
 (** Pure checked conversion from a still-current exact observation. Never
     reconstruct from metadata, a revision, JSON or an arbitrary availability
     predicate. Caller must separately bind the SAME actual canonical writer. *)

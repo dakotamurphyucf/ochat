@@ -16,6 +16,7 @@ let payload_limit = 1048576
 
 type fixture =
   { env : Eio_unix.Stdenv.base
+  ; sessions : Store.Session_store.t
   ; handle : Store.Session_store.Handle.t
   ; owner : P.Session_ref.t
   }
@@ -194,6 +195,64 @@ let read_archive fixture =
   Archive.read ~env:fixture.env ~handle:fixture.handle ~max_payload_length:payload_limit
 ;;
 
+let inline_uri = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=="
+
+let image_message () =
+  let module Payload = History_entry.Payload in
+  let content : Payload.Content.t list =
+    [ Text { text = inline_uri; annotations = []; logprobs = Absent }
+    ; Image { uri = inline_uri; detail = Absent }
+    ; Image { uri = "https://not-a-local-asset.invalid/test"; detail = Absent }
+    ]
+  in
+  Payload.Semantic.create
+    (Message { form = Input; role = User; content; phase = Absent })
+    ~metadata:Payload.Metadata.empty
+  |> Result.ok_or_failwith
+  |> Payload.authored
+  |> History_entry.create_with_id ~id:(history 1 "").id
+  |> A.History_codec.to_protocol
+;;
+
+let check_image fixture actor member =
+  let citation = Ledger.Member.citation member in
+  let read ?(current = fun () -> Actor.state actor) part =
+    A.Recovery_image.read
+      fixture.sessions
+      ~handle:fixture.handle
+      ~current
+      ~max_frame_bytes:payload_limit
+      citation
+      ~part
+      ~max_bytes:34
+  in
+  let image = read 1 |> Result.ok |> Option.value_exn in
+  [%test_eq: string]
+    "1e85ec81b9800b4c443d39caca0d0926089a3ac201120db1ceb45b93789480b8"
+    (P.Inline_image.contents image
+     |> Digestif.SHA256.digest_string
+     |> Digestif.SHA256.to_hex);
+  List.iter [ 0; 2 ] ~f:(fun part ->
+    assert (
+      Option.equal
+        A.Recovery_source_reader.equal_error
+        (Result.error (read part))
+        (Some Unsupported)));
+  let checked = ref false in
+  let current () =
+    if !checked
+    then Error (P.Error.invalid_request "revoked")
+    else (
+      checked := true;
+      Actor.state actor)
+  in
+  assert (
+    Option.equal
+      A.Recovery_source_reader.equal_error
+      (Result.error (read ~current 1))
+      (Some Denied))
+;;
+
 let walk fixture sw ~fault ~initial =
   let journal = journal fixture Store.Journal.create in
   let actual_archive =
@@ -283,7 +342,7 @@ let walk fixture sw ~fault ~initial =
            ~equal:String.equal);
        assert (Scope.equal active (enable ()));
        [%test_eq: int64] began.counters.revision (state actor).counters.revision;
-       let live = history 1 "new member before tracked compaction" in
+       let live = image_message () in
        append live;
        let appended = state actor in
        let append_delta = data_transaction journal appended in
@@ -297,6 +356,7 @@ let walk fixture sw ~fault ~initial =
        (match Ledger.Member.source before_member with
         | Live basis -> [%test_eq: int64] appended.counters.revision basis.revision
         | Summary_archive _ -> failwith "ordinary append was already archived");
+       check_image fixture actor before_member;
        fail_next := fault;
        let after = compact fixture actor writer in
        if List.length !written <> 2
@@ -353,6 +413,39 @@ let walk fixture sw ~fault ~initial =
             [%test_eq: int64] root.basis.revision captured.revision;
             [%test_eq: string] (Chatml_source.Digest.to_hex root.digest) captured.sha256
           | Live _ -> failwith "pruned member still names a live row");
+         check_image fixture actor relocated;
+         let path =
+           Filename.concat
+             (Store.Session_store.Handle.archive_directory fixture.handle)
+             (Archive.filename captured)
+         in
+         let file = Eio.Path.(Eio.Stdenv.fs fixture.env / path) in
+         let saved = Eio.Path.(Eio.Stdenv.fs fixture.env / (path ^ ".fixture-backup")) in
+         let read () =
+           A.Recovery_image.read
+             fixture.sessions
+             ~handle:fixture.handle
+             ~current:(fun () -> Actor.state actor)
+             ~max_frame_bytes:payload_limit
+             (Ledger.Member.citation relocated)
+             ~part:1
+             ~max_bytes:34
+         in
+         Eio.Path.rename file saved;
+         Exn.protect
+           ~finally:(fun () -> Eio.Path.rename saved file)
+           ~f:(fun () ->
+             assert (
+               Option.equal
+                 A.Recovery_source_reader.equal_error
+                 (Result.error (read ()))
+                 (Some Missing));
+             Eio.Path.save ~create:(`Exclusive 0o600) file "invalid archive";
+             assert (
+               Option.equal
+                 A.Recovery_source_reader.equal_error
+                 (Result.error (read ()))
+                 (Some Corrupt)));
          let summary = List.last_exn (membership after) in
          match Ledger.Member.provenance summary with
          | Derived_summary operation ->
@@ -533,7 +626,9 @@ let%expect_test
             ~server_id:(Store.Session_store.server_id storage.sessions)
             ~session_id
         in
-        let fixture = { env; handle = storage.session; owner } in
+        let fixture =
+          { env; sessions = storage.sessions; handle = storage.session; owner }
+        in
         let initial = Persistence.Restored.authored state in
         let after = Eio.Switch.run (fun sw -> walk fixture sw ~fault ~initial) in
         Eio.Switch.run (fun sw -> reopen fixture sw ~initial ~after ~fault))));

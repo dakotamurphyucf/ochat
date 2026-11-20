@@ -165,6 +165,16 @@ establish attachment membership. A model-supplied image URL does not establish
 local custody. An unavailable attachment can have a readable caption if the
 caption has independent provenance and passes the same visibility checks.
 
+For a canonical read, the host binds the source Store and live session handle
+before selecting a member. The reader resolves the member at its recorded
+source ordinal, checks the archive digest and source generation, and checks
+the current visibility again before releasing the projection. A locator that
+moves during the read can be retried. Inline image reads accept original
+image parts carrying bounded PNG, JPEG, GIF or WebP data. The reader checks
+canonical base64 and the media signature. Text that happens to contain an
+image URL remains text. [Canonical source reader](../../lib/agent_session/recovery_source_reader.mli),
+[inline image reader](../../lib/agent_session/recovery_image.mli).
+
 ### Logical visibility and physical custody
 
 Commit the visibility change and the edit, deletion, redaction, or window

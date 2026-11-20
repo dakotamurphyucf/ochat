@@ -360,6 +360,8 @@
   recovery_window_ledger
   recovery_window_capture
   recovery_visibility
+  recovery_source_reader
+  recovery_image
   administration
   session_delta
   session_metadata_transition

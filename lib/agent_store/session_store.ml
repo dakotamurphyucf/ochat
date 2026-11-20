@@ -380,6 +380,17 @@ let retained_lifecycle_available t handle =
   owns_handle t handle && (not t.closed) && Handle.retained_available handle
 ;;
 
+let retained_reader t ~handle ~max_entries ~max_bytes =
+  if retained_lifecycle_available t handle
+  then
+    Retention_reader.create
+      ~env:t.env
+      ~root:(Handle.directory handle)
+      ~max_entries
+      ~max_bytes
+  else Error (Store_error.Corrupt "retained reader requires its current source session")
+;;
+
 let retain_lifecycle_owner t handle current =
   if retained_lifecycle_available t handle && Lifecycle.Current.is_current current handle
   then
