@@ -88,7 +88,15 @@ let journal fixture make =
 
 let with_actor
       ?(state_committed = fun _ _ -> ())
-      fixture sw journal ~restored ~previous_transaction_hash ~archive f
+      ?(snapshot_payload_limit = payload_limit)
+      ?before_commit
+      fixture
+      sw
+      journal
+      ~restored
+      ~previous_transaction_hash
+      ~archive
+      f
   =
   let initial_state = Persistence.Restored.state restored in
   let writer =
@@ -108,7 +116,7 @@ let with_actor
         Persistence.create
           ~archive
           ~pending_archive:None
-          ~before_commit:None
+          ~before_commit
           ~retention_preflight:None
           ~command_accepted:(fun _ _ -> ())
           ~writer
@@ -121,7 +129,7 @@ let with_actor
       let backend, canonical_persistence =
         Persistence.actor_persistence_with_startup_disposal
           persistence
-          ~recovery_notes:(fixture.owner, payload_limit)
+          ~recovery_notes:(fixture.owner, snapshot_payload_limit)
       in
       let actor =
         Actor.create_with_bound_runtime_source_owner

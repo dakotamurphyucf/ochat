@@ -22,19 +22,25 @@ type phase =
   | Settled of settlement
 [@@deriving equal]
 
+type phase_encoding =
+  | Compact
+  | Named
+[@@deriving equal]
+
 type t =
   { ordinal : int64
   ; generation : int
   ; scope : S.t
   ; tracked : bool
   ; phase : phase
+  ; phase_encoding : phase_encoding
   }
 [@@deriving equal]
 
 let invalid message = Error (P.Error.invalid_request message)
 let max_source_bytes = 128
 
-let create ~ordinal ~generation ~scope ~tracked ~phase =
+let create ~ordinal ~generation ~scope ~tracked ~phase ~phase_encoding =
   let key = S.key scope in
   if
     Int64.(ordinal <= 0L)
@@ -47,7 +53,7 @@ let create ~ordinal ~generation ~scope ~tracked ~phase =
   then invalid "recovery attempt identity is outside the admitted allocation"
   else (
     match scope.relation with
-    | Root -> Ok { ordinal; generation; scope; tracked; phase }
+    | Root -> Ok { ordinal; generation; scope; tracked; phase; phase_encoding }
     | Nested _ -> invalid "recovery attempt must be an actual root")
 ;;
 
@@ -61,6 +67,7 @@ let allocate handle ~tracking =
       ~scope:(H.scope handle)
       ~tracked:(Inference_ledger.equal_tracking tracking Tracked)
       ~phase:Allocated
+      ~phase_encoding:Compact
   | _ -> invalid "recovery attempt must be bound to a foreground operation"
 ;;
 
@@ -75,6 +82,12 @@ let same_identity t other =
   && Int.equal t.generation other.generation
   && S.equal t.scope other.scope
   && Bool.equal t.tracked other.tracked
+;;
+
+let same_storage_reservation t other =
+  same_identity t other
+  && equal_phase_encoding t.phase_encoding Compact
+  && equal_phase_encoding other.phase_encoding Compact
 ;;
 
 let matches_handle t handle =
@@ -104,7 +117,10 @@ let matches_accounting t accounting =
 ;;
 
 let check_transition previous ~incoming =
-  if not (same_identity previous incoming)
+  if
+    not
+      (same_identity previous incoming
+       && equal_phase_encoding previous.phase_encoding incoming.phase_encoding)
   then invalid "recovery attempt changed its actual allocation identity"
   else if equal_phase previous.phase incoming.phase
   then Ok ()
@@ -175,13 +191,57 @@ let phase_of_json json =
   | _ -> invalid "unknown recovery attempt phase"
 ;;
 
+(* Each new phase occupies the same byte in a canonical Store snapshot. Once
+   the actual attempt is admitted, its acknowledgement and terminal replace
+   that reserved byte. The named beta format retains its original encoding. *)
+let phase_codes : (string * phase) list =
+  [ "0", Allocated
+  ; "1", Running
+  ; "2", Settled { origin = Returned; delivery = Definitely_not_submitted }
+  ; "3", Settled { origin = Returned; delivery = Possibly_submitted }
+  ; "4", Settled { origin = Returned; delivery = Response_started }
+  ; "5", Settled { origin = Interrupted; delivery = Definitely_not_submitted }
+  ; "6", Settled { origin = Interrupted; delivery = Possibly_submitted }
+  ; "7", Settled { origin = Interrupted; delivery = Response_started }
+  ]
+;;
+
+let phase_to_field t =
+  match t.phase_encoding with
+  | Named -> "phase", phase_to_json t.phase
+  | Compact ->
+    let code, _ =
+      List.find_exn phase_codes ~f:(fun (_, phase) -> equal_phase phase t.phase)
+    in
+    "phase_code", `Number code
+;;
+
+let phase_from_fields json =
+  let open Result.Let_syntax in
+  match
+    ( Document_schema.Json.field json ~name:"phase"
+    , Document_schema.Json.field json ~name:"phase_code" )
+  with
+  | Value phase, Absent ->
+    let%map phase = phase_of_json phase in
+    phase, Named
+  | Absent, Value (`Number code) ->
+    let%map phase =
+      List.Assoc.find phase_codes code ~equal:String.equal
+      |> Result.of_option
+           ~error:(P.Error.invalid_request "invalid recovery attempt phase code")
+    in
+    phase, Compact
+  | _ -> invalid "recovery attempt requires exactly one phase encoding"
+;;
+
 let to_jsonaf t =
   `Object
     [ "ordinal", X.int64_json t.ordinal
     ; "generation", X.host_counter_to_json t.generation
     ; "scope", S.to_json t.scope
     ; ("tracked", if t.tracked then `True else `False)
-    ; "phase", phase_to_json t.phase
+    ; phase_to_field t
     ]
 ;;
 
@@ -198,8 +258,8 @@ let of_jsonaf json =
   let%bind generation = X.required fields "generation" X.host_counter_of_json in
   let%bind scope = X.required fields "scope" scope_of_json in
   let%bind tracked = X.required fields "tracked" J.bool in
-  let%bind phase = X.required fields "phase" phase_of_json in
-  create ~ordinal ~generation ~scope ~tracked ~phase
+  let%bind phase, phase_encoding = phase_from_fields json in
+  create ~ordinal ~generation ~scope ~tracked ~phase ~phase_encoding
 ;;
 
 let shape =
@@ -221,5 +281,6 @@ let shape =
     ; "scope", scope
     ; "tracked", D.value
     ; "phase", phase
+    ; "phase_code", D.value
     ]
 ;;

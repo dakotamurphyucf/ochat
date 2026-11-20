@@ -201,6 +201,13 @@ acknowledgement from an acknowledged attempt with an unknown submission outcome.
 The terminal record survives retirement of detailed inference accounting
 without retaining request bodies or replaying execution authority.
 
+The Store checks the full prospective snapshot before admitting a new
+preparation or attempt binding. At capacity, the actor can omit that
+optional evidence and commit the required inference accounting. A prepared
+source whose binding was omitted keeps its prepared-only status. An admitted
+binding reserves space for acknowledgement and settlement. Errors from an
+entered writer follow the normal journal recovery path.
+
 ### Logical visibility and physical custody
 
 Commit the visibility change and the edit, deletion, redaction, or window

@@ -101,7 +101,7 @@ let load fixture journal initial =
 
 let no_archive _ _ = failwith "inference receipt test reached the archive writer"
 
-let with_attempts ~pressure f ~finish =
+let with_attempts ?snapshot_payload_limit ?on_commit ~pressure f ~finish =
   with_actor_workspace (fun env workspace_instance ->
     Eio.Switch.run (fun sw ->
       let mode = ref Confirm in
@@ -139,8 +139,13 @@ let with_attempts ~pressure f ~finish =
       in
       let initial = Persistence.Restored.authored initial_state in
       let active_journal = journal fixture Store.Journal.create in
+      let before_commit =
+        Option.map on_commit ~f:(fun hook -> hook fixture active_journal)
+      in
       let after =
         with_actor
+          ?snapshot_payload_limit
+          ?before_commit
           fixture
           sw
           active_journal
@@ -164,7 +169,7 @@ let with_attempts ~pressure f ~finish =
              in
              Actor.set_configuration_policy actor policy |> protocol_ok;
              let preparation_id = ref 0 in
-             let worker_failure = ref None in
+             let worker_failure, publish_failure = Eio.Promise.create () in
              let run
                    ~sw
                    ~(input : A.Operation_worker.Input.t)
@@ -291,7 +296,7 @@ let with_attempts ~pressure f ~finish =
                A.Operation_worker.create ~run:(fun ~sw ~input caps ->
                  try run ~sw ~input caps with
                  | exn ->
-                   worker_failure := Some exn;
+                   ignore (Eio.Promise.try_resolve publish_failure exn : bool);
                    raise exn)
              in
              Actor.set_operation_worker actor (Some worker) |> protocol_ok;
@@ -307,12 +312,10 @@ let with_attempts ~pressure f ~finish =
                  (history !sequence "private turn body")
                |> protocol_ok
                |> ignore;
-               let finished =
-                 Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 20. (fun () ->
-                   await_idle actor)
-               in
-               Option.iter !worker_failure ~f:raise;
-               finished
+               Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 20. (fun () ->
+                 Eio.Fiber.first
+                   (fun () -> await_idle actor)
+                   (fun () -> raise (Eio.Promise.await worker_failure)))
              in
              let enable () =
                Actor.enable_recovery_windows
@@ -534,4 +537,215 @@ let%test_unit "equal replacement configuration cannot bind the original preparat
         |> List.hd_exn
       in
       assert (Option.is_none (Record.attempt prepared)))
+;;
+
+let snapshot_payload_bytes (state : State.t) ~hash =
+  let payload =
+    A.Session_state_document.encode
+      (A.Session_state_document.authored state)
+      ~limits:document_limits
+    |> document_ok
+  in
+  let open Store in
+  let snapshot =
+    Snapshot.create
+      ~limits:document_limits
+      ~session_id
+      ~transaction_sequence:state.counters.transaction_sequence
+      ~transaction_hash:(Some hash)
+      ~event_sequence:state.counters.event_sequence
+      ~created_at:state.identity.updated_at
+      ~prompt_artifact:(P.Id.Prompt_revision.to_string state.spec.prompt_revision_id)
+      ~workspace_identity:state.spec.workspace_instance.conflict_domain
+      ~payload
+    |> store_ok
+  in
+  Snapshot.stored snapshot
+  |> Snapshot.Stored.record
+  |> Document_record.stored_bytes
+  |> String.length
+;;
+
+type receipt_stage =
+  | Prepared
+  | Allocated
+  | Running
+  | Settled
+[@@deriving equal]
+
+let receipt_stage state =
+  match Effective.effective_records state with
+  | [] -> None
+  | [ record ] ->
+    Some
+      (match Record.attempt record with
+       | None -> Prepared
+       | Some attempt ->
+         (match Attempt.phase attempt with
+          | Allocated -> Allocated
+          | Running -> Running
+          | Settled _ -> Settled))
+  | _ -> failwith "unexpected recovery preparation count"
+;;
+
+let check_normal_accounting (state : State.t) =
+  let row = Accounting.rows state.inference_ledger |> List.hd_exn in
+  match Inference.Observation.Attempt_record.state (Accounting.Row.record row) with
+  | Terminal terminal ->
+    assert (
+      Inference.Event.Terminal.equal_delivery
+        (Inference.Event.Terminal.delivery terminal)
+        Response_started)
+  | Prepared | Running | Interrupted _ ->
+    failwith "normal inference accounting was not committed"
+;;
+
+let check_phase_encodings state =
+  let actual = receipt state in
+  let compact phase = Attempt.with_phase actual phase |> Attempt.to_jsonaf in
+  let phases : Attempt.phase list =
+    [ Allocated
+    ; Running
+    ; settled Returned Definitely_not_submitted
+    ; settled Returned Possibly_submitted
+    ; settled Returned Response_started
+    ; settled Interrupted Definitely_not_submitted
+    ; settled Interrupted Possibly_submitted
+    ; settled Interrupted Response_started
+    ]
+  in
+  let encoded_length phase = compact phase |> Jsonaf.to_string |> String.length in
+  List.iter phases ~f:(fun phase ->
+    assert (Int.equal (encoded_length phase) (encoded_length Allocated)));
+  let fields =
+    match compact Running with
+    | `Object fields ->
+      List.filter fields ~f:(fun (name, _) -> not (String.equal name "phase_code"))
+    | _ -> assert false
+  in
+  let named = `Object (fields @ [ "phase", `Object [ "kind", `String "running" ] ]) in
+  let decoded = Attempt.of_jsonaf named |> protocol_ok in
+  assert (Attempt.equal_phase (Attempt.phase decoded) Running);
+  assert (D.Json.equal named (Attempt.to_jsonaf decoded));
+  assert (not (Attempt.same_storage_reservation actual decoded))
+;;
+
+let%expect_test "optional recovery capacity uses the prospective physical snapshot" =
+  let sizes =
+    with_attempts
+      ~pressure:0
+      (fun turn enable ->
+         enable ();
+         ignore (turn Confirm))
+      ~finish:(fun fixture _ initial _ dispatches ->
+        assert (Int.equal dispatches 1);
+        let journal, _ = reopened fixture initial in
+        let _, sizes =
+          List.fold
+            (Effective.journal_transactions journal)
+            ~init:(initial, [])
+            ~f:(fun (previous, sizes) transaction ->
+              let next =
+                Persistence.apply_transaction ~limits:document_limits previous transaction
+                |> store_ok
+              in
+              let state = Persistence.Restored.state next in
+              let sizes =
+                match receipt_stage state with
+                | None -> sizes
+                | Some stage when List.Assoc.mem sizes stage ~equal:equal_receipt_stage ->
+                  sizes
+                | Some stage ->
+                  ( stage
+                  , snapshot_payload_bytes
+                      state
+                      ~hash:(Store.Transaction.hash transaction) )
+                  :: sizes
+              in
+              next, sizes)
+        in
+        sizes)
+  in
+  let bytes stage = List.Assoc.find_exn sizes stage ~equal:equal_receipt_stage in
+  let prepared = bytes Prepared in
+  let allocated = bytes Allocated in
+  assert (prepared < allocated && allocated < bytes Settled);
+  let turn limit expected =
+    with_attempts
+      ~pressure:0
+      ~snapshot_payload_limit:limit
+      (fun turn enable ->
+         enable ();
+         let after = turn Confirm in
+         check_normal_accounting after;
+         assert (Option.equal equal_receipt_stage (receipt_stage after) expected))
+      ~finish:(fun fixture _ initial _ dispatches ->
+        assert (Int.equal dispatches 1);
+        let _, reopened = reopened fixture initial in
+        let after = Persistence.Restored.state reopened.state in
+        check_normal_accounting after;
+        if Option.equal equal_receipt_stage expected (Some Settled)
+        then check_phase_encodings after;
+        assert (Option.equal equal_receipt_stage (receipt_stage after) expected))
+  in
+  turn (prepared - 1) None;
+  turn prepared (Some Prepared);
+  turn allocated (Some Settled);
+  print_endline "prepared evidence and the fresh binding can be omitted independently";
+  print_endline "an admitted receipt settles after the accounting snapshot grows";
+  [%expect
+    {|
+    prepared evidence and the fresh binding can be omitted independently
+    an admitted receipt settles after the accounting snapshot grows
+    |}]
+;;
+
+let%expect_test "once the optional binding enters the writer it cannot fall back" =
+  let restore = ref None in
+  let on_commit (fixture : fixture) journal state =
+    if
+      Option.is_none !restore
+      && Option.equal equal_receipt_stage (receipt_stage state) (Some Allocated)
+    then (
+      let segment =
+        Filename.concat
+          (Store.Session_store.Handle.journal_directory fixture.handle)
+          (Store.Journal.current_segment journal |> Store.Journal_segment.Id.filename)
+      in
+      let root = Eio.Stdenv.fs fixture.env in
+      let actual = Eio.Path.(root / segment) in
+      let held = Eio.Path.(root / (segment ^ ".fixture-held")) in
+      Eio.Path.rename actual held;
+      restore
+      := Some
+           (fun () ->
+             if Eio.Path.is_directory actual then Eio.Path.rmdir actual;
+             Eio.Path.rename held actual);
+      Eio.Path.mkdir ~perm:0o700 actual);
+    Ok ()
+  in
+  with_attempts
+    ~pressure:0
+    ~on_commit
+    (fun turn enable ->
+       enable ();
+       Exn.protect
+         ~finally:(fun () -> Option.iter !restore ~f:(fun restore -> restore ()))
+         ~f:(fun () ->
+           match turn Confirm with
+           | exception Graph.Rejected { code = Persistence_error; message; _ } ->
+             assert (String.is_substring message ~substring:"append journal segment")
+           | exception exn -> raise exn
+           | _ -> failwith "a failed journal append retried without its receipt"))
+    ~finish:(fun fixture _ initial _ dispatches ->
+      assert (Option.is_some !restore);
+      assert (Int.equal dispatches 0);
+      let _, reopened = reopened fixture initial in
+      let state = Persistence.Restored.state reopened.state in
+      assert (Option.equal equal_receipt_stage (receipt_stage state) (Some Prepared));
+      assert (Int64.equal (Accounting.last_attempt_ordinal state.inference_ledger) 0L));
+  print_endline
+    "after actual append failure, replay retained only the admitted preparation";
+  [%expect
+    {| after actual append failure, replay retained only the admitted preparation |}]
 ;;

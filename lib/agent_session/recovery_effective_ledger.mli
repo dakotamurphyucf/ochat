@@ -46,4 +46,10 @@ val validate_state
 val to_jsonaf : t -> Jsonaf.t
 val of_jsonaf : Jsonaf.t -> (t, P.Error.t) result
 val validate_encoded : Jsonaf.t -> (unit, Document_schema.Error.t) result
+
+(** The same retained shelf, with only fixed-width admitted phase replacements.
+    A new binding, receipt format, preparation, version or locator needs full
+    storage admission. *)
+val same_storage_reservation : t -> t -> bool
+
 val shape : Document_schema.Shape.t

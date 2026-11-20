@@ -14020,12 +14020,46 @@ let recovery_attempt_deltas receipts =
   List.map receipts ~f:(fun receipt -> Session_delta.Recovery_effective_attempt_changed receipt)
 ;;
 
+let check_recovery_admission t candidate =
+  match t.canonical_persistence with
+  | Some backend ->
+    Canonical_backend_binding_data.check_recovery_admission
+      backend
+      ~command_audit:t.command_audit
+      ~previous:t.state
+      candidate
+  | None -> Error (error Invalid_state "recovery evidence requires a bound Store profile")
+;;
+
+let prepare_inference_transition
+      ?run_preparation
+      t
+      ~changes
+      ~payloads
+      ~recovery_allocation
+  =
+  let open Result.Let_syntax in
+  let prepare changes =
+    prepare_transition ?run_preparation t ~delta:(Session_delta.Batch changes) ~payloads
+  in
+  match recovery_allocation with
+  | None -> prepare changes
+  | Some receipt ->
+    let%bind candidate =
+      prepare (changes @ [ Session_delta.Recovery_effective_attempt_changed receipt ])
+    in
+    (match%bind check_recovery_admission t candidate with
+     | Fits -> Ok candidate
+     | Capacity_exhausted -> prepare changes)
+;;
+
 let commit_inference_ledger
       ?allocation_acknowledgement
       ?owned_graph
       ?run_preparation
       ?admission
       ?check_before_commit
+      ?recovery_allocation
       ?(recovery_attempts = [])
       t
       ledger
@@ -14050,7 +14084,10 @@ let commit_inference_ledger
          (Inference_ledger.revision ledger)
          (Inference_ledger.revision t.state.inference_ledger))
   in
-  if not accounting_changed && List.is_empty recovery_attempts
+  if
+    (not accounting_changed)
+    && List.is_empty recovery_attempts
+    && Option.is_none recovery_allocation
   then (
     let%map () =
       Option.value_map check_before_commit ~default:(Ok ()) ~f:(fun check -> check ())
@@ -14093,13 +14130,21 @@ let commit_inference_ledger
         in
         changes, payloads)
     in
-    let delta = Session_delta.Batch (changes @ recovery_attempt_deltas recovery_attempts) in
+    let changes = changes @ recovery_attempt_deltas recovery_attempts in
+    let prepare ?run_preparation () =
+      prepare_inference_transition
+        ?run_preparation
+        t
+        ~changes
+        ~payloads
+        ~recovery_allocation
+    in
     match allocation_acknowledgement, owned_graph with
     | Some acknowledgement, None ->
       let%bind () =
         Held_inference_allocation_acknowledgement.check acknowledgement ~actor:t ~ledger
       in
-      let%bind candidate = prepare_transition ?run_preparation t ~delta ~payloads in
+      let%bind candidate = prepare ?run_preparation () in
       let initialization_acknowledgement =
         match acknowledgement.scope with
         | Authored _ | Goal_runtime _ -> None
@@ -14145,8 +14190,18 @@ let commit_inference_ledger
     | Some _, Some _ ->
       Error (error Conflict "inference mutation has conflicting ACK ownership")
     | None, None ->
-      transition ?check_before_commit ?run_preparation t ~delta ~payloads
-      |> Result.map ~f:ignore
+      (match recovery_allocation with
+       | None ->
+         transition
+           ?check_before_commit
+           ?run_preparation
+           t
+           ~delta:(Batch changes)
+           ~payloads
+         |> Result.map ~f:ignore
+       | Some _ ->
+         let%bind candidate = prepare ?run_preparation () in
+         install ?check_before_commit ?run_preparation t candidate)
     | None, Some mutation ->
       let goal_scope =
         Option.filter (goal_runtime_scope t) ~f:(fun scope ->
@@ -14162,7 +14217,7 @@ let commit_inference_ledger
          exact graph and preparation are retained, and only their basis advances
          after ACK. Preparing without a preparation avoids fresh-effect policy. *)
       let revision = t.state.counters.revision in
-      let%bind candidate = prepare_transition t ~delta ~payloads in
+      let%bind candidate = prepare () in
       let%bind goal_runtime_acknowledgement =
         Option.value_map goal_scope ~default:(Ok None) ~f:(fun scope ->
           Goal_runtime_acknowledgement.prepare_factual
@@ -25528,28 +25583,31 @@ let capture_recovery_preparation t capture input ~configuration ~binding_is_curr
         ~delta:(Recovery_effective_prepared record)
         ~payloads:[]
     in
-    let commit_observation =
-      Session_commit_observation.Owner.create_guarded
-        ~previous
-        ~candidate
-        ~check_at_writer:check
-    in
-    let%bind () =
-      persist_transition
-        ?run_preparation
-        t
-        candidate
-        ~check_before_commit:check
-        ~commit_observation
-    in
-    install_committed_transition ?run_preparation t candidate;
-    Configuration_capture.record_recovery_binding
-      t.configuration_capture
-      capture
-      ~configuration
-      ~source_revision:(Recovery_effective_record.source_revision record);
-    publish_committed_transition t candidate;
-    Ok ()
+    (match%bind check_recovery_admission t candidate with
+     | Capacity_exhausted -> Ok ()
+     | Fits ->
+       let commit_observation =
+         Session_commit_observation.Owner.create_guarded
+           ~previous
+           ~candidate
+           ~check_at_writer:check
+       in
+       let%bind () =
+         persist_transition
+           ?run_preparation
+           t
+           candidate
+           ~check_before_commit:check
+           ~commit_observation
+       in
+       install_committed_transition ?run_preparation t candidate;
+       Configuration_capture.record_recovery_binding
+         t.configuration_capture
+         capture
+         ~configuration
+         ~source_revision:(Recovery_effective_record.source_revision record);
+       publish_committed_transition t candidate;
+       Ok ())
 ;;
 
 let root_configuration_context t operation_id =
@@ -42960,12 +43018,12 @@ let prepare_runtime_attempt ?origin_observation t execution owner relation confi
       in
       Inherited_attempt.Prepared.Inherited plan)
     else (
-      let recovery_attempts =
-        plan_recovery_attempt t execution configuration handle ~tracking |> Option.to_list
+      let recovery_allocation =
+        plan_recovery_attempt t execution configuration handle ~tracking
       in
       let%bind () =
         commit_inference_ledger
-          ~recovery_attempts
+          ?recovery_allocation
           ?allocation_acknowledgement
           ?run_preparation:basis.preparation
           ?admission
@@ -43434,33 +43492,36 @@ let commit_inherited_attempt t (plan : Inherited_attempt.Plan.t) before_writer =
         ]
       else []
     in
-    let recovery_attempts =
+    let recovery_allocation =
       match plan.original with
-      | Legacy _ -> []
+      | Legacy _ -> None
       | Runtime { execution; _ } ->
-        plan_recovery_attempt t execution plan.configuration plan.handle ~tracking:plan.tracking
-        |> Option.to_list
+        plan_recovery_attempt
+          t
+          execution
+          plan.configuration
+          plan.handle
+          ~tracking:plan.tracking
     in
-    let delta =
-      Session_delta.Batch
-        ((Session_delta.inference_ledger_update
-            ?policy_update:(Canonical_usage_update.policy_update accounting)
-            plan.after
-            ~delegated_usage:(Canonical_usage_update.delegated_usage accounting)
-          :: accounting_deltas)
-         @
-         (match included with
-          | None -> []
-          | Some (update, _) -> [ Session_delta.Goal_descendants_changed update ])
-         @ recovery_attempt_deltas recovery_attempts)
+    let changes =
+      (Session_delta.inference_ledger_update
+         ?policy_update:(Canonical_usage_update.policy_update accounting)
+         plan.after
+         ~delegated_usage:(Canonical_usage_update.delegated_usage accounting)
+       :: accounting_deltas)
+      @
+      match included with
+      | None -> []
+      | Some (update, _) -> [ Session_delta.Goal_descendants_changed update ]
     in
     let run_preparation = inherited_attempt_preparation plan in
     let previous = t.state in
     let%bind candidate =
-      prepare_transition
+      prepare_inference_transition
         ?run_preparation
         t
-        ~delta
+        ~changes
+        ~recovery_allocation
         ~payloads:
           [ Agent_protocol.Event.Durable.Payload.Session_updated
               (Session_state.summary { t.state with inference_ledger = plan.after })

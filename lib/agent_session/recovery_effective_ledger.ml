@@ -44,6 +44,12 @@ type t =
 let records t = t.records
 let current_incarnation t = t.current_incarnation
 
+let same_storage_reservation t other =
+  phys_equal t other
+  || (Option.equal Int64.equal t.current_incarnation other.current_incarnation
+      && List.equal Record.same_storage_reservation t.records other.records)
+;;
+
 let rotate_incarnation t =
   match t.current_incarnation with
   | None -> t

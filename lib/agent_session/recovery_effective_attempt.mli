@@ -36,6 +36,7 @@ val with_phase : t -> phase -> t
 val matches_handle : t -> Inference_ledger.Handle.t -> bool
 val belongs_to : t -> P.Recovery_window.Scope.t -> bool
 val matches_accounting : t -> Inference.Observation.Attempt_record.t -> bool
+val same_storage_reservation : t -> t -> bool
 val check_transition : t -> incoming:t -> (unit, P.Error.t) result
 
 (** At startup an acknowledged running attempt could have crossed submission.

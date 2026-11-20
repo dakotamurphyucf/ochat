@@ -129,6 +129,21 @@ let members t = t.members
 let custody t = t.custody
 let attempt t = t.attempt
 
+let same_storage_reservation t other =
+  phys_equal t other
+  || (phys_equal t.preparation_id other.preparation_id
+      && phys_equal t.configuration_digest other.configuration_digest
+      && phys_equal t.scope other.scope
+      && phys_equal t.operation other.operation
+      && Int64.equal t.source_revision other.source_revision
+      && Int64.equal t.overlay_incarnation other.overlay_incarnation
+      && Int.equal t.input_count other.input_count
+      && phys_equal t.members other.members
+      && phys_equal t.custody other.custody
+      && Option.value_map t.attempt ~default:false ~f:(fun old ->
+        Option.exists other.attempt ~f:(Attempt.same_storage_reservation old)))
+;;
+
 let valid_preparation_id id =
   Result.is_ok (Inference.Observation.Observation_id.of_string id)
 ;;

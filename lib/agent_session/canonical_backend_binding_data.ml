@@ -7,11 +7,22 @@ type commit =
   -> Session_transition.t
   -> (unit, Agent_protocol.Error.t) result
 
+module Recovery_admission = struct
+  type t =
+    | Fits
+    | Capacity_exhausted
+end
+
 type t =
   { domain : int
   ; writer : Agent_store.Commit_writer.t
   ; commit : commit
   ; recovery_note_owner : Agent_protocol.Session_ref.t option
+  ; check_recovery_admission :
+      command_audit:Document_schema.Document.t option
+      -> previous:Session_state.t
+      -> Session_transition.t
+      -> (Recovery_admission.t, Agent_protocol.Error.t) result
   }
 
 let check_domain_exn t =
@@ -19,8 +30,18 @@ let check_domain_exn t =
   then invalid_arg "canonical persistence binding belongs to another domain"
 ;;
 
-let create ~writer ~commit ~recovery_note_owner =
-  { domain = (Stdlib.Domain.self () :> int); writer; commit; recovery_note_owner }
+let create ~writer ~commit ~recovery_note_owner ~check_recovery_admission =
+  { domain = (Stdlib.Domain.self () :> int)
+  ; writer
+  ; commit
+  ; recovery_note_owner
+  ; check_recovery_admission
+  }
+;;
+
+let check_recovery_admission t ~command_audit ~previous candidate =
+  check_domain_exn t;
+  t.check_recovery_admission ~command_audit ~previous candidate
 ;;
 
 let session_owner t =
