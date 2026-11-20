@@ -1,5 +1,8 @@
 open! Core
 
+(** Maximum retained source positions across a window ledger. *)
+val max_members : int
+
 (** Host-qualified identity. [generation] identifies the admitted source lifetime;
     the opaque window ID remains independent of session and storage revisions. *)
 module Scope : sig

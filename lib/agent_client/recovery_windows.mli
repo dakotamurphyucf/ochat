@@ -12,3 +12,10 @@ val list
   -> ( Agent_protocol.Recovery_query.Summary.t Agent_protocol.Page.t
        , Agent_protocol.Error.t )
        result
+
+(** List or search visible items. Continue on the same host with the returned
+    opaque cursor, including when the current page contains no rows. *)
+val query
+  :  Connection.t
+  -> Agent_protocol.Recovery_history_request.t
+  -> (Agent_protocol.Recovery_history_page.t, Agent_protocol.Error.t) result

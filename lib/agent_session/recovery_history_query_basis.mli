@@ -4,7 +4,7 @@ open! Core
 
 module P = Agent_protocol
 
-type family =
+type family = P.Recovery_history_request.family =
   | Canonical
   | Effective
 

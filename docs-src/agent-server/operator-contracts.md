@@ -543,3 +543,26 @@ An ordinary append preserves the page. When the service returns
 OCaml clients can use `Agent_client.Recovery_windows.enable` and
 `Agent_client.Recovery_windows.list` over an initialized connection. The
 default `Session_handle.initialize` requests this feature.
+
+### List and search recovery items
+
+Negotiate `recovery.history_query` to use `session.recovery.query`. Supply
+the host-qualified session, the source family (`canonical` or `effective`),
+and a limit from 1 to 50. Use `action: "list_items"` with the exact window
+scope returned by `session.recovery.windows`. Each row identifies the
+citation, role, ordinal and readable text-part numbers. Effective rows also
+identify the preparation revision and can include the observed attempt.
+
+To search, use `action: "search"` and a nonempty literal `term`. Omit
+`window` to search the current generation, or supply one exact window.
+The stock service exposes ordinary user and assistant text. Every hit
+includes the part number, half-open UTF-8 byte offsets and a highlighted
+snippet. The request can narrow the role, the half-open ordinal range
+(`ordinals`), and the total encoded reply budget (`max_reply_bytes`).
+
+Inspect both `next` and `coverage` on every response. When `next` is a
+string, pass it as `cursor` with the same query, including when `rows` is
+empty. A null `next` with `complete` ends the search. A null `next` with
+`source_unavailable` means some source data could not be examined. On
+`Cursor_expired`, start again without a cursor. The typed OCaml entry point
+is `Agent_client.Recovery_windows.query`.

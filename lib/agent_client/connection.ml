@@ -115,6 +115,7 @@ let has_command_receipt = function
   | Ingress_submit _
   | Instructions _
   | Recovery_windows _
+  | Recovery_history _
   | Goal_query _
   | Recovery_enable _
   | Goal_control _
@@ -1035,12 +1036,14 @@ let request_without_history t command = non_history_response (request t command)
 type recovery_command =
   | Enable of P.Recovery_query.Enable.t
   | List_windows of P.Recovery_query.List_windows.t
+  | Query_history of P.Recovery_history_request.t
 
 let request_recovery t ~initialized_as command =
   let command =
     match command with
     | Enable request -> P.Command.Recovery_enable request
     | List_windows request -> P.Command.Recovery_windows request
+    | Query_history request -> P.Command.Recovery_history request
   in
   let check () =
     if Option.exists (initialization t) ~f:(phys_equal initialized_as)

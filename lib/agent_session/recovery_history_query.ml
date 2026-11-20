@@ -17,29 +17,18 @@ type scope = Basis.scope =
   | Current_generation
   | Window of Scope.t
 
-type action =
+type action = P.Recovery_history_request.action =
   | List_items
   | Search of P.Search_term.t
 
-let max_rows = 50
+let max_rows = P.Recovery_query.max_page_size
 let max_positions = 256
-let max_encoded_bytes = 64 * 1024
+let max_encoded_bytes = P.Recovery_query.max_page_bytes
 let max_cursor_bytes = 2048
 let max_members = Recovery_window_record.max_members
 let invalid reason = Error (P.Error.invalid_request reason)
-
-let role_name = function
-  | Text.User -> "user"
-  | Assistant -> "assistant"
-  | Developer -> "developer"
-  | Tool_result -> "tool_result"
-;;
-
-let view_name = function
-  | Text.Ordinary -> "ordinary"
-  | Selected_developer -> "selected_developer"
-  | Selected_tool_result -> "selected_tool_result"
-;;
+let role_name = P.Recovery_history_request.role_name
+let view_name = P.Recovery_history_request.view_name
 
 type t =
   { source : P.Session_ref.t
@@ -65,6 +54,54 @@ let wire_limits max_bytes =
   P.Recovery_wire.limits ~max_bytes ~max_fields:2048 ~max_nodes:65_536
 ;;
 
+let of_request (request : P.Recovery_history_request.t) =
+  let { P.Recovery_history_request.session = source
+      ; window
+      ; family
+      ; view
+      ; role
+      ; ordinals
+      ; page
+      ; max_reply_bytes
+      ; action
+      }
+    =
+    request
+  in
+  let scope =
+    Option.value_map window ~default:Current_generation ~f:(fun w -> Window w)
+  in
+  let limit = page.limit in
+  let query =
+    `Array
+      [ `String "local_history_query.v1"
+      ; P.Session_ref.to_json source
+      ; (match scope with
+         | Current_generation -> `Null
+         | Window scope -> Scope.to_json scope)
+      ; `String
+          (match family with
+           | Canonical -> "canonical"
+           | Effective -> "effective")
+      ; `String (view_name view)
+      ; X.option_json (fun role -> `String (role_name role)) role
+      ; X.option_json
+          (fun (lo, hi) -> `Array [ X.integer_json lo; X.integer_json hi ])
+          ordinals
+      ; X.integer_json limit
+      ; X.integer_json max_reply_bytes
+      ; (match action with
+         | List_items -> `Null
+         | Search term -> P.Search_term.to_json term)
+      ]
+  in
+  let%map.Result _ =
+    P.Recovery_wire.measure ~limits:(wire_limits max_encoded_bytes) query
+  in
+  let digest = Digest.of_contents (Jsonaf.to_string query) ~checkpoint:(fun () -> ()) in
+  { source; scope; family; view; role; ordinals; limit; max_reply_bytes; action; digest }
+;;
+
 let create
       ~source
       ~scope
@@ -76,59 +113,26 @@ let create
       ?(max_reply_bytes = max_encoded_bytes)
       action
   =
-  let valid_scope =
-    match scope, action with
-    | Current_generation, List_items -> false
-    | Current_generation, Search _ -> true
-    | Window scope, _ -> P.Session_ref.equal source (Scope.session scope)
+  let open Result.Let_syntax in
+  let%bind page = P.Page.Request.create ~limit () in
+  let window =
+    match scope with
+    | Current_generation -> None
+    | Window scope -> Some scope
   in
-  if
-    (not valid_scope)
-    || limit <= 0
-    || limit > max_rows
-    || max_reply_bytes <= 0
-    || max_reply_bytes > max_encoded_bytes
-    || Option.exists ordinals ~f:(fun (lo, hi) -> lo < 0 || hi < lo || hi > max_members)
-  then invalid "invalid local recovery query bounds or scope"
-  else (
-    let query =
-      `Array
-        [ `String "local_history_query.v1"
-        ; P.Session_ref.to_json source
-        ; (match scope with
-           | Current_generation -> `Null
-           | Window scope -> Scope.to_json scope)
-        ; `String
-            (match family with
-             | Canonical -> "canonical"
-             | Effective -> "effective")
-        ; `String (view_name view)
-        ; X.option_json (fun role -> `String (role_name role)) role
-        ; X.option_json
-            (fun (lo, hi) -> `Array [ X.integer_json lo; X.integer_json hi ])
-            ordinals
-        ; X.integer_json limit
-        ; X.integer_json max_reply_bytes
-        ; (match action with
-           | List_items -> `Null
-           | Search term -> P.Search_term.to_json term)
-        ]
-    in
-    let%map.Result _ =
-      P.Recovery_wire.measure ~limits:(wire_limits max_encoded_bytes) query
-    in
-    let digest = Digest.of_contents (Jsonaf.to_string query) ~checkpoint:(fun () -> ()) in
-    { source
-    ; scope
-    ; family
-    ; view
-    ; role
-    ; ordinals
-    ; limit
-    ; max_reply_bytes
-    ; action
-    ; digest
-    })
+  let%bind request =
+    P.Recovery_history_request.create
+      ~session:source
+      ?window
+      ~family
+      ~view
+      ?role
+      ?ordinals
+      ~page
+      ~max_reply_bytes
+      action
+  in
+  of_request request
 ;;
 
 module Continuation = struct

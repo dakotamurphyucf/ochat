@@ -10,7 +10,7 @@ module Windows = Recovery_window_ledger
 
 let invalid reason = Error (P.Error.invalid_request reason)
 let max_preparations = 64
-let max_members = 8192
+let max_members = Agent_protocol.Recovery_window.max_members
 
 let limits ~archive_budget ~attempt_budget =
   D.Limits.create

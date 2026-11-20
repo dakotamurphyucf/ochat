@@ -2079,6 +2079,7 @@ let compose
       | Session_run _
       | Recurrence_query _
       | Recovery_windows _
+      | Recovery_history _
       | Goal_query _
       | Session_pending_inputs _
       | Session_pending_input _

@@ -23,3 +23,14 @@ let fields json names =
   let%map () = Extension_codec.closed fields names in
   fields
 ;;
+
+let revision_to_json n = `String (Int64.to_string n)
+
+let revision_of_json json =
+  let open Result.Let_syntax in
+  let%bind encoded = Json_codec.string json in
+  match Int64.of_string_opt encoded with
+  | Some n when Int64.(n >= 0L) && String.equal encoded (Int64.to_string n) -> Ok n
+  | Some _ | None ->
+    Error (Protocol_error.invalid_request "invalid decimal recovery revision")
+;;

@@ -104,6 +104,7 @@ let recurrence_query_limits =
 let recovery_method name =
   String.equal name Agent_protocol.Recovery_query.Enable.method_name
   || String.equal name Agent_protocol.Recovery_query.List_windows.method_name
+  || String.equal name Agent_protocol.Recovery_history_request.method_name
 ;;
 
 let recovery_envelope_limits =
@@ -111,9 +112,16 @@ let recovery_envelope_limits =
     (Agent_protocol.Recovery_query.max_page_bytes + 512)
 ;;
 
+let history_envelope_limits =
+  query_envelope_limits ~max_depth:18 ~max_fields:2052 ~max_nodes:65544
+    (Agent_protocol.Recovery_query.max_page_bytes + 512)
+;;
+
 let operator_query_limits method_ =
   if List.mem Agent_protocol.Goal_query.Request.methods method_ ~equal:String.equal
   then Some ("Goal", goal_query_limits)
+  else if String.equal method_ Agent_protocol.Recovery_history_request.method_name
+  then Some ("Recovery", history_envelope_limits)
   else if recovery_method method_ then Some ("Recovery", recovery_envelope_limits)
   else if
     List.mem Agent_protocol.Recurrence_query.Request.methods method_ ~equal:String.equal

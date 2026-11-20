@@ -165,6 +165,7 @@ let create
   in
   let operator_features =
     [ Agent_protocol.Recovery_query.Features.windows, Option.is_some seed_factory
+    ; Agent_protocol.Recovery_history_request.feature, Option.is_some seed_factory
     ; Agent_protocol.Goal_query.Features.inspect, Option.is_some goal_read
     ; Agent_protocol.Goal_control.Features.control, Option.is_some goal_operator
     ; Agent_protocol.Recurrence_query.Features.inspect, Option.is_some recurrence_read
@@ -511,6 +512,7 @@ let idempotency = function
      general command journal cannot authorize their replay or fabricate absence. *)
   | Agent_protocol.Command.Recovery_enable _
   | Recovery_windows _
+  | Recovery_history _
   | Goal_query _
   | Goal_control _
   | Recurrence_query _
@@ -3044,6 +3046,7 @@ let prepared_writer_attachment command =
   | Session_run_start _
   | Recovery_enable _
   | Recovery_windows _
+  | Recovery_history _
   | Goal_query _
   | Goal_control _
   | Recurrence_query _
@@ -3225,6 +3228,11 @@ let dispatch_authorized
     let%bind service = recovery_window_operator t context actor in
     let%map page = Recovery_window_operator.list service ~on_release request in
     Agent_protocol.Method_result.Recovery_windows page
+  | Recovery_history request ->
+    let open Result.Let_syntax in
+    let%bind service = recovery_window_operator t context actor in
+    let%map page = Recovery_window_operator.query service ~on_release request in
+    Agent_protocol.Method_result.Recovery_history page
   | Goal_query request ->
     let open Result.Let_syntax in
     let%bind read =
@@ -3426,6 +3434,7 @@ let command_session_id = function
     Some (Agent_protocol.Session_ref.session_id request.session)
   | Recovery_enable request -> Some (Agent_protocol.Session_ref.session_id request.session)
   | Recovery_windows request -> Some (Agent_protocol.Session_ref.session_id request.session)
+  | Recovery_history request -> Some (Agent_protocol.Session_ref.session_id request.session)
   | Goal_query request -> Some (Agent_protocol.Session_ref.session_id request.session)
   | Goal_control request ->
     Some
@@ -3627,6 +3636,7 @@ let receipt_summary ~session_id result =
   | Ingress_submit _
   | Recovery_enable _
   | Recovery_windows _
+  | Recovery_history _
   | Goal_query _
   | Goal_control _
   | Recurrence_query _
@@ -4203,7 +4213,7 @@ let handle t ?actor ?(on_release = ignore) ~context ~inference_budget command =
     in
     let operator =
       match command with
-      | Recovery_enable _ | Recovery_windows _ -> Some "context recovery"
+      | Recovery_enable _ | Recovery_windows _ | Recovery_history _ -> Some "context recovery"
       | Goal_query _ | Goal_control _ -> Some "Goal"
       | Recurrence_query _ | Recurrence_control _ -> Some "Recurrence"
       | _ -> None
@@ -4214,7 +4224,7 @@ let handle t ?actor ?(on_release = ignore) ~context ~inference_budget command =
       Error (error Permission_denied (name ^ " authority expired or was revoked"))
     | Ok _, Ok _, Some _ ->
       (match command, t.recurrence_operator with
-       | (Recovery_enable _ | Recovery_windows _), _ ->
+       | (Recovery_enable _ | Recovery_windows _ | Recovery_history _), _ ->
          let%bind check = Result.of_option !release
            ~error:(error Permission_denied "missing recovery response authority") in
          let%bind () = check () in

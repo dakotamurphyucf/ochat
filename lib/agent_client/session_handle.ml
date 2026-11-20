@@ -66,6 +66,7 @@ let initialize connection ~implementation_name ~implementation_version =
     ~features:
       (Agent_protocol.Inference_query.Features.all
        @ [ Agent_protocol.Recovery_query.Features.windows
+         ; Agent_protocol.Recovery_history_request.feature
          ; Agent_protocol.Goal_query.Features.inspect
          ; Agent_protocol.Goal_control.Features.control
          ; Agent_protocol.Recurrence_query.Features.inspect

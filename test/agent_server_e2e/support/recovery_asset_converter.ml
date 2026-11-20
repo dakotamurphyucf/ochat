@@ -99,7 +99,7 @@ let expect_error error = function
 
 let image = Base64.decode_exn "R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=="
 
-let check_history_query factory entry ~attachment_id ~authenticate scope =
+let check_history_query factory entry ~attachment_id ~authenticate ~typed ~observer scope =
   let module History = Agent_server.Session_factory.Recovery_history in
   let module Query = A.Recovery_history_query in
   let module Access = Actor.Recovery_history_access in
@@ -128,6 +128,30 @@ let check_history_query factory entry ~attachment_id ~authenticate scope =
     |> protocol_ok
   in
   let selected = query "history page fixture" in
+  let wire ?cursor action =
+    let page = P.Page.Request.create ~limit:1 ?cursor () |> protocol_ok in
+    P.Recovery_history_request.create ~session:(P.Recovery_window.Scope.session scope)
+      ~window:scope ~family:Canonical ~page action |> protocol_ok
+  in
+  let remote ?cursor term =
+    Agent_client.Recovery_windows.query typed
+      (wire ?cursor (Search (P.Search_term.create term |> protocol_ok)))
+  in
+  let remote_first = remote "history page fixture" |> protocol_ok in
+  let match_text (page : P.Recovery_history_page.t) =
+    match page.rows with
+    | [ { projection = Match hit; _ } ] -> P.Search_snippet.text hit.snippet
+    | _ -> failwith "unexpected recovery search projection"
+  in
+  let remote_cursor = Option.value_exn remote_first.next in
+  require (String.equal first (match_text remote_first)) "wrong remote search result";
+  (match Http_driver.request_without_history observer (Recovery_history (wire List_items)) with
+   | Error failure when P.Error.equal_code failure.code Method_not_found -> ()
+   | _ -> failwith "window negotiation granted history query access");
+  (match (Agent_client.Recovery_windows.query typed (wire List_items) |> protocol_ok).rows with
+   | [ { projection = Text_parts _; _ } ] -> ()
+   | _ -> failwith "list did not return safe part metadata");
+
   let run ?cursor ?on_release ?authorize_view actor query =
     History.query factory ~access:(Access.operator actor) ?authorize_view ?cursor ?on_release query
   in
@@ -165,6 +189,7 @@ let check_history_query factory entry ~attachment_id ~authenticate scope =
   let foreign =
     Operator_authorization.trusted_local (Operator_authorization.principal actor)
   in
+  expect Cursor_expired (remote ~cursor:remote_cursor "different literal");
   expect Cursor_expired (run ~cursor foreign selected);
   expect Cursor_expired (run ~cursor actor (query "irrelevant"));
   expect
@@ -196,6 +221,9 @@ let check_history_query factory entry ~attachment_id ~authenticate scope =
   expect Cursor_expired (run ~cursor:tampered actor selected);
   ignore (append 2 : string);
   require (check ()) "an ordinary append invalidated released history";
+  let remote_next = remote ~cursor:remote_cursor "history page fixture" |> protocol_ok in
+  require (String.equal second (match_text remote_next) && Option.is_none remote_next.next)
+    "remote continuation drifted across append";
   let resumed = run ~cursor (authenticate ()) selected |> protocol_ok in
   require
     (List.equal String.equal (snippets resumed) [ second ]
@@ -546,14 +574,14 @@ let run env environment =
     require
       (Option.is_none remote_next.next_cursor && List.length remote_next.items = 1)
       "remote continuation missed successor";
-    Http_driver.shutdown observer;
     let next = windows ~cursor (authenticate ()) |> protocol_ok in
     require
       (Option.is_none next.next_cursor
        && List.length next.items = 1
        && A.Recovery_window_record.equal_state (List.hd_exn next.items).state Open)
       "a new authentication of the same credential must resume after an append";
-    check_history_query factory entry ~attachment_id ~authenticate (List.hd_exn next.items).scope;
+    check_history_query factory entry ~attachment_id ~authenticate ~typed ~observer (List.hd_exn next.items).scope;
+    Http_driver.shutdown observer;
     let archived = state entry in
     require
       (Option.is_none
@@ -600,8 +628,7 @@ let run env environment =
        |> protocol_ok
        : P.Initialize.Response.t);
     let id = P.Envelope.Request_id.of_json (`String "held-window-page") |> protocol_ok in
-    let command = P.Command.Recovery_windows request in
-    let held =
+    let hold command =
       D.dispatch_output
         dispatcher
         ~actor:proof
@@ -614,16 +641,21 @@ let run env environment =
       |> protocol_ok
       |> Option.value_exn
     in
-    require
-      (D.Output.requires_check held)
-      "queued recovery response lost its disclosure guard";
+    let query =
+      P.Recovery_history_request.create ~session:owner ~window:scope ~family:Canonical
+        ~page:request.page List_items |> protocol_ok
+    in
+    let held = [ hold (P.Command.Recovery_windows request); hold (Recovery_history query) ] in
+    List.iter held ~f:(fun output ->
+      require (D.Output.requires_check output) "queued recovery output lost its release guard");
     Actor.expire_recovery_window entry.actor ~actor:proof ~attachment_id ~authorize scope
     |> protocol_ok;
-    (match D.Output.materialize held with
-     | Response { id = actual; outcome = Error failure }
-       when P.Envelope.Request_id.compare id actual = 0
-            && P.Error.equal_code failure.code Permission_denied -> ()
-     | _ -> failwith "queued response disclosed an expired window");
+    List.iter held ~f:(fun output ->
+      match D.Output.materialize output with
+      | Response { id = actual; outcome = Error failure }
+        when P.Envelope.Request_id.compare id actual = 0
+             && P.Error.equal_code failure.code Permission_denied -> ()
+      | _ -> failwith "queued response disclosed an expired window");
     D.close_connection_and_wait dispatcher context |> protocol_ok;
     expect_expired (windows ~cursor (authenticate ()));
     expect_error Expired (read retained ~part:0);

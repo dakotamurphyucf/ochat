@@ -685,6 +685,7 @@ let architecture_methods =
   ; "session.runs"
   ; "session.run"
   ; "session.recovery.enable"
+  ; "session.recovery.query"
   ; "session.recovery.windows"
   ; "session.goals"
   ; "session.goal"
@@ -762,7 +763,7 @@ let%expect_test "every architecture method has request and result dispatch" =
           (List.equal String.equal expected (normalize Method_result.supported_methods)
            : bool)
       }];
-  [%expect {| ((method_count 120) (requests true) (results true)) |}]
+  [%expect {| ((method_count 121) (requests true) (results true)) |}]
 ;;
 
 let%expect_test "history deletion requires stable ID, revision and idempotency" =
@@ -1464,4 +1465,33 @@ let%expect_test "Schedule original provenance is immutable and wire-versioned" =
   assert (Result.is_error (Schedule.validate forged));
   print_endline "legacy absence, positive v4, strict current child and immutable origin";
   [%expect {| legacy absence, positive v4, strict current child and immutable origin |}]
+;;
+
+let%test_unit "recovery pages have a cursor exactly when another page can be examined" =
+  let module R = Recovery_history_page in
+  let token = Page.Cursor.of_string "opaque-test-cursor" |> ok_or_fail |> Page.Cursor.to_json in
+  List.iter
+    [ "complete", false
+    ; "source_unavailable", false
+    ; "row_limit", true
+    ; "position_limit", true
+    ; "work_limit", true
+    ; "reply_limit", true
+    ]
+    ~f:(fun (coverage, needs_cursor) ->
+      List.iter [ true; false ] ~f:(fun has_cursor ->
+        let json =
+          `Object
+            [ "rows", `Array []
+            ; "next", (if has_cursor then token else `Null)
+            ; "coverage", `String coverage
+            ]
+        in
+        match R.of_json json with
+        | Ok page ->
+          assert (Bool.equal needs_cursor has_cursor);
+          assert (Document_schema.Json.equal json (R.to_json page))
+        | Error e ->
+          assert (not (Bool.equal needs_cursor has_cursor));
+          assert (Error.equal_code e.code Invalid_request)))
 ;;

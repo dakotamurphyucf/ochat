@@ -45,31 +45,23 @@ let effective ~origin ~digest =
   else Error (Protocol_error.invalid_request "negative effective history coordinate")
 ;;
 
-let decimal n = `String (Int64.to_string n)
-
-let of_decimal json =
-  let open Result.Let_syntax in
-  let%bind encoded = J.string json in
-  match Int64.of_string_opt encoded with
-  | Some n when Int64.(n >= 0L) && String.equal encoded (Int64.to_string n) -> Ok n
-  | Some _ | None ->
-    Error (Protocol_error.invalid_request "invalid decimal recovery revision")
-;;
-
 let origin_to_json = function
   | Unchanged rev -> `Object [ "kind", `String "unchanged"; "base", Revision.to_json rev ]
   | Captured { session_revision } ->
-    `Object [ "kind", `String "captured"; "session_revision", decimal session_revision ]
+    `Object
+      [ "kind", `String "captured"
+      ; "session_revision", Recovery_wire.revision_to_json session_revision
+      ]
   | Inserted { incarnation; change_id } ->
     `Object
       [ "kind", `String "inserted"
-      ; "incarnation", decimal incarnation
+      ; "incarnation", Recovery_wire.revision_to_json incarnation
       ; "change_id", `Number (Int.to_string change_id)
       ]
   | Replaced { incarnation; change_id; base } ->
     `Object
       [ "kind", `String "replaced"
-      ; "incarnation", decimal incarnation
+      ; "incarnation", Recovery_wire.revision_to_json incarnation
       ; "change_id", `Number (Int.to_string change_id)
       ; "base", Revision.to_json base
       ]
@@ -80,7 +72,9 @@ let origin_of_json json =
   let%bind fields = J.fields json in
   let%bind kind = J.required_as fields "kind" J.string in
   let change () =
-    let%bind incarnation = J.required_as fields "incarnation" of_decimal in
+    let%bind incarnation =
+      J.required_as fields "incarnation" Recovery_wire.revision_of_json
+    in
     let%map change_id =
       J.required_as fields "change_id" (J.bounded_int ~min:0 ~max:Int.max_value)
     in
@@ -93,7 +87,9 @@ let origin_of_json json =
     Unchanged base
   | "captured" ->
     let%bind () = Extension_codec.closed fields [ "kind"; "session_revision" ] in
-    let%map session_revision = J.required_as fields "session_revision" of_decimal in
+    let%map session_revision =
+      J.required_as fields "session_revision" Recovery_wire.revision_of_json
+    in
     Captured { session_revision }
   | "inserted" ->
     let%bind () = Extension_codec.closed fields [ "kind"; "incarnation"; "change_id" ] in

@@ -6,7 +6,7 @@ module P = Agent_protocol
 module Text = Recovery_item_text
 module Source = Recovery_source_reader
 
-type family =
+type family = P.Recovery_history_request.family =
   | Canonical
   | Effective
 
@@ -14,7 +14,7 @@ type scope =
   | Current_generation
   | Window of P.Recovery_window.Scope.t
 
-type action =
+type action = P.Recovery_history_request.action =
   | List_items
   | Search of P.Search_term.t
 
@@ -34,6 +34,9 @@ val create
   -> ?max_reply_bytes:int
   -> action
   -> (t, P.Error.t) Result.t
+
+(** Shares the validated request parameters without bringing a cursor into the query digest. *)
+val of_request : P.Recovery_history_request.t -> (t, P.Error.t) Result.t
 
 val source : t -> P.Session_ref.t
 val family : t -> family

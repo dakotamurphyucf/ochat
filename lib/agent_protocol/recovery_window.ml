@@ -1,4 +1,6 @@
 open! Core
+
+let max_members = 8192
 module J = Json_codec
 module Version = Recovery_item_version
 

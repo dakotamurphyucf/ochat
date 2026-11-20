@@ -28,3 +28,9 @@ val list
   -> ( Agent_protocol.Recovery_query.Summary.t Agent_protocol.Page.t
        , Agent_protocol.Error.t )
        result
+
+val query
+  :  t
+  -> on_release:(release -> unit)
+  -> Agent_protocol.Recovery_history_request.t
+  -> (Agent_protocol.Recovery_history_page.t, Agent_protocol.Error.t) result

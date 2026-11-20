@@ -13,7 +13,7 @@ module Source = Recovery_source_reader
 module Work = Recovery_source_work
 module Digest = Chatml_source.Digest
 
-type family =
+type family = P.Recovery_history_request.family =
   | Canonical
   | Effective
 
@@ -206,28 +206,21 @@ let physical_position work record ~request_ordinal =
 
 let attempt_evidence attempt =
   let module A = Recovery_effective_attempt in
-  let phase =
+  let module E = P.Recovery_attempt_evidence in
+  let phase : E.phase =
     match A.phase attempt with
-    | Allocated -> [ "phase", `String "allocated" ]
-    | Running -> [ "phase", `String "running" ]
+    | Allocated -> Allocated
+    | Running -> Running
     | Settled { origin; delivery } ->
-      let origin =
-        match origin with
-        | Returned -> "returned"
-        | Interrupted -> "interrupted"
-      in
-      let delivery =
+      let delivery : E.delivery =
         match delivery with
-        | Definitely_not_submitted -> "definitely_not_submitted"
-        | Possibly_submitted -> "possibly_submitted"
-        | Response_started -> "response_started"
+        | Definitely_not_submitted -> Definitely_not_submitted
+        | Possibly_submitted -> Possibly_submitted
+        | Response_started -> Response_started
       in
-      [ "phase", `String origin; "delivery", `String delivery ]
+      (match origin with Returned -> Returned delivery | Interrupted -> Interrupted delivery)
   in
-  `Object
-    (("ordinal", X.int64_json (A.ordinal attempt))
-     :: ("tracked", X.bool_json (A.tracked attempt))
-     :: phase)
+  E.to_json { ordinal = A.ordinal attempt; tracked = A.tracked attempt; phase }
 ;;
 
 let effective_incarnation (state : Session_state.t) =

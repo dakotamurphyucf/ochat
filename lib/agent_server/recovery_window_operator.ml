@@ -9,6 +9,7 @@ type t =
   { factory : Session_factory.t
   ; context : Connection_context.t
   ; actor : Operator_authorization.t
+  ; negotiation : Connection_context.Authoring_negotiation.t
   ; registry : Session_registry.t
   ; server_id : P.Id.Server.t
   ; now : unit -> P.Timestamp.t
@@ -20,18 +21,28 @@ let error code message = P.Error.create code ~message ~retryable:false ()
 
 let create factory ~context ~actor ~registry ~server_id ~now =
   match factory, Connection_context.authoring_negotiation context with
-  | Some factory, Some lease
-    when Connection_context.Authoring_negotiation.selected lease Q.Features.windows ->
+  | Some factory, Some lease ->
     let actor =
       Operator_authorization.restrict actor ~is_current:(fun () ->
         Connection_context.current_authoring_negotiation context lease)
     in
-    Ok { factory; context; actor; registry; server_id; now }
+    Ok { factory; context; actor; negotiation = lease; registry; server_id; now }
   | _ -> Error (error Method_not_found "this connection has no recovery window feature")
+;;
+
+let require_feature t feature =
+  if
+    Connection_context.Authoring_negotiation.selected t.negotiation feature
+    && Operator_authorization.is_current t.actor
+  then Ok ()
+  else
+    Error
+      (error Method_not_found "this connection has no current requested recovery feature")
 ;;
 
 let enable t (entry : Session_registry.entry) ~on_release (request : Q.Enable.t) =
   let open Result.Let_syntax in
+  let%bind () = require_feature t Q.Features.windows in
   let principal = Operator_authorization.principal t.actor in
   let session_id = P.Session_ref.session_id request.session in
   let attachment_id = request.attachment_id in
@@ -80,6 +91,7 @@ let enable t (entry : Session_registry.entry) ~on_release (request : Q.Enable.t)
 ;;
 
 let list t ~on_release (request : Q.List_windows.t) =
+  let%bind.Result () = require_feature t Q.Features.windows in
   Session_factory.Recovery_history.list_windows
     t.factory
     ~on_release
@@ -88,4 +100,25 @@ let list t ~on_release (request : Q.List_windows.t) =
     ?generation:request.generation
     ?state:request.state
     request.page
+;;
+
+let query t ~on_release (request : P.Recovery_history_request.t) =
+  let open Result.Let_syntax in
+  let%bind () = require_feature t P.Recovery_history_request.feature in
+  let%bind query = A.Recovery_history_query.of_request request in
+  let%bind json =
+    Session_factory.Recovery_history.query
+      t.factory
+      ~access:(Actor.Recovery_history_access.operator t.actor)
+      ?cursor:request.page.cursor
+      ~on_release:(fun check ->
+        on_release (fun () ->
+          if check ()
+          then Ok ()
+          else Error (error Permission_denied "recovery history authority expired")))
+      query
+  in
+  let%bind page = P.Recovery_history_page.of_json json in
+  let%map () = P.Recovery_history_page.validate page ~request in
+  page
 ;;

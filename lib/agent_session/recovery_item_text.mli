@@ -13,13 +13,13 @@ type selection =
       ; source_revision : int64
       }
 
-type view =
+type view = P.Recovery_history_request.view =
   | Ordinary
   | Selected_developer
   | Selected_tool_result
 [@@deriving equal]
 
-type role =
+type role = P.Recovery_history_request.role =
   | User
   | Assistant
   | Developer

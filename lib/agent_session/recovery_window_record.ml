@@ -11,7 +11,7 @@ module Source = Recovery_window_location.Source
 module Member = Recovery_window_location.Member
 
 let invalid message = Error (P.Error.invalid_request message)
-let max_members = 8192
+let max_members = Agent_protocol.Recovery_window.max_members
 
 type origin =
   | Root

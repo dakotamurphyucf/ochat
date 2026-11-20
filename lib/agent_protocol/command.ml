@@ -33,6 +33,7 @@ type t =
   | Instructions of (Instruction_control.Request.t[@sexp.opaque])
   | Recovery_enable of (Recovery_query.Enable.t[@sexp.opaque])
   | Recovery_windows of (Recovery_query.List_windows.t[@sexp.opaque])
+  | Recovery_history of (Recovery_history_request.t[@sexp.opaque])
   | Goal_query of (Goal_query.Request.t[@sexp.opaque])
   | Goal_control of (Goal_control.Request.t[@sexp.opaque])
   | Recurrence_query of (Recurrence_query.Request.t[@sexp.opaque])
@@ -125,6 +126,7 @@ let method_name = function
   | Instructions request -> Instruction_control.Request.method_name request
   | Recovery_enable _ -> Recovery_query.Enable.method_name
   | Recovery_windows _ -> Recovery_query.List_windows.method_name
+  | Recovery_history _ -> Recovery_history_request.method_name
   | Goal_query request -> Goal_query.Request.method_name request
   | Goal_control request -> Goal_control.Request.method_name request
   | Recurrence_query request -> Recurrence_query.Request.method_name request
@@ -221,6 +223,7 @@ let params = function
   | Instructions request -> Instruction_control.Request.params request
   | Recovery_enable v -> Recovery_query.Enable.to_json v
   | Recovery_windows v -> Recovery_query.List_windows.to_json v
+  | Recovery_history v -> Recovery_history_request.to_json v
   | Goal_query request -> Goal_query.Request.params request
   | Goal_control request -> Goal_control.Request.params request
   | Recurrence_query request -> Recurrence_query.Request.params request
@@ -395,6 +398,7 @@ let decoders =
     , map Session.Cancel_operation_request.of_json (fun x -> Session_cancel_operation x) )
   ; Recovery_query.Enable.method_name, map Recovery_query.Enable.of_json (fun x -> Recovery_enable x)
   ; Recovery_query.List_windows.method_name, map Recovery_query.List_windows.of_json (fun x -> Recovery_windows x)
+  ; Recovery_history_request.method_name, map Recovery_history_request.of_json (fun x -> Recovery_history x)
   ; "session.runs", map Run_query.Request.of_json (fun x -> Session_runs x)
   ; "session.run", map Run_query.Lookup_request.of_json (fun x -> Session_run x)
   ; ( "session.pending_inputs"
