@@ -119,7 +119,14 @@ exists, but its next model request can remain pending. Negotiate
 the owner writer. Use `session.recovery.followup` to inspect the current phase.
 
 ```json
-{"action":"inspect","session":{"server_id":"<server>","session_id":"<session>"},"attachment_id":"<owner attachment>"}
+{
+  "action": "inspect",
+  "session": {
+    "server_id": "<server>",
+    "session_id": "<session>"
+  },
+  "attachment_id": "<owner attachment>"
+}
 ```
 
 The reply contains `phase` and `basis`. Copy the complete returned `basis`
