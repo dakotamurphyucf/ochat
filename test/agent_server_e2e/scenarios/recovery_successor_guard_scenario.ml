@@ -13,7 +13,7 @@ let require = Crash_recovery_fixture.require
 let queued = "Recover the outstanding parser investigation."
 let instruction = "Keep the user's exact queued message."
 
-let config =
+let config ?(input = 1800L) () =
   let module C = Agent_server.Recovery_capacity_configuration in
   C.create
     ~mode:Manual
@@ -25,7 +25,7 @@ let config =
           ; model = "gpt-4.1"
           ; encoder = Openai_responses_v1
           ; total = 16384L
-          ; input = Some 1800L
+          ; input = Some input
           ; output = Some 500L
           ; session_total = Some 7000L
           ; omitted_output_default = Some 60L
@@ -58,7 +58,7 @@ let run env environment =
   Notes.with_fixture
     ~on_preparation:(fun () -> Int.incr preparations)
     ~prompt_xml:source
-    ~recovery_capacity:config
+    ~recovery_capacity:(config ())
     env
     environment
     ~auth

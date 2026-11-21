@@ -496,7 +496,13 @@
       --scenario
       data-integrity
       --case
-      daemon-recovery.successor-hint-guards))))))
+      daemon-recovery.successor-hint-guards)
+     (run
+      %{exe:agent_server_e2e.exe}
+      --scenario
+      data-integrity
+      --case
+      daemon-recovery.selected-successor-sources))))))
 
 (rule
  (alias agent-e2e-pending)

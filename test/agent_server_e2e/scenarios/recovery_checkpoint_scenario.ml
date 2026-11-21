@@ -179,7 +179,7 @@ let write_and_register ?(body = note_body) ?(before_checkpoint = ignore) request
   acknowledgment
 ;;
 
-let require_local_hint input =
+let require_hints input expected =
   let excerpts =
     List.filter_map input ~f:(fun item ->
       Option.bind (Jsonaf.member "content" item) ~f:(function
@@ -193,13 +193,18 @@ let require_local_hint input =
         | _ -> None))
   in
   match excerpts with
-  | [ Some (`String "user"), `Array [ excerpt ] ] ->
+  | [ Some (`String "user"), `Array excerpts ] ->
     require
-      (Document_schema.Json.equal excerpt
-         (`Object [ "source", string "local_note"; "text", string note_body; "more", `False ]))
-      "successor did not receive its exact selected note"
+      (List.equal Document_schema.Json.equal excerpts expected)
+      "successor did not receive its exact ordered selection"
   | _ -> Fixture.fail "expected one untrusted user-priority recovery hint"
 ;;
+
+let excerpt source text =
+  `Object [ "source", string source; "text", string text; "more", `False ]
+;;
+
+let require_local_hint input = require_hints input [ excerpt "local_note" note_body ]
 
 let run env environment =
   let fixture = Fixture.fixture env environment "authored-checkpoint" in

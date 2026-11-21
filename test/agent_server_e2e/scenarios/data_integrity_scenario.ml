@@ -8,6 +8,7 @@ let cases =
   ; "daemon-recovery.converter-adoption", Support.Recovery_asset_converter.run
   ; "daemon-recovery.configured-capacity", Recovery_capacity_scenario.run
   ; "daemon-recovery.successor-hint-guards", Recovery_successor_guard_scenario.run
+  ; "daemon-recovery.selected-successor-sources", Recovery_successor_selection_scenario.run
   ; "daemon-recovery.authored-checkpoint", Recovery_checkpoint_scenario.run
   ; "daemon-recovery.authored-rollover-hooks", Recovery_rollover_hooks_scenario.run
   ; "daemon-recovery.installed-originals", Support.Installed_originals.run
