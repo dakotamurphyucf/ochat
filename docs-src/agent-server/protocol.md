@@ -75,7 +75,7 @@ Use `recovery.windows` for capture and lineage, `recovery.history_query` for
 list/search, `recovery.text_range` or `recovery.asset_read` for retrieval,
 `recovery.rollover_control` for status and requests, and
 `recovery.note_share_control` for source-owner note grants.
-[Window and history operations](operator-contracts.md#local-recovery-windows) ·
+[Window and history operations](operations.md#local-recovery-windows) ·
 [Rollover requests](../development/operator-recovery-rollover.md) ·
 [Sharing a note](../development/recovery-note-shares.md)
 

@@ -3309,6 +3309,9 @@ type kind =
   | Binary
 [@@deriving compare, equal, sexp]
 
+(** A MIME type with two bounded token components, without parameters. *)
+val is_media_type : string -> bool
+
 module Metadata : sig
   type t =
     { id : Id.Blob.t
@@ -3430,6 +3433,14 @@ type t =
   | Session_configuration_get of Session_configuration.Get_request.t
   | Session_configuration_update of Session_configuration.Update_request.t
   | Instructions of (Instruction_control.Request.t[@sexp.opaque])
+  | Recovery_enable of (Recovery_query.Enable.t[@sexp.opaque])
+  | Recovery_windows of (Recovery_query.List_windows.t[@sexp.opaque])
+  | Recovery_history of (Recovery_history_request.t[@sexp.opaque])
+  | Recovery_range of (Recovery_text_range.t[@sexp.opaque])
+  | Recovery_asset_read of (Recovery_asset_read.t[@sexp.opaque])
+  | Recovery_status of (Recovery_rollover_control.Inspect.t[@sexp.opaque])
+  | Recovery_rollover of (Recovery_rollover_control.Request.t[@sexp.opaque])
+  | Recovery_note_shares of (Recovery_note_share_control.Request.t[@sexp.opaque])
   | Goal_query of (Goal_query.Request.t[@sexp.opaque])
   | Goal_control of (Goal_control.Request.t[@sexp.opaque])
   | Recurrence_query of (Recurrence_query.Request.t[@sexp.opaque])
@@ -8478,6 +8489,61 @@ module Continuation : sig
 end
 ```
 
+## history_text
+
+[implementation](../../lib/agent_protocol/history_text.ml) · [interface](../../lib/agent_protocol/history_text.mli)
+
+```ocaml
+(** An admitted readable text part. Its index is its original position in one
+    history item, including any intervening hidden or nontext parts. The
+    caller owns item visibility, revision selection and aggregate budgets. *)
+type t = private
+  { index : int
+  ; text : string
+  }
+
+val max_parts : int
+val max_part_bytes : int
+val default_slice_bytes : int
+val max_slice_bytes : int
+
+(** Admit up to 1 MiB of UTF-8 at an original index in [0, 4096). *)
+val create : index:int -> text:string -> (t, Error.t) result
+
+module Slice : sig
+  type t = private
+    { text : string
+    ; next_offset : int option
+    }
+end
+
+(** Read the half-open byte range in this part. Both endpoints must be scalar
+    boundaries. The default reply budget is 4 KiB and its maximum is 16 KiB.
+    A continuation always advances. A budget too small for the first scalar
+    returns a resource-limit error. Empty ranges at valid boundaries succeed. *)
+val read : ?max_bytes:int -> t -> start:int -> stop:int -> (Slice.t, Error.t) result
+
+module Literal : sig
+  type part := t
+  type t
+
+  val create : Search_term.t -> t
+
+  module Match : sig
+    type t = private
+      { start : int
+      ; stop : int
+      ; snippet : Search_snippet.t
+      }
+  end
+
+  (** First ASCII-insensitive literal match. Coordinates are half-open byte
+      offsets in the original part. The snippet covers the entire match in
+      at most 512 UTF-8 bytes. No concatenation, folding of Unicode or normalization. *)
+  val find : t -> part -> (Match.t option, Error.t) result
+end
+```
+
 ## host_invocation
 
 [implementation](../../lib/agent_protocol/host_invocation.ml) · [interface](../../lib/agent_protocol/host_invocation.mli)
@@ -8631,6 +8697,8 @@ end
 
 module Server : S
 module Session : S
+module Session_incarnation : S
+module Context_window : S
 module Run : S
 module Goal : S
 
@@ -9140,6 +9208,36 @@ module Response : sig
   val to_json : t -> Jsonaf.t
   val of_json : Jsonaf.t -> (t, Error.t) result
 end
+```
+
+## inline_image
+
+[implementation](../../lib/agent_protocol/inline_image.ml) · [interface](../../lib/agent_protocol/inline_image.mli)
+
+```ocaml
+open! Core
+
+(** A bounded local image carried by an admitted neutral image part. Validates
+    canonical base64 and the media signature. This does not parse the image,
+    fetch a URL, or establish who may read the part. *)
+type t
+
+type error =
+  | Unsupported
+  | Invalid_encoding
+  | Media_mismatch
+  | Size_limit
+[@@deriving equal, sexp_of]
+
+(** Inspect only the signature of the supplied local bytes. *)
+val media_type_of_contents : string -> string option
+
+(** Accept PNG, JPEG, GIF and WebP data URLs. Check the decoded byte length
+    before allocating. The caller may select up to 1 MiB per image. *)
+val of_data_uri : string -> max_bytes:int -> (t, error) result
+
+val media_type : t -> string
+val contents : t -> string
 ```
 
 ## instruction_control
@@ -10364,6 +10462,14 @@ type t =
   | Session_configuration_get of Session_configuration.t
   | Session_configuration_update of Session_configuration.t
   | Instructions of (Instruction_control.Result.t[@sexp.opaque])
+  | Recovery_enable of (Recovery_window.Scope.t[@sexp.opaque])
+  | Recovery_windows of (Recovery_query.Summary.t Page.t[@sexp.opaque])
+  | Recovery_history of (Recovery_history_page.t[@sexp.opaque])
+  | Recovery_range of (Recovery_text_range.Reply.t[@sexp.opaque])
+  | Recovery_asset_read of (Recovery_asset_read.Reply.t[@sexp.opaque])
+  | Recovery_status of (Recovery_rollover_control.Status.t[@sexp.opaque])
+  | Recovery_rollover of (Recovery_rollover_control.Receipt.t[@sexp.opaque])
+  | Recovery_note_shares of (Recovery_note_share_control.Response.t[@sexp.opaque])
   | Goal_query of (Goal_query.Result.t[@sexp.opaque])
   | Goal_control of (Goal_control.Result.t[@sexp.opaque])
   | Recurrence_query of (Recurrence_query.Result.t[@sexp.opaque])
@@ -12401,6 +12507,771 @@ val validate : t -> (unit, Protocol_error.t) result
 val to_jsonaf : t -> Jsonaf.t
 val of_jsonaf : Jsonaf.t -> (t, Protocol_error.t) result
 val shape : Document_schema.Shape.t
+```
+
+## recovery_asset_read
+
+[implementation](../../lib/agent_protocol/recovery_asset_read.ml) · [interface](../../lib/agent_protocol/recovery_asset_read.mli)
+
+```ocaml
+(** Read bounded bytes from one exact canonical original. A continuation must
+    pin the SHA-256 returned by the preceding authenticated read. *)
+val method_name : string
+
+val feature : string
+val max_original_bytes : int
+val max_chunk_bytes : int
+
+(** Maximum serialized JSON-RPC success response, including request ID. *)
+val max_envelope_bytes : int
+
+type t = private
+  { citation : Recovery_window.Citation.t
+  ; part : int
+  ; offset : int
+  ; max_bytes : int
+  ; expected_sha256 : string option
+  }
+
+(** [offset] is a zero-based byte offset. End of file is a valid offset.
+    [max_bytes] defaults to 16 KiB and is at most 64 KiB. *)
+val create
+  :  Recovery_window.Citation.t
+  -> part:int
+  -> offset:int
+  -> ?max_bytes:int
+  -> ?expected_sha256:string
+  -> unit
+  -> (t, Protocol_error.t) result
+
+val session : t -> Session_ref.t
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Protocol_error.t) result
+
+module Reply : sig
+  type request := t
+
+  type kind =
+    | Image
+    | Document
+  [@@deriving equal]
+
+  type t = private
+    { citation : Recovery_window.Citation.t
+    ; part : int
+    ; kind : kind
+    ; media_type : string
+    ; byte_length : int
+    ; sha256 : string
+    ; offset : int
+    ; bytes : string
+    ; next_offset : int option
+    }
+
+  (** Project at most one chunk from an already verified complete original.
+      [sha256] is the whole original's lowercase hexadecimal SHA-256. *)
+  val of_verified_original
+    :  request
+    -> kind:kind
+    -> media_type:string
+    -> sha256:string
+    -> string
+    -> (t, Protocol_error.t) result
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Protocol_error.t) result
+  val validate : t -> request:request -> (unit, Protocol_error.t) result
+end
+```
+
+## recovery_attempt_evidence
+
+[implementation](../../lib/agent_protocol/recovery_attempt_evidence.ml) · [interface](../../lib/agent_protocol/recovery_attempt_evidence.mli)
+
+```ocaml
+(** Local observations about one provider attempt attached to a prepared item. *)
+open! Core
+
+type delivery =
+  | Definitely_not_submitted
+  | Possibly_submitted
+  | Response_started
+
+type phase =
+  | Allocated
+  | Running
+  | Returned of delivery
+  | Interrupted of delivery
+
+type t =
+  { ordinal : int64
+  ; tracked : bool
+  ; phase : phase
+  }
+
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Protocol_error.t) result
+```
+
+## recovery_history_page
+
+[implementation](../../lib/agent_protocol/recovery_history_page.ml) · [interface](../../lib/agent_protocol/recovery_history_page.mli)
+
+```ocaml
+(** Closed, bounded projection from an authorized history query. A terminal
+    [Source_unavailable] page records incomplete source coverage. A continuation
+    can accompany an empty page. *)
+open! Core
+
+type projection =
+  | Text_parts of int list
+  | Match of
+      { part : int
+      ; start : int
+      ; stop : int
+      ; snippet : Search_snippet.t
+      }
+
+type row = private
+  { citation : Recovery_window.Citation.t
+  ; preparation_revision : int64 option
+  ; ordinal : int
+  ; role : Recovery_history_request.role
+  ; attempt : Recovery_attempt_evidence.t option
+  ; projection : projection
+  }
+
+type coverage =
+  | Complete
+  | Source_unavailable
+  | Row_limit
+  | Position_limit
+  | Work_limit
+  | Reply_limit
+
+type t = private
+  { rows : row list
+  ; next : Page.Cursor.t option
+  ; coverage : coverage
+  }
+
+val of_json : Jsonaf.t -> (t, Protocol_error.t) result
+val to_json : t -> Jsonaf.t
+val validate : t -> request:Recovery_history_request.t -> (unit, Protocol_error.t) result
+```
+
+## recovery_history_request
+
+[implementation](../../lib/agent_protocol/recovery_history_request.ml) · [interface](../../lib/agent_protocol/recovery_history_request.mli)
+
+```ocaml
+(** A bounded query of one session's local canonical or prepared history.
+    Omitting the window selects the current generation for a search. Listing
+    always selects an exact window. A cursor conveys no authorization. *)
+open! Core
+
+val method_name : string
+val feature : string
+
+type family =
+  | Canonical
+  | Effective
+[@@deriving equal]
+
+type view =
+  | Ordinary
+  | Selected_developer
+  | Selected_tool_result
+[@@deriving equal]
+
+type role =
+  | User
+  | Assistant
+  | Developer
+  | Tool_result
+[@@deriving equal, sexp_of]
+
+type action =
+  | List_items
+  | Search of Search_term.t
+
+val role_name : role -> string
+val view_name : view -> string
+val role_of_json : Jsonaf.t -> (role, Protocol_error.t) result
+
+type t = private
+  { session : Session_ref.t
+  ; window : Recovery_window.Scope.t option
+  ; family : family
+  ; view : view
+  ; role : role option
+  ; ordinals : (int * int) option
+  ; page : Page.Request.t
+  ; max_reply_bytes : int
+  ; action : action
+  }
+
+val create
+  :  session:Session_ref.t
+  -> ?window:Recovery_window.Scope.t
+  -> family:family
+  -> ?view:view
+  -> ?role:role
+  -> ?ordinals:int * int
+  -> page:Page.Request.t
+  -> ?max_reply_bytes:int
+  -> action
+  -> (t, Protocol_error.t) result
+
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Protocol_error.t) result
+```
+
+## recovery_item_version
+
+[implementation](../../lib/agent_protocol/recovery_item_version.ml) · [interface](../../lib/agent_protocol/recovery_item_version.mli)
+
+```ocaml
+open! Core
+
+(** A canonical version names an occurrence revision. An effective version also
+    identifies how its immutable neutral projection was obtained. Its digest
+    covers that member's projection; it does not attest to provider submission. *)
+type origin =
+  | Unchanged of History.Content_revision.t
+  | Inserted of
+      { incarnation : int64
+      ; change_id : int
+      }
+  | Replaced of
+      { incarnation : int64
+      ; change_id : int
+      ; base : History.Content_revision.t
+      }
+  | Captured of { session_revision : int64 }
+[@@deriving compare, equal, sexp_of]
+
+type t = private
+  | Canonical of History.Content_revision.t
+  | Effective of
+      { origin : origin
+      ; digest : Chatml_source.Digest.t
+      }
+[@@deriving compare, equal, sexp_of]
+
+val canonical : History.Content_revision.t -> t
+
+(** [incarnation] is the committed session revision establishing the current
+    overlay namespace. A legacy projection lacking change provenance must use
+    [Captured] with its exact source revision. *)
+val effective
+  :  origin:origin
+  -> digest:Chatml_source.Digest.t
+  -> (t, Protocol_error.t) result
+
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Protocol_error.t) result
+```
+
+## recovery_note_share_control
+
+[implementation](../../lib/agent_protocol/recovery_note_share_control.ml) · [interface](../../lib/agent_protocol/recovery_note_share_control.mli)
+
+```ocaml
+(** Exact, metadata-only management of source-owned recovery note shares. *)
+open! Core
+
+val feature : string
+val max_envelope_bytes : int
+
+module Path : sig
+  type t [@@deriving compare, equal, sexp_of]
+
+  val of_string : string -> (t, Protocol_error.t) result
+  val to_string : t -> string
+end
+
+module Selection : sig
+  type t = private
+    { id : int64
+    ; revision : int64
+    }
+
+  val create : id:int64 -> revision:int64 -> (t, Protocol_error.t) result
+end
+
+(** The opaque route accepted by the selected recipient tool. The route
+    carries no grant authority. Disclose it only to the intended recipient. *)
+module Reference : sig
+  type t [@@deriving equal]
+
+  val create
+    :  Session_ref.t
+    -> nonce:Id.Session_incarnation.t
+    -> id:int64
+    -> (t, Protocol_error.t) result
+
+  val source : t -> Session_ref.t
+  val id : t -> int64
+  val matches : t -> source:Session_ref.t -> nonce:Id.Session_incarnation.t -> bool
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Protocol_error.t) result
+end
+
+module Source : sig
+  type t = private
+    { session : Session_ref.t
+    ; attachment_id : Id.Attachment.t
+    ; expected_generation : int
+    }
+
+  val create
+    :  Session_ref.t
+    -> attachment_id:Id.Attachment.t
+    -> expected_generation:int
+    -> (t, Protocol_error.t) result
+end
+
+module Basis : sig
+  type t = private
+    { share_revision : int64
+    ; catalog_revision : int64
+    }
+
+  val create
+    :  share_revision:int64
+    -> catalog_revision:int64
+    -> (t, Protocol_error.t) result
+end
+
+module Request : sig
+  type t =
+    | Inspect of
+        { source : Source.t
+        ; path : Path.t option
+        }
+    | Share of
+        { source : Source.t
+        ; expected : Basis.t
+        ; selection : Selection.t
+        ; recipient : Session_ref.t
+        ; expires_at : Timestamp.t
+        ; key : Idempotency_key.t
+        }
+    | Revoke of
+        { source : Source.t
+        ; expected_share_revision : int64
+        ; reference : Reference.t
+        ; key : Idempotency_key.t
+        }
+
+  val source : t -> Source.t
+  val methods : string list
+  val method_name : t -> string
+  val to_json : t -> Jsonaf.t
+  val of_method_and_params : method_:string -> Jsonaf.t -> (t, Protocol_error.t) result
+end
+
+module Metadata : sig
+  type t =
+    { basis : Basis.t
+    ; selection : Selection.t option
+    }
+end
+
+module Receipt : sig
+  type t = private
+    { reference : Reference.t
+    ; share_revision : int64
+    }
+
+  val create : Reference.t -> share_revision:int64 -> (t, Protocol_error.t) result
+end
+
+module Response : sig
+  type t =
+    | Inspected of Metadata.t
+    | Shared of Receipt.t
+    | Revoked of Receipt.t
+
+  val method_name : t -> string
+  val to_json : t -> Jsonaf.t
+  val of_method_and_json : method_:string -> Jsonaf.t -> (t, Protocol_error.t) result
+
+  (** Bind the result to the original request. Retried receipts can describe
+      a historical revision even after the current ledger has advanced. *)
+  val validate : t -> request:Request.t -> (unit, Protocol_error.t) result
+end
+```
+
+## recovery_query
+
+[implementation](../../lib/agent_protocol/recovery_query.ml) · [interface](../../lib/agent_protocol/recovery_query.mli)
+
+```ocaml
+(** Host-local recovery activation and lineage inspection. Session references
+    always include a server. A continuation grants no permission. *)
+val max_page_size : int
+
+val max_page_bytes : int
+
+module Features : sig
+  val windows : string
+end
+
+module State : sig
+  type t =
+    | Open
+    | Sealed
+    | Expired
+  [@@deriving equal, sexp_of]
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+module Summary : sig
+  type t =
+    { scope : Recovery_window.Scope.t
+    ; state : State.t
+    }
+  [@@deriving sexp_of]
+
+  val page_to_json : t Page.t -> Jsonaf.t
+  val page_of_json : Jsonaf.t -> (t Page.t, Error.t) result
+end
+
+module Enable : sig
+  val method_name : string
+
+  type t =
+    { session : Session_ref.t
+    ; attachment_id : Id.Attachment.t
+    ; expected_generation : int
+    }
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+module List_windows : sig
+  val method_name : string
+
+  type t =
+    { session : Session_ref.t
+    ; generation : int option
+    ; state : State.t option
+    ; page : Page.Request.t
+    }
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+```
+
+## recovery_rollover_control
+
+[implementation](../../lib/agent_protocol/recovery_rollover_control.ml) · [interface](../../lib/agent_protocol/recovery_rollover_control.mli)
+
+```ocaml
+(** Host-local status and exact-cut publication through the owning writer. *)
+open! Core
+
+val feature : string
+val max_envelope_bytes : int
+
+module Basis : sig
+  type t = private
+    { scope : Recovery_window.Scope.t
+    ; revision : int64
+    }
+  [@@deriving equal, sexp_of]
+
+  val create : Recovery_window.Scope.t -> revision:int64 -> (t, Protocol_error.t) result
+end
+
+module Inspect : sig
+  val method_name : string
+
+  type t =
+    { session : Session_ref.t
+    ; attachment_id : Id.Attachment.t option
+    ; key : Idempotency_key.t option
+    }
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Protocol_error.t) result
+end
+
+module Request : sig
+  val method_name : string
+
+  type t =
+    { expected : Basis.t
+    ; attachment_id : Id.Attachment.t
+    ; key : Idempotency_key.t
+    ; force : bool
+    }
+
+  val session : t -> Session_ref.t
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Protocol_error.t) result
+end
+
+module Receipt : sig
+  type failure =
+    | Basis_changed
+    | Cancelled
+    | Checkpoint_required
+    | Hook_vetoed
+    | Hook_failed
+  [@@deriving equal, sexp_of]
+
+  type quality =
+    | Checkpointed
+    | Archive_only_missing_checkpoint
+    | Archive_only_unavailable_checkpoint
+  [@@deriving equal, sexp_of]
+
+  type outcome =
+    | Pending
+    | Committed of
+        { successor : Recovery_window.Scope.t
+        ; cut_revision : int64
+        ; quality : quality
+        }
+    | Failed of failure
+  [@@deriving equal, sexp_of]
+
+  type t = private
+    { expected : Basis.t
+    ; outcome : outcome
+    }
+  [@@deriving equal, sexp_of]
+
+  val create : Basis.t -> outcome -> (t, Protocol_error.t) result
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Protocol_error.t) result
+  val validate : t -> request:Request.t -> (unit, Protocol_error.t) result
+end
+
+module Capacity : sig
+  type target = private
+    { profile : string
+    ; model : string
+    ; configuration_revision : int64
+    }
+  [@@deriving equal, sexp_of]
+
+  val target
+    :  profile:string
+    -> model:string
+    -> configuration_revision:int64
+    -> (target, Protocol_error.t) result
+
+  type unavailable =
+    | Disabled
+    | Awaiting_preparation
+    | Stale_preparation
+    | Evidence_unavailable
+  [@@deriving equal, sexp_of]
+
+  type freshness = Session_configuration.phase =
+    | Preparing
+    | Effective
+    | Retained
+  [@@deriving equal, sexp_of]
+
+  type evidence =
+    | Measured
+    | Estimated
+  [@@deriving equal, sexp_of]
+
+  type remaining =
+    | Available of int64
+    | Exceeded_by of int64
+    | Excess_out_of_range
+  [@@deriving equal, sexp_of]
+
+  type t =
+    | Unknown of
+        { reason : unavailable
+        ; target : target option
+        }
+    | Observed of
+        { target : target
+        ; freshness : freshness
+        ; remaining : (evidence * remaining) option
+        }
+  [@@deriving equal, sexp_of]
+end
+
+module Status : sig
+  type actions =
+    { rollover : bool
+    ; force : bool
+    }
+  [@@deriving equal, sexp_of]
+
+  type view =
+    | Unavailable
+    | Available of
+        { current : Basis.t
+        ; previous : Recovery_window.Scope.t option
+        ; capacity : Capacity.t
+        ; receipt : Receipt.t option
+        ; actions : actions
+        }
+  [@@deriving equal, sexp_of]
+
+  type t = private
+    { session : Session_ref.t
+    ; view : view
+    }
+  [@@deriving equal, sexp_of]
+
+  val create : Session_ref.t -> view -> (t, Protocol_error.t) result
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Protocol_error.t) result
+  val validate : t -> request:Inspect.t -> (unit, Protocol_error.t) result
+end
+```
+
+## recovery_text_range
+
+[implementation](../../lib/agent_protocol/recovery_text_range.ml) · [interface](../../lib/agent_protocol/recovery_text_range.mli)
+
+```ocaml
+(** Read one ordinary user or assistant text part from an exact recovery
+    occurrence. Offsets count UTF-8 bytes in the original part. *)
+val method_name : string
+
+val feature : string
+
+type t = private
+  { citation : Recovery_window.Citation.t
+  ; preparation_revision : int64 option
+  ; part : int
+  ; start : int
+  ; stop : int
+  ; max_bytes : int
+  }
+
+(** Effective citations require their original nonnegative preparation revision.
+    The half-open range is bounded by the maximum admitted text part size. *)
+val create
+  :  Recovery_window.Citation.t
+  -> ?preparation_revision:int64
+  -> part:int
+  -> start:int
+  -> stop:int
+  -> ?max_bytes:int
+  -> unit
+  -> (t, Protocol_error.t) result
+
+val session : t -> Session_ref.t
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Protocol_error.t) result
+
+module Reply : sig
+  type request := t
+
+  type t = private
+    { text : string
+    ; next_offset : int option
+    }
+
+  val of_slice : History_text.Slice.t -> t
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Protocol_error.t) result
+
+  (** Require the bytes to reach either the requested stop or the exact next
+      offset. A truncated response must advance within its selected range. *)
+  val validate : t -> request:request -> (unit, Protocol_error.t) result
+end
+```
+
+## recovery_window
+
+[implementation](../../lib/agent_protocol/recovery_window.ml) · [interface](../../lib/agent_protocol/recovery_window.mli)
+
+```ocaml
+open! Core
+
+(** Maximum retained source positions across a window ledger. *)
+val max_members : int
+
+(** Host-qualified identity. [generation] identifies the admitted source lifetime;
+    the opaque window ID remains independent of session and storage revisions. *)
+module Scope : sig
+  type t [@@deriving compare, equal, sexp_of]
+
+  val create
+    :  session:Session_ref.t
+    -> generation:int
+    -> window:Id.Context_window.t
+    -> (t, Protocol_error.t) result
+
+  val session : t -> Session_ref.t
+  val generation : t -> int
+  val window : t -> Id.Context_window.t
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Protocol_error.t) result
+end
+
+module Citation : sig
+  type t [@@deriving equal, sexp_of]
+
+  val create
+    :  Scope.t
+    -> occurrence:History.Id.t
+    -> version:Recovery_item_version.t
+    -> (t, Protocol_error.t) result
+
+  val scope : t -> Scope.t
+  val occurrence : t -> History.Id.t
+  val version : t -> Recovery_item_version.t
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Protocol_error.t) result
+end
+
+(** Immutable ordered membership, independent of the physical location of each
+    payload. Construction rejects foreign citations and duplicate exact members.
+    Membership gives no permission to read the corresponding bytes. *)
+type t
+
+val create : Scope.t -> Citation.t list -> (t, Protocol_error.t) result
+val scope : t -> Scope.t
+val length : t -> int
+val at : t -> ordinal:int -> Citation.t option
+val ordinal : t -> Citation.t -> int option
+
+(** The wire shape stores the common scope once. The member count is bounded
+    to 65,536 and the encoded manifest to 8 MiB. Ordinals are zero-based. *)
+val to_json : t -> Jsonaf.t
+
+val of_json : Jsonaf.t -> (t, Protocol_error.t) result
+```
+
+## recovery_wire
+
+[implementation](../../lib/agent_protocol/recovery_wire.ml) · [interface](../../lib/agent_protocol/recovery_wire.mli)
+
+```ocaml
+(** Bounded admission shared by recovery coordinates and membership manifests. *)
+val limits : max_bytes:int -> max_fields:int -> max_nodes:int -> Document_schema.Limits.t
+
+val measure
+  :  limits:Document_schema.Limits.t
+  -> Jsonaf.t
+  -> (int, Protocol_error.t) result
+
+val admit_coordinate : Jsonaf.t -> (unit, Protocol_error.t) result
+val fields : Jsonaf.t -> string list -> (Json_codec.fields, Protocol_error.t) result
+
+(** Canonical, nonnegative decimal strings for immutable recovery coordinates. *)
+val revision_to_json : int64 -> Jsonaf.t
+val revision_of_json : Jsonaf.t -> (int64, Protocol_error.t) result
 ```
 
 ## recurrence_control
@@ -15092,8 +15963,32 @@ val supported_children : string list
 (** Captured current-installation lifecycle pointer; no execution authority. *)
 val moderator_lifecycle : string
 
+(** Typed source-bound local recovery ledger, independent of ordinary history. *)
+val recovery_windows : string
+
+val recovery_installed_originals : string
+val recovery_effective : string
+val recovery_effective_archive : string
+val recovery_effective_attempt : string
+
+(** Exact membership survives withdrawal. Older reducers must reject even a journal-only edit or deletion. *)
+val recovery_withdrawals : string
+
 (** Durable immutable Goal association on a captured recurrence definition. *)
 val recurrence_controller_goal : string
+
+val recovery_notes : string
+val recovery_note_shares : string
+val recovery_reminders : string
+val recovery_rollover : string
+val recovery_rollover_commit : string
+val recovery_rollover_batch : string
+val recovery_rollover_continuation : string
+val recovery_rollover_hooks : string
+val recovery_checkpoint_opportunity : string
+val recovery_authored_checkpoint : string
+val recovery_capacity_rollover : string
+val recovery_rollover_turn_retirement : string
 ```
 
 ## session_work

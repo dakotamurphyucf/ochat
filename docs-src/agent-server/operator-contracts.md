@@ -131,6 +131,9 @@ module Server : sig
 
   type t =
     { data_dir : string
+    ; recovery_capacity : Recovery_capacity_configuration.t option [@sexp.option]
+      (** Startup-owned capacity ceiling. Sessions opt in through their own
+          durable recovery window. Absence leaves capacity off. *)
     ; recurrence_automation : Recurrence_automation_configuration.t option [@sexp.option]
       (** Explicit restart-bound planning principal/controller grants and optional
           finite no-follow timezone directory. Absence disables automatic due
@@ -525,107 +528,3 @@ let event_cursor request =
        | _ -> Error (error Invalid_request "event cursor is invalid")))
 ;;
 ```
-
-## Local recovery windows
-
-Request the `recovery.windows` feature at initialization. Use a JSON-RPC request
-ID that fits in 256 encoded bytes. On a host that selects the feature,
-`session.recovery.enable` starts the window ledger for one
-settled session. Supply the host-qualified `session`, the `attachment_id` of
-the owner writer on this connection, and the session's `expected_generation`.
-The owner needs message-send and transcript access. Repeating enable in the
-same generation returns its active window. A stale generation returns a
-conflict. Recovery starts only when requested.
-
-On a durable Embedded host, a process-bound session's creator must attach
-with `owner_read_write` on an authenticated local connection. The local Store
-preserves the session and its windows after exit. A new process reopens that
-Store and acquires a fresh attachment. A transient local session cannot enroll.
-Window enrollment leaves capacity policy to the host. Local rollover status and
-ordinary rollover use the same owner-writer requirements and the host's current
-capacity policy. Forced rollover still requires configuration authority.
-
-When an installed prompt retained document originals, enablement attempts to
-adopt the originals for exact initial message parts covered by the active
-window. The same connection and owner writer must remain current through
-publication. Each enablement uses a single time and byte allowance.
-Repeating enablement can resume interrupted adoption and skips completed
-parts. Missing or revoked installed custody leaves the window and rendered text
-available. A committed original follows the session's recovery visibility
-and retention.
-
-Use `session.recovery.windows` to list the windows in lineage order. A
-reader with session and transcript access can do this without attaching.
-Supply the host-qualified `session` and a `limit` from 1 to 50. Omit
-`generation` to read the current generation, or pass a specific generation.
-The optional `state` takes `open`, `sealed` or `expired`. To continue, pass
-the returned `next_cursor` as `cursor` with the same filters and limit.
-An ordinary append preserves the page. When the service returns
-`Cursor_expired`, start a new list. Each row reports its scope and state.
-
-OCaml clients can use `Agent_client.Recovery_windows.enable` and
-`Agent_client.Recovery_windows.list` over an initialized connection. The
-default `Session_handle.initialize` requests this feature.
-
-### List and search recovery items
-
-Negotiate `recovery.history_query` to use `session.recovery.query`. Supply
-the host-qualified session, the source family (`canonical` or `effective`),
-and a limit from 1 to 50. Use `action: "list_items"` with the exact window
-scope returned by `session.recovery.windows`. Each row identifies the
-citation, role, ordinal and readable text-part numbers. Effective rows also
-identify the preparation revision and can include the observed attempt.
-
-To search, use `action: "search"` and a nonempty literal `term`. Omit
-`window` to search the current generation, or supply one exact window.
-The stock service exposes ordinary user and assistant text. Every hit
-includes the part number, half-open UTF-8 byte offsets and a highlighted
-snippet. The request can narrow the role, the half-open ordinal range
-(`ordinals`), and the total encoded reply budget (`max_reply_bytes`).
-
-Inspect both `next` and `coverage` on every response. When `next` is a
-string, pass it as `cursor` with the same query, including when `rows` is
-empty. A null `next` with `complete` ends the search. A null `next` with
-`source_unavailable` means some source data could not be examined. On
-`Cursor_expired`, start again without a cursor. The typed OCaml entry point
-is `Agent_client.Recovery_windows.query`.
-
-### Read an exact recovery text range
-
-To read beyond a snippet, negotiate `recovery.text_range` and call
-`session.recovery.read_text` with its `citation`, original `part` index,
-and half-open UTF-8 byte offsets `start` and `stop`. For an effective
-item, also send the returned `preparation_revision`. Both offsets must
-land on character boundaries. The default reply budget is 4 KiB. Set
-`max_bytes` up to 16 KiB and continue at `next_offset` when present.
-An empty range at a valid boundary succeeds. The host checks access again
-when writing the reply. If the source changes in the meantime, submit a
-fresh read against a currently visible citation. The typed client exposes `Agent_client.Recovery_windows.read_text`.
-
-### Read an exact recovery original
-
-Negotiate `recovery.asset_read` and call `session.recovery.read_asset` with
-a currently visible **canonical** citation, the zero-based original
-`part` index, and a zero-based byte `offset`. Start at offset zero.
-Set `max_bytes` to change the 16 KiB default, up to 64 KiB. This works for
-locally retained original documents and supported images in ordinary user
-or assistant messages. The host can read an original of at most 8 MiB.
-An ordinary rendered-text part may have no retained original. The method
-reports `blob_unavailable` if no visible original is available for the
-coordinate and `invalid_request` for an unsupported visible part.
-
-The reply repeats the citation and part. It reports `kind` (`document`
-or `image`), `media_type`, the full original `byte_length` and its lower-case
-`sha256`, plus the actual `offset` and the chunk as canonical
-`data_base64`. If `next_offset` is present, send it with the same citation,
-part and the returned `sha256` as `expected_sha256`. An omitted next offset
-marks the end. For a reassembled original, verify the complete byte count
-and SHA-256 before consuming it. The typed OCaml client exposes decoded
-chunk bytes through `Agent_client.Recovery_windows.read_asset`.
-
-The original stays private to its owning session Store. A citation does
-not grant access, and the host checks the same source revision and current
-authority when delivering each reply. If the window expires or visibility
-or authority changes, queued replies can fail and readers must not continue
-under the previous authorization. This method reads retained bytes through
-the session protocol without fetching an external URI.
