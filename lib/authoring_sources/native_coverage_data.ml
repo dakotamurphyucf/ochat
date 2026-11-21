@@ -755,16 +755,16 @@ let topic_contracts =
     , "4f6d7742b639ab6d13441a1ca1b3b654d6a1ba1c37b8d950973e2b108f966351" )
   ; ( "one_off_v1"
     , "runtime.context_windows"
-    , "60d702fb13d49b52eb6b7a74aecb71f5c45fbf64fd8cf5da1bbf72aae3dffa9c" )
+    , "0d3320e4f43369c7f1dff657ea82757658bbac02c5c827a592242fbdfe67b10a" )
   ; ( "tool_v1"
     , "runtime.context_windows"
-    , "18957cfc648e0495a02c78d869f6dcef62c2ab6bd61b2401a3631520b3439e9d" )
+    , "61f833deeb51dd64c5c006430a9638dc90481e029ffa3916ec422284bf7cab4d" )
   ; ( "moderator_v1"
     , "runtime.context_windows"
-    , "d589067ba0bbf0f7df8c8a127c20c7d804b1a41d8b38b61b5c1d8e22ae802e02" )
+    , "ab826a126a647f94866e13475ab21632d0cb7ccdb38bf503d093770a6fe46980" )
   ; ( "delegated_moderator_v1"
     , "runtime.context_windows"
-    , "f74af2196108e77a66966388055b864d376020b9617d5af6ac31153a78f7af89" )
+    , "c70cb9ce2a3df3adf6d7271d9cda4b9bd84ba15b7c6db62224f46f776809d18e" )
   ; ( "one_off_v1"
     , "runtime.recovery_notes"
     , "29bd47eefc500611825c2eafd5989929fcb4a9629e270828ad5618188571b41d" )

@@ -1670,10 +1670,10 @@ let implementation_sources =
 let topic_contracts =
   [ ( "moderator_v1"
     , "runtime.context_windows"
-    , "d589067ba0bbf0f7df8c8a127c20c7d804b1a41d8b38b61b5c1d8e22ae802e02" )
+    , "ab826a126a647f94866e13475ab21632d0cb7ccdb38bf503d093770a6fe46980" )
   ; ( "delegated_moderator_v1"
     , "runtime.context_windows"
-    , "f74af2196108e77a66966388055b864d376020b9617d5af6ac31153a78f7af89" )
+    , "c70cb9ce2a3df3adf6d7271d9cda4b9bd84ba15b7c6db62224f46f776809d18e" )
   ; ( "one_off_v1"
     , "instructions.sources"
     , "4cbb224a500d3e811fe54e5cacfd8c8f91612e6fa2236c79f42f4b0c7655b2e3" )
