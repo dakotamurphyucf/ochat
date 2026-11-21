@@ -1322,7 +1322,6 @@ let recovery_window_operator t context actor =
   Recovery_window_operator.create
     t.seed_factory ~context ~actor ~registry:t.registry
     ~server_id:(Agent_store.Session_store.server_id t.session_store)
-    ~now:(fun () -> now t)
 ;;
 
 let pending_service t context =

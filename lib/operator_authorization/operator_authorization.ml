@@ -1,8 +1,21 @@
 open! Core
 
+module Durable_local_host = struct
+  type t = unit ref
+
+  let create () = ref ()
+end
+
+module Local_recovery_host = struct
+  type t =
+    | Transient
+    | Durable of Durable_local_host.t
+end
+
 type t =
   { principal : Agent_protocol.Principal.t
   ; origin : int
+  ; durable_local : (Durable_local_host.t * Agent_protocol.Id.Server.t) option
   ; is_current : unit -> bool
   }
 
@@ -22,7 +35,22 @@ let rec fresh_origin () =
 ;;
 
 let origin t = t.origin
-let guarded ~principal ~is_current = { principal; origin = fresh_origin (); is_current }
+
+let guarded ~principal ~is_current =
+  { principal; origin = fresh_origin (); durable_local = None; is_current }
+;;
+
+let durable_local ~host ~server_id ~principal ~is_current =
+  { (guarded ~principal ~is_current) with durable_local = Some (host, server_id) }
+;;
+
+let is_durable_local t = Option.is_some t.durable_local
+
+let current_durable_local t ~host ~server_id =
+  is_current t
+  && Option.exists t.durable_local ~f:(fun (actual, server) ->
+    phys_equal actual host && Agent_protocol.Id.Server.equal server server_id)
+;;
 
 let restrict ?(original_first = false) t ~is_current:allowed =
   let is_current =

@@ -801,6 +801,16 @@ module Resource_observation : sig
       visibility on the returned State before release. *)
   val check_recovery_current : t -> (Session_state.t, Agent_protocol.Error.t) result
 
+  (** Check the current window-management writer against this observation.
+      Durable local authority must identify this canonical writer's actual
+      host and creating principal. A transport must recheck its connection and
+      source access independently. *)
+  val check_recovery_window_writer
+    :  t
+    -> actor:Operator_authorization.t
+    -> attachment_id:Agent_protocol.Id.Attachment.t
+    -> (Session_state.t, Agent_protocol.Error.t) result
+
   (** List safe window summaries on this physical actor. The Factory establishes
       session visibility and retains source custody through release. *)
   val list_recovery_windows

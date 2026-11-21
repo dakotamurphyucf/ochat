@@ -415,23 +415,139 @@ let test_local_transient_bootstrap env environment =
 ;;
 
 let test_local_process_bound_eof env environment =
+  let module P = Agent_protocol in
+  let module Windows = Agent_client.Recovery_windows in
   let fixture = fixture env environment "stdio-local-eof" in
-  Eio.Switch.run (fun sw ->
-    with_stdio ~sw env fixture (local_arguments fixture) (fun process ->
-      let client = Stdio_client.create ~process ~clock:(Eio.Stdenv.clock env) in
-      ignore (initialize client : Agent_protocol.Initialize.Response.t);
+  let with_connection f =
+    Eio.Switch.run (fun sw ->
+      with_stdio ~sw env fixture (local_arguments fixture) (fun process ->
+        let client = Stdio_client.create ~process ~clock:(Eio.Stdenv.clock env) in
+        let connection =
+          Agent_client.Transport.create
+            ~request:(fun command ->
+              Result.map (Stdio_client.request client command) ~f:(fun reply ->
+                reply.result))
+            ~next_notification:(fun () -> None)
+            ~close:(fun () -> ())
+          |> Agent_client.Connection.create
+        in
+        let initialized =
+          Agent_client.Session_handle.initialize_with_features
+            connection
+            ~implementation_name:"local-recovery-reopen-e2e"
+            ~implementation_version:"dev"
+            ~features:[ P.Recovery_query.Features.windows ]
+          |> protocol_ok
+        in
+        let answer = f client connection initialized in
+        let result = finish_process env process in
+        require_exit result (Exited 0) "process-bound local stdio survived EOF";
+        assert_stdout_pure result.stdout;
+        answer))
+  in
+  let enable client connection initialized (session : P.Session.t) ~key =
+    let attachment_id =
+      match
+        (typed_request
+           client
+           (Session_attach
+              { session_id = session.id
+              ; requested_mode = Owner_read_write
+              ; subscribe = false
+              ; after_sequence = None
+              ; reclaim_token = None
+              ; idempotency_key = idempotency_key key
+              }))
+          .result
+      with
+      | Session_attach result -> result.attachment.id
+      | _ -> fail "attached stdio source did not return an owner writer"
+    in
+    Windows.enable
+      connection
+      { session =
+          P.Session_ref.create
+            ~server_id:initialized.P.Initialize.Response.server_id
+            ~session_id:session.id
+      ; attachment_id
+      ; expected_generation = session.generation
+      }
+    |> protocol_ok
+  in
+  let scope, before =
+    with_connection (fun client connection initialized ->
       let sessions = list_sessions client in
       require (List.length sessions = 1) "local stdio did not expose one embedded session";
       let session = List.hd_exn sessions in
       require
-        (Agent_protocol.Session.equal_liveness session.spec.liveness Process_bound)
-        "local stdio session was not process-bound";
-      require
-        (Agent_protocol.Session.equal_execution_host session.spec.execution_host Embedded)
-        "local stdio session was not embedded";
-      let result = finish_process env process in
-      require_exit result (Exited 0) "process-bound local stdio survived EOF";
-      assert_stdout_pure result.stdout))
+        (P.Session.equal_liveness session.spec.liveness Process_bound
+         && P.Session.equal_execution_host session.spec.execution_host Embedded
+         && P.Session.equal_persistence session.spec.persistence Durable)
+        "local stdio session did not declare its actual durable process-bound lifetime";
+      let scope = enable client connection initialized session ~key:"stdio-enroll" in
+      scope, initialized)
+  in
+  let module Embedded = Agent_server.Embedded in
+  let roots = Temporary_environment.roots environment in
+  let storage =
+    Agent_server.Local_storage.Root.create ~path:(Config_fixture.data_dir fixture) ()
+    |> protocol_ok
+  in
+  let options : Embedded.options =
+    { prompt_file = Config_fixture.prompt_path fixture
+    ; workspace = Config_fixture.physical_workspace fixture
+    ; tool_dir = roots.root
+    ; home = Some roots.home
+    ; storage = Durable storage
+    ; start_immediately = false
+    ; permission_profile = Embedded.default_permission_profile
+    ; attachment_mode = Owner_read_write
+    ; event_capacity = 64
+    }
+  in
+  Support.Provider_fixture.with_host ~env fixture (fun inference_host ->
+    let daemon_options = Inference_composition.daemon_options inference_host in
+    Eio.Switch.run (fun sw ->
+      Embedded.with_local_host ~sw ~env ~daemon_options options ~f:(fun host ->
+        let connection = Embedded.host_connection host in
+        let after =
+          Agent_client.Session_handle.initialize_with_features
+            connection
+            ~implementation_name:"local-recovery-reopen-embedded"
+            ~implementation_version:"dev"
+            ~features:[ P.Recovery_query.Features.windows ]
+          |> protocol_ok
+        in
+        require
+          (P.Id.Server.equal before.server_id after.server_id
+           && P.Id.Principal.equal before.principal.id after.principal.id)
+          "local stdio EOF changed the reopened durable identity";
+        let session = P.Recovery_window.Scope.session scope in
+        let session_id = P.Session_ref.session_id session in
+        let fields =
+          Agent_client.Admin.get_session connection session_id
+          |> protocol_ok
+          |> P.Public.Snapshot.fields
+        in
+        let expected =
+          Option.value_exn fields.lifecycle |> P.Session_lifecycle.Observation.expected
+        in
+        let selected =
+          Embedded.attach_retained host ~mode:Owner_read_write ~expected |> protocol_ok
+        in
+        let request =
+          P.Recovery_query.Enable.
+            { session
+            ; attachment_id = (Embedded.attachment selected).id
+            ; expected_generation = fields.session.generation
+            }
+        in
+        let actual = Windows.enable connection request |> protocol_ok in
+        require
+          (P.Recovery_window.Scope.equal actual scope)
+          "explicit local selection after subprocess EOF changed the retained window";
+        Ok ())
+      |> protocol_ok))
 ;;
 
 let test_local_malformed_input env environment =

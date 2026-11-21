@@ -529,13 +529,21 @@ let event_cursor request =
 ## Local recovery windows
 
 Request the `recovery.windows` feature at initialization. Use a JSON-RPC request
-ID that fits in 256 encoded bytes. On a daemon that
-selects it, `session.recovery.enable` starts the window ledger for one
+ID that fits in 256 encoded bytes. On a host that selects the feature,
+`session.recovery.enable` starts the window ledger for one
 settled session. Supply the host-qualified `session`, the `attachment_id` of
 the owner writer on this connection, and the session's `expected_generation`.
 The owner needs message-send and transcript access. Repeating enable in the
 same generation returns its active window. A stale generation returns a
 conflict. Recovery starts only when requested.
+
+On a durable Embedded host, a process-bound session's creator must attach
+with `owner_read_write` on an authenticated local connection. The local Store
+preserves the session and its windows after exit. A new process reopens that
+Store and acquires a fresh attachment. A transient local session cannot enroll.
+Window enrollment leaves capacity policy to the host. Local rollover status and
+ordinary rollover use the same owner-writer requirements and the host's current
+capacity policy. Forced rollover still requires configuration authority.
 
 When an installed prompt retained document originals, enablement attempts to
 adopt the originals for exact initial message parts covered by the active

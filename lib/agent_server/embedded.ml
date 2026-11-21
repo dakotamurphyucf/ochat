@@ -16,6 +16,7 @@ type host =
   { daemon : Daemon.t
   ; connection : Agent_client.Connection.t
   ; principal : Agent_protocol.Principal.t
+  ; connection_authority : unit -> Operator_authorization.t
   ; event_capacity : int
   ; max_attachments : int
   ; temporary_root : string option
@@ -408,7 +409,7 @@ let embedded_trace_request dispatcher ~context ~max_request_bytes ~bound request
          ())
 ;;
 
-let make_connection_owner daemon principal event_capacity ~max_attachments =
+let make_connection_owner daemon actor event_capacity ~max_attachments =
   let notifications = Eio.Stream.create event_capacity in
   let closed, close_resolver = Eio.Promise.create () in
   let publish_notification envelope =
@@ -424,7 +425,7 @@ let make_connection_owner daemon principal event_capacity ~max_attachments =
     Connection_context.create_authenticated
       ~connection_id:
         (Agent_protocol.Id.Attachment.create () |> Agent_protocol.Id.Attachment.to_string)
-      ~actor:(Operator_authorization.trusted_local principal)
+      ~actor
       ~transport:In_memory
       ~publish_notification
       ~max_attachments
@@ -454,8 +455,8 @@ let make_connection_owner daemon principal event_capacity ~max_attachments =
   Embedded_host_cleanup.Connection_owner.create ~connection ~close_actual
 ;;
 
-let make_connection daemon principal event_capacity ~max_attachments =
-  make_connection_owner daemon principal event_capacity ~max_attachments
+let make_connection daemon actor event_capacity ~max_attachments =
+  make_connection_owner daemon actor event_capacity ~max_attachments
   |> Embedded_host_cleanup.Connection_owner.connection
 ;;
 
@@ -613,6 +614,11 @@ let open_owned_host
     | None -> Some before_activation, None
     | Some policy -> None, Some (local_setup policy)
   in
+  let local_recovery_host : Operator_authorization.Local_recovery_host.t =
+    match temporary_root with
+    | Some _ -> Transient
+    | None -> Durable (Operator_authorization.Durable_local_host.create ())
+  in
   let%bind daemon =
     Daemon.start
       ~sw
@@ -623,6 +629,7 @@ let open_owned_host
       ?home
       ?before_activation
       ?local_setup
+      ~local_recovery_host
       ~process_start_identity:None
       ()
   in
@@ -646,7 +653,24 @@ let open_owned_host
     let max_attachments =
       daemon_options.Daemon.protocol_limits.max_attachments_per_connection
     in
-    let owner = make_connection_owner daemon principal event_capacity ~max_attachments in
+    let server_id = Agent_store.Session_store.server_id (Daemon.store daemon) in
+    let connection_authority () =
+      match local_recovery_host with
+      | Transient -> Operator_authorization.trusted_local principal
+      | Durable host ->
+        Operator_authorization.durable_local
+          ~host
+          ~server_id
+          ~principal
+          ~is_current:(fun () -> not (Embedded_host_cleanup.is_closing cleanup))
+    in
+    let owner =
+      make_connection_owner
+        daemon
+        (connection_authority ())
+        event_capacity
+        ~max_attachments
+    in
     Embedded_host_cleanup.adopt_connection_exn cleanup owner;
     let connection = Embedded_host_cleanup.Connection_owner.connection owner in
     match initialize connection with
@@ -656,6 +680,7 @@ let open_owned_host
         { daemon
         ; connection
         ; principal
+        ; connection_authority
         ; event_capacity
         ; max_attachments
         ; temporary_root
@@ -695,6 +720,7 @@ let open_host
 let close_host host = Embedded_host_cleanup.close host.cleanup
 let host_connection host = host.connection
 let host_principal host = host.principal
+let host_connection_authority host = host.connection_authority ()
 let host_dispatcher host = Daemon.dispatcher host.daemon
 let host_close_connection host = Daemon.close_connection host.daemon
 
@@ -1036,7 +1062,7 @@ let connect_host host =
     Ok
       (make_connection
          host.daemon
-         host.principal
+         (host_connection_authority host)
          host.event_capacity
          ~max_attachments:host.max_attachments)
 ;;
@@ -1168,6 +1194,7 @@ let session_id t = t.session_id
 let attachment t = t.attachment
 let dispatcher t = host_dispatcher t.host
 let principal t = host_principal t.host
+let connection_authority t = host_connection_authority t.host
 
 let connect t =
   match connect_host t.host with
@@ -1182,7 +1209,7 @@ let connect_owned t =
   Embedded_host_cleanup.adopt_additional_connection t.host.cleanup ~create:(fun () ->
     make_connection_owner
       t.host.daemon
-      t.host.principal
+      (connection_authority t)
       t.host.event_capacity
       ~max_attachments:t.host.max_attachments)
 ;;

@@ -123,12 +123,12 @@ let run_local
         ~env
         ~default_model:"gpt-4.5-preview"
     in
-    let serve ~dispatcher ~close_connection ~principal =
-      Agent_transport_stdio.Server.run
+    let serve ~dispatcher ~close_connection ~actor =
+      Agent_transport_stdio.Server.run_authenticated
         ~sw
         ~dispatcher
         ~close_connection
-        ~principal
+        ~actor
         ~connection_id:
           (Agent_protocol.Id.Attachment.create ()
            |> Agent_protocol.Id.Attachment.to_string)
@@ -154,7 +154,7 @@ let run_local
           serve
             ~dispatcher:(Agent_server.Embedded.host_dispatcher host)
             ~close_connection:(Agent_server.Embedded.host_close_connection host)
-            ~principal:(Agent_server.Embedded.host_principal host))
+            ~actor:(Agent_server.Embedded.host_connection_authority host))
       |> Result.map_error ~f:protocol_error
     else (
       let%bind embedded =
@@ -172,7 +172,7 @@ let run_local
         serve
           ~dispatcher:(Agent_server.Embedded.dispatcher embedded)
           ~close_connection:(Agent_server.Embedded.close_connection embedded)
-          ~principal:(Agent_server.Embedded.principal embedded))
+          ~actor:(Agent_server.Embedded.connection_authority embedded))
       |> Result.map_error ~f:protocol_error))
 ;;
 

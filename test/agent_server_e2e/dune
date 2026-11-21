@@ -507,6 +507,7 @@
     %{exe:../../bin/ochat_agent_server.exe}
     (progn
      (run %{exe:agent_server_e2e.exe} --scenario recovery-migration)
+     (run %{exe:agent_server_e2e.exe} --scenario data-integrity --case embedded-recovery.owner-enrollment)
      (run
       %{exe:agent_server_e2e.exe}
       --scenario

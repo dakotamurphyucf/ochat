@@ -11,7 +11,6 @@ val create
   -> actor:Operator_authorization.t
   -> registry:Session_registry.t
   -> server_id:Agent_protocol.Id.Server.t
-  -> now:(unit -> Agent_protocol.Timestamp.t)
   -> (t, Agent_protocol.Error.t) result
 
 val enable

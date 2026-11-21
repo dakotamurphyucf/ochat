@@ -22,6 +22,7 @@ val create
   :  writer:Agent_store.Commit_writer.t
   -> commit:commit
   -> recovery_note_owner:Agent_protocol.Session_ref.t option
+  -> local_recovery_host:Operator_authorization.Local_recovery_host.t option
   -> check_recovery_admission:
        (command_audit:Document_schema.Document.t option
         -> previous:Session_state.t
@@ -31,6 +32,12 @@ val create
 
 val session_owner : t -> Agent_protocol.Session_ref.t option
 val recovery_note_owner : t -> Agent_protocol.Session_ref.t option
+
+type recovery_window_host =
+  | Daemon
+  | Embedded of { local_owner_authenticated : bool }
+
+val recovery_window_host : t -> actor:Operator_authorization.t -> recovery_window_host
 
 (** Pure size admission using the exact native Store profiles and the current
     preservation carrier. Capacity refusal creates no writer attempt or ACK. *)

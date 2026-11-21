@@ -953,17 +953,17 @@ let implementation_sources =
   ; ( "lib/agent_server/session_policy_resource.mli"
     , "c744590e865c71a18c6e265ba830ec481771063421eaec587e9bb8eccf59e9dc" )
   ; ( "lib/agent_session/canonical_backend_binding_data.ml"
-    , "c1ae57bb1ada69c57caec8793cda4bde5175ab37e1dc2c87f72865ca2b43533e" )
+    , "a89257c2f9fc26632e90420d38ba90197c11733301c7c7ac51db35515103ee35" )
   ; ( "lib/agent_session/canonical_backend_binding_data.mli"
-    , "ba1956174073a3f6b52b6e5182ef9c7097559cd2f0547fe634af56ec1835c156" )
+    , "25e80759f70992d52e5ce8c9b11be243169a69dda5cb88127bc2ab5b2f7f03ef" )
   ; ( "lib/agent_session/failed_startup_data.ml"
     , "a689293adb107002de12bd511cc5a6f5ce335705dcdcd9c9592324651e9fa1af" )
   ; ( "lib/agent_session/failed_startup_data.mli"
     , "30a8caafe8f5ffb683f9a00a934110545ef2457ad6829383473738f5b379683f" )
   ; ( "lib/agent_session/session_actor.mli"
-    , "a78a6d24b3a07f8319fb53e0d074b0b8d5e8039abc786bf98ddc87f6f139ca55" )
+    , "315f44cb9ed133bb2899bb229e3637021e1afeb1a606e6af7ae23dfc64428e02" )
   ; ( "lib/agent_session/session_persistence.mli"
-    , "b5a69b807ca80235776abc20fbac71af706625ac2a480a52955e072516a7c905" )
+    , "fd13e81f17215a612657f31190b8e046ab8d10629c60a17458bd3d8d65abbef6" )
   ; ( "lib/agent_session/policy_restore_basis.ml"
     , "a5eb1344b40d62feb062a5384403b187e434637483e4a35e8c71b70b89c93ba1" )
   ; ( "lib/agent_session/policy_restore_basis.mli"
@@ -1047,7 +1047,7 @@ let implementation_sources =
   ; ( "lib/agent_session/session_commit_observation.ml"
     , "babbe9ec3ff397949cbcdf453f7805afeb71e7e90db2c9924c8a2cf9eaa2155a" )
   ; ( "lib/agent_session/session_persistence.ml"
-    , "4ddf0fc46a4c6a6b564668fe5edb707846cf00ce1c59b9af10c013cbde10aaeb" )
+    , "69754a0d1d00f2392dc497f49429319bd0a0c3c3ff6cdcd375a3f10706356c19" )
   ; ( "lib/agent_session/session_recovery_cpu.ml"
     , "9756e9a7e8680f8b8f0a76fc747697dd3272a40a079ddec802ee0394b700b40e" )
   ; ( "lib/agent_session/session_recovery_cpu.mli"
@@ -1209,9 +1209,9 @@ let implementation_sources =
   ; ( "lib/agent_server/embedded_local_template.ml"
     , "93691f37b0b11d3b5ef3303d2d6f35d7bdffe2ea2eb360db9d007ab841210e3e" )
   ; ( "lib/agent_server/embedded.ml"
-    , "e4d6dfda8e99cb5d31386ce6b640c4be18afb5bef343798fe1aa8da72935d490" )
+    , "128c2fa3973f387e95cbb1310fbb4093b4e3a81fa03ebb1fd1bc57e3cf5fffd0" )
   ; ( "bin/ochat_agent_stdio.ml"
-    , "8d134cd11c7df2a60e6b4b77a5ff7f9ea0c28a8a2674a3dd9f573adaa7623902" )
+    , "182edcc35c87832eb3ea6e5558151b0f9f726f738c38b78c70ddb7b4355d55ec" )
   ; ( "lib/agent_server/native_resource_authority.ml"
     , "6c1d600bb41fa15279a82bc66b479c850778eda7ba40dac7911a4819df9b991b" )
   ; ( "lib/agent_server/delegated_policy_call.ml"
@@ -1221,7 +1221,7 @@ let implementation_sources =
   ; ( "lib/agent_server/descendant_accounting_host.ml"
     , "3baff14cf9c606e899c08f95805cc3ca9f070827b46ec531e1c230314820b0fd" )
   ; ( "lib/agent_server/session_factory.ml"
-    , "a6e783ec6dac757809c752296066dabb5d87374a3e5dd9c3e941e7d60e10d1a7" )
+    , "b01f9c2a5f0a1facc9a0af1cecb374563216148b06646e99e96da1a0bab9ef61" )
   ; ( "bin/inference_composition.ml"
     , "1f57451d5543a5fe8f2f23dc0e593374b64946d088cba164acd1c087a7cdce18" )
   ; ( "lib/agent_protocol/developer_command_id.ml"
@@ -1299,7 +1299,7 @@ let implementation_sources =
   ; ( "lib/agent_server/developer_model_job_runner.ml"
     , "7604ff6140540e3b53720515526242e7bc1014c97d6895aacadbfb2909bda718" )
   ; ( "lib/agent_server/daemon.ml"
-    , "74096ce452b0953af19765082f19871a2261cfc59c5913e3a9a8b80b9e53712c" )
+    , "ecb0055a0ce20a403e9178cdb215e68c51da9195182850f7a558219a912f8a03" )
   ; ( "lib/agent_session/developer_claimed_resource_owner.ml"
     , "fb251c6e022f9880820b15807018adc5cf240500050a0424321d7507d3e2bc41" )
   ; ( "lib/agent_server/developer_claim_deadline.ml"
@@ -1341,7 +1341,7 @@ let implementation_sources =
   ; ( "lib/agent_session/administration.ml"
     , "7d3232cf693b995c471ab7fc22fa8f3a450623b36dd3fcc2b918eb6a1ac3cad5" )
   ; ( "lib/agent_server/command_handler.ml"
-    , "d7e81fa53840f8b93225ef39757bbdaed5693efb620aa84f85039466e2766aac" )
+    , "95758bb5b492fef5dd43a3bda11b37f8e9063a5790cd91dcbcb8f160666e5524" )
   ; ( "lib/agent_session/preparation_tracking.ml"
     , "101b922ff06365f9592e1b168a7e4267ddc74f769ae48d4a26ca204865a13732" )
   ; ( "lib/agent_session/turn_admission_staging.ml"
@@ -1537,7 +1537,7 @@ let implementation_sources =
   ; ( "lib/agent_session/goal_continuation_phase.ml"
     , "e24a210492bfcc9e94c7bf472603531eb053eb7654de7c6100083464da9b1b51" )
   ; ( "lib/agent_session/session_actor.ml"
-    , "4b4dc16c3c5e430d0cd5d460084f2fa9195bb585fbc0be00b73dbcac0785618f" )
+    , "50ad0b6654a802d3bad84bb51e92b314e2df8a9094442f867eb91c7613f92e30" )
   ; ( "lib/agent_session/idle_completion_write.ml"
     , "d427fa80c4346b64f3f9bf4d5025ad2218403278816ade76ff17ba1adaa426d9" )
   ; ( "lib/agent_session/goal_descendant_admission_custody.ml"

@@ -7480,6 +7480,45 @@ let recovery_publication_backend t =
   else require_recovery_backend t
 ;;
 
+let require_recovery_window_owner (t : t) ~actor ~attachment_id =
+  let module P = Agent_protocol in
+  let open Result.Let_syntax in
+  let state = t.state in
+  let principal = Operator_authorization.principal actor in
+  let now = t.services.now in
+  let host =
+    Option.value_map
+      t.canonical_persistence
+      ~default:Canonical_backend_binding_data.Daemon
+      ~f:(fun binding ->
+        Canonical_backend_binding_data.recovery_window_host binding ~actor)
+  in
+  let denied () =
+    Error
+      (error Permission_denied "recovery window requires the durable local owner writer")
+  in
+  match host, state.spec.protocol with
+  | Daemon, _ ->
+    Writer_attachment.require_recovery_owner
+      state
+      ~principal:principal.id
+      ~attachment_id
+      ~now
+  | ( Embedded { local_owner_authenticated = true }
+    , { execution_host = Embedded; liveness = Process_bound; persistence = Durable; _ } )
+    ->
+    let%bind attachment = Writer_attachment.require state ~attachment_id ~now in
+    if
+      P.Session.equal_attachment_mode attachment.mode Owner_read_write
+      && Option.is_none attachment.owner_lease
+      && Option.exists
+           state.identity.creating_principal
+           ~f:(P.Id.Principal.equal principal.id)
+    then Ok ()
+    else denied ()
+  | Embedded _, _ -> denied ()
+;;
+
 module Resource_observation = struct
   module Resource_identity = Session_state.Spec.Resource_identity
 
@@ -7551,6 +7590,13 @@ module Resource_observation = struct
     let%bind current = check_current t in
     let%map _ = recovery_publication_backend t.actor in
     current
+  ;;
+
+  let check_recovery_window_writer t ~actor ~attachment_id =
+    let open Result.Let_syntax in
+    let%bind state = check_recovery_current t in
+    let%map () = require_recovery_window_owner t.actor ~actor ~attachment_id in
+    state
   ;;
 
   let list_recovery_windows t ~actor ~generation ~state page =
@@ -58274,7 +58320,7 @@ let enable_recovery_windows_internal t actor attachment_id authorize =
       then authorize t.state
       else Error (error Permission_denied "recovery window writer authority expired")
     in
-    require_recovery_owner_writer t ~principal:principal.id ~attachment_id
+    require_recovery_window_owner t ~actor ~attachment_id
   in
   let%bind () = check () in
   match t.state.recovery_windows with
@@ -58846,7 +58892,7 @@ let rollover_operator t actor ~attachment_id ~authorize =
   in
   let%bind () =
     if Operator_authorization.is_current actor
-    then require_recovery_owner_writer t ~principal:principal.id ~attachment_id
+    then require_recovery_window_owner t ~actor ~attachment_id
     else Error (error Permission_denied "rollover operator authority expired")
   in
   Ok principal
@@ -60585,9 +60631,8 @@ let handle_recovery_rollover
     let authorize_force =
       Option.map force ~f:(fun authorize_force state ->
         let%bind () = authorize_force state in
-        let principal = Operator_authorization.principal actor in
         if Operator_authorization.is_current actor
-        then require_recovery_owner_writer t ~principal:principal.id ~attachment_id
+        then require_recovery_window_owner t ~actor ~attachment_id
         else Error (error Permission_denied "rollover force authority expired"))
     in
     let check () =

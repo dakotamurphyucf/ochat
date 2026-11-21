@@ -151,6 +151,10 @@ val host_connection : host -> Agent_client.Connection.t
     separate operator service contract. *)
 val host_principal : host -> Agent_protocol.Principal.t
 
+(** Mint the original operator proof for one transport owned by this local
+    host. Each call creates a distinct authentication origin. *)
+val host_connection_authority : host -> Operator_authorization.t
+
 val host_dispatcher : host -> Dispatcher.t
 
 (** Physical close for an owned host used without an ordinary session. It
@@ -218,6 +222,7 @@ val session_id : t -> Agent_protocol.Id.Session.t
 val attachment : t -> Agent_protocol.Session.Attachment.t
 val dispatcher : t -> Dispatcher.t
 val principal : t -> Agent_protocol.Principal.t
+val connection_authority : t -> Operator_authorization.t
 
 (** Compatibility API: caller must retain an open host; closed hosts raise. *)
 val connect : t -> Agent_client.Connection.t

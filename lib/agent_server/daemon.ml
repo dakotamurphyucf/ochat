@@ -1156,6 +1156,7 @@ let compose
       ~provider_operator
       ~project_catalog
       ~project_sources
+      ~local_recovery_host
       store
       built
       prompts
@@ -1373,6 +1374,7 @@ let compose
       ~home
       ~inference_policy:options.inference_policy
       ~context_capacity_host
+      ~local_recovery_host
       ~qualify_chatml_extensions:options.qualify_chatml_extensions
       ~session_helpers:options.session_helpers
       ~independent_lifetime_policy:options.independent_lifetime_policy
@@ -2238,6 +2240,7 @@ let start
       ?(options = default_options)
       ?before_activation
       ?local_setup
+      ?local_recovery_host
       ()
   =
   Mirage_crypto_rng_unix.use_default ();
@@ -2423,6 +2426,7 @@ let start
       ~provider_operator
       ~project_catalog
       ~project_sources
+      ~local_recovery_host
       store
       built
       (Prompt_catalog_host.catalog project_catalog))

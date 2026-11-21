@@ -781,6 +781,10 @@ val start
            admission, then starts provider/catalog/source work. Failure joins
            the Store startup owner. Existing [before_activation] callers remain
            source-compatible; Embedded uses one handoff for its minted ID. *)
+  -> ?local_recovery_host:Operator_authorization.Local_recovery_host.t
+       (** The actual Embedded lifetime supplied by the trusted composition.
+           Its durable identity is also held by the local authenticators.
+           Daemon transports do not mint it. *)
   -> unit
   -> (t, Agent_protocol.Error.t) result
 

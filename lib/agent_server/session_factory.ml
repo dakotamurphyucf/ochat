@@ -317,6 +317,7 @@ type t =
   ; home : string option
   ; inference_policy : inference_policy
   ; context_capacity_host : Agent_session.Session_context_capacity.Host.t
+  ; local_recovery_host : Operator_authorization.Local_recovery_host.t option
   ; qualify_chatml_extensions : bool
   ; session_helpers : Agent_session.Session_management_channel.grant list
   ; independent_lifetime_policy : string option
@@ -12851,6 +12852,7 @@ let create_unloaded_entry
     let actor_persistence, canonical_persistence =
       Agent_session.Session_persistence.actor_persistence_with_startup_disposal
         ~recovery_notes:(recovery_note_owner, t.limits.snapshot_payload_limit)
+        ?local_recovery_host:t.local_recovery_host
         persistence
     in
     let actor =
@@ -20217,6 +20219,7 @@ let create
       ~home
       ~inference_policy
       ~context_capacity_host
+      ~local_recovery_host
       ~qualify_chatml_extensions
       ~session_helpers
       ~independent_lifetime_policy
@@ -20289,6 +20292,7 @@ let create
     ; home
     ; inference_policy
     ; context_capacity_host
+    ; local_recovery_host
     ; qualify_chatml_extensions
     ; session_helpers
     ; independent_lifetime_policy

@@ -18,6 +18,7 @@ type t =
   ; writer : Agent_store.Commit_writer.t
   ; commit : commit
   ; recovery_note_owner : Agent_protocol.Session_ref.t option
+  ; local_recovery_host : Operator_authorization.Local_recovery_host.t option
   ; check_recovery_admission :
       command_audit:Document_schema.Document.t option
       -> previous:Session_state.t
@@ -30,11 +31,18 @@ let check_domain_exn t =
   then invalid_arg "canonical persistence binding belongs to another domain"
 ;;
 
-let create ~writer ~commit ~recovery_note_owner ~check_recovery_admission =
+let create
+      ~writer
+      ~commit
+      ~recovery_note_owner
+      ~local_recovery_host
+      ~check_recovery_admission
+  =
   { domain = (Stdlib.Domain.self () :> int)
   ; writer
   ; commit
   ; recovery_note_owner
+  ; local_recovery_host
   ; check_recovery_admission
   }
 ;;
@@ -50,6 +58,27 @@ let session_owner t =
 ;;
 
 let recovery_note_owner = session_owner
+
+type recovery_window_host =
+  | Daemon
+  | Embedded of { local_owner_authenticated : bool }
+
+let recovery_window_host t ~actor =
+  check_domain_exn t;
+  match t.local_recovery_host with
+  | None -> Daemon
+  | Some Transient -> Embedded { local_owner_authenticated = false }
+  | Some (Durable host) ->
+    let local_owner_authenticated =
+      Agent_store.Commit_writer.is_available t.writer
+      && Option.exists t.recovery_note_owner ~f:(fun owner ->
+        Operator_authorization.current_durable_local
+          actor
+          ~host
+          ~server_id:(Agent_protocol.Session_ref.server_id owner))
+    in
+    Embedded { local_owner_authenticated }
+;;
 
 let validate_exn t ~session_id ~commit =
   check_domain_exn t;

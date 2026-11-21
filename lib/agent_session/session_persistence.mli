@@ -65,6 +65,7 @@ val actor_persistence : t -> Session_actor.persistence
     snapshot payload budget for owned note writes. *)
 val actor_persistence_with_startup_disposal
   :  ?recovery_notes:Agent_protocol.Session_ref.t * int
+  -> ?local_recovery_host:Operator_authorization.Local_recovery_host.t
   -> t
   -> Session_actor.persistence * Session_actor.Canonical_persistence.t
 

@@ -1,4 +1,4 @@
-(** Shared recovery operations for an initialized daemon connection. Callers
+(** Shared recovery operations for an initialized host connection. Callers
     can inspect without attaching. Activation requires the current owner's
     attachment and the generation they intend to enable. *)
 val enable

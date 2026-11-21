@@ -536,7 +536,7 @@ let actor_persistence_with_profile t ~snapshot_payload_limit =
 
 let actor_persistence t = actor_persistence_with_profile t ~snapshot_payload_limit:None
 
-let actor_persistence_with_startup_disposal ?recovery_notes t =
+let actor_persistence_with_startup_disposal ?recovery_notes ?local_recovery_host t =
   let snapshot_payload_limit = Option.map recovery_notes ~f:snd in
   let persistence = actor_persistence_with_profile t ~snapshot_payload_limit in
   let binding =
@@ -544,6 +544,7 @@ let actor_persistence_with_startup_disposal ?recovery_notes t =
       ~writer:t.writer
       ~commit:persistence.commit
       ~recovery_note_owner:(Option.map recovery_notes ~f:fst)
+      ~local_recovery_host
       ~check_recovery_admission:(check_recovery_admission t ~snapshot_payload_limit)
   in
   persistence, binding

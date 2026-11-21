@@ -12,21 +12,30 @@ type t =
   ; negotiation : Connection_context.Authoring_negotiation.t
   ; registry : Session_registry.t
   ; server_id : P.Id.Server.t
-  ; now : unit -> P.Timestamp.t
   }
 
 type release = unit -> (unit, P.Error.t) result
 
 let error code message = P.Error.create code ~message ~retryable:false ()
 
-let create factory ~context ~actor ~registry ~server_id ~now =
+let original_local_authority context actor =
+  (not (Operator_authorization.is_durable_local actor))
+  || Option.exists (Connection_context.original_actor context) ~f:(fun original ->
+    Int.equal
+      (Operator_authorization.origin original)
+      (Operator_authorization.origin actor)
+    && Operator_authorization.is_current original)
+;;
+
+let create factory ~context ~actor ~registry ~server_id =
   match factory, Connection_context.authoring_negotiation context with
   | Some factory, Some lease ->
     let actor =
       Operator_authorization.restrict actor ~is_current:(fun () ->
-        Connection_context.current_authoring_negotiation context lease)
+        Connection_context.current_authoring_negotiation context lease
+        && original_local_authority context actor)
     in
-    Ok { factory; context; actor; negotiation = lease; registry; server_id; now }
+    Ok { factory; context; actor; negotiation = lease; registry; server_id }
   | _ -> Error (error Method_not_found "this connection has no recovery window feature")
 ;;
 
@@ -47,6 +56,7 @@ let enable t (entry : Session_registry.entry) ~on_release (request : Q.Enable.t)
   let session_id = P.Session_ref.session_id request.session in
   let attachment_id = request.attachment_id in
   let authorize (state : A.Session_state.t) =
+    let%bind () = Session_registry.check_native_metadata_publication t.registry entry in
     if
       not
         (Operator_authorization.is_current t.actor
@@ -69,16 +79,13 @@ let enable t (entry : Session_registry.entry) ~on_release (request : Q.Enable.t)
     in
     let%bind observation = Actor.observe_resource_state entry.actor in
     let check () =
-      let%bind () = Session_registry.check_native_metadata_publication t.registry entry in
-      let%bind state = Actor.Resource_observation.check_current observation in
-      let%bind () = authorize state in
-      let%bind () =
-        A.Writer_attachment.require_recovery_owner
-          state
-          ~principal:principal.id
+      let%bind state =
+        Actor.Resource_observation.check_recovery_window_writer
+          observation
+          ~actor:t.actor
           ~attachment_id
-          ~now:t.now
       in
+      let%bind () = authorize state in
       if
         Option.exists state.recovery_windows ~f:(fun ledger ->
           P.Recovery_window.Scope.equal scope (Ledger.Window.scope (Ledger.active ledger)))
@@ -267,7 +274,6 @@ let rollover t (entry : Session_registry.entry) ~on_release (request : Control.R
     then Ok ()
     else Error (error Invalid_request "rollover belongs to another host")
   in
-  let principal = Operator_authorization.principal t.actor in
   let authorize state =
     let%bind () = Session_registry.check_native_metadata_publication t.registry entry in
     authorize_control_writer t session (Some request.attachment_id) state
@@ -283,15 +289,13 @@ let rollover t (entry : Session_registry.entry) ~on_release (request : Control.R
   in
   let%bind observation = Actor.observe_resource_state entry.actor in
   let check () =
-    let%bind state = Actor.Resource_observation.check_current observation in
-    let%bind () = authorize state in
-    let%bind () =
-      A.Writer_attachment.require_recovery_owner
-        state
-        ~principal:principal.id
+    let%bind state =
+      Actor.Resource_observation.check_recovery_window_writer
+        observation
+        ~actor:t.actor
         ~attachment_id:request.attachment_id
-        ~now:t.now
     in
+    let%bind () = authorize state in
     if request.force then authorize_force state else Ok ()
   in
   let%map () = check () in
