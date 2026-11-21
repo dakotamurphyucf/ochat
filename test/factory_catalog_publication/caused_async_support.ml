@@ -323,6 +323,7 @@ let observe_attempt (t : probe) (expected_job : P.Job.t) =
 type fixture =
   { probe : probe
   ; failure : Failure.t
+  ; progress : Fixture_progress.t
   ; direct : bool ref
   ; direct_providers : int ref
   ; child_providers : int ref
@@ -349,6 +350,7 @@ let with_claimed_async
       f
   =
   let failure = Failure.create () in
+  let progress = Fixture_progress.create () in
   let handoff, handoff_u = Eio.Promise.create () in
   let entered, entered_u = Eio.Promise.create () in
   let release, release_u = Eio.Promise.create () in
@@ -394,6 +396,7 @@ let with_claimed_async
   in
   Birth.with_native_goal_child
     ~timeout:90.
+    ~progress
     ~parent_prompt_text
     ~inherited_tools:[ "read_file", Descendant_goal_resume_tests.parent_reader ]
     ~sources
@@ -439,6 +442,9 @@ let with_claimed_async
               Direct.start_child daemon child;
               let before_parent = Model.checkpoint parent in
               let before_child, ceiling, admission = activate scenario daemon child in
+              Fixture_progress.mark
+                (Some progress)
+                "observe the delegated read after child Goal admission";
               gate_armed := true;
               resolve handoff handoff_u;
               Model.within env "actual delegated read after Async birth ACK" (fun () ->
@@ -476,12 +482,16 @@ let with_claimed_async
                 }
               in
               probe := Some subject;
+              Fixture_progress.mark
+                (Some progress)
+                "exercise the actual claimed Async Job";
               f
                 env
                 sw
                 daemon
                 { probe = subject
                 ; failure
+                ; progress
                 ; direct
                 ; direct_providers
                 ; child_providers

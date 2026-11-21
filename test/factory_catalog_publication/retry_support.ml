@@ -49,23 +49,23 @@ module Fixture_phase = struct
     , (List.take (List.rev current.moderator_executions) 4 : P.Moderator_execution.t list)]
   ;;
 
-  let await_actor ?(details = fun _ -> []) ~clock ~phase (entry : Registry.entry) select =
+  let rec await_change (entry : Registry.entry) select =
+    let changed = A.Durable_event_log.changed entry.durable_events in
+    match select (state entry) with
+    | Some value -> value
+    | None ->
+      Eio.Promise.await changed;
+      await_change entry select
+  ;;
+
+  let await_actor ?(details = fun _ -> []) ~clock ~phase entry select =
     within
       ~clock
       phase
       ~on_timeout:(fun () ->
         let current = state entry in
         snapshot current :: details current)
-      (fun () ->
-         let rec await () =
-           let changed = A.Durable_event_log.changed entry.durable_events in
-           match select (state entry) with
-           | Some value -> value
-           | None ->
-             Eio.Promise.await changed;
-             await ()
-         in
-         await ())
+      (fun () -> await_change entry select)
   ;;
 end
 
@@ -131,6 +131,30 @@ type counters =
   ; transcripts : string list ref
   }
 
+module Fixture_progress = struct
+  type t = { mutable mark : string -> unit }
+
+  let create () = { mark = ignore }
+  let mark t phase = Option.iter t ~f:(fun progress -> progress.mark phase)
+
+  let run t ~clock ~seconds f =
+    let now () = Eio.Time.Mono.now clock in
+    let last = ref (now (), "load and initialize the actual parent runtime") in
+    Exn.protect
+      ~finally:(fun () -> t.mark <- ignore)
+      ~f:(fun () ->
+        t.mark <- (fun phase -> last := now (), phase);
+        with_progress_watchdog
+          ~clock
+          ~seconds
+          ~last_progress:(fun () -> fst !last)
+          ~timeout_exn:(fun () ->
+            Failure
+              ("factory fixture stopped progressing while attempting to " ^ snd !last))
+          f)
+  ;;
+end
+
 let with_recoverable_fixture
       ?capacity_source
       ?chatml_runtime_policy
@@ -138,6 +162,7 @@ let with_recoverable_fixture
       ?sources
       ?test_root
       ?(timeout = 30.)
+      ?progress
       ?(prompt_text = Source.prompt_text)
       ?(wrap_env = Fn.id)
       ?(entry_cleanup = Source.direct_cleanup ())
@@ -178,12 +203,24 @@ let with_recoverable_fixture
     ~max_root_agents
     ~policy
     (fun env sw root daemon ->
-       Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) timeout (fun () ->
+       let exercise () =
          Source.with_loaded_entry_using
            ~cleanup:entry_cleanup
            daemon
            (fun ~entry ~runtime ~revision ->
-              f env sw root daemon policy entry runtime revision counters)))
+              Fixture_progress.mark progress "exercise the loaded parent";
+              let result = f env sw root daemon policy entry runtime revision counters in
+              Fixture_progress.mark progress "close the completed fixture's parent entry";
+              result)
+       in
+       match progress with
+       | None -> Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) timeout exercise
+       | Some progress ->
+         Fixture_progress.run
+           progress
+           ~clock:(Eio.Stdenv.mono_clock env)
+           ~seconds:timeout
+           exercise)
 ;;
 
 let with_fixture ?timeout ?prompt_text ?wrap_env ?max_root_agents ?post_stream f =
