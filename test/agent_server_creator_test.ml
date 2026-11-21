@@ -83,6 +83,17 @@ let%expect_test
         in
         let phase = ref "startup" in
         let started = ref (Eio.Time.now (Eio.Stdenv.clock env)) in
+        let mono = Eio.Stdenv.mono_clock env in
+        let last_verified = ref (Eio.Time.Mono.now mono) in
+        let rec watch () =
+          let verified = !last_verified in
+          let deadline =
+            Mtime.add_span verified (Mtime.Span.of_uint64_ns 40_000_000_000L)
+            |> Option.value_exn
+          in
+          Eio.Time.Mono.sleep_until mono deadline;
+          if Mtime.equal verified !last_verified then raise Eio.Time.Timeout else watch ()
+        in
         let phases = Queue.create () in
         let last_state = ref None in
         let mark_phase next =
@@ -221,11 +232,10 @@ let%expect_test
                   started := Eio.Time.now (Eio.Stdenv.clock env);
                   Queue.clear phases;
                   mark_phase "connect";
-                  (* The first workflow measured 8.0s wall / 7.6s CPU locally;
-                     concurrent Linux CI reached its final stop/inspect/restart at
-                     19.8s. Bound the complete workflow with scheduling headroom;
-                     native operation deadlines remain unchanged. *)
-                  Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 40. (fun () ->
+                  (* Bound each real operation, including the initial and final lifecycle
+                     work. Only validated tool completion renews the deadline. *)
+                  last_verified := Eio.Time.Mono.now mono;
+                  Eio.Fiber.first watch (fun () ->
                     let client = connection daemon (principal ()) in
                     Exn.protect
                       ~finally:(fun () -> Agent_client.Connection.close client)
@@ -319,6 +329,7 @@ let%expect_test
               ~f:(fun entry -> P.History.equal_kind entry.P.History.kind Tool_output)
           in
           [%test_eq: int] 1 (output_count current - output_count before);
+          last_verified := Eio.Time.Mono.now mono;
           root_call.status, fresh
         in
         let complete = function
