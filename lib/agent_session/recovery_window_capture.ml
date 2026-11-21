@@ -61,11 +61,29 @@ let create_root (state : S.t) ~owner ~window =
       Ledger.create ~owner [ root ]))
 ;;
 
+let can_bootstrap (state : S.t) =
+  match state.runtime_initialization, state.active_operation with
+  | Ready, None -> true
+  | Pending { fresh_history = false }, None ->
+    let spec = state.spec.protocol in
+    (match spec.execution_host, spec.liveness, spec.persistence, state.lifecycle with
+     | Embedded, Process_bound, Durable, { desired = Stopped; observed = Stopped } ->
+       Int.equal state.identity.generation 0
+       && (not spec.start_immediately)
+       && (not state.pending_initial_start)
+       && Option.is_none state.spec.delegation
+       && Option.is_none state.run_state
+       && Int.equal state.conversation.initial_prompt_entry_count 0
+     | _ -> false)
+  | Pending _, _ | Ready, Some _ -> false
+;;
+
 let bootstrap (state : S.t) ~owner ~window =
-  match state.recovery_windows, state.runtime_initialization, state.active_operation with
-  | Some _, _, _ -> invalid "recovery window is already enabled"
-  | None, Ready, None -> create_root state ~owner ~window
-  | None, (Ready | Pending _), _ -> invalid "recovery bootstrap requires settled history"
+  if Option.is_some state.recovery_windows
+  then invalid "recovery window is already enabled"
+  else if can_bootstrap state
+  then create_root state ~owner ~window
+  else invalid "recovery bootstrap requires settled or stopped seeded history"
 ;;
 
 let members window =

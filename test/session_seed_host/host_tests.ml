@@ -11,6 +11,7 @@ let%expect_test
       let original = request ~code:(catalog_code client) ~key:"neutral-seed" transcript in
       let seeded = C.Session_handle.seed client original |> protocol_ok in
       let state = assert_stopped daemon seeded transcript in
+      assert (not (A.Recovery_window_capture.can_bootstrap state));
       let again = C.Session_handle.seed client original |> protocol_ok in
       assert (P.Id.Session.equal seeded.session_id again.session_id);
       let retained =

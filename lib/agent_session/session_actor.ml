@@ -58328,11 +58328,24 @@ let enable_recovery_windows_internal t actor attachment_id authorize =
     Ok (scope ledger)
   | Some _ -> Error (error Invalid_state "recovery window owner differs from this host")
   | None ->
-    let%bind () =
-      match t.state.runtime_initialization, t.state.active_operation with
-      | Ready, None -> Ok ()
-      | Pending _, _ | Ready, Some _ ->
-        Error (error Conflict "recovery window enablement requires settled history")
+    let check_basis () =
+      if not (Recovery_window_capture.can_bootstrap t.state)
+      then
+        Error
+          (error
+             Conflict
+             "recovery window enablement requires settled or stopped seeded history")
+      else (
+        match t.state.runtime_initialization with
+        | Pending _
+          when Option.is_some t.initialization_scope || Option.is_some t.run_preparation ->
+          Error (error Conflict "seed initialization is already in progress")
+        | Ready | Pending _ -> Ok ())
+    in
+    let%bind () = check_basis () in
+    let check_before_commit () =
+      let%bind () = check () in
+      check_basis ()
     in
     let previous = t.state in
     let window = P.Id.Context_window.create () in
@@ -58356,14 +58369,14 @@ let enable_recovery_windows_internal t actor attachment_id authorize =
       Session_commit_observation.Owner.create_guarded
         ~previous
         ~candidate
-        ~check_at_writer:check
+        ~check_at_writer:check_before_commit
     in
     let%bind () =
       persist_transition
         ?run_preparation
         t
         candidate
-        ~check_before_commit:check
+        ~check_before_commit
         ~commit_observation
     in
     install_committed_transition ?run_preparation t candidate;

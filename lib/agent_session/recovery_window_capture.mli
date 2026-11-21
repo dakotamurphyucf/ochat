@@ -6,6 +6,12 @@ open! Core
 module P = Agent_protocol
 module Ledger = Recovery_window_ledger
 
+(** The durable basis for first enrollment. Ordinary sessions require Ready
+    history with no active operation. A stopped, unstarted local durable seed
+    can already identify its exact imported rows. The live Actor must still
+    prove ownership and exclude an in-progress initializer for that seed. *)
+val can_bootstrap : Session_state.t -> bool
+
 val bootstrap
   :  Session_state.t
   -> owner:P.Session_ref.t
