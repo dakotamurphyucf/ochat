@@ -37,6 +37,7 @@
   chatml_builtin_spec
   chatml_builtin_surface
   chatml_extension_surface
+  chatml_context_rollover
   chatml_surface_inventory)
  (private_modules chatml_contract_encoding)
  (libraries core jsonaf menhirLib source chatml_source chatml_diagnostic chatml_trace)

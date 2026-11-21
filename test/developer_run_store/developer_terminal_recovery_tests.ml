@@ -23,10 +23,29 @@ let authority env root (owner : P.Execution_owner.developer) =
     / ("run_" ^ P.Id.Developer_run.to_string owner.run_id ^ ".json"))
 ;;
 
-let seed_running ?(alternate = false) ?(extra_jobs = 0) ~env ~root ~owner ~capture ~id () =
+let seed_running
+      ?(alternate = false)
+      ?(extra_jobs = 0)
+      ?max_document_bytes
+      ?max_work_steps
+      ~env
+      ~root
+      ~owner
+      ~capture
+      ~id
+      ()
+  =
   Eio.Switch.run (fun sw ->
     let session = F.create_session env sw root in
-    let store = F.open_run session sw ~max_jobs_per_run:(Int.max 4 (extra_jobs + 1)) () in
+    let store =
+      F.open_run
+        session
+        sw
+        ~max_jobs_per_run:(Int.max 4 (extra_jobs + 1))
+        ?max_document_bytes
+        ?max_work_steps
+        ()
+    in
     let handle, initial = F.admit store owner capture in
     let job = Selected.job owner capture ~id ~parent:P.Developer_job.Launch.Run_root in
     let prepared =
@@ -317,7 +336,31 @@ let%test_unit "recovery work limit and callback exception stay distinct" =
     let owner = F.owner 0 in
     let capture = F.digest "recovery budget capture" in
     let id = Selected.job_id "job_recovery_budget" in
-    ignore (seed_running ~extra_jobs:5 ~env ~root ~owner ~capture ~id () : string option);
+    let max_jobs_per_run = 12 in
+    let max_document_bytes = 16 * 1024 in
+    let probe_work_steps = 10_000 in
+    let open_run session sw ?checkpoint ?(max_work_steps = probe_work_steps) () =
+      F.open_run
+        session
+        sw
+        ?checkpoint
+        ~max_jobs_per_run
+        ~max_document_bytes
+        ~max_work_steps
+        ()
+    in
+    ignore
+      (seed_running
+         ~extra_jobs:(max_jobs_per_run - 1)
+         ~max_document_bytes
+         ~max_work_steps:probe_work_steps
+         ~env
+         ~root
+         ~owner
+         ~capture
+         ~id
+         ()
+       : string option);
     let ticks = ref 0 in
     let checkpoint () = incr ticks in
     let observed_work =
@@ -331,23 +374,27 @@ let%test_unit "recovery work limit and callback exception stay distinct" =
             ~lock_nonce:"recovery-budget-probe"
           |> F.store_ok
         in
-        let store = F.open_run session sw ~checkpoint ~max_jobs_per_run:6 () in
+        let store = open_run session sw ~checkpoint () in
         let opening_work = !ticks in
         let handle, _ = F.admit store owner capture in
-        let admission_work = !ticks - opening_work in
+        let after_admission = !ticks in
+        let admission_work = after_admission - opening_work in
         let claim = R.Run_claim.acquire ~store ~handle |> F.run_ok in
         let recovery = R.Recovery.open_ ~claim ~handle |> F.run_ok in
         let before = !ticks in
+        let claim_work = before - after_admission in
         let view = R.Recovery.observe recovery |> F.run_ok in
         let observed_work = !ticks - before in
-        (* Opening now includes the independent abandoned-Live inventory scan;
-           compare recovery against admission work, which this limit probes. *)
-        if observed_work <= admission_work
+        (* Opening polls both independent startup scans. Their combined count
+           is an upper bound on either allowance. The extra jobs make the
+           candidate walk cost more than any setup operation. *)
+        if observed_work <= Int.max opening_work (Int.max admission_work claim_work)
         then
           failwithf
-            "recovery work thresholds: opening=%d admission=%d observed=%d"
+            "recovery work thresholds: opening=%d admission=%d claim=%d observed=%d"
             opening_work
             admission_work
+            claim_work
             observed_work
             ();
         let observed = R.Recovery.View.observation view in
@@ -379,9 +426,7 @@ let%test_unit "recovery work limit and callback exception stay distinct" =
           ~lock_nonce:"recovery-budget-limited"
         |> F.store_ok
       in
-      let store =
-        F.open_run session sw ~max_jobs_per_run:6 ~max_work_steps:(observed_work - 1) ()
-      in
+      let store = open_run session sw ~max_work_steps:(observed_work - 1) () in
       let handle, _ = F.admit store owner capture in
       let claim = R.Run_claim.acquire ~store ~handle |> F.run_ok in
       let recovery = R.Recovery.open_ ~claim ~handle |> F.run_ok in
@@ -413,7 +458,7 @@ let%test_unit "recovery work limit and callback exception stay distinct" =
           ~lock_nonce:"recovery-budget-sentinel"
         |> F.store_ok
       in
-      let store = F.open_run session sw ~checkpoint ~max_jobs_per_run:6 () in
+      let store = open_run session sw ~checkpoint () in
       let handle, _ = F.admit store owner capture in
       let claim = R.Run_claim.acquire ~store ~handle |> F.run_ok in
       let recovery = R.Recovery.open_ ~claim ~handle |> F.run_ok in

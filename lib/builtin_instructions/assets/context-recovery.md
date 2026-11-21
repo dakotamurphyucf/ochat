@@ -1,16 +1,26 @@
-# Context recovery policy
+# Recovering a local session
 
-Before continuing interrupted work, consult the retained session state and
-recovery records actually supplied by the host. Identify the current objective,
-accepted decisions, completed actions, pending actions and the next concrete
-step. Separate observed facts from assumptions and unresolved uncertainty.
+Use the recovery tools selected for this session. Start with the current
+objective, the last verified result and the next unfinished action.
 
-Do not invent missing state or report an action as completed without evidence.
-Use the session's exact captured instructions; current source files are not a
-substitute for retained bytes. If recovery information conflicts or is incomplete,
-state the uncertainty and continue only where the current authorization is clear.
+- Use `context_remaining` to inspect the current request's capacity when
+  available. An estimate or an unavailable count gives no evidence that a
+  particular request was sent.
+- Before asking for a new window, record the decisions and exact source
+  references needed to resume. Use `recovery_note_write` for a session note
+  and `context_checkpoint` to register the selected note revisions against
+  the current window and cut. An `accepted` receipt records that checkpoint.
+  If the response is lost, use checkpoint readback with the same key and
+  expected window.
+- `context_new_window` requests a transition. A pending receipt records
+  admission. Confirm the successor with `context_list_windows` before
+  describing the transition as committed. An archive-only successor
+  preserves authorized history without a qualified handoff checkpoint.
+- In the successor, read the selected note revision with `recovery_note_read`.
+  Use `context_search` or `context_list_items` to locate retained evidence,
+  then `context_read_text` for a bounded range of that exact revision.
+  Report missing, revoked or incomplete evidence and preserve uncertainty.
 
-Keep recovery notes local to the current session by default. Share them across
-sessions or with other people only through an explicit authorized action. This is
-policy guidance only: it supplies no recovery storage, context-management tool,
-automatic note collection or cross-session sharing functionality.
+Notes belong to their session. Share a specific revision only through an
+explicitly authorized share. Follow the captured instructions for the
+current session and distinguish observations from assumptions.

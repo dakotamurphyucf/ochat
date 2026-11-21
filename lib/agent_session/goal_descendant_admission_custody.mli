@@ -43,6 +43,12 @@ module Descendant_preparation : sig
       | Sealed_before_writer
   end
 
+  module Parent_observation : sig
+    type t =
+      | Current
+      | Superseded
+  end
+
   (** Only Actor capture supplies the original State/controller/issuer and the
       negative owner/before guards. One preparation owns exactly one Set claim;
       retirement, sealing and factual ACK never reset that claim. *)
@@ -58,11 +64,18 @@ module Descendant_preparation : sig
     ; writer_attempted : bool ref
     ; phase : Phase.t ref
     ; mutable reservation_set_claim : unit ref option
+    ; mutable parent_observation : Parent_observation.t
     ; check_owner : unit -> (unit, Agent_protocol.Error.t) result
     ; check_before : unit -> (unit, Agent_protocol.Error.t) result
     }
 
   val on_domain : t -> bool
+  val parent_observation_superseded : t -> bool
+
+  (** An actual root observed that its canonically selected State changed
+      before the child could write. This alone grants no retry or custody. *)
+  val observe_parent_state_change : t -> unit
+
   val occurrence : t -> Goal_descendant_occurrence.t
   val scopes : t -> Agent_store.Delegation_goal_origin.Scope.t list
   val delegation : t -> Agent_store.Delegation_store.Reference.t option

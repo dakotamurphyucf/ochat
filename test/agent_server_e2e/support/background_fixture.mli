@@ -95,4 +95,11 @@ val checkpoint
   -> session
   -> Agent_session.Session_state.t option
 
+(** Read the same physical checkpoint and journal from an open Store handle. *)
+val checkpoint_from_paths
+  :  Eio_unix.Stdenv.base
+  -> snapshot_directory:string
+  -> journal_directory:string
+  -> Agent_session.Session_state.t option
+
 val moderator_state : Agent_session.Session_state.t -> string

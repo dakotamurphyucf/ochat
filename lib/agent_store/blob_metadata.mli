@@ -39,5 +39,16 @@ type t =
     stages carry an explicit [Developer] target. No caller may infer developer
     custody from the absence of a session target. *)
 
+(** Reserved Store metadata for retained original assets. The tag binds an exact
+    source version and part. It conveys no permission to adopt or read bytes. *)
+module Recovery_use : sig
+  val is_reserved : string -> bool
+
+  val for_part
+    :  Agent_protocol.Recovery_window.Citation.t
+    -> part:int
+    -> (string, Agent_protocol.Error.t) result
+end
+
 val equal : t -> t -> bool
 val blob_equal : Agent_protocol.Blob.Metadata.t -> Agent_protocol.Blob.Metadata.t -> bool

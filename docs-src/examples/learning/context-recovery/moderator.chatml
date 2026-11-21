@@ -1,0 +1,39 @@
+type state = {
+  successor:[ `None | `Some(string) ];
+  review:Review.state;
+  review_finished:bool
+}
+let initial_state = {successor = `None; review = Review.initial; review_finished = false}
+
+let finished : fun(Lifecycle.obligation) -> bool = fun obligation ->
+  match obligation with
+  | `Finished -> true
+  | `Active -> false
+
+let review_preference : fun(json Lifecycle.action) -> Recovery_rollover.continuation =
+  fun action -> match action with
+  | `Wait(_) -> `Wait
+  | `No_action -> `Continue
+  | `Continue -> `Continue
+
+let on_event : context -> state -> moderator_event -> state task =
+  fun ctx state event -> match (|event, state.successor|) with
+  | (|`Turn_end, `Some(_)|) ->
+    let progress = Review.step(state.review) in
+    Task.pure({successor = state.successor; review = progress.state;
+               review_finished = finished(progress.decision.obligation)})
+  | _ -> Task.pure(state)
+
+let on_context_rollover :
+  context -> state -> context_rollover_event -> (state * context_rollover_decision) task =
+  fun ctx state event -> match event with
+  | `Before_context_rollover(offer) ->
+    Task.pure((|state, `Before(Recovery_rollover.before(offer.checkpoint, `Require_checkpoint))|))
+  | `After_context_rollover(committed) ->
+    let progress = Review.step(state.review) in
+    let continuation = Context_rollover.compose([
+      Recovery_rollover.after(committed.checkpoint),
+      review_preference(progress.decision.action)]) in
+    let next = {successor = `Some(committed.window.id); review = progress.state;
+                review_finished = finished(progress.decision.obligation)} in
+    Task.pure((|next, `After(continuation)|))

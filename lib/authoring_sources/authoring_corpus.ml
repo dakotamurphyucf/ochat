@@ -2779,6 +2779,58 @@ module Coverage = struct
           }))
   ;;
 
+  let rollover_mappings =
+    List.map
+      [ ( "delegated_moderator_v1/module/Context_rollover"
+        , "874673df3adc8a134eae34a5daf8b7954dc02bda7751b94e3996cd14613bccc7"
+        , "2823a2fd2c5ef3dd76447d3ee77a5591a7fd678ed836bf1beafe66a300f739e7" )
+      ; ( "delegated_moderator_v1/module_export/Context_rollover.compose"
+        , "d7fdc8c1603ecdb9533f00918ffa4c333a87c4a277ec83c098ab0b6f5c1fcc73"
+        , "2823a2fd2c5ef3dd76447d3ee77a5591a7fd678ed836bf1beafe66a300f739e7" )
+      ; ( "delegated_moderator_v1/type_alias/context_rollover_before"
+        , "d9260f9f50dca296e39cf56b681a3e87f1f5d293a3bb3acb7e70188e9fc8c3fb"
+        , "2823a2fd2c5ef3dd76447d3ee77a5591a7fd678ed836bf1beafe66a300f739e7" )
+      ; ( "delegated_moderator_v1/type_alias/context_rollover_continuation"
+        , "d3f80ea259a2d446013e1cf5f1eab9a830456ae8836429c97264205674dd15bc"
+        , "2823a2fd2c5ef3dd76447d3ee77a5591a7fd678ed836bf1beafe66a300f739e7" )
+      ; ( "delegated_moderator_v1/type_alias/context_rollover_decision"
+        , "2af3686d8997fd96b1a97e3f149ef31adf1a705573255424b6e374312dd3b037"
+        , "2823a2fd2c5ef3dd76447d3ee77a5591a7fd678ed836bf1beafe66a300f739e7" )
+      ; ( "delegated_moderator_v1/type_alias/context_rollover_event"
+        , "9050f6df72842bf67efcf5c4bd1c8d44f3b51d452a7c6f813c8374cf14051997"
+        , "2823a2fd2c5ef3dd76447d3ee77a5591a7fd678ed836bf1beafe66a300f739e7" )
+      ; ( "moderator_v1/module/Context_rollover"
+        , "e363a67c2ab47a6a00d68c021c116a98b22361ff2a265ed77cd83a90ddde6489"
+        , "b1e39f65350bb9ef410ad26ca2a078e513a77328446a42187043d6598c2d4cd5" )
+      ; ( "moderator_v1/module_export/Context_rollover.compose"
+        , "41da6a3e64c2e82c811d7c6446d998fe3886fdacd049cca395d777fab9ff6703"
+        , "b1e39f65350bb9ef410ad26ca2a078e513a77328446a42187043d6598c2d4cd5" )
+      ; ( "moderator_v1/type_alias/context_rollover_before"
+        , "f916b4c3d00c1d4c3fb75936fb9258061347e9df0e00aa9cc171029730a1225d"
+        , "b1e39f65350bb9ef410ad26ca2a078e513a77328446a42187043d6598c2d4cd5" )
+      ; ( "moderator_v1/type_alias/context_rollover_continuation"
+        , "cab5f98da303ce911dfe8648475710be0dcba60236b8cea38c826ebcb7f0a5bb"
+        , "b1e39f65350bb9ef410ad26ca2a078e513a77328446a42187043d6598c2d4cd5" )
+      ; ( "moderator_v1/type_alias/context_rollover_decision"
+        , "f81dfddeb8c2887ba8424f9b9385c840f7523f48576628337a0aa02ba54a6921"
+        , "b1e39f65350bb9ef410ad26ca2a078e513a77328446a42187043d6598c2d4cd5" )
+      ; ( "moderator_v1/type_alias/context_rollover_event"
+        , "84b3833cd572db808d47d9ce4c462b36ae1191c4f156fe96d9d712710019029c"
+        , "b1e39f65350bb9ef410ad26ca2a078e513a77328446a42187043d6598c2d4cd5" )
+      ]
+      ~f:(fun (target_id, contract_sha256, topic_closure_sha256) ->
+        { target_id
+        ; contract_sha256
+        ; topic_id = "runtime.context_windows"
+        ; topic_closure_sha256
+        ; evidence =
+            [ "test/agent_server_e2e/scenarios/recovery_rollover_hooks_scenario.ml"
+            ; "lib/chatml/chatml_context_rollover.ml"
+            ; "lib/agent_session/recovery_rollover_hooks.ml"
+            ]
+        })
+  ;;
+
   let reviewed_mappings =
     entrypoint_mappings
     @ task_mappings
@@ -2797,6 +2849,7 @@ module Coverage = struct
     @ goal_mappings
     @ background_mappings
     @ invocation_context_mappings
+    @ rollover_mappings
   ;;
 end
 
@@ -3700,7 +3753,7 @@ let runtime_foundation ~sources =
          ; review =
              Audited
                { excerpt_sha256 =
-                   [ "6e6ec03ec819715129d26b68a3dcd196f358845e110aa754acd893157fac5abf" ]
+                   [ "ebbcefb5f554cd78dd58c4b0e6d7679fb783662d82226539fc080cfc83d11b49" ]
                ; evidence =
                    [ "test/builtin_instructions/builtin_instructions_tests.ml"
                    ; "test/chatmd_prompt_content/content_tests.ml"
@@ -3728,6 +3781,73 @@ let runtime_foundation ~sources =
                    [ "test/factory_catalog_publication/goal_native_metadata_tests.ml"
                    ; "test/factory_catalog_publication/goal_native_resume_tests.ml"
                    ; "test/goal_domain/goal_resume_request_tests.ml"
+                   ]
+               }
+         }
+       ]
+     @ [ { id = "runtime.context_windows"
+         ; title =
+             "Inspect capacity, record a checkpoint and request a local context window"
+         ; prerequisites = []
+         ; surfaces = shared
+         ; excerpts =
+             [ { path = "development/context-window-tools.md"
+               ; heading = "# Selected context window tools"
+               ; include_children = true
+               }
+             ]
+         ; review =
+             Audited
+               { excerpt_sha256 =
+                   [ "5d563e2a9288b0cb55088e31a301bae65b589b93ef82fa995e1d1876f5e5cf97" ]
+               ; evidence =
+                   [ "test/agent_session/recovery_rollover_tests.ml"
+                   ; "test/agent_server_e2e/scenarios/recovery_checkpoint_scenario.ml"
+                   ; "test/agent_server_e2e/scenarios/recovery_rollover_hooks_scenario.ml"
+                   ]
+               }
+         }
+       ]
+     @ [ { id = "runtime.recovery_history"
+         ; title =
+             "Recover an exact ordinary history selection in a foreground model operation"
+         ; prerequisites = []
+         ; surfaces = shared
+         ; excerpts =
+             [ { path = "development/recovery-history-tools.md"
+               ; heading = "# Selected recovery history tools"
+               ; include_children = true
+               }
+             ]
+         ; review =
+             Audited
+               { excerpt_sha256 =
+                   [ "f46807b5400fecc820092d0a20d06b9e25193330fd54f28d56b1abbf6abff095" ]
+               ; evidence =
+                   [ "test/agent_session/recovery_history_access_tests.ml"
+                   ; "test/agent_server_e2e/scenarios/recovery_history_provider_scenario.ml"
+                   ]
+               }
+         }
+       ]
+     @ [ { id = "runtime.recovery_notes"
+         ; title = "Read, share and update selected recovery notes"
+         ; prerequisites = []
+         ; surfaces = shared
+         ; excerpts =
+             [ { path = "development/recovery-note-tools.md"
+               ; heading = "# Selected recovery note tools"
+               ; include_children = true
+               }
+             ]
+         ; review =
+             Audited
+               { excerpt_sha256 =
+                   [ "9563520674b403f46660bd82f74743428f0b792f20f837131588db25028a7041" ]
+               ; evidence =
+                   [ "test/agent_session/recovery_note_native_tests.ml"
+                   ; "test/agent_server_e2e/scenarios/recovery_note_provider_scenario.ml"
+                   ; "test/agent_server_e2e/scenarios/recovery_note_shared_provider_scenario.ml"
                    ]
                }
          }

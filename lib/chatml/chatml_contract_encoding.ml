@@ -1,72 +1,106 @@
 open Core
 module Spec = Chatml_builtin_spec
 
-let type_scheme root ~checkpoint =
-  let atom s = Sexp.Atom s in
-  let node tag children = Sexp.List (atom tag :: children) in
-  let map xs ~f =
-    List.map xs ~f:(fun x ->
-      checkpoint ();
-      f x)
+type t =
+  { atom : string -> unit
+  ; list : (unit -> unit) -> unit
+  }
+
+let atom t = t.atom
+let list t = t.list
+
+let type_scheme t root =
+  let atom = atom t in
+  let list = list t in
+  let node tag emit =
+    list (fun () ->
+      atom tag;
+      emit ())
   in
-  let rec ty t =
-    checkpoint ();
-    match t with
-    | Spec.TVar name -> node "TVar" [ atom name ]
-    | TCon (name, arguments) -> node "TCon" [ atom name; Sexp.List (map arguments ~f:ty) ]
+  let nodes values emit = list (fun () -> List.iter values ~f:emit) in
+  let rec ty = function
+    | Spec.TVar name -> node "TVar" (fun () -> atom name)
+    | TCon (name, arguments) ->
+      node "TCon" (fun () ->
+        atom name;
+        nodes arguments ty)
     | TInt -> atom "TInt"
     | TFloat -> atom "TFloat"
     | TBool -> atom "TBool"
     | TString -> atom "TString"
     | TUnit -> atom "TUnit"
-    | TArray t -> node "TArray" [ ty t ]
-    | TRef t -> node "TRef" [ ty t ]
-    | TTuple ts -> node "TTuple" [ Sexp.List (map ts ~f:ty) ]
-    | TRecord r -> node "TRecord" [ row r ]
-    | TModule r -> node "TModule" [ row r ]
-    | TField_receiver (name, r) -> node "TField_receiver" [ atom name; row r ]
-    | TVariant r -> node "TVariant" [ variant r ]
-    | TFun (ts, r) -> node "TFun" [ Sexp.List (map ts ~f:ty); ty r ]
-    | TMu (name, t) -> node "TMu" [ atom name; ty t ]
-    | TRec_var name -> node "TRec_var" [ atom name ]
+    | TArray value -> node "TArray" (fun () -> ty value)
+    | TRef value -> node "TRef" (fun () -> ty value)
+    | TTuple values -> node "TTuple" (fun () -> nodes values ty)
+    | TRecord value -> node "TRecord" (fun () -> row value)
+    | TModule value -> node "TModule" (fun () -> row value)
+    | TField_receiver (name, value) ->
+      node "TField_receiver" (fun () ->
+        atom name;
+        row value)
+    | TVariant value -> node "TVariant" (fun () -> variant value)
+    | TFun (parameters, result) ->
+      node "TFun" (fun () ->
+        nodes parameters ty;
+        ty result)
+    | TMu (name, value) ->
+      node "TMu" (fun () ->
+        atom name;
+        ty value)
+    | TRec_var name -> node "TRec_var" (fun () -> atom name)
   and row = function
-    | Spec.TRow_empty ->
-      checkpoint ();
-      atom "TRow_empty"
-    | TRow_var name ->
-      checkpoint ();
-      node "TRow_var" [ atom name ]
-    | TRow_extend (fields, r) ->
-      checkpoint ();
-      node
-        "TRow_extend"
-        [ Sexp.List (map fields ~f:(fun (name, t) -> Sexp.List [ atom name; ty t ]))
-        ; row r
-        ]
+    | Spec.TRow_empty -> atom "TRow_empty"
+    | TRow_var name -> node "TRow_var" (fun () -> atom name)
+    | TRow_extend (fields, rest) ->
+      node "TRow_extend" (fun () ->
+        nodes fields (fun (name, value) ->
+          list (fun () ->
+            atom name;
+            ty value));
+        row rest)
   and variant = function
-    | Spec.TVariant_row_empty ->
-      checkpoint ();
-      atom "TVariant_row_empty"
-    | TVariant_row_var name ->
-      checkpoint ();
-      node "TVariant_row_var" [ atom name ]
-    | TVariant_row_extend (fields, r) ->
-      checkpoint ();
-      node
-        "TVariant_row_extend"
-        [ Sexp.List
-            (map fields ~f:(fun (name, ts) ->
-               Sexp.List [ atom name; Sexp.List (map ts ~f:ty) ]))
-        ; variant r
-        ]
+    | Spec.TVariant_row_empty -> atom "TVariant_row_empty"
+    | TVariant_row_var name -> node "TVariant_row_var" (fun () -> atom name)
+    | TVariant_row_extend (fields, rest) ->
+      node "TVariant_row_extend" (fun () ->
+        nodes fields (fun (name, values) ->
+          list (fun () ->
+            atom name;
+            nodes values ty));
+        variant rest)
   in
   ty root
 ;;
 
+let to_sexp ~checkpoint emit =
+  let reversed = ref [] in
+  let atom text =
+    checkpoint ();
+    reversed := Sexp.Atom text :: !reversed
+  in
+  let list emit =
+    checkpoint ();
+    let parent = !reversed in
+    reversed := [];
+    emit ();
+    let children =
+      List.fold !reversed ~init:[] ~f:(fun result child ->
+        checkpoint ();
+        child :: result)
+    in
+    reversed := Sexp.List children :: parent
+  in
+  emit { atom; list };
+  match !reversed with
+  | [ root ] -> root
+  | _ -> failwith "compiler identity must have one root"
+;;
+
 (* Sexplib0 0.17 machine syntax: spaces separate only adjacent unquoted atoms.
-   Explicit pending events make list emission stack safe. Byte work polls in
-   4096-byte chunks, including long native names and escaped binary atoms. *)
-let to_string ?(allocate = fun _ -> ()) root ~checkpoint =
+   Byte work polls in 4096-byte chunks, including long native names and escaped
+   binary atoms. The emitter reads original type nodes and never builds a second
+   tree for byte output. *)
+let to_string ?(allocate = fun _ -> ()) ~checkpoint emit =
   allocate 1024;
   let buffer = Buffer.create 256 in
   let poll index = if index mod 4096 = 0 then checkpoint () in
@@ -118,33 +152,31 @@ let to_string ?(allocate = fun _ -> ()) root ~checkpoint =
         Buffer.add_char buffer (Char.of_int_exn (48 + (code mod 10))));
     Buffer.add_char buffer '"'
   in
-  let rec emit need_space events =
-    allocate 128;
-    match events with
-    | [] ->
-      checkpoint ();
-      Buffer.contents buffer
-    | `Close :: rest ->
-      checkpoint ();
-      Buffer.add_char buffer ')';
-      emit false rest
-    | `Nodes [] :: rest -> emit need_space rest
-    | `Nodes (node :: nodes) :: rest ->
-      emit need_space (`Node node :: `Nodes nodes :: rest)
-    | `Node (Sexp.Atom text) :: rest ->
-      checkpoint ();
-      if quoted text
-      then (
-        escape text;
-        emit false rest)
-      else (
-        if need_space then Buffer.add_char buffer ' ';
-        copy text;
-        emit true rest)
-    | `Node (Sexp.List nodes) :: rest ->
-      checkpoint ();
-      Buffer.add_char buffer '(';
-      emit false (`Nodes nodes :: `Close :: rest)
+  let needs_space = ref false in
+  let charge_node () =
+    checkpoint ();
+    allocate 256
   in
-  emit false [ `Node root ]
+  let atom text =
+    charge_node ();
+    if quoted text
+    then (
+      escape text;
+      needs_space := false)
+    else (
+      if !needs_space then Buffer.add_char buffer ' ';
+      copy text;
+      needs_space := true)
+  in
+  let list emit =
+    charge_node ();
+    Buffer.add_char buffer '(';
+    needs_space := false;
+    emit ();
+    Buffer.add_char buffer ')';
+    needs_space := false
+  in
+  emit { atom; list };
+  checkpoint ();
+  Buffer.contents buffer
 ;;

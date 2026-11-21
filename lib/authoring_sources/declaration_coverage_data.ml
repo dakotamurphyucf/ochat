@@ -242,7 +242,7 @@ let implementation_sources =
   ; ( "lib/chat_response/authoring_policy.ml"
     , "78a9aaae6ad9a0626577dbcd83c8138458550c104bb99fa7808bbed1eb97a1d3" )
   ; ( "lib/chat_response/generated_admission.ml"
-    , "781909db7e778943cbca05cf969eb93a4bff646bd6711f8dcda4d0e272062651" )
+    , "137adaa4beca5c2d5f0d6f36c5c18e25ffe3370b5086376720b0df1a3cb9bc17" )
   ; ( "lib/chat_response/initial_prompt_history.ml"
     , "daf50b9c9a5337b562b5d78c8f37b12033aba72f561491f506443095e694fed9" )
   ; ( "lib/chatmd/chatmd_tag_scope.ml"
@@ -275,7 +275,7 @@ let implementation_sources =
   ; ( "lib/chatmd/chatmd_source_bundle.ml"
     , "5bd5d602cee857ede7d25645a6e7fc970bd82943b5eac30526faab98d069f4e1" )
   ; ( "lib/chatmd/prompt.ml"
-    , "9d35e23e50ad499469c2a6c067d9c20ae8683c23d0c26c8b6dcc1883e7feef6d" )
+    , "b9d416e1c123677a59d232097ec192a1a38d2eeaf593f13e180ab27f00a3cf1e" )
   ; ( "lib/chatmd/source_loader.ml"
     , "12c1ef9c5380aef91967e1e33a918678d6cac6b3d74594b4496834ddff2e3c12" )
   ; ( "lib/chatmd_shell_spec/authoring_metadata.ml"
@@ -291,7 +291,7 @@ let implementation_sources =
   ; ( "lib/meta_prompting/preprocessor.ml"
     , "5eedb68b3db23b16a8769522104d2f4e6f9f2e3cce2e11e40c92dc5c2ad879b8" )
   ; ( "lib/chat_response/converter.ml"
-    , "c6cdff248b4433655daa72064ce42e90d9522a7e2a632b78f555f86961bc0b0e" )
+    , "c4617afa8e0a8d28283289bd5cfd5c170eb04d30071fee1389e4f28faef4490e" )
   ; ( "lib/chat_response/fetch.ml"
     , "4a05211b42c66f2191cbf264002358f8eda48794c10ccc6bd40923b5f0cb3907" )
   ; ( "lib/chat_response/mcp_discovery_cache.ml"
@@ -334,7 +334,7 @@ let implementation_sources =
   ; ( "lib/chatmd/chatmd_owned_parser.ml"
     , "54814044e438ec34474351f6e0c7f8e4c926626013089c6c8183b2ac0717cf2b" )
   ; ( "lib/agent_session/prompt_revision_builder.ml"
-    , "eaa1553325dd9a63b75c7c15b4450bf23037774e567d75d898f11d1c819af0bf" )
+    , "37f45e9da3ac432191a9e1641332e399f623e0de4b26efdd2ebfb3c83bde22da" )
   ; ( "lib/agent_session/prompt_script_sources.ml"
     , "996751e15ce03b37c6d144c2e5fd576963b3e72d37803c31cefb9400fa1a34c6" )
   ]

@@ -70,7 +70,10 @@ module Compaction_archive : sig
     | Edit
     | Delete
     | Pending_input
-  [@@deriving equal, sexp]
+    | Rollover
+  [@@deriving equal, enumerate, sexp]
+
+  val of_recovery_source : Recovery_window_ledger.Source.archive_kind -> kind
 
   (** Administrative reconciliation of an invocation in the checksummed archive.
       Original inputs and recorded outcomes remain in that archive, not copied
@@ -91,6 +94,13 @@ module Compaction_archive : sig
     ; invocation_dispositions : invocation_disposition list [@sexp.list]
     }
   [@@deriving sexp]
+
+  val of_rollover : Recovery_rollover.Commit.t -> t
+
+  val check_rollover_unchanged
+    :  t list
+    -> incoming:t list
+    -> (unit, Agent_protocol.Error.t) result
 end
 
 module Conversation : sig
@@ -172,6 +182,12 @@ type 'spec fields =
   ; automatic_turn_budget : Automatic_turn_budget.t option [@sexp.option]
     (** Qualified host scheduling accounting. Historical absence is preserved
         until the host explicitly enables it; runtime reload cannot reset it. *)
+  ; recovery_windows : (Recovery_window_ledger.t option[@sexp.opaque])
+  ; recovery_installed_originals : (Recovery_installed_originals.t option[@sexp.opaque])
+  ; recovery_effective : (Recovery_effective_ledger.t option[@sexp.opaque])
+  ; recovery_reminders : (Recovery_reminder.t option[@sexp.opaque])
+    (** The absent field disables local window accounting. Canonical history
+        and physical archive custody continue to use their existing owners. *)
   ; permissions : Agent_protocol.Permission.t list
   ; grants : Agent_protocol.Grant.t list
   ; jobs : Agent_protocol.Job.t list
@@ -201,6 +217,9 @@ type 'spec fields =
   ; instruction_selection : Instruction_selection.t option [@sexp.option]
     (** Exact inert captured instruction custody and immutable mutation receipts.
         No transcript entry, source grant or provider activation is implied. *)
+  ; recovery_notes : (Recovery_note_session.t[@sexp.opaque]) option [@sexp.option]
+  ; recovery_note_shares : (Recovery_note_share.t[@sexp.opaque]) option [@sexp.option]
+  ; recovery_rollover : (Recovery_rollover.t[@sexp.opaque]) option [@sexp.option]
   ; recurrence_catalog : Recurrence_catalog.t option [@sexp.option]
   ; subscriptions : Agent_protocol.Subscription.t list [@sexp.list]
   ; deliveries : Agent_protocol.Delivery.t list [@sexp.list]
@@ -271,6 +290,13 @@ module Native_validation : sig
       publication revision, then still requires full final State validation and
       exact publication equality. No State or authority is returned. *)
   val validate_remaining
+    :  t
+    -> policy_revision:int64
+    -> (unit, Agent_protocol.Error.t) Result.t
+
+  (** Private ordered document replay still has unstamped counters. The window
+      locators are allowed to bind the transaction's one next publication. *)
+  val validate_ordered_prefix
     :  t
     -> policy_revision:int64
     -> (unit, Agent_protocol.Error.t) Result.t

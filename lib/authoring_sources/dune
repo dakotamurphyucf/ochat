@@ -41,6 +41,37 @@
     lib/agent_session/goal_native_metadata_service.ml %{dep:../agent_session/goal_native_metadata_service.ml}
     lib/agent_session/goal_native_metadata_view.ml %{dep:../agent_session/goal_native_metadata_view.ml}
     lib/agent_session/goal_run_evidence.ml %{dep:../agent_session/goal_run_evidence.ml}
+    lib/agent_session/recovery_history_native_request.ml %{dep:../agent_session/recovery_history_native_request.ml}
+    lib/agent_session/recovery_history_native_tool.ml %{dep:../agent_session/recovery_history_native_tool.ml}
+    lib/agent_session/recovery_history_native_service.ml %{dep:../agent_session/recovery_history_native_service.ml}
+    lib/agent_server/recovery_history_native_host.ml %{dep:../agent_server/recovery_history_native_host.ml}
+    lib/agent_session/recovery_effective_release.ml %{dep:../agent_session/recovery_effective_release.ml}
+    lib/chat_response/tool_capability.ml %{dep:../chat_response/tool_capability.ml}
+    lib/chat_response/managed_tool_registry.ml %{dep:../chat_response/managed_tool_registry.ml}
+    lib/agent_session/recovery_note_access.ml %{dep:../agent_session/recovery_note_access.ml}
+    lib/agent_session/recovery_note_native_request.ml %{dep:../agent_session/recovery_note_native_request.ml}
+    lib/agent_session/recovery_note_native_tool.ml %{dep:../agent_session/recovery_note_native_tool.ml}
+    lib/agent_session/recovery_note_native_service.ml %{dep:../agent_session/recovery_note_native_service.ml}
+    lib/agent_session/recovery_note_query.ml %{dep:../agent_session/recovery_note_query.ml}
+    lib/agent_session/recovery_note_share.ml %{dep:../agent_session/recovery_note_share.ml}
+    lib/agent_session/recovery_context_native_tool.ml %{dep:../agent_session/recovery_context_native_tool.ml}
+    lib/agent_session/recovery_context_service.ml %{dep:../agent_session/recovery_context_service.ml}
+    lib/agent_session/recovery_authored_checkpoint.ml %{dep:../agent_session/recovery_authored_checkpoint.ml}
+    lib/agent_session/recovery_checkpoint_cut.ml %{dep:../agent_session/recovery_checkpoint_cut.ml}
+    lib/agent_session/recovery_checkpoint_candidate.ml %{dep:../agent_session/recovery_checkpoint_candidate.ml}
+    lib/agent_session/recovery_checkpoint_opportunity.ml %{dep:../agent_session/recovery_checkpoint_opportunity.ml}
+    lib/chat_response/soft_checkpoint.ml %{dep:../chat_response/soft_checkpoint.ml}
+    lib/chatml/chatml_context_rollover.ml %{dep:../chatml/chatml_context_rollover.ml}
+    lib/chat_response/context_rollover_hook.ml %{dep:../chat_response/context_rollover_hook.ml}
+    lib/agent_session/recovery_rollover.ml %{dep:../agent_session/recovery_rollover.ml}
+    lib/agent_session/recovery_rollover_hooks.ml %{dep:../agent_session/recovery_rollover_hooks.ml}
+    lib/agent_session/recovery_rollover_hook_policy.ml %{dep:../agent_session/recovery_rollover_hook_policy.ml}
+    lib/agent_session/recovery_rollover_hook_snapshot.ml %{dep:../agent_session/recovery_rollover_hook_snapshot.ml}
+    lib/agent_session/recovery_rollover_batch_cut.ml %{dep:../agent_session/recovery_rollover_batch_cut.ml}
+    lib/agent_session/recovery_rollover_evidence.ml %{dep:../agent_session/recovery_rollover_evidence.ml}
+    lib/agent_session/recovery_ordinary_selection.ml %{dep:../agent_session/recovery_ordinary_selection.ml}
+    lib/agent_session/recovery_rollover_hint_ref.ml %{dep:../agent_session/recovery_rollover_hint_ref.ml}
+    lib/agent_session/recovery_successor_guidance.ml %{dep:../agent_session/recovery_successor_guidance.ml}
     lib/agent_session/recurrence_native_admission.ml %{dep:../agent_session/recurrence_native_admission.ml}
     lib/agent_session/recurrence_native_schema.ml %{dep:../agent_session/recurrence_native_schema.ml}
     lib/agent_session/recurrence_native_request.ml %{dep:../agent_session/recurrence_native_request.ml}
@@ -490,6 +521,7 @@
     lib/agent_server/developer_background_job_runner.ml %{dep:../agent_server/developer_background_job_runner.ml}
     lib/agent_server/developer_child_agent_runner.ml %{dep:../agent_server/developer_child_agent_runner.ml}
     lib/agent_server/developer_child_content_projection.ml %{dep:../agent_server/developer_child_content_projection.ml}
+    lib/agent_protocol/inline_image.ml %{dep:../agent_protocol/inline_image.ml}
     lib/agent_server/developer_child_selection.ml %{dep:../agent_server/developer_child_selection.ml}
     lib/agent_server/developer_queued_issuer.ml %{dep:../agent_server/developer_queued_issuer.ml}
     lib/agent_server/developer_live_resources.ml %{dep:../agent_server/developer_live_resources.ml}
@@ -536,6 +568,7 @@
     lib/agent_session/legacy_callback_runtime.ml %{dep:../agent_session/legacy_callback_runtime.ml}
     lib/agent_session/run_job_completion.ml %{dep:../agent_session/run_job_completion.ml}
     lib/agent_session/run_transition.ml %{dep:../agent_session/run_transition.ml}
+    lib/agent_session/run_rollover_work.ml %{dep:../agent_session/run_rollover_work.ml}
     lib/agent_session/run_work_settlement.ml %{dep:../agent_session/run_work_settlement.ml}
     lib/agent_session/run_producer_settlement.ml %{dep:../agent_session/run_producer_settlement.ml}
     lib/agent_session/run_subscription_evidence.ml %{dep:../agent_session/run_subscription_evidence.ml}
@@ -611,6 +644,9 @@
     guide/chatml-authoring-goals.md %{dep:../../docs-src/guide/chatml-authoring-goals.md}
     guide/native-goal-metadata.md %{dep:../../docs-src/guide/native-goal-metadata.md}
     guide/chatml-authoring-runs.md %{dep:../../docs-src/guide/chatml-authoring-runs.md}
+    development/context-window-tools.md %{dep:../../docs-src/development/context-window-tools.md}
+    development/recovery-history-tools.md %{dep:../../docs-src/development/recovery-history-tools.md}
+    development/recovery-note-tools.md %{dep:../../docs-src/development/recovery-note-tools.md}
     guide/admitted-instructions.md %{dep:../../docs-src/guide/admitted-instructions.md}
     guide/builtin-instructions.md %{dep:../../docs-src/guide/builtin-instructions.md}
     guide/chatml-installed-libraries.md %{dep:../../docs-src/guide/chatml-installed-libraries.md}

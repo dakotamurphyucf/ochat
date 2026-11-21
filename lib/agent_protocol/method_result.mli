@@ -158,6 +158,15 @@ type t =
   | Session_configuration_get of Session_configuration.t
   | Session_configuration_update of Session_configuration.t
   | Instructions of (Instruction_control.Result.t[@sexp.opaque])
+  | Recovery_enable of (Recovery_window.Scope.t[@sexp.opaque])
+  | Recovery_windows of (Recovery_query.Summary.t Page.t[@sexp.opaque])
+  | Recovery_history of (Recovery_history_page.t[@sexp.opaque])
+  | Recovery_range of (Recovery_text_range.Reply.t[@sexp.opaque])
+  | Recovery_asset_read of (Recovery_asset_read.Reply.t[@sexp.opaque])
+  | Recovery_status of (Recovery_rollover_control.Status.t[@sexp.opaque])
+  | Recovery_rollover of (Recovery_rollover_control.Receipt.t[@sexp.opaque])
+  | Recovery_followup of (Recovery_followup.Reply.t[@sexp.opaque])
+  | Recovery_note_shares of (Recovery_note_share_control.Response.t[@sexp.opaque])
   | Goal_query of (Goal_query.Result.t[@sexp.opaque])
   | Goal_control of (Goal_control.Result.t[@sexp.opaque])
   | Recurrence_query of (Recurrence_query.Result.t[@sexp.opaque])

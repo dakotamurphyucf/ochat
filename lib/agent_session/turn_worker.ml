@@ -309,9 +309,12 @@ let moderate_submission config input on_runtime_request =
 
 let run
       ?root_binding
+      ?(checkpoint_tools = Chat_response.Soft_checkpoint.Unselected)
       ?runtime_policy
       ?authoring_context
       ?agent_guidance
+      ?successor_guidance
+      ?after_rollover
       ?dispatch_tool
       ?moderator_events
       ?notification_input
@@ -321,6 +324,32 @@ let run
       ~input
       capabilities
   =
+  let capabilities, ordinary_write_admission =
+    match capabilities.Operation_worker.Capabilities.model_admission with
+    | None -> capabilities, None
+    | Some port ->
+      let requested_moderator = ref false in
+      let managed = ref false in
+      let check_moderator () =
+        let open Result.Let_syntax in
+        let%map () = port.check ~managed:true in
+        requested_moderator := true
+      in
+      let check_notification () =
+        let open Result.Let_syntax in
+        let%map () = port.check ~managed:false in
+        managed := !requested_moderator;
+        requested_moderator := false
+      in
+      let admit prepared attempt =
+        port.admit ~managed:!managed prepared attempt |> require_ok
+      in
+      ( { capabilities with
+          admit_moderator_turn = check_moderator
+        ; admit_notification_turn = check_notification
+        }
+      , Some admit )
+  in
   let config =
     match config.Config.moderator, moderator_events with
     | Some moderator, Some make ->
@@ -351,7 +380,7 @@ let run
     match ended (), initial_notification_input with
     | true, _ | _, None -> []
     | false, Some prepare ->
-      (prepare ~input () |> require_ok)
+      (prepare ~capabilities () |> require_ok)
         .Chat_response.In_memory_stream.Safe_point_input.entries
   in
   let history = input.Operation_worker.Input.history @ initial_entries in
@@ -368,6 +397,66 @@ let run
   (match initial_entries with
    | [] -> ()
    | _ -> checkpoint_moderator ());
+  let successor =
+    Option.map capabilities.successor_inference ~f:(fun successor ->
+      let optional_hint =
+        Option.map successor_guidance ~f:(fun make -> make ~input ~capabilities)
+      in
+      { successor with optional_hint })
+  in
+  let fresh_binding = ref (Option.is_some capabilities.successor_inference) in
+  let consume_fresh_binding () =
+    let fresh = !fresh_binding in
+    fresh_binding := false;
+    fresh
+  in
+  let initial_context =
+    match successor, root_binding with
+    | Some _, None -> Inference_runtime.Context.detach config.inference_context
+    | _ -> config.inference_context
+  in
+  let root_context =
+    Option.map capabilities.root_context ~f:(fun source ->
+      let source = { source with Chat_response.Root_context.checkpoint_tools } in
+      match root_binding with
+      | Some binding ->
+        Chat_response.Root_binding.wrap ~fresh:consume_fresh_binding binding source
+      | None ->
+        Chat_response.Root_context.
+          { with_context =
+              (fun ~previous ~history f ->
+                source.with_context
+                  ~previous
+                  ~history
+                  (fun
+                      context
+                       ~select_checkpoint
+                       ~select_prepared
+                       ~on_prepared
+                       ~on_dispatch
+                     ->
+                     let context =
+                       if consume_fresh_binding ()
+                       then Inference_runtime.Context.detach context
+                       else context
+                     in
+                     f
+                       context
+                       ~select_checkpoint
+                       ~select_prepared
+                       ~on_prepared
+                       ~on_dispatch))
+          ; checkpoint_tools
+          })
+  in
+  let select_successor () =
+    capabilities.select_rollover_followup after_rollover |> require_ok;
+    runtime_requests := []
+  in
+  let foreground_capacity =
+    Option.map capabilities.capacity_rollover ~f:(fun port ->
+      Chat_response.Foreground_capacity.create port ~on_retired:select_successor)
+  in
   let final_history =
     let prepare_model_input =
       Option.map authoring_context ~f:(fun make ->
@@ -386,11 +475,18 @@ let run
         ~env:config.Config.env
         ?agent_guidance:
           (Option.map agent_guidance ~f:(fun make -> make ~input ~capabilities))
-        ~inference_context:config.inference_context
-        ?root_context:
-          (Option.map capabilities.root_context ~f:(fun source ->
-             Option.value_map root_binding ~default:source ~f:(fun binding ->
-               Chat_response.Root_binding.wrap binding source)))
+        ~inference_context:initial_context
+        ?root_context
+        ?ordinary_write_admission
+        ?successor
+        ?foreground_capacity
+        ?on_settled_batch:
+          (Option.map capabilities.settle_tool_batch ~f:(fun settle batch ->
+             match settle batch |> require_ok with
+             | Chat_response.Settled_tool_batch.Retire ->
+               select_successor ();
+               Chat_response.Settled_tool_batch.Retire
+             | Continue -> Chat_response.Settled_tool_batch.Continue))
         ~inference_identity:(config.inference_identity capabilities.allocate_inference)
         ~on_inference_attempt:config.on_inference_attempt
         ~on_inference_completion:config.on_inference_completion
@@ -427,7 +523,7 @@ let run
         ~safe_point_input:
           (safe_point_input
              ?notification_input:
-               (Option.map notification_input ~f:(fun make -> make ~input))
+               (Option.map notification_input ~f:(fun make -> make ~capabilities))
              capabilities)
         ~sw
         ()
@@ -441,22 +537,28 @@ let run
 
 let create
       ?root_binding
+      ?checkpoint_tools
       ?runtime_policy
       ?authoring_context
       ?agent_guidance
+      ?successor_guidance
+      ?after_rollover
       ?dispatch_tool
       ?moderator_events
       ?notification_input
       ?initial_notification_input
       config
   =
-  Operation_worker.create ~run:(fun ~sw ~input capabilities ->
+  Operation_worker.create_capacity_aware ~run:(fun ~sw ~input capabilities ->
     match
       run
         ?root_binding
+        ?checkpoint_tools
         ?runtime_policy
         ?authoring_context
         ?agent_guidance
+        ?successor_guidance
+        ?after_rollover
         ?dispatch_tool
         ?moderator_events
         ?notification_input

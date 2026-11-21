@@ -25,6 +25,7 @@ module Artifact : sig
     ; shell_manifest_sha256 : string option
     ; program_bundle : Prompt_program_bundle.t option
     ; content_bundle : Prompt_program_bundle.t option
+    ; originals_sha256 : string option
     ; manifest_sha256 : string
     ; manifest_publication : Prompt_manifest_document.Publication.t
     ; created_at : Agent_protocol.Timestamp.t
@@ -74,6 +75,7 @@ module Artifact : sig
     -> ?shell_manifest_sha256:string
     -> ?program_bundle:Prompt_program_bundle.t
     -> ?content_bundle:Prompt_program_bundle.t
+    -> ?originals_sha256:string
     -> created_at:Agent_protocol.Timestamp.t
     -> unit
     -> (t, Store_error.t) result
@@ -117,6 +119,7 @@ val discard_interrupted_installs
     no authorization policy. *)
 val install
   :  ?before_publish:(unit -> unit)
+  -> ?originals:Installed_document_originals.t
   -> t
   -> transaction_id:Agent_protocol.Id.Transaction.t
   -> Artifact.t
@@ -139,7 +142,8 @@ val install
     exception/cancellation propagates unchanged. Raw [install]
     retains its exclusive, reject-existing contract. *)
 val install_or_reuse
-  :  t
+  :  ?originals:Installed_document_originals.t
+  -> t
   -> transaction_id:Agent_protocol.Id.Transaction.t
   -> Artifact.t
   -> checkpoint:(unit -> unit)
@@ -151,11 +155,27 @@ val install_or_reuse
     Missing, altered, unexpected or symlinked tree files fail closed. *)
 val load : t -> Agent_protocol.Id.Prompt_revision.t -> (Artifact.t, Store_error.t) result
 
-(** Bounded inventory/digest verification against an independently retained
+(** Read one bounded payload from the private original pool, verifying the actual
+    installed publication and the exact occurrence, length and digest. Supplying
+    rendered artifact metadata does not authorize release. The current host
+    must hold and recheck the installed source admission around this operation.
+    [admit] reserves an aggregate caller budget against the verified entry
+    before its body is opened. Ordinary [load] never opens this optional pool. *)
+val read_original
+  :  ?admit:(Installed_document_originals.Entry.t -> bool)
+  -> t
+  -> Artifact.t
+  -> occurrence:Installed_document_originals.Occurrence.t
+  -> max_bytes:int
+  -> checkpoint:(unit -> unit)
+  -> (Installed_document_originals.Entry.t * string, Store_error.t) result
+
+(** Bounded authored inventory/digest verification against an independently retained
     admission digest. Uses the caller's aggregate reader budget, rejects links,
     unknown/missing files and mismatched identity, and does not compile sources.
     The caller must own and serialize the artifact root. Verification alone does
-    not prove that the artifact is unreferenced or authorize deletion. *)
+    not prove that the artifact is unreferenced or authorize deletion. A private
+    installed-only originals pool is neither exposed nor required here. *)
 val verify_retained
   :  t
   -> reader:Retention_reader.t

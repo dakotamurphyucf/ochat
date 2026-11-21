@@ -295,6 +295,7 @@ let prepare_owned
   else
     let module Abort = struct
       exception Admission of Core.Error.t
+      exception Lost_source of Owner.Error.t
     end
     in
     let count =
@@ -416,32 +417,42 @@ let prepare_owned
                     | Error error -> source_error definition error
                     | Ok owner ->
                       (match
-                         Owner.with_scope owner ~f:(fun scope ->
-                           Owner.Scope.capture
-                             scope
-                             ~env:t.env
-                             ~definition
-                             ~preprocess:Meta_prompting.Preprocessor.preprocess
-                             ~limits:(Prompt_revision_builder.capture_limits ())
-                             ~checkpoint
-                           |> Result.map ~f:(fun capture ->
-                             let prepare_content =
-                               Option.filter prepare_content ~f:(fun _ ->
-                                 capture_needs_content capture ~checkpoint)
-                             in
-                             Prompt_revision_builder.build_captured
-                               ?prepare_programs:
-                                 (Option.map prepare_programs ~f:(fun prepare _ ->
-                                    prepare scope capture))
-                               ?prepare_content:
-                                 (Option.map prepare_content ~f:(fun prepare _ ->
-                                    prepare scope capture))
-                               ~capture:(Owner.Capture.value capture)
-                               ~source_receipt:receipt
-                               ~artifact_store:t.artifact_store
-                               ~transaction_id:(transaction_id definition)
-                               ~created_at
-                               definition))
+                         try
+                           Owner.with_scope owner ~f:(fun scope ->
+                             Owner.Scope.capture
+                               scope
+                               ~env:t.env
+                               ~definition
+                               ~preprocess:Meta_prompting.Preprocessor.preprocess
+                               ~limits:(Prompt_revision_builder.capture_limits ())
+                               ~checkpoint
+                             |> Result.map ~f:(fun capture ->
+                               let prepare_content =
+                                 Option.filter prepare_content ~f:(fun _ ->
+                                   capture_needs_content capture ~checkpoint)
+                               in
+                               let checkpoint () =
+                                 checkpoint ();
+                                 match Owner.Scope.check_capture scope capture with
+                                 | Ok () -> ()
+                                 | Error error -> raise (Abort.Lost_source error)
+                               in
+                               Prompt_revision_builder.build_captured
+                                 ~checkpoint
+                                 ?prepare_programs:
+                                   (Option.map prepare_programs ~f:(fun prepare _ ->
+                                      prepare scope capture))
+                                 ?prepare_content:
+                                   (Option.map prepare_content ~f:(fun prepare _ ->
+                                      prepare scope capture))
+                                 ~capture:(Owner.Capture.value capture)
+                                 ~source_receipt:receipt
+                                 ~artifact_store:t.artifact_store
+                                 ~transaction_id:(transaction_id definition)
+                                 ~created_at
+                                 definition))
+                         with
+                         | Abort.Lost_source error -> Error error
                        with
                        | Error error -> source_error definition error
                        | Ok prepared ->
@@ -796,6 +807,90 @@ let find t id =
 let find_by_name t name =
   Owner_domain.check_exn t.domain;
   Eio.Mutex.use_ro t.mutex (fun () -> Map.find t.entries_by_name name)
+;;
+
+let with_installed_original
+      ?admit
+      t
+      ~definition
+      ~revision
+      ~occurrence
+      ~max_bytes
+      ~authorize
+      ~checkpoint
+      ~f
+  =
+  let module Protocol = Agent_protocol in
+  let module Abort = struct
+    exception Authorization of Protocol.Error.t
+  end
+  in
+  let open Result.Let_syntax in
+  let key = Id.to_string definition in
+  let denied () =
+    Protocol.Error.create
+      Permission_denied
+      ~message:"installed document original authorization changed"
+      ~retryable:false
+      ()
+  in
+  let selected () =
+    Owner_domain.check_exn t.domain;
+    match
+      t.publication, Map.find t.entries_by_id key, Map.find t.source_selections key
+    with
+    | Open, Some { availability = Ready selected; _ }, Some selection
+      when Protocol.Id.Prompt_revision.equal (Prompt_revision.id selected) revision ->
+      Ok (selected, selection)
+    | _ -> Error (denied ())
+  in
+  let%bind () = authorize () in
+  let%bind selected_revision, selection = selected () in
+  let artifact = Prompt_revision.artifact selected_revision in
+  let active = ref true in
+  let check () =
+    let%bind () = if !active then Ok () else Error (denied ()) in
+    let%bind () = authorize () in
+    let%bind current_revision, current_selection = selected () in
+    if
+      not
+        (phys_equal current_revision selected_revision
+         && phys_equal current_selection selection)
+    then Error (denied ())
+    else (
+      match artifact.source_receipt, Source_selection.availability selection with
+      | Some expected, Live ->
+        Source_selection.check_intent selection expected
+        |> Result.map_error ~f:(fun _ -> denied ())
+      | _ -> Error (denied ()))
+  in
+  let poll () =
+    checkpoint ();
+    match check () with
+    | Ok () -> ()
+    | Error error -> raise (Abort.Authorization error)
+  in
+  Exn.protect
+    ~finally:(fun () -> active := false)
+    ~f:(fun () ->
+      let%bind () = check () in
+      let%bind original, contents =
+        try
+          Agent_store.Prompt_artifact_store.read_original
+            ?admit
+            t.artifact_store
+            artifact
+            ~occurrence
+            ~max_bytes
+            ~checkpoint:poll
+          |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
+        with
+        | Abort.Authorization error -> Error error
+      in
+      let%bind () = check () in
+      let%bind outcome = f ~check original contents in
+      let%map () = check () in
+      outcome)
 ;;
 
 let cached_revision t revision_id =

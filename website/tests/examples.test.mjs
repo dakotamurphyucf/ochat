@@ -65,7 +65,7 @@ test('catalog enforces explicit file ownership, paths, dependency edges, notices
     ['complete', 'template', 'illustration'].map(
       (kind) => input.filter((e) => e.kind === kind).length,
     ),
-    [21, 4, 1],
+    [22, 4, 1],
   );
   const source = input.find((e) => e.id === 'specialist');
   const reject = (mutate, pattern) => {
@@ -346,6 +346,10 @@ test('tutorial records keep stable IDs and navigation follows learning paths', (
   );
   assert.equal(
     byPage.get('tutorials/goal-recurrence').next.route,
+    '/docs/tutorials/context-recovery/',
+  );
+  assert.equal(
+    byPage.get('tutorials/context-recovery').next.route,
     '/docs/tutorials/',
   );
   assert.equal(

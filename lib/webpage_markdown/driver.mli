@@ -59,6 +59,9 @@ val fetch_and_convert
   -> string
   -> Markdown.t
 
+(** Convert the supplied exact HTML input without another filesystem read. *)
+val html_to_markdown_string : string -> Markdown.t
+
 (** [convert_html_file path] loads the file at [path] (assumed to contain raw
     HTML) and converts it to Markdown using the exact same pipeline as
     {!fetch_and_convert}.  This is useful for offline processing or unit

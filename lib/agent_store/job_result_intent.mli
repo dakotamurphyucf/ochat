@@ -46,6 +46,10 @@ val create
   -> metadata:Blob_store.Metadata.t
   -> (t, Store_error.t) result
 
+(** Bounded maintenance discovery. Directory kind and absence are checked;
+    a positive result only schedules the full validated preparation scan. *)
+val has_entries : Retention_reader.t -> (bool, Store_error.t) result
+
 (** Validate every intent, rejecting corruption, symlinks, identity mismatches and
     excessive counts before returning any candidate. Missing directories are empty. *)
 val list

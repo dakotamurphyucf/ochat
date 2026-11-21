@@ -357,6 +357,29 @@ val handle_event_entries_transactional
         -> (prepared_commit, string) result)
   -> (Moderation.Outcome.t, string) result
 
+(** Optional, separate hook in the current installed extensibility-v1 program.
+    The trust owner must claim one exact phase before entering the handler.
+    No history or note bytes are projected by this boundary. Tool calls are
+    routed only through the supplied ownership-checked executor. *)
+val has_context_rollover : t -> bool
+
+val handle_context_rollover
+  :  t
+  -> session_id:string
+  -> now_ms:int
+  -> event:Context_rollover_hook.t
+  -> authorize:(unit -> (unit, string) result)
+  -> on_tool_call:
+       (name:string
+        -> args:Jsonaf.t
+        -> (Moderation.Capabilities.tool_call_result, string) result)
+  -> prepare:
+       (decision:Context_rollover_hook.Decision.t
+        -> outcome:Moderation.Outcome.t
+        -> snapshot:Session.Moderator_state.Identity_snapshot.t
+        -> (prepared_commit, string) result)
+  -> (Moderation.Outcome.t, string) result
+
 (** Transactionally consume one queued v1 internal event. Shares validation,
     scoped tool execution and prospective persistence with
     [handle_event_entries_transactional]. [authorize] receives the detached
@@ -567,6 +590,14 @@ val effective_entries_of_snapshot
   :  Session.Moderator_state.Identity_snapshot.t
   -> History_entry.t list
   -> (Moderation.Effective_entry.t list, string) result
+
+(** Coordinate-only version using the same committed overlay and effective
+    order. The caller chooses when to read original canonical payloads. *)
+val effective_sources_of_snapshot
+  :  Session.Moderator_state.Identity_snapshot.t
+  -> 'entry list
+  -> occurrence:('entry -> History_entry.Id.t)
+  -> ('entry Moderation.Identity_overlay.source list, string) result
 
 (** [effective_items t history] applies the durable moderator overlay to the
     projected canonical history. *)

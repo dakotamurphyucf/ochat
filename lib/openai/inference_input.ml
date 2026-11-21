@@ -276,7 +276,7 @@ let preflight_history profile ~target history =
       captured profile ~target payload ~actual_origin ~raw |> Result.map ~f:(fun _ -> ()))
 ;;
 
-let history profile request =
+let history ?materialized profile request =
   let assets =
     Resolved
       (List.fold (R.assets request) ~init:String.Map.empty ~f:(fun assets asset ->
@@ -291,15 +291,36 @@ let history profile request =
   in
   List.map (R.history request) ~f:(fun entry ->
     let payload = History_entry.payload entry in
-    match P.representation payload with
-    | Authored -> semantic assets (P.semantic payload)
-    | Reconstructed _ ->
+    let private_output =
+      Option.bind materialized ~f:(fun materialized ->
+        Inference_runtime.Protected_delivery.Materialized.find
+          materialized
+          (History_entry.id entry))
+    in
+    match private_output, P.representation payload with
+    | Some output, _ ->
+      let open Result.Let_syntax in
+      let original = P.semantic payload in
+      (match P.Semantic.view original with
+       | Result { relation; kind; _ } ->
+         let%bind replacement =
+           P.Semantic.create
+             (Result { relation; kind; output })
+             ~metadata:(P.Semantic.metadata original)
+           |> unsupported
+         in
+         (* Its authority covers the materialized output bytes only. References
+            to assets from the ordinary request cannot add bytes to this output. *)
+         semantic (Resolved String.Map.empty) replacement
+       | _ -> invalid)
+    | None, Authored -> semantic assets (P.semantic payload)
+    | None, Reconstructed _ ->
       (* This explicitly marked legacy representation is verified by its existing
          boundary; it is never relabelled as an actual wire capture. *)
       Responses_history.to_item payload
       |> unsupported
       |> Result.map ~f:Responses.Item.jsonaf_of_t
-    | Captured { origin = actual_origin; raw } ->
+    | None, Captured { origin = actual_origin; raw } ->
       captured profile ~target:(R.target request) payload ~actual_origin ~raw)
   |> Result.all
 ;;
@@ -352,7 +373,7 @@ let setting setting =
   |> Result.map_error ~f:(fun _ -> E.Unsupported_setting)
 ;;
 
-let prepare profile request =
+let prepare ?materialized profile request =
   let open Result.Let_syntax in
   let%bind () =
     if
@@ -382,7 +403,7 @@ let prepare profile request =
     then Error E.Incompatible_replay
     else Ok ()
   in
-  let%bind history = history profile request in
+  let%bind history = history ?materialized profile request in
   let history =
     match R.guidance request with
     | None -> history
@@ -401,9 +422,14 @@ let prepare profile request =
       :: history
   in
   let%bind tools = Result.all (List.map (R.tools request) ~f:tool) in
-  let%bind settings =
-    Result.all (List.map (R.Target.settings (R.target request)) ~f:setting)
+  let settings = R.Target.settings (R.target request) in
+  let settings =
+    match materialized with
+    | None -> settings
+    | Some _ ->
+      List.filter settings ~f:(fun setting -> not (R.Setting.is_prompt_cache setting))
   in
+  let%bind settings = Result.all (List.map settings ~f:setting) in
   D.Prepared.of_captured_settings
     ?guidance_provenance:(Option.map (R.guidance request) ~f:R.Guidance.provenance)
     profile

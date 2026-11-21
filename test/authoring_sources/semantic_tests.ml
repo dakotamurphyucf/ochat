@@ -15,6 +15,10 @@ let%expect_test
     List.concat_map V.semantic_features ~f:(fun feature -> feature.implementation_paths)
     |> List.dedup_and_sort ~compare:String.compare
   in
+  let rollover_host = "lib/chatml/chatml_context_rollover.ml" in
+  assert
+    (List.exists V.runtime_features ~f:(fun feature ->
+       List.mem feature.implementation_paths rollover_host ~equal:String.equal));
   [%test_eq: string list]
     (S.implementation_sources sources
      |> List.map ~f:(fun source -> source.S.path)
@@ -28,7 +32,8 @@ let%expect_test
        (* Host control belongs to the separate runtime contract inventory. *)
        && not
             (List.mem
-               [ "lib/chatml/chatml_host_runtime.ml"
+               [ rollover_host
+               ; "lib/chatml/chatml_host_runtime.ml"
                ; "lib/chatml/chatml_compilation.ml"
                ; "lib/chatml/chatml_compilation_checkpoint.ml"
                ; "lib/chatml/chatml_execution.ml"

@@ -60,9 +60,13 @@ val actor_persistence : t -> Session_actor.persistence
     commit-closure association. Supply this pair together to Actor's bound
     runtime-source constructor. Domain/closure/session validation occurs before
     Actor startup. This is backend identity only, not uncertain-write,
-    acknowledgement, custody settlement or execution authority. *)
+    acknowledgement, custody settlement or execution authority. A configured
+    [recovery_notes] pair supplies this Store's host-qualified owner and exact
+    snapshot payload budget for owned note writes. *)
 val actor_persistence_with_startup_disposal
-  :  t
+  :  ?recovery_notes:Agent_protocol.Session_ref.t * int
+  -> ?local_recovery_host:Operator_authorization.Local_recovery_host.t
+  -> t
   -> Session_actor.persistence * Session_actor.Canonical_persistence.t
 
 val transaction_hash : t -> string option

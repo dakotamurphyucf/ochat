@@ -127,7 +127,16 @@ let%expect_test "nested authored bindings survive independent ancestry stop and 
             in
             function_call !requests name args
         in
-        let find daemon child = R.load (D.registry daemon) child |> protocol_ok in
+        let await stage f =
+          with_stage_timeout ~clock:(Eio.Stdenv.clock env) ~seconds:20. ~stage f
+        in
+        let find daemon child =
+          await "authored graph session load" (fun () ->
+            R.load (D.registry daemon) child |> protocol_ok)
+        in
+        let selected_tools entry =
+          await "authored graph selected tools" (fun () -> tools entry)
+        in
         let with_daemon f =
           Eio.Switch.run (fun sw ->
             let before = !requests in
@@ -155,13 +164,13 @@ let%expect_test "nested authored bindings survive independent ancestry stop and 
             Exn.protect
               ~finally:(fun () -> D.shutdown daemon |> protocol_ok)
               ~f:(fun () ->
-                Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 20. (fun () ->
-                  let client = connection daemon (principal ()) in
-                  Exn.protect
-                    ~finally:(fun () -> Agent_client.Connection.close client)
-                    ~f:(fun () ->
-                      initialize client;
-                      f sw daemon client))))
+                let client = connection daemon (principal ()) in
+                Exn.protect
+                  ~finally:(fun () -> Agent_client.Connection.close client)
+                  ~f:(fun () ->
+                    await "authored graph client initialization" (fun () ->
+                      initialize client);
+                    f sw daemon client)))
         in
         let with_handle sw client entry f =
           let handle =
@@ -198,15 +207,16 @@ let%expect_test "nested authored bindings survive independent ancestry stop and 
           | Published (Complete value) -> value
           | status -> raise_s [%sexp "graph call failed", (status : P.Invocation.status)]
         in
-        let invoke sw client entry =
+        let invoke ~stage sw client entry =
           let before = (state entry).invocations in
-          with_handle sw client entry (fun handle ->
-            H.send_message
-              handle
-              { kind = Plain_text; text = "Run the tool."; attachments = [] }
-            |> protocol_ok
-            |> ignore;
-            ignore (idle entry : Agent_session.Session_state.t));
+          await stage (fun () ->
+            with_handle sw client entry (fun handle ->
+              H.send_message
+                handle
+                { kind = Plain_text; text = "Run the tool."; attachments = [] }
+              |> protocol_ok
+              |> ignore;
+              ignore (idle entry : Agent_session.Session_state.t)));
           model_result entry ~before
         in
         let check_read entry ~before =
@@ -227,17 +237,24 @@ let%expect_test "nested authored bindings survive independent ancestry stop and 
         in
         let parent_id, middle_id, independent_id, leaf_id =
           with_daemon (fun sw daemon client ->
-            let parent, _ = create_session ~start_immediately:true client in
+            let parent, _ =
+              await "authored graph parent startup" (fun () ->
+                create_session ~start_immediately:true client)
+            in
             let parent = find daemon parent.id in
-            let middle = invoke sw client parent |> session_id |> find daemon in
-            [%test_eq: string list] [ "branch" ] (tools parent);
-            [%test_eq: string list] [ "leaf" ] (tools middle);
+            let middle =
+              invoke ~stage:"authored graph initial nested call" sw client parent
+              |> session_id
+              |> find daemon
+            in
+            [%test_eq: string list] [ "branch" ] (selected_tools parent);
+            [%test_eq: string list] [ "leaf" ] (selected_tools middle);
             let first_leaf =
               model_result middle ~before:[] |> session_id |> find daemon
             in
             check_read first_leaf ~before:[];
-            [%test_eq: string list] [ "read_file" ] (tools first_leaf);
-            let definition =
+            [%test_eq: string list] [ "read_file" ] (selected_tools first_leaf);
+            let prepare_definition () =
               Owner.with_background_runtime middle.runtime (fun runtime ->
                 let native =
                   Option.value_exn runtime.Agent_session.Runtime_builder.native_runtime
@@ -274,7 +291,10 @@ let%expect_test "nested authored bindings survive independent ancestry stop and 
                      |> String.concat ~sep:"\n")))
               |> protocol_ok
             in
-            let independent =
+            let definition =
+              await "authored graph independent definition" prepare_definition
+            in
+            let prepare_independent () =
               Agent_server.Session_factory.create_generated_session
                 ~start_immediately:true
                 ~lifetime:Independent
@@ -286,15 +306,23 @@ let%expect_test "nested authored bindings survive independent ancestry stop and 
                 definition
               |> protocol_ok
             in
-            with_handle sw client parent (fun handle ->
-              H.stop handle ~mode:Cancel |> protocol_ok |> ignore);
+            let independent =
+              await "authored graph independent startup" prepare_independent
+            in
+            await "authored graph owned ancestry stop" (fun () ->
+              with_handle sw client parent (fun handle ->
+                H.stop handle ~mode:Cancel |> protocol_ok |> ignore));
             stopped parent;
             stopped middle;
             stopped first_leaf;
             assert (not (Owner.is_loaded parent.runtime));
             assert (not (Owner.is_loaded middle.runtime));
             running independent;
-            let leaf = invoke sw client independent |> session_id |> find daemon in
+            let leaf =
+              invoke ~stage:"authored graph call after owned stop" sw client independent
+              |> session_id
+              |> find daemon
+            in
             check_read leaf ~before:[];
             assert (not (P.Id.Session.equal (id leaf) (id first_leaf)));
             id parent, id middle, id independent, id leaf)
@@ -312,7 +340,10 @@ let%expect_test "nested authored bindings survive independent ancestry stop and 
           let leaf = find daemon leaf_id in
           let before = (state leaf).invocations in
           continuation := Some leaf_id;
-          let continued = invoke sw client independent |> session_id in
+          let continued =
+            invoke ~stage:"authored graph call after reopen" sw client independent
+            |> session_id
+          in
           assert (P.Id.Session.equal leaf_id continued);
           check_read leaf ~before;
           stopped parent;

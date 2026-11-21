@@ -70,6 +70,15 @@ when no authentic selected Build exists. Successful reinitialization
 retires old context generations and joins their work before the new feature
 epoch is published.
 
+Recovery methods require their feature to be selected during initialization.
+Use `recovery.windows` for capture and lineage, `recovery.history_query` for
+list/search, `recovery.text_range` or `recovery.asset_read` for retrieval,
+`recovery.rollover_control` for status and requests, and
+`recovery.note_share_control` for source-owner note grants.
+[Window and history operations](operations.md#local-recovery-windows) ·
+[Rollover requests](../development/operator-recovery-rollover.md) ·
+[Sharing a note](../development/recovery-note-shares.md)
+
 | Method | Request type | Minimum method scope | Result / behavior |
 |---|---|---|---|
 | `protocol.initialize` | `Initialize.Request` | Authentication only | Negotiate protocol; must precede other methods. |
@@ -110,6 +119,17 @@ epoch is published.
 | `session.search` | `Search_query` | `session.transcript.read` plus current session visibility | Bounded literal search over current readable canonical user/assistant text. |
 | `session.search.navigate` | `Search_navigation.Request` | `session.transcript.read` plus current session visibility | Revalidate a hit and read bounded current context without activation. |
 | `session.get` | `Session.Get_request` | `session.transcript.read` | Scoped snapshot; optional history window. |
+| `session.recovery.enable` | `Recovery_query.Enable` | `session.message.send` and `session.transcript.read`, current owner writer | Enable capture for the expected session generation and return the active window. |
+| `session.recovery.windows` | `Recovery_query.List_windows` | `session.transcript.read` and session visibility | Page through the lineage, optionally filtering by generation or window state. |
+| `session.recovery.query` | `Recovery_history_request` | `session.transcript.read` and current source visibility | List or search authorized items in a selected window with bounded results. |
+| `session.recovery.read_text` | `Recovery_text_range` | `session.transcript.read` and current source visibility | Read a bounded UTF-8 range from the exact cited text part. |
+| `session.recovery.read_asset` | `Recovery_asset_read` | `session.transcript.read` and current source visibility | Read a bounded chunk of a retained original image or document. |
+| `session.recovery.status` | `Recovery_rollover_control.Inspect` | `session.transcript.read` and session visibility | Inspect the current window, capacity evidence, offered actions and transition receipt. |
+| `session.recovery.rollover` | `Recovery_rollover_control.Request` | `session.message.send`, transcript visibility and current writer | Submit or retry against an expected window and revision. Forcing a rollover also requires configuration administration. |
+| `session.recovery.followup` | `Recovery_followup` | `session.message.send`, transcript visibility and current owner writer | Inspect the successor phase or apply an action at the exact current window and revision. Negotiate `recovery.followup_control`. |
+| `session.recovery.notes.inspect` | `Recovery_note_share_control.Request` | `grant.manage` and `session.transcript.read`, source owner writer | Read revision metadata for grant management or an exact note path. |
+| `session.recovery.notes.share` | `Recovery_note_share_control.Request` | Same source owner and scopes as inspect | Grant one recipient access to a specific note revision until the supplied expiry. |
+| `session.recovery.notes.revoke_share` | `Recovery_note_share_control.Request` | Same source owner and scopes as inspect | Revoke the specified grant and return its receipt. |
 | `session.configuration_get` | `Session_configuration.Get_request` | `session.transcript.read` | Safe selected/captured configuration and independent configuration revision; profile identity requires `diagnostics.read`. |
 | `session.configuration_update` | `Session_configuration.Update_request` | `session.message.send`; profile patches also require `provider.select` | Writable attachment, expected generation/configuration revision and nonempty model/profile/settings patch; next root capture selection. |
 | `session.instructions_get` | `Instruction_control.Request.Inspect` | `session.transcript.read` plus current session/root visibility | Selected safe root/member/digest identities and available actions; no bodies or execution activation. |

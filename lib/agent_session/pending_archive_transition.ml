@@ -44,11 +44,21 @@ let collect state ~delta ~limits =
       | Workspace_changed _
       | Canonical_entries_appended _
       | Instruction_selection_changed _
+      | Recovery_note_changed _
+      | Recovery_note_share_changed _
+      | Recovery_rollover_changed _
+      | Recovery_rollover_committed _
       | Goal_accounts_changed _
       | Goal_catalog_changed _
       | Recurrence_catalog_changed _
       | Run_state_changed _
       | Canonical_history_replaced _
+      | Recovery_window_expired _
+      | Recovery_window_enabled _
+      | Recovery_effective_prepared _
+      | Recovery_reminder_changed _
+      | Recovery_effective_attempt_changed _
+      | Recovery_summary_compacted _
       | Authoring_references_forgotten _
       | Authoring_publication_changed _
       | Initial_prompt_count_changed _

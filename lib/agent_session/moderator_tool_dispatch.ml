@@ -424,7 +424,8 @@ let create
         |> Result.map_error ~f:(fun _ -> "invalid original tool input"))
   in
   Stream.Tool_dispatch.
-    { for_fork = None
+    { protection = None
+    ; for_fork = None
     ; commit_call
     ; prepare_call = None
     ; validate_original

@@ -39,7 +39,16 @@ let with_max_root_agents (config : Agent_server.Config.t) ~max_root_agents =
   }
 ;;
 
+let assert_cleanup_diagnostics diagnostics errors =
+  let expected =
+    List.map errors ~f:(fun (failure : Agent_protocol.Error.t) ->
+      "queued moderator cleanup failed: " ^ failure.message)
+  in
+  [%test_eq: string list] expected (List.rev !diagnostics)
+;;
+
 let with_daemon
+      ?diagnostics
       ?test_root
       ?observe_shutdown
       ?(startup_mode = Daemon.Execute)
@@ -104,7 +113,22 @@ let with_daemon
   let unused = fun () -> Model.spawn("agent_prompt_v1", input) in
   Task.pure(`Complete(`String("ok")))|});
          prepare_sources env root;
-         Eio.Switch.run (fun sw ->
+         let run f =
+           match diagnostics with
+           | None -> Eio.Switch.run f
+           | Some lines ->
+             let logger : Eio.Debug.traceln =
+               { traceln =
+                   (fun ?__POS__:_ format ->
+                     Format.kasprintf (fun line -> lines := line :: !lines) format)
+               }
+             in
+             (* Let the daemon's callback fibers inherit the observer before
+                startup. Check its diagnostics only after their owners join. *)
+             Eio.Fiber.with_binding (Eio.Stdenv.debug env)#traceln logger (fun () ->
+               Eio.Switch.run f)
+         in
+         run (fun sw ->
            let daemon =
              Daemon.start
                ~sw
@@ -1179,6 +1203,8 @@ let on_event ctx state event = match event with
       | Named_run -> true
     in
     let observe_callbacks = (not qualify_chatml_extensions) && not named_run in
+    let expected_cleanup = ref None in
+    let diagnostics = ref [] in
     let finish_observation = Finish_observation.create () in
     let admitted_jobs = ref [] in
     let constructor_live = Atomic.make true in
@@ -1262,6 +1288,7 @@ let on_event ctx state event = match event with
         }
     in
     with_daemon
+      ~diagnostics
       ~prompt_text:(prompt_text ~named_run ~observe_callbacks)
       ~wrap_env:(Finish_observation.wrap finish_observation)
       ~sources:
@@ -1288,7 +1315,6 @@ let on_event ctx state event = match event with
          in
          let closed = ref false in
          let repair = ref None in
-         let expected_cleanup = ref None in
          let close () =
            if not !closed
            then (
@@ -2403,7 +2429,8 @@ let on_event ctx state event = match event with
                          (P.Schedule.to_json left)
                          (P.Schedule.to_json right))
                     saved.schedules
-                    final.schedules)))))
+                    final.schedules))));
+    assert_cleanup_diagnostics diagnostics (Option.to_list !expected_cleanup))
 ;;
 
 let%test_unit "legacy Factory initialization owns dedicated Model call and spawn" =
@@ -2743,6 +2770,8 @@ let on_event ctx state event = match event with
       failwith "native approval must not dispatch a provider")
   in
   let shutdown_report = ref None in
+  let expected_cleanup = ref None in
+  let diagnostics = ref [] in
   let assert_disposal_guard error =
     let expected =
       P.Error.create
@@ -2754,7 +2783,7 @@ let on_event ctx state event = match event with
     assert (Jsonaf.exactly_equal (P.Error.to_json expected) (P.Error.to_json error))
   in
   let with_daemon =
-    with_daemon ~wrap_env:(Fault.wrap fault) ~observe_shutdown:(fun report ->
+    with_daemon ~diagnostics ~wrap_env:(Fault.wrap fault) ~observe_shutdown:(fun report ->
       assert (Option.is_none !shutdown_report);
       shutdown_report := Some report)
   in
@@ -3085,6 +3114,7 @@ let on_event ctx state event = match event with
             String.is_substring
               secondary.message
               ~substring:"652 original constructor callback finish");
+          expected_cleanup := Some secondary;
           (match Recovery.Snapshot.failures snapshot with
            | [ Protocol actual ] -> assert (phys_equal actual secondary)
            | _ -> failwith "canonical callback secondary differs from original fact");
@@ -3197,7 +3227,8 @@ let on_event ctx state event = match event with
      not enroll those diagnostics into the unrelated Daemon shutdown graph. *)
   let disposed = Option.value_exn !shutdown_report in
   assert (Agent_server.Session_disposal_report.disposed disposed);
-  assert (List.is_empty (Agent_server.Session_disposal_report.failures disposed))
+  assert (List.is_empty (Agent_server.Session_disposal_report.failures disposed));
+  assert_cleanup_diagnostics diagnostics [ Option.value_exn !expected_cleanup ]
 ;;
 
 let%test_unit "loaded quiescent runtime reclaims snapshots without unloading" =

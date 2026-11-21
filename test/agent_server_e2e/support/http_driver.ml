@@ -194,7 +194,7 @@ let request_without_history t command =
       -> Error (Agent_protocol.Error.invalid_request "expected non-history response"))
 ;;
 
-let initialize_request () =
+let initialize_request ~features =
   let open Result.Let_syntax in
   let%bind implementation =
     Agent_protocol.Initialize.Implementation.create
@@ -205,15 +205,15 @@ let initialize_request () =
     ~implementation
     ~protocol_min:Agent_protocol.Version.current
     ~protocol_max:Agent_protocol.Version.current
-    ~features:[]
+    ~features
     ~event_encodings:[ Json ]
     ~max_inbound_event_bytes:(16 * 1024 * 1024)
     ()
 ;;
 
-let initialize t =
+let initialize ?(features = []) t =
   let open Result.Let_syntax in
-  let%bind initialize_request = initialize_request () in
+  let%bind initialize_request = initialize_request ~features in
   let%bind rpc = request t (Protocol_initialize initialize_request) in
   match rpc.result |> Public_view.non_history with
   | Protocol_initialize response -> Ok (response, rpc.response)

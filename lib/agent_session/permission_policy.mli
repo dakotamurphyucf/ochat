@@ -2,6 +2,10 @@ open! Core
 
 (** Compiled interactive and unattended tool authorization policy. *)
 
+type interactive_responder =
+  | Use_writable_attachment
+  | No_interactive_responder
+
 type tool_default =
   | Ask
   | Policy
@@ -61,6 +65,14 @@ val create
   -> evaluator_revision:string option
   -> reviewer:Permission_reviewer.t option
   -> (t, Agent_protocol.Error.t) result
+
+(** Host-owned availability policy. A writable attachment can stand for an
+    interactive responder only when the process owner opted in to that behavior.
+    This policy affects neither retained profiles nor invocation grants. *)
+val has_interactive_responder
+  :  interactive_responder
+  -> has_writable_attachment:(unit -> bool)
+  -> bool
 
 (** [decide] never silently waits when no responder is available. *)
 val decide : t -> responder_available:bool -> invocation -> decision

@@ -1,11 +1,21 @@
 open! Core
 module P = Agent_protocol
 
+type recovery_phase =
+  | Intent
+  | Commit
+
 type t =
   | Conversation of
       { env : Eio_unix.Stdenv.base
       ; session : Session_store.Handle.t
       ; blob : P.Id.Blob.t
+      }
+  | Recovery_asset of
+      { env : Eio_unix.Stdenv.base
+      ; session : Session_store.Handle.t
+      ; phase : recovery_phase
+      ; filename : string
       }
   | Developer of
       { root : Developer_run_store.Result_root.t
@@ -15,6 +25,23 @@ type t =
       }
 
 let conversation ~env ~session ~blob = Conversation { env; session; blob }
+
+let recovery_asset_directory = function
+  | Intent -> "recovery-asset-intents"
+  | Commit -> "recovery-asset-commits"
+;;
+
+let valid_recovery_asset_filename filename =
+  match String.chop_suffix filename ~suffix:".frame" with
+  | Some key -> Result.is_ok (Document_fields.digest (`String key))
+  | None -> false
+;;
+
+let recovery_asset ~env ~session ~phase ~filename =
+  if valid_recovery_asset_filename filename
+  then Ok (Recovery_asset { env; session; phase; filename })
+  else Error (Store_error.Corrupt "invalid recovery asset publication filename")
+;;
 
 let developer ~root ~(owner : P.Execution_owner.developer) ~job ~attempt =
   if
@@ -81,6 +108,10 @@ let with_location t ~f =
       ~parents:[ base; directory ]
       ~directory
       ~filename:(P.Id.Blob.to_string blob ^ ".frame")
+  | Recovery_asset { env; session; phase; filename } ->
+    let base = Session_store.Handle.directory session in
+    let directory = Filename.concat base (recovery_asset_directory phase) in
+    f ~env ~parents:[ base; directory ] ~directory ~filename
   | Developer { root; owner; job; attempt } ->
     Developer_run_store.Result_root.with_storage_lease root ~f:(fun ~env ~root ->
       let base = Data_root.developer_result_intents_path root in
@@ -190,7 +221,7 @@ let protect_io ~operation ~native f =
   | exn -> Error (Store_error.of_exn ~operation ~path:native exn)
 ;;
 
-let save_exact t ~max_frame_bytes contents =
+let save_exact ?before_rename t ~max_frame_bytes contents =
   let open Result.Let_syntax in
   let%bind _ = validate_frame contents ~max_frame_bytes in
   with_location t ~f:(fun ~env ~parents ~directory ~filename ->
@@ -204,7 +235,21 @@ let save_exact t ~max_frame_bytes contents =
         | Some prior when String.equal prior contents -> Ok ()
         | Some _ -> corrupt "result intent already belongs to another selection"
       in
-      Durable_file.replace ~env ~durability:Flush_file_and_directory ~path:native contents))
+      let exception Rejected of Store_error.t in
+      let before_rename () =
+        match Option.map before_rename ~f:(fun check -> check ()) with
+        | None | Some (Ok ()) -> ()
+        | Some (Error failure) -> raise (Rejected failure)
+      in
+      try
+        Durable_file.replace
+          ~before_rename
+          ~env
+          ~durability:Flush_file_and_directory
+          ~path:native
+          contents
+      with
+      | Rejected failure -> Error failure))
 ;;
 
 let read_exact t ~max_frame_bytes =
@@ -214,6 +259,21 @@ let read_exact t ~max_frame_bytes =
     let native = Filename.concat directory filename in
     protect_io ~operation:"read result intent" ~native (fun () ->
       read_at ~env ~parents ~directory ~filename ~max_frame_bytes))
+;;
+
+let stabilize_exact t ~expected ~max_frame_bytes =
+  let open Result.Let_syntax in
+  with_location t ~f:(fun ~env ~parents ~directory ~filename ->
+    let native = Filename.concat directory filename in
+    protect_io ~operation:"stabilize result publication" ~native (fun () ->
+      let%bind actual = read_at ~env ~parents ~directory ~filename ~max_frame_bytes in
+      match actual with
+      | None -> Error (Store_error.Missing native)
+      | Some actual when String.equal expected actual ->
+        (* The atomic writer syncs its file before rename. If its subsequent
+           directory sync was uncertain, an exact reader completes that sync. *)
+        Durable_file.sync_directory ~env ~path:directory
+      | Some _ -> corrupt "result publication changed before stabilization"))
 ;;
 
 let remove_at ~env ~directory ~filename ~expected ~read_prior =
@@ -250,7 +310,8 @@ let remove_exact_with_retention
   let open Result.Let_syntax in
   let%bind _ = validate_frame expected ~max_frame_bytes in
   match t with
-  | Conversation _ -> corrupt "conversation intent has no developer retention borrow"
+  | Conversation _ | Recovery_asset _ ->
+    corrupt "conversation intent has no developer retention borrow"
   | Developer { root; owner; job; attempt } ->
     Developer_run_store.Retention.with_root
       retention

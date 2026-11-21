@@ -4,6 +4,26 @@ open! Core
     stored here. The actor serializes every mutation after its ownership checks. *)
 type t
 
+module Capacity_basis : sig
+  type t
+
+  val automatic_policy : t -> Inference_runtime.Context_capacity.Policy.t option
+  val capture : Session_state.t -> selection:Session_context_capacity.Selection.t -> t
+  val has_policy : t -> bool
+  val equal : t -> t -> bool
+  val automatic : t -> bool
+end
+
+module Capacity_observation : sig
+  type t
+end
+
+module Cut_basis : sig
+  type t
+
+  val capture : Session_state.t -> t
+end
+
 module Token : sig
   type t
 
@@ -13,7 +33,15 @@ end
 val create : unit -> t
 
 val begin_capture
-  :  t
+  :  ?capacity:Capacity_basis.t
+  -> ?cut:Cut_basis.t
+  -> ?recovery_scope:Agent_protocol.Recovery_window.Scope.t
+  -> capture_recovery:bool
+  -> can_remind:
+       (scope:Agent_protocol.Recovery_window.Scope.t
+        -> policy:Chatml_source.Digest.t
+        -> bool)
+  -> t
   -> operation_id:Agent_protocol.Id.Operation.t
   -> generation:int
   -> revision:int64
@@ -21,11 +49,121 @@ val begin_capture
   -> policy:Configuration_policy.t
   -> Token.t
 
+val check_recovery
+  :  t
+  -> Token.t
+  -> scope:Agent_protocol.Recovery_window.Scope.t
+  -> (unit, Agent_protocol.Error.t) Result.t
+
+val checkpoint_policy
+  :  t
+  -> Token.t
+  -> scope:Agent_protocol.Recovery_window.Scope.t
+  -> current:Capacity_basis.t option
+  -> attempt:Inference_runtime.Attempt.t option
+  -> Inference_runtime.Context_capacity.Policy.t option
+
+val claim_reminder
+  :  t
+  -> Token.t
+  -> scope:Agent_protocol.Recovery_window.Scope.t
+  -> current:Capacity_basis.t option
+  -> Inference_runtime.Prepared.t
+  -> (Recovery_reminder.Claim.t option, Agent_protocol.Error.t) Result.t
+
+val check_reminder_dispatch
+  :  t
+  -> Token.t
+  -> scope:Agent_protocol.Recovery_window.Scope.t
+  -> current:Capacity_basis.t option
+  -> Recovery_reminder.Claim.t
+  -> Inference_runtime.Prepared.t
+  -> Inference_runtime.Attempt.t
+  -> (unit, Agent_protocol.Error.t) Result.t
+
+(** Exact process-local identity of the immutable configuration object from
+    the same adapter preparation. It is cleared on dispatch or scope exit. *)
+val record_recovery_binding
+  :  t
+  -> Token.t
+  -> configuration:Inference.Observation.Configuration.t
+  -> source_revision:int64
+  -> unit
+
+val recovery_source_revision
+  :  t
+  -> operation_id:Agent_protocol.Id.Operation.t
+  -> configuration:Inference.Observation.Configuration.t
+  -> int64 option
+
 val mark
   :  t
   -> Token.t
   -> Inference.Observation.Configuration.t
   -> (unit, Agent_protocol.Error.t) Result.t
+
+val mark_capacity
+  :  t
+  -> Token.t
+  -> current:Capacity_basis.t option
+  -> Capacity_observation.t
+  -> (unit, Agent_protocol.Error.t) Result.t
+
+(** An oversized preparation cannot allocate, even if its worker omits the
+    automatic transition callback. Only the exact root object is blocked. *)
+val check_allocation
+  :  t
+  -> operation_id:Agent_protocol.Id.Operation.t
+  -> Inference.Observation.Configuration.t
+  -> (unit, Agent_protocol.Error.t) result
+
+val capacity_status
+  :  t
+  -> operation_id:Agent_protocol.Id.Operation.t
+  -> current:Capacity_basis.t option
+  -> Session_context_capacity.status
+
+(** Exact automatic worker observation, while the same root bracket is active. *)
+val capacity_rollover
+  :  t
+  -> operation_id:Agent_protocol.Id.Operation.t
+  -> current:Capacity_basis.t option
+  -> state:Session_state.t
+  -> Chat_response.Capacity_rollover.stage
+  -> (Chat_response.Capacity_rollover.pressure, Agent_protocol.Error.t) result
+
+(** Read the live or retained root evidence without changing the capture.
+    The caller must supply the current exact target, configuration and window basis. *)
+val inspect_capacity
+  :  t
+  -> current:Capacity_basis.t option
+  -> Session_context_capacity.status
+
+(** Window of the actual finalized root preparation for this operation. A
+    retained same-operation observation still requires live Actor checks. *)
+module Native_window : sig
+  type t
+
+  val scope : t -> Agent_protocol.Recovery_window.Scope.t
+  val same_preparation : t -> t -> bool
+end
+
+val native_window
+  :  t
+  -> operation_id:Agent_protocol.Id.Operation.t
+  -> configuration_revision:int64
+  -> target:Inference.Request.Target.t
+  -> Native_window.t option
+
+(** Check the live root writer's exact captured preparation before acknowledging
+    an ordinary model turn. No durable state is changed by this predicate. *)
+val ordinary_attempt_is_current
+  :  t
+  -> operation_id:Agent_protocol.Id.Operation.t
+  -> current:Capacity_basis.t option
+  -> prepared:Inference_runtime.Prepared.t
+  -> attempt:Inference_runtime.Attempt.t
+  -> bool
 
 val finish : t -> Token.t -> success:bool -> unit
 
@@ -42,7 +180,26 @@ val view
     or cancellation clears preparing ownership under cancellation protection;
     successful completion retains a historical projection, never an active one. *)
 val root_port
-  :  begin_capture:(unit -> (Token.t, Agent_protocol.Error.t) Result.t)
+  :  select_checkpoint:(Token.t -> Chat_response.Soft_checkpoint.select option)
+  -> begin_capture:(unit -> (Token.t, Agent_protocol.Error.t) Result.t)
+  -> publish_capacity:
+       (Token.t -> Capacity_observation.t -> (unit, Agent_protocol.Error.t) Result.t)
+  -> publish_recovery:
+       (Token.t
+        -> Inference_runtime.Recovery_input.t
+        -> configuration:Inference.Observation.Configuration.t
+        -> binding_is_current:(unit -> bool)
+        -> (unit, Agent_protocol.Error.t) Result.t)
+  -> claim_reminder:
+       (Token.t
+        -> Inference_runtime.Prepared.t
+        -> (Recovery_reminder.Claim.t option, Agent_protocol.Error.t) Result.t)
+  -> accept_reminder:
+       (Token.t
+        -> Recovery_reminder.Claim.t
+        -> Inference_runtime.Prepared.t
+        -> Inference_runtime.Attempt.t
+        -> (unit -> unit, Agent_protocol.Error.t) Result.t)
   -> mark:
        (Token.t
         -> Inference.Observation.Configuration.t

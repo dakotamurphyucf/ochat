@@ -1,4 +1,32 @@
 open! Core
+module Context_capacity = Context_capacity
+module Protected_delivery = Protected_delivery
+
+module Recovery_input : sig
+  type t
+
+  type row = private
+    { ordinal : int
+    ; occurrence : History_entry.Id.t
+    ; digest : Chatml_source.Digest.t
+    }
+
+  val preparation_id : t -> string
+  val configuration_digest : t -> Chatml_source.Digest.t
+  val input_count : t -> int
+  val rows : t -> row list
+  val max_input_count : int
+  val max_projection_bytes : int
+
+  (** Use only for an already admitted neutral source row. Protected occurrence
+      filtering precedes digests on [Prepared.recovery_input]. *)
+  val projected_digest
+    :  ?charge_work:(int -> unit)
+    -> ?checkpoint:(unit -> unit)
+    -> History_entry.t
+    -> remaining_bytes:int
+    -> Chatml_source.Digest.t option * int
+end
 
 (** Trusted per-attempt application-submission checkpoint. A guard contains a
     host-owned [refresh] callback, not authority created by this module. Refresh
@@ -9,16 +37,40 @@ open! Core
     nonyielding final check. No refreshed witness is stored on a shared Context,
     so concurrent sibling attempts cannot overwrite one another. Exceptions
     and cancellation retain their original cause.
-    The selected backend invokes [check] after auth/transport waits and immediately
-    before entering model-request submission. A later revocation may race an
-    already admitted request. *)
+    The selected backend invokes [with_submission] after transport selection.
+    It holds any source custody for the application write only. After acquisition,
+    every refresh precedes the synchronous final checks, followed immediately by
+    the actual write. [check] remains available to ordinary backends and rejects
+    guarded source custody before running any callbacks. *)
 module Submission_guard : sig
   type t
 
   val empty : t
   val create : refresh:(unit -> unit -> unit) -> t
+
+  (** Hold grouped host source custody across refresh, any actual application
+      admission, and the first write. A valid refresh returns a nonyielding
+      check that can be performed both sides of that admission. *)
+  val create_scoped
+    :  leases:Protected_delivery.Lease.t list
+    -> refresh:(unit -> unit -> unit)
+    -> t
+
+  (** Run a host writer only after the selected credential, operation and
+      source guards pass. The returned check and ordinary final checks run
+      synchronously again immediately before the actual application write.
+      A writer must be idempotent for the same physical attempt. *)
+  val create_admission : refresh:(unit -> unit -> unit) -> t
+
+  (** Application-only admission after all ordinary admissions and their
+      rechecks. The adapter performs its last transport authorization before
+      this writer is called and again before application bytes. [check] rejects
+      this guard because an inspection is not a write boundary. *)
+  val create_write_admission : refresh:(unit -> unit -> unit) -> t
+
   val compose : t -> t -> t
   val check : t -> unit
+  val with_submission : ?check_transport:(unit -> unit) -> t -> f:(unit -> 'a) -> 'a
 end
 
 (** Effectful inference boundary. A prepared value owns its actual adapter and
@@ -38,6 +90,7 @@ module Preparation_error : sig
     | Transport_unavailable
     | Session_closed
     | Invalid_preparation
+    | Protected_delivery of Protected_delivery.error
     | Request_limit of Document_schema.Error.t
   [@@deriving equal, sexp_of]
 end
@@ -124,6 +177,16 @@ end
 module Plan : sig
   type t
 
+  type run =
+    sw:Eio.Switch.t
+    -> scope:Transcript.Scope.t
+    -> accounting_id:Inference.Observation.Observation_id.t
+    -> note_delivery:(Inference.Event.Terminal.delivery -> unit)
+    -> on_event:(Inference.Event.t -> unit)
+    -> on_observation:(Inference.Observation.t -> unit)
+    -> submission_guard:Submission_guard.t
+    -> Receipt.t
+
   (** Trusted backend preparation. The closure captures the immutable lowered
       request, selected driver and exact host auth resolver. Its request is
       private. Configuration is the safe projection of this request's target,
@@ -151,16 +214,21 @@ module Plan : sig
     :  request:Inference.Request.t
     -> configuration:Inference.Observation.Configuration.t
     -> fingerprint:string
-    -> run:
-         (sw:Eio.Switch.t
-          -> scope:Transcript.Scope.t
-          -> accounting_id:Inference.Observation.Observation_id.t
-          -> note_delivery:(Inference.Event.Terminal.delivery -> unit)
-          -> on_event:(Inference.Event.t -> unit)
-          -> on_observation:(Inference.Observation.t -> unit)
-          -> submission_guard:Submission_guard.t
-          -> Receipt.t)
+    -> run:run
     -> (t, Preparation_error.t) Result.t
+
+  (** Trusted protected adapter. Configuration reflects omission of optional
+      prompt-cache settings. Capacity is withheld when live results are present. *)
+  val create_isolated
+    :  request:Inference.Request.t
+    -> configuration:Inference.Observation.Configuration.t
+    -> fingerprint:string
+    -> run:run
+    -> (t, Preparation_error.t) Result.t
+
+  (** Attest the encoder and coverage of the same finalized input captured by
+      this plan. The callback runs only for explicit capacity assessment. *)
+  val with_capacity_source : t -> Context_capacity.Source.t -> t
 end
 
 module Session = Session
@@ -203,6 +271,12 @@ module Adapter : sig
     :  ?supports_request_guidance:bool
     -> ?prepare_with_policy:
          (policy:Inference.Observation.Transport_policy.t
+          -> preparation_id:string
+          -> Inference.Request.t
+          -> (Plan.t, Preparation_error.t) Result.t)
+    -> ?prepare_protected:
+         (policy:Inference.Observation.Transport_policy.t
+          -> materialized:Protected_delivery.Materialized.t
           -> preparation_id:string
           -> Inference.Request.t
           -> (Plan.t, Preparation_error.t) Result.t)
@@ -263,11 +337,45 @@ module Prepared : sig
   val configuration : t -> Inference.Observation.Configuration.t
   val fingerprint : t -> string
 
+  (** Physical association created by [start], including protected plans. *)
+  val owns_attempt : t -> Attempt.t -> bool
+
+  (** Check ordered, exact admitted history occurrences without returning any
+      request data. Fails when a selected occurrence has a different payload. *)
+  val includes_history : t -> History_entry.t list -> bool
+
+  (** Inspect final positions in the admitted neutral request, excluding both
+      ends of protected tool delivery before computing evidence. No request
+      body, authority or provider materialization can escape. Oversized
+      history yields no evidence. A preparation does not prove submission. *)
+  val recovery_input : t -> Recovery_input.t option
+
+  (** Nonyielding check of the same adapter/profile binding and resource owner.
+      The returned closure retains no prepared request or source-count input. *)
+  val binding_guard : t -> unit -> bool
+
+  (** Explicit, local assessment of this accepted prepared request under the
+      host policy. It allocates no attempt, does not authorize dispatch, and
+      never performs authentication or provider I/O. No policy means unknown. *)
+  val assess_capacity
+    :  ?policy:Context_capacity.Policy.t
+    -> t
+    -> Context_capacity.Assessment.t
+
+  (** Reject attempts to reuse a result from a different preparation or policy,
+      including after independent preparation with the same display ID. *)
+  val capacity_assessment_is_current
+    :  ?policy:Context_capacity.Policy.t
+    -> t
+    -> Context_capacity.Assessment.t
+    -> bool
+
   (** Local allocation only, before credential resolution or network effects.
       The trusted host supplies fresh actual scope/accounting identities and
       durably admits tracking before run. Reusing a scope across attempts is a
       host ownership error; this value is not a durable identity allocator.
-      Repeated starts are explicit new attempts, never hidden retries. *)
+      Repeated starts are explicit new attempts for ordinary requests. Protected
+      preparation admits at most one actual root scope and one submission. *)
   val start
     :  t
     -> scope:Transcript.Scope.t
@@ -342,9 +450,14 @@ module Context : sig
 
   (** The request must match this complete selected target. Final history,
       guidance, tools and immutable assets are already captured. A plan with a
-      different request, preparation identity or safe configuration rejects. *)
+      different request, preparation identity or safe configuration rejects.
+      A protected plan must match the exact committed output in effective
+      history. [protect_tool_arguments] also isolates a turn which may generate
+      protected call arguments, before the tool has produced a delivery plan. *)
   val prepare
-    :  t
+    :  ?protected_delivery:Protected_delivery.t list
+    -> ?protect_tool_arguments:bool
+    -> t
     -> preparation_id:string
     -> Inference.Request.t
     -> (Prepared.t, Preparation_error.t) Result.t

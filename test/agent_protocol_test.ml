@@ -684,6 +684,17 @@ let architecture_methods =
   ; "session.run.start"
   ; "session.runs"
   ; "session.run"
+  ; "session.recovery.enable"
+  ; "session.recovery.followup"
+  ; "session.recovery.notes.inspect"
+  ; "session.recovery.notes.revoke_share"
+  ; "session.recovery.notes.share"
+  ; "session.recovery.query"
+  ; "session.recovery.read_asset"
+  ; "session.recovery.read_text"
+  ; "session.recovery.rollover"
+  ; "session.recovery.status"
+  ; "session.recovery.windows"
   ; "session.goals"
   ; "session.goal"
   ; "session.goal.command"
@@ -760,7 +771,70 @@ let%expect_test "every architecture method has request and result dispatch" =
           (List.equal String.equal expected (normalize Method_result.supported_methods)
            : bool)
       }];
-  [%expect {| ((method_count 118) (requests true) (results true)) |}]
+  [%expect {| ((method_count 129) (requests true) (results true)) |}]
+;;
+
+let%expect_test "note share management binds a closed receipt to its exact request" =
+  let module W = Recovery_note_share_control in
+  let generator = deterministic_generator () in
+  let server_id = Id.Server.create_with generator in
+  let session_id = Id.Session.create_with generator in
+  let session = Session_ref.create ~server_id ~session_id in
+  let attachment_id = Id.Attachment.create_with generator in
+  let source =
+    W.Source.create session ~attachment_id ~expected_generation:0 |> ok_or_fail
+  in
+  let path = W.Path.of_string "handoff/known" |> ok_or_fail in
+  let request = W.Request.Inspect { source; path = Some path } in
+  let method_ = W.Request.method_name request in
+  let fields =
+    match W.Request.to_json request with
+    | `Object fields -> fields
+    | _ -> assert false
+  in
+  let accepts_request json =
+    W.Request.of_method_and_params ~method_ json |> Result.is_ok
+  in
+  assert (accepts_request (`Object fields));
+  assert (not (accepts_request (`Object (("content", `Null) :: fields))));
+  let nested name replacement =
+    `Object (List.Assoc.add fields name replacement ~equal:String.equal)
+  in
+  assert (not (accepts_request (nested "path" (`String "../private"))));
+  assert (
+    not
+      (accepts_request
+         (nested "source"
+            (`Object
+                [ "server_id", Id.Server.to_json server_id
+                ; "session_id", Id.Session.to_json session_id
+                ; "extra", `Null
+                ]))));
+  let nonce = Id.Session_incarnation.create_with generator in
+  let reference = W.Reference.create session ~nonce ~id:2L |> ok_or_fail in
+  let request =
+    W.Request.Revoke
+      { source
+      ; expected_share_revision = 3L
+      ; reference
+      ; key = Idempotency_key.of_string "exact-revoke" |> ok_or_fail
+      }
+  in
+  let response grant_id share_revision =
+    let reference = W.Reference.create session ~nonce ~id:grant_id |> ok_or_fail in
+    W.Response.Revoked (W.Receipt.create reference ~share_revision |> ok_or_fail)
+  in
+  let valid = response 2L 4L in
+  let decoded =
+    W.Response.of_method_and_json
+      ~method_:(W.Response.method_name valid)
+      (W.Response.to_json valid)
+    |> ok_or_fail
+  in
+  assert (Result.is_ok (W.Response.validate decoded ~request));
+  assert (Result.is_error (W.Response.validate (response 1L 4L) ~request));
+  assert (Result.is_error (W.Response.validate (response 2L 5L) ~request));
+  [%expect {| |}]
 ;;
 
 let%expect_test "history deletion requires stable ID, revision and idempotency" =
@@ -854,6 +928,121 @@ let%expect_test "blob reads are bounded and chunks validate exact cursors" =
     {|
     ((request_valid true) (zero_chunk_rejected true) (chunk_valid true))
     |}]
+;;
+
+let%test_unit "recovery asset chunks bind exact ordinary coordinates and bounded bytes" =
+  let module Wire = Recovery_asset_read in
+  let module Reply = Wire.Reply in
+  let session =
+    Session_ref.create
+      ~server_id:(Id.Server.of_string "srv_recovery" |> ok_or_fail)
+      ~session_id:(Id.Session.of_string "ses_recovery" |> ok_or_fail)
+  in
+  let scope =
+    Recovery_window.Scope.create
+      ~session
+      ~generation:1
+      ~window:(Id.Context_window.of_string "win_recovery" |> ok_or_fail)
+    |> ok_or_fail
+  in
+  let citation version =
+    Recovery_window.Citation.create
+      scope
+      ~occurrence:(History.Id.of_string "4:test:7" |> ok_or_fail)
+      ~version
+    |> ok_or_fail
+  in
+  let revision = History.Content_revision.zero in
+  let original = "\000\255binary\n" in
+  let sha256 = Digestif.SHA256.(digest_string original |> to_hex) in
+  let citation = citation (Recovery_item_version.canonical revision) in
+  let request = Wire.create citation ~part:1 ~offset:0 ~max_bytes:3 () |> ok_or_fail in
+  let rewritten json ~name value =
+    match json with
+    | `Object fields ->
+      `Object ((name, value) :: List.Assoc.remove fields ~equal:String.equal name)
+    | _ -> assert false
+  in
+  assert (Result.is_error (Wire.create citation ~part:1 ~offset:3 ()));
+  assert (
+    Result.is_error
+      (Wire.create citation ~part:1 ~offset:0 ~max_bytes:(Wire.max_chunk_bytes + 1) ()));
+  assert (
+    Result.is_error
+      (Wire.create citation ~part:1 ~offset:(Wire.max_original_bytes + 1) ()));
+  assert (
+    Result.is_error
+      (Wire.of_json (rewritten (Wire.to_json request) ~name:"blob_id" `Null)));
+  let project request =
+    Reply.of_verified_original
+      request
+      ~kind:Document
+      ~media_type:"application/pdf"
+      ~sha256
+      original
+    |> ok_or_fail
+  in
+  let first = project request in
+  let first_json = Reply.to_json first in
+  let first = Reply.of_json first_json |> ok_or_fail in
+  Reply.validate first ~request |> ok_or_fail;
+  assert (
+    String.equal first.bytes "\000\255b"
+    && Option.equal Int.equal first.next_offset (Some 3));
+  List.iter
+    [ "data_base64", `String "AA"
+    ; "data_base64", `String (String.make (Wire.max_envelope_bytes + 1) 'A')
+    ; "next_offset", `Number "5"
+    ; "media_type", `String "application/pdf; x=1"
+    ; "blob_id", `String "private"
+    ]
+    ~f:(fun (name, value) ->
+      assert (Result.is_error (Reply.of_json (rewritten first_json ~name value))));
+  let wrong_part =
+    Reply.of_json (rewritten first_json ~name:"part" (`Number "2")) |> ok_or_fail
+  in
+  assert (Result.is_error (Reply.validate wrong_part ~request));
+  let continuation =
+    Wire.create citation ~part:1 ~offset:3 ~expected_sha256:sha256 () |> ok_or_fail
+  in
+  let last = project continuation in
+  Reply.validate last ~request:continuation |> ok_or_fail;
+  assert (
+    String.equal (first.bytes ^ last.bytes) original && Option.is_none last.next_offset);
+  let different =
+    Wire.create citation ~part:1 ~offset:3 ~expected_sha256:(String.make 64 'f') ()
+    |> ok_or_fail
+  in
+  assert (Result.is_error (Reply.validate last ~request:different));
+  let whole = Wire.create citation ~part:1 ~offset:0 () |> ok_or_fail in
+  let changed =
+    rewritten
+      (Reply.to_json (project whole))
+      ~name:"data_base64"
+      (`String (Base64.encode_exn (String.map original ~f:(fun _ -> 'x'))))
+    |> Reply.of_json
+    |> ok_or_fail
+  in
+  assert (Result.is_error (Reply.validate changed ~request:whole));
+  let maximum = String.make Wire.max_original_bytes '\255' in
+  let digest = Digestif.SHA256.(digest_string maximum |> to_hex) in
+  let max_request =
+    Wire.create citation ~part:1 ~offset:0 ~max_bytes:Wire.max_chunk_bytes ()
+    |> ok_or_fail
+  in
+  let project_max =
+    Reply.of_verified_original
+      max_request
+      ~kind:Document
+      ~media_type:"application/pdf"
+      ~sha256:digest
+  in
+  let largest = project_max maximum |> ok_or_fail in
+  let largest_json = Reply.to_json largest in
+  assert (String.length (Jsonaf.to_string largest_json) < Wire.max_envelope_bytes);
+  Reply.validate (Reply.of_json largest_json |> ok_or_fail) ~request:max_request
+  |> ok_or_fail;
+  assert (Result.is_error (project_max (maximum ^ "x")))
 ;;
 
 let%expect_test "typed durable payload derives and validates its event kind" =
@@ -1462,4 +1651,33 @@ let%expect_test "Schedule original provenance is immutable and wire-versioned" =
   assert (Result.is_error (Schedule.validate forged));
   print_endline "legacy absence, positive v4, strict current child and immutable origin";
   [%expect {| legacy absence, positive v4, strict current child and immutable origin |}]
+;;
+
+let%test_unit "recovery pages have a cursor exactly when another page can be examined" =
+  let module R = Recovery_history_page in
+  let token = Page.Cursor.of_string "opaque-test-cursor" |> ok_or_fail |> Page.Cursor.to_json in
+  List.iter
+    [ "complete", false
+    ; "source_unavailable", false
+    ; "row_limit", true
+    ; "position_limit", true
+    ; "work_limit", true
+    ; "reply_limit", true
+    ]
+    ~f:(fun (coverage, needs_cursor) ->
+      List.iter [ true; false ] ~f:(fun has_cursor ->
+        let json =
+          `Object
+            [ "rows", `Array []
+            ; "next", (if has_cursor then token else `Null)
+            ; "coverage", `String coverage
+            ]
+        in
+        match R.of_json json with
+        | Ok page ->
+          assert (Bool.equal needs_cursor has_cursor);
+          assert (Document_schema.Json.equal json (R.to_json page))
+        | Error e ->
+          assert (not (Bool.equal needs_cursor has_cursor));
+          assert (Error.equal_code e.code Invalid_request)))
 ;;

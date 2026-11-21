@@ -9,7 +9,24 @@ module Input = struct
     }
 end
 
+module Model_admission = struct
+  type t =
+    { check : managed:bool -> (unit, Agent_protocol.Error.t) result
+    ; admit :
+        managed:bool
+        -> Inference_runtime.Prepared.t
+        -> Inference_runtime.Attempt.t
+        -> (unit -> unit, Agent_protocol.Error.t) result
+    }
+end
+
 module Capabilities = struct
+  type 'plan notification_consumer =
+    'plan
+    -> ( Chat_response.In_memory_stream.Safe_point_input.batch
+         , Agent_protocol.Error.t )
+         result
+
   type event_handler =
     executing:Agent_protocol.Moderator_execution.t
     -> policy_caller:Delegated_policy_caller.t option
@@ -112,8 +129,23 @@ module Capabilities = struct
         -> (unit, Agent_protocol.Error.t) result
     ; admit_moderator_turn : unit -> (unit, Agent_protocol.Error.t) result
     ; admit_notification_turn : unit -> (unit, Agent_protocol.Error.t) result
+    ; model_admission : Model_admission.t option
     ; root_context : Chat_response.Root_context.t option
+    ; capacity_rollover : Chat_response.Capacity_rollover.t option
+    ; select_rollover_followup :
+        (Recovery_rollover_continuation.Hook.view
+         -> Recovery_rollover_continuation.Hook.decision)
+          option
+        -> (unit, Agent_protocol.Error.t) result
+    ; successor_inference : Chat_response.Root_context.Successor.t option
+    ; successor_hint_references : Recovery_rollover_hint_ref.Witness.t option
+    ; settle_tool_batch :
+        (Chat_response.Settled_tool_batch.t
+         -> (Chat_response.Settled_tool_batch.decision, Agent_protocol.Error.t) result)
+          option
     ; consume_deferred : unit -> (History_entry.t list, Agent_protocol.Error.t) result
+    ; consume_notifications : Notification_delivery.t notification_consumer
+    ; consume_initial_notifications : Notification_delivery.idle notification_consumer
     ; request_permission :
         permission:Agent_protocol.Permission.t
         -> timeout_seconds:float option
@@ -150,7 +182,15 @@ type outcome =
   | Cancelled of cancellation
   | Failed of Agent_protocol.Error.t
 
-type t = { run : sw:Eio.Switch.t -> input:Input.t -> Capabilities.t -> outcome }
+type run = sw:Eio.Switch.t -> input:Input.t -> Capabilities.t -> outcome
 
-let create ~run = { run }
+type t =
+  { run : run
+  ; capacity_aware : bool
+  }
+
+let create ~run = { run; capacity_aware = false }
+let create_capacity_aware ~run = { run; capacity_aware = true }
+let map_run t ~f = { t with run = f t.run }
+let supports_capacity_rollover t = t.capacity_aware
 let run t ~sw ~input capabilities = t.run ~sw ~input capabilities

@@ -166,6 +166,7 @@
   configuration_transition
   configuration_update
   configuration_capture
+  session_context_capacity
   configuration_policy
   queue_provenance_semantics
   session_storage_semantics
@@ -230,6 +231,41 @@
   instruction_selection_capacity
   instruction_selection_record
   instruction_selection
+  recovery_note_access
+  recovery_note_change
+  recovery_note_session
+  recovery_note_query
+  recovery_history_native_request
+  recovery_history_native_service
+  recovery_history_native_tool
+  recovery_note_native_request
+  recovery_note_native_service
+  recovery_note_native_tool
+  recovery_note_share_value
+  recovery_note_share_document
+  recovery_note_share
+  recovery_note_share_change
+  recovery_authored_checkpoint
+  recovery_rollover_checkpoint
+  recovery_checkpoint_opportunity
+  recovery_checkpoint_candidate
+  recovery_rollover_continuation
+  recovery_rollover_input
+  recovery_rollover_hint_ref
+  recovery_rollover_hooks
+  recovery_rollover_hook_policy
+  recovery_rollover_hook_snapshot
+  recovery_successor_guidance
+  recovery_rollover_batch
+  recovery_rollover_batch_cut
+  recovery_rollover_capacity
+  recovery_rollover_capacity_cut
+  recovery_rollover_evidence
+  recovery_checkpoint_cut
+  recovery_rollover
+  recovery_rollover_projection
+  recovery_context_service
+  recovery_context_native_tool
   instruction_transition
   goal_command_transition
   goal_control_transition
@@ -259,6 +295,7 @@
   moderator_lifecycle
   policy_restore_basis
   run_state
+  run_rollover_work
   run_transition
   run_work_settlement
   run_subscription_evidence
@@ -334,6 +371,9 @@
   stream_invocation
   native_tool_dispatch
   native_tool_policy
+  protected_delivery_queue
+  protected_native_call
+  recovery_native_result
   fork_tool_dispatch
   native_tool_invocation
   host_permission_subject
@@ -344,6 +384,33 @@
   native_tool_moderation
   script_tool_calls
   compaction_archive
+  recovery_window_location
+  recovery_window_record
+  recovery_window_page
+  recovery_window_ledger
+  recovery_window_capture
+  recovery_installed_originals
+  recovery_effective_projection
+  recovery_effective_archive
+  recovery_effective_attempt
+  recovery_effective_record
+  recovery_effective_ledger
+  recovery_effective_capture
+  recovery_reminder
+  recovery_reminder_preparation
+  recovery_effective_receipts
+  recovery_visibility
+  recovery_window_seal
+  recovery_source_work
+  recovery_source_reader
+  recovery_effective_release
+  recovery_image
+  recovery_item_text
+  recovery_history_query_basis
+  recovery_history_query
+  recovery_query_cursor
+  recovery_asset
+  recovery_ordinary_selection
   administration
   session_delta
   session_metadata_transition
@@ -460,10 +527,15 @@
   goal_host_turn_admission
   inference_ledger)
  (private_modules product_callback_data canonical_backend_binding_data failed_startup_data failed_startup_release_data callback_cleanup_data retirement_cleanup_completion runtime_unmoderated_source retained_job_producer policy_caller_source delegated_policy_governance_data delegated_policy_seed policy_canonical_usage_source goal_causal_admission_custody policy_canonical_usage_forwarding policy_cause_leaf policy_forwarding_frame policy_forwarding_route policy_forwarding constructor_model_producer session_commit_attempt delegated_policy_caller_custody delegated_policy_claim_state goal_policy_ordered session_goal_policy_projection goal_policy_receipt goal_policy_contributions_data goal_policy_contributions_capacity goal_policy_contributions_carrier goal_policy_contributions_update policy_native_ancestry policy_standalone_source policy_canonical_usage_data policy_canonical_usage_carrier policy_canonical_usage_selection policy_canonical_usage_update policy_canonical_usage_projection policy_canonical_usage_ordered idle_completion_write goal_descendant_admission_custody capacity_depth goal_descendants_data goal_descendants_canonical goal_descendants_capacity delegated_usage_state goal_native_actions goal_activation_policy goal_root_policy goal_descendant_root_route goal_causal_root_route run_work_settlement goal_wake_selection goal_continuation_phase recurrence_activation_custody recurrence_run_evidence actor_reply recurrence_execution_capacity recurrence_executions run_recurrence_origins queue_payload recurrence_runtime recurrence_execution_record recurrence_frontier_records recurrence_frontier_codec recurrence_frontier_transition recurrence_frontier_settlement agent_authority_scope goal_accounting_state goal_accounting_stored instruction_selection_capacity instruction_selection_record workspace_ownership authored_native_contract pending_carrier_admission prompt_parser_boundary prompt_program_custody prompt_script_roles legacy_queue_checkpoint legacy_job_delivery external_delivery_checkpoint execution_custody observation_continuation job_custody constructor_job_handoff constructor_callback_checkpoint constructor_invocation_checkpoint constructor_permission_checkpoint legacy_queue_custody legacy_schedule_custody ingress_creator_custody
-  prompt_project_baseline_record prompt_project_baseline_document native_tool_policy pending_turn run_input_handoff)
+  recovery_note_share_value recovery_note_share_document recovery_authored_checkpoint recovery_rollover_checkpoint recovery_rollover_evidence recovery_rollover_projection recovery_checkpoint_cut recovery_source_work
+  recovery_history_query_basis recovery_query_cursor
+  prompt_project_baseline_record prompt_project_baseline_document native_tool_policy protected_delivery_queue protected_native_call pending_turn run_input_handoff)
  (libraries ochat.inference_client ochat.inference_runtime ochat.inference ochat.history_chatmd ochat.transcript
   core
   core_unix
+  base64
+  mirage-crypto
+  mirage-crypto-rng
   digestif
   eio
   eio.unix
@@ -483,6 +555,7 @@
   ochat.chatml_git_host
   ochat.agent_protocol
   ochat.operator_authorization
+  ochat.recovery_notes
   ochat.agent_store
   chatmd
   chat_response

@@ -224,8 +224,8 @@ let run_stream
   live (Source_started { scope; origin = P.Origin.unavailable });
   (* Every backend, including the legacy fixture branch, performs the final
      owned submission check immediately before producing provider effects. *)
-  Runtime.Submission_guard.check submission_guard;
-  post_stream ~sw ~inputs
+  Runtime.Submission_guard.with_submission submission_guard ~f:(fun () ->
+    post_stream ~sw ~inputs)
   |> Stdlib.Seq.iter (fun event ->
     note_delivery E.Terminal.Response_started;
     let json = Res.Response_stream.jsonaf_of_t event in
@@ -310,7 +310,15 @@ let run_stream
   |> ok
 ;;
 
-let create_internal ~request_guidance ~on_prepare ~namespace ~default_model ~post_stream =
+let create_internal
+      ~request_guidance
+      ~on_prepare
+      ~capacity_source
+      ~binding_is_current
+      ~namespace
+      ~default_model
+      ~post_stream
+  =
   let source = Transcript.Source_id.of_string namespace |> ok in
   let sequence = Atomic.make 0 in
   let next () = Atomic.fetch_and_add sequence 1 |> Int.to_string in
@@ -341,8 +349,43 @@ let create_internal ~request_guidance ~on_prepare ~namespace ~default_model ~pos
       && String.equal (R.Target.profile target) "selected"
       && Option.is_none (R.Target.account target)
       && String.equal (R.Target.endpoint target) "fixture://responses"
-    then Ok ()
+    then
+      if binding_is_current ()
+      then Ok ()
+      else Error Runtime.Preparation_error.Target_unavailable
     else Error Runtime.Preparation_error.Target_mismatch
+  in
+  let prepare ~isolated ~preparation_id request =
+    on_prepare request;
+    let open Result.Let_syntax in
+    let%bind configuration =
+      O.Configuration.of_target
+        (R.target request)
+        ~preparation_id
+        ~transport:In_process
+        ~capabilities:[]
+        ~limits:O.Admission.observation
+      |> Result.map_error ~f:(fun _ -> Runtime.Preparation_error.Invalid_preparation)
+    in
+    let create = if isolated then Runtime.Plan.create_isolated else Runtime.Plan.create in
+    let%map plan =
+      create
+        ~request
+        ~configuration
+        ~fingerprint:preparation_id
+        ~run:(run_stream ~request_guidance post_stream request)
+    in
+    match capacity_source request with
+    | None -> plan
+    | Some source -> Runtime.Plan.with_capacity_source plan source
+  in
+  let prepare_protected =
+    Option.some_if
+      request_guidance
+      (fun ~policy:_ ~materialized ~preparation_id request ->
+         if Runtime.Protected_delivery.Materialized.has_live_results materialized
+         then Error (Runtime.Preparation_error.Protected_delivery Unavailable)
+         else prepare ~isolated:true ~preparation_id request)
   in
   let adapter =
     Runtime.Adapter.create
@@ -351,23 +394,8 @@ let create_internal ~request_guidance ~on_prepare ~namespace ~default_model ~pos
       ~id:"fixture.responses"
       ~limits:Runtime.Limits.default
       ~bind
-      ~prepare:(fun ~preparation_id request ->
-        on_prepare request;
-        let open Result.Let_syntax in
-        let%bind configuration =
-          O.Configuration.of_target
-            (R.target request)
-            ~preparation_id
-            ~transport:In_process
-            ~capabilities:[]
-            ~limits:O.Admission.observation
-          |> Result.map_error ~f:(fun _ -> Runtime.Preparation_error.Invalid_preparation)
-        in
-        Runtime.Plan.create
-          ~request
-          ~configuration
-          ~fingerprint:preparation_id
-          ~run:(run_stream ~request_guidance post_stream request))
+      ~prepare:(prepare ~isolated:false)
+      ?prepare_protected
       ()
     |> ok
   in
@@ -378,6 +406,8 @@ let create_with_observer ~on_prepare ~namespace ~default_model ~post_stream =
   create_internal
     ~request_guidance:false
     ~on_prepare
+    ~capacity_source:(fun _ -> None)
+    ~binding_is_current:(fun () -> true)
     ~namespace
     ~default_model
     ~post_stream
@@ -387,6 +417,8 @@ let create_with_request_guidance ~on_prepare ~namespace ~default_model ~post_str
   create_internal
     ~request_guidance:true
     ~on_prepare
+    ~capacity_source:(fun _ -> None)
+    ~binding_is_current:(fun () -> true)
     ~namespace
     ~default_model
     ~post_stream
@@ -395,6 +427,26 @@ let create_with_request_guidance ~on_prepare ~namespace ~default_model ~post_str
 let create ~namespace ~default_model ~post_stream =
   create_with_observer ~on_prepare:ignore ~namespace ~default_model ~post_stream
 ;;
+
+let create_with_capacity_and_guidance
+      ~request_guidance
+      ~capacity_source
+      ~binding_is_current
+      ~namespace
+      ~default_model
+      ~post_stream
+  =
+  create_internal
+    ~request_guidance
+    ~on_prepare:ignore
+    ~capacity_source:(fun request -> Some (capacity_source request))
+    ~binding_is_current
+    ~namespace
+    ~default_model
+    ~post_stream
+;;
+
+let create_with_capacity = create_with_capacity_and_guidance ~request_guidance:false
 
 let capture_config t config =
   let open Result.Let_syntax in

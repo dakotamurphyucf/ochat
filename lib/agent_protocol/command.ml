@@ -31,6 +31,15 @@ type t =
   | Session_configuration_get of Session_configuration.Get_request.t
   | Session_configuration_update of Session_configuration.Update_request.t
   | Instructions of (Instruction_control.Request.t[@sexp.opaque])
+  | Recovery_enable of (Recovery_query.Enable.t[@sexp.opaque])
+  | Recovery_windows of (Recovery_query.List_windows.t[@sexp.opaque])
+  | Recovery_history of (Recovery_history_request.t[@sexp.opaque])
+  | Recovery_range of (Recovery_text_range.t[@sexp.opaque])
+  | Recovery_asset_read of (Recovery_asset_read.t[@sexp.opaque])
+  | Recovery_status of (Recovery_rollover_control.Inspect.t[@sexp.opaque])
+  | Recovery_rollover of (Recovery_rollover_control.Request.t[@sexp.opaque])
+  | Recovery_followup of (Recovery_followup.t[@sexp.opaque])
+  | Recovery_note_shares of (Recovery_note_share_control.Request.t[@sexp.opaque])
   | Goal_query of (Goal_query.Request.t[@sexp.opaque])
   | Goal_control of (Goal_control.Request.t[@sexp.opaque])
   | Recurrence_query of (Recurrence_query.Request.t[@sexp.opaque])
@@ -121,6 +130,15 @@ let method_name = function
   | Session_work _ -> "session.work"
   | Session_configuration_get _ -> "session.configuration_get"
   | Instructions request -> Instruction_control.Request.method_name request
+  | Recovery_enable _ -> Recovery_query.Enable.method_name
+  | Recovery_windows _ -> Recovery_query.List_windows.method_name
+  | Recovery_history _ -> Recovery_history_request.method_name
+  | Recovery_range _ -> Recovery_text_range.method_name
+  | Recovery_asset_read _ -> Recovery_asset_read.method_name
+  | Recovery_status _ -> Recovery_rollover_control.Inspect.method_name
+  | Recovery_rollover _ -> Recovery_rollover_control.Request.method_name
+  | Recovery_followup _ -> Recovery_followup.method_name
+  | Recovery_note_shares v -> Recovery_note_share_control.Request.method_name v
   | Goal_query request -> Goal_query.Request.method_name request
   | Goal_control request -> Goal_control.Request.method_name request
   | Recurrence_query request -> Recurrence_query.Request.method_name request
@@ -215,6 +233,15 @@ let params = function
   | Session_work request -> Session_work.Query.to_json request
   | Session_configuration_get request -> Session_configuration.Get_request.to_json request
   | Instructions request -> Instruction_control.Request.params request
+  | Recovery_enable v -> Recovery_query.Enable.to_json v
+  | Recovery_windows v -> Recovery_query.List_windows.to_json v
+  | Recovery_history v -> Recovery_history_request.to_json v
+  | Recovery_range v -> Recovery_text_range.to_json v
+  | Recovery_asset_read v -> Recovery_asset_read.to_json v
+  | Recovery_status v -> Recovery_rollover_control.Inspect.to_json v
+  | Recovery_rollover v -> Recovery_rollover_control.Request.to_json v
+  | Recovery_followup v -> Recovery_followup.to_json v
+  | Recovery_note_shares v -> Recovery_note_share_control.Request.to_json v
   | Goal_query request -> Goal_query.Request.params request
   | Goal_control request -> Goal_control.Request.params request
   | Recurrence_query request -> Recurrence_query.Request.params request
@@ -387,6 +414,21 @@ let decoders =
   ; "session.stop", map Session.Stop_request.of_json (fun x -> Session_stop x)
   ; ( "session.cancel_operation"
     , map Session.Cancel_operation_request.of_json (fun x -> Session_cancel_operation x) )
+  ; ( Recovery_query.Enable.method_name
+    , map Recovery_query.Enable.of_json (fun x -> Recovery_enable x) )
+  ; ( Recovery_query.List_windows.method_name
+    , map Recovery_query.List_windows.of_json (fun x -> Recovery_windows x) )
+  ; ( Recovery_history_request.method_name
+    , map Recovery_history_request.of_json (fun x -> Recovery_history x) )
+  ; ( Recovery_text_range.method_name
+    , map Recovery_text_range.of_json (fun x -> Recovery_range x) )
+  ; ( Recovery_asset_read.method_name
+    , map Recovery_asset_read.of_json (fun x -> Recovery_asset_read x) )
+  ; ( Recovery_rollover_control.Inspect.method_name
+    , map Recovery_rollover_control.Inspect.of_json (fun x -> Recovery_status x) )
+  ; ( Recovery_rollover_control.Request.method_name
+    , map Recovery_rollover_control.Request.of_json (fun x -> Recovery_rollover x) )
+  ; Recovery_followup.method_name, map Recovery_followup.of_json (fun x -> Recovery_followup x)
   ; "session.runs", map Run_query.Request.of_json (fun x -> Session_runs x)
   ; "session.run", map Run_query.Lookup_request.of_json (fun x -> Session_run x)
   ; ( "session.pending_inputs"
@@ -451,6 +493,11 @@ let decoders =
     , fun params ->
         Recurrence_query.Request.of_method_and_params ~method_ ~params
         |> Result.map ~f:(fun request -> Recurrence_query request) ))
+  @ List.map Recovery_note_share_control.Request.methods ~f:(fun method_ ->
+    ( method_
+    , fun params ->
+        Recovery_note_share_control.Request.of_method_and_params ~method_ params
+        |> Result.map ~f:(fun request -> Recovery_note_shares request) ))
   @ List.map Recurrence_control.Request.methods ~f:(fun method_ ->
     ( method_
     , fun params ->

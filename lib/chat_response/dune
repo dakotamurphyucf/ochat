@@ -5,6 +5,7 @@
   cache
   config
   converter
+  converter_asset_capture
   converter_source
   ctx
   effect_rejection
@@ -20,6 +21,10 @@
   inference_config
   neutral_turn
   in_memory_stream
+  settled_tool_batch
+  capacity_rollover
+  foreground_capacity
+  soft_checkpoint
   model_executor
   model_completion_drain
   model_spawn_request
@@ -31,6 +36,7 @@
   chatml_moderator
   chatml_moderation
   moderation
+  context_rollover_hook
   run_operations
   moderator_manager
   goal_native_scope

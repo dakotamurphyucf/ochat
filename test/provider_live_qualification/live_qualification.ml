@@ -317,6 +317,7 @@ module Failure = struct
         | Transport_unavailable
         | Session_closed
         | Invalid_preparation
+        | Protected_delivery _
         | Request_limit _ )
     | Terminal _ -> false
   ;;
@@ -334,6 +335,7 @@ module Failure = struct
     | Transport_unavailable -> "transport_unavailable"
     | Session_closed -> "session_closed"
     | Invalid_preparation -> "invalid_preparation"
+    | Protected_delivery _ -> "protected_delivery"
     | Request_limit _ -> "request_limit"
   ;;
 
@@ -357,11 +359,13 @@ module Failure = struct
     | Unsupported_transport -> "unsupported_transport"
     | Session_closed -> "session_closed"
     | Session_busy -> "session_busy"
+    | Http_context_limit -> "http_context_limit"
     | Http_status _ -> "http_status"
   ;;
 
   let provider_code = function
     | T.Provider_failure.Invalid_request -> "invalid_request"
+    | Context_window_exceeded -> "context_window_exceeded"
     | Denied -> "denied"
     | Rate_limited -> "rate_limited"
     | Unavailable -> "unavailable"
@@ -390,6 +394,7 @@ module Failure = struct
           ( "transport"
           , transport_code why
           , (match why with
+             | Http_context_limit -> Some 400
              | Http_status status -> Some status
              | Connection
              | Timeout

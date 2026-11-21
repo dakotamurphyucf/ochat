@@ -8,6 +8,9 @@ val create
   -> retention:Pending_disposition.Retention.t
   -> t
 
+val successor_operation : t -> Agent_protocol.Id.Operation.t option
+val retires_for_administration : t -> kind:Session_state.Compaction_archive.kind -> bool
+
 val prepare
   :  t
   -> Session_state.t

@@ -7,6 +7,7 @@ module Range = Input.Range
 module Member = Source.Portable_path
 module Limits = Content.Limits
 module A = Content.Accounting
+module Originals = Agent_store.Installed_document_originals
 
 module Error = struct
   type reason =
@@ -54,11 +55,13 @@ end
 
 type t =
   { content : Content.t
+  ; originals : Originals.t option
   ; limits : Limits.t
   ; accounting : Accounting.t
   }
 
 let content t = t.content
+let originals t = t.originals
 let accounting t = t.accounting
 let limits t = t.limits
 
@@ -236,10 +239,11 @@ let local_source owner budget occurrence ~checkpoint =
     Content.Rendered.Source.Local { member; contents })
 ;;
 
-let run owner ~parsed_contexts ~limits ~checkpoint =
+let run ?(retain_root_originals = false) owner ~parsed_contexts ~limits ~checkpoint =
   let open Result.Let_syntax in
   let budget = Budget.create limits in
   let%bind () = preflight budget parsed_contexts ~checkpoint in
+  let retained_root = if retain_root_originals then List.hd parsed_contexts else None in
   let%bind rendered =
     List.fold_result parsed_contexts ~init:[] ~f:(fun rendered parsed ->
       List.fold_result
@@ -272,7 +276,13 @@ let run owner ~parsed_contexts ~limits ~checkpoint =
             in
             let%bind limits = Budget.render_limits budget in
             let%bind value =
-              Content.Rendered.create parsed ~occurrence ~source ~limits ~checkpoint
+              Content.Rendered.create
+                ~retain_original:(Option.exists retained_root ~f:(phys_equal parsed))
+                parsed
+                ~occurrence
+                ~source
+                ~limits
+                ~checkpoint
               |> Result.map_error ~f:Error.content
             in
             let%map () =
@@ -282,14 +292,19 @@ let run owner ~parsed_contexts ~limits ~checkpoint =
   in
   let original_limits = limits in
   let%bind limits = Budget.capture_limits budget in
-  let%bind content =
-    Content.capture ~parsed_contexts ~rendered:(List.rev rendered) ~limits ~checkpoint
+  let%bind content, originals =
+    Content.capture_with_originals
+      ~parsed_contexts
+      ~rendered:(List.rev rendered)
+      ~limits
+      ~checkpoint
     |> Result.map_error ~f:Error.content
   in
   checkpoint ();
   let observed = Content.accounting content in
   Ok
     { content
+    ; originals
     ; limits = original_limits
     ; accounting =
         { Accounting.content = observed

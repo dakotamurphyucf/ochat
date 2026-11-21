@@ -188,10 +188,9 @@ let%expect_test
        let invoke id name fields =
          queued := [ id, name, `Object fields ];
          send_lab_message env host id;
-         (* Observe the complete turn: retiring its persisted history can take more
-            than five CPU seconds after the earlier lab operations. Tool and shell
-            execution deadlines remain independently enforced. *)
-         Workflow.finish_call ~timeout:15. env host id;
+         (* This durable scenario also checks the real shell policy. The watchdog
+            bounds each observed host phase independently of those job deadlines. *)
+         Workflow.finish_call ~timeout:30. env host id;
          Host.initial_outcome (Host.snapshot host) id
        in
        let begin_checks id phase =

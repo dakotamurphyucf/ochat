@@ -24,6 +24,7 @@ type t =
   ; shell_manifest_sha256 : string option
   ; program_bundle : Prompt_program_bundle.Manifest.t option
   ; content_bundle : Prompt_program_bundle.Manifest.t option
+  ; originals_sha256 : string option
   ; created_at : P.Timestamp.t
   }
 [@@deriving equal, sexp_of]
@@ -63,6 +64,16 @@ let validate t =
   in
   let%bind _ = F.protocol (P.Timestamp.of_string (P.Timestamp.to_string t.created_at)) in
   let%bind _ = F.digest (`String t.root_sha256) in
+  let%bind () =
+    match
+      t.originals_sha256, t.prompt_definition_id, t.source_receipt, t.content_bundle
+    with
+    | None, _, _, _ -> Ok ()
+    | Some digest, Some _, Some _, Some _ ->
+      Result.map (F.digest (`String digest)) ~f:ignore
+    | Some _, _, _, _ ->
+      F.invalid "originals_sha256" "installed originals require an owned captured source"
+  in
   let%bind _ =
     match t.shell_manifest_sha256 with
     | None -> Ok None

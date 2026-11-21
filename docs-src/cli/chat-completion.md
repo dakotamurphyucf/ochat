@@ -37,6 +37,49 @@ observations are printed on stderr. Observations can be partial, replaced or
 contain gaps; they are not the final transcript. Stdout is reserved for the
 complete canonical export when `-output-file` is omitted or `/dev/stdout`.
 
+## Capture recoverable context
+
+Add `-enable-recovery` to enroll a new or selected durable conversation. The
+session keeps its window ledger when the process exits. On the next invocation,
+use the same storage root and session ID. Observing an earlier run with
+`-run-id` is read-only and excludes enrollment.
+
+`-recovery-capacity-file FILE` selects the host's capacity policy for this
+invocation. You can supply it independently of enrollment. For automatic
+rollover, enroll the session and supply a policy that qualifies its actual
+model and profile each time you run the local host.
+[Local capacity file](../agent-server/configuration.md#local-recovery-capacity-file).
+
+When you submit new input to a retained versioned moderator, the CLI joins its
+cold resume callback before selecting the input revision. A failed callback
+reports its error before the new message is admitted.
+
+If the input crosses an automatic context boundary, the command keeps the same
+managed Run ID. Once the successor is admitted, the Run records the retired
+Operation as relinquished and follows the new Operation to its terminal result.
+Later invocations can inspect the original Run receipt or send a new message
+in the retained successor window. A suspended continuation can still require
+an operator decision before the Run finishes.
+
+## Tool approvals in unattended runs
+
+This command can write the conversation and has no interactive approval prompt.
+When the captured tool policy is Ask and there is no matching grant, the run
+uses the captured no-responder fallback. The stock local profile denies that
+call immediately. The provider receives a tool error and can continue the turn.
+
+For an unattended note-reading workflow, open a durable local session in a
+[client that can answer tool approvals](../agent-server/tutorials/local-tui.md).
+When the model requests `recovery_note_read`, select **durable exact** to approve
+the same arguments and installed tool resources for this session generation.
+Select **approve prefix** to permit that named tool for any valid arguments in
+the session. Stop the session and close the interactive host, then continue the
+retained versioned conversation with the same private storage root and session
+ID. Old exact approvals issued before protected request binding require a fresh
+approval. Shared notes still require explicit source authorization.
+Selecting a tool in ChatMD makes it available to the model. Permission to
+execute it is a separate host decision.
+
 ## Select execution mode
 
 `-run-mode single-turn` is the default. Ordinary and legacy prompts use their

@@ -4,6 +4,7 @@ module P = Agent_protocol
 module Boundary = struct
   type t =
     | Worker of P.Id.Operation.t
+    | Successor of P.Id.Operation.t
     | Idle_start
   [@@deriving equal, sexp]
 end
@@ -18,9 +19,25 @@ let conflict message = Error (P.Error.create Conflict ~message ~retryable:false 
 
 let create (state : Session_state.t) ~boundary ~runtime_admission_open =
   let open Result.Let_syntax in
+  let%bind () =
+    match boundary with
+    | Boundary.Successor operation ->
+      let matches =
+        Option.exists state.recovery_windows ~f:(fun windows ->
+          let scope =
+            Recovery_window_ledger.Window.scope (Recovery_window_ledger.active windows)
+          in
+          Option.exists state.recovery_rollover ~f:(fun ledger ->
+            match Recovery_rollover.foreground ledger ~scope with
+            | Some { phase = Preparing id; _ } -> P.Id.Operation.equal operation id
+            | _ -> false))
+      in
+      if matches then Ok () else conflict "pending adoption has no preparing successor"
+    | Worker _ | Idle_start -> Ok ()
+  in
   let%bind owner_available =
     match boundary, state.active_operation with
-    | Boundary.Worker id, Some operation ->
+    | (Worker id | Successor id), Some operation ->
       if
         (not (P.Id.Operation.equal id operation.id))
         || not (Int.equal state.identity.generation operation.generation)
@@ -39,7 +56,8 @@ let create (state : Session_state.t) ~boundary ~runtime_admission_open =
             | Failed _
             | Interrupted _ ) ) ->
           conflict "pending worker consumption requires an actual live Turn root")
-    | Worker _, None -> conflict "pending worker consumption has no current root"
+    | (Worker _ | Successor _), None ->
+      conflict "pending worker consumption has no current root"
     | Idle_start, Some _ -> Ok false
     | Idle_start, None ->
       (match state.lifecycle.observed with
@@ -70,13 +88,14 @@ let eligible t input =
   then false
   else (
     match P.Pending_input.binding input, t.boundary with
-    | Safe_boundary, (Worker _ | Idle_start) -> true
-    | Await_idle, Idle_start -> true
+    | Safe_boundary, (Worker _ | Successor _ | Idle_start) -> true
+    | Await_idle, (Successor _ | Idle_start) -> true
     | After_root { terminal = Some _; _ }, Idle_start -> true
-    | After_root { operation_id; terminal = Some _; _ }, Worker current ->
+    | ( After_root { operation_id; terminal = Some _; _ }
+      , (Worker current | Successor current) ) ->
       not (P.Id.Operation.equal operation_id current)
-    | Await_idle, Worker _ | After_root { terminal = None; _ }, (Worker _ | Idle_start) ->
-      false)
+    | Await_idle, Worker _
+    | After_root { terminal = None; _ }, (Worker _ | Successor _ | Idle_start) -> false)
 ;;
 
 let eligible_prefix t queue =

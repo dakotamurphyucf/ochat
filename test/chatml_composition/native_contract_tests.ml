@@ -21,7 +21,8 @@ let descriptor (registration : Chat_response.Agent_runtime.native_registration) 
       , `String
           (match registration.result_contract with
            | Native_output -> "native_output"
-           | Invocation_v1 -> "invocation_v1") )
+           | Invocation_v1 -> "invocation_v1"
+           | Protected_recovery_v1 -> "protected_recovery_v1") )
     ]
 ;;
 
@@ -58,6 +59,19 @@ let documentation name =
   | "goal_progress"
   | "goal_start"
   | "goal_resume" -> "runtime.goal_metadata", shared
+  | "context_remaining" | "context_checkpoint" | "context_new_window" ->
+    "runtime.context_windows", shared
+  | "context_list_windows"
+  | "context_list_items"
+  | "context_search"
+  | "context_read_text"
+  | "context_read_media" -> "runtime.recovery_history", shared
+  | "recovery_note_list"
+  | "recovery_note_read"
+  | "recovery_note_search"
+  | "recovery_note_write"
+  | "recovery_note_append"
+  | "recovery_note_delete" -> "runtime.recovery_notes", shared
   | "run_chatml" -> "runtime.native.requests", shared
   | "agent_create" -> "runtime.delegation.creation", shared
   | "agent_status" | "agent_send" -> "runtime.delegation.submissions", shared
@@ -148,6 +162,15 @@ let%expect_test "runtime native catalog contracts remain paired with reviewed re
     (instructions_status instructions.sources
      9aa238203e9443b0a8d51f41421fd455b18291a8b306ff76b209a5ae6e2c9934
      3838b75b95419129bea126eeb2f7da07f229ccb180a83f34c68648a16f0c8fa5)
+    (context_remaining runtime.context_windows
+     de12f236a29ae49a158f35d12a0c7bffc90e5c79f397ea51affbdc3a95007637
+     f0367aef8020eb017c9c995c60310a624fb8aec5e4388dd9246ec6c511674c53)
+    (context_new_window runtime.context_windows
+     fe635b6a171ed40ae0080faf8c49f442c23952b5b643741cada85ff000588c30
+     f0367aef8020eb017c9c995c60310a624fb8aec5e4388dd9246ec6c511674c53)
+    (context_checkpoint runtime.context_windows
+     6afaa6adb1cde9ed866dfd4d49631427608f02df7a5e1d098f9d6bdba6a9e0ab
+     f0367aef8020eb017c9c995c60310a624fb8aec5e4388dd9246ec6c511674c53)
     (goal_get runtime.goal_metadata
      c8c1615cb79ccbff4199c462328b97eae95a061c9741fb9c570dc3da791cd617
      b06cac08508c2f3340bb60c47164ebd97bcee15ef04e9a09832552c4e50db111)
@@ -199,6 +222,39 @@ let%expect_test "runtime native catalog contracts remain paired with reviewed re
     (recurrence_history runtime.recurrence
      341d5ee94a789d80e3aacac5609ba64fccaba4ee5e625a0c3647dea5840a8d33
      fda039c2f5d8716bc5cc036e7757305d8f6d9467830abc53ef88540560ca503a)
+    (context_list_windows runtime.recovery_history
+     230c4c9f7bf8595480000e61506233b54e022582456eca5b11a499ad22815047
+     ecca70c1efe5a8fbaf7b47db9bdcfe205ce832ea8cdbf9a18bd447ec9aefd47d)
+    (context_list_items runtime.recovery_history
+     e5778fc1299a0bfe3beca71beee486e28703b4f26865c3d41b992e60b8d13dfb
+     ecca70c1efe5a8fbaf7b47db9bdcfe205ce832ea8cdbf9a18bd447ec9aefd47d)
+    (context_search runtime.recovery_history
+     0f3cf387386789ce8d74977f80b2b2276752e9d585dd1ae7de8479c407116d47
+     ecca70c1efe5a8fbaf7b47db9bdcfe205ce832ea8cdbf9a18bd447ec9aefd47d)
+    (context_read_text runtime.recovery_history
+     557f7de04a32eb5b96625f09c652ffb99b2c6c95b7821486672ecc569059a93a
+     ecca70c1efe5a8fbaf7b47db9bdcfe205ce832ea8cdbf9a18bd447ec9aefd47d)
+    (context_read_media runtime.recovery_history
+     b24f99228d18e9c10f1b9bbbd569afc6800276cb2671ea6599b6ebb1db02dc31
+     ecca70c1efe5a8fbaf7b47db9bdcfe205ce832ea8cdbf9a18bd447ec9aefd47d)
+    (recovery_note_read runtime.recovery_notes
+     9c9c737587601b6603a28f97bfb933b8e24ac0e1d3af52d5ef65406f54f95bab
+     ef6c9b9fe5cf025eab4739e7b5c36691b782c4e0dcfe0a2bbf2434c11a2228a7)
+    (recovery_note_list runtime.recovery_notes
+     b46516562e256b3d674e7ee0bd9d138c1088c1a6297089117517d133b6a1ae36
+     ef6c9b9fe5cf025eab4739e7b5c36691b782c4e0dcfe0a2bbf2434c11a2228a7)
+    (recovery_note_search runtime.recovery_notes
+     9f09d60d68c3db5065db88bdb5bc5a2c8ad63d93e5733ac45dc9eb810b6e5adc
+     ef6c9b9fe5cf025eab4739e7b5c36691b782c4e0dcfe0a2bbf2434c11a2228a7)
+    (recovery_note_write runtime.recovery_notes
+     8eb6688c6aa118b1eee54a1cecdb8d7f2bb29671d4788308e73dd2632743436e
+     ef6c9b9fe5cf025eab4739e7b5c36691b782c4e0dcfe0a2bbf2434c11a2228a7)
+    (recovery_note_append runtime.recovery_notes
+     4a7dff20af98db7986148d69ec1665cb7f77f427856ce5f0fd8c7bf9a9f5355d
+     ef6c9b9fe5cf025eab4739e7b5c36691b782c4e0dcfe0a2bbf2434c11a2228a7)
+    (recovery_note_delete runtime.recovery_notes
+     687d18e14ebd6bcf05670fe06ed97025ca3041c14c6267880a0eb50514fe67e9
+     ef6c9b9fe5cf025eab4739e7b5c36691b782c4e0dcfe0a2bbf2434c11a2228a7)
     |}]
 ;;
 

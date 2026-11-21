@@ -414,10 +414,10 @@ let%expect_test
                 (fun ~tools:_ _ -> failwith "unexpected standalone completion")
             ; idle_notifications = (fun ~source:_ ~tools:_ () -> Ok false)
             ; notification_input =
-                (fun ~source:_ ~tools:_ ~operation_id:_ () ->
+                (fun ~source:_ ~tools:_ ~consume:_ () ->
                   Ok Chat_response.In_memory_stream.Safe_point_input.empty)
             ; initial_notification_input =
-                (fun ~source:_ ~tools:_ ~operation_id:_ () ->
+                (fun ~source:_ ~tools:_ ~consume:_ () ->
                   (match mode with
                    | `Input_revoked ->
                      Eio.Fiber.yield ();

@@ -27,21 +27,23 @@ let close t =
   if not t.borrowed then retire t
 ;;
 
-let select t resolved =
+let select t resolved ~fresh =
   let open Result.Let_syntax in
   let reused =
-    Option.bind t.current ~f:(fun current ->
-      if
-        Inference.Observation.Transport_policy.equal
-          (Runtime.Context.transport_policy current.context)
-          (Runtime.Context.transport_policy resolved)
-      then
-        Runtime.Context.derive_in_session
-          current.context
-          ~target:(Runtime.Context.target resolved)
-        |> Result.ok
-        |> Option.map ~f:(fun context -> { current with context })
-      else None)
+    Option.bind
+      (if fresh then None else t.current)
+      ~f:(fun current ->
+        if
+          Inference.Observation.Transport_policy.equal
+            (Runtime.Context.transport_policy current.context)
+            (Runtime.Context.transport_policy resolved)
+        then
+          Runtime.Context.derive_in_session
+            current.context
+            ~target:(Runtime.Context.target resolved)
+          |> Result.ok
+          |> Option.map ~f:(fun context -> { current with context })
+        else None)
   in
   match reused with
   | Some current ->
@@ -62,7 +64,7 @@ let select t resolved =
       Ok context)
 ;;
 
-let with_context t ~resolved ~f =
+let with_context ?(fresh = false) t ~resolved ~f =
   if t.closed || Runtime.Session.is_closed t.session
   then Error Runtime.Preparation_error.Session_closed
   else if t.borrowed
@@ -75,7 +77,7 @@ let with_context t ~resolved ~f =
     in
     match
       let open Result.Let_syntax in
-      let%map context = select t resolved in
+      let%map context = select t resolved ~fresh in
       f
         (Runtime.Context.with_preparation_lifetime context ~is_open:(fun () ->
            not t.closed))
@@ -90,12 +92,19 @@ let with_context t ~resolved ~f =
       Exn.raise_with_original_backtrace exn backtrace)
 ;;
 
-let wrap t (source : Root_context.t) : Root_context.t =
+let wrap ?(fresh = fun () -> false) t (source : Root_context.t) : Root_context.t =
   { with_context =
       (fun ~previous ~history f ->
-        source.with_context ~previous ~history (fun resolved ~on_dispatch ->
-          match with_context t ~resolved ~f:(fun context -> f context ~on_dispatch) with
-          | Ok result -> result
-          | Error error -> raise_s [%sexp (error : Runtime.Preparation_error.t)]))
+        source.with_context
+          ~previous
+          ~history
+          (fun resolved ~select_checkpoint ~select_prepared ~on_prepared ~on_dispatch ->
+             match
+               with_context ~fresh:(fresh ()) t ~resolved ~f:(fun context ->
+                 f context ~select_checkpoint ~select_prepared ~on_prepared ~on_dispatch)
+             with
+             | Ok result -> result
+             | Error error -> raise_s [%sexp (error : Runtime.Preparation_error.t)]))
+  ; checkpoint_tools = source.checkpoint_tools
   }
 ;;

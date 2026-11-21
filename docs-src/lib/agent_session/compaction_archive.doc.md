@@ -1,9 +1,10 @@
 # Compaction_archive — independently retained pre-change history
 
 Agent hosts archive the previous `Session_state` before committing compaction,
-reset, rebuild or prompt upgrade. The module and persisted field retain their
-historical names for compatibility. This is distinct from legacy TUI snapshots and from session deletion's
-archive policy. See [session history](../../agent-server/sessions-and-workspaces.md#history-and-synchronization).
+reset, rebuild, prompt upgrade, history edit or deletion, and pending-input
+replacement or cancellation. The module and persisted field retain their
+historical names for compatibility. Legacy TUI snapshots and session deletion
+have separate archive policies. See [session history](../../agent-server/sessions-and-workspaces.md#history-and-synchronization).
 
 ## Commit and storage
 
@@ -17,12 +18,15 @@ serialized states without this additive field decode as an empty list.
 Administrative replacement uses a `Created` state delta with a new retained
 reference. The same persistence boundary writes the previous state first; a
 failed archive or journal write does not install the candidate state. References
-have an additive `kind` (`Compaction`, `Reset`, `Rebuild`, `Upgrade`); old
-references without it decode as `Compaction`. Existing snapshots remain readable.
+have a typed `kind`. Older references without it decode as `Compaction`.
 
-Files live in the session's private `archive/<kind>-<operation-id>.frame`, with
-lowercase `compaction`, `reset`, `rebuild` or `upgrade` prefixes. Old compaction
-paths are unchanged.
+Files live in the session's private `archive/<kind>-<operation-id>.frame`.
+The lowercase prefixes are `compaction`, `reset`, `rebuild`, `upgrade`,
+`edit`, `delete` and `pending-input`. The writer and retained-history scanner
+use the same rules for prefixes, typed operation IDs and the frame suffix.
+Previously written pending-input frames participate in the same reference
+proof as the other kinds. This uses existing storage paths and requires no
+migration.
 They use the store's checksummed frame format and configured snapshot payload
 limit, with Eio durable replacement and file/directory flush. A failed write
 prevents replacement history from committing. The actor then attempts a normal
@@ -30,9 +34,13 @@ compaction-failed transition, retaining old history. If the whole store is
 unwritable, that failure transition cannot itself be guaranteed durable.
 
 A crash after archive creation but before journal commit can leave an
-unreferenced file. It is not exposed through the API. Referenced archives are
-not pruned with events, journals or fallback snapshots. Session removal and
-transient-store cleanup remove them; disk use grows with retained operations.
+unreferenced file. The retained-history scanner checks complete orphan frames
+for possible blob references. It skips temporary writes and fails the entire
+proof on an unknown name, invalid operation ID or inconsistent committed
+reference. A reference proof checks storage custody. API access still needs an
+authorized committed reference. Referenced archives survive ordinary event,
+journal and fallback snapshot pruning. Session removal and transient-store
+cleanup remove them.
 
 ## Retrieval and boundaries
 
@@ -55,4 +63,5 @@ opt-in `administration-idempotency / admin.compact` daemon scenario.
 
 See [implementation](../../../lib/agent_session/compaction_archive.ml),
 [interface](../../../lib/agent_session/compaction_archive.mli),
+[retained-history scan](../../../lib/agent_session/retained_history.mli),
 [protocol](../../agent-server/protocol.md), and [testing](../../agent-server/testing.md).

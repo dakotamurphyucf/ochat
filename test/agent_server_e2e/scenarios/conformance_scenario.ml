@@ -4281,6 +4281,17 @@ let method_coverage =
   ; "session.renew_owner", "conformance.error-codes"
   ; "session.start", "conformance.session-lifecycle"
   ; "session.run.start", "conformance.run-admission"
+  ; "session.recovery.enable", "daemon-recovery.converter-adoption"
+  ; "session.recovery.notes.inspect", "daemon-recovery.note-share-operator"
+  ; "session.recovery.notes.revoke_share", "daemon-recovery.note-share-operator"
+  ; "session.recovery.notes.share", "daemon-recovery.note-share-operator"
+  ; "session.recovery.query", "daemon-recovery.converter-adoption"
+  ; "session.recovery.read_asset", "daemon-recovery.converter-adoption"
+  ; "session.recovery.read_text", "daemon-recovery.converter-adoption"
+  ; "session.recovery.rollover", "daemon-recovery.operator-rollover"
+  ; "session.recovery.followup", "daemon-recovery.connected-followup"
+  ; "session.recovery.status", "daemon-recovery.operator-rollover"
+  ; "session.recovery.windows", "daemon-recovery.converter-adoption"
   ; "session.goals", "conformance.goal-operator"
   ; "session.goal", "conformance.goal-operator"
   ; "session.goal.command", "conformance.goal-operator"
@@ -4336,9 +4347,11 @@ let require_core_method_coverage () =
   (* This scenario initializes the core protocol without Authoring features.
      Opt-in Authoring handlers are qualified separately by the configured
      installation and authored workflow suites; semantic/source invariants also
-     have direct service tests. This inventory checks core scenario ownership,
-     not every Authoring method on every transport. The independent full method
-     inventory in agent_protocol_test checks codec dispatch completeness. *)
+     have direct service tests. The inventory binds core methods to the case
+     that exercises each one. Recovery rows are covered by the connected cases
+     in the offline recovery aliases on the transports used by those fixtures.
+     The full method inventory in agent_protocol_test checks codec dispatch
+     completeness independently. *)
   let expected =
     Set.diff
       (String.Set.of_list Agent_protocol.Command.supported_methods)

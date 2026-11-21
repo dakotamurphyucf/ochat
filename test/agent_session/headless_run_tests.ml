@@ -126,7 +126,7 @@ let with_service
                ; run = (fun ?capture_cleanup:_ () -> activate ())
                }
          ; parse_user_content =
-             (fun ~id content ->
+             (fun ?asset_capture:_ ~id content ->
                Int.incr parses;
                !parse_hook ();
                Ok (A.History_codec.user_text ~id content.text))

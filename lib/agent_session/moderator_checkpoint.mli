@@ -51,6 +51,12 @@ val decode
   :  Jsonaf.t option
   -> (Session.Moderator_state.Identity_snapshot.t option, Agent_protocol.Error.t) result
 
+(** Same identity and queue validation, charged against the source call. *)
+val decode_for_recovery
+  :  Recovery_source_work.t
+  -> Jsonaf.t option
+  -> (Session.Moderator_state.Identity_snapshot.t option, Agent_protocol.Error.t) result
+
 val observer
   :  Jsonaf.t option
   -> (Agent_protocol.Invocation.observer option, Agent_protocol.Error.t) result

@@ -52,15 +52,13 @@ end
 module Selected_contract : sig
   type t
 
-  (** Host supplies its actual selected Build and Contract, never a client
-      digest. Standard contracts are rederived with [Contract.for_target];
-      Native uses only an independently host-admitted actual native Contract.
-      [Contract.input_bytes] charges before conversion, then the authentic
-      fingerprint must match BOTH Prepared.compiler_contract and the required
-      environment contract. Retained names from this one static surface are
-      bounded by [Limits] and never unioned across targets. Required host
-      entrypoints contribute to the fingerprint but are not expression-global
-      suggestions. The value is comparison evidence, not authority. *)
+  (** Use the actual host-selected Build and abstract Contract. A single
+      allocation- and work-bounded emission checks the encoded length and
+      derives a fingerprint matching both the prepared and required environment
+      contracts. Continue with names from that same static surface under the
+      remaining work allowance. Host entrypoints contribute to the fingerprint
+      but do not become expression-global suggestions. The resulting comparison
+      evidence carries no runtime authority. *)
   val admit
     :  Build.t
     -> selected_contract:Contract.t

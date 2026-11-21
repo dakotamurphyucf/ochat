@@ -159,9 +159,9 @@ let services t : B.extension_services =
   ; standalone_completion = (fun ~tools:_ _ -> unexpected "standalone completion")
   ; idle_notifications = (fun ~source:_ ~tools:_ () -> unexpected "idle notification")
   ; notification_input =
-      (fun ~source:_ ~tools:_ ~operation_id:_ () -> unexpected "notification")
+      (fun ~source:_ ~tools:_ ~consume:_ () -> unexpected "notification")
   ; initial_notification_input =
-      (fun ~source:_ ~tools:_ ~operation_id:_ () -> unexpected "initial notification")
+      (fun ~source:_ ~tools:_ ~consume:_ () -> unexpected "initial notification")
   }
 ;;
 

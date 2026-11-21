@@ -10,6 +10,45 @@ val principal : t -> Agent_protocol.Principal.t
     callers must not replace them with authorization success. *)
 val is_current : t -> bool
 
+(** Process-local discriminator for a signed continuation. Independent
+    authentications can represent the same principal. This value conveys no
+    authority and has no persistent meaning. *)
+val origin : t -> int
+
+(** Narrow the same credential. Both its original check and [is_current] must
+    still succeed. A new invocation can narrow that credential independently. *)
+val restrict : ?original_first:bool -> t -> is_current:(unit -> bool) -> t
+
+(** A private in-process host identity. The owning Embedded composition passes
+    the same physical value to its canonical session writer and its original
+    local connection authentication. No value is decoded from a request. *)
+module Durable_local_host : sig
+  type t
+
+  val create : unit -> t
+end
+
+module Local_recovery_host : sig
+  type t =
+    | Transient
+    | Durable of Durable_local_host.t
+end
+
+val durable_local
+  :  host:Durable_local_host.t
+  -> server_id:Agent_protocol.Id.Server.t
+  -> principal:Agent_protocol.Principal.t
+  -> is_current:(unit -> bool)
+  -> t
+
+val is_durable_local : t -> bool
+
+val current_durable_local
+  :  t
+  -> host:Durable_local_host.t
+  -> server_id:Agent_protocol.Id.Server.t
+  -> bool
+
 (** Explicit local trusted contexts; never a remote authentication default. *)
 val trusted_local : Agent_protocol.Principal.t -> t
 

@@ -1489,12 +1489,135 @@ let parse_recurrence_execution context path sexp =
   C.create ~principal_id ~controllers ~expires_at |> admitted
 ;;
 
+let parse_recovery_capacity context path sexp =
+  let module C = Recovery_capacity_configuration in
+  let module Capacity = Inference_runtime.Context_capacity in
+  let module Mode = Agent_session.Session_context_capacity.Mode in
+  let open Result.Let_syntax in
+  let integer path value =
+    let%bind value = atom context path value in
+    match Int64.of_string value with
+    | tokens -> Ok tokens
+    | exception _ -> shape_error context path "an integer token count"
+  in
+  let required_integer path fields name =
+    required context path fields name >>= integer (path ^ "." ^ name)
+  in
+  let optional_integer path fields name =
+    optional_value
+      context
+      path
+      fields
+      name
+      (fun _ path value -> integer path value |> Result.map ~f:Option.some)
+      ~default:None
+  in
+  let%bind fields = record context path sexp in
+  let%bind mode = required context path fields "mode" >>= atom context (path ^ ".mode") in
+  let parse_target sexp =
+    let path = path ^ ".targets[]" in
+    let%bind fields = record context path sexp in
+    let%bind () =
+      ensure_allowed
+        context
+        path
+        fields
+        [ "prompt"
+        ; "profile"
+        ; "model"
+        ; "encoder"
+        ; "total"
+        ; "input"
+        ; "output"
+        ; "session_total"
+        ; "omitted_output_default"
+        ; "checkpoint_reserve"
+        ; "warning_lead"
+        ; "estimate_margin"
+        ]
+    in
+    let label name =
+      required context path fields name >>= atom context (path ^ "." ^ name)
+    in
+    let%bind prompt = label "prompt" in
+    let%bind profile = label "profile" in
+    let%bind model = label "model" in
+    let%bind encoder =
+      match%bind label "encoder" with
+      | "openai_responses_v1" -> Ok Capacity.Encoder.Openai_responses_v1
+      | _ -> shape_error context (path ^ ".encoder") "openai_responses_v1"
+    in
+    let%bind total = required_integer path fields "total" in
+    let%bind input = optional_integer path fields "input" in
+    let%bind output = optional_integer path fields "output" in
+    let%bind session_total = optional_integer path fields "session_total" in
+    let%bind omitted_output_default =
+      optional_integer path fields "omitted_output_default"
+    in
+    let%bind checkpoint_reserve = required_integer path fields "checkpoint_reserve" in
+    let%bind warning_lead = required_integer path fields "warning_lead" in
+    let%map estimate_margin = required_integer path fields "estimate_margin" in
+    C.Target.
+      { prompt
+      ; profile
+      ; model
+      ; encoder
+      ; total
+      ; input
+      ; output
+      ; session_total
+      ; omitted_output_default
+      ; checkpoint_reserve
+      ; warning_lead
+      ; estimate_margin
+      }
+  in
+  let enabled mode =
+    let%bind () =
+      ensure_allowed context path fields [ "mode"; "host_total"; "targets" ]
+    in
+    let%bind host_total = required_integer path fields "host_total" in
+    let%bind targets =
+      optional_value
+        context
+        path
+        fields
+        "targets"
+        (fun context path value ->
+           let%bind rows = list context path value in
+           if Stdlib.List.compare_length_with rows C.max_targets > 0
+           then shape_error context path "at most 32 qualified targets"
+           else List.map rows ~f:parse_target |> Result.all)
+        ~default:[]
+    in
+    C.create ~mode ~host_total ~targets
+    |> Result.map ~f:Option.some
+    |> Result.map_error ~f:(fun error ->
+      [ diagnostic
+          context
+          ~code:"config.recovery_capacity"
+          ~path
+          ~message:error.Agent_protocol.Error.message
+          ~remediation:
+            "Use a positive cap and leave room for output, checkpoint and warning \
+             reserves."
+      ])
+  in
+  match mode with
+  | "off" ->
+    Result.map (ensure_allowed context path fields [ "mode" ]) ~f:(fun () -> None)
+  | "manual" -> enabled Mode.Manual
+  | "automatic" -> enabled Mode.Automatic
+  | _ -> shape_error context (path ^ ".mode") "off, manual or automatic"
+;;
+
 let parse_server context sexp =
   let path = "server" in
   let open Result.Let_syntax in
   let%bind fields = record context path sexp in
   let allowed =
     [ "data_dir"
+    ; "recovery_capacity"
     ; "recurrence_automation"
     ; "recurrence_execution"
     ; "project_sources"
@@ -1518,6 +1641,11 @@ let parse_server context sexp =
   let%bind () = ensure_allowed context path fields allowed in
   let%bind data_dir =
     required context path fields "data_dir" >>= resolve_path context "server.data_dir"
+  in
+  let%bind recovery_capacity =
+    match field fields "recovery_capacity" with
+    | None -> Ok None
+    | Some value -> parse_recovery_capacity context "server.recovery_capacity" value
   in
   let%bind recurrence_automation =
     match field fields "recurrence_automation" with
@@ -1712,6 +1840,7 @@ let parse_server context sexp =
   in
   Config.Server.
     { data_dir
+    ; recovery_capacity
     ; recurrence_automation
     ; recurrence_execution
     ; project_sources
@@ -1874,6 +2003,7 @@ let parse_prompt context index sexp =
     ; "permission_profile"
     ; "runtime_policy"
     ; "tool_contract"
+    ; "document_originals"
     ; "enabled"
     ]
   in
@@ -1914,6 +2044,16 @@ let parse_prompt context index sexp =
        | _ ->
          shape_error context (path ^ ".tool_contract") "standard or developer_model_spawn")
   in
+  let%bind document_originals =
+    match field fields "document_originals" with
+    | None -> Ok Config.Prompt.Rendered_only
+    | Some value ->
+      let%bind value = atom context (path ^ ".document_originals") value in
+      (match value with
+       | "rendered_only" -> Ok Config.Prompt.Rendered_only
+       | "retain" -> Ok Config.Prompt.Retain
+       | _ -> shape_error context (path ^ ".document_originals") "rendered_only or retain")
+  in
   let%map enabled =
     optional_value context path fields "enabled" parse_bool ~default:true
   in
@@ -1925,6 +2065,7 @@ let parse_prompt context index sexp =
     ; permission_profile
     ; runtime_policy
     ; tool_contract
+    ; document_originals
     ; enabled
     }
 ;;
@@ -2432,24 +2573,7 @@ let validate ~env raw =
       })
 ;;
 
-module Embedded_local = struct
-  type t =
-    { context : context
-    ; sections : (string * Sexp.t) list
-    }
-
-  type bound =
-    { context : context
-    ; operator_id : Agent_protocol.Id.Principal.t
-    ; project_sources : Project_source_configuration.t option
-    ; authoring_project_access : Authoring_project_access_configuration.t option
-    ; authoring_upload_access : Authoring_upload_access_configuration.t option
-    ; developer : Developer_startup_configuration.t
-    ; permission_profile : Config.Permission_profile.t option
-    ; manifest_grants : Config.Manifest_grant.t list
-    ; developer_scopes : Agent_protocol.Scope.Set.t
-    }
-
+module Local_policy_file = struct
   let maximum_file_bytes = 9 * 1024 * 1024
 
   let load ~env ~path =
@@ -2490,25 +2614,58 @@ module Embedded_local = struct
           then Ok ()
           else invalid "local policy exceeds its syntax depth or node budget"
         in
-        let%bind raw = Config_parser.parse_string ~source_file:path contents in
-        let%bind sections = top_fields context raw.forms in
-        let%bind () =
-          ensure_allowed
-            context
-            "$"
-            sections
-            [ "project_sources"
-            ; "authoring_project_access"
-            ; "authoring_upload_access"
-            ; "permission_profiles"
-            ; "manifest_grants"
-            ; "developer"
-            ; "developer_scopes"
-            ]
-        in
-        let%bind _ = required context "$" sections "developer" in
-        let%map _ = required context "$" sections "developer_scopes" in
-        { context; sections })
+        let%map raw = Config_parser.parse_string ~source_file:path contents in
+        context, raw.forms)
+  ;;
+end
+
+let load_recovery_capacity ~env ~path =
+  let open Result.Let_syntax in
+  let%bind context, forms = Local_policy_file.load ~env ~path in
+  match forms with
+  | [ value ] -> parse_recovery_capacity context "recovery_capacity" value
+  | _ -> shape_error context "$" "one recovery capacity record"
+;;
+
+module Embedded_local = struct
+  type t =
+    { context : context
+    ; sections : (string * Sexp.t) list
+    }
+
+  type bound =
+    { context : context
+    ; operator_id : Agent_protocol.Id.Principal.t
+    ; project_sources : Project_source_configuration.t option
+    ; authoring_project_access : Authoring_project_access_configuration.t option
+    ; authoring_upload_access : Authoring_upload_access_configuration.t option
+    ; developer : Developer_startup_configuration.t
+    ; permission_profile : Config.Permission_profile.t option
+    ; manifest_grants : Config.Manifest_grant.t list
+    ; developer_scopes : Agent_protocol.Scope.Set.t
+    }
+
+  let load ~env ~path =
+    let open Result.Let_syntax in
+    let%bind context, forms = Local_policy_file.load ~env ~path in
+    let%bind sections = top_fields context forms in
+    let%bind () =
+      ensure_allowed
+        context
+        "$"
+        sections
+        [ "project_sources"
+        ; "authoring_project_access"
+        ; "authoring_upload_access"
+        ; "permission_profiles"
+        ; "manifest_grants"
+        ; "developer"
+        ; "developer_scopes"
+        ]
+    in
+    let%bind _ = required context "$" sections "developer" in
+    let%map _ = required context "$" sections "developer_scopes" in
+    { context; sections }
   ;;
 
   let bind (t : t) ~env ~operator_id =

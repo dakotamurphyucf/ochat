@@ -277,16 +277,11 @@ let journal_tail env directory state =
           transaction))
 ;;
 
-let checkpoint env fixture session =
-  let directory =
-    Filename.concat
-      (Config_fixture.data_dir fixture)
-      ("sessions/" ^ Agent_protocol.Id.Session.to_string session.summary.id ^ "/snapshot")
-  in
+let checkpoint_from_paths env ~snapshot_directory ~journal_directory =
   match
     Agent_store.Snapshot.load_current
       ~env
-      ~directory
+      ~directory:snapshot_directory
       ~max_payload_length:(64 * 1024 * 1024)
   with
   | Error (Agent_store.Store_error.Missing _) -> None
@@ -301,13 +296,25 @@ let checkpoint env fixture session =
      with
      | Ok state ->
        (match
-          journal_tail env (Filename.concat (Filename.dirname directory) "journal") state
+          journal_tail env journal_directory state
         with
         | Error (Agent_store.Store_error.Missing _) -> None
         | result ->
           Some (Agent_session.Session_persistence.Restored.state (store_ok result)))
      | Error error ->
        raise_s [%sexp "background checkpoint decode", (error : Agent_store.Store_error.t)])
+;;
+
+let checkpoint env fixture session =
+  let store =
+    Filename.concat
+      (Config_fixture.data_dir fixture)
+      ("sessions/" ^ Agent_protocol.Id.Session.to_string session.summary.id)
+  in
+  checkpoint_from_paths
+    env
+    ~snapshot_directory:(Filename.concat store "snapshot")
+    ~journal_directory:(Filename.concat store "journal")
 ;;
 
 let moderator_state state =

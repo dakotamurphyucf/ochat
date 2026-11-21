@@ -333,9 +333,19 @@ let project_result principal = function
            ~message:"instruction result scope is unavailable"
            ~retryable:false
            ())
-  | (Goal_query _ | Recurrence_query _) as value ->
+  | ( Recovery_windows _
+    | Recovery_status _
+    | Recovery_history _
+    | Recovery_range _
+    | Recovery_asset_read _
+    | Goal_query _
+    | Recurrence_query _ ) as value ->
     operator_result value ~has_required_scope:(has principal View_session_transcript)
-  | (Goal_control _ | Recurrence_control _) as value ->
+  | Recovery_note_shares _ as value ->
+    operator_result
+      value
+      ~has_required_scope:(has principal View_session_transcript && has principal Manage_grants)
+  | (Recovery_enable _ | Recovery_rollover _ | Recovery_followup _ | Goal_control _ | Recurrence_control _) as value ->
     operator_result
       value
       ~has_required_scope:
@@ -380,7 +390,9 @@ let scope_identity principal =
 let export_use principal = "session_export:" ^ scope_identity principal
 
 let can_read_blob principal (metadata : Agent_store.Blob_store.Metadata.t) =
-  if String.is_prefix metadata.allowed_use ~prefix:"job_result:"
+  if Agent_store.Blob_metadata.Recovery_use.is_reserved metadata.allowed_use
+  then false
+  else if String.is_prefix metadata.allowed_use ~prefix:"job_result:"
   then has principal Send_messages
   else if String.is_prefix metadata.allowed_use ~prefix:"session_export:"
   then String.equal metadata.allowed_use (export_use principal)

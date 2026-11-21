@@ -87,6 +87,21 @@ val data_root : t -> Data_root.t
 val server_id : t -> Agent_protocol.Id.Server.t
 val session_index : t -> Session_index.t
 
+(** A purpose-specific commitment for an authenticated session's actual
+    schema-checked protected native input and selected resource. The Store
+    supplies its own server identity and owns the private key under its
+    live exclusive lock. Only the commitment may leave this boundary. *)
+val protected_approval_identity
+  :  t
+  -> session_id:Agent_protocol.Id.Session.t
+  -> generation:int
+  -> profile_revision:string
+  -> tool_name:string
+  -> tool_revision:string
+  -> resource_fingerprint:string
+  -> input:Jsonaf.t
+  -> (string, Store_error.t) result
+
 module Command_receipts : sig
   type store = t
 
@@ -382,6 +397,33 @@ val owns_handle : t -> Handle.t -> bool
 (** Pure negative availability only, no permission or witness. Checks actual
     Store/Handle ownership, locks, existing uncertainty and publication health. *)
 val retained_lifecycle_available : t -> Handle.t -> bool
+
+(** Create a bounded reader beneath an owned live session directory using
+    the issuing Store's filesystem. This does not grant transcript access. *)
+(** Serialize the private recovery asset journal for this actual retained
+    Handle. Check physical ownership before and after the borrow; [f] must not
+    recurse or await its owning actor. Acquire this borrow before Blob Store
+    admission. An application error inside [f] may be returned as a value. *)
+val with_recovery_assets
+  :  t
+  -> handle:Handle.t
+  -> f:(env:Eio_unix.Stdenv.base -> ('a, Store_error.t) result)
+  -> ('a, Store_error.t) result
+
+(** The collector defers instead of waiting behind an in-flight recovery
+    asset read or publication. The same physical retained Handle is checked. *)
+val try_with_recovery_assets
+  :  t
+  -> handle:Handle.t
+  -> f:(env:Eio_unix.Stdenv.base -> ('a, Store_error.t) result)
+  -> ('a option, Store_error.t) result
+
+val retained_reader
+  :  t
+  -> handle:Handle.t
+  -> max_entries:int
+  -> max_bytes:int
+  -> (Retention_reader.t, Store_error.t) result
 
 (** Pure checked conversion from a still-current exact observation. Never
     reconstruct from metadata, a revision, JSON or an arbitrary availability

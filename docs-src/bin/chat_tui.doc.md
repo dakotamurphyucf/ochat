@@ -23,6 +23,8 @@ raw protocol clients must discover catalog IDs.
 |---|---|
 | `-file FILE` | Local prompt; default path is `./prompts/interactive.md`, which need not exist in a clean checkout. Supply a tracked/user-created file. |
 | `--local` | Native process-bound host; records default to `$HOME/.ochat/agent-store`. New-session workspace is launch cwd; selection retains the saved workspace. |
+| `--enable-recovery` | Enroll the selected durable `--local` session in recovery window capture. A new session enrolls before its first interactive turn. |
+| `--recovery-capacity-file FILE` | Apply an explicit capacity policy to this local host process. Supply it again when reopening the store. [File format](../agent-server/configuration.md#local-recovery-capacity-file). |
 | `--data-root DIR` | With `--local`, select an absolute durable root; incompatible with `--transient`. |
 | `--transient` | With `--local`, explicitly select temporary records removed after owned host cleanup. |
 | `--connect URI` | Daemon mode; incompatible with local runtime/persistence flags. |
@@ -50,6 +52,23 @@ temporary session storage is removed after the client and host finish.
 
 Shell-manifest authorization is supported by both interactive local modes; it is
 not one of the legacy-only persistence/execution controls.
+
+## Local context recovery
+
+Use a durable local store and an authored prompt with the tools it needs:
+
+```sh
+chat-tui --no-config --local --new-session --enable-recovery \
+  --data-root /absolute/private/agent-store \
+  --recovery-capacity-file ./recovery.sexp -file ./agent.chatmd
+```
+
+After exiting, reopen with `--local --session ID` and the same data root.
+Supply the capacity file again if you need that policy. Enrollment remains
+with the conversation. For daemon sessions, enroll through the connected
+owner's [recovery protocol](../agent-server/operations.md#local-recovery-windows).
+The [recovery tutorial](../examples/learning/context-recovery/README.md) shows
+which tools to select and how a checkpointed successor uses them.
 
 ## Edited transcript adoption
 

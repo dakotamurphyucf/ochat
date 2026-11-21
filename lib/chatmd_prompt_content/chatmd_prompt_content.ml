@@ -23,14 +23,19 @@ let finish budget result =
   Result.map result ~f:(fun document -> { document; accounting = B.accounting budget })
 ;;
 
-let capture ~parsed_contexts ~rendered ~limits ~checkpoint =
+let capture_with_originals ~parsed_contexts ~rendered ~limits ~checkpoint =
   let open Result.Let_syntax in
   let budget = B.create limits ~checkpoint in
-  let result =
-    let%bind inventory = Content_inventory.capture ~parsed_contexts ~rendered ~budget in
-    Document.create inventory ~budget
+  let%bind inventory, originals =
+    Content_inventory.capture ~parsed_contexts ~rendered ~budget
   in
-  finish budget result
+  let%map content = finish budget (Document.create inventory ~budget) in
+  content, originals
+;;
+
+let capture ~parsed_contexts ~rendered ~limits ~checkpoint =
+  capture_with_originals ~parsed_contexts ~rendered ~limits ~checkpoint
+  |> Result.map ~f:fst
 ;;
 
 let of_storage storage ~inputs ~limits ~checkpoint =
@@ -44,19 +49,37 @@ module Materialized = struct
   type t =
     { projection : Projection.t
     ; content : content
+    ; original_keys : Content_inventory.Original_keys.t
     ; accounting : Accounting.t
     }
 
   let projection t = t.projection
   let accounting t = t.accounting
   let belongs_to t ~content = phys_equal t.content content
+
+  let original_key t occurrence =
+    Content_inventory.Original_keys.find t.original_keys occurrence
+  ;;
 end
 
 let materialize t ~parsed ~limits ~checkpoint =
   let budget = B.create limits ~checkpoint in
   Content_inventory.materialize (Document.inventory t.document) ~parsed ~budget
-  |> Result.map ~f:(fun projection ->
-    { Materialized.projection; content = t; accounting = B.accounting budget })
+  |> Result.map ~f:(fun (projection, original_keys) ->
+    { Materialized.projection
+    ; content = t
+    ; original_keys
+    ; accounting = B.accounting budget
+    })
+;;
+
+let original_key t ~parsed ~occurrence ~limits ~checkpoint =
+  let budget = B.create limits ~checkpoint in
+  Content_inventory.original_key
+    (Document.inventory t.document)
+    ~parsed
+    ~occurrence
+    ~budget
 ;;
 
 let adopt t ~previous ~limits ~checkpoint =

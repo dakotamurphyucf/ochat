@@ -96,6 +96,9 @@ let run (lifetime : Agent_server.Session_factory.generated_lifetime) =
             root
             (Filename.concat root "parent.chatmd")
         in
+        let await stage f =
+          with_stage_timeout ~clock:(Eio.Stdenv.clock env) ~seconds:15. ~stage f
+        in
         let next_call = ref None in
         let provider_calls = ref 0 in
         let with_daemon
@@ -166,34 +169,35 @@ let run (lifetime : Agent_server.Session_factory.generated_lifetime) =
             Exn.protect
               ~finally:(fun () -> shutdown daemon)
               ~f:(fun () ->
-                Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 15. (fun () ->
-                  let client = connection daemon (principal ()) in
-                  Exn.protect
-                    ~finally:(fun () -> Agent_client.Connection.close client)
-                    ~f:(fun () ->
-                      initialize client;
-                      f sw daemon client))))
+                let client = connection daemon (principal ()) in
+                Exn.protect
+                  ~finally:(fun () -> Agent_client.Connection.close client)
+                  ~f:(fun () ->
+                    await "client initialization" (fun () -> initialize client);
+                    f sw daemon client)))
         in
         let attach sw client id =
-          H.attach
-            ~sw
-            ~clock:(Eio.Stdenv.clock env)
-            ~connection:client
-            ~session_id:id
-            ~mode:Read_write
-            ~subscribe:false
-            ()
-          |> protocol_ok
+          await "MCP caller attachment" (fun () ->
+            H.attach
+              ~sw
+              ~clock:(Eio.Stdenv.clock env)
+              ~connection:client
+              ~session_id:id
+              ~mode:Read_write
+              ~subscribe:false
+              ()
+            |> protocol_ok)
         in
         let call sw client entry name arguments =
           let before = state entry in
           let handle = attach sw client before.identity.session_id in
           next_call := Some (name, arguments);
-          H.send_message
-            handle
-            { kind = Plain_text; text = "Run the requested tool"; attachments = [] }
-          |> protocol_ok
-          |> ignore;
+          await "MCP tool submission" (fun () ->
+            H.send_message
+              handle
+              { kind = Plain_text; text = "Run the requested tool"; attachments = [] }
+            |> protocol_ok
+            |> ignore);
           let rec idle () =
             let current = state entry in
             List.iter current.permissions ~f:(fun permission ->
@@ -216,7 +220,7 @@ let run (lifetime : Agent_server.Session_factory.generated_lifetime) =
               Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
               idle ()
           in
-          let current = idle () in
+          let current = await ("MCP tool settlement for " ^ name) idle in
           H.detach handle |> protocol_ok;
           List.filter current.invocations ~f:(fun invocation ->
             not
@@ -240,7 +244,8 @@ let run (lifetime : Agent_server.Session_factory.generated_lifetime) =
         let parent_id, child_id, leaf_id =
           with_daemon (fun sw daemon client ->
             let parent, parent_attachment =
-              create_session ~start_immediately:true client
+              await "MCP parent creation" (fun () ->
+                create_session ~start_immediately:true client)
             in
             let parent_entry =
               R.find (Daemon.registry daemon) parent.id |> Option.value_exn
@@ -248,19 +253,26 @@ let run (lifetime : Agent_server.Session_factory.generated_lifetime) =
             let connected = connections () in
             assert (connected > 0);
             let child =
-              create_child ~lifetime ~control:independent env root daemon parent_entry
+              await "MCP child creation" (fun () ->
+                create_child ~lifetime ~control:independent env root daemon parent_entry)
             in
             (match lifetime with
              | Owned -> ()
              | Independent ->
-               A.stop parent_entry.actor ~attachment_id:parent_attachment.id ~mode:Cancel
-               |> protocol_ok
-               |> ignore;
-               Agent_server.Runtime_owner.unload_and_wait parent_entry.runtime
-               |> protocol_ok;
+               await "MCP parent stop" (fun () ->
+                 A.stop
+                   parent_entry.actor
+                   ~attachment_id:parent_attachment.id
+                   ~mode:Cancel
+                 |> protocol_ok
+                 |> ignore;
+                 Agent_server.Runtime_owner.unload_and_wait parent_entry.runtime
+                 |> protocol_ok);
                assert (not (Agent_server.Runtime_owner.is_loaded parent_entry.runtime)));
             let retained_connections = connections () in
-            let leaf = create_child env root daemon child in
+            let leaf =
+              await "MCP leaf creation" (fun () -> create_child env root daemon child)
+            in
             [%test_eq: int] retained_connections (connections ());
             (* Both lifetimes retain the canonical parent's connection; an
                Independent child no longer reconstructs its own MCP pool. *)
@@ -287,11 +299,14 @@ let run (lifetime : Agent_server.Session_factory.generated_lifetime) =
             [%test_eq: string list] [ "echo"; "echo" ] (lines "calls");
             parent.id, (state child).identity.session_id, (state leaf).identity.session_id)
         in
+        let load stage daemon id =
+          await stage (fun () -> R.load (Daemon.registry daemon) id |> protocol_ok)
+        in
         let initial_connections = connections () in
         with_daemon (fun sw daemon client ->
-          let parent = R.load (Daemon.registry daemon) parent_id |> protocol_ok in
-          let child = R.load (Daemon.registry daemon) child_id |> protocol_ok in
-          let leaf = R.load (Daemon.registry daemon) leaf_id |> protocol_ok in
+          let parent = load "MCP parent recovery" daemon parent_id in
+          let child = load "MCP child recovery" daemon child_id in
+          let leaf = load "MCP leaf recovery" daemon leaf_id in
           (match lifetime with
            | Owned -> ()
            | Independent ->
@@ -321,7 +336,8 @@ let run (lifetime : Agent_server.Session_factory.generated_lifetime) =
             [ "echo"; "echo"; "echo"; "change_catalog" ]
             (lines "calls");
           let handle = attach sw client child_id in
-          H.stop handle ~mode:Cancel |> protocol_ok |> ignore;
+          await "MCP descendant stop" (fun () ->
+            H.stop handle ~mode:Cancel |> protocol_ok |> ignore);
           H.detach handle |> protocol_ok;
           assert (P.Session.equal_desired_state (state child).lifecycle.desired Stopped);
           assert (P.Session.equal_desired_state (state leaf).lifecycle.desired Stopped));
@@ -358,7 +374,10 @@ let run (lifetime : Agent_server.Session_factory.generated_lifetime) =
         with_daemon ?shutdown (fun sw daemon client ->
           let before = !provider_calls in
           let handle = attach sw client child_id in
-          (match H.start handle ~queue_if_limited:false with
+          (match
+             await "MCP changed-schema start rejection" (fun () ->
+               H.start handle ~queue_if_limited:false)
+           with
            | Error error ->
              assert (String.is_substring error.message ~substring:"capabilit");
              (match lifetime with
@@ -380,19 +399,21 @@ let run (lifetime : Agent_server.Session_factory.generated_lifetime) =
         catalog "original";
         with_daemon (fun sw daemon client ->
           let handle = attach sw client child_id in
-          H.start handle ~queue_if_limited:false |> protocol_ok |> ignore;
+          await "MCP restored-schema start" (fun () ->
+            H.start handle ~queue_if_limited:false |> protocol_ok |> ignore);
           H.detach handle |> protocol_ok;
-          let child = R.load (Daemon.registry daemon) child_id |> protocol_ok in
+          let child = load "MCP child recovery" daemon child_id in
           call sw client child "echo" "{}" |> success child);
         [%test_eq: string list]
           [ "echo"; "echo"; "echo"; "change_catalog"; "echo" ]
           (lines "calls");
         with_daemon (fun sw daemon client ->
-          let parent = R.load (Daemon.registry daemon) parent_id |> protocol_ok in
-          let child = R.load (Daemon.registry daemon) child_id |> protocol_ok in
-          let leaf = R.load (Daemon.registry daemon) leaf_id |> protocol_ok in
+          let parent = load "MCP parent recovery" daemon parent_id in
+          let child = load "MCP child recovery" daemon child_id in
+          let leaf = load "MCP leaf recovery" daemon leaf_id in
           let handle = attach sw client leaf_id in
-          H.start handle ~queue_if_limited:false |> protocol_ok |> ignore;
+          await "MCP authority-gate start" (fun () ->
+            H.start handle ~queue_if_limited:false |> protocol_ok |> ignore);
           H.detach handle |> protocol_ok;
           let controller =
             match lifetime with

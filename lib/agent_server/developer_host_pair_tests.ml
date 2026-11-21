@@ -389,6 +389,7 @@ let%test_module "retained Developer Host policy" =
         ; source_file = Filename.concat root "server.sexp"
         ; server =
             { data_dir = Option.value data_dir ~default:(Filename.concat root "data")
+            ; recovery_capacity = None
             ; recurrence_automation = None
             ; recurrence_execution = None
             ; session_helpers = []
@@ -453,6 +454,7 @@ let%test_module "retained Developer Host policy" =
               ; permission_profile = profile.id
               ; runtime_policy = None
               ; tool_contract = Chatml_compilation.Tool_contract.Standard
+              ; document_originals = Rendered_only
               ; enabled = true
               }
             ]
@@ -815,6 +817,9 @@ let%test_module "retained Developer Host policy" =
           ~tool_dir:root
           ~home:(Some root)
           ~inference_policy:options.inference_policy
+          ~interactive_permission_responder:options.interactive_permission_responder
+          ~local_recovery_host:None
+          ~context_capacity_host:options.context_capacity_host
           ~qualify_chatml_extensions:options.qualify_chatml_extensions
           ~session_helpers:options.session_helpers
           ~independent_lifetime_policy:options.independent_lifetime_policy
@@ -1425,6 +1430,7 @@ let%test_module "retained Developer Host policy" =
         Mirage_crypto_rng_unix.use_default ();
         Eio_main.run (fun env ->
           let real_clock = Eio.Stdenv.clock env in
+          let mono_clock = Eio.Stdenv.mono_clock env in
           Eio.Time.with_timeout_exn real_clock 30. (fun () ->
             let root =
               Filename.concat
@@ -1460,6 +1466,7 @@ let run ctx input =
                 Eio.Switch.run (fun sw ->
                   let requests = ref 0 in
                   let grand_requests = ref 0 in
+                  let grand_dispatched, signal_grand_dispatch = Eio.Promise.create () in
                   let grand_native_attempts = ref 0 in
                   let authorized_names = ref [] in
                   let sent_producer = ref false in
@@ -1470,7 +1477,10 @@ let run ctx input =
                   let active_phase = ref None in
                   let respond _ body =
                     if String.is_substring body ~substring:"Retained grand marker"
-                    then incr grand_requests;
+                    then (
+                      incr grand_requests;
+                      if Int.equal !grand_requests 1
+                      then Eio.Promise.resolve signal_grand_dispatch ());
                     if
                       (not !sent_producer)
                       && String.is_substring body ~substring:"Retained child marker"
@@ -1779,25 +1789,61 @@ let run ctx input =
                          | Queued -> ()
                          | _ ->
                            failwith "old selected row changed before second scheduler ran");
-                        resume ();
-                        let rec await_old () =
+                        let await_stage stage f =
+                          match
+                            Eio.Time.Timeout.run
+                              (Eio.Time.Timeout.seconds mono_clock 10.)
+                              (fun () -> Ok (f ()))
+                          with
+                          | Ok value -> value
+                          | Error `Timeout ->
+                            let state = P.Developer_job.state (old_job ()) in
+                            raise_s
+                              [%sexp
+                                "Timed out waiting for the original Grand job"
+                              , (stage : string)
+                              , (second_depth : int)
+                              , (state.attempt : int)
+                              , (state.status : P.Job.status)
+                              , (!grand_requests : int)
+                              , (loop_wait_deadline phase_b : float option)]
+                        in
+                        let rec await_old ready () =
                           let latest = old_job () in
-                          match (P.Developer_job.state latest).status with
-                          | Queued | Running | Waiting_permission _ | Waiting_completion _
-                            ->
-                            Eio.Time.sleep real_clock 0.002;
-                            await_old ()
-                          | Succeeded | Failed _ | Cancelled | Interrupted _ -> latest
+                          if ready (P.Developer_job.state latest)
+                          then latest
+                          else (
+                            Eio.Time.Mono.sleep mono_clock 0.05;
+                            await_old ready ())
                         in
+                        resume ();
+                        let claimed =
+                          await_stage
+                            "durable claim"
+                            (await_old (fun state -> state.attempt > 0))
+                        in
+                        [%test_eq: int] (P.Developer_job.state claimed).attempt 1;
+                        if Int.equal second_depth 2
+                        then
+                          await_stage "Grand provider request" (fun () ->
+                            Eio.Promise.await grand_dispatched);
                         let terminal =
-                          Eio.Time.with_timeout_exn real_clock 10. await_old
+                          await_stage
+                            "durable terminal outcome"
+                            (await_old (fun state ->
+                               match state.status with
+                               | Queued
+                               | Running
+                               | Waiting_permission _
+                               | Waiting_completion _ -> false
+                               | Succeeded | Failed _ | Cancelled | Interrupted _ -> true))
                         in
+                        [%test_eq: int] (P.Developer_job.state terminal).attempt 1;
                         (match second_depth, (P.Developer_job.state terminal).status with
                          | 2, Succeeded -> [%test_eq: int] !grand_requests 1
                          | 1, Failed error ->
                            [%test_eq: int] !grand_requests 0;
                            [%test_eq: int] !grand_native_attempts 0;
-                           [%test_eq: int] (P.Developer_job.state terminal).attempt 1;
                            [%test_eq: P.Error.code] error.code Invalid_request;
                            [%test_eq: string]
                              error.message

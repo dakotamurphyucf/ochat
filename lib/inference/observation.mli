@@ -44,6 +44,7 @@ end
 module Estimator : sig
   type method_ =
     | O200k_serialized_history
+    | O200k_serialized_prepared_request
     | Utf8_heuristic
   [@@deriving equal, sexp_of]
 
@@ -241,10 +242,13 @@ module Configuration : sig
       preserve absent versus null; provenance
       is copied only from an actual selected setting. Unknown setting names are
       represented only by withheld_settings count, never by arbitrary labels.
+      [omit_prompt_cache] projects the wire omission of optional provider cache
+      settings on isolated requests. It says nothing about provider defaults.
       Reading this value requires Diagnostics AND existing session visibility;
       that runtime authority cannot be granted by constructing this pure value. *)
   val of_target
     :  ?transport_policy:Transport_policy.t
+    -> ?omit_prompt_cache:bool
     -> Request.Target.t
     -> preparation_id:string
     -> transport:transport
@@ -310,6 +314,7 @@ module Diagnostic : sig
       | Missing_required_parameter
       | Unsupported_parameter
       | Invalid_parameter
+      | Context_window_exceeded
       | Unclassified
     [@@deriving equal, sexp_of]
 

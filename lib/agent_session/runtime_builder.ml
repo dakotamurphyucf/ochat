@@ -89,7 +89,8 @@ type extension_services =
   ; notification_input :
       source:Agent_protocol.Invocation.observer option
       -> tools:Script_tool_calls.t
-      -> operation_id:Agent_protocol.Id.Operation.t
+      -> consume:
+           Notification_delivery.t Operation_worker.Capabilities.notification_consumer
       -> unit
       -> ( Chat_response.In_memory_stream.Safe_point_input.batch
            , Agent_protocol.Error.t )
@@ -97,7 +98,8 @@ type extension_services =
   ; initial_notification_input :
       source:Agent_protocol.Invocation.observer option
       -> tools:Script_tool_calls.t
-      -> operation_id:Agent_protocol.Id.Operation.t
+      -> consume:
+           Notification_delivery.idle Operation_worker.Capabilities.notification_consumer
       -> unit
       -> ( Chat_response.In_memory_stream.Safe_point_input.batch
            , Agent_protocol.Error.t )
@@ -239,7 +241,8 @@ type t =
   ; inference_execution : Inference_client.Execution.t
   ; now : unit -> Agent_protocol.Timestamp.t
   ; parse_user_content :
-      id:History_entry.Id.t
+      ?asset_capture:Chat_response.Converter_asset_capture.t
+      -> id:History_entry.Id.t
       -> Agent_protocol.Session.Message_content.t
       -> (History_entry.t, Agent_protocol.Error.t) result
   ; parse_prepared_input :
@@ -248,6 +251,7 @@ type t =
       -> (Runtime_input_preparation.Prepared_input.t, Agent_protocol.Error.t) result
   ; initial_history : History_entry.t list
   ; initial_prompt_entry_count : int
+  ; initial_installed_originals : Recovery_installed_originals.Initial.t option
   ; reserved_history_through : int
   ; moderator_snapshot : unit -> Jsonaf.t option
   ; moderator_manager : Manager.t option
@@ -1013,7 +1017,7 @@ let inherit_resources ~(parent : resources) ~definition =
     match parent.managed with
     | None -> Ok None
     | Some managed ->
-      Chat_response.Managed_tool_registry.delegate_standalone
+      Chat_response.Managed_tool_registry.delegate_generated_foreground
         managed
         ~selected:
           (Chat_response.Generated_admission.capabilities
@@ -1042,29 +1046,44 @@ let initial_items
       ~construction_checkpoint
       ~ctx
       ~elements
+      ~installed_projection
       ~manifest_authorizer
       ~approval_provider
       ~response_dir
   =
+  let run_agent ?prompt_dir ?session_id ~ctx prompt items =
+    (match check_construction construction_checkpoint with
+     | Ok () -> ()
+     | Error failure -> raise (Construction_rejected failure));
+    Chat_response.Driver.run_agent
+      ~history_compaction:false
+      ?prompt_dir
+      ?session_id
+      ~response_dir
+      ~shell_manifest_authorizer:manifest_authorizer
+      ~shell_approval_provider:approval_provider
+      ~ctx
+      prompt
+      items
+  in
   try
     Ok
-      (Converter.to_items
-         ~ctx
-         ~run_agent:(fun ?prompt_dir ?session_id ~ctx prompt items ->
-           (match check_construction construction_checkpoint with
-            | Ok () -> ()
-            | Error failure -> raise (Construction_rejected failure));
-           Chat_response.Driver.run_agent
-             ~history_compaction:false
-             ?prompt_dir
-             ?session_id
-             ~response_dir
-             ~shell_manifest_authorizer:manifest_authorizer
-             ~shell_approval_provider:approval_provider
-             ~ctx
-             prompt
-             items)
-         elements)
+      (match installed_projection with
+       | None ->
+         List.map (Converter.to_items ~ctx ~run_agent elements) ~f:(fun item -> item, [])
+       | Some (revision, projection) ->
+         Converter.to_items_with_installed_documents ~ctx ~run_agent projection
+         |> List.map ~f:(fun (item, captures) ->
+           let captured =
+             List.filter_map captures ~f:(fun (part, occurrence) ->
+               if part >= 4096
+               then None
+               else
+                 Option.map
+                   (Prompt_revision.installed_original_key revision occurrence)
+                   ~f:(fun key -> part, key))
+           in
+           item, captured))
   with
   | Construction_rejected failure -> Error failure
 ;;
@@ -1076,7 +1095,9 @@ let allocate_initial ~namespace ~next_sequence items =
     |> Result.map_error ~f:failure
   in
   let%map history =
-    List.map items ~f:(Openai.Responses_history.create ~allocator)
+    List.map items ~f:(fun (item, originals) ->
+      let%map.Result row = Openai.Responses_history.create ~allocator item in
+      row, originals)
     |> Result.all
     |> Result.map_error ~f:failure
   in
@@ -1740,7 +1761,7 @@ let plain_user_item text =
     { role = User; content = [ Text { text; _type = "input_text" } ]; _type = "message" }
 ;;
 
-let chatmd_user_item ~ctx ~run_agent paths text =
+let chatmd_user_item ?asset_capture ~ctx ~run_agent paths text =
   let xml =
     if String.is_prefix (String.strip text) ~prefix:"<"
     then text
@@ -1750,7 +1771,7 @@ let chatmd_user_item ~ctx ~run_agent paths text =
     Prompt.Chat_markdown.parse_chat_inputs ~dir:paths.Runtime_paths.workspace xml
     |> List.find_map ~f:(function
       | Prompt.Chat_markdown.User message ->
-        Some (Converter.convert_user_msg ~ctx ~run_agent message)
+        Some (Converter.convert_user_msg ?asset_capture ~ctx ~run_agent message)
       | _ -> None)
     |> Result.of_option ~error:(failure "ChatMD input does not contain a user message")
   with
@@ -1775,12 +1796,18 @@ let parse_user_content ~ctx ~manifest_authorizer ~approval_provider ~response_di
       prompt
       items
   in
-  fun ~id content ->
+  fun ?asset_capture ~id content ->
     let open Result.Let_syntax in
     let%map item =
       match content.Agent_protocol.Session.Message_content.kind with
       | Plain_text -> Ok (plain_user_item content.text)
-      | Chatmd -> chatmd_user_item ~ctx ~run_agent:converter_runner paths content.text
+      | Chatmd ->
+        chatmd_user_item
+          ?asset_capture
+          ~ctx
+          ~run_agent:converter_runner
+          paths
+          content.text
     in
     Openai.Responses_history.create_with_id_exn ~id item
 ;;
@@ -2260,12 +2287,11 @@ let guarded_services authority (services : extension_services) =
         checked (fun () -> services.claim_lifecycle ~event ~snapshot f))
   ; run_actions = (fun executing -> checked (fun () -> services.run_actions executing))
   ; notification_input =
-      (fun ~source ~tools ~operation_id () ->
-        checked (fun () -> services.notification_input ~source ~tools ~operation_id ()))
+      (fun ~source ~tools ~consume () ->
+        checked (fun () -> services.notification_input ~source ~tools ~consume ()))
   ; initial_notification_input =
-      (fun ~source ~tools ~operation_id () ->
-        checked (fun () ->
-          services.initial_notification_input ~source ~tools ~operation_id ()))
+      (fun ~source ~tools ~consume () ->
+        checked (fun () -> services.initial_notification_input ~source ~tools ~consume ()))
   ; idle_notifications =
       (fun ~source ~tools () ->
         checked (fun () -> services.idle_notifications ~source ~tools ()))
@@ -4103,8 +4129,7 @@ module Product = struct
     let%bind () = check_snapshot t ~moderator_checkpoint in
     let%bind () = check_open t in
     let worker =
-      Operation_worker.create ~run:(fun ~sw ~input capabilities ->
-        Operation_worker.run t.worker ~sw ~input capabilities)
+      Operation_worker.map_run t.worker ~f:Fn.id
     in
     let runtime =
       t.make_binding
@@ -4278,24 +4303,47 @@ let build_product_attachment
             }
         | tool -> tool)
   in
-  let%bind initial_history, initial_end =
+  let%bind initial_history, initial_end, initial_installed_originals =
     match existing_history with
-    | Some history -> Ok (history, next_history_sequence)
+    | Some history -> Ok (history, next_history_sequence, None)
     | None ->
       let%bind () = check_construction construction_checkpoint in
+      let installed =
+        match source with
+        | Authored { revision; _ } when Option.is_some artifact.originals_sha256 ->
+          let open Option.Let_syntax in
+          let%bind definition = artifact.prompt_definition_id in
+          let%map projection = Prompt_revision.document_projection revision in
+          definition, revision, projection
+        | Authored _ | Captured_artifact _ | Authored_child _ | Generated _ -> None
+      in
+      let installed_projection =
+        Option.map installed ~f:(fun (_, revision, projection) -> revision, projection)
+      in
       let%bind items =
         initial_items
           ~construction_checkpoint
           ~ctx
           ~elements
+          ~installed_projection
           ~manifest_authorizer
           ~approval_provider
           ~response_dir
       in
-      allocate_initial
-        ~namespace:history_namespace
-        ~next_sequence:next_history_sequence
-        items
+      let%bind rows, initial_end =
+        allocate_initial
+          ~namespace:history_namespace
+          ~next_sequence:next_history_sequence
+          items
+      in
+      let%map originals =
+        Option.value_map installed ~default:(Ok None) ~f:(fun (definition, revision, _) ->
+          Recovery_installed_originals.Initial.create
+            ~definition
+            ~revision:(Prompt_revision.id revision)
+            rows)
+      in
+      List.map rows ~f:fst, initial_end, originals
   in
   let reserved_history_through = initial_end + moderator_reservation_size in
   let%bind restored_moderator_snapshot =
@@ -4768,22 +4816,22 @@ let build_product_attachment
     match extension_services, script_tools with
     | Some services, Some tools ->
       Some
-        (fun ~input ->
+        (fun ~(capabilities : Operation_worker.Capabilities.t) ->
           services.notification_input
             ~source:notification_source
             ~tools
-            ~operation_id:input.Operation_worker.Input.operation.id)
+            ~consume:capabilities.consume_notifications)
     | _ -> None
   in
   let initial_notification_input =
     match extension_services, script_tools with
     | Some services, Some tools ->
       Some
-        (fun ~input ->
+        (fun ~(capabilities : Operation_worker.Capabilities.t) ->
           services.initial_notification_input
             ~source:notification_source
             ~tools
-            ~operation_id:input.Operation_worker.Input.operation.id)
+            ~consume:capabilities.consume_initial_notifications)
     | _ -> None
   in
   let idle_notifications =
@@ -4794,6 +4842,11 @@ let build_product_attachment
   in
   let worker =
     Turn_worker.create
+      ?checkpoint_tools:
+        (Option.map advertised_dispatch ~f:(fun (_, selected) ->
+           Recovery_checkpoint_candidate.selected_tools selected))
+      ?successor_guidance:
+        (Option.bind script_tools ~f:Script_tool_calls.successor_guidance)
       ~root_binding:(Prepared_native.root_binding prepared_native)
       ?authoring_context:(Option.map authoring ~f:Authoring_runtime.materialize)
       ?agent_guidance:
@@ -4854,10 +4907,10 @@ let build_product_attachment
     match check_execution with
     | None -> worker
     | Some check ->
-      Operation_worker.create ~run:(fun ~sw ~input capabilities ->
+      Operation_worker.map_run worker ~f:(fun run ~sw ~input capabilities ->
         match check () with
         | Error error -> Operation_worker.Failed error
-        | Ok () -> Operation_worker.run worker ~sw ~input capabilities)
+        | Ok () -> run ~sw ~input capabilities)
   in
   let activity =
     Option.map (source_authority source) ~f:(fun _ -> Runtime_activity.create ~sw)
@@ -4871,12 +4924,12 @@ let build_product_attachment
     match activity with
     | None -> worker
     | Some activity ->
-      Operation_worker.create ~run:(fun ~sw:_ ~input capabilities ->
+      Operation_worker.map_run worker ~f:(fun run ~sw:_ ~input capabilities ->
         Runtime_activity.with_switch activity (fun ~sw ->
-          Operation_worker.run worker ~sw ~input capabilities))
+          run ~sw ~input capabilities))
   in
   let worker =
-    Operation_worker.create ~run:(fun ~sw ~input capabilities ->
+    Operation_worker.map_run worker ~f:(fun run ~sw ~input capabilities ->
       let enrolled =
         let open Result.Let_syntax in
         let%bind receipt =
@@ -4889,7 +4942,7 @@ let build_product_attachment
       in
       match enrolled with
       | Error failure -> Operation_worker.Failed failure
-      | Ok () -> Operation_worker.run worker ~sw ~input capabilities)
+      | Ok () -> run ~sw ~input capabilities)
   in
   let runtime_lifecycle_kind =
     match moderator, lifecycle, extension_services with
@@ -4954,7 +5007,7 @@ let build_product_attachment
     | false ->
       parse_user_content ~ctx ~manifest_authorizer ~approval_provider ~response_dir paths
     | true ->
-      fun ~id content ->
+      fun ?asset_capture:_ ~id content ->
         (match
            content.Agent_protocol.Session.Message_content.kind, content.attachments
          with
@@ -4978,6 +5031,7 @@ let build_product_attachment
         ~worker
         ~initial_history
         ~initial_prompt_entry_count
+        ~initial_installed_originals
         ~moderator_snapshot
         ~authored_start
         ~runtime_resume
@@ -5011,6 +5065,7 @@ let build_product_attachment
               ~tracking))
     ; initial_history
     ; initial_prompt_entry_count
+    ; initial_installed_originals
     ; reserved_history_through
     ; moderator_snapshot
     ; moderator_manager =
@@ -5282,6 +5337,7 @@ let build_product_attachment
       ~worker
       ~initial_history:history
       ~initial_prompt_entry_count
+      ~initial_installed_originals:None
       ~moderator_snapshot:(fun () -> checkpoint)
       ~authored_start:(authored_start_for worker)
       ~runtime_resume:(runtime_resume_for worker)
@@ -5316,6 +5372,7 @@ let build_product_attachment
       ~worker
       ~initial_history
       ~initial_prompt_entry_count
+      ~initial_installed_originals
       ~moderator_snapshot:(fun () -> !published_moderator_snapshot)
       ~authored_start
       ~runtime_resume

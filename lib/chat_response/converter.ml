@@ -133,19 +133,27 @@ let function_call_output_part_of_content_item
 let function_call_output_of_items
       ?source
       ?agent_source_runner
+      ?observe
       ~ctx
       ~run_agent
       (items : CM.content_item list)
   : Res.Tool_output.Output.t
   =
   let parts =
-    List.map items ~f:(fun ci ->
-      function_call_output_part_of_content_item
-        ?source
-        ?agent_source_runner
-        ~ctx
-        ~run_agent
-        ci)
+    List.mapi items ~f:(fun part ci ->
+      let output =
+        function_call_output_part_of_content_item
+          ?source
+          ?agent_source_runner
+          ~ctx
+          ~run_agent
+          ci
+      in
+      (match ci, output with
+       | CM.Basic literal, Res.Tool_output.Output_part.Input_text _ ->
+         Option.iter observe ~f:(fun observe -> observe ~part literal)
+       | _ -> ());
+      output)
   in
   Res.Tool_output.Output.Content parts
 ;;
@@ -222,7 +230,7 @@ let rec string_of_items
 
     Local paths are converted to data-URIs through {!Io.Base64.file_to_data_uri} so that the resulting JSON can be sent verbatim to OpenAI without further processing.
 *)
-and convert_basic_item ?source ~ctx (b : CM.basic_content_item)
+and convert_basic_item ?source ?asset_capture ~ctx (b : CM.basic_content_item)
   : Res.Input_message.content_item
   =
   let dir = Ctx.dir ctx in
@@ -231,7 +239,15 @@ and convert_basic_item ?source ~ctx (b : CM.basic_content_item)
     let final =
       match source with
       | Some source -> source_result (Converter_source.image source b)
-      | None -> if b.is_local then Io.Base64.file_to_data_uri ~dir url else url
+      | None ->
+        if b.is_local
+        then (
+          Ctx.check_effect ctx;
+          let uri = Io.Base64.file_to_data_uri ~dir url in
+          Option.iter asset_capture ~f:(fun (capture, part) ->
+            Converter_asset_capture.record_image capture ~part);
+          uri)
+        else url
     in
     Image { image_url = final; detail = "auto"; _type = "input_image" }
   | _, Some doc ->
@@ -244,31 +260,87 @@ and convert_basic_item ?source ~ctx (b : CM.basic_content_item)
          | _, true, true ->
            let env = Ctx.env ctx in
            Webpage_markdown.Driver.(
-             convert_html_file Eio.Path.(Eio.Stdenv.fs env / doc) |> Markdown.to_string)
+             (match asset_capture with
+              | None ->
+                convert_html_file Eio.Path.(Eio.Stdenv.fs env / doc) |> Markdown.to_string
+              | Some (capture, part) ->
+                Ctx.check_effect ctx;
+                let original = Eio.Path.(load (Eio.Stdenv.fs env / doc)) in
+                let rendered = html_to_markdown_string original |> Markdown.to_string in
+                Converter_asset_capture.record_document
+                  capture
+                  ~part
+                  ~media_type:"text/html"
+                  ~contents:original;
+                rendered))
          | _, true, false ->
            let net = Ctx.net ctx in
            let env = Ctx.env ctx in
            Webpage_markdown.Driver.(fetch_and_convert ~env ~net doc |> Markdown.to_string)
          | false, false, _ -> Fetch.get ~ctx doc ~is_local:b.is_local)
     in
+    (match source, asset_capture with
+     | None, Some (capture, part) when b.is_local && (b.cleanup_html || not b.markdown) ->
+       (* Local Fetch passes the bytes through verbatim, including its local
+          cleanup flag behavior. The captured content is that same read. *)
+       Converter_asset_capture.record_document
+         capture
+         ~part
+         ~media_type:(if b.cleanup_html then "text/html" else "application/octet-stream")
+         ~contents:txt
+     | _ -> ());
     Text { text = txt; _type = "input_text" }
   | _ -> Text { text = Option.value ~default:"" b.text; _type = "input_text" }
 
 and convert_content_item
       ?source
       ?agent_source_runner
+      ?asset_capture
       ~ctx
       ~run_agent
       (ci : CM.content_item)
   : Res.Input_message.content_item
   =
   match ci with
-  | CM.Basic b -> convert_basic_item ?source ~ctx b
+  | CM.Basic b -> convert_basic_item ?source ?asset_capture ~ctx b
   | CM.Agent agent ->
     let txt = run_content_agent ?source ?agent_source_runner ~ctx ~run_agent agent in
     Text { text = txt; _type = "input_text" }
 
-and convert_msg ?source ?agent_source_runner ~ctx ~run_agent (m : CM.msg) : Res.Item.t =
+and convert_input_parts
+      ?source
+      ?agent_source_runner
+      ?asset_capture
+      ?observe
+      ~ctx
+      ~run_agent
+      (message : CM.msg)
+  : Res.Input_message.content_item list
+  =
+  match message.content with
+  | None -> []
+  | Some (CM.Text text) -> [ Text { text; _type = "input_text" } ]
+  | Some (CM.Items items) ->
+    List.mapi items ~f:(fun part item ->
+      let asset_capture = Option.map asset_capture ~f:(fun capture -> capture, part) in
+      let output =
+        convert_content_item
+          ?source
+          ?agent_source_runner
+          ?asset_capture
+          ~ctx
+          ~run_agent
+          item
+      in
+      (match item, output with
+       | CM.Basic literal, Res.Input_message.Text _ ->
+         Option.iter observe ~f:(fun observe -> observe ~part literal)
+       | _ -> ());
+      output)
+
+and convert_msg ?source ?agent_source_runner ?observe ~ctx ~run_agent (m : CM.msg)
+  : Res.Item.t
+  =
   let _ = Ctx.cache ctx in
   let role =
     match String.lowercase m.role with
@@ -307,7 +379,14 @@ and convert_msg ?source ?agent_source_runner ~ctx ~run_agent (m : CM.msg) : Res.
       | None -> Res.Tool_output.Output.Text ""
       | Some (CM.Text t) -> Res.Tool_output.Output.Text t
       | Some (CM.Items items) ->
-        function_call_output_of_items ?source ?agent_source_runner ~ctx ~run_agent items
+        let observe = if Option.is_none m.tool_call then observe else None in
+        function_call_output_of_items
+          ?source
+          ?agent_source_runner
+          ?observe
+          ~ctx
+          ~run_agent
+          items
     in
     (match m.tool_call with
      | Some { id = call_id; function_ = { name; arguments = raw_args } } ->
@@ -345,13 +424,7 @@ and convert_msg ?source ?agent_source_runner ~ctx ~run_agent (m : CM.msg) : Res.
       | `Developer -> Res.Input_message.Developer
     in
     let content_items =
-      match m.content with
-      | None -> []
-      | Some (CM.Text t) -> [ Res.Input_message.Text { text = t; _type = "input_text" } ]
-      | Some (CM.Items lst) ->
-        List.map
-          lst
-          ~f:(convert_content_item ?source ?agent_source_runner ~ctx ~run_agent)
+      convert_input_parts ?source ?agent_source_runner ?observe ~ctx ~run_agent m
     in
     Res.Item.Input_message { role = role_val; content = content_items; _type = "message" }
 
@@ -363,19 +436,21 @@ and convert_msg ?source ?agent_source_runner ~ctx ~run_agent (m : CM.msg) : Res.
    diverging we only need to update the implementation here without
    touching every call-site. *)
 
-and convert_system_msg ?source ?agent_source_runner ~ctx ~run_agent (m : CM.system_msg)
+and convert_system_msg
+      ?source
+      ?agent_source_runner
+      ?observe
+      ~ctx
+      ~run_agent
+      (m : CM.system_msg)
   : Res.Item.t
   =
   (* [system_msg] is an alias of [msg] but we *know* its [role] is "system"
      and that it never carries tool-call metadata.  Therefore we can
      shortcut straight to an [Input_message] constructor without any
      defensive pattern-matching on the role field. *)
-  let content_items : Res.Input_message.content_item list =
-    match m.content with
-    | None -> []
-    | Some (CM.Text t) -> [ Res.Input_message.Text { text = t; _type = "input_text" } ]
-    | Some (CM.Items lst) ->
-      List.map lst ~f:(convert_content_item ?source ?agent_source_runner ~ctx ~run_agent)
+  let content_items =
+    convert_input_parts ?source ?agent_source_runner ?observe ~ctx ~run_agent m
   in
   Res.Item.Input_message
     { role = Res.Input_message.System; content = content_items; _type = "message" }
@@ -383,30 +458,37 @@ and convert_system_msg ?source ?agent_source_runner ~ctx ~run_agent (m : CM.syst
 and convert_developer_msg
       ?source
       ?agent_source_runner
+      ?observe
       ~ctx
       ~run_agent
       (m : CM.developer_msg)
   : Res.Item.t
   =
-  let content_items : Res.Input_message.content_item list =
-    match m.content with
-    | None -> []
-    | Some (CM.Text t) -> [ Res.Input_message.Text { text = t; _type = "input_text" } ]
-    | Some (CM.Items lst) ->
-      List.map lst ~f:(convert_content_item ?source ?agent_source_runner ~ctx ~run_agent)
+  let content_items =
+    convert_input_parts ?source ?agent_source_runner ?observe ~ctx ~run_agent m
   in
   Res.Item.Input_message
     { role = Res.Input_message.Developer; content = content_items; _type = "message" }
 
-and convert_user_msg ?source ?agent_source_runner ~ctx ~run_agent (m : CM.user_msg)
+and convert_user_msg
+      ?source
+      ?agent_source_runner
+      ?asset_capture
+      ?observe
+      ~ctx
+      ~run_agent
+      (m : CM.user_msg)
   : Res.Item.t
   =
-  let content_items : Res.Input_message.content_item list =
-    match m.content with
-    | None -> []
-    | Some (CM.Text t) -> [ Res.Input_message.Text { text = t; _type = "input_text" } ]
-    | Some (CM.Items lst) ->
-      List.map lst ~f:(convert_content_item ?source ?agent_source_runner ~ctx ~run_agent)
+  let content_items =
+    convert_input_parts
+      ?source
+      ?agent_source_runner
+      ?asset_capture
+      ?observe
+      ~ctx
+      ~run_agent
+      m
   in
   Res.Item.Input_message
     { role = Res.Input_message.User; content = content_items; _type = "message" }
@@ -493,6 +575,7 @@ and convert_tool_call_msg
 and convert_tool_response_msg
       ?source
       ?agent_source_runner
+      ?observe
       ~ctx
       ~run_agent
       (m : CM.tool_response_msg)
@@ -505,7 +588,13 @@ and convert_tool_response_msg
     | None -> Res.Tool_output.Output.Text ""
     | Some (CM.Text t) -> Text t
     | Some (CM.Items items) ->
-      function_call_output_of_items ?source ?agent_source_runner ~ctx ~run_agent items
+      function_call_output_of_items
+        ?source
+        ?agent_source_runner
+        ?observe
+        ~ctx
+        ~run_agent
+        items
   in
   match m.type_ with
   | Some "custom_tool_call" ->
@@ -551,21 +640,23 @@ and convert_reasoning (r : CM.reasoning) : Res.Item.t =
       assert (List.length items = 2)
     ]}
 *)
-let convert_element ?source ?agent_source_runner ~ctx ~run_agent
+let convert_element ?source ?agent_source_runner ?observe ~ctx ~run_agent
   : CM.top_level_elements -> Res.Item.t option
   = function
-  | CM.Msg m -> Some (convert_msg ?source ?agent_source_runner ~ctx ~run_agent m)
+  | CM.Msg m -> Some (convert_msg ?source ?agent_source_runner ?observe ~ctx ~run_agent m)
   | CM.System m ->
-    Some (convert_system_msg ?source ?agent_source_runner ~ctx ~run_agent m)
+    Some (convert_system_msg ?source ?agent_source_runner ?observe ~ctx ~run_agent m)
   | CM.Developer m ->
-    Some (convert_developer_msg ?source ?agent_source_runner ~ctx ~run_agent m)
-  | CM.User m -> Some (convert_user_msg ?source ?agent_source_runner ~ctx ~run_agent m)
+    Some (convert_developer_msg ?source ?agent_source_runner ?observe ~ctx ~run_agent m)
+  | CM.User m ->
+    Some (convert_user_msg ?source ?agent_source_runner ?observe ~ctx ~run_agent m)
   | CM.Assistant m ->
     Some (convert_assistant_msg ?source ?agent_source_runner ~ctx ~run_agent m)
   | CM.Tool_call m ->
     Some (convert_tool_call_msg ?source ?agent_source_runner ~ctx ~run_agent m)
   | CM.Tool_response m ->
-    Some (convert_tool_response_msg ?source ?agent_source_runner ~ctx ~run_agent m)
+    Some
+      (convert_tool_response_msg ?source ?agent_source_runner ?observe ~ctx ~run_agent m)
   | CM.Reasoning r -> Some (convert_reasoning r)
   | CM.Config _ -> None
   | CM.Tool _ -> None
@@ -587,6 +678,19 @@ let to_items
   : Res.Item.t list
   =
   List.filter_map els ~f:(convert_element ?source ?agent_source_runner ~ctx ~run_agent)
+;;
+
+let to_items_with_installed_documents ~ctx ~run_agent projection =
+  let module Projected = CM.Document_projection in
+  List.filter_mapi (Projected.elements projection) ~f:(fun top_level element ->
+    let captures = ref [] in
+    let observe ~part literal =
+      Option.iter
+        (Projected.local_capture projection ~top_level ~part literal)
+        ~f:(fun occurrence -> captures := (part, occurrence) :: !captures)
+    in
+    Option.map (convert_element ~observe ~ctx ~run_agent element) ~f:(fun emitted ->
+      emitted, List.rev !captures))
 ;;
 
 (* This counts typed scalars and collection entries before either generated

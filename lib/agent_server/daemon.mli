@@ -292,7 +292,15 @@ type options =
   ; quota_limits : Agent_session.Quota_manager.limits
   ; reviewer_resolver : Catalog_builder.reviewer_resolver option
   ; policy_evaluator_resolver : Catalog_builder.policy_evaluator_resolver option
+  ; interactive_permission_responder :
+      Agent_session.Permission_policy.interactive_responder
+    (** Trusted process-local frontend behavior. Defaults to using current
+        writable attachments as responders. A frontend that cannot answer
+        approval prompts disables them even when it writes the conversation. *)
   ; inference_policy : Session_factory.inference_policy
+  ; context_capacity_host : Agent_session.Session_context_capacity.Host.t
+    (** Explicit durable-session and exact-target qualification. Disabled by
+        default. No provider limit or counter is inferred from the model. *)
   ; qualify_chatml_extensions : bool
     (** Enable the shared extension runtime; true by default. False is an explicit
         embedding compatibility override and suppresses extension discovery.
@@ -778,6 +786,10 @@ val start
            admission, then starts provider/catalog/source work. Failure joins
            the Store startup owner. Existing [before_activation] callers remain
            source-compatible; Embedded uses one handoff for its minted ID. *)
+  -> ?local_recovery_host:Operator_authorization.Local_recovery_host.t
+       (** The actual Embedded lifetime supplied by the trusted composition.
+           Its durable identity is also held by the local authenticators.
+           Daemon transports do not mint it. *)
   -> unit
   -> (t, Agent_protocol.Error.t) result
 

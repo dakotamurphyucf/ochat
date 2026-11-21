@@ -33,6 +33,17 @@ let directory session =
   Filename.concat (Session_store.Handle.directory session) "result-preparations"
 ;;
 
+let has_entries reader =
+  let open Result.Let_syntax in
+  let directory = "result-preparations" in
+  match%bind Retention_reader.kind_or_missing reader ~path:directory with
+  | None -> Ok false
+  | Some `Directory ->
+    let%map names = Retention_reader.list reader ~directory in
+    not (List.is_empty names)
+  | Some `File -> Error (Store_error.Corrupt "result preparations are not a directory")
+;;
+
 let filename t = P.Id.Blob.to_string t.reference.blob.id ^ ".frame"
 let path session t = Filename.concat (directory session) (filename t)
 let corrupt message = Error (Store_error.Corrupt message)

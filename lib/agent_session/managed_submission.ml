@@ -13,6 +13,10 @@ type outcome =
 type status =
   | Deferred
   | Ready
+  | Suspended_rollover of
+      { predecessor : Agent_protocol.Id.Operation.t
+      ; continuation : Agent_protocol.Id.Operation.t
+      }
   | Assigned of P.Id.Operation.t
   | Terminal of P.Id.Operation.t option * outcome
 [@@deriving equal, sexp]
@@ -41,6 +45,8 @@ let to_json t =
     | Deferred -> "deferred", None, false
     | Ready -> "ready", None, false
     | Assigned id -> "assigned", Some id, false
+    | Suspended_rollover { predecessor; _ } ->
+      "suspended_rollover", Some predecessor, false
     | Terminal (operation, outcome) ->
       ( (match outcome with
          | Completed -> "completed"
@@ -90,6 +96,8 @@ let validate t =
     | Terminal (None, Invalidated) -> List.is_empty t.output_ids
     | Terminal (None, _) -> false
     | Assigned _ | Terminal (Some _, _) -> true
+    | Suspended_rollover { predecessor; continuation } ->
+      not (P.Id.Operation.equal predecessor continuation)
   with
   | true -> Ok ()
   | false -> Error (P.Error.invalid_request "invalid managed submission receipt")
@@ -127,6 +135,18 @@ let validate_transition ~previous next =
     | Ready, (Ready | Assigned _ | Terminal (None, Invalidated)) -> true
     | Assigned before, Assigned after -> P.Id.Operation.equal before after
     | Assigned before, Terminal (Some after, _) -> P.Id.Operation.equal before after
+    | Assigned before, Suspended_rollover { predecessor; _ } ->
+      P.Id.Operation.equal before predecessor
+    | Suspended_rollover before, Suspended_rollover after ->
+      P.Id.Operation.equal before.predecessor after.predecessor
+      && P.Id.Operation.equal before.continuation after.continuation
+    | Suspended_rollover { predecessor; continuation }, Assigned successor ->
+      not
+        (P.Id.Operation.equal predecessor successor
+         || P.Id.Operation.equal continuation successor)
+    | ( Suspended_rollover { predecessor; _ }
+      , Terminal (Some operation, (Interrupted | Invalidated)) ) ->
+      P.Id.Operation.equal predecessor operation
     | Terminal _, Terminal _ -> equal previous next
     | _ -> false
   in
@@ -146,6 +166,41 @@ let validate_transition ~previous next =
          "managed submission transition changes retained identity or outcome")
 ;;
 
+let rollover_conflict () =
+  Error
+    (P.Error.create
+       Conflict
+       ~message:"managed rollover assignment changed"
+       ~retryable:true
+       ())
+;;
+
+let suspend_rollover t ~predecessor ~continuation =
+  match t.status with
+  | Assigned operation when P.Id.Operation.equal predecessor operation ->
+    let next = { t with status = Suspended_rollover { predecessor; continuation } } in
+    Result.map (validate_transition ~previous:t next) ~f:(fun () -> next)
+  | _ -> rollover_conflict ()
+;;
+
+let claim_rollover t ~continuation ~successor =
+  match t.status with
+  | Suspended_rollover current when P.Id.Operation.equal current.continuation continuation
+    ->
+    let next = { t with status = Assigned successor } in
+    Result.map (validate_transition ~previous:t next) ~f:(fun () -> next)
+  | _ -> rollover_conflict ()
+;;
+
+let finish_rollover t ~continuation =
+  match t.status with
+  | Suspended_rollover current when P.Id.Operation.equal current.continuation continuation
+    ->
+    let next = { t with status = Terminal (Some current.predecessor, Interrupted) } in
+    Result.map (validate_transition ~previous:t next) ~f:(fun () -> next)
+  | _ -> rollover_conflict ()
+;;
+
 let reconcile
       ~generation
       ~reference
@@ -159,7 +214,7 @@ let reconcile
   =
   match t.status with
   | Terminal _ -> t
-  | Deferred | Ready | Assigned _ ->
+  | Deferred | Ready | Assigned _ | Suspended_rollover _ ->
     let status =
       match
         (not discarded)
@@ -170,6 +225,7 @@ let reconcile
         Terminal
           ( (match t.status with
              | Assigned id -> Some id
+             | Suspended_rollover { predecessor; _ } -> Some predecessor
              | _ -> None)
           , Invalidated )
       | true ->
@@ -243,6 +299,12 @@ let status_to_jsonaf = function
   | Ready -> `Object [ "kind", `String "ready" ]
   | Assigned id ->
     `Object [ "kind", `String "assigned"; "operation_id", P.Id.Operation.to_json id ]
+  | Suspended_rollover { predecessor; continuation } ->
+    `Object
+      [ "kind", `String "suspended_rollover"
+      ; "operation_id", P.Id.Operation.to_json predecessor
+      ; "continuation", P.Id.Operation.to_json continuation
+      ]
   | Terminal (id, outcome) ->
     `Object
       [ "kind", `String "terminal"
@@ -261,6 +323,10 @@ let status_of_jsonaf json =
   | "assigned" ->
     Result.map (X.required fields "operation_id" P.Id.Operation.of_json) ~f:(fun id ->
       Assigned id)
+  | "suspended_rollover" ->
+    let%bind predecessor = X.required fields "operation_id" P.Id.Operation.of_json in
+    let%map continuation = X.required fields "continuation" P.Id.Operation.of_json in
+    Suspended_rollover { predecessor; continuation }
   | "terminal" ->
     let%bind id = X.required fields "operation_id" (X.nullable P.Id.Operation.of_json) in
     let%map outcome = X.required fields "outcome" outcome_of_jsonaf in
@@ -274,6 +340,7 @@ let status_shape =
     [ "deferred", X.fields_shape [ "kind" ]
     ; "ready", X.fields_shape [ "kind" ]
     ; "assigned", X.fields_shape [ "kind"; "operation_id" ]
+    ; "suspended_rollover", X.fields_shape [ "kind"; "operation_id"; "continuation" ]
     ; "terminal", X.fields_shape [ "kind"; "operation_id"; "outcome" ]
     ]
 ;;

@@ -30,6 +30,7 @@ end
 type t
 
 val content : t -> Content.t
+val originals : t -> Agent_store.Installed_document_originals.t option
 
 (** Original immutable aggregate ceilings for downstream reconciliation. *)
 val limits : t -> Content.Limits.t
@@ -56,7 +57,8 @@ val accounting : t -> Accounting.t
     Borrowed checkpoint/cancellation exception identities propagate unchanged.
     Local's actual joined operation owner remains responsible for native cleanup. *)
 val run
-  :  Chatml_local_source.t
+  :  ?retain_root_originals:bool
+  -> Chatml_local_source.t
   -> parsed_contexts:Parsed.t list
   -> limits:Content.Limits.t
   -> checkpoint:(unit -> unit)

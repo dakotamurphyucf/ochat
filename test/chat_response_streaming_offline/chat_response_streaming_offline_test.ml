@@ -2046,7 +2046,8 @@ let%expect_test "tool observer adapters preserve exact typed host rejection" =
         (* A dispatcher is required to exercise the pre-tool catch that normally
            converts unexpected host failures into a synthetic rejected call. *)
         let dispatch_tool : Stream.Tool_dispatch.t =
-          { for_fork = None
+          { protection = None
+          ; for_fork = None
           ; commit_call = (fun _ -> false)
           ; prepare_call =
               (match mode with

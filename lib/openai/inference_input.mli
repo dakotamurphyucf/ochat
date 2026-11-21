@@ -5,7 +5,8 @@ open! Core
     require exact provenance and matching independently decoded semantics before
     raw replay. No provider IDs replace host identities. *)
 val prepare
-  :  Responses_driver.Profile.t
+  :  ?materialized:Inference_runtime.Protected_delivery.Materialized.t
+  -> Responses_driver.Profile.t
   -> Inference.Request.t
   -> (Responses_driver.Prepared.t, Inference_runtime.Preparation_error.t) Result.t
 

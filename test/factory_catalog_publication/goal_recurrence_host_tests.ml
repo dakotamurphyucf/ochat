@@ -96,23 +96,38 @@ let assert_finished_checkpoint current (admission : P.Run_receipt.t) first secon
     (snapshot_field snapshot "recurrence")
 ;;
 
-let waiting ?since ~clock parent admission =
-  Support.await
-    ~clock
-    ~phase:"joining the controller turn and committing its Wait"
-    ~on_timeout:(fun () ->
-      let current = Support.healthy parent in
-      [ [%sexp (Support.run current admission.P.Run_receipt.run_id : P.Run.t)]
-      ; [%sexp (current.schedules : P.Schedule.t list)]
-      ])
-    (fun () ->
-       let current = Support.healthy parent in
-       match (Support.run current admission.P.Run_receipt.run_id).lifecycle with
-       | Waiting wake
-         when Option.is_none current.active_operation
-              && not (Option.exists since ~f:(Wake.equal wake)) -> Some (current, wake)
-       | Admitted | Active | Waiting _ -> None
-       | Terminal _ -> failwith "Controller Run ended before its review wait")
+let waiting ?since env parent admission =
+  let controller_run current = Support.run current admission.P.Run_receipt.run_id in
+  let details current =
+    [ [%sexp (controller_run current : P.Run.t)]
+    ; [%sexp (current.A.Session_state.schedules : P.Schedule.t list)]
+    ]
+  in
+  let await ~phase select =
+    Fixture_phase.await_actor
+      parent
+      ~clock:(Eio.Stdenv.mono_clock env)
+      ~phase
+      ~details
+      (fun current ->
+         let current = Support.validate_healthy current in
+         select current (controller_run current).lifecycle)
+  in
+  let wake =
+    await ~phase:"publishing the authored controller Wait" (fun _ lifecycle ->
+      match lifecycle with
+      | Waiting wake when not (Option.exists since ~f:(Wake.equal wake)) -> Some wake
+      | Admitted | Active | Waiting _ -> None
+      | Terminal _ -> failwith "Controller Run ended before its review wait")
+  in
+  await
+    ~phase:"retiring the controller turn at its committed Wait"
+    (fun current lifecycle ->
+       match lifecycle with
+       | Waiting retained when Wake.equal retained wake ->
+         Option.some_if (Option.is_none current.active_operation) (current, wake)
+       | Admitted | Active | Waiting _ | Terminal _ ->
+         failwith "Controller Run changed its Wait before turn retirement")
 ;;
 
 let timer (current : A.Session_state.t) (wake : Wake.t) =
@@ -336,7 +351,12 @@ type review_wait =
 
 let compaction_output = "The current release-note handoff names a reviewer."
 
-let with_waiting_controller ?resume_input f =
+let with_waiting_controller
+      ?test_root
+      ?(configure = Support.configure_guidance)
+      ?resume_input
+      f
+  =
   let providers = ref 0 in
   let post_stream ~sw:_ ~inputs =
     Int.incr providers;
@@ -372,8 +392,9 @@ let with_waiting_controller ?resume_input f =
   in
   let policy = guidance_inference_policy ~default_model:"fixture-model" ~post_stream () in
   Native.with_accepted_start
+    ?test_root
     ~startup:Support.startup
-    ~configure:Support.configure_guidance
+    ~configure
     ~timeout_seconds:120.
     ~v1:true
     ~policy
@@ -396,7 +417,7 @@ let with_waiting_controller ?resume_input f =
                   | Staged | Accepted _ | Dispatch_claimed _ -> None
                   | Discarded _ | Rejected _ -> failwith "Native Goal Start was rejected")
               in
-              let initial, wake = waiting ~clock parent admitted in
+              let initial, wake = waiting env parent admitted in
               Native.assert_admission_ack
                 ~goal_id:Support.goal_id
                 env
@@ -540,7 +561,7 @@ let check_resident
     ~next_due:expected_second_due
     first.origin;
   started.advance_scheduler 55.1;
-  let _, wake = waiting ~since:initial_wake ~clock parent admitted in
+  let _, wake = waiting ~since:initial_wake env parent admitted in
   let review =
     Support.await ~clock ~phase:"joining the authored review observations" (fun () ->
       Some (Goal_resume_runtime_tests.settled_snapshot parent))

@@ -259,19 +259,7 @@ let scan
       if temporary name
       then Ok contents
       else (
-        let%bind operation =
-          List.find_map
-            [ "compaction"; "reset"; "rebuild"; "upgrade"; "edit"; "delete" ]
-            ~f:(fun prefix -> String.chop_prefix name ~prefix:(prefix ^ "-"))
-          |> Result.of_option
-               ~error:(Store.Store_error.Corrupt "unknown archive filename")
-        in
-        let%bind operation =
-          String.chop_suffix operation ~suffix:".frame"
-          |> Result.of_option
-               ~error:(Store.Store_error.Corrupt "invalid archive filename")
-        in
-        let%bind _ = P.Id.Operation.of_string operation |> protocol in
+        let%bind _ = Compaction_archive.Name.of_string name |> protocol in
         let%bind bytes =
           Reader.read
             reader

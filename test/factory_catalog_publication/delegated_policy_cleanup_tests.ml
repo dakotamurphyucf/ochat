@@ -1230,8 +1230,8 @@ module Goal_independent = struct
     | Create_leaf
     | Finish_middle
     | Idle
-    | Read of string
-    | Finish_read
+    | Read of string * unit Eio.Promise.u
+    | Finish_read of unit Eio.Promise.u
 
   let provider_key = "593-goal-independent-birth"
 
@@ -1512,13 +1512,14 @@ let on_event ctx state event = match event with
         | Finish_middle ->
           phase := Idle;
           completed_response "593 creator completed Independent child creation"
-        | Read call_id ->
+        | Read (call_id, followed_up) ->
           !at_provider ();
-          phase := Finish_read;
+          phase := Finish_read followed_up;
           Warm_vector.response ~id:call_id Warm_vector.original
-        | Finish_read ->
+        | Finish_read followed_up ->
           !at_provider ();
           phase := Idle;
+          Eio.Promise.resolve followed_up ();
           completed_response "593 Independent child completed its later input"
         | Idle -> failwith "Independent fixture dispatched an unrequested provider")
     in
@@ -1655,11 +1656,17 @@ let on_event ctx state event = match event with
            let providers_before = !(counters.providers) in
            let check_later_input index =
              let provider_call_id = "593-independent-later-" ^ Int.to_string index in
-             phase := Read provider_call_id;
+             let followup, followed_up = Eio.Promise.create () in
+             phase := Read (provider_call_id, followed_up);
              let submitted = submit provider_call_id |> protocol_ok in
              assert (Option.is_some submitted.operation_id);
+             (* Each input crosses both inherited policies and submits two real
+                attempts. Observe the second provider before waiting for terminal
+                accounting in the two roots. *)
+             within env "later Independent provider follow-up" (fun () ->
+               Eio.Promise.await followup);
              let current =
-               within env "later Independent input" (fun () -> await_leaf_quiet leaf)
+               within env "later Independent turn retirement" (fun () -> await_leaf_quiet leaf)
              in
              Failure.raise_if_present failure;
              let invocation : P.Invocation.t =

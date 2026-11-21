@@ -104,22 +104,17 @@ let%expect_test
          in
          let plan = prepare () in
          A.reserve_history_block actor ~count:1 |> protocol_ok |> ignore;
-         (match A.consume_notifications actor ~operation_id:input.operation.id plan with
+         (match capabilities.consume_notifications plan with
           | Error { code = Conflict; _ } -> ()
           | _ -> failwith "stale proposal was accepted");
          let before = A.state actor |> protocol_ok in
          let plan = prepare () in
          reject_save := true;
-         assert (
-           Result.is_error
-             (A.consume_notifications actor ~operation_id:input.operation.id plan));
+         assert (Result.is_error (capabilities.consume_notifications plan));
          reject_save := false;
          assert_same_session_snapshot before (A.state actor |> protocol_ok);
          assert_same_session_snapshot before (Agent_session.Memory_backend.state backend);
-         let batch =
-           A.consume_notifications actor ~operation_id:input.operation.id plan
-           |> protocol_ok
-         in
+         let batch = capabilities.consume_notifications plan |> protocol_ok in
          let expected =
            match mode with
            | `Revoked -> 0
@@ -128,10 +123,7 @@ let%expect_test
          [%test_eq: int] expected (List.length batch.entries);
          [%test_eq: bool] (expected > 0) batch.request_turn;
          assert (not batch.user_input);
-         let repeat =
-           A.consume_notifications actor ~operation_id:input.operation.id (prepare ())
-           |> protocol_ok
-         in
+         let repeat = capabilities.consume_notifications (prepare ()) |> protocol_ok in
          assert (List.is_empty repeat.entries);
          assert (not repeat.request_turn);
          (match mode with

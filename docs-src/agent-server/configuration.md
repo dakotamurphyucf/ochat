@@ -287,6 +287,85 @@ Unavailable confinement or a changed boundary fails closed; no unconfined fallba
 is provided. Trusted OCaml hosts may instead supply callback grants, but cannot
 combine them with configured grants in the same daemon.
 
+### Local context capacity
+
+The stock daemon defaults to `off` when `server.recovery_capacity` is omitted.
+A configured host must also see the session's durable opt-in before it makes
+capacity available. An authorized owner can opt in through
+`session.recovery.enable` with the current attachment and generation. Restart
+preserves that opt-in. Reading retained recovery history remains governed by its
+own source and access checks.
+
+Add the following member inside `server` to declare limits for a specific
+target. The numbers are example host policy values. Set them to the limits you
+have qualified for the selected encoder and deployment.
+
+```scheme
+(recovery_capacity
+ ((mode manual)
+  (host_total 8192)
+  (targets
+   (((prompt smoke)
+     (profile first-party-openai-responses)
+     (model gpt-4.1)
+     (encoder openai_responses_v1)
+     (total 16384)
+     (input 6000)
+     (output 500)
+     (session_total 7000)
+     (omitted_output_default 60)
+     (checkpoint_reserve 512)
+     (warning_lead 256)
+     (estimate_margin 100))))))
+```
+
+| Field | Effect |
+| --- | --- |
+| `mode` | `off` disables capacity. `manual` permits an opted-in session to use it. `automatic` lets the stock foreground worker start a fresh local window at the configured limits. The session must have recovery windows enabled and its resolved target must match a qualification. An unmatched target or a worker without rollover support reports effective `manual`. |
+| `host_total` | Required positive total-token ceiling in `manual` or `automatic`. Each qualified target's effective total is also bounded by its declared total and optional session ceiling. |
+| `targets` | Up to 32 qualifications with distinct prompt names. An omitted or empty list leaves numeric policy unavailable. |
+| `prompt`, `profile`, `model`, `encoder` | The named prompt and the expected resolved profile, model and encoder. The stock adapter currently qualifies `openai_responses_v1`. |
+| `total`, `input`, `output`, `session_total` | Required positive target total and optional positive caps for input, output and session total, all in tokens. |
+| `omitted_output_default` | Optional positive reservation for requests with no output limit. A prepared request's explicit limit takes precedence. |
+| `checkpoint_reserve`, `warning_lead`, `estimate_margin` | Required positive tokens for checkpoint planning and the early-warning threshold, plus a required nonnegative margin for estimator uncertainty. Configuration validation checks the reservations against the effective input bound. |
+
+At startup the server captures the target from the named, ready prompt through
+the same inference policy used to create sessions. It registers a numerical
+policy only when the declared profile, model and encoder match and the target
+resolves. The policy applies to the entire captured target, including profile
+revision, routing and effective settings. If a target is unavailable, or an
+opted-in session later selects a different target, capacity remains manual
+without a numeric policy. Startup rejects ambiguous qualifications that resolve
+to the same target. An explicit `((mode off))` is also valid.
+
+The OpenAI Responses adapter estimates tokens from the actual prepared input
+encoding. The estimate identifies its coverage and reports unknown when an
+input component cannot be counted. The host and target limits are local
+declarations and the estimate does not describe provider billing or account
+entitlement. Capacity reporting requires an admitted preparation in the
+current session. The authored capacity tools still require their normal
+selection and authority.
+
+Use `-validate-only` to check configuration shape and token bounds. Actual
+prompt and target qualification occurs during startup. Changes to
+`server.recovery_capacity` take effect on restart.
+
+### Local recovery capacity file
+
+For `ochat chat-completion` or `chat-tui --local`, pass the record inside the
+daemon's `recovery_capacity` setting as a standalone S-expression. For example,
+this file sets a host ceiling and leaves the target list empty:
+
+```sexp
+((mode manual) (host_total 8192))
+```
+
+Pass its path with `-recovery-capacity-file FILE`. To qualify automatic
+operation, use the same target fields as in the daemon example above, set
+`prompt` to `embedded.prompt`, and match the actual selected provider profile
+and model. The file applies for the lifetime of the local process. Window
+capture belongs to the durable session and is selected with `-enable-recovery`.
+
 ### Other server settings
 
 `unix_socket` is always enabled. Its parent directory must already be private,
@@ -388,6 +467,17 @@ addressed prompt artifact. A durable session pins that artifact and its
 permission profile revision. Restart uses the pinned artifact, not whatever
 currently exists at the live source path. Catalog reload affects future
 sessions; explicit prompt upgrade or rebuild changes an existing session.
+
+A prompt administrator can set `(document_originals retain)` in a prompt entry
+to retain original bytes for that definition's installed local captured
+documents. The default, `(document_originals rendered_only)`, preserves the
+rendered text of `<doc local capture>` without storing the original. The
+setting applies to the installed root and its imported message declarations.
+Originals are stored in a private pool owned by the immutable prompt revision.
+They are outside the authored source tree and the public prompt and blob APIs.
+Their optional custody failures leave the rendered revision readable. Removing
+the setting on catalog reload denies new reads of that revision's originals.
+This setting does not enable session recovery windows.
 
 The operator is responsible for exposing only prompt/workspace combinations
 whose declarations and permission profiles are safe together. Selecting a

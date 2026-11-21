@@ -176,8 +176,42 @@ let empty_response : Res.Response.t =
   }
 ;;
 
-let reply_summary t text =
+let reply_terminal t event response =
   if t.closed then failwith "provider request is already closed";
+  let response = Res.Response.jsonaf_of_t response in
+  let body =
+    if t.streaming
+    then (
+      let data =
+        `Object
+          [ "type", `String event
+          ; "sequence_number", `Number (Int64.to_string t.next_sequence)
+          ; "response", response
+          ]
+      in
+      "event: " ^ event ^ "\ndata: " ^ Jsonaf.to_string data ^ "\n\n")
+    else Jsonaf.to_string response
+  in
+  t.push (Some body);
+  t.closed <- true;
+  t.push None
+;;
+
+let reject_context t =
+  let error : Res.Error.t =
+    { code = Some "context_length_exceeded"
+    ; message = "request exceeds the fixture context limit"
+    ; param = None
+    ; type_ = "invalid_request_error"
+    }
+  in
+  reply_terminal
+    t
+    "response.failed"
+    { empty_response with status = Failed; error = Some error }
+;;
+
+let reply_summary t text =
   let output =
     Res.Item.Output_message
       { role = Assistant
@@ -188,21 +222,7 @@ let reply_summary t text =
       ; content = [ { annotations = []; text; _type = "output_text" } ]
       }
   in
-  let response =
-    Res.Response.jsonaf_of_t { empty_response with output = [ output ] }
-    |> Jsonaf.to_string
-  in
-  t.push
-    (Some
-       (if t.streaming
-        then
-          "event: response.completed\n\
-           data: {\"type\":\"response.completed\",\"sequence_number\":0,\"response\":"
-          ^ response
-          ^ "}\n\n"
-        else response));
-  t.closed <- true;
-  t.push None
+  reply_terminal t "response.completed" { empty_response with output = [ output ] }
 ;;
 
 let finish t =

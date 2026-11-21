@@ -26,6 +26,10 @@ test('feature destinations remain visible and onboarding stays in order', async 
     'ChatML workflows',
   ])
     assert.ok(sidebar.some((group) => group.label === label));
+  const operate = links(
+    sidebar.find((group) => group.label === 'Run and operate').items,
+  );
+  assert.ok(operate.includes('/docs/guides/local-context-recovery/'));
   assert.deepEqual(
     documentationPaths(entries).map((item) => item.href),
     [
@@ -33,6 +37,7 @@ test('feature destinations remain visible and onboarding stays in order', async 
       '/docs/guides/subagents/',
       '/docs/concepts/chatml/',
       '/docs/tutorials/goal-recurrence/',
+      '/docs/tutorials/context-recovery/',
       '/docs/guides/chatml-development/',
     ],
   );

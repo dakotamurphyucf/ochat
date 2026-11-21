@@ -82,7 +82,8 @@ module Rendered : sig
       These per-render ceilings must be remaining aggregate allowances in native
       capture. [capture] additionally reconciles their observed receipts. *)
   val create
-    :  Parsed.t
+    :  ?retain_original:bool
+    -> Parsed.t
     -> occurrence:Occurrence.t
     -> source:Source.t
     -> limits:Limits.t
@@ -113,6 +114,16 @@ val capture
   -> checkpoint:(unit -> unit)
   -> (t, Error.t) Result.t
 
+(** Collect only explicitly carried local originals, using the same exact
+    occurrence reconciliation and work allowance as rendered capture. The
+    ordinary rendered custody carries no original bytes. *)
+val capture_with_originals
+  :  parsed_contexts:Parsed.t list
+  -> rendered:Rendered.t list
+  -> limits:Limits.t
+  -> checkpoint:(unit -> unit)
+  -> (t * Agent_store.Installed_document_originals.t option, Error.t) Result.t
+
 (** Admit complete active and inactive records against exact supplied parser-input
     revisions. Reject malformed selectors/ranges, duplicate occurrence keys and
     missing/surplus payloads before materialization. Unknown metadata is retained.
@@ -131,6 +142,13 @@ module Materialized : sig
   type t
 
   val projection : t -> Projection.t
+
+  (** Private identity already admitted for that exact parser
+      occurrence. A key neither proves installation nor authorizes reading bytes. *)
+  val original_key
+    :  t
+    -> Occurrence.t
+    -> Agent_store.Installed_document_originals.Occurrence.t option
 
   (** Deliberate immutable content-owner affinity, in addition to the projection
       retaining its original Parsed. No equality or native authority claim. *)
@@ -156,6 +174,17 @@ val materialize
   -> limits:Limits.t
   -> checkpoint:(unit -> unit)
   -> (Materialized.t, Error.t) Result.t
+
+(** Derive the exact private lookup key from an actual parsed Local_capture
+    occurrence and its rendered custody. Key derivation does not imply an
+    original was installed or provide access to its bytes. *)
+val original_key
+  :  t
+  -> parsed:Parsed.t
+  -> occurrence:Occurrence.t
+  -> limits:Limits.t
+  -> checkpoint:(unit -> unit)
+  -> (Agent_store.Installed_document_originals.Occurrence.t, Error.t) Result.t
 
 (** Incoming custody must preserve every previous record and exact payload;
     compatible unknown fields from both documents survive. Child selection uses

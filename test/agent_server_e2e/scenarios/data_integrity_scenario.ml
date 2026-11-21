@@ -4,6 +4,36 @@ let cases =
   [ ( "http.audit-attribution-pagination-tamper-restart"
     , Support.Data_integrity_http.test_audit )
   ; "http.blob-bounds-digest-foreign-ownership", Support.Data_integrity_http.test_blobs
+  ; "daemon-recovery.note-share-operator", Recovery_note_share_operator_scenario.run
+  ; "daemon-recovery.asset-publication", Support.Data_integrity_http.test_recovery_assets
+  ; "daemon-recovery.converter-adoption", Support.Recovery_asset_converter.run
+  ; "embedded-recovery.owner-enrollment", Recovery_embedded_owner_scenario.run
+  ; "embedded-recovery.cold-managed-rollover", Recovery_managed_rollover_scenario.run
+  ; "embedded-recovery.headless-permissions", Recovery_headless_permission_scenario.run
+  ; "embedded-recovery.headless-exact-permission", Recovery_headless_permission_scenario.run_exact
+  ; "daemon-recovery.configured-capacity", Recovery_capacity_scenario.run
+  ; "daemon-recovery.operator-rollover", Recovery_operator_rollover_scenario.run
+  ; "daemon-recovery.connected-followup", Recovery_followup_scenario.run
+  ; "daemon-recovery.websocket-rollover", Recovery_websocket_scenario.run
+  ; "daemon-recovery.automatic-capacity", Recovery_automatic_scenario.run
+  ; "daemon-recovery.automatic-soft-checkpoint", Recovery_automatic_scenario.run_soft
+  ; "daemon-recovery.ordinary-hard-limit", Recovery_successor_guard_scenario.ordinary_hard_limit
+  ; "daemon-recovery.checkpoint-wake", Recovery_wake_admission_scenario.checkpoint
+  ; "daemon-recovery.ordinary-wake-denied", Recovery_wake_admission_scenario.denied
+  ; "daemon-recovery.ordinary-wake-at-write", Recovery_wake_admission_scenario.accepted
+  ; "daemon-recovery.near-limit-reminder", Recovery_reminder_scenario.run_stock
+  ; "daemon-recovery.near-limit-before-write", Recovery_reminder_scenario.run_cut
+  ; "daemon-recovery.near-limit-required-input", Recovery_reminder_scenario.run_tight
+  ; "daemon-recovery.successor-hint-guards", Recovery_successor_guard_scenario.run
+  ; "daemon-recovery.selected-successor-sources", Recovery_successor_selection_scenario.run
+  ; "daemon-recovery.authored-checkpoint", Recovery_checkpoint_scenario.run
+  ; "daemon-recovery.soft-checkpoint", Recovery_soft_checkpoint_scenario.run
+  ; "daemon-recovery.soft-checkpoint-lost-accept",
+    Recovery_soft_checkpoint_scenario.run_lost_accept
+  ; "daemon-recovery.authored-rollover-hooks", Recovery_rollover_hooks_scenario.run
+  ; "daemon-recovery.authored-example", Context_recovery_example_scenario.run
+  ; "daemon-recovery.installed-originals", Support.Installed_originals.run
+  ; "daemon-recovery.installed-handoff", Support.Installed_originals.run_handoff
   ; "http.export-atomic-success", Support.Data_integrity_http.test_export
   ; "http-peer.export-atomic-failures", Support.Data_integrity_download.run
   ; ( "http-peer.export-atomic-cancellation"

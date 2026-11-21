@@ -105,9 +105,11 @@ let with_team_runtime ?(sources = sources) ?reviewer_provider f =
           | false ->
             (match !queued with
              | None -> Stdlib.Seq.empty
-             | Some (name, args) ->
+             | Some (name, args, dispatched) ->
                queued := None;
-               Fixtures.call_events [ id "parent", name, args ])
+               let call_id = id "parent" in
+               Eio.Promise.resolve dispatched call_id;
+               Fixtures.call_events [ call_id, name, args ])
           | true ->
             if contains transcript "Refine the proposed verification wording."
             then (
@@ -209,38 +211,83 @@ let with_team_runtime ?(sources = sources) ?reviewer_provider f =
                   in
                   let invoke handle name args =
                     let parent = H.session_id handle in
-                    let before = (state parent).invocations in
-                    queued := Some (name, args);
-                    H.send_message
-                      handle
-                      { kind = Plain_text
-                      ; text = "Perform the requested review operation."
-                      ; attachments = []
-                      }
-                    |> protocol_ok
-                    |> ignore;
-                    let outcome = ref None in
-                    (* A completed tool also joins and persists the session's work;
-                       this observes the whole turn, including graceful child stop. *)
-                    Background_shell_tests.wait ~timeout:15. env (fun () ->
+                    let wall_clock = Eio.Stdenv.clock env in
+                    let clock = Eio.Stdenv.mono_clock env in
+                    let diagnostic =
+                      Failure_diagnostic.create ~now:(fun () -> Eio.Time.now wall_clock)
+                    in
+                    Failure_diagnostic.observe diagnostic (state parent);
+                    let dispatched, dispatch = Eio.Promise.create () in
+                    queued := Some (name, args, dispatch);
+                    let receipt =
+                      H.send_message
+                        handle
+                        { kind = Plain_text
+                        ; text = "Perform the requested review operation."
+                        ; attachments = []
+                        }
+                      |> protocol_ok
+                    in
+                    let await_stage stage f =
+                      Failure_diagnostic.mark diagnostic stage;
+                      match
+                        Eio.Time.Timeout.run
+                          (Eio.Time.Timeout.seconds clock 15.)
+                          (fun () -> Ok (f ()))
+                      with
+                      | Ok value -> value
+                      | Error `Timeout ->
+                        (match
+                           Eio.Time.Timeout.run
+                             (Eio.Time.Timeout.seconds clock 1.)
+                             (fun () -> Ok (state parent))
+                         with
+                         | Ok current -> Failure_diagnostic.observe diagnostic current
+                         | Error `Timeout -> ());
+                        Failure_diagnostic.report
+                          diagnostic
+                          ~context:
+                            [%sexp
+                              (name : string)
+                            , (receipt.operation_id : P.Id.Operation.t option)];
+                        raise Eio.Time.Timeout
+                    in
+                    let rec await_state observe () =
                       let current = state parent in
-                      outcome
-                      := List.find_map current.invocations ~f:(fun invocation ->
-                           if
-                             List.exists before ~f:(fun old ->
-                               P.Id.Invocation.equal
-                                 old.P.Invocation.context.id
-                                 invocation.context.id)
-                           then None
-                           else (
+                      match observe current with
+                      | Some outcome ->
+                        Failure_diagnostic.observe diagnostic current;
+                        outcome
+                      | None ->
+                        Eio.Time.Mono.sleep clock 0.05;
+                        await_state observe ()
+                    in
+                    let call_id =
+                      await_stage "parent provider call" (fun () ->
+                        Eio.Promise.await dispatched)
+                    in
+                    let outcome =
+                      await_stage
+                        "matching model invocation publication"
+                        (await_state (fun current ->
+                           List.find_map current.invocations ~f:(fun invocation ->
+                             let context = invocation.P.Invocation.context in
                              match invocation.status with
                              | Published result
-                               when P.Invocation.equal_origin
-                                      invocation.context.origin
-                                      Model -> Some result
-                             | _ -> None));
-                      Option.is_none current.active_operation && Option.is_some !outcome);
-                    Option.value_exn !outcome
+                               when P.Invocation.equal_origin context.origin Model
+                                    && String.equal context.tool_name name
+                                    && Option.equal
+                                         String.equal
+                                         context.provider_call_id
+                                         (Some call_id) -> Some result
+                             | _ -> None)))
+                    in
+                    (* Tool publication can precede durable retirement of the parent turn. *)
+                    await_stage
+                      "parent turn retirement"
+                      (await_state (fun current ->
+                         Option.some_if (Option.is_none current.active_operation) ()));
+                    outcome
                   in
                   f ~env ~daemon create invoke state continuations)))))
 ;;

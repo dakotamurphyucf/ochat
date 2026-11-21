@@ -595,6 +595,11 @@ let initialized_restart
       ~admission
       ~completed
   =
+  (* Select snapshots by event count during this direct, fail-fast activation.
+     Exercise overlapping retention explicitly at the selected call below. *)
+  let server = configuration.Agent_server.Config.server in
+  let durability = { server.durability with snapshot_every_ms = Int.max_value } in
+  let configuration = { configuration with server = { server with durability } } in
   with_headless_daemon
     ~provider_limit:2
     env
@@ -717,7 +722,7 @@ let initialized_restart
             while this NEW Existing-session occurrence owns its NEW Run. *)
          A.Recurrence_child_origin.validate_definition origin original_definition
          |> protocol_ok;
-         let next_admission =
+         let activate () =
            Service.activate
              service
              ~controller:parent
@@ -726,8 +731,35 @@ let initialized_restart
              ~target_actor:proof
              ~intent
              ~attempt
-           |> Run_service_tests.activated child
          in
+         let before = state child in
+         let execution () =
+           Entry.frontier (entry parent)
+           |> protocol_ok
+           |> fun frontier -> Frontier.find_execution frontier (Intent.occurrence intent)
+         in
+         Controller_retention_fixture.with_retention
+           sw
+           (Daemon.registry daemon)
+           parent
+           (fun () ->
+              let session =
+                Intent.occurrence intent
+                |> A.Recurrence_identity.Occurrence.definition
+                |> A.Recurrence_identity.Definition.controller
+              in
+              Factory.check_registered_owner (Daemon.factory daemon) parent ~session
+              |> protocol_ok;
+              match activate () with
+              | Error { code = Conflict; retryable = false; _ } -> ()
+              | Error error -> protocol_ok (Error error)
+              | Ok _ -> failwith "fresh admission crossed exact controller retention");
+         let after = state child in
+         assert (Option.is_none (execution ()));
+         assert (Option.equal A.Run_state.equal before.run_state after.run_state);
+         assert (not (Owner.is_loaded child.runtime));
+         [%test_eq: int * int] counts (!constructions, !providers);
+         let next_admission = activate () |> Run_service_tests.activated child in
          assert (not (P.Id.Run.equal admission.run_id next_admission.run_id));
          let final =
            Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 15. (fun () ->

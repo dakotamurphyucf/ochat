@@ -793,6 +793,47 @@ let%expect_test "known required semantics are accepted but invalid shapes remain
     |}]
 ;;
 
+let%expect_test "recognized semantic requirements accumulate only when opted in" =
+  let codec = identity_codec ~semantics:[ "first"; "common"; "last" ] (shape []) in
+  let capture codec ~markers ~extra =
+    Document.inspect
+      ~limits
+      (`Object
+          [ "format", `String "ochat.document"
+          ; "schema_version", `Number "1"
+          ; "kind", `String "example"
+          ; "required_semantics", `Array (List.map markers ~f:(fun name -> `String name))
+          ; "future_envelope", `String extra
+          ; "payload", `Object []
+          ])
+    |> ok
+    |> Domain_codec.decode codec
+    |> ok
+  in
+  let previous = capture codec ~markers:[ "first"; "common" ] ~extra:"same" in
+  let incoming = capture codec ~markers:[ "common"; "last" ] ~extra:"same" in
+  print_error (Domain_codec.adopt codec ~previous ~incoming);
+  let merge ~previous ~incoming =
+    Domain_codec.adopt ~merge_required_semantics:true codec ~previous ~incoming
+  in
+  let adopted = merge ~previous ~incoming |> ok |> Domain_codec.encode codec |> ok in
+  print_s [%sexp (Document.required_semantics adopted : string list)];
+  let conflicting = capture codec ~markers:[ "last" ] ~extra:"changed" in
+  print_error (merge ~previous ~incoming:conflicting);
+  let broader = identity_codec ~semantics:[ "unknown" ] (shape []) in
+  let unknown = capture broader ~markers:[ "unknown" ] ~extra:"same" in
+  print_error (merge ~previous:unknown ~incoming);
+  print_error (merge ~previous ~incoming:unknown);
+  [%expect
+    {|
+    (Extension_conflict (required_semantics))
+    (first common last)
+    (Extension_conflict (future_envelope))
+    (Required_semantics_unknown unknown)
+    (Required_semantics_unknown unknown)
+    |}]
+;;
+
 let%expect_test
     "property: arbitrary extensions survive edits through actual scalar domain values"
   =

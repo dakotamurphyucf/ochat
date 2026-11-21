@@ -24,6 +24,7 @@ type error =
 type result_contract =
   | Native_output
   | Invocation_v1
+  | Protected_recovery_v1
 [@@deriving sexp, equal]
 
 type implementation =
@@ -54,10 +55,54 @@ let reference binding = binding.reference
 let implementation binding = binding.implementation
 let descriptor binding = binding.descriptor
 
+let require_plain_invocation binding =
+  match binding.result_contract with
+  | Protected_recovery_v1 ->
+    error
+      "capability.protected_owner_required"
+      "Recovery requires its owning protected session dispatch."
+  | Native_output | Invocation_v1 -> Ok ()
+;;
+
 let check_delegation binding =
   match binding.delegation_restriction with
-  | None -> Ok ()
+  | None -> require_plain_invocation binding
   | Some message -> error "delegation.native_context_unavailable" message
+;;
+
+module Local_history_tool = struct
+  type t =
+    | List_windows
+    | List_items
+    | Search
+    | Read_text
+    | Read_media
+  [@@deriving enumerate, equal]
+
+  let name = function
+    | List_windows -> "context_list_windows"
+    | List_items -> "context_list_items"
+    | Search -> "context_search"
+    | Read_text -> "context_read_text"
+    | Read_media -> "context_read_media"
+  ;;
+
+  let implementation_revision tool =
+    Chatmd_shell_spec.Source_ref.digest ("ochat.recovery.history.native.v1:" ^ name tool)
+  ;;
+end
+
+let check_generated_foreground binding =
+  match
+    binding.delegation_restriction, binding.implementation, binding.result_contract
+  with
+  | None, Native _, Protected_recovery_v1
+    when List.exists Local_history_tool.all ~f:(fun tool ->
+           String.equal binding.reference.name (Local_history_tool.name tool)
+           && String.equal
+                binding.reference.implementation_revision
+                (Local_history_tool.implementation_revision tool)) -> Ok ()
+  | _ -> check_delegation binding
 ;;
 
 let native_implementation binding =
@@ -123,6 +168,9 @@ let bind
     | Native _, Native_output -> interface
     | Native _, Invocation_v1 ->
       [%sexp ("ochat.native-result.v1" : string), (interface : string)] |> Sexp.to_string
+    | Native _, Protected_recovery_v1 ->
+      [%sexp ("ochat.protected-recovery.v1" : string), (interface : string)]
+      |> Sexp.to_string
     | Managed target, _ ->
       [%sexp
         ("ochat.managed-tool.v1" : string)

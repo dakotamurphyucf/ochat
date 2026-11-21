@@ -137,6 +137,50 @@ let atom_to_jsonaf ~limits ~state_document delta =
           [ "kind", `String "canonical_history_replaced"
           ; "entries", (X.list_json P.History.entry_to_json) value
           ])
+  | Recovery_window_expired scope ->
+    Ok (
+      `Object
+        [ "kind", `String "recovery_window_expired"
+        ; "scope", P.Recovery_window.Scope.to_json scope
+        ])
+  | Recovery_window_enabled (owner, window) ->
+    Ok
+      (`Object
+          [ "kind", `String "recovery_window_enabled"
+          ; "owner", P.Session_ref.to_json owner
+          ; "window", P.Id.Context_window.to_json window
+          ])
+  | Recovery_effective_prepared record ->
+    Ok
+      (`Object
+          [ "kind", `String "recovery_effective_prepared"
+          ; "record", Recovery_effective_record.to_jsonaf record
+          ])
+  | Recovery_reminder_changed change ->
+    Ok
+      (`Object
+          [ "kind", `String "recovery_reminder_changed"
+          ; "change", Recovery_reminder.Change.to_json change
+          ])
+  | Recovery_effective_attempt_changed receipt ->
+    Ok
+      (`Object
+         [ "kind", `String "recovery_effective_attempt_changed"
+         ; "receipt", Recovery_effective_receipts.to_jsonaf receipt
+         ])
+  | Recovery_summary_compacted (archive, history, capture) ->
+    let additions =
+      match capture with
+      | `Canonical -> []
+      | `Canonical_and_effective -> [ "effective_transfer", `True ]
+    in
+    Ok
+      (`Object
+         ([ "kind", `String "recovery_summary_compacted"
+          ; "archive", Session_state_document.archive_reference_to_jsonaf archive
+          ; "entries", X.list_json P.History.entry_to_json history
+          ]
+          @ additions))
   | Deferred_entries_enqueued value ->
     Ok
       (`Object
@@ -327,6 +371,22 @@ let atom_to_jsonaf ~limits ~state_document delta =
       (`Object
           [ "kind", `String "invocation_reconciled"
           ; "value", P.Invocation.Storage.to_json value
+          ])
+  | Recovery_note_changed change ->
+    Ok
+      (`Object
+          [ "kind", `String "recovery_note_changed"
+          ; "value", Recovery_note_change.to_json change
+          ])
+  | Recovery_rollover_changed change ->
+    Ok (`Object [ "kind", `String "recovery_rollover_changed"; "value", Recovery_rollover.Change.to_json change ])
+  | Recovery_rollover_committed change ->
+    Ok (`Object [ "kind", `String "recovery_rollover_committed"; "value", Recovery_rollover.Commit.to_json change ])
+  | Recovery_note_share_changed change ->
+    Ok
+      (`Object
+          [ "kind", `String "recovery_note_share_changed"
+          ; "value", Recovery_note_share_change.to_json change
           ])
   | Instruction_selection_changed value ->
     let%map.Result json = Instruction_selection.to_jsonaf value in
@@ -548,6 +608,34 @@ let atom_of_jsonaf ~limits json =
     Result.map
       (X.required fields "entries" (X.list P.History.entry_of_json))
       ~f:(fun value -> Delta.Canonical_history_replaced value)
+  | "recovery_window_expired" ->
+    let%map scope = X.required fields "scope" P.Recovery_window.Scope.of_json in
+    Delta.Recovery_window_expired scope
+  | "recovery_window_enabled" ->
+    let%bind owner = X.required fields "owner" P.Session_ref.of_json in
+    let%map window = X.required fields "window" P.Id.Context_window.of_json in
+    Delta.Recovery_window_enabled (owner, window)
+  | "recovery_effective_prepared" ->
+    let%map record = X.required fields "record" Recovery_effective_record.of_jsonaf in
+    Delta.Recovery_effective_prepared record
+  | "recovery_reminder_changed" ->
+    let%map change = X.required fields "change" Recovery_reminder.Change.of_json in
+    Delta.Recovery_reminder_changed change
+  | "recovery_effective_attempt_changed" ->
+    let%map receipt = X.required fields "receipt" Recovery_effective_receipts.of_jsonaf in
+    Delta.Recovery_effective_attempt_changed receipt
+  | "recovery_summary_compacted" ->
+    let%bind archive =
+      X.required fields "archive" Session_state_document.archive_reference_of_jsonaf
+    in
+    let%bind history = X.required fields "entries" (X.list P.History.entry_of_json) in
+    let%map capture =
+      match J.optional fields "effective_transfer" with
+      | None -> Ok `Canonical
+      | Some `True -> Ok `Canonical_and_effective
+      | Some _ -> Error (P.Error.invalid_request "invalid summary effective transfer")
+    in
+    Delta.Recovery_summary_compacted (archive, history, capture)
   | "deferred_entries_enqueued" ->
     Result.map
       (X.required fields "entries" (X.list P.History.entry_of_json))
@@ -716,6 +804,20 @@ let atom_of_jsonaf ~limits json =
   | "invocation_reconciled" ->
     Result.map (X.required fields "value" P.Invocation.Storage.of_json) ~f:(fun value ->
       Delta.Invocation_reconciled value)
+  | "recovery_note_changed" ->
+    let%map.Result change = X.required fields "value" Recovery_note_change.of_json in
+    Delta.Recovery_note_changed change
+  | "recovery_rollover_changed" ->
+    let%map.Result change = X.required fields "value" Recovery_rollover.Change.of_json in
+    Delta.Recovery_rollover_changed change
+  | "recovery_rollover_committed" ->
+    let%map.Result change = X.required fields "value" Recovery_rollover.Commit.of_json in
+    Delta.Recovery_rollover_committed change
+  | "recovery_note_share_changed" ->
+    let%map.Result change =
+      X.required fields "value" Recovery_note_share_change.of_json
+    in
+    Delta.Recovery_note_share_changed change
   | "instruction_selection_changed" ->
     let%map.Result value = X.required fields "value" Instruction_selection.of_jsonaf in
     Delta.Instruction_selection_changed value
@@ -870,6 +972,33 @@ let shape =
                          ~identity_field:"id"
                          Session_record_shapes.history_entry )
                    ] )
+             ; ( "recovery_window_expired"
+               , X.shape_exn [ "kind", D.Shape.value; "scope", D.Shape.value ] )
+             ; ( "recovery_window_enabled"
+               , X.shape_exn
+                   [ "kind", D.Shape.value
+                   ; "owner", Recovery_window_ledger.Source.owner_shape
+                   ; "window", D.Shape.value
+                   ] )
+             ; ( "recovery_effective_prepared"
+               , X.shape_exn
+                   [ "kind", D.Shape.value; "record", Recovery_effective_record.shape ] )
+             ; ( "recovery_reminder_changed"
+               , X.shape_exn
+                   [ "kind", D.Shape.value; "change", Recovery_reminder.Change.shape ] )
+             ; ( "recovery_effective_attempt_changed"
+               , X.shape_exn
+                   [ "kind", D.Shape.value; "receipt", Recovery_effective_receipts.shape ] )
+             ; ( "recovery_summary_compacted"
+               , X.shape_exn
+                   [ "kind", D.Shape.value
+                   ; "effective_transfer", D.Shape.value
+                   ; "archive", Session_state_document.archive_reference_shape
+                   ; ( "entries"
+                     , X.array_shape_exn
+                         ~identity_field:"id"
+                         Session_record_shapes.history_entry )
+                   ] )
              ; ( "deferred_entries_enqueued"
                , X.shape_exn
                    [ "kind", D.Shape.value
@@ -973,6 +1102,16 @@ let shape =
              ; ( "invocation_reconciled"
                , X.shape_exn
                    [ "kind", D.Shape.value; "value", Session_record_shapes.invocation ] )
+             ; ( "recovery_note_changed"
+               , X.shape_exn
+                   [ "kind", D.Shape.value; "value", Recovery_note_change.shape ] )
+             ; ( "recovery_note_share_changed"
+               , X.shape_exn
+                   [ "kind", D.Shape.value; "value", Recovery_note_share_change.shape ] )
+             ; ( "recovery_rollover_changed"
+               , X.shape_exn [ "kind", D.Shape.value; "value", D.Shape.value ] )
+             ; ( "recovery_rollover_committed"
+               , X.shape_exn [ "kind", D.Shape.value; "value", D.Shape.value ] )
              ; ( "instruction_selection_changed"
                , X.shape_exn
                    [ "kind", D.Shape.value; "value", Instruction_selection.shape ] )
@@ -1711,6 +1850,23 @@ let apply t ?transaction_metadata ~limits previous =
         let%bind child = field "value" in
         patch_member ~limits ~shape payload [ destination ] ~identity_field:key child
       in
+      let patch_archive payload =
+        let%bind child = field "archive" in
+        patch_member
+          ~limits
+          ~shape:Session_state_document.archive_reference_shape
+          payload
+          [ "conversation"; "compaction_archives" ]
+          ~identity_field:"operation_id"
+          child
+      in
+      let patch_entries payload =
+        let%bind entries = field "entries" in
+        match entries with
+        | `Array entries ->
+          List.fold_result entries ~init:payload ~f:(patch_history ~limits)
+        | _ -> Error (path_error [ "changes" ] "invalid admitted history entries")
+      in
       match kind with
       | "permission_changed" -> member "permissions" "id" Session_record_shapes.permission
       | "grant_changed" -> member "grants" "id" Session_record_shapes.grant
@@ -1753,22 +1909,13 @@ let apply t ?transaction_metadata ~limits previous =
           ~identity_field:"id"
           child
       | "compaction_archived" | "history_edited" | "history_deleted" ->
-        let%bind child = field "archive" in
-        patch_member
-          ~limits
-          ~shape:Session_state_document.archive_reference_shape
-          payload
-          [ "conversation"; "compaction_archives" ]
-          ~identity_field:"operation_id"
-          child
+        patch_archive payload
+      | "recovery_summary_compacted" ->
+        let%bind payload = patch_archive payload in
+        patch_entries payload
       | "canonical_entries_appended"
       | "canonical_history_replaced"
-      | "deferred_entries_enqueued" ->
-        let%bind entries = field "entries" in
-        (match entries with
-         | `Array entries ->
-           List.fold_result entries ~init:payload ~f:(patch_history ~limits)
-         | _ -> Error (path_error [ "changes" ] "invalid admitted history entries"))
+      | "deferred_entries_enqueued" -> patch_entries payload
       | "delivery_committed" ->
         let%bind delivery = field "delivery" in
         let%bind payload =

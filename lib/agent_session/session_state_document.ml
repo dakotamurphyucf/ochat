@@ -303,6 +303,7 @@ let archive_kind_to_jsonaf = function
   | Edit -> `String "edit"
   | Delete -> `String "delete"
   | Pending_input -> `String "pending_input"
+  | Rollover -> `String "rollover"
 ;;
 
 let archive_kind_of_jsonaf =
@@ -315,6 +316,7 @@ let archive_kind_of_jsonaf =
     ; "edit", Edit
     ; "delete", Delete
     ; "pending_input", Pending_input
+    ; "rollover", Rollover
     ]
 ;;
 
@@ -785,6 +787,20 @@ let project_fields_with_presence
       Instruction_selection.to_jsonaf selection
       |> Result.map ~f:(fun raw -> [ "instruction_selection", raw ])
   in
+  let%bind recovery_note_fields =
+    match t.recovery_notes with
+    | None -> Ok []
+    | Some catalog ->
+      let%map raw = Recovery_note_session.to_json catalog in
+      [ "recovery_notes", raw ]
+  in
+  let%bind recovery_note_share_fields =
+    match t.recovery_note_shares with
+    | None -> Ok []
+    | Some shares ->
+      let%map raw = Recovery_note_share.to_json shares in
+      [ "recovery_note_shares", raw ]
+  in
   let%map recurrence_catalog_fields =
     match t.recurrence_catalog with
     | None ->
@@ -819,6 +835,16 @@ let project_fields_with_presence
        , (X.list_json Managed_submission.to_jsonaf) t.managed_submissions )
      ; "managed_stops", (X.list_json Managed_stop.to_jsonaf) t.managed_stops
      ]
+     @ Option.value_map t.recovery_rollover ~default:[] ~f:(fun ledger ->
+       [ "recovery_rollover", Recovery_rollover.to_json ledger ])
+     @ Option.value_map t.recovery_windows ~default:[] ~f:(fun ledger ->
+       [ "recovery_windows", Recovery_window_ledger.to_jsonaf ledger ])
+     @ Option.value_map t.recovery_installed_originals ~default:[] ~f:(fun receipt ->
+       [ "recovery_installed_originals", Recovery_installed_originals.to_jsonaf receipt ])
+     @ Option.value_map t.recovery_effective ~default:[] ~f:(fun ledger ->
+       [ "recovery_effective", Recovery_effective_ledger.to_jsonaf ledger ])
+     @ Option.value_map t.recovery_reminders ~default:[] ~f:(fun ledger ->
+       [ "recovery_reminders", Recovery_reminder.to_json ledger ])
      @ run_state_fields run_state_field t.run_state
      @ goal_catalog_fields
      @ goal_accounts_fields
@@ -828,6 +854,8 @@ let project_fields_with_presence
      @ policy_canonical_usage_fields
      @ goal_policy_contributions_fields
      @ instruction_selection_fields
+     @ recovery_note_fields
+     @ recovery_note_share_fields
      @ recurrence_catalog_fields
      @ [ ( "moderator_executions"
          , (X.list_json P.Moderator_execution.to_json) t.moderator_executions )
@@ -916,6 +944,32 @@ let state_fields_of_jsonaf ?capture ~limits json =
   in
   let%bind automatic_turn_budget =
     X.required fields "automatic_turn_budget" (X.nullable Automatic_turn_budget.of_jsonaf)
+  in
+  let%bind recovery_windows =
+    match D.Json.field json ~name:"recovery_windows" with
+    | Absent -> Ok None
+    | Null -> Error (P.Error.invalid_request "recovery_windows must be a ledger")
+    | Value ledger -> Recovery_window_ledger.of_jsonaf ledger |> Result.map ~f:Option.some
+  in
+  let%bind recovery_installed_originals =
+    match D.Json.field json ~name:"recovery_installed_originals" with
+    | Absent -> Ok None
+    | Null -> Error (P.Error.invalid_request "invalid installed original receipt")
+    | Value receipt ->
+      Recovery_installed_originals.of_jsonaf receipt |> Result.map ~f:Option.some
+  in
+  let%bind recovery_effective =
+    match D.Json.field json ~name:"recovery_effective" with
+    | Absent -> Ok None
+    | Null -> Error (P.Error.invalid_request "recovery_effective must be a ledger")
+    | Value ledger ->
+      Recovery_effective_ledger.of_jsonaf ledger |> Result.map ~f:Option.some
+  in
+  let%bind recovery_reminders =
+    match D.Json.field json ~name:"recovery_reminders" with
+    | Absent -> Ok None
+    | Null -> Error (P.Error.invalid_request "recovery_reminders must be a ledger")
+    | Value ledger -> Recovery_reminder.of_json ledger |> Result.map ~f:Option.some
   in
   let%bind permissions = X.required fields "permissions" (X.list P.Permission.of_json) in
   let%bind grants = X.required fields "grants" (X.list P.Grant.of_json) in
@@ -1020,6 +1074,24 @@ let state_fields_of_jsonaf ?capture ~limits json =
       (X.nullable Instruction_selection.of_jsonaf)
     |> Result.map ~f:Option.join
   in
+  let%bind recovery_notes =
+    J.optional_as
+      fields
+      "recovery_notes"
+      (Recovery_note_session.of_json ~session_id:identity.session_id)
+  in
+  let%bind recovery_rollover =
+    match D.Json.field json ~name:"recovery_rollover" with
+    | Absent -> Ok None
+    | Null -> Error (P.Error.invalid_request "recovery_rollover must be a ledger")
+    | Value raw -> Result.map (Recovery_rollover.of_json raw) ~f:Option.some
+  in
+  let%bind recovery_note_shares =
+    J.optional_as
+      fields
+      "recovery_note_shares"
+      (Recovery_note_share.of_json ~session_id:identity.session_id)
+  in
   let%bind recurrence_catalog =
     J.optional_as fields "recurrence_catalog" (X.nullable Recurrence_catalog.of_jsonaf)
     |> Result.map ~f:Option.join
@@ -1063,6 +1135,10 @@ let state_fields_of_jsonaf ?capture ~limits json =
     ; conversation
     ; active_operation
     ; automatic_turn_budget
+    ; recovery_windows
+    ; recovery_installed_originals
+    ; recovery_effective
+    ; recovery_reminders
     ; permissions
     ; grants
     ; jobs
@@ -1082,6 +1158,9 @@ let state_fields_of_jsonaf ?capture ~limits json =
     ; policy_canonical_usage
     ; goal_policy_contributions
     ; instruction_selection
+    ; recovery_notes
+    ; recovery_note_shares
+    ; recovery_rollover
     ; recurrence_catalog
     ; subscriptions
     ; deliveries
@@ -1117,6 +1196,10 @@ let state_shape =
     ; "conversation", conversation_shape
     ; "active_operation", X.nullable_shape Shapes.operation
     ; "automatic_turn_budget", X.nullable_shape Automatic_turn_budget.shape
+    ; "recovery_windows", Recovery_window_ledger.shape
+    ; "recovery_installed_originals", Recovery_installed_originals.shape
+    ; "recovery_effective", Recovery_effective_ledger.shape
+    ; "recovery_reminders", Recovery_reminder.shape
     ; "permissions", X.array_shape_exn ~identity_field:"id" Shapes.permission
     ; "grants", X.array_shape_exn ~identity_field:"id" Shapes.grant
     ; "jobs", X.array_shape_exn ~identity_field:"id" Shapes.job
@@ -1136,6 +1219,9 @@ let state_shape =
     ; "policy_canonical_usage", D.Shape.value
     ; "goal_policy_contributions", D.Shape.value
     ; "instruction_selection", X.nullable_shape Instruction_selection.shape
+    ; "recovery_notes", D.Shape.value
+    ; "recovery_note_shares", D.Shape.value
+    ; "recovery_rollover", D.Shape.value
     ; "recurrence_catalog", X.nullable_shape Recurrence_catalog.shape
     ; "managed_stops", X.array_shape_exn ~identity_field:"id" Managed_stop.shape
     ; ( "moderator_executions"
@@ -1235,6 +1321,36 @@ let validate_run_capacity_only (state : S.t) document =
             { path = [ "run_state" ]; reason = "admitted run index is missing" }))
 ;;
 
+let validate_raw_effective_capacity document =
+  match D.Json.field (D.Document.payload document) ~name:"recovery_effective" with
+  | Absent -> Ok ()
+  | Null -> Error (D.Error.Malformed "recovery_effective must be a ledger")
+  | Value ledger -> Recovery_effective_ledger.validate_encoded ledger
+;;
+
+let validate_raw_recovery_window_capacity document =
+  match D.Json.field (D.Document.payload document) ~name:"recovery_windows" with
+  | Absent -> Ok ()
+  | Null -> Error (D.Error.Malformed "recovery_windows must be a ledger")
+  | Value ledger -> Recovery_window_ledger.validate_encoded ledger
+;;
+
+let validate_raw_installed_original_capacity document =
+  match
+    D.Json.field (D.Document.payload document) ~name:"recovery_installed_originals"
+  with
+  | Absent -> Ok ()
+  | Null -> Error (D.Error.Malformed "invalid installed original receipt")
+  | Value receipt -> Recovery_installed_originals.validate_encoded receipt
+;;
+
+let validate_raw_recovery_note_share_capacity document =
+  match D.Json.field (D.Document.payload document) ~name:"recovery_note_shares" with
+  | Absent -> Ok ()
+  | Null -> Error (D.Error.Malformed "recovery_note_shares must be a ledger")
+  | Value ledger -> Recovery_note_share.validate_encoded ledger
+;;
+
 let validate_raw_queue_capacity document =
   let raw_moderator =
     match D.Json.field (D.Document.payload document) ~name:"moderator" with
@@ -1266,6 +1382,10 @@ end
 let validate_run_capacity basis document ~limits =
   let state = Capacity_basis.state basis in
   let open Result.Let_syntax in
+  let%bind () = validate_raw_recovery_window_capacity document in
+  let%bind () = validate_raw_installed_original_capacity document in
+  let%bind () = validate_raw_effective_capacity document in
+  let%bind () = validate_raw_recovery_note_share_capacity document in
   let%bind () = validate_raw_queue_capacity document in
   let%bind () =
     match D.Json.field (D.Document.payload document) ~name:"ingress_registrations" with
@@ -2023,6 +2143,10 @@ let decode_with_evidence ?previous ~limits document =
   let open Result.Let_syntax in
   let%bind document = upgrade document ~limits in
   let%bind () = check_storage_semantics document in
+  let%bind () = validate_raw_recovery_window_capacity document in
+  let%bind () = validate_raw_installed_original_capacity document in
+  let%bind () = validate_raw_effective_capacity document in
+  let%bind () = validate_raw_recovery_note_share_capacity document in
   let%bind () = validate_raw_queue_capacity document in
   let capture = Decode_evidence.Capture.create ?previous ~limits () in
   let%bind carrier =
@@ -2651,6 +2775,39 @@ let encode t ~limits =
   document
 ;;
 
+let make_archive_document state ~limits ~encode_original =
+  let open Result.Let_syntax in
+  (* Every archive reference binds this same projection, including those for
+     queued input. The caller may already have encoded the original document. *)
+  let value = value state in
+  let%bind state =
+    match value.recovery_notes, value.recovery_note_shares, value.recovery_rollover with
+    | None, None, None -> encode_original ()
+    | _ ->
+      let redacted =
+        with_value
+          state
+          { value with
+            recovery_notes = None
+          ; recovery_note_shares = None
+          ; recovery_rollover = None
+          }
+      in
+      encode redacted ~limits
+  in
+  (* Admit the encoded child without replacing its captured JSON representation. *)
+  let%bind _ = decode ~limits state in
+  D.Document.create
+    ~limits
+    ~kind:"session.compaction_archive"
+    ~version:1
+    ~payload:(`Object [ "state", D.Document.json state ])
+;;
+
+let archive_document state ~limits =
+  make_archive_document state ~limits ~encode_original:(fun () -> encode state ~limits)
+;;
+
 let adopt previous ~limits incoming =
   let open Result.Let_syntax in
   let%bind () = validate_run_carrier previous in
@@ -2713,6 +2870,36 @@ let adopt previous ~limits incoming =
   let%bind () = validate_goal_carrier incoming in
   let%bind () = validate_instruction_carrier previous in
   let%bind () = validate_instruction_carrier incoming in
+  let%bind () =
+    Recovery_note_session.check_unchanged
+      (value previous).recovery_notes
+      ~incoming:(value incoming).recovery_notes
+    |> X.document_result
+  in
+  let%bind () =
+    Recovery_note_share.check_unchanged
+      (value previous).recovery_note_shares
+      ~incoming:(value incoming).recovery_note_shares
+    |> X.document_result
+  in
+  let%bind () =
+    Recovery_reminder.check_unchanged
+      (value previous).recovery_reminders
+      ~incoming:(value incoming).recovery_reminders
+    |> X.document_result
+  in
+  let%bind () =
+    Recovery_rollover.check_unchanged
+      (value previous).recovery_rollover
+      ~incoming:(value incoming).recovery_rollover
+    |> X.document_result
+  in
+  let%bind () =
+    S.Compaction_archive.check_rollover_unchanged
+      (value previous).conversation.compaction_archives
+      ~incoming:(value incoming).conversation.compaction_archives
+    |> X.document_result
+  in
   let%bind () =
     validate_instruction_update
       (value previous).instruction_selection
@@ -2796,17 +2983,29 @@ let retire_canonical_entries t ~retained_ids ~initial_count ~limits =
   let%bind payload = replace payload "conversation" conversation in
   let%bind raw = replace (D.Document.json document) "payload" payload in
   let%bind document = D.Document.inspect ~limits raw in
-  let%bind carrier =
-    D.Domain_codec.decode
-      (codec ~capture:None ~limits ~presence:Session_state_presence.authored)
-      document
+  let presence = Session_state_presence.authored in
+  let%bind retirement_codec =
+    match previous.recovery_windows with
+    | None -> Ok (codec ~capture:None ~limits ~presence)
+    | Some _ ->
+      (* The filtered carrier temporarily retains the previous ledger. Its
+         checked replacement is installed before full State admission. *)
+      D.Domain_codec.create
+        ~limits
+        ~kind:"session.state"
+        ~version:current_version
+        ~shape
+        ~supported_semantics:Session_storage_semantics.supported
+        ~decode:(fun json -> X.document_result (state_fields_of_jsonaf ~limits json))
+        ~encode:(fun state -> X.document_result (state_to_jsonaf state ~limits ~presence))
   in
-  let%map state =
-    Pending_carrier_admission.rehydrate
-      (D.Extension_carrier.value carrier)
-      ~document
-      ~limits
+  let%bind carrier = D.Domain_codec.decode retirement_codec document in
+  let rehydrate =
+    match previous.recovery_windows with
+    | None -> Pending_carrier_admission.rehydrate
+    | Some _ -> Pending_carrier_admission.rehydrate_transaction_prefix
   in
+  let%map state = rehydrate (D.Extension_carrier.value carrier) ~document ~limits in
   { carrier = D.Extension_carrier.with_value carrier state
   ; lifecycle_basis = t.lifecycle_basis
   ; original = t.original
@@ -2846,6 +3045,26 @@ let retire_canonical_suffix t ~retained_ids ~limits =
       ~limits
 ;;
 
+let retire_canonical_compaction t ~history ~limits =
+  let canonical = (value t).conversation.canonical_history in
+  let ids =
+    List.map history ~f:(fun (entry : P.History.entry) -> entry.id)
+    |> Hash_set.of_list (module P.History.Id)
+  in
+  let retained_ids =
+    List.filter_map canonical ~f:(fun entry ->
+      Option.some_if (Hash_set.mem ids entry.id) entry.id)
+  in
+  retire_canonical_entries
+    t
+    ~retained_ids
+    ~initial_count:
+      (Int.min
+         (value t).conversation.initial_prompt_entry_count
+         (List.length retained_ids))
+    ~limits
+;;
+
 let retire_canonical_deletion t ~deletion ~limits =
   let open Result.Let_syntax in
   let%bind () =
@@ -2883,16 +3102,12 @@ let transfer_pending_internal
     | false, None -> Ok ()
     | (true | false), Some reference ->
       let%bind captured =
-        D.Document.create
-          ~limits
-          ~kind:"session.compaction_archive"
-          ~version:1
-          ~payload:(`Object [ "state", D.Document.json previous_document ])
+        make_archive_document t ~limits ~encode_original:(fun () -> Ok previous_document)
       in
       let kind_allowed =
         match reference.Session_state.Compaction_archive.kind with
         | Pending_input | Reset | Rebuild | Upgrade -> true
-        | Compaction | Edit | Delete -> false
+        | Compaction | Edit | Delete | Rollover -> false
       in
       if
         kind_allowed
@@ -3009,6 +3224,9 @@ let transfer_pending_internal
            next.conversation.pending_dispositions
     then Ok ()
     else Error (invalid "pending custody transfer differs from pure candidate")
+  in
+  let incoming =
+    with_value incoming { incoming_value with recovery_windows = next.recovery_windows }
   in
   Ok
     { incoming with
@@ -3155,7 +3373,8 @@ let encode_ordered_prefix_with_evidence t ~limits =
   in
   let%bind native = S.Native_validation.create (value t) |> X.document_result in
   let%bind () =
-    S.Native_validation.validate_remaining native ~policy_revision |> X.document_result
+    S.Native_validation.validate_ordered_prefix native ~policy_revision
+    |> X.document_result
   in
   encode_prefix_fields_with_evidence t ~limits
 ;;
@@ -3167,6 +3386,10 @@ let encode_ordered_prefix t ~limits =
 let decode_prefix ?previous ~limits document =
   let open Result.Let_syntax in
   let%bind () = check_storage_semantics document in
+  let%bind () = validate_raw_recovery_window_capacity document in
+  let%bind () = validate_raw_installed_original_capacity document in
+  let%bind () = validate_raw_effective_capacity document in
+  let%bind () = validate_raw_recovery_note_share_capacity document in
   let%bind () = validate_raw_queue_capacity document in
   let capture = Decode_evidence.Capture.create ?previous ~limits () in
   let%bind carrier =
@@ -3272,7 +3495,10 @@ module Encoded = struct
         prefix_codec ~capture:None ~limits ~presence:(prefix_presence previous)
     in
     let%bind carrier =
+      (* A later Created can introduce a recognized state semantics marker.
+         Preserve both sets when replay adopts that historical carrier. *)
       D.Domain_codec.adopt
+        ~merge_required_semantics:true
         merge_codec
         ~previous:previous.carrier
         ~incoming:incoming.carrier
@@ -3560,7 +3786,12 @@ module Transaction = struct
         invalid
           "history continuation changed its exact candidate or accounting projection"
     in
-    let%map _ = encode admitted ~limits in
+    let encode_next =
+      match next.recovery_windows with
+      | None -> encode
+      | Some _ -> encode_prefix
+    in
+    let%map _ = encode_next admitted ~limits in
     { staged = admitted }
   ;;
 
@@ -3734,6 +3965,39 @@ module Transaction = struct
   let checkpoint t ~limits =
     let%map.Result _ = encode t.staged ~limits in
     t.staged
+  ;;
+
+  let retire_administrative_history t ~original ~(next : S.t) ~limits =
+    let open Result.Let_syntax in
+    let%bind archive =
+      Recovery_window_capture.rollover_replacement_archive (value { staged = original })
+        ~incoming:next
+      |> X.document_result
+    in
+    match archive with
+    | None -> Ok t
+    | Some archive ->
+      let%bind document = archive_document original ~limits in
+      if
+        not
+          (String.equal
+             archive.sha256
+             (Agent_store.Document_record.digest (D.Document.to_string document)))
+      then
+        Error
+          (D.Error.Invalid_field
+             { path = [ "conversation"; "compaction_archives" ]
+             ; reason =
+                 "administrative archive does not bind the exact previous admitted document"
+             })
+      else
+        let%map staged =
+          retire_canonical_compaction
+            t.staged
+            ~history:next.conversation.canonical_history
+            ~limits
+        in
+        { staged }
   ;;
 
   let transfer_pending t ~plan ~archive ~expiry_archive ~limits =

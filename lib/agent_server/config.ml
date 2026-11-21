@@ -66,6 +66,7 @@ module Server = struct
 
   type t =
     { data_dir : string
+    ; recovery_capacity : Recovery_capacity_configuration.t option [@sexp.option]
     ; recurrence_automation : Recurrence_automation_configuration.t option [@sexp.option]
     ; recurrence_execution : Recurrence_execution_configuration.t option [@sexp.option]
     ; project_sources : Project_source_configuration.t option [@sexp.option]
@@ -141,6 +142,11 @@ module Workspace = struct
 end
 
 module Prompt = struct
+  type document_originals =
+    | Rendered_only
+    | Retain
+  [@@deriving compare, equal, sexp]
+
   type t =
     { id : string
     ; path : string
@@ -149,6 +155,7 @@ module Prompt = struct
     ; permission_profile : string
     ; runtime_policy : string option
     ; tool_contract : Chatml_compilation.Tool_contract.t
+    ; document_originals : document_originals
     ; enabled : bool
     }
   [@@deriving compare, equal, sexp]

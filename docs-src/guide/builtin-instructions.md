@@ -16,9 +16,10 @@ instructions from the installed build. The catalog has these exact IDs:
 
 These assets provide guidance. Importing one creates no goal, schedule, tool,
 source grant, skill activation or runtime. In particular, `context-recovery`
-supplies policy text only: it provides no context-management storage, tool,
-automatic recovery or cross-session sharing functionality. Agents must use only
-the capabilities actually supplied and authorized in the current session.
+supplies the recovery policy as guidance. Select and authorize the native tools
+separately, and enroll the durable session for window capture. The
+[recovery tutorial](../examples/learning/context-recovery/README.md) shows both
+the import and the selected tools in one checked definition.
 
 ## Compose messages
 

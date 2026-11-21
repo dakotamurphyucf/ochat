@@ -55,6 +55,8 @@ let reset_state (state : Session_state.t) options =
   ; spec = { spec with protocol = { spec.protocol with labels } }
   ; lifecycle = { desired = Stopped; observed = Stopped }
   ; pending_initial_start = false
+  ; recovery_installed_originals = None
+  ; recovery_rollover = None
   ; conversation = conversation state options
   ; active_operation = None
   ; permissions = []
@@ -93,6 +95,13 @@ let plan_reset state options =
   then Error (Agent_protocol.Error.invalid_request "metadata revision exhausted")
   else (
     let candidate = reset_state state options in
+    let%bind recovery_windows =
+      Recovery_window_capture.replacement state ~incoming:candidate
+    in
+    let recovery_effective =
+      Recovery_effective_capture.replacement state ~incoming:candidate
+    in
+    let candidate = { candidate with recovery_windows; recovery_effective } in
     let%bind run_state =
       match state.run_state with
       | None -> Ok None
@@ -191,6 +200,13 @@ let plan_rebuild state revision =
         { state.conversation with canonical_history = []; initial_prompt_entry_count = 0 }
     }
   in
+  let%bind recovery_windows =
+    Recovery_window_capture.replacement previous ~incoming:candidate
+  in
+  let recovery_effective =
+    Recovery_effective_capture.replacement previous ~incoming:candidate
+  in
+  let candidate = { candidate with recovery_windows; recovery_effective } in
   let%map () = Session_state.validate_administration_candidate candidate ~previous in
   candidate
 ;;
@@ -202,6 +218,7 @@ let archive ~archive_reference ~previous (candidate : Session_state.t) kind =
   let%bind candidate, invocation_dispositions =
     match kind with
     | Session_state.Compaction_archive.Compaction
+    | Rollover
     | Upgrade
     | Edit
     | Delete
@@ -219,7 +236,11 @@ let archive ~archive_reference ~previous (candidate : Session_state.t) kind =
              "administrative history sequence is out of range")
       else (
         let source =
-          { previous with Session_state.conversation = candidate.conversation }
+          { previous with
+            Session_state.conversation = candidate.conversation
+          ; recovery_windows = None
+          ; recovery_effective = None
+          }
         in
         let%bind plan =
           Invocation_recovery.plan
@@ -264,6 +285,13 @@ let archive ~archive_reference ~previous (candidate : Session_state.t) kind =
           }
         , dispositions ))
   in
+  let%bind recovery_windows =
+    Recovery_window_capture.replacement previous ~incoming:candidate
+  in
+  let recovery_effective =
+    Recovery_effective_capture.replacement previous ~incoming:candidate
+  in
+  let candidate = { candidate with recovery_windows; recovery_effective } in
   let%bind reference =
     archive_reference ~previous ~kind (Agent_protocol.Id.Operation.create ())
   in

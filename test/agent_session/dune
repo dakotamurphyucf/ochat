@@ -46,6 +46,14 @@
   descendant_physical_recovery_tests
   instruction_selection_tests
   instruction_selection_persistence_tests
+  recovery_note_actor_tests
+  recovery_note_share_tests
+  recovery_note_native_tests
+  recovery_rollover_tests
+  recovery_rollover_commit_tests
+  recovery_rollover_batch_tests
+  recovery_rollover_capacity_tests
+  recovery_rollover_hooks_tests
   instruction_clear_capacity_tests
   goal_run_tests
   goal_root_policy_tests
@@ -130,6 +138,7 @@
   delegation_authority_tests
   delegated_moderation_tests
   delegated_routing_tests
+  protected_native_tests
   delegation_lifecycle_tests
   generated_runtime_tests
   generated_session_state_tests
@@ -164,6 +173,13 @@
   job_artifact_fixtures
   job_artifact_retention_tests
   retained_history_tests
+  recovery_window_ledger_tests
+  recovery_window_actor_tests
+  recovery_history_query_tests
+  recovery_history_access_tests
+  recovery_worker_window_tests
+  recovery_effective_actor_tests
+  recovery_effective_attempt_tests
   replay_retention_tests
   job_progress_tests
   job_progress_authority_tests
@@ -203,7 +219,7 @@
   standalone_tests
   root_invocation_tests
   state_tests)
- (libraries session_commit_attempt_test_support goal_root_policy_test_support agent_server_test_support developer_root_owner_test_suite developer_run_store_test_suite inference_fixture ochat.transcript core eio eio_main mirage-crypto-rng.unix ochat.agent_session ochat.instruction_content ochat.agent_server ochat.agent_store)
+ (libraries session_commit_attempt_test_support goal_root_policy_test_support agent_server_test_support developer_root_owner_test_suite developer_run_store_test_suite inference_fixture ochat.transcript core eio eio_main mirage-crypto-rng.unix ochat.agent_session ochat.recovery_notes ochat.instruction_content ochat.agent_server ochat.agent_store)
  (inline_tests)
  (preprocess
   (pps ppx_jane ppx_expect)))

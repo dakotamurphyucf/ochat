@@ -15,11 +15,7 @@ let denied () =
 ;;
 
 let create ~actor:original ~is_current =
-  let actor =
-    Operator_authorization.guarded
-      ~principal:(Operator_authorization.principal original)
-      ~is_current:(fun () -> Operator_authorization.is_current original && is_current ())
-  in
+  let actor = Operator_authorization.restrict ~original_first:true original ~is_current in
   { original; actor }
 ;;
 

@@ -1099,6 +1099,15 @@ and owner shutdown close custody before external effects. A successful runtime
 reconfiguration with an existing worker also closes pending permits; initial
 worker installation alone does not reopen or revoke prior closed custody.
 
+Once the target Actor acknowledges the held Run, activation on a distinct
+controller can wait for snapshot retention of that controller's exact loaded
+Actor, Runtime owner and Store handle. The wait stays inside the original
+activation and retains no Registry mutex or lifecycle reservation. On release
+it rechecks both owners, the original authority and the held Run. Cancellation
+propagates through the existing cleanup. Exclusive reservations, failed cleanup
+and changed owners still reject. New admission and retained-receipt
+reconciliation still check their entries without waiting for retention.
+
 The checked view exposes separate policy, original-authentication, fresh timing
 and pure basis checks. Original guards and supplied clocks execute trusted host
 code, even when they do not yield. The complete check first rejects stale or

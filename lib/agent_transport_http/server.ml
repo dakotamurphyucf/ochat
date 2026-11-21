@@ -194,7 +194,7 @@ let request_body t request =
 ;;
 
 let dispatch t ~actor connection envelope =
-  Agent_server.Dispatcher.dispatch_envelope
+  Agent_server.Dispatcher.dispatch_output
     t.dispatcher
     ~context:connection.context
     ~actor
@@ -224,16 +224,31 @@ let dispatch_rpc t ~actor connection ~created = function
 ;;
 
 let rpc_response ~connection_id responses =
+  let module Output = Agent_server.Dispatcher.Output in
+  let render responses =
+    match List.map responses ~f:(fun response ->
+      Agent_protocol.Envelope.to_json (Output.materialize response)) with
+    | [ value ] -> value
+    | values -> `Array values
+  in
   match responses with
   | [] ->
     P.Response.create
       ~headers:(P.Headers.of_list [ connection_header, connection_id ])
       `No_content
-  | [ response ] ->
-    Agent_protocol.Envelope.to_json response |> json_response ~connection_id
-  | responses ->
-    List.map responses ~f:Agent_protocol.Envelope.to_json
-    |> fun values -> json_response ~connection_id (`Array values)
+  | _ when List.exists responses ~f:Output.requires_check ->
+    (* Batch peers and the HTTP writer can yield after dispatch. Release the
+       complete response under its original per-request checks on the body pull. *)
+    let pending = ref (Some responses) in
+    let stream = P.Stream.from ~f:(fun () ->
+      let remaining = !pending in
+      pending := None;
+      Option.map remaining ~f:(fun values -> Jsonaf.to_string (render values))) in
+    P.Response.create
+      ~headers:(P.Headers.add json_headers connection_header connection_id)
+      ~body:(P.Body.of_string_stream ~length:`Chunked stream)
+      `OK
+  | _ -> json_response ~connection_id (render responses)
 ;;
 
 let handle_rpc t request actor =
@@ -576,13 +591,19 @@ let upload_parameters request =
     | None -> Ok None
     | Some encoded -> Result.map (session_id encoded) ~f:Option.some
   in
-  Ok
-    ( media_type
-    , kind
-    , target_session
-    , P.Headers.get headers "ochat-display-name"
-    , Option.value (P.Headers.get headers "ochat-allowed-use") ~default:"message_input"
-    , P.Headers.get headers "ochat-sha256" )
+  let allowed_use =
+    Option.value (P.Headers.get headers "ochat-allowed-use") ~default:"message_input"
+  in
+  if Agent_store.Blob_metadata.Recovery_use.is_reserved allowed_use
+  then Error (protocol_error Invalid_request "reserved blob use")
+  else
+    Ok
+      ( media_type
+      , kind
+      , target_session
+      , P.Headers.get headers "ochat-display-name"
+      , allowed_use
+      , P.Headers.get headers "ochat-sha256" )
 ;;
 
 let write_upload_body request upload =

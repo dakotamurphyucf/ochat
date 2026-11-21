@@ -60,22 +60,28 @@ let create_child env root daemon parent ~model ~reasoning ~tokens ~marker =
   |> protocol_ok
 ;;
 
-let inference_policy env =
+let inference_policy
+      ?(on_preparation = ignore)
+      ?(extra_features = [])
+      ?transport_policy
+      env
+      ~endpoint
+      ~auth
+  =
   let module D = Openai.Responses_driver in
-  (* This case exercises the actual adapter over the isolated HTTP/SSE server.
-     Capture the selected endpoint and credential explicitly at the fixture
-     boundary; never replace the provider request assertions with a mock stream. *)
-  let endpoint = Sys.getenv_exn "API_URL" ^ "/v1/responses" in
+  (* Capture the explicit loopback endpoint, transport and credential at the
+     host boundary. Requests still use the actual production adapter. *)
   let capabilities =
     D.Capability.create
       ~baseline:
         (List.map
-           [ D.Capability.Text_input
-           ; Function_tools
-           ; Opaque_replay
-           ; Setting "max_output_tokens"
-           ; Setting "reasoning"
-           ]
+           ([ D.Capability.Text_input
+            ; Function_tools
+            ; Opaque_replay
+            ; Setting "max_output_tokens"
+            ; Setting "reasoning"
+            ]
+            @ extra_features)
            ~f:(fun feature -> feature, D.Capability.Supported))
       ~models:[]
     |> Or_error.ok_exn
@@ -92,13 +98,13 @@ let inference_policy env =
   let driver =
     D.create ~net:(Eio.Stdenv.net env) ~clock:(Eio.Stdenv.clock env) () |> Or_error.ok_exn
   in
-  let lease = D.Auth.bearer "generated-local-fixture" in
   let host =
     Inference_host.create
+      ?transport_policy
       driver
       ~profile
       ~profile_revision:None
-      ~auth:(fun ~sw:_ _ -> lease)
+      ~auth
       ~default_model:"gpt-4.1"
       ~namespace:Agent_protocol.Id.Transaction.(create () |> to_string)
       ~limits:Inference_runtime.Limits.default
@@ -126,7 +132,10 @@ let inference_policy env =
     ; runtime_inference_ports =
         (fun _ ->
           Ok
-            { new_preparation_id = (Inference_host.identity host).new_preparation_id
+            { new_preparation_id =
+                (fun () ->
+                  on_preparation ();
+                  (Inference_host.identity host).new_preparation_id ())
             ; on_admitted = (fun ~scope:_ ~accounting_id:_ -> ())
             ; on_attempt = ignore
             ; on_observation = ignore
@@ -170,7 +179,12 @@ let run_child env root =
           ~process_start_identity:None
           ~options:
             { Daemon.default_options with
-              inference_policy = inference_policy env
+              inference_policy =
+                inference_policy
+                  env
+                  ~endpoint:(Sys.getenv_exn "API_URL" ^ "/v1/responses")
+                  ~auth:(fun ~sw:_ _ ->
+                    Openai.Responses_driver.Auth.bearer "generated-local-fixture")
             ; qualify_chatml_extensions = true
             }
           ()

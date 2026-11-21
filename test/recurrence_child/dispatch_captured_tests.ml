@@ -120,7 +120,8 @@ let with_new_controller env sw daemon f =
 ;;
 
 let%expect_test
-    "sole daemon driver reserves creates and activates its declared captured mode"
+    "sole daemon driver activates its acknowledged captured Run after controller \
+     retention"
   =
   Eio_main.run (fun env ->
     Mirage_crypto_rng_unix.use_default ();
@@ -173,6 +174,7 @@ let%expect_test
                   [%test_eq: int] 0 !providers;
                   (state parent).identity.session_id))
          in
+         let requests = ref [] in
          let entered, signal_entered = Eio.Promise.create () in
          let release, signal_release = Eio.Promise.create () in
          let release_provider () =
@@ -182,7 +184,16 @@ let%expect_test
          let policy =
            T.inference_policy
              ~default_model:"fixture-model"
-             ~post_stream:(fun ~sw:_ ~inputs:_ ->
+             ~post_stream:(fun ~sw:_ ~inputs ->
+               let transcript =
+                 `Array (List.map inputs ~f:Openai.Responses.Item.jsonaf_of_t)
+                 |> Jsonaf.to_string
+               in
+               let labels =
+                 List.filter [ "520_START_FIRST"; "520_START_SECOND" ] ~f:(fun label ->
+                   String.is_substring transcript ~substring:label)
+               in
+               requests := labels :: !requests;
                Int.incr providers;
                if Int.equal !providers 1
                then (
@@ -191,20 +202,55 @@ let%expect_test
                if !providers > 2 then failwith "captured startup replayed provider";
                Cold.completed_response "485 actual captured result")
          in
+         let config = configured config parent_id in
+         let config =
+           { config with
+             server =
+               { config.server with
+                 durability =
+                   (* This cut supplies its own physical retention reservation. *)
+                   { config.server.durability with
+                     snapshot_every_ms = Int.max_value
+                   ; snapshot_every_events = Int.max_value
+                   }
+               }
+           }
+         in
+         let daemon_env, cut =
+           Held_controller_retention_fixture.sync_boundary env ~controller:parent_id
+         in
          with_daemon
            ~policy
-           env
+           daemon_env
            root
-           (configured config parent_id)
+           config
            ~provider_calls:providers
            (fun _sw daemon ->
-              protect_cleanup ~finally:release_provider (fun () ->
+              let finally () =
+                Held_controller_retention_fixture.release_writer cut;
+                release_provider ()
+              in
+              protect_cleanup ~finally (fun () ->
                 Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 20. (fun () ->
-                  Eio.Promise.await entered;
                   let parent = loaded daemon parent_id in
+                  let synced =
+                    Held_controller_retention_fixture.prove
+                      cut
+                      ~clock:(Eio.Stdenv.mono_clock env)
+                      ~daemon
+                      ~parent
+                      ~provider_count:(fun () -> !providers)
+                  in
+                  Eio.Promise.await entered;
                   let execution = actual_execution parent in
                   let attempt = Execution.current_attempt execution in
                   let origin = Execution.Attempt.origin attempt |> Option.value_exn in
+                  assert (Origin.equal synced origin);
+                  Origin.validate
+                    origin
+                    ~intent:(Execution.intent execution)
+                    ~attempt:(Execution.Attempt.request attempt)
+                  |> protocol_ok;
                   let admission = Origin.admission origin in
                   let child =
                     loaded daemon (P.Session_ref.session_id (Origin.session origin))
@@ -270,6 +316,9 @@ let%expect_test
                   |> protocol_ok;
                   [%test_eq: int] 1 (List.length (Execution.attempts execution));
                   [%test_eq: int] 2 !providers;
+                  [%test_eq: string list list]
+                    [ [ "520_START_FIRST" ]; [ "520_START_SECOND" ] ]
+                    (List.rev !requests);
                   assert (
                     Agent_server.Session_registry.execution_selected
                       (Daemon.registry daemon)
@@ -286,9 +335,10 @@ let%expect_test
                   | _ -> failwith "captured startup did not complete")))));
   print_endline
     "sole timer owns fresh reservation and real linked child; reciprocal Run exists \
-     before first Model; declared Single_turn settles once";
+     before first Model; retention joins before its only startup, and Single_turn \
+     settles once";
   [%expect
-    {| sole timer owns fresh reservation and real linked child; reciprocal Run exists before first Model; declared Single_turn settles once |}]
+    {| sole timer owns fresh reservation and real linked child; reciprocal Run exists before first Model; retention joins before its only startup, and Single_turn settles once |}]
 ;;
 
 module Goal = P.Goal
@@ -648,6 +698,74 @@ let assert_one_physical_attempt parent session =
   Totals.View.total_usage view
 ;;
 
+let provider_wait_snapshot daemon parent providers =
+  let module Intent = A.Recurrence_execution_intent in
+  let registry = Daemon.registry daemon in
+  let execution = actual_execution parent in
+  let intent = Execution.intent execution in
+  let attempt = Execution.current_attempt execution in
+  let request = Execution.Attempt.request attempt in
+  let origin = Option.map (Execution.Attempt.origin attempt) ~f:Origin.run_id in
+  let rejection = Execution.Attempt.rejection attempt in
+  let uncertainty = Execution.Attempt.uncertainty attempt in
+  let terminal = Option.map (Execution.Attempt.terminal attempt) ~f:Terminal.outcome in
+  let controller =
+    Intent.occurrence intent |> A.Recurrence_identity.Occurrence.definition
+  in
+  let controller_id =
+    A.Recurrence_identity.Definition.controller controller |> P.Session_ref.session_id
+  in
+  let controller_reserved = Registry.lifecycle_reserved registry controller_id in
+  let child_id = P.Session_ref.session_id (Intent.target intent) in
+  let target =
+    Option.map (Registry.find registry child_id) ~f:(fun handle ->
+      let loaded = Agent_server.Runtime_owner.is_loaded handle.runtime in
+      let source_idle = Agent_server.Runtime_owner.source_lane_idle handle.runtime in
+      let reserved = Registry.lifecycle_reserved registry child_id in
+      let current = state handle in
+      let run =
+        Option.bind current.run_state ~f:(fun index ->
+          List.find_map (A.Run_state.runs index) ~f:(fun candidate ->
+            let%bind.Option origin = A.Run_state.recurrence_origin index candidate.id in
+            if Result.is_ok (Origin.validate origin ~intent ~attempt:request)
+            then Some candidate.lifecycle
+            else None))
+      in
+      let model_jobs =
+        List.filter_map current.jobs ~f:(fun job ->
+          if P.Job.equal_kind job.kind Model_call
+          then
+            Some
+              (match job.status with
+               | Queued -> "queued"
+               | Running -> "running"
+               | Waiting_permission _ -> "waiting for permission"
+               | Waiting_completion _ -> "waiting for completion"
+               | Succeeded -> "succeeded"
+               | Failed _ -> "failed"
+               | Cancelled -> "cancelled"
+               | Interrupted _ -> "interrupted")
+          else None)
+      in
+      let inference_attempts = List.length (Ledger.rows current.inference_ledger) in
+      [%message
+        (loaded : bool)
+          (source_idle : bool)
+          (reserved : bool)
+          (run : P.Run.Lifecycle.t option)
+          (model_jobs : string list)
+          (inference_attempts : int)])
+  in
+  [%message
+    (providers : int)
+      (origin : P.Id.Run.t option)
+      (rejection : P.Error.code option)
+      (uncertainty : P.Error.code option)
+      (terminal : Terminal.Outcome.t option)
+      (controller_reserved : bool)
+      (target : Sexp.t option)]
+;;
+
 let%expect_test "captured occurrence spends its original Goal's final Attempt once" =
   Eio_main.run (fun env ->
     let clock = Eio.Stdenv.clock env in
@@ -749,8 +867,25 @@ let%expect_test "captured occurrence spends its original Goal's final Attempt on
                      | _ ->
                        failwith "captured Goal recurrence recorded multiple executions"));
                  phase "first captured Model provider" (fun () ->
-                   Eio.Time.with_timeout_exn clock progress_timeout (fun () ->
-                     Eio.Promise.await entered));
+                   match
+                     Eio.Time.with_timeout_exn clock progress_timeout (fun () ->
+                       Eio.Promise.await entered)
+                   with
+                   | () -> ()
+                   | exception Eio.Time.Timeout ->
+                     let snapshot =
+                       Eio.Time.with_timeout clock 2. (fun () ->
+                         Ok (provider_wait_snapshot daemon parent !providers))
+                     in
+                     (match snapshot with
+                      | Ok snapshot ->
+                        raise_s
+                          [%message
+                            "captured Model provider timed out" (snapshot : Sexp.t)]
+                      | Error `Timeout ->
+                        failwith
+                          "captured Model provider timed out and Actor observation did \
+                           not return"));
                  let execution = actual_execution parent in
                  let attempt = Execution.current_attempt execution in
                  let origin = Execution.Attempt.origin attempt |> Option.value_exn in
@@ -830,7 +965,26 @@ let%expect_test "captured occurrence spends its original Goal's final Attempt on
                    let current = actual_execution parent in
                    assert (Execution.equal execution current);
                    assert (not (Execution.is_pending current));
-                   [%test_eq: int] 1 (List.length (Execution.attempts current));
+                   (* A rejected source preparation can rotate before admission. Only
+                      the admitted Run makes the physical Model call charged to the Goal. *)
+                   let attempts = Execution.attempts current in
+                   List.iter (List.drop_last_exn attempts) ~f:(fun previous ->
+                     assert (Option.is_none (Execution.Attempt.origin previous));
+                     assert (Option.is_none (Execution.Attempt.terminal previous));
+                     A.Recurrence_retry_resolution.validate
+                       (Option.value_exn (Execution.Attempt.retry_resolution previous))
+                       ~intent:(Execution.intent current)
+                       ~attempt:(Execution.Attempt.request previous)
+                     |> protocol_ok);
+                   let admitted = Execution.current_attempt current in
+                   assert (
+                     Option.exists
+                       (Execution.Attempt.origin admitted)
+                       ~f:(Origin.equal origin));
+                   assert (
+                     Option.exists
+                       (Execution.Attempt.terminal admitted)
+                       ~f:(Terminal.equal terminal));
                    let frontier = Entry.frontier (entry parent) |> protocol_ok in
                    [%test_eq: int] 1 (List.length (Frontier.executions frontier));
                    assert (

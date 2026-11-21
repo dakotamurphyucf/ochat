@@ -214,5 +214,19 @@
     "deferred": [],
     "benefit": "Inspect exact revisions, develop interactively and attribute bounded observations to the source that ran.",
     "example": "Save or publish an immutable bundle revision, Check it, select Fixture or Live, then inspect an exact command or REPL trace."
+  },
+  {
+    "id": "context-recovery",
+    "title": "Local context recovery",
+    "pages": [
+      "tutorials/context-recovery",
+      "development/operator-recovery-rollover",
+      "development/recovery-history-tools",
+      "development/recovery-note-shares"
+    ],
+    "qualification": "Durable sessions opt in to capture. Exact revisions and current authority govern retained reads; automatic rollover also requires a qualified target.",
+    "benefit": "Keep the original evidence accessible across local window transitions without resending retired history.",
+    "example": "Checkpoint a review using a small private note, then recover a cited decision from the sealed predecessor.",
+    "deferred": []
   }
 ]

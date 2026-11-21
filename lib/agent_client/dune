@@ -21,6 +21,7 @@
   developer_trace_connection
   activity_views
   run_views
+  recovery_windows
   conversation_search
   blob_download
   instruction_controls

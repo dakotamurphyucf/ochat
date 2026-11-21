@@ -18,6 +18,7 @@
   (alias agent-e2e-workspaces)
   (alias agent-e2e-multiclient)
   (alias agent-e2e-extensibility-pr)
+  (alias agent-e2e-recovery-authored-example)
   (alias agent-e2e-artifact-redaction)))
 
 ;; Bound secret-registration growth and preserve its exact redaction contract in
@@ -90,6 +91,24 @@
       shell-grants-redaction
       --case
       redaction.live-trace)
+     (run
+      %{exe:agent_server_e2e.exe}
+      --scenario
+      data-integrity
+      --case
+      daemon-recovery.configured-capacity)
+     (run
+      %{exe:agent_server_e2e.exe}
+      --scenario
+      data-integrity
+      --case
+      daemon-recovery.authored-checkpoint)
+     (run
+      %{exe:agent_server_e2e.exe}
+      --scenario
+      data-integrity
+      --case
+      daemon-recovery.authored-rollover-hooks)
      (run %{exe:agent_server_e2e.exe} --scenario fork-children))))))
 
 (alias
@@ -109,6 +128,7 @@
   (alias agent-e2e-security)
   (alias agent-e2e-crash)
   (alias agent-e2e-recovery)
+  (alias agent-e2e-recovery-qualification)
   (alias agent-e2e-tui-auto)
   (alias agent-e2e-pty-headless)
   (alias agent-e2e-load)))
@@ -142,6 +162,7 @@
  (libraries ochat.operator_authorization
   ochat.provider_runtime
   agent_server_test_support
+  provider_websocket_fixture
   inference_composition
   base64
   core
@@ -177,7 +198,11 @@
  (preprocessor_deps
   (glob_files_rec ../chatml_extensibility_fixtures/x08-external-completion/*)
   (glob_files_rec ../chatml_extensibility_fixtures/x06-response-watcher/*)
-  ../chatml_extensibility_fixtures/x07-helper-session/any.json)
+  ../chatml_extensibility_fixtures/x07-helper-session/any.json
+  (glob_files ../../docs-src/examples/learning/context-recovery/*)
+  (glob_files_rec ../../docs-src/examples/libraries/recovery-rollover/*)
+  (glob_files_rec ../../docs-src/examples/libraries/lifecycle/*)
+  (glob_files_rec ../../docs-src/examples/learning/lifecycle-composition/components/review/*))
  (preprocess
   (pps ppx_jane ppx_blob)))
 
@@ -462,8 +487,38 @@
     %{exe:../../bin/ochat_agent_server.exe}
     (run %{exe:agent_server_e2e.exe} --scenario crash-matrix)))))
 
+;; Run the checked-in positive hook example once when PR and recovery are
+;; combined by the safe aggregate.
+(rule
+ (alias agent-e2e-recovery-authored-example)
+ (action
+  (setenv OCHAT_E2E_ARTIFACT_ROOT %{workspace_root}/_build/agent-e2e-artifacts
+   (setenv OCHAT_E2E_SERVER_EXE %{exe:../../bin/ochat_agent_server.exe}
+    (run %{exe:agent_server_e2e.exe} --scenario data-integrity --case daemon-recovery.authored-example)))))
+
+(rule
+ (alias agent-e2e-recovery-headless-permissions)
+ (action
+  (setenv OCHAT_E2E_ARTIFACT_ROOT %{workspace_root}/_build/agent-e2e-artifacts
+   (setenv OCHAT_E2E_MAIN_EXE %{exe:../../bin/main.exe}
+    (setenv OCHAT_E2E_STDIO_EXE %{exe:../../bin/ochat_agent_stdio.exe}
+     (progn
+      (run %{exe:agent_server_e2e.exe} --scenario data-integrity --case embedded-recovery.headless-permissions)
+      (run %{exe:agent_server_e2e.exe} --scenario data-integrity --case embedded-recovery.headless-exact-permission)))))))
+
+(rule
+ (alias agent-e2e-recovery-cold-managed)
+ (action
+  (setenv OCHAT_E2E_ARTIFACT_ROOT %{workspace_root}/_build/agent-e2e-artifacts
+   (setenv OCHAT_E2E_MAIN_EXE %{exe:../../bin/main.exe}
+    (run %{exe:agent_server_e2e.exe} --scenario data-integrity --case embedded-recovery.cold-managed-rollover)))))
+
 (rule
  (alias agent-e2e-recovery)
+ (deps
+  (alias agent-e2e-recovery-cold-managed)
+  (alias agent-e2e-recovery-authored-example)
+  (alias agent-e2e-recovery-headless-permissions))
  (action
   (setenv
    OCHAT_E2E_ARTIFACT_ROOT
@@ -471,7 +526,72 @@
    (setenv
     OCHAT_E2E_SERVER_EXE
     %{exe:../../bin/ochat_agent_server.exe}
-    (run %{exe:agent_server_e2e.exe} --scenario recovery-migration)))))
+    (progn
+     (run %{exe:agent_server_e2e.exe} --scenario recovery-migration)
+     (run %{exe:agent_server_e2e.exe} --scenario data-integrity --case embedded-recovery.owner-enrollment)
+     (run
+      %{exe:agent_server_e2e.exe}
+      --scenario
+      data-integrity
+      --case
+      daemon-recovery.successor-hint-guards)
+     (run
+      %{exe:agent_server_e2e.exe}
+      --scenario
+      data-integrity
+      --case
+      daemon-recovery.selected-successor-sources)
+     (run
+      %{exe:agent_server_e2e.exe}
+      --scenario
+      data-integrity
+      --case
+      daemon-recovery.note-share-operator)
+     (run %{exe:agent_server_e2e.exe} --scenario data-integrity --case daemon-recovery.ordinary-hard-limit)
+     (run %{exe:agent_server_e2e.exe} --scenario data-integrity --case daemon-recovery.operator-rollover)
+     (run %{exe:agent_server_e2e.exe} --scenario data-integrity --case daemon-recovery.websocket-rollover)
+     (run %{exe:agent_server_e2e.exe} --scenario data-integrity --case daemon-recovery.connected-followup)
+     (run %{exe:agent_server_e2e.exe} --scenario data-integrity --case daemon-recovery.checkpoint-wake)
+     (run %{exe:agent_server_e2e.exe} --scenario data-integrity --case daemon-recovery.automatic-capacity)
+     (run %{exe:agent_server_e2e.exe} --scenario data-integrity --case daemon-recovery.automatic-soft-checkpoint)
+     (run %{exe:agent_server_e2e.exe} --scenario data-integrity --case daemon-recovery.soft-checkpoint)
+     (run %{exe:agent_server_e2e.exe} --scenario data-integrity --case daemon-recovery.soft-checkpoint-lost-accept)
+     (run
+      %{exe:agent_server_e2e.exe}
+      --scenario
+      data-integrity
+      --case
+      daemon-recovery.ordinary-wake-denied)
+     (run
+      %{exe:agent_server_e2e.exe}
+      --scenario
+      data-integrity
+      --case
+      daemon-recovery.ordinary-wake-at-write))))))
+
+;; Full recovery delivery and asset qualification uses the offline provider.
+;; The converter runs the stdio server in-process. The stock reminder and
+;; installed-original cases spawn the daemon executable.
+(rule
+ (alias agent-e2e-recovery-qualification)
+ (action
+  (setenv
+   OCHAT_E2E_ARTIFACT_ROOT
+   %{workspace_root}/_build/agent-e2e-artifacts
+   (setenv
+    OCHAT_E2E_SERVER_EXE
+    %{exe:../../bin/ochat_agent_server.exe}
+    (progn
+     (run %{exe:agent_server_e2e.exe} --scenario data-integrity --case daemon-recovery.asset-publication)
+     (run %{exe:agent_server_e2e.exe} --scenario data-integrity --case daemon-recovery.converter-adoption)
+     (run %{exe:agent_server_e2e.exe} --scenario data-integrity --case daemon-recovery.near-limit-reminder)
+     (run %{exe:agent_server_e2e.exe} --scenario data-integrity --case daemon-recovery.near-limit-before-write)
+     (run %{exe:agent_server_e2e.exe} --scenario data-integrity --case daemon-recovery.near-limit-required-input)
+     (run %{exe:agent_server_e2e.exe} --scenario data-integrity --case daemon-recovery.installed-originals)
+     (run %{exe:agent_server_e2e.exe} --scenario data-integrity --case daemon-recovery.installed-handoff)
+     (run %{exe:agent_server_e2e.exe} --scenario runtime-integrity --case recovery.authored-history)
+     (run %{exe:agent_server_e2e.exe} --scenario runtime-integrity --case recovery.notes-provider-write)
+     (run %{exe:agent_server_e2e.exe} --scenario runtime-integrity --case recovery.notes-shared-provider-write))))))
 
 (rule
  (alias agent-e2e-pending)

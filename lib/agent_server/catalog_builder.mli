@@ -6,6 +6,7 @@ open! Core
 type t =
   { workspaces : Agent_session.Workspace_catalog.t
   ; prompts : Agent_session.Prompt_definition.t list
+  ; retain_document_originals : Agent_protocol.Id.Prompt_definition.t list
   ; permission_profiles : Agent_session.Permission_policy.t list
   ; manifest_grants : Operator_manifest_grant.t list
   }

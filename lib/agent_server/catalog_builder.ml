@@ -3,6 +3,7 @@ open! Core
 type t =
   { workspaces : Agent_session.Workspace_catalog.t
   ; prompts : Agent_session.Prompt_definition.t list
+  ; retain_document_originals : Agent_protocol.Id.Prompt_definition.t list
   ; permission_profiles : Agent_session.Permission_policy.t list
   ; manifest_grants : Operator_manifest_grant.t list
   }
@@ -169,6 +170,12 @@ let build
   in
   let%bind workspaces = Agent_session.Workspace_catalog.create workspace_definitions in
   let%bind prompts = Result.all (List.map config.prompts ~f:(prompt ~root_invocation)) in
+  let retain_document_originals =
+    List.filter_map config.prompts ~f:(fun value ->
+      match value.Config.Prompt.document_originals with
+      | Rendered_only -> None
+      | Retain -> Some (prompt_id value.id))
+  in
   let%bind permission_profiles =
     Result.all
       (List.map config.permission_profiles ~f:(fun profile ->
@@ -181,5 +188,5 @@ let build
     |> Result.map_error ~f:(fun error ->
       Agent_store.Store_error.Corrupt error.Agent_protocol.Error.message)
   in
-  { workspaces; prompts; permission_profiles; manifest_grants }
+  { workspaces; prompts; retain_document_originals; permission_profiles; manifest_grants }
 ;;

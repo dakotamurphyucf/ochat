@@ -38,6 +38,7 @@ export const tutorialPaths = [
       'tutorials/stateful-workflow',
       'tutorials/background-results',
       'tutorials/goal-recurrence',
+      'tutorials/context-recovery',
     ],
   },
   {

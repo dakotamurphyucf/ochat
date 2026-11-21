@@ -205,10 +205,8 @@ let borrowed_agent_actor (scope : borrowed) =
           (Agent_protocol.Error.invalid_request "native invocation scope is not active")
     in
     Option.map actor ~f:(fun actor ->
-      Operator_authorization.guarded
-        ~principal:(Operator_authorization.principal actor)
-        ~is_current:(fun () ->
-          Atomic.get scope.active && Operator_authorization.is_current actor)))
+      Operator_authorization.restrict actor ~is_current:(fun () ->
+        Atomic.get scope.active)))
 ;;
 
 let borrowed_policy_caller (scope : borrowed) =
@@ -376,6 +374,11 @@ module Admission = struct
 
   let callback_scope t =
     Option.map t.borrowed.goal_context ~f:Chat_response.Goal_native_scope.owner
+  ;;
+
+  let selected_capabilities t =
+    let%bind.Result () = check_now t ~binding:t.binding in
+    borrowed_capabilities t.borrowed
   ;;
 
   let invocation t = t.borrowed.invocation

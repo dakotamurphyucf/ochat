@@ -46,6 +46,7 @@ module Setting : sig
     -> (t, Error.t) Result.t
 
   val name : t -> string
+  val is_prompt_cache : t -> bool
   val value : t -> Jsonaf.t Presence.t
   val provenance : t -> provenance
 
@@ -272,3 +273,12 @@ val with_guidance
   -> (t, Error.t) Result.t
 
 val guidance : t -> Guidance.t option
+
+(** Select one tool from the existing surface and re-admit the full immutable
+    request with the supplied request-only guidance. *)
+val with_single_tool
+  :  t
+  -> tool:Tool_spec.t
+  -> guidance:Guidance.t option
+  -> limits:Document_schema.Limits.t
+  -> (t, Error.t) result

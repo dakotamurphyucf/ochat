@@ -661,6 +661,21 @@ end
 
 (** Mailbox-level regression support; not exposed by any wire method. *)
 module For_testing : sig
+  (** Use the currently selected physical launch identity with a sealed window
+      in the fixture ledger. Both deliveries use the real publication mailbox.
+      A fixture need not add a separate active rollover implementation. *)
+  val deliver_stale_foreground_entry
+    :  t
+    -> window:Agent_protocol.Recovery_window.Scope.t
+    -> History_entry.t
+    -> (unit, Agent_protocol.Error.t) result
+
+  val deliver_stale_foreground_result
+    :  t
+    -> window:Agent_protocol.Recovery_window.Scope.t
+    -> history:History_entry.t list
+    -> (unit, Agent_protocol.Error.t) result
+
   (** Deliver a completed worker result through the real priority mailbox.
       Returning acknowledges actor consumption, including rejection of stale IDs. *)
   val deliver_compaction_result
@@ -720,9 +735,12 @@ val create_with_runtime_source_owner
 (** First-party canonical counterpart. Validates SAME physical commit closure,
     writer session and creating domain before Actor startup. Old constructors
     remain unsupported for failed-startup disposal; no generic availability
-    callback or alternative persistence adapter is admitted by this binding. *)
+    callback or alternative persistence adapter is admitted by this binding.
+    [interactive_permission_responder] is selected by the actual process owner
+    even when the Actor loads a session originally created by another frontend. *)
 val create_with_bound_runtime_source_owner
   :  canonical_persistence:Canonical_persistence.t
+  -> interactive_permission_responder:Permission_policy.interactive_responder
   -> runtime_source_owner:Runtime_source_owner.Identity.t
   -> ordinary_execution_admission:(unit -> (unit, Agent_protocol.Error.t) result)
   -> schedule_permission_timeouts:bool
@@ -778,6 +796,94 @@ module Resource_observation : sig
       State, the exact host association and physical source, and existing
       per-effect guards. *)
   val check_current : t -> (Session_state.t, Agent_protocol.Error.t) result
+
+  (** Additionally require a determinate, available canonical writer before
+      releasing recovery data. A pending write returns [Conflict], and a
+      writer requiring recovery or unavailable returns [Persistence_error].
+      Nonyielding. Callers still check their original source, authority and item
+      visibility on the returned State before release. *)
+  val check_recovery_current : t -> (Session_state.t, Agent_protocol.Error.t) result
+
+  (** Check the current window-management writer against this observation.
+      Durable local authority must identify this canonical writer's actual
+      host and creating principal. A transport must recheck its connection and
+      source access independently. *)
+  val check_recovery_window_writer
+    :  t
+    -> actor:Operator_authorization.t
+    -> attachment_id:Agent_protocol.Id.Attachment.t
+    -> (Session_state.t, Agent_protocol.Error.t) result
+
+  (** List safe window summaries on this physical actor. The Factory establishes
+      session visibility and retains source custody through release. *)
+  val list_recovery_windows
+    :  t
+    -> actor:Operator_authorization.t
+    -> generation:int option
+    -> state:Recovery_window_record.state option
+    -> Agent_protocol.Page.Request.t
+    -> (Recovery_window_page.summary Agent_protocol.Page.t, Agent_protocol.Error.t) result
+end
+
+(** Exact authority to list or search retained history on this observed
+    physical actor. Every page needs a current operator proof or its own
+    model-native admission. Model delivery is tied to the original still-live
+    foreground owner and can outlive the individual tool callback. *)
+module Recovery_history_access : sig
+  type request
+  type proof
+
+  val operator : Operator_authorization.t -> request
+
+  val model
+    :  Native_tool_invocation.Admission.t
+    -> binding:Chat_response.Tool_capability.binding
+    -> request
+
+  val requires_release_check : request -> bool
+
+  val principal
+    :  request
+    -> query:Recovery_history_query.t
+    -> (Agent_protocol.Principal.t, Agent_protocol.Error.t) result
+
+  val capture
+    :  Resource_observation.t
+    -> request
+    -> query:Recovery_history_query.t
+    -> (proof, Agent_protocol.Error.t) result
+
+  val check_current : proof -> (Session_state.t, Agent_protocol.Error.t) result
+
+  val read_cursor
+    :  proof
+    -> Agent_protocol.Page.Cursor.t
+    -> (Recovery_history_query.Continuation.t, Agent_protocol.Error.t) result
+
+  val seal_cursor
+    :  proof
+    -> Recovery_history_query.Continuation.t
+    -> (string, Agent_protocol.Error.t) result
+
+  (** Capture the exact still-running, local foreground operation. The proof
+      checks current transcript authority after the native admission exits. *)
+  type native_read
+
+  val capture_native
+    :  Resource_observation.t
+    -> Native_tool_invocation.Admission.t
+    -> binding:Chat_response.Tool_capability.binding
+    -> source:Agent_protocol.Session_ref.t
+    -> tool:Recovery_history_native_request.Tool.t
+    -> (native_read, Agent_protocol.Error.t) result
+
+  val native_current : native_read -> (Session_state.t, Agent_protocol.Error.t) result
+  val native_principal : native_read -> Agent_protocol.Principal.t
+
+  val list_native_windows
+    :  native_read
+    -> Agent_protocol.Page.Request.t
+    -> (Agent_protocol.Recovery_query.Summary.t Agent_protocol.Page.t, Agent_protocol.Error.t) result
 end
 
 (** Observes accepted State through this Actor's mailbox. May yield. The host
@@ -1635,6 +1741,7 @@ val complete_initialization_model_job
     Marks Ready without a second archive. *)
 val complete_initialization
   :  ?moderator_manager:Chat_response.Moderator_manager.t
+  -> ?installed_originals:Recovery_installed_originals.Initial.t
   -> t
   -> scope:Initialization_scope.t
   -> candidate:Session_state.t
@@ -2447,28 +2554,6 @@ val reserve_history_block
   -> count:int
   -> (History_id_source.reservation, Agent_protocol.Error.t) result
 
-val commit_worker_entry
-  :  t
-  -> operation_id:Agent_protocol.Id.Operation.t
-  -> History_entry.t
-  -> (unit, Agent_protocol.Error.t) result
-
-val consume_deferred
-  :  t
-  -> operation_id:Agent_protocol.Id.Operation.t
-  -> (History_entry.t list, Agent_protocol.Error.t) result
-
-(** Commit a disclosure-checked proposal at this foreground operation's input
-    boundary. Saves delivery/history atomically and retains consumed wake IDs for
-    the next actual model admission or terminal disposition. *)
-val consume_notifications
-  :  t
-  -> operation_id:Agent_protocol.Id.Operation.t
-  -> Notification_delivery.t
-  -> ( Chat_response.In_memory_stream.Safe_point_input.batch
-       , Agent_protocol.Error.t )
-       result
-
 (** Commit eligible idle data and settle its requested wake with actual operation
     admission, or with budget rejection. Existing pending wake receipts never
     insert a second history entry. Stop/compaction intent takes precedence. *)
@@ -2509,18 +2594,6 @@ val deliver_standalone_completion
   -> current_capabilities:Chat_response.Tool_capability.t
   -> policy:Chat_response.One_off_request.policy
   -> (unit, Agent_protocol.Error.t) result
-
-(** Before the first provider call, claim eligible restored wakes for this
-    already-started operation and insert ready new data. The worker appends only
-    returned new entries to its input snapshot. Actual before-model admission
-    settles the claims; terminal cleanup discards any unadmitted requests. *)
-val consume_initial_notifications
-  :  t
-  -> operation_id:Agent_protocol.Id.Operation.t
-  -> Notification_delivery.idle
-  -> ( Chat_response.In_memory_stream.Safe_point_input.batch
-       , Agent_protocol.Error.t )
-       result
 
 val cancel_operation
   :  t
@@ -2575,6 +2648,13 @@ val invocation_granted
   :  t
   -> tool_name:string
   -> identity_digest:string
+  -> (bool, Agent_protocol.Error.t) result
+
+(** Only an explicit named-tool grant can match this query. The caller remains
+    responsible for its admitted tool/resource and argument checks. *)
+val invocation_named_granted
+  :  t
+  -> tool_name:string
   -> (bool, Agent_protocol.Error.t) result
 
 (** Resolves an existing pending permission without a client attachment.
@@ -3705,6 +3785,21 @@ val set_configuration_policy
   -> Configuration_policy.t
   -> (unit, Agent_protocol.Error.t) Result.t
 
+(** Trusted host startup policy. An actor without its actual durable writer
+    owner always reports disabled capacity. *)
+val set_context_capacity_host
+  :  t
+  -> Session_context_capacity.Host.t
+  -> (unit, Agent_protocol.Error.t) Result.t
+
+(** Safe status bound to an exact running operation of this local owner.
+    Reading after retirement fails. The native caller must separately admit
+    the invoking tool and recheck any durable transition claim. *)
+val context_capacity
+  :  t
+  -> operation_id:Agent_protocol.Id.Operation.t
+  -> Session_context_capacity.Port.t
+
 val configuration
   :  t
   -> (Agent_protocol.Session_configuration.t, Agent_protocol.Error.t) Result.t
@@ -3827,6 +3922,297 @@ val read_goals
   -> actor:Operator_authorization.t
   -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
   -> (Agent_protocol.Goal.t list, Agent_protocol.Error.t) result
+
+(** The current guarded native route publishes prepared capacity evidence and
+    admits only a pending rollover for the original foreground window. *)
+val context_remaining_native
+  :  t
+  -> access:Recovery_context_service.access
+  -> (Recovery_context_service.observation, Agent_protocol.Error.t) result
+
+val context_new_window_native
+  :  t
+  -> access:Recovery_context_service.access
+  -> window:Agent_protocol.Id.Context_window.t
+  -> (Recovery_rollover.Receipt.t, Agent_protocol.Error.t) result
+
+val context_checkpoint_native
+  :  t
+  -> access:Recovery_context_service.access
+  -> Recovery_context_service.Checkpoint.Request.t
+  -> (Recovery_context_service.Checkpoint.Receipt.t, Agent_protocol.Error.t) result
+
+(** Inspect the bounded rollover projection from a current observed actor.
+    The host binds transcript visibility and optional attachment to the original
+    connection. This does not yield and can be repeated at transport release. *)
+val inspect_context_rollover
+  :  Resource_observation.t
+  -> actor:Operator_authorization.t
+  -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> authorize_writer:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> authorize_force:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> Agent_protocol.Recovery_rollover_control.Inspect.t
+  -> (Agent_protocol.Recovery_rollover_control.Status.t, Agent_protocol.Error.t) result
+
+(** Submit a new quiescent cut or reconcile the exact principal-owned intent.
+    Checks run again at publication. An exact terminal receipt precedes comparison
+    of today's cut, without recreating force or attachment authority. *)
+val publish_context_rollover
+  :  t
+  -> actor:Operator_authorization.t
+  -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> authorize_force:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> Agent_protocol.Recovery_rollover_control.Request.t
+  -> (Agent_protocol.Recovery_rollover_control.Receipt.t, Agent_protocol.Error.t) result
+
+(** Request under the current writer attachment. Force requires a separate
+    trusted authorization check and still binds the exact expected revision. *)
+val request_context_rollover
+  :  t
+  -> actor:Operator_authorization.t
+  -> attachment_id:Agent_protocol.Id.Attachment.t
+  -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> ?authorize_force:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> key:Agent_protocol.Idempotency_key.t
+  -> Recovery_rollover.Expected.t
+  -> (Recovery_rollover.Receipt.t, Agent_protocol.Error.t) result
+
+(** Settle one admitted intent under the current durable owner writer and an
+    exact quiescent cut. Checkpoint use requires transcript scope. Archive-only
+    publication requires an admitted force and a current force check. The host
+    checks must not yield. An already terminal intent returns its immutable
+    receipt after checking current caller authority. An ambiguous writer needs
+    reopen/replay before the actor can authorize another runtime operation. *)
+val settle_context_rollover
+  :  t
+  -> actor:Operator_authorization.t
+  -> attachment_id:Agent_protocol.Id.Attachment.t
+  -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> ?authorize_force:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> id:Agent_protocol.Id.Operation.t
+  -> Recovery_rollover.Expected.t
+  -> Recovery_rollover.Settlement.t
+  -> (Recovery_rollover.Receipt.t, Agent_protocol.Error.t) result
+
+(** Control a durable successor using the current owner writer and exact window revision.
+    Continue selects one fresh foreground preparation. Pending input and wakes are
+    accepted only if the exact resulting attempt reaches transport admission. *)
+val control_context_rollover
+  :  t
+  -> actor:Operator_authorization.t
+  -> attachment_id:Agent_protocol.Id.Attachment.t
+  -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> id:Agent_protocol.Id.Operation.t
+  -> Recovery_rollover.Expected.t
+  -> Recovery_rollover_continuation.action
+  -> (Recovery_rollover_continuation.t, Agent_protocol.Error.t) result
+
+(** Record the owning writer's explicit checkpoint recipe against the exact
+    quiescent history and immutable note revisions. The holder needs transcript
+    scope and the current host check. A later exact cut may use the recorded
+    checkpoint if the covered history and selected note revisions are unchanged. *)
+val record_context_checkpoint
+  :  t
+  -> actor:Operator_authorization.t
+  -> attachment_id:Agent_protocol.Id.Attachment.t
+  -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> Recovery_rollover.Expected.t
+  -> notes:Recovery_notes.Catalog.selection list
+  -> (Recovery_rollover.Checkpoint.t, Agent_protocol.Error.t) result
+
+(** Opt in with the original current writer and host visibility check. The
+    actor records exactly the settled canonical view under its durable Store's
+    actual host-qualified owner. Repeating enablement returns the current scope
+    without a second journal delta. Legacy archive windows remain unavailable. *)
+val enable_recovery_windows
+  :  t
+  -> actor:Operator_authorization.t
+  -> attachment_id:Agent_protocol.Id.Attachment.t
+  -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> (Agent_protocol.Recovery_window.Scope.t, Agent_protocol.Error.t) result
+
+(** Permanently fence one sealed window. Requires the current source manager
+    and owner writer. An authorized retry on an expired window is idempotent. *)
+val expire_recovery_window
+  :  t
+  -> actor:Operator_authorization.t
+  -> attachment_id:Agent_protocol.Id.Attachment.t
+  -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> Agent_protocol.Recovery_window.Scope.t
+  -> (unit, Agent_protocol.Error.t) result
+
+(** The bound durable actor checks original owned-session authority in its mailbox.
+    Exact note bytes travel only on this requested result. Listing pairs metadata
+    with the current catalog revision needed by a subsequent create. *)
+val read_recovery_note
+  :  t
+  -> access:Recovery_note_access.t
+  -> Recovery_notes.Catalog.selection
+  -> (Recovery_notes.Catalog.Content.t, Agent_protocol.Error.t) result
+
+val list_recovery_notes
+  :  t
+  -> access:Recovery_note_access.t
+  -> ( Recovery_notes.Catalog.Catalog_revision.t * Recovery_notes.Catalog.metadata list
+       , Agent_protocol.Error.t )
+       result
+
+(** Process-local result from an actual protected model call. It pins the
+    operation's physical custody and the exact note or catalog revision. The
+    callbacks do not retain the callback scope, body or catalog. The Factory
+    checks registry ownership and reserves the source for provider submission. *)
+type recovery_note_delivery = private
+  { source : Agent_protocol.Session_ref.t
+  ; materialize : unit -> (Jsonaf.t, Agent_protocol.Error.t) result
+  ; check_current : unit -> bool
+  }
+
+val prepare_recovery_note_query
+  :  t
+  -> access:Recovery_note_access.t
+  -> Recovery_note_query.t
+  -> (recovery_note_delivery, Agent_protocol.Error.t) result
+
+(** Identify the host-qualified recipient and running foreground operation from
+    the actual protected model invocation. Fresh disclosure still requires
+    its original authority and a current, explicit source grant. *)
+val shared_recovery_note_operation
+  :  t
+  -> access:Recovery_note_access.t
+  -> ( Agent_protocol.Session_ref.t * Agent_protocol.Id.Operation.t
+       , Agent_protocol.Error.t )
+       result
+
+(** A current writer and original host visibility are checked before receipt
+    lookup and at the actual writer. The receipt is returned after the publish
+    boundary. A replay performs no Store mutation. *)
+val mutate_recovery_note_operator
+  :  t
+  -> access:Recovery_note_access.t
+  -> key:Agent_protocol.Idempotency_key.t
+  -> Recovery_notes.Catalog.mutation
+  -> (Recovery_notes.Catalog.Receipt.t, Agent_protocol.Error.t) result
+
+(** Uses the actual checked native invocation identity as the receipt key.
+    A current token for the selected effect and the actor's physical executing
+    invocation are required. *)
+val mutate_recovery_note_native
+  :  t
+  -> access:Recovery_note_access.t
+  -> Recovery_notes.Catalog.mutation
+  -> (Recovery_notes.Catalog.Receipt.t, Agent_protocol.Error.t) result
+
+(** Canonical two-session note sharing. These functions are for the trusted host.
+    [check_owner] must be a nonyielding check of this exact physical Store and
+    Registry association on its creating domain. It supplies no caller authority. *)
+module Recovery_note_shares : sig
+  type actor = t
+  type check_owner = unit -> (unit, Agent_protocol.Error.t) result
+  type reader
+  type target
+  type disclosure
+
+  val management_revision
+    :  actor
+    -> access:Recovery_note_access.t
+    -> check_owner:check_owner
+    -> (Recovery_note_share.Revision.t, Agent_protocol.Error.t) result
+
+  (** Snapshot both current revisions and an optional exact path in one mailbox
+      turn. The reply contains at most one identity and revision. *)
+  val inspect_management
+    :  actor
+    -> access:Recovery_note_access.t
+    -> check_owner:check_owner
+    -> Agent_protocol.Recovery_note_share_control.Path.t option
+    -> (Agent_protocol.Recovery_note_share_control.Metadata.t, Agent_protocol.Error.t) result
+
+  (** Nonyielding final response check on this actor's creating domain. *)
+  val check_management_now
+    :  actor
+    -> access:Recovery_note_access.t
+    -> check_owner:check_owner
+    -> (unit, Agent_protocol.Error.t) result
+
+  (** Idempotently bind this actual durable target before entering the source
+      Actor. Establishes only an owner incarnation, never a local or incoming
+      grant. For a trusted host after source management admission. *)
+  val establish_target
+    :  actor
+    -> check_owner:check_owner
+    -> (target, Agent_protocol.Error.t) result
+
+  val create
+    :  actor
+    -> access:Recovery_note_access.t
+    -> check_owner:check_owner
+    -> target:target
+    -> key:Agent_protocol.Idempotency_key.t
+    -> Recovery_note_share.create
+    -> (Recovery_note_share.Receipt.t, Agent_protocol.Error.t) result
+
+  val revoke
+    :  actor
+    -> access:Recovery_note_access.t
+    -> check_owner:check_owner
+    -> key:Agent_protocol.Idempotency_key.t
+    -> Recovery_note_share.revoke
+    -> (Recovery_note_share.Receipt.t, Agent_protocol.Error.t) result
+
+  (** Capture the exact recipient, durable incarnation and original current
+      scoped authority without entering a second mailbox. *)
+  val reader
+    :  actor
+    -> access:Recovery_note_access.t
+    -> check_owner:check_owner
+    -> (reader, Agent_protocol.Error.t) result
+
+  (** Fresh protected provider-input admission for this actual running foreground
+      operation. Checks its physical current operation custody and original
+      authenticated transcript scope on each use, even after a native callback
+      ended. A persisted operation coordinate alone grants nothing. *)
+  val reader_for_delivery
+    :  actor
+    -> operation_id:Agent_protocol.Id.Operation.t
+    -> check_owner:check_owner
+    -> (reader, Agent_protocol.Error.t) result
+
+  (** Explicit one-grant selection on the source actor. The result is inert
+      until [materialize], and carries no plaintext. *)
+  val select
+    :  actor
+    -> check_owner:check_owner
+    -> reader:reader
+    -> Recovery_note_share.Reference.t
+    -> (disclosure, Agent_protocol.Error.t) result
+
+  (** Trusted Factory only. Run outside the source mailbox with actual Registry
+      read custody already held. A same-domain reservation excludes canonical
+      writes that change protected source state and rejects a pending writer.
+      The caller bounds the callback duration and releases Registry custody on
+      return, exception or cancellation. The supplied check is synchronous. *)
+  val with_source_custody
+    :  actor
+    -> check_owner:check_owner
+    -> f:((unit -> bool) -> 'a)
+    -> ('a, Agent_protocol.Error.t) result
+
+  (** Synchronous exact note selection within source custody. Entry,
+      recipient and grant admission are still checked on every use. *)
+  val select_for_delivery
+    :  actor
+    -> check_owner:check_owner
+    -> reader:reader
+    -> Recovery_note_share.Reference.t
+    -> (disclosure, Agent_protocol.Error.t) result
+
+  (** Final synchronous two-owner check and exact note lookup. Invoke within
+      the source's retained ownership lifetime immediately before publication
+      with no intervening yield or additional untrusted callback. *)
+  val materialize
+    :  disclosure
+    -> (Recovery_notes.Catalog.Content.t, Agent_protocol.Error.t) result
+end
 
 (** Actual admitted native effect and original execution epoch are checked in
     the mailbox before CAS and immediately before persistence. Replacement needs

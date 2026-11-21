@@ -20,6 +20,37 @@ let kind_of_json =
     [ "file", File; "image", Image; "audio", Audio; "binary", Binary ]
 ;;
 
+let is_media_type media_type =
+  let token value =
+    (not (String.is_empty value))
+    && String.for_all value ~f:(function
+      | 'a' .. 'z'
+      | 'A' .. 'Z'
+      | '0' .. '9'
+      | '!'
+      | '#'
+      | '$'
+      | '%'
+      | '&'
+      | '\''
+      | '*'
+      | '+'
+      | '-'
+      | '.'
+      | '^'
+      | '_'
+      | '`'
+      | '|'
+      | '~' -> true
+      | _ -> false)
+  in
+  String.length media_type <= 255
+  &&
+  match String.split media_type ~on:'/' with
+  | [ kind; subtype ] -> token kind && token subtype
+  | _ -> false
+;;
+
 let nonnegative_int64 = Json_codec.bounded_int64 ~min:Int64.zero ~max:Int64.max_value
 
 let optional_field name value encode =

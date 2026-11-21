@@ -112,5 +112,11 @@
     "outcome": "Review two captured workers\u2019 outcomes and complete a Goal with retained evidence.",
     "requires": "The extracted source tree, daemon planning and captured-child execution, and a configured model.",
     "nextBenefit": "Use authorized Goal and recurrence reads to examine the retained outcome after reconnecting."
+  },
+  {
+    "page": "tutorials/context-recovery",
+    "outcome": "Recover one exact prior decision in a new local window and continue an existing ChatML component.",
+    "requires": "A stock Ochat build, the complete recovery bundle, a private durable daemon, and a configured provider for live use.",
+    "nextBenefit": "Use the operator guide to inspect status and reconcile a lost receipt or changed source."
   }
 ]

@@ -358,10 +358,10 @@ module Writer_barrier = struct
     if Option.is_none (Eio.Promise.peek t.release) then Eio.Promise.resolve t.resume ()
   ;;
 
-  let wrap t env =
+  let wrap ?(boundary = Crash_fault_io.Before_sync) t env =
     Crash_fault_io.wrap
       env
-      ~boundary:Before_sync
+      ~boundary
       ~matches:(fun path ->
         String.is_substring path ~substring:"/journal/"
         && String.is_suffix path ~suffix:".log")

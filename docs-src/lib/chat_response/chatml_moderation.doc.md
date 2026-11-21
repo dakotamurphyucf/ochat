@@ -32,6 +32,8 @@ module Phase : sig
     | Internal_event
     | Tool_invoked
     | Tool_observed
+    | Before_context_rollover
+    | After_context_rollover
   [@@deriving sexp, compare]
 
   val to_string : t -> string

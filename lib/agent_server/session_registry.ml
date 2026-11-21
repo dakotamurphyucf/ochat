@@ -262,6 +262,7 @@ type t =
         , Lifecycle_reservation.t
         , Session_key.comparator_witness )
         Map.t
+  ; mutable retention_wait_observer : (entry * unit Eio.Promise.u) option
   ; mutable read_leases : Read_lease.t list
   ; mutable failed_cleanups : Failed_cleanup.t list
   ; closing : bool Atomic.t
@@ -296,6 +297,7 @@ let create () =
   ; disposal_diagnostics = []
   ; lifecycle_owner = ref ()
   ; reservations = Map.empty (module Session_key)
+  ; retention_wait_observer = None
   ; read_leases = []
   ; failed_cleanups = []
   ; closing = Atomic.make false
@@ -1800,6 +1802,83 @@ let try_publication_lock t f =
   then Exn.protect ~f ~finally:(fun () -> Eio.Mutex.unlock t.mutex)
   else Error (lifecycle_conflict "session publication is concurrently busy")
 ;;
+
+let await_loaded_retention t entry ~check_current =
+  let open Result.Let_syntax in
+  let unavailable () =
+    Error
+      (Agent_protocol.Error.create
+         Conflict
+         ~message:"held recurrence controller cannot join its current Registry owner"
+         ~retryable:false
+         ())
+  in
+  let wait_for_owner handle =
+    let session_id = Agent_store.Session_store.Handle.session_id handle in
+    let read_release () =
+      if
+        Atomic.get t.closing
+        || cleanup_pending t session_id
+        || not (Option.exists (find t session_id) ~f:(same_disposal_entry entry))
+      then unavailable ()
+      else (
+        match Map.find t.reservations session_id with
+        | None -> Ok None
+        | Some { phase = Loaded { purpose = Retention; entry = retained }; finished; _ }
+          when same_disposal_entry entry retained -> Ok (Some finished)
+        | Some { phase = Exclusive | Loaded _; _ } -> unavailable ())
+    in
+    let rec wait ~resumed =
+      Eio.Fiber.check ();
+      let%bind () = check_current ~resumed in
+      if Eio.Mutex.try_lock t.mutex
+      then (
+        let%bind release =
+          Exn.protect ~f:read_release ~finally:(fun () -> Eio.Mutex.unlock t.mutex)
+        in
+        match release with
+        | None -> if resumed then check_retained_owner entry else Ok ()
+        | Some release ->
+          let%bind () = check_retained_owner entry in
+          (match t.retention_wait_observer with
+           | Some (selected, notify) when same_disposal_entry entry selected ->
+             t.retention_wait_observer <- None;
+             Eio.Promise.resolve notify ()
+           | Some _ | None -> ());
+          Eio.Promise.await release;
+          wait ~resumed:true)
+      else (
+        (* Join actual lock contention without carrying a sampled authority
+           across it or executing that authority's callbacks under the lock. *)
+        Eio.Mutex.use_ro t.mutex (fun () -> ());
+        wait ~resumed:true)
+    in
+    wait ~resumed:false
+  in
+  if not (Int.equal t.domain (Stdlib.Domain.self () :> int))
+  then unavailable ()
+  else (
+    match entry.store_handle with
+    | None -> unavailable ()
+    | Some handle -> wait_for_owner handle)
+;;
+
+module For_testing = struct
+  let with_loaded_retention_wait_observer t entry f =
+    check_disposal_domain_exn t;
+    if Option.is_some t.retention_wait_observer
+    then invalid_arg "a loaded retention wait observer is already installed";
+    let observed, notify = Eio.Promise.create () in
+    t.retention_wait_observer <- Some (entry, notify);
+    Exn.protect
+      ~f:(fun () -> f observed)
+      ~finally:(fun () ->
+        match t.retention_wait_observer with
+        | Some (_, actual) when phys_equal notify actual ->
+          t.retention_wait_observer <- None
+        | Some _ | None -> ())
+  ;;
+end
 
 let check_native_metadata_publication t entry =
   if not (Int.equal t.domain (Stdlib.Domain.self () :> int))

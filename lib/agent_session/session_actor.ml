@@ -1674,6 +1674,115 @@ module Operation_completion = struct
   ;;
 end
 
+module Foreground_publication = struct
+  module P = Agent_protocol
+  module Scope = P.Recovery_window.Scope
+
+  type t =
+    { launch : unit ref
+    ; session : P.Id.Session.t
+    ; generation : int
+    ; window : Scope.t option
+    ; operation : P.Operation.t
+    ; live : bool Atomic.t
+    ; completion : Operation_completion.t option
+    ; mutable finished_root : Inference_runtime.Attempt.t option
+    }
+
+  let scope (state : Session_state.t) =
+    Option.map state.recovery_windows ~f:(fun ledger ->
+      Recovery_window_ledger.(Window.scope (active ledger)))
+  ;;
+
+  let capture (state : Session_state.t) ~operation ~completion =
+    { launch = ref ()
+    ; session = state.identity.session_id
+    ; generation = state.identity.generation
+    ; window = scope state
+    ; operation
+    ; live = Atomic.make true
+    ; completion
+    ; finished_root = None
+    }
+  ;;
+
+  let matches t ~(selected : t option) ~(state : Session_state.t) =
+    Option.exists selected ~f:(fun current -> phys_equal t.launch current.launch)
+    && P.Id.Session.equal t.session state.identity.session_id
+    && Int.equal t.generation state.identity.generation
+    && Option.equal Scope.equal t.window (scope state)
+    && Option.exists state.active_operation ~f:(fun operation ->
+      P.Id.Operation.equal t.operation.id operation.id
+      && Int.equal t.operation.generation operation.generation
+      && P.Operation.equal_kind t.operation.kind operation.kind)
+  ;;
+end
+
+module Foreground_rollover = struct
+  module P = Agent_protocol
+
+  type t =
+    { id : P.Id.Operation.t
+    ; publication : Foreground_publication.t
+    ; check : unit -> (P.Principal.t, P.Error.t) result
+    ; authorize_force : (Session_state.t -> (unit, P.Error.t) result) option
+    }
+end
+
+module Foreground_successor = struct
+  module P = Agent_protocol
+
+  module Handoff = struct
+    type t =
+      { owner : P.Id.Operation.t
+      ; predecessor : Foreground_publication.t
+      ; view : Recovery_rollover_continuation.Hook.view
+      ; capacity_stage :
+          (Chat_response.Capacity_rollover.Trigger.t
+          * Chat_response.Capacity_rollover.stage)
+            option
+      ; check : unit -> (unit, P.Error.t) result
+      ; hook_authority : unit -> (unit, P.Error.t) result
+      ; custody : Execution_custody.t option
+      }
+  end
+
+  type t =
+    { owner : P.Id.Operation.t
+    ; scope : P.Recovery_window.Scope.t
+    ; operation : P.Id.Operation.t
+    ; mutable input : Recovery_rollover_input.t
+    ; pending : History_entry.t list
+    ; mutable capacity_basis : Configuration_capture.Capacity_basis.t
+    ; policy : Session_context_capacity.Selection.t
+    ; check : unit -> (unit, P.Error.t) result
+    ; mutable prepared : Inference_runtime.Prepared.t option
+    ; mutable admitted : (Inference_runtime.Attempt.t * int64) option
+    ; mutable hold : Recovery_rollover_continuation.hold
+    }
+end
+
+module Authored_rollover_hook = struct
+  module P = Agent_protocol
+
+  type t =
+    { owner : P.Id.Operation.t
+    ; phase : Recovery_rollover_hooks.phase
+    ; claim : Recovery_rollover_hooks.Claim.t
+    ; manager : Chat_response.Moderator_manager.t
+    ; event : Chat_response.Context_rollover_hook.t
+    ; view_transcript : bool
+    ; admitted : Session_state.t
+    ; check_authority : unit -> (unit, P.Error.t) result
+    }
+end
+
+module Worker_readiness = struct
+  type t =
+    | Foreground of Foreground_publication.t
+    | Compaction of Agent_protocol.Id.Operation.t
+end
+
 module Pending_runtime_operation = struct
   type t =
     { operation_id : Agent_protocol.Id.Operation.t
@@ -3572,6 +3681,7 @@ type invocation_execution =
   { owner : invocation_owner
   ; policy_source : Policy_standalone_source.Classification.t
   ; mutable native_goal : (Goal_native_actions.Entry.t * int option) option
+  ; context_rollover_basis : Configuration_capture.Native_window.t option
   ; dispatched : Agent_protocol.Invocation.t
   ; mutable accepts_children : bool
   ; authority_live : bool Atomic.t
@@ -4682,6 +4792,7 @@ module Inherited_turn = struct
       ; operation : Agent_protocol.Operation.t
       ; custody : agent_custody option
       ; entry : Agent_protocol.History.entry
+      ; successor : Foreground_successor.t option
       }
 
     type run_user =
@@ -5200,6 +5311,15 @@ module Descendant_root_request = struct
     | Bind _ | Begin _ | Commit _ | Refresh_reserved _ | Refresh_admitted _ -> false
   ;;
 
+  let prewriter_preparation : type outcome. outcome operation -> R.Preparation.t option =
+    function
+    | Bind (_, _, preparation) -> Some preparation
+    | Begin (_, reservations) -> Some (R.Reservation_set.preparation reservations)
+    | Commit attempt -> Some attempt.preparation
+    | Refresh_reserved reservation -> Some reservation.preparation
+    | Reconcile _ | Close _ | Import _ | Refresh_admitted _ -> None
+  ;;
+
   type 'result capture =
     { basis : Child_accounting_basis.t
     ; records : Agent_store.Delegation_store.record list
@@ -5397,6 +5517,225 @@ module Recurrence_read_request = struct
     | Planning : Operator_authorization.t * authorize -> Recurrence_planning_read.t t
 end
 
+type recovery_note_delivery =
+  { source : Agent_protocol.Session_ref.t
+  ; materialize : unit -> (Jsonaf.t, Agent_protocol.Error.t) result
+  ; check_current : unit -> bool
+  }
+
+module Recovery_note_request = struct
+  module C = Recovery_notes.Catalog
+  module P = Agent_protocol
+
+  type checked =
+    | Operator of
+        { principal : P.Id.Principal.t
+        ; attachment_id : P.Id.Attachment.t option
+        }
+    | Native of P.Invocation.t * P.Id.Operation.t
+
+  type mutation_route =
+    | Operator_key of Agent_protocol.Idempotency_key.t
+    | Native_invocation
+
+  type _ t =
+    | Read : Recovery_note_access.t * C.selection -> C.Content.t t
+    | List : Recovery_note_access.t -> (C.Catalog_revision.t * C.metadata list) t
+    | Query : Recovery_note_access.t * Recovery_note_query.t -> recovery_note_delivery t
+    | Shared_operation : Recovery_note_access.t -> (P.Session_ref.t * P.Id.Operation.t) t
+    | Mutate : Recovery_note_access.t * mutation_route * C.mutation -> C.Receipt.t t
+end
+
+module Recovery_note_share_request = struct
+  module P = Agent_protocol
+  module S = Recovery_note_share
+
+  type check_owner = unit -> (unit, P.Error.t) result
+
+  type witness =
+    { incarnation : S.Incarnation.t
+    ; check_current : check_owner
+    }
+
+  type reader = Reader of witness
+  type target = Target of witness
+
+  type disclosure =
+    | Disclosure of (unit -> (Recovery_notes.Catalog.Content.t, P.Error.t) result)
+
+  type _ t =
+    | Management_revision : Recovery_note_access.t * check_owner -> S.Revision.t t
+    | Inspect_management :
+        Recovery_note_access.t * check_owner * P.Recovery_note_share_control.Path.t option
+        -> P.Recovery_note_share_control.Metadata.t t
+    | Establish_target : check_owner -> target t
+    | Select : check_owner * reader * S.Reference.t -> disclosure t
+    | Create :
+        Recovery_note_access.t * check_owner * target * P.Idempotency_key.t * S.create
+        -> S.Receipt.t t
+    | Revoke :
+        Recovery_note_access.t * check_owner * P.Idempotency_key.t * S.revoke
+        -> S.Receipt.t t
+end
+
+module Recovery_rollover_request = struct
+  module P = Agent_protocol
+  module R = Recovery_rollover
+
+  type authorize = Session_state.t -> (unit, P.Error.t) result
+
+  type _ t =
+    | Native_remaining :
+        Recovery_context_service.access -> Recovery_context_service.observation t
+    | Native_new_window :
+        Recovery_context_service.access * P.Id.Context_window.t -> R.Receipt.t t
+    | Native_checkpoint :
+        Recovery_context_service.access * Recovery_authored_checkpoint.Request.t
+        -> Recovery_authored_checkpoint.Receipt.t t
+    | Worker_settled :
+        Foreground_publication.t * Chat_response.Settled_tool_batch.t
+        -> (Chat_response.Settled_tool_batch.decision * Authored_rollover_hook.t option) t
+    | Capacity_inspect :
+        Foreground_publication.t * Chat_response.Capacity_rollover.stage
+        -> Chat_response.Capacity_rollover.pressure t
+    | Capacity_request :
+        Foreground_publication.t
+        * Chat_response.Capacity_rollover.Trigger.t
+        * Chat_response.Capacity_rollover.stage
+        -> (Chat_response.Settled_tool_batch.decision * Authored_rollover_hook.t option) t
+    | Hook_complete :
+        Authored_rollover_hook.t
+        * Chat_response.Context_rollover_hook.Decision.t
+        * Chat_response.Moderation.Outcome.t
+        * Session.Moderator_state.Identity_snapshot.t
+        -> unit t
+    | Hook_release : Authored_rollover_hook.t * Recovery_rollover_hooks.failure -> unit t
+    | Successor_hook : Foreground_successor.Handoff.t -> Authored_rollover_hook.t option t
+    | Successor_handoff :
+        Foreground_publication.t
+        -> Foreground_successor.Handoff.t option t
+    | Successor_selection :
+        Foreground_successor.Handoff.t * Recovery_rollover_continuation.Hook.decision
+        -> unit t
+    | Successor_prepared :
+        Foreground_successor.t * bool * Inference_runtime.Prepared.t
+        -> bool t
+    | Successor_dispatch :
+        Foreground_successor.t * Inference_runtime.Attempt.t
+        -> (unit -> unit) t
+    | Successor_control :
+        Operator_authorization.t
+        * P.Id.Attachment.t
+        * authorize
+        * P.Id.Operation.t
+        * R.Expected.t
+        * Recovery_rollover_continuation.action
+        -> Recovery_rollover_continuation.t t
+    | Operator_request :
+        Operator_authorization.t
+        * P.Id.Attachment.t
+        * authorize
+        * authorize option
+        * P.Idempotency_key.t
+        * R.Expected.t
+        -> R.Receipt.t t
+    | Operator_publish :
+        Operator_authorization.t
+        * authorize
+        * authorize
+        * P.Recovery_rollover_control.Request.t
+        -> P.Recovery_rollover_control.Receipt.t t
+    | Operator_settle :
+        Operator_authorization.t
+        * P.Id.Attachment.t
+        * authorize
+        * authorize option
+        * P.Id.Operation.t
+        * R.Expected.t
+        * R.Settlement.t
+        -> R.Receipt.t t
+    | Operator_checkpoint :
+        Operator_authorization.t
+        * P.Id.Attachment.t
+        * authorize
+        * R.Expected.t
+        * Recovery_notes.Catalog.selection list
+        -> R.Checkpoint.t t
+end
+
+module Soft_checkpoint_request = struct
+  module O = Recovery_checkpoint_opportunity
+  module R = Inference_runtime
+  module P = Agent_protocol
+
+  type owner = Foreground_publication.t * Configuration_capture.Token.t
+
+  type plan =
+    { id : P.Id.Operation.t
+    ; expected : O.Expected.t
+    ; original : Operator_authorization.t
+    ; policy : R.Context_capacity.Policy.t
+    ; candidate : (Recovery_checkpoint_candidate.t, Recovery_checkpoint_opportunity.unavailable) result
+    }
+
+  type _ t =
+    | Plan : owner * Chat_response.Soft_checkpoint.tools * R.Prepared.t -> plan option t
+    | Admit : owner * plan * O.decision * R.Prepared.t -> O.Claim.t t
+    | Accept : owner * plan * O.Claim.t * R.Prepared.t * R.Attempt.t -> (unit -> unit) t
+    | Settle :
+        owner * plan * O.Claim.t * R.Attempt.t * Chat_response.Soft_checkpoint.outcome
+        -> unit t
+end
+
+module Context_request = struct
+  module Capacity = struct
+    type _ t =
+      | Set_host : Session_context_capacity.Host.t -> unit t
+      | Read : Agent_protocol.Id.Operation.t -> Session_context_capacity.status t
+      | Publish :
+          Configuration_capture.Token.t * Configuration_capture.Capacity_observation.t
+          -> unit t
+      | Claim_reminder :
+          Configuration_capture.Token.t * Inference_runtime.Prepared.t
+          -> Recovery_reminder.Claim.t option t
+      | Accept_reminder :
+          Configuration_capture.Token.t
+          * Recovery_reminder.Claim.t
+          * Inference_runtime.Prepared.t
+          * Inference_runtime.Attempt.t
+          -> (unit -> unit) t
+  end
+
+  type _ t =
+    | Soft_checkpoint : 'a Soft_checkpoint_request.t -> 'a t
+    | Capacity : 'a Capacity.t -> 'a t
+    | Recovery_effective :
+        Configuration_capture.Token.t
+        * Inference_runtime.Recovery_input.t
+        * Inference.Observation.Configuration.t
+        * (unit -> bool)
+        -> unit t
+    | Expire_recovery_window :
+        Operator_authorization.t
+        * Agent_protocol.Id.Attachment.t
+        * (Session_state.t -> (unit, Agent_protocol.Error.t) result)
+        * Agent_protocol.Recovery_window.Scope.t
+        -> unit t
+    | Enable_recovery_windows :
+        Operator_authorization.t
+        * Agent_protocol.Id.Attachment.t
+        * (Session_state.t -> (unit, Agent_protocol.Error.t) result)
+        -> Agent_protocol.Recovery_window.Scope.t t
+    | Recovery_note : 'a Recovery_note_request.t -> 'a t
+    | Recovery_note_share : 'a Recovery_note_share_request.t -> 'a t
+    | Rollover : 'a Recovery_rollover_request.t -> 'a t
+    | Instruction_command :
+        Instruction_admission.t
+        * Instruction_command_admission.Source.t option
+        * Instruction_command.t
+        -> Instruction_command.Receipt.t t
+end
+
 module Goal_request = struct
   type authorize = Session_state.t -> (unit, Agent_protocol.Error.t) result
 
@@ -5428,6 +5767,17 @@ module Recurrence_check_request = struct
         * Recurrence_execution_attempt.t
         -> Recurrence_goal_run_guard.t option t
 end
+
+type _ model_turn_request =
+  | Check_model_turn : Agent_protocol.Id.Operation.t * bool -> unit model_turn_request
+  | Admit_ordinary_model_write :
+      Foreground_publication.t
+      * bool
+      * Inference_runtime.Prepared.t
+      * Inference_runtime.Attempt.t
+      -> (unit -> unit) model_turn_request
+  | Admit_moderator_turn : Agent_protocol.Id.Operation.t -> unit model_turn_request
+  | Admit_notification_turn : Agent_protocol.Id.Operation.t -> unit model_turn_request
 
 type _ request =
   | Install_descendant_host :
@@ -5519,8 +5869,7 @@ type _ request =
   | Manage_moderator_follow_up :
       Agent_protocol.Id.Operation.t * Agent_protocol.Invocation.observer
       -> unit request
-  | Admit_moderator_turn : Agent_protocol.Id.Operation.t -> unit request
-  | Admit_notification_turn : Agent_protocol.Id.Operation.t -> unit request
+  | Model_turn : 'a model_turn_request -> 'a request
   | Claim_ordinary_event :
       Agent_protocol.Id.Moderator_execution.t
       * Agent_protocol.Id.Operation.t option
@@ -5566,7 +5915,7 @@ type _ request =
   | Finish_queued_event : Queued_callback_finish.t -> unit request
   | Set_queued_event_cancel : queued_event_borrow * (unit -> unit) -> unit request
   | Commit_invocation_call :
-      Agent_protocol.Id.Operation.t * Agent_protocol.Invocation.t * History_entry.t
+      Foreground_publication.t * Agent_protocol.Invocation.t * History_entry.t
       -> unit request
   | Claim_invocation :
       Agent_protocol.Id.Operation.t * Agent_protocol.Invocation.t
@@ -5744,7 +6093,7 @@ type _ request =
       Configuration_update.Validated.t
       -> Agent_protocol.Session_configuration.t request
   | Begin_configuration_capture :
-      Agent_protocol.Id.Operation.t
+      Agent_protocol.Id.Operation.t * bool
       -> Configuration_capture.Token.t request
   | Mark_configuration_capture :
       Configuration_capture.Token.t * Inference.Observation.Configuration.t
@@ -5844,6 +6193,7 @@ type _ request =
       Initialization_scope_data.t
       * Session_state.t
       * Chat_response.Moderator_manager.t option
+      * Recovery_installed_originals.Initial.t option
       -> Agent_protocol.Session.t request
   | Checkpoint_runtime_construction :
       Initialization_scope_data.t
@@ -5966,11 +6316,7 @@ type _ request =
       Recurrence_creation.t * Recurrence_child_link.t * int * int
       -> Recurrence_child_association.t request
   | Recurrence_read : 'a Recurrence_read_request.t -> 'a request
-  | Apply_instruction_command :
-      Instruction_admission.t
-      * Instruction_command_admission.Source.t option
-      * Instruction_command.t
-      -> Instruction_command.Receipt.t request
+  | Context_request : 'a Context_request.t -> 'a request
   | Update_metadata :
       Agent_protocol.Id.Attachment.t * int64 * Agent_protocol.Session_metadata.Patch.t
       -> Agent_protocol.Session.t request
@@ -6078,23 +6424,22 @@ type _ request =
       Agent_protocol.Id.Attachment.t * int64 * Agent_protocol.History.Id.t
       -> Agent_protocol.Session.t request
   | Adopt_deferred : Agent_protocol.Session.t request
-  | Reserve_history_block : int -> History_id_source.reservation request
-  | Commit_worker_entry : Agent_protocol.Id.Operation.t * History_entry.t -> unit request
+  | Reserve_history_block :
+      Foreground_publication.t option * int -> History_id_source.reservation request
+  | Commit_worker_entry : Foreground_publication.t * History_entry.t -> unit request
   | Prepare_authoring_input :
-      Agent_protocol.Id.Operation.t
+      Foreground_publication.t
       * Chat_response.Authoring_materialization.t
       * History_entry.t list
       * Chat_response.Moderation.Effective_entry.t list
       -> History_entry.t list request
   | Publish_invocation_output :
-      Agent_protocol.Id.Operation.t * Agent_protocol.Id.Invocation.t * History_entry.t
+      Foreground_publication.t * Agent_protocol.Id.Invocation.t * History_entry.t
       -> unit request
-  | Commit_worker_moderator :
-      Agent_protocol.Id.Operation.t * Jsonaf.t option
-      -> unit request
-  | Consume_deferred : Agent_protocol.Id.Operation.t -> History_entry.t list request
+  | Commit_worker_moderator : Foreground_publication.t * Jsonaf.t option -> unit request
+  | Consume_deferred : Foreground_publication.t -> History_entry.t list request
   | Consume_notifications :
-      Agent_protocol.Id.Operation.t * Notification_delivery.t
+      Foreground_publication.t * Notification_delivery.t
       -> Chat_response.In_memory_stream.Safe_point_input.batch request
   | Admit_standalone_delivery : Standalone_delivery.t -> unit request
   | Retire_obsolete_moderator_delivery : int64 * Agent_protocol.Job.t -> bool request
@@ -6105,13 +6450,13 @@ type _ request =
       * Chat_response.One_off_request.policy
       -> unit request
   | Consume_initial_notifications :
-      Agent_protocol.Id.Operation.t * Notification_delivery.idle
+      Foreground_publication.t * Notification_delivery.idle
       -> Chat_response.In_memory_stream.Safe_point_input.batch request
-  | Has_writer_attachment : bool request
-  | Invocation_granted : string * string -> bool request
-  | Worker_ready : Agent_protocol.Id.Operation.t * (unit -> unit) -> unit request
+  | Has_interactive_permission_responder : bool request
+  | Invocation_granted : string * string option -> bool request
+  | Worker_ready : Worker_readiness.t * (unit -> unit) -> unit request
   | Worker_terminal :
-      Agent_protocol.Id.Operation.t * Operation_worker.outcome * agent_custody option
+      Foreground_publication.t * Operation_worker.outcome * agent_custody option
       -> unit request
   | Compaction_terminal :
       Agent_protocol.Id.Operation.t * compaction_outcome
@@ -6458,6 +6803,12 @@ and t =
   ; mutable lifecycle_fence : Lifecycle_fence.t option
   ; mutable organization_admission : Session_organization_admission.t option
   ; mutable configuration_policy : Configuration_policy.t option
+  ; mutable context_capacity_host : Session_context_capacity.Host.t
+  ; mutable rollover_requires_recovery : bool
+  ; mutable live_operator_rollover : Foreground_rollover.t option
+  ; mutable foreground_successor : Foreground_successor.t option
+  ; mutable foreground_successor_handoff : Foreground_successor.Handoff.t option
+  ; mutable authored_rollover_hook : Authored_rollover_hook.t option
   ; mutable recurrence_controller : Recurrence_controller.t option
   ; recurrence_runtime : Recurrence_runtime.t
   ; recurrence_creation_owner : unit ref
@@ -6484,7 +6835,9 @@ and t =
   ; max_attachments : int
   ; subscriber_capacity : int
   ; schedule_permission_timeouts : bool
+  ; interactive_permission_responder : Permission_policy.interactive_responder
   ; mutable owner_timer_cancel : unit Eio.Promise.u option
+  ; mutable foreground_publication : Foreground_publication.t option
   ; mutable active_cancel : (unit -> unit) option
   ; mutable runtime_retirement : runtime_retirement option
   ; mutable idle_moderator_borrowed : bool
@@ -6538,6 +6891,11 @@ and t =
   ; event_sequence : int64 Atomic.t
   ; mutable state : Session_state.t
   ; mutable stopped : bool
+  ; recovery_window_cursor : Recovery_window_page.signer Lazy.t
+  ; recovery_query_cursor : Recovery_query_cursor.t Lazy.t
+  ; mutable protected_source_custody : unit ref option
+  ; mutable canonical_write_in_progress : bool
+    (* Synchronous share publication observes only an installed durable state. *)
   ; mutable command_audit : Document_schema.Document.t option
   }
 
@@ -7104,6 +7462,64 @@ end
 
 let error code message = Agent_protocol.Error.create code ~message ~retryable:false ()
 
+let require_recovery_backend t =
+  let open Result.Let_syntax in
+  let unavailable () = error Persistence_error "canonical recovery writer is unavailable" in
+  let%bind backend =
+    Result.of_option t.canonical_persistence ~error:(unavailable ())
+  in
+  if Canonical_backend_binding_data.is_available backend
+  then Ok backend
+  else Error (unavailable ())
+;;
+
+let recovery_publication_backend t =
+  if t.canonical_write_in_progress
+  then Error (error Conflict "canonical writer is deciding recovery visibility")
+  else if t.rollover_requires_recovery
+  then Error (error Persistence_error "recovery publication requires journal recovery")
+  else require_recovery_backend t
+;;
+
+let require_recovery_window_owner (t : t) ~actor ~attachment_id =
+  let module P = Agent_protocol in
+  let open Result.Let_syntax in
+  let state = t.state in
+  let principal = Operator_authorization.principal actor in
+  let now = t.services.now in
+  let host =
+    Option.value_map
+      t.canonical_persistence
+      ~default:Canonical_backend_binding_data.Daemon
+      ~f:(fun binding ->
+        Canonical_backend_binding_data.recovery_window_host binding ~actor)
+  in
+  let denied () =
+    Error
+      (error Permission_denied "recovery window requires the durable local owner writer")
+  in
+  match host, state.spec.protocol with
+  | Daemon, _ ->
+    Writer_attachment.require_recovery_owner
+      state
+      ~principal:principal.id
+      ~attachment_id
+      ~now
+  | ( Embedded { local_owner_authenticated = true }
+    , { execution_host = Embedded; liveness = Process_bound; persistence = Durable; _ } )
+    ->
+    let%bind attachment = Writer_attachment.require state ~attachment_id ~now in
+    if
+      P.Session.equal_attachment_mode attachment.mode Owner_read_write
+      && Option.is_none attachment.owner_lease
+      && Option.exists
+           state.identity.creating_principal
+           ~f:(P.Id.Principal.equal principal.id)
+    then Ok ()
+    else denied ()
+  | Embedded _, _ -> denied ()
+;;
+
 module Resource_observation = struct
   module Resource_identity = Session_state.Spec.Resource_identity
 
@@ -7163,10 +7579,32 @@ module Resource_observation = struct
       && Option.equal Int64.equal original.parent_stop_epoch current.parent_stop_epoch
       && (phys_equal original.spec current.spec
           || Resource_identity.equal
+
                t.resource_identity
                (Resource_identity.capture current.spec))
     then Ok current
     else Error (error Conflict "session resource observation is stale")
+  ;;
+
+  let check_recovery_current (t : t) =
+    let open Result.Let_syntax in
+    let%bind current = check_current t in
+    let%map _ = recovery_publication_backend t.actor in
+    current
+  ;;
+
+  let check_recovery_window_writer t ~actor ~attachment_id =
+    let open Result.Let_syntax in
+    let%bind state = check_recovery_current t in
+    let%map () = require_recovery_window_owner t.actor ~actor ~attachment_id in
+    state
+  ;;
+
+  let list_recovery_windows t ~actor ~generation ~state page =
+    let open Result.Let_syntax in
+    let%bind current = check_recovery_current t in
+    Recovery_window_page.list
+      (Lazy.force t.actor.recovery_window_cursor) current ~actor ~generation ~state page
   ;;
 end
 
@@ -7963,16 +8401,21 @@ let check_child_accounting_identity t (basis : Child_accounting_basis.t) =
     Error (error Conflict "child accounting Actor/controller/State observation changed")
 ;;
 
-let check_child_accounting_capture t (basis : Child_accounting_basis.t) =
+let check_child_accounting_capture
+      ?(on_state_change = ignore)
+      t
+      (basis : Child_accounting_basis.t)
+  =
   let%bind.Result () = check_child_accounting_identity t basis in
   if phys_equal basis.state t.state
   then Ok ()
-  else
-    Error (error Conflict "child accounting Actor/controller/State observation changed")
+  else (
+    on_state_change ();
+    Error (error Conflict "child accounting Actor/controller/State observation changed"))
 ;;
 
-let check_child_accounting_basis t basis ~current =
-  let%bind.Result () = check_child_accounting_capture t basis in
+let check_child_accounting_basis ?on_state_change t basis ~current =
+  let%bind.Result () = check_child_accounting_capture ?on_state_change t basis in
   if Recurrence_controller.is_current current
   then Ok ()
   else Error (error Conflict "child accounting Store observation changed")
@@ -8313,6 +8756,7 @@ let capture_descendant_preparation t ~occurrence ~writer_attempted =
     ; writer_attempted
     ; phase = ref Descendant_preparation.Phase.Open
     ; reservation_set_claim = None
+    ; parent_observation = Current
     ; check_owner
     ; check_before
     }
@@ -9460,10 +9904,14 @@ let cancel_job_scopes t jobs =
     | false -> ())
 ;;
 
-let moderator_is_borrowed t =
+let ordinary_moderator_is_borrowed t =
   Option.is_some t.moderator_borrow
   || Option.is_some t.queued_event_borrow
   || Delegated_policy_custody.pending t
+;;
+
+let moderator_is_borrowed t =
+  ordinary_moderator_is_borrowed t || Option.is_some t.authored_rollover_hook
 ;;
 
 let call t ?(priority = Mailbox.Normal) ?command_audit request =
@@ -12456,6 +12904,12 @@ let rec deferred_execution_delta (previous : Session_state.t) (delta : Session_d
   | Workspace_changed _
   | Canonical_entries_appended _
   | Canonical_history_replaced _
+  | Recovery_window_expired _
+  | Recovery_window_enabled _
+  | Recovery_effective_prepared _
+  | Recovery_reminder_changed _
+  | Recovery_effective_attempt_changed _
+  | Recovery_summary_compacted _
   | Authoring_references_forgotten _
   | Authoring_publication_changed _
   | Initial_prompt_count_changed _
@@ -12497,6 +12951,10 @@ let rec deferred_execution_delta (previous : Session_state.t) (delta : Session_d
   | Goal_catalog_changed _
   | Goal_accounts_changed _
   | Instruction_selection_changed _
+  | Recovery_note_changed _
+  | Recovery_note_share_changed _
+  | Recovery_rollover_changed _
+  | Recovery_rollover_committed _
   | Recurrence_catalog_changed _
   | Run_state_changed _
   | Moderator_changed _
@@ -12829,7 +13287,83 @@ module Startup_write = struct
   ;;
 end
 
+(* A live source lease still owns every existing coordinate. The physical
+   first submission may append only the selected pending suffix and its exact
+   derived locator extension. It cannot move or reinterpret an existing row. *)
+let is_protected_successor_append
+      t
+      ~(requested : Session_transition.t)
+      (selected, attempt)
+  =
+  let module P = Agent_protocol in
+  let selected : Foreground_successor.t = selected in
+  let owns_phase state ~admitted =
+    Option.exists (Session_delta.foreground_continuation state) ~f:(fun continuation ->
+      P.Id.Operation.equal selected.owner continuation.owner
+      &&
+      match admitted, continuation.phase with
+      | false, Preparing operation | true, Admitted { operation; _ } ->
+        P.Id.Operation.equal selected.operation operation
+      | _ -> false)
+  in
+  let previous = t.state.conversation.canonical_history in
+  let same_prefix, added =
+    List.split_n requested.state.conversation.canonical_history (List.length previous)
+  in
+  Option.exists t.foreground_successor ~f:(phys_equal selected)
+  && Option.is_none selected.admitted
+  && Option.exists selected.prepared ~f:(fun prepared ->
+       Inference_runtime.Prepared.owns_attempt prepared attempt)
+  && owns_phase t.state ~admitted:false
+  && owns_phase requested.state ~admitted:true
+  && List.equal P.History.equal_entry previous same_prefix
+  && List.equal P.History.equal_entry added (Recovery_rollover_input.entries selected.input)
+  && (match Recovery_window_capture.append t.state added with
+      | Ok expected ->
+        Option.equal Recovery_window_ledger.equal expected requested.state.recovery_windows
+      | Error _ -> false)
+;;
+
+let check_protected_source_write t ~(requested : Session_transition.t) ~successor_append =
+  let previous = t.state in
+  let next = requested.state in
+  if
+    Option.is_some t.protected_source_custody
+    && ((not (Int.equal previous.identity.generation next.identity.generation))
+        || (not (phys_equal previous.recovery_notes next.recovery_notes))
+        || (not (phys_equal previous.recovery_note_shares next.recovery_note_shares))
+        || (not (phys_equal previous.moderator next.moderator))
+        || (((not (phys_equal previous.recovery_windows next.recovery_windows))
+             || not
+                  (phys_equal
+                     previous.conversation.canonical_history
+                     next.conversation.canonical_history))
+            && not
+                 (Option.exists
+                    successor_append
+                    ~f:(is_protected_successor_append t ~requested)))
+        || not
+             (phys_equal
+                previous.conversation.compaction_archives
+                next.conversation.compaction_archives))
+  then
+    Error
+      (Agent_protocol.Error.create
+         Conflict
+         ~message:"protected source is currently being disclosed"
+         ~retryable:true
+         ())
+  else Ok ()
+;;
+
+let require_rollover_recovered t =
+  if t.rollover_requires_recovery
+  then Error (error Conflict "rollover outcome requires canonical journal recovery")
+  else Ok ()
+;;
+
 let persist_transition
+      ?protected_successor_append
       ?(causal_canonical_fence = Causal_canonical_custody.Fence.Unrestricted)
       ?commit_observation
       ?startup_write
@@ -12845,6 +13379,13 @@ let persist_transition
       (candidate : Session_transition.t)
   =
   let open Result.Let_syntax in
+  let%bind () = require_rollover_recovered t in
+  let%bind () =
+    check_protected_source_write
+      t
+      ~requested:candidate
+      ~successor_append:protected_successor_append
+  in
   let%bind () =
     Causal_canonical_custody.check_fence t ~requested:candidate causal_canonical_fence
   in
@@ -12861,8 +13402,11 @@ let persist_transition
       Exn.raise_with_original_backtrace exn backtrace
   in
   let delegated = ref None in
+  let write_in_progress = t.canonical_write_in_progress in
+  t.canonical_write_in_progress <- true;
   Exn.protect
     ~finally:(fun () ->
+      t.canonical_write_in_progress <- write_in_progress;
       Option.iter !delegated ~f:Delegated_policy_custody.finish_writer;
       Constructor_model_custody.finish_writer fence;
       Causal_root_custody.finish_writer causal_fence)
@@ -13078,6 +13622,8 @@ let prepare_completion_plan t (transition : Session_transition.t) completion_sam
 ;;
 
 let install
+      ?model_turn_writer
+      ?protected_successor_append
       ?causal_root_acknowledgement
       ?unmoderated_configuration_acknowledgement
       ?constructor_job_control
@@ -13308,15 +13854,16 @@ let install
   in
   let%bind () =
     persist_transition
+      ?protected_successor_append
       ?commit_observation:
-        (match causal_root_acknowledgement, constructor_job_control with
-         | Some write, None -> Some (Session_commit_attempt.observation write.writer)
-         | None, Some (_, plan) ->
+        (match causal_root_acknowledgement, constructor_job_control, model_turn_writer with
+         | Some write, None, None -> Some (Session_commit_attempt.observation write.writer)
+         | None, Some (_, plan), None ->
            Some
              (Session_commit_attempt.observation
                 plan.Constructor_model_data.canonical.attempt)
-         | None, None -> None
-         | Some _, Some _ ->
+         | None, None, observation -> observation
+         | _ ->
            invalid_arg
              "one canonical candidate cannot have two distinct native writer owners")
       ?idle_completion_write
@@ -13568,6 +14115,7 @@ let check_constructor_job_handoff
 ;;
 
 let transition
+      ?check_model_turn_at_writer
       ?idle_completion_step
       ?goal_runtime_scope
       ?check_before_commit
@@ -13628,8 +14176,14 @@ let transition
               in
               check_runtime_construction_effect (Existing_goal scope.continuation))
       in
+      let model_turn_writer =
+        Option.map check_model_turn_at_writer ~f:(fun check_at_writer ->
+          Session_commit_observation.Owner.create_guarded
+            ~previous:t.state ~candidate:transition ~check_at_writer)
+      in
       let%map () =
         install
+          ?model_turn_writer
           ?idle_completion_write
           ?goal_runtime_acknowledgement
           ?check_before_commit
@@ -13831,12 +14385,51 @@ module Held_inference_allocation_acknowledgement = struct
   ;;
 end
 
+let recovery_attempt_deltas receipts =
+  List.map receipts ~f:(fun receipt -> Session_delta.Recovery_effective_attempt_changed receipt)
+;;
+
+let check_recovery_admission t candidate =
+  match t.canonical_persistence with
+  | Some backend ->
+    Canonical_backend_binding_data.check_recovery_admission
+      backend
+      ~command_audit:t.command_audit
+      ~previous:t.state
+      candidate
+  | None -> Error (error Invalid_state "recovery evidence requires a bound Store profile")
+;;
+
+let prepare_inference_transition
+      ?run_preparation
+      t
+      ~changes
+      ~payloads
+      ~recovery_allocation
+  =
+  let open Result.Let_syntax in
+  let prepare changes =
+    prepare_transition ?run_preparation t ~delta:(Session_delta.Batch changes) ~payloads
+  in
+  match recovery_allocation with
+  | None -> prepare changes
+  | Some receipt ->
+    let%bind candidate =
+      prepare (changes @ [ Session_delta.Recovery_effective_attempt_changed receipt ])
+    in
+    (match%bind check_recovery_admission t candidate with
+     | Fits -> Ok candidate
+     | Capacity_exhausted -> prepare changes)
+;;
+
 let commit_inference_ledger
       ?allocation_acknowledgement
       ?owned_graph
       ?run_preparation
       ?admission
       ?check_before_commit
+      ?recovery_allocation
+      ?(recovery_attempts = [])
       t
       ledger
   =
@@ -13854,53 +14447,73 @@ let commit_inference_ledger
        | None -> Ok ()
        | Some preparation -> check_run_preparation t preparation)
   in
+  let accounting_changed =
+    not
+      (Int64.equal
+         (Inference_ledger.revision ledger)
+         (Inference_ledger.revision t.state.inference_ledger))
+  in
   if
-    Int64.equal
-      (Inference_ledger.revision ledger)
-      (Inference_ledger.revision t.state.inference_ledger)
+    (not accounting_changed)
+    && List.is_empty recovery_attempts
+    && Option.is_none recovery_allocation
   then (
     let%map () =
       Option.value_map check_before_commit ~default:(Ok ()) ~f:(fun check -> check ())
     in
     Option.iter owned_graph ~f:(install_input_graph_acknowledgement t))
   else (
-    let%bind accounting =
-      Canonical_usage_update.prepare
-        ?policy_usage:t.state.policy_canonical_usage
-        t.state.inference_ledger
-        ~accounts:t.state.goal_accounts
-        ~catalog:t.state.goal_catalog
-        ~after:ledger
-        ~delegated_usage:t.state.delegated_usage
-        ~admission
+    let%bind changes, payloads =
+      if not accounting_changed
+      then Ok ([], [])
+      else (
+        let%map accounting =
+          Canonical_usage_update.prepare
+            ?policy_usage:t.state.policy_canonical_usage
+            t.state.inference_ledger
+            ~accounts:t.state.goal_accounts
+            ~catalog:t.state.goal_catalog
+            ~after:ledger
+            ~delegated_usage:t.state.delegated_usage
+            ~admission
+        in
+        let accounting_delta =
+          if Canonical_usage_update.accounts_changed accounting
+          then
+            [ Session_delta.Goal_accounts_changed
+                (Option.value_exn (Canonical_usage_update.accounts accounting))
+            ]
+          else []
+        in
+        let changes =
+          Session_delta.inference_ledger_update
+            ?policy_update:(Canonical_usage_update.policy_update accounting)
+            ledger
+            ~delegated_usage:(Canonical_usage_update.delegated_usage accounting)
+          :: accounting_delta
+        in
+        let payloads =
+          [ Agent_protocol.Event.Durable.Payload.Session_updated
+              (Session_state.summary { t.state with inference_ledger = ledger })
+          ]
+        in
+        changes, payloads)
     in
-    let accounting_delta =
-      if Canonical_usage_update.accounts_changed accounting
-      then
-        [ Session_delta.Goal_accounts_changed
-            (Option.value_exn (Canonical_usage_update.accounts accounting))
-        ]
-      else []
-    in
-    let delta =
-      Session_delta.Batch
-        (Session_delta.inference_ledger_update
-           ?policy_update:(Canonical_usage_update.policy_update accounting)
-           ledger
-           ~delegated_usage:(Canonical_usage_update.delegated_usage accounting)
-         :: accounting_delta)
-    in
-    let payloads =
-      [ Agent_protocol.Event.Durable.Payload.Session_updated
-          (Session_state.summary { t.state with inference_ledger = ledger })
-      ]
+    let changes = changes @ recovery_attempt_deltas recovery_attempts in
+    let prepare ?run_preparation () =
+      prepare_inference_transition
+        ?run_preparation
+        t
+        ~changes
+        ~payloads
+        ~recovery_allocation
     in
     match allocation_acknowledgement, owned_graph with
     | Some acknowledgement, None ->
       let%bind () =
         Held_inference_allocation_acknowledgement.check acknowledgement ~actor:t ~ledger
       in
-      let%bind candidate = prepare_transition ?run_preparation t ~delta ~payloads in
+      let%bind candidate = prepare ?run_preparation () in
       let initialization_acknowledgement =
         match acknowledgement.scope with
         | Authored _ | Goal_runtime _ -> None
@@ -13946,8 +14559,18 @@ let commit_inference_ledger
     | Some _, Some _ ->
       Error (error Conflict "inference mutation has conflicting ACK ownership")
     | None, None ->
-      transition ?check_before_commit ?run_preparation t ~delta ~payloads
-      |> Result.map ~f:ignore
+      (match recovery_allocation with
+       | None ->
+         transition
+           ?check_before_commit
+           ?run_preparation
+           t
+           ~delta:(Batch changes)
+           ~payloads
+         |> Result.map ~f:ignore
+       | Some _ ->
+         let%bind candidate = prepare ?run_preparation () in
+         install ?check_before_commit ?run_preparation t candidate)
     | None, Some mutation ->
       let goal_scope =
         Option.filter (goal_runtime_scope t) ~f:(fun scope ->
@@ -13963,7 +14586,7 @@ let commit_inference_ledger
          exact graph and preparation are retained, and only their basis advances
          after ACK. Preparing without a preparation avoids fresh-effect policy. *)
       let revision = t.state.counters.revision in
-      let%bind candidate = prepare_transition t ~delta ~payloads in
+      let%bind candidate = prepare () in
       let%bind goal_runtime_acknowledgement =
         Option.value_map goal_scope ~default:(Ok None) ~f:(fun scope ->
           Goal_runtime_acknowledgement.prepare_factual
@@ -14276,6 +14899,18 @@ let acknowledge_inference ?owned_graph ?run_preparation t owner handle attempt =
   let open Result.Let_syntax in
   let%bind registration = inference_registration t owner handle in
   let%bind () = validate_inference_attempt registration attempt in
+  let recovery_attempts =
+    Recovery_effective_receipts.acknowledge t.state handle |> Option.to_list
+  in
+  let%bind () =
+    if
+      List.is_empty recovery_attempts
+      || phys_equal
+           (Inference_owner.Registration.configuration registration)
+           (Inference_runtime.Attempt.configuration attempt)
+    then Ok ()
+    else Error (error Conflict "recovery acknowledgement is from another prepared configuration")
+  in
   let%bind ledger =
     Inference_ledger.set_state t.state.inference_ledger handle Running
     |> Result.map_error ~f:inference_error
@@ -14288,7 +14923,7 @@ let acknowledge_inference ?owned_graph ?run_preparation t owner handle attempt =
   (match owned_graph with
    | None -> Inference_owner.Registration.acknowledge registration attempt
    | Some _ -> ());
-  commit_inference_ledger ?owned_graph ?run_preparation t ledger
+  commit_inference_ledger ?owned_graph ?run_preparation ~recovery_attempts t ledger
 ;;
 
 let observe_inference ?owned_graph ?run_preparation t handle incoming =
@@ -14378,7 +15013,52 @@ let complete_inference ?owned_graph ?run_preparation t owner handle completion =
     | Some _ -> owned_graph
     | None -> Some (select_factual_graph t owner Preserve)
   in
-  commit_inference_ledger ?owned_graph ?run_preparation t ledger
+  let recovery_attempts =
+    Recovery_effective_receipts.complete t.state handle completion |> Option.to_list
+  in
+  let%bind () =
+    if
+      List.is_empty recovery_attempts
+      || Option.exists
+           (Inference_owner.Registration.attempt registration)
+           ~f:(phys_equal (Inference_client.Completion.attempt completion))
+    then Ok ()
+    else Error (error Conflict "completion is from another actual recovery attempt")
+  in
+  let%map () =
+    commit_inference_ledger ?owned_graph ?run_preparation ~recovery_attempts t ledger
+  in
+  (* A stored ordinal can be replayed as data. The live cut also requires the
+     same physical attempt whose completion the graph just acknowledged. *)
+  let actual = Inference_client.Completion.attempt completion in
+  let rejected =
+    match state with
+    | Terminal terminal -> Inference.Event.Terminal.is_context_window_rejection terminal
+    | Prepared | Running | Interrupted _ -> false
+  in
+  if
+    ((not (List.is_empty recovery_attempts)) || rejected)
+    && Option.exists
+         (Inference_owner.Registration.attempt registration)
+         ~f:(phys_equal actual)
+    && Option.is_none (Inference_ledger.Handle.invocation_id handle)
+    &&
+    match (Inference_ledger.Handle.scope handle).relation with
+    | Root -> true
+    | Nested _ -> false
+  then
+    Option.iter t.foreground_publication ~f:(fun publication ->
+      let operation = Inference_ledger.Handle.operation_id handle in
+      if
+        Option.equal
+          Agent_protocol.Id.Operation.equal
+          operation
+          (Some publication.operation.id)
+        && Foreground_publication.matches
+             publication
+             ~selected:t.foreground_publication
+             ~state:t.state
+      then publication.finished_root <- Some actual)
 ;;
 
 let interrupt_inference_row ledger handle ~delivery =
@@ -14406,21 +15086,21 @@ let interrupt_inference_row ledger handle ~delivery =
 let release_inference ?owned_graph ?run_preparation t owner handle =
   let open Result.Let_syntax in
   let%bind registration = inference_registration t owner handle in
-  let%bind ledger =
-    interrupt_inference_row
-      t.state.inference_ledger
-      handle
-      ~delivery:
-        (Option.map
-           (Inference_owner.Registration.attempt registration)
-           ~f:Inference_runtime.Attempt.delivery)
+  let delivery =
+    Option.map
+      (Inference_owner.Registration.attempt registration)
+      ~f:Inference_runtime.Attempt.delivery
+  in
+  let%bind ledger = interrupt_inference_row t.state.inference_ledger handle ~delivery in
+  let recovery_attempts =
+    Recovery_effective_receipts.release t.state handle ~delivery |> Option.to_list
   in
   let owned_graph =
     match owned_graph with
     | Some _ -> owned_graph
     | None -> Some (select_factual_graph t owner Preserve)
   in
-  let%map () = commit_inference_ledger ?owned_graph ?run_preparation t ledger in
+  let%map () = commit_inference_ledger ?owned_graph ?run_preparation ~recovery_attempts t ledger in
   Graph_owner.release
     owner
     ~ledger:t.state.inference_ledger
@@ -14509,10 +15189,26 @@ let finish_inference_owner ?owned_graph ?run_preparation t owner =
         Owned_inference_mutation.acknowledgement = Native_join installation
       }
     in
+    let recovery_attempts =
+      if Option.is_none t.state.recovery_effective
+      then []
+      else (
+        let receipts = ref [] in
+        Graph_owner.iter_registrations owner ~f:(fun registration ->
+          let handle = Inference_owner.Registration.handle registration in
+          let delivery =
+            Option.map (Inference_owner.Registration.attempt registration)
+              ~f:Inference_runtime.Attempt.delivery
+          in
+          Option.iter (Recovery_effective_receipts.release t.state handle ~delivery)
+            ~f:(fun receipt -> receipts := receipt :: !receipts));
+        List.rev !receipts)
+    in
     let%map () =
       commit_inference_ledger
         ~owned_graph:mutation
         ?run_preparation
+        ~recovery_attempts
         ~check_before_commit:(fun () ->
           Inference_native_finish_installation.check_basis installation ~actor:t)
         t
@@ -14689,7 +15385,8 @@ let reconcile_inference_recovery t =
       ~f:(fun ledger row ->
         interrupt_inference_row ledger (Inference_ledger.Row.handle row) ~delivery:None)
   in
-  commit_inference_ledger t ledger
+  let recovery_attempts = Recovery_effective_receipts.recover t.state in
+  commit_inference_ledger ~recovery_attempts t ledger
 ;;
 
 let abort_staged_work t ~owner =
@@ -15780,7 +16477,8 @@ let set_operation_worker t worker =
 ;;
 
 let runtime_admission_open t =
-  Option.is_none t.runtime_retirement
+  (not t.rollover_requires_recovery)
+  && Option.is_none t.runtime_retirement
   && Option.is_none t.lifecycle_fence
   &&
   match t.policy_restoration with
@@ -16194,9 +16892,8 @@ let retire_runtime_worker_with_cleanup_internal (t : t) ~closing =
     Error (error Invalid_state "runtime retirement election lost its original owner")
 ;;
 
-let with_runtime_terminal t operation_id f =
-  let completion = capture_operation_completion t operation_id in
-  Option.iter completion ~f:(fun completion ->
+let record_runtime_terminal t operation_id (completion : Operation_completion.t option) f =
+  Option.iter completion ~f:(fun (completion : Operation_completion.t) ->
     Callback_cleanup_data.Host.end_operation_registration completion.callback_cleanup);
   let finish result =
     let retained =
@@ -16213,6 +16910,10 @@ let with_runtime_terminal t operation_id f =
     let backtrace = Stdlib.Printexc.get_raw_backtrace () in
     finish (Error (exn, backtrace));
     Exn.raise_with_original_backtrace exn backtrace
+;;
+
+let with_runtime_terminal t operation_id f =
+  record_runtime_terminal t operation_id (capture_operation_completion t operation_id) f
 ;;
 
 let validate_runtime_worker t worker inference moderator_manager =
@@ -16389,12 +17090,13 @@ let set_runtime_worker
       installed := true)
 ;;
 
-let change_moderator t moderator =
+let change_moderator ?check_before_commit t moderator =
   if moderator_is_borrowed t
   then Error (error Conflict "moderator invocation owns the moderator checkpoint")
   else (
     let state = { t.state with moderator } in
     transition
+      ?check_before_commit
       t
       ~delta:(Session_delta.Moderator_changed moderator)
       ~payloads:
@@ -16993,8 +17695,9 @@ let stop_managed_internal t reference key mode generation max_receipts =
     receipt
 ;;
 
-let append_history t entries =
+let append_history ?check_before_commit t entries =
   transition
+    ?check_before_commit
     t
     ~delta:(Session_delta.Canonical_entries_appended entries)
     ~payloads:[ Agent_protocol.Event.Durable.Payload.History_appended entries ]
@@ -17071,7 +17774,11 @@ let write_attachment t attachment_id =
   Writer_attachment.require t.state ~attachment_id ~now:t.services.now
 ;;
 
-let has_writer_attachment t = Writer_attachment.any t.state ~now:t.services.now
+let has_interactive_permission_responder t =
+  Permission_policy.has_interactive_responder
+    t.interactive_permission_responder
+    ~has_writable_attachment:(fun () -> Writer_attachment.any t.state ~now:t.services.now)
+;;
 
 let grant_is_unexpired t grant =
   match grant.Agent_protocol.Grant.expires_at with
@@ -17081,7 +17788,8 @@ let grant_is_unexpired t grant =
 
 let grant_identity_matches grant ~tool_name ~identity_digest =
   match grant.Agent_protocol.Grant.scope with
-  | Exact_session | Durable_exact -> String.equal grant.identity_digest identity_digest
+  | Exact_session | Durable_exact ->
+    Option.exists identity_digest ~f:(String.equal grant.identity_digest)
   | Prefix_session ->
     String.equal
       grant.identity_digest
@@ -17137,7 +17845,7 @@ let commit_administration t attachment_id expected_revision kind candidate =
            candidate.Session_state.identity.generation
            (t.state.identity.generation + 1)
       && List.is_empty candidate.ingress_registrations
-    | Upgrade | Compaction | Edit | Delete | Pending_input ->
+    | Upgrade | Compaction | Edit | Delete | Pending_input | Rollover ->
       List.equal
         External_ingress.equal
         candidate.ingress_registrations
@@ -17185,12 +17893,12 @@ let commit_administration t attachment_id expected_revision kind candidate =
           match kind with
           | Reset -> Pending_disposition.Retirement_reason.Source_reset
           | Rebuild -> Source_replaced
-          | Compaction | Upgrade | Edit | Delete | Pending_input ->
+          | Compaction | Upgrade | Edit | Delete | Pending_input | Rollover ->
             Canonical_history_retired
         in
         prepare_pending t ~archive:(Some archive) (Retire reason)
         |> Result.map ~f:Option.some)
-    | Compaction | Upgrade | Edit | Delete | Pending_input -> Ok None
+    | Compaction | Upgrade | Edit | Delete | Pending_input | Rollover -> Ok None
   in
   let state =
     Option.value_map pending ~default:state ~f:(fun prepared ->
@@ -17615,13 +18323,17 @@ let correct_governed_attempt (ack : Inherited_attempt.Acknowledgement.t) =
     Error (error Conflict "governed inference initial confirmation remains pending")
 ;;
 
-let close_unattempted_inherited_attempt t (plan : Inherited_attempt.Plan.t) =
+let close_unattempted_inherited_attempt
+      ?(wait_for_release = false)
+      t
+      (plan : Inherited_attempt.Plan.t)
+  =
   let open Result.Let_syntax in
   let%bind closed = call t ~priority:Priority (Inherited_inference (Seal plan)) in
   match plan.arms, closed with
   | Descendant_attempt slot, Descendant_closed closed ->
-    let%map _ = schedule_descendant_admission_cleanup t slot ~closed in
-    ()
+    let%bind promise = schedule_descendant_admission_cleanup t slot ~closed in
+    if wait_for_release then Eio.Promise.await promise else Ok ()
   | Policy_causal_attempt _, Causal_closed _ | Combined_attempt _, Combined_closed _ ->
     let%bind promise = schedule_governed_plan_cleanup t plan in
     Actor_reply.await promise
@@ -17630,7 +18342,7 @@ let close_unattempted_inherited_attempt t (plan : Inherited_attempt.Plan.t) =
     Error (error Conflict "governed cleanup changed its closed arms")
 ;;
 
-let drive_inherited_attempt t (plan : Inherited_attempt.Plan.t) =
+let drive_inherited_attempt ?retry_parent_progress t (plan : Inherited_attempt.Plan.t) =
   let open Result.Let_syntax in
   let refresh_original () =
     match plan.original with
@@ -17653,144 +18365,153 @@ let drive_inherited_attempt t (plan : Inherited_attempt.Plan.t) =
               call t ~priority:Priority (Inherited_inference (Release acknowledgement)))
            : (unit, Agent_protocol.Error.t) result))
   in
-  Exn.protect
-    ~finally:(fun () ->
-      try cleanup () with
-      | exn ->
-        (try Eio.traceln "governed Attempt cleanup failed: %s" (Exn.to_string exn) with
-         | _ -> ()))
-    ~f:(fun () ->
-      let%bind physical =
-        match inherited_attempt_physical plan with
-        | None -> Ok None
-        | Some slot ->
-          let%bind views =
-            (Descendant_admission_slot.host slot).prepare
-              slot.preparation
-              slot.reservations
+  let with_admission ~f =
+    Exn.protect
+      ~finally:(fun () ->
+        try cleanup () with
+        | exn ->
+          (try Eio.traceln "governed Attempt cleanup failed: %s" (Exn.to_string exn) with
+           | _ -> ()))
+      ~f:(fun () ->
+        let result = f () in
+        match result, retry_parent_progress, plan.arms with
+        | Error _, Some retry, Descendant_attempt slot
+          when Descendant_preparation.parent_observation_superseded slot.preparation ->
+          let%bind () =
+            close_unattempted_inherited_attempt ~wait_for_release:true t plan
           in
-          (* A physical root can also own this held occurrence. Its reservation
-             advances the Store observation that the original runtime checks. *)
-          let%map () = refresh_original () in
-          Some views
-      in
-      let%bind () = call t (Inherited_inference (Preview (plan, physical))) in
-      let%bind policy =
-        match inherited_attempt_causal plan with
-        | None -> Ok None
-        | Some causal ->
-          (causal_plan_driver causal).prepare causal.slot.preparation causal.reservations
-          |> Result.map ~f:Option.some
-      in
-      let%bind before_writer =
-        match physical, policy with
-        | Some physical, None -> Ok (Descendant_before physical)
-        | None, Some policy -> Ok (Causal_before policy)
-        | Some physical, Some policy -> Ok (Combined_before (physical, policy))
-        | None, None ->
-          Error (error Invalid_state "governed inference has no prewriter arm")
-      in
-      (* A causal reservation can advance the same owner again. Reacquire the
+          transferred := true;
+          Eio.Fiber.yield ();
+          retry ()
+        | _ -> result)
+  in
+  with_admission ~f:(fun () ->
+    let%bind physical =
+      match inherited_attempt_physical plan with
+      | None -> Ok None
+      | Some slot ->
+        let%bind views =
+          (Descendant_admission_slot.host slot).prepare slot.preparation slot.reservations
+        in
+        (* A physical root can also own this held occurrence. Its reservation
+           advances the Store observation that the original runtime checks. *)
+        let%map () = refresh_original () in
+        Some views
+    in
+    let%bind () = call t (Inherited_inference (Preview (plan, physical))) in
+    let%bind policy =
+      match inherited_attempt_causal plan with
+      | None -> Ok None
+      | Some causal ->
+        (causal_plan_driver causal).prepare causal.slot.preparation causal.reservations
+        |> Result.map ~f:Option.some
+    in
+    let%bind before_writer =
+      match physical, policy with
+      | Some physical, None -> Ok (Descendant_before physical)
+      | None, Some policy -> Ok (Causal_before policy)
+      | Some physical, Some policy -> Ok (Combined_before (physical, policy))
+      | None, None ->
+        Error (error Invalid_state "governed inference has no prewriter arm")
+    in
+    (* A causal reservation can advance the same owner again. Reacquire the
          original runtime's observation outside the target mailbox. *)
+    let%bind () =
+      match policy, plan.original with
+      | Some _, _ -> refresh_original ()
+      | None, Legacy _ -> Ok ()
+      | None, Runtime { execution; _ } -> refresh_execution_descendant t execution
+    in
+    let%bind committed =
+      Eio.Cancel.protect (fun () ->
+        call t (Inherited_inference (Commit (plan, before_writer))))
+    in
+    match committed with
+    | Attempt_unconfirmed _ ->
+      Error (error Conflict "governed inference canonical writer remains unconfirmed")
+    | Acknowledged acknowledgement ->
+      let%bind registration =
+        match acknowledgement.original with
+        | Legacy { registration; _ } -> !registration
+        | Runtime { selected; _ } ->
+          Result.map !selected ~f:(fun selected ->
+            selected.Admitted_inference.registration)
+      in
       let%bind () =
-        match policy, plan.original with
-        | Some _, _ -> refresh_original ()
-        | None, Legacy _ -> Ok ()
-        | None, Runtime { execution; _ } -> refresh_execution_descendant t execution
+        match Inference_owner.Registration.factual_usage registration with
+        | None -> confirm_governed_attempt t acknowledgement |> Result.map ~f:ignore
+        | Some facts -> Inference_owner.Factual_usage.confirm_initial facts
       in
-      let%bind committed =
-        Eio.Cancel.protect (fun () ->
-          call t (Inherited_inference (Commit (plan, before_writer))))
+      let%bind confirmation =
+        Result.of_option
+          acknowledgement.confirmation
+          ~error:(error Conflict "governed initial duty has no exact confirmation vector")
       in
-      match committed with
-      | Attempt_unconfirmed _ ->
-        Error (error Conflict "governed inference canonical writer remains unconfirmed")
-      | Acknowledged acknowledgement ->
-        let%bind registration =
-          match acknowledgement.original with
-          | Legacy { registration; _ } -> !registration
-          | Runtime { selected; _ } ->
-            Result.map !selected ~f:(fun selected ->
-              selected.Admitted_inference.registration)
-        in
-        let%bind () =
-          match Inference_owner.Registration.factual_usage registration with
-          | None -> confirm_governed_attempt t acknowledgement |> Result.map ~f:ignore
-          | Some facts -> Inference_owner.Factual_usage.confirm_initial facts
-        in
-        let%bind confirmation =
-          Result.of_option
-            acknowledgement.confirmation
-            ~error:
-              (error Conflict "governed initial duty has no exact confirmation vector")
-        in
-        let submission_guard =
-          Inference_runtime.Submission_guard.create ~refresh:(fun () ->
-            let refreshed =
-              let%bind () =
-                match acknowledgement.original with
-                | Legacy _ -> Ok ()
-                | Runtime { selected; execution; _ } ->
-                  let%bind selected = !selected in
-                  let%bind () = refresh_admitted_inference t selected in
-                  refresh_execution_descendant t execution
-              in
-              let%bind views =
-                match acknowledgement.arms, acknowledgement.governed, confirmation with
-                | ( Descendant_attempt slot
-                  , Descendant_ack descendant
-                  , Descendant_confirmation confirmed ) ->
-                  let%map views =
-                    (Descendant_admission_slot.host slot).refresh_admitted
-                      descendant
-                      confirmed
-                  in
-                  Descendant_views views
-                | ( Policy_causal_attempt causal
-                  , Causal_ack canonical
-                  , Causal_confirmation confirmed ) ->
-                  let%map views =
-                    (causal_plan_driver causal).refresh_admitted canonical confirmed
-                  in
-                  Causal_views views
-                | ( Combined_attempt { descendant = slot; causal }
-                  , Combined_ack (descendant, canonical)
-                  , Combined_confirmation (physical, policy) ) ->
-                  let%bind physical =
-                    (Descendant_admission_slot.host slot).refresh_admitted
-                      descendant
-                      physical
-                  in
-                  let%map policy =
-                    (causal_plan_driver causal).refresh_admitted canonical policy
-                  in
-                  Combined_views (physical, policy)
-                | ( (Descendant_attempt _ | Policy_causal_attempt _ | Combined_attempt _)
-                  , (Descendant_ack _ | Causal_ack _ | Combined_ack _)
-                  , ( Descendant_confirmation _
-                    | Causal_confirmation _
-                    | Combined_confirmation _ ) ) ->
-                  Error
-                    (error Conflict "governed inference refresh changed its closed arms")
-              in
-              call
-                t
-                (Inherited_inference (Refresh (acknowledgement, confirmation, views)))
+      let submission_guard =
+        Inference_runtime.Submission_guard.create ~refresh:(fun () ->
+          let refreshed =
+            let%bind () =
+              match acknowledgement.original with
+              | Legacy _ -> Ok ()
+              | Runtime { selected; execution; _ } ->
+                let%bind selected = !selected in
+                let%bind () = refresh_admitted_inference t selected in
+                refresh_execution_descendant t execution
             in
-            match refreshed with
-            | Ok check -> check
-            | Error error -> raise (Inference_allocation.Rejected error))
-        in
-        let allocation =
-          Inference_allocation.Host.create ~handle:plan.handle ~submission_guard
-        in
-        transferred := true;
-        Ok allocation)
+            let%bind views =
+              match acknowledgement.arms, acknowledgement.governed, confirmation with
+              | ( Descendant_attempt slot
+                , Descendant_ack descendant
+                , Descendant_confirmation confirmed ) ->
+                let%map views =
+                  (Descendant_admission_slot.host slot).refresh_admitted
+                    descendant
+                    confirmed
+                in
+                Descendant_views views
+              | ( Policy_causal_attempt causal
+                , Causal_ack canonical
+                , Causal_confirmation confirmed ) ->
+                let%map views =
+                  (causal_plan_driver causal).refresh_admitted canonical confirmed
+                in
+                Causal_views views
+              | ( Combined_attempt { descendant = slot; causal }
+                , Combined_ack (descendant, canonical)
+                , Combined_confirmation (physical, policy) ) ->
+                let%bind physical =
+                  (Descendant_admission_slot.host slot).refresh_admitted
+                    descendant
+                    physical
+                in
+                let%map policy =
+                  (causal_plan_driver causal).refresh_admitted canonical policy
+                in
+                Combined_views (physical, policy)
+              | ( (Descendant_attempt _ | Policy_causal_attempt _ | Combined_attempt _)
+                , (Descendant_ack _ | Causal_ack _ | Combined_ack _)
+                , ( Descendant_confirmation _
+                  | Causal_confirmation _
+                  | Combined_confirmation _ ) ) ->
+                Error
+                  (error Conflict "governed inference refresh changed its closed arms")
+            in
+            call t (Inherited_inference (Refresh (acknowledgement, confirmation, views)))
+          in
+          match refreshed with
+          | Ok check -> check
+          | Error error -> raise (Inference_allocation.Rejected error))
+      in
+      let allocation =
+        Inference_allocation.Host.create ~handle:plan.handle ~submission_guard
+      in
+      transferred := true;
+      Ok allocation)
 ;;
 
-let finish_prepared_inference t = function
+let finish_prepared_inference ?retry_parent_progress t = function
   | Inherited_attempt.Prepared.Ordinary allocation -> Ok allocation
-  | Inherited plan -> drive_inherited_attempt t plan
+  | Inherited plan -> drive_inherited_attempt ?retry_parent_progress t plan
 ;;
 
 let settle_inference_usage t selected =
@@ -17886,19 +18607,25 @@ let drain_inference_usage t =
 
 let inference_port t execution ~graph ~relation ~configuration =
   let open Result.Let_syntax in
-  let%bind () = drain_inference_usage t in
-  let%bind () = retry_descendant_admission_cleanup t in
-  let%bind () = refresh_held_execution t execution in
-  let%bind origin_observation = observe_inference_origin t in
-  let%bind prepared =
-    Eio.Cancel.protect (fun () ->
-      call
-        t
-        (Inherited_inference
-           (Allocate_runtime
-              (origin_observation, execution, graph, relation, configuration))))
+  let allocate ?retry_parent_progress () =
+    let%bind () = drain_inference_usage t in
+    let%bind () = retry_descendant_admission_cleanup t in
+    let%bind () = refresh_held_execution t execution in
+    let%bind origin_observation = observe_inference_origin t in
+    let%bind prepared =
+      Eio.Cancel.protect (fun () ->
+        call
+          t
+          (Inherited_inference
+             (Allocate_runtime
+                (origin_observation, execution, graph, relation, configuration))))
+    in
+    finish_prepared_inference ?retry_parent_progress t prepared
   in
-  finish_prepared_inference t prepared
+  match execution, relation with
+  | Inference_operation _, Root ->
+    allocate ~retry_parent_progress:(fun () -> allocate ()) ()
+  | _ -> allocate ()
 ;;
 
 let validate_initialization_scope_current t scope =
@@ -18516,7 +19243,13 @@ let initialization_transition ?admission_hold ?job_custody t scope ~delta ~paylo
     candidate
 ;;
 
-let complete_initialization t scope (candidate : Session_state.t) moderator_manager =
+let complete_initialization
+      t
+      scope
+      (candidate : Session_state.t)
+      moderator_manager
+      installed_originals
+  =
   let open Result.Let_syntax in
   let%bind () = validate_initialization_scope t scope in
   (* Reject before any Manager snapshot can reacquire the active callback gate. *)
@@ -18560,9 +19293,34 @@ let complete_initialization t scope (candidate : Session_state.t) moderator_mana
     else Ok ()
   in
   let current = t.state in
+  let%bind recovery_installed_originals =
+    match
+      ( current.recovery_installed_originals
+      , installed_originals
+      , Option.bind
+          t.canonical_persistence
+          ~f:Canonical_backend_binding_data.session_owner )
+    with
+    | (Some _ as previous), _, _ -> Ok previous
+    | None, Some initial, Some owner
+      when Recovery_installed_originals.Initial.matches_source
+             initial
+             ~definition:current.spec.prompt_definition_id
+             ~revision:current.spec.prompt_revision_id ->
+      Recovery_installed_originals.admit
+        initial
+        ~owner
+        ~generation:current.identity.generation
+        ~initial_rows:
+          (List.take
+             candidate.conversation.canonical_history
+             candidate.conversation.initial_prompt_entry_count)
+    | _ -> Ok None
+  in
   let state =
     { current with
       runtime_initialization = Ready
+    ; recovery_installed_originals
     ; failure = None
     ; lifecycle =
         { current.lifecycle with
@@ -18925,7 +19683,7 @@ let adopt_deferred t =
       ~payloads:[ Agent_protocol.Event.Durable.Payload.History_appended entries ])
 ;;
 
-let reserve_history_block ?run_preparation t count =
+let reserve_history_block ?run_preparation ?check_before_commit t count =
   if count <= 0
   then Error (error Invalid_request "history reservation count must be positive")
   else if Int64.(t.state.conversation.next_history_sequence > max_value - of_int count)
@@ -18937,6 +19695,7 @@ let reserve_history_block ?run_preparation t count =
     let%map _ =
       transition
         ?run_preparation
+        ?check_before_commit
         t
         ~delta:(Session_delta.History_block_reserved reserved_through)
         ~payloads:[]
@@ -18950,6 +19709,35 @@ let current_operation t operation_id =
     -> Ok operation
   | Some _ -> Error (error Conflict "a different foreground operation is active")
   | None -> Error (error Operation_not_found "foreground operation is not active")
+;;
+
+let foreground_publication_matches t publication =
+  Foreground_publication.matches
+    publication
+    ~selected:t.foreground_publication
+    ~state:t.state
+;;
+
+let check_foreground_publication t publication =
+  if foreground_publication_matches t publication
+  then Ok ()
+  else Error (error Conflict "foreground worker no longer owns this context window")
+;;
+
+let check_live_foreground_publication t (publication : Foreground_publication.t) =
+  let open Result.Let_syntax in
+  let%bind () = check_foreground_publication t publication in
+  let%bind operation = current_operation t publication.operation.id in
+  match operation.state with
+  | (Starting | Running) when Atomic.get publication.live -> Ok ()
+  | Starting | Running | Cancelling | Completed | Failed _ | Cancelled | Interrupted _ ->
+    Error (error Conflict "foreground worker publication has ended")
+;;
+
+let with_foreground_publication t (publication : Foreground_publication.t) f =
+  let check () = check_live_foreground_publication t publication in
+  let%bind.Result () = check () in
+  f publication.operation.id ~check
 ;;
 
 let running_operation
@@ -19095,7 +19883,12 @@ let invocation_admission_deltas
   | Some _ -> Error (error Conflict "invocation identity is already admitted")
 ;;
 
-let commit_invocation_call t operation_id (invocation : Agent_protocol.Invocation.t) entry
+let commit_invocation_call
+      t
+      operation_id
+      ~check
+      (invocation : Agent_protocol.Invocation.t)
+      entry
   =
   let open Result.Let_syntax in
   let%bind operation = current_operation t operation_id in
@@ -19167,6 +19960,7 @@ let commit_invocation_call t operation_id (invocation : Agent_protocol.Invocatio
   then Ok ()
   else
     transition
+      ~check_before_commit:check
       t
       ~delta:
         (Session_delta.Batch
@@ -19234,6 +20028,68 @@ let operation_agent_admission t id =
     if Agent_protocol.Id.Operation.equal owner id
     then Ok (Some admission)
     else Error (error Conflict "operation admission belongs to another owner")
+;;
+
+let successor_hint_witness t publication (selected : Foreground_successor.t) =
+  let module P = Agent_protocol in
+  let module R = Recovery_rollover in
+  let module H = Recovery_rollover_hint_ref in
+  let open Option.Let_syntax in
+  let%bind admission =
+    Result.ok (operation_agent_admission t selected.operation) |> Option.join
+  in
+  let%bind ledger = t.state.recovery_rollover in
+  let%bind receipt = R.find ledger ~id:selected.owner in
+  let%bind reference_selection =
+    let explicit =
+      Option.bind receipt.hooks ~f:(fun hooks ->
+        match Recovery_rollover_hooks.before hooks with
+        | Completed (_, Proceed { hints; _ }) -> hints
+        | _ -> None)
+    in
+    match receipt.status, explicit with
+    | Terminal (Committed { successor; _ }), Some explicit
+      when P.Recovery_window.Scope.equal successor selected.scope -> Some explicit
+    | Terminal (Committed { checkpoint = Checkpointed checkpoint; successor; _ }), None
+      when P.Recovery_window.Scope.equal successor selected.scope ->
+      List.take (R.Checkpoint.notes checkpoint) H.Selection.max_references
+      |> List.map ~f:H.local_note
+      |> H.Selection.create
+      |> Result.ok
+    | Terminal (Committed { checkpoint = Archive_only _; successor; _ }), None
+      when P.Recovery_window.Scope.equal successor selected.scope ->
+      Some H.Selection.empty
+    | (Pending | Terminal _), _ -> None
+  in
+  let check_current () =
+    Int.equal t.runtime_source_domain (Stdlib.Domain.self () :> int)
+    && (not t.stopped)
+    && Option.exists t.foreground_successor ~f:(phys_equal selected)
+    && Option.exists t.state.recovery_windows ~f:(fun windows ->
+      P.Recovery_window.Scope.equal
+        selected.scope
+        (Recovery_window_record.scope (Recovery_window_ledger.active windows)))
+    && Result.is_ok (check_live_foreground_publication t publication)
+    && (match operation_agent_admission t selected.operation with
+        | Ok (Some actual) -> phys_equal admission actual
+        | Ok None | Error _ -> false)
+    && Execution_custody.Admission.Status.(
+         match Execution_custody.Admission.status admission with
+         | Current -> true
+         | Closed | Authority_expired -> false)
+    && Option.exists (Session_delta.foreground_continuation t.state) ~f:(fun current ->
+      P.Id.Operation.equal current.owner selected.owner
+      &&
+      match current.phase, selected.admitted with
+      | Preparing operation, None -> P.Id.Operation.equal operation selected.operation
+      | Admitted { operation; ordinal }, Some (_, selected_ordinal) ->
+        P.Id.Operation.equal operation selected.operation
+        && Int64.equal ordinal selected_ordinal
+      | _ -> false)
+  in
+  if check_current ()
+  then Some (H.Witness.create ~references:reference_selection ~check_current)
+  else None
 ;;
 
 let parent_of_admission = function
@@ -19645,10 +20501,34 @@ let claim_invocation t operation_id (invocation : Agent_protocol.Invocation.t) =
       ~delta:(Session_delta.Batch (admission @ [ Invocation_changed dispatched ]))
       ~payloads:[]
   in
+  let context_rollover_basis =
+    let module P = Agent_protocol in
+    let open Option.Let_syntax in
+    let context = dispatched.P.Invocation.context in
+    let%bind () =
+      if
+        String.equal context.tool_name
+          (Recovery_context_service.name Recovery_context_service.New_window)
+        &&
+        (match context.origin with
+         | Model -> Option.is_some context.call_entry_id
+         | Script -> Option.is_some context.parent_invocation
+         | Moderator | Delegated_agent | External_adapter -> false)
+      then Some ()
+      else None
+    in
+    let%bind target = Configuration_transition.target t.state |> Result.ok in
+    Configuration_capture.native_window
+      t.configuration_capture
+      ~operation_id
+      ~configuration_revision:t.state.spec.configuration_revision
+      ~target
+  in
   let execution =
     { owner
     ; policy_source
     ; native_goal = None
+    ; context_rollover_basis
     ; dispatched
     ; accepts_children = true
     ; authority_live = Atomic.make true
@@ -21828,11 +22708,10 @@ let callback_actor_after_current t ~scope =
      | Some custody ->
        let%map actor = Execution_custody.actor custody in
        Some
-         (Operator_authorization.guarded
-            ~principal:(Operator_authorization.principal actor)
+         (Operator_authorization.restrict
+            actor
             ~is_current:(fun () ->
-              Result.is_ok (check_callback_inference_current t scope)
-              && Operator_authorization.is_current actor)))
+              Result.is_ok (check_callback_inference_current t scope))))
 ;;
 
 let callback_agent_actor t ~scope =
@@ -21957,6 +22836,7 @@ let claim_event_invocation t borrow (invocation : Agent_protocol.Invocation.t) =
     { owner = Event_moderator borrow
     ; policy_source
     ; native_goal = None
+    ; context_rollover_basis = None
     ; dispatched
     ; accepts_children = true
     ; authority_live = Atomic.make true
@@ -24692,6 +25572,7 @@ let claim_idle_invocation t borrow (invocation : Agent_protocol.Invocation.t) =
     { owner = Invocation_moderator borrow
     ; policy_source
     ; native_goal = None
+    ; context_rollover_basis = None
     ; dispatched
     ; accepts_children = true
     ; authority_live = Atomic.make true
@@ -24821,7 +25702,7 @@ let lifecycle_for_compaction t operation_id =
     { desired = t.state.lifecycle.desired; observed = Compacting operation_id }
 ;;
 
-let commit_worker_entry t operation_id entry =
+let commit_worker_entry t operation_id ~check entry =
   let open Result.Let_syntax in
   let%bind _ = current_operation t operation_id in
   let protocol_entry =
@@ -24832,7 +25713,7 @@ let commit_worker_entry t operation_id entry =
       History_entry.Id.equal existing.id protocol_entry.id)
   with
   | None ->
-    let%map _ = append_history t [ protocol_entry ] in
+    let%map _ = append_history ~check_before_commit:check t [ protocol_entry ] in
     ()
   | Some existing ->
     if
@@ -24843,7 +25724,7 @@ let commit_worker_entry t operation_id entry =
     else Error (error Conflict "history ID was committed with a different payload")
 ;;
 
-let prepare_authoring_input t operation_id materialization history effective =
+let prepare_authoring_input t operation_id ~check materialization history effective =
   let module M = Chat_response.Authoring_materialization in
   let open Result.Let_syntax in
   let%bind _ = running_operation t operation_id in
@@ -24923,6 +25804,7 @@ let prepare_authoring_input t operation_id materialization history effective =
     let%bind returned = History_codec.all_of_protocol entries in
     let%map _ =
       transition
+        ~check_before_commit:check
         t
         ~delta:
           (Session_delta.Batch
@@ -24942,7 +25824,7 @@ let prepare_authoring_input t operation_id materialization history effective =
     returned
 ;;
 
-let publish_invocation_output t operation_id invocation_id entry =
+let publish_invocation_output t operation_id ~check invocation_id entry =
   let open Result.Let_syntax in
   (* A completed tool may publish while a sibling waits for permission. Publishing
      its already-resolved result does not authorize or execute another tool. *)
@@ -25004,6 +25886,7 @@ let publish_invocation_output t operation_id invocation_id entry =
     in
     let%map _ =
       transition
+        ~check_before_commit:check
         t
         ~delta:
           (Session_delta.Batch
@@ -25013,7 +25896,7 @@ let publish_invocation_output t operation_id invocation_id entry =
     ()
 ;;
 
-let commit_worker_moderator t operation_id moderator =
+let commit_worker_moderator t operation_id ~check moderator =
   let open Result.Let_syntax in
   let%bind _ = running_operation ~allow_stopping:true t operation_id in
   if moderator_is_borrowed t
@@ -25057,7 +25940,10 @@ let commit_worker_moderator t operation_id moderator =
       in
       if Option.equal Jsonaf.exactly_equal t.state.moderator acknowledged
       then Ok ()
-      else Result.map (change_moderator t acknowledged) ~f:(fun _ -> ()))
+      else
+        Result.map
+          (change_moderator ~check_before_commit:check t acknowledged)
+          ~f:(fun _ -> ()))
 ;;
 
 let configuration_view t =
@@ -25138,7 +26024,75 @@ let commit_configuration_update t validated =
   configuration_view t
 ;;
 
-let begin_configuration_capture t operation_id =
+let context_capacity_selection t ~owner ~target =
+  let opted_in () =
+    Option.exists t.state.recovery_windows ~f:(fun ledger ->
+      Agent_protocol.Session_ref.equal owner (Recovery_window_ledger.owner ledger))
+  in
+  Session_context_capacity.Selection.select t.context_capacity_host ~owner ~target ~opted_in
+  |> Option.map ~f:(fun selection ->
+    Session_context_capacity.Selection.require_worker
+      selection
+      ~automatic:
+        (opted_in ()
+         && Option.exists t.operation_worker ~f:Operation_worker.supports_capacity_rollover))
+;;
+
+let context_capacity_basis t target =
+  Option.bind
+    (Option.bind t.canonical_persistence ~f:Canonical_backend_binding_data.session_owner)
+    ~f:(fun owner ->
+      context_capacity_selection t ~owner ~target
+      |> Option.map ~f:(fun selection ->
+        Configuration_capture.Capacity_basis.capture t.state ~selection))
+;;
+
+let current_context_capacity_basis t =
+  Result.ok (Configuration_transition.target t.state)
+  |> Option.bind ~f:(context_capacity_basis t)
+;;
+
+let read_context_capacity t operation_id =
+  let open Result.Let_syntax in
+  let%bind _ = running_operation ~allow_waiting_permission:true t operation_id in
+  let%map () = require_runtime_admission t in
+  Configuration_capture.capacity_status
+    t.configuration_capture
+    ~operation_id
+    ~current:(current_context_capacity_basis t)
+;;
+
+let current_recovery_preparation_scope t =
+  let open Option.Let_syntax in
+  let%bind storage = t.canonical_persistence in
+  let%bind owner = Canonical_backend_binding_data.session_owner storage in
+  let%bind windows = t.state.recovery_windows in
+  if Agent_protocol.Session_ref.equal owner (Recovery_window_ledger.owner windows)
+  then Some (Recovery_window_ledger.Window.scope (Recovery_window_ledger.active windows))
+  else None
+;;
+
+let automatic_capacity_principal t operation_id =
+  let module P = Agent_protocol in
+  let open Result.Let_syntax in
+  let%bind () = check_operation_descendant t operation_id in
+  let missing () =
+    error Permission_denied "automatic rollover has no current original authority"
+  in
+  let%bind admission = operation_agent_admission t operation_id in
+  let%bind admission = Result.of_option admission ~error:(missing ()) in
+  let%bind () = check_agent_admission admission in
+  let%bind custody =
+    Result.of_option (Execution_custody.Admission.custody admission) ~error:(missing ())
+  in
+  let%bind actor = Execution_custody.actor custody in
+  let principal = Operator_authorization.principal actor in
+  if P.Principal.has_scope principal Send_messages
+  then Ok principal
+  else Error (missing ())
+;;
+
+let begin_configuration_capture t operation_id ~automatic =
   let open Result.Let_syntax in
   let%bind _ = running_operation t operation_id in
   let%bind () = require_runtime_admission t in
@@ -25148,7 +26102,24 @@ let begin_configuration_capture t operation_id =
       t.configuration_policy
       ~error:(error Invalid_state "root configuration policy is unavailable")
   in
+  let capacity = context_capacity_basis t target in
+  let recovery_scope = current_recovery_preparation_scope t in
+  let cut =
+    if
+      automatic
+      && Option.is_some recovery_scope
+      && Option.exists capacity ~f:Configuration_capture.Capacity_basis.automatic
+      && Result.is_ok (automatic_capacity_principal t operation_id)
+    then Some (Configuration_capture.Cut_basis.capture t.state)
+    else None
+  in
   Configuration_capture.begin_capture
+    ?capacity
+    ?cut
+    ?recovery_scope
+    ~capture_recovery:
+      (Recovery_effective_ledger.has_record_capacity t.state.recovery_effective)
+    ~can_remind:(Recovery_reminder.can_claim t.state.recovery_reminders)
     t.configuration_capture
     ~operation_id
     ~generation:t.state.identity.generation
@@ -25169,16 +26140,273 @@ let finish_configuration_capture t capture success =
   Ok ()
 ;;
 
-let root_configuration_context t operation_id =
+let mark_context_capacity t capture observation =
+  let open Result.Let_syntax in
+  let%bind _ = running_operation t (Configuration_capture.Token.operation_id capture) in
+  let%bind () = require_runtime_admission t in
+  Configuration_capture.mark_capacity
+    t.configuration_capture
+    capture
+    ~current:(current_context_capacity_basis t)
+    observation
+;;
+
+let capture_recovery_preparation t capture input ~configuration ~binding_is_current =
+  let open Result.Let_syntax in
+  let operation = Configuration_capture.Token.operation_id capture in
+  let check () =
+    let%bind _ = running_operation t operation in
+    let%bind () = require_runtime_admission t in
+    let%bind () =
+      if binding_is_current ()
+      then Ok ()
+      else Error (error Conflict "actual prepared adapter binding is unavailable")
+    in
+    let%bind admission = operation_agent_admission t operation in
+    let%bind () = Option.value_map admission ~default:(Ok ()) ~f:check_agent_admission in
+    let%bind scope =
+      Result.of_option
+        (current_recovery_preparation_scope t)
+        ~error:(error Conflict "actual durable recovery window is unavailable")
+    in
+    Configuration_capture.check_recovery t.configuration_capture capture ~scope
+  in
+  let%bind () = check () in
+  let%bind prepared = Recovery_effective_capture.prepare t.state ~operation input in
+  match prepared with
+  | None -> Ok ()
+  | Some record ->
+    let previous = t.state in
+    let run_preparation =
+      Option.map t.run_source_binding ~f:(fun binding -> binding.Source_binding.preparation)
+    in
+    let%bind candidate =
+      prepare_transition
+        ?run_preparation
+        t
+        ~delta:(Recovery_effective_prepared record)
+        ~payloads:[]
+    in
+    (match%bind check_recovery_admission t candidate with
+     | Capacity_exhausted -> Ok ()
+     | Fits ->
+       let commit_observation =
+         Session_commit_observation.Owner.create_guarded
+           ~previous
+           ~candidate
+           ~check_at_writer:check
+       in
+       let%bind () =
+         persist_transition
+           ?run_preparation
+           t
+           candidate
+           ~check_before_commit:check
+           ~commit_observation
+       in
+       install_committed_transition ?run_preparation t candidate;
+       Configuration_capture.record_recovery_binding
+         t.configuration_capture
+         capture
+         ~configuration
+         ~source_revision:(Recovery_effective_record.source_revision record);
+       publish_committed_transition t candidate;
+       Ok ())
+;;
+
+let reminder_scope t capture =
+  let open Result.Let_syntax in
+  let operation = Configuration_capture.Token.operation_id capture in
+  let%bind _ = running_operation t operation in
+  let%bind () = require_runtime_admission t in
+  let%bind admission = operation_agent_admission t operation in
+  let%bind () = Option.value_map admission ~default:(Ok ()) ~f:check_agent_admission in
+  Result.of_option
+    (current_recovery_preparation_scope t)
+    ~error:(error Conflict "reminder recovery window is unavailable")
+;;
+
+let commit_reminder_change t change ~check =
+  let open Result.Let_syntax in
+  let run_preparation =
+    Option.map t.run_source_binding ~f:(fun binding -> binding.Source_binding.preparation)
+  in
+  let previous = t.state in
+  let%bind candidate =
+    prepare_transition
+      ?run_preparation
+      t
+      ~delta:(Recovery_reminder_changed change)
+      ~payloads:[]
+  in
+  match%bind check_recovery_admission t candidate with
+  | Capacity_exhausted -> Ok false
+  | Fits ->
+    let commit_observation =
+      Session_commit_observation.Owner.create_guarded
+        ~previous
+        ~candidate
+        ~check_at_writer:check
+    in
+    let%bind () =
+      persist_transition
+        ?run_preparation
+        t
+        candidate
+        ~check_before_commit:check
+        ~commit_observation
+    in
+    install_committed_transition ?run_preparation t candidate;
+    publish_committed_transition t candidate;
+    Ok true
+;;
+
+let claim_recovery_reminder t capture prepared =
+  let open Result.Let_syntax in
+  let check_claim () =
+    let%bind scope = reminder_scope t capture in
+    Configuration_capture.claim_reminder
+      t.configuration_capture
+      capture
+      ~scope
+      ~current:(current_context_capacity_basis t)
+      prepared
+  in
+  match%bind check_claim () with
+  | None -> Ok None
+  | Some claim ->
+    let check () =
+      match%bind check_claim () with
+      | Some current when Recovery_reminder.Claim.equal claim current -> Ok ()
+      | _ -> Error (error Conflict "reminder claim became unavailable")
+    in
+    let%map committed = commit_reminder_change t (Claim claim) ~check in
+    Option.some_if committed claim
+;;
+
+let accept_recovery_reminder t capture claim prepared attempt =
+  let open Result.Let_syntax in
+  let check () =
+    let%bind scope = reminder_scope t capture in
+    Configuration_capture.check_reminder_dispatch
+      t.configuration_capture
+      capture
+      ~scope
+      ~current:(current_context_capacity_basis t)
+      claim
+      prepared
+      attempt
+  in
+  let%bind () = check () in
+  let attempt = Inference_runtime.Attempt.accounting_id attempt in
+  let%bind accepted =
+    if Recovery_reminder.accepted_by t.state.recovery_reminders claim attempt
+    then Ok true
+    else commit_reminder_change t (Accept (claim, attempt)) ~check
+  in
+  if accepted
+  then
+    Ok
+      (fun () ->
+        match check () with
+        | Ok () -> ()
+        | Error failure -> raise (Native_tool_dispatch.Dispatch_error failure))
+  else Error (error Conflict "reminder acceptance could not be retained")
+;;
+
+let root_configuration_context t (publication : Foreground_publication.t) ~automatic =
+  let operation_id = publication.operation.id in
+  let select_checkpoint capture ~tools ~request ~prepare_isolated baseline =
+    let module R = Inference_runtime in
+    let module O = Recovery_checkpoint_opportunity in
+    let module C = Recovery_checkpoint_candidate in
+    let module P = Inference_client.Prepared_selection in
+    let open Option.Let_syntax in
+    let owner = publication, capture in
+    let ask : type a. a Soft_checkpoint_request.t -> a =
+      fun req ->
+      match call t (Context_request (Soft_checkpoint req)) with
+      | Ok value -> value
+      | Error failure -> raise (Native_tool_dispatch.Dispatch_error failure)
+    in
+    let%bind plan = ask (Plan (owner, tools, baseline)) in
+    let withhold reason =
+      ignore (ask (Admit (owner, plan, Withhold reason, baseline)) : O.Claim.t)
+    in
+    match plan.candidate with
+    | Error reason ->
+      withhold reason;
+      None
+    | Ok recipe ->
+      let preview =
+        let%bind alternative = C.project recipe request in
+        let%bind candidate = prepare_isolated alternative |> Result.ok in
+        let selected = P.prepared candidate in
+        match C.pressure plan.policy selected with
+        | Some (Below_warning | Near_limit | Checkpoint_due)
+          when R.Prepared.includes_history selected (Inference.Request.history request) ->
+          Some (candidate, selected)
+        | Some _ | None -> None
+      in
+      (match preview with
+       | None ->
+         withhold Unproven_fit;
+         None
+       | Some (candidate, prepared) ->
+         let claim = ask (Admit (owner, plan, Offer (C.recipe recipe), prepared)) in
+         let%bind () =
+           match claim.decision with
+           | Offer _ -> Some ()
+           | Withhold _ -> None
+         in
+         let for_attempt attempt =
+           let entered = ref false in
+           R.Submission_guard.create_write_admission ~refresh:(fun () ->
+             if !entered
+             then
+               raise
+                 (Native_tool_dispatch.Dispatch_error
+                    (error Conflict "checkpoint opportunity already submitted"));
+             entered := true;
+             ask (Accept (owner, plan, claim, prepared, attempt)))
+         in
+         let approve_call attempt ~name ~arguments =
+           R.Prepared.owns_attempt prepared attempt && C.accepts recipe ~name ~arguments
+         in
+         let settle attempt outcome =
+           call
+             t
+             (Context_request
+                (Soft_checkpoint (Settle (owner, plan, claim, attempt, outcome))))
+         in
+         Some
+           Chat_response.Soft_checkpoint.Selected.
+             { candidate; for_attempt; approve_call; settle })
+  in
   Configuration_capture.root_port
-    ~begin_capture:(fun () -> call t (Begin_configuration_capture operation_id))
+    ~select_checkpoint:(fun capture -> Option.some_if automatic (select_checkpoint capture))
+    ~begin_capture:(fun () ->
+      call t (Begin_configuration_capture (operation_id, automatic)))
+    ~publish_capacity:(fun capture observation ->
+      call t (Context_request (Capacity (Publish (capture, observation)))))
+    ~publish_recovery:(fun capture input ~configuration ~binding_is_current ->
+      call
+        t
+        (Context_request
+           (Recovery_effective (capture, input, configuration, binding_is_current))))
+    ~claim_reminder:(fun capture prepared ->
+      call t (Context_request (Capacity (Claim_reminder (capture, prepared)))))
+    ~accept_reminder:(fun capture claim prepared attempt ->
+      call
+        t
+        (Context_request (Capacity (Accept_reminder (capture, claim, prepared, attempt)))))
     ~mark:(fun capture configuration ->
       call t (Mark_configuration_capture (capture, configuration)))
     ~finish:(fun capture ~success ->
       call t (Finish_configuration_capture (capture, success)))
 ;;
 
-let consume_deferred t operation_id =
+let consume_deferred t operation_id ~check =
   if not (runtime_admission_open t)
   then Ok []
   else
@@ -25199,6 +26427,7 @@ let consume_deferred t operation_id =
     else (
       let%map _ =
         transition
+          ~check_before_commit:check
           t
           ~delta:(Pending_transition.delta prepared)
           ~payloads:[ Agent_protocol.Event.Durable.Payload.History_appended entries ]
@@ -25426,6 +26655,8 @@ let notification_payloads = function
 ;;
 
 let consume_notifications_internal
+      ~check
+      ?(track_wakes = true)
       ?(wakes = [])
       ?(discarded_wakes = [])
       t
@@ -25477,6 +26708,7 @@ let consume_notifications_internal
         | [] -> Ok ()
         | _ ->
           transition
+            ~check_before_commit:check
             t
             ~delta:(Session_delta.Batch deltas)
             ~payloads:(notification_payloads entries)
@@ -25490,7 +26722,7 @@ let consume_notifications_internal
       let ids =
         List.map selected_wakes ~f:(fun value -> value.Agent_protocol.Delivery.context.id)
       in
-      t.notification_inputs <- Some (operation_id, ids @ existing);
+      if track_wakes then t.notification_inputs <- Some (operation_id, ids @ existing);
       let wake =
         List.exists selected_wakes ~f:(fun value ->
           Agent_protocol.Completion.equal_wake value.context.wake Request_turn)
@@ -25531,7 +26763,7 @@ let notification_wake_deltas t operation_id ~accept =
   |> Result.all
 ;;
 
-let worker_ready t operation_id cancel =
+let worker_ready ?check_before_commit t operation_id cancel =
   match t.state.active_operation with
   | None ->
     cancel ();
@@ -25556,6 +26788,7 @@ let worker_ready t operation_id cancel =
         let open Result.Let_syntax in
         let%map _ =
           transition
+            ?check_before_commit
             t
             ~delta:(Session_delta.Active_operation_changed (Some operation))
             ~payloads:
@@ -25877,16 +27110,29 @@ let compaction_terminal_base_delta t operation = function
         ~previous:t.state.conversation.canonical_history
         history
     in
+    let history_changes : Session_delta.t list =
+      match t.state.recovery_windows with
+      | None -> [ Compaction_archived archive; Canonical_history_replaced history ]
+      | Some _ ->
+        let capture =
+          if
+            Option.exists
+              t.state.recovery_effective
+              ~f:Recovery_effective_ledger.has_live_sources
+          then `Canonical_and_effective
+          else `Canonical
+        in
+        [ Recovery_summary_compacted (archive, history, capture) ]
+    in
     let operation = operation_state t operation Agent_protocol.Operation.Completed in
     let lifecycle = terminal_lifecycle t in
     Ok
       ( Session_delta.Batch
-          [ Compaction_archived archive
-          ; Canonical_history_replaced history
-          ; Compaction_generation_changed generation
-          ; Active_operation_changed None
-          ; Lifecycle_changed lifecycle
-          ]
+          (history_changes
+           @ [ Compaction_generation_changed generation
+             ; Active_operation_changed None
+             ; Lifecycle_changed lifecycle
+             ])
       , [ Agent_protocol.Event.Durable.Payload.History_replaced
             (Session_state.history_window history)
         ; Operation_completed operation
@@ -26054,7 +27300,7 @@ let run_compaction t operation selection port installed allocator history =
   try
     Eio.Switch.run (fun operation_switch ->
       let cancel () = Eio.Switch.fail operation_switch Compaction_cancel_requested in
-      match call t ~priority:Priority (Worker_ready (operation_id, cancel)) with
+      match call t ~priority:Priority (Worker_ready (Compaction operation_id, cancel)) with
       | Error failure -> Compaction_failed failure
       | Ok () ->
         Eio.Switch.check operation_switch;
@@ -26370,7 +27616,14 @@ let manage_moderator_follow_up t operation_id observer =
   | _ -> Error (error Conflict "foreground routing requires the installed moderator")
 ;;
 
-let admit_moderator_turn t operation_id =
+let preparing_successor t operation_id =
+  Option.exists (Session_delta.foreground_continuation t.state) ~f:(fun continuation ->
+    match continuation.phase with
+    | Preparing operation -> Agent_protocol.Id.Operation.equal operation operation_id
+    | Awaiting | Waiting | Held _ | Admitted _ | Finished _ -> false)
+;;
+
+let check_managed_model_turn t operation_id =
   let open Result.Let_syntax in
   let%bind () = require_selected_execution t in
   let%bind operation = running_operation t operation_id in
@@ -26383,29 +27636,135 @@ let admit_moderator_turn t operation_id =
       Error (error Conflict "provider admission cannot interrupt a moderator event")
     | false, false -> Ok ()
   in
-  let%bind plan = Observation_follow_up.admit_turn ~state:t.state ~observer in
-  let%bind notifications = notification_wake_deltas t operation_id ~accept:true in
-  let%bind run_deltas = run_turn_deltas t operation plan.events [] in
-  match follow_up_deltas t plan @ notifications @ run_deltas with
-  | [] -> Ok ()
-  | deltas ->
-    transition t ~delta:(Session_delta.Batch deltas) ~payloads:[] |> Result.map ~f:ignore
+  Ok (operation, observer)
 ;;
 
-let admit_notification_turn t operation_id =
+let managed_model_turn_deltas t operation_id =
+  let open Result.Let_syntax in
+  let%bind operation, observer = check_managed_model_turn t operation_id in
+  let%bind plan = Observation_follow_up.admit_turn ~state:t.state ~observer in
+  let%bind notifications =
+    if preparing_successor t operation_id
+    then Ok []
+    else notification_wake_deltas t operation_id ~accept:true
+  in
+  let%bind run_deltas = run_turn_deltas t operation plan.events [] in
+  Ok (follow_up_deltas t plan @ notifications @ run_deltas)
+;;
+
+let check_notification_model_turn t operation_id =
   let open Result.Let_syntax in
   let%bind () = require_selected_execution t in
   let%bind _ = running_operation t operation_id in
-  let%bind () =
-    match t.state.lifecycle.desired, t.state.halted, moderator_is_borrowed t with
-    | Running, false, false -> Ok ()
-    | _ -> Error (error Conflict "session cannot admit a provider request")
-  in
-  let%bind deltas = notification_wake_deltas t operation_id ~accept:true in
+  match t.state.lifecycle.desired, t.state.halted, moderator_is_borrowed t with
+  | Running, false, false -> Ok ()
+  | _ -> Error (error Conflict "session cannot admit a provider request")
+;;
+
+let notification_model_turn_deltas t operation_id =
+  let open Result.Let_syntax in
+  let%bind () = check_notification_model_turn t operation_id in
+  if preparing_successor t operation_id
+  then Ok []
+  else notification_wake_deltas t operation_id ~accept:true
+;;
+
+let persist_model_turn ?check_at_writer t deltas =
   match deltas with
   | [] -> Ok ()
   | _ ->
-    transition t ~delta:(Session_delta.Batch deltas) ~payloads:[] |> Result.map ~f:ignore
+    transition
+      ?check_model_turn_at_writer:check_at_writer
+      ?check_before_commit:check_at_writer
+      t
+      ~delta:(Session_delta.Batch deltas)
+      ~payloads:[]
+    |> Result.map ~f:ignore
+;;
+
+let admit_moderator_turn t operation_id =
+  Result.bind (managed_model_turn_deltas t operation_id) ~f:(persist_model_turn t)
+;;
+
+let admit_notification_turn t operation_id =
+  Result.bind (notification_model_turn_deltas t operation_id) ~f:(persist_model_turn t)
+;;
+
+let check_model_turn t operation_id ~managed =
+  if managed
+  then Result.map (check_managed_model_turn t operation_id) ~f:ignore
+  else check_notification_model_turn t operation_id
+;;
+
+let ordinary_model_registration t operation_id attempt =
+  List.find_map t.inference_owners ~f:(fun custody ->
+    let owner = Inference_graph_custody.owner custody in
+    let selected = ref None in
+    Graph_owner.iter_registrations owner ~f:(fun registration ->
+      let handle = Inference_owner.Registration.handle registration in
+      if Option.exists (Inference_ledger.Handle.operation_id handle)
+           ~f:(Agent_protocol.Id.Operation.equal operation_id)
+         && Option.is_none (Inference_ledger.Handle.invocation_id handle)
+         && Option.exists (Inference_owner.Registration.attempt registration)
+              ~f:(phys_equal attempt)
+      then selected := Some (owner, registration));
+    !selected)
+;;
+
+let admit_ordinary_model_write
+      t
+      (publication : Foreground_publication.t)
+      ~managed
+      prepared
+      attempt
+  =
+  let open Result.Let_syntax in
+  let operation_id = publication.operation.id in
+  let missing () = error Conflict "ordinary model admission lost its running attempt" in
+  let%bind owner, registration =
+    Result.of_option (ordinary_model_registration t operation_id attempt) ~error:(missing ())
+  in
+  let handle = Inference_owner.Registration.handle registration in
+  let check () =
+    let%bind () = require_runtime_admission t in
+    let%bind () =
+      if Option.exists
+           (Graph_owner.registration owner ~ordinal:(Inference_ledger.Handle.ordinal handle))
+           ~f:(phys_equal registration)
+      then Ok ()
+      else Error (missing ())
+    in
+    let%bind () = check_model_turn t operation_id ~managed in
+    let%bind admission = operation_agent_admission t operation_id in
+    let%bind () = Option.value_map admission ~default:(Ok ()) ~f:check_agent_admission in
+    let%bind () =
+      if Atomic.get publication.live
+         && Foreground_publication.matches publication ~selected:t.foreground_publication ~state:t.state
+      then Ok ()
+      else Error (error Conflict "ordinary model admission lost its original foreground")
+    in
+    if
+      Configuration_capture.ordinary_attempt_is_current
+        t.configuration_capture
+        ~operation_id
+        ~current:(current_context_capacity_basis t)
+        ~prepared
+        ~attempt
+    then Ok ()
+    else Error (error Conflict "ordinary model admission lost its prepared root")
+  in
+  let%bind () = check () in
+  let%bind deltas =
+    if managed
+    then managed_model_turn_deltas t operation_id
+    else notification_model_turn_deltas t operation_id
+  in
+  let%bind () = persist_model_turn ~check_at_writer:check t deltas in
+  let%map () = check () in
+  fun () ->
+    match check () with
+    | Ok () -> ()
+    | Error failure -> raise (Native_tool_dispatch.Dispatch_error failure)
 ;;
 
 let foreground_terminal_requests t operation_id outcome =
@@ -26438,13 +27797,21 @@ let foreground_terminal_requests t operation_id outcome =
     follow_up_deltas t plan
 ;;
 
-let worker_terminal ?idle_completion t operation_id outcome compaction_custody =
+let worker_terminal
+      ?idle_completion
+      ?check_before_commit
+      t
+      operation_id
+      outcome
+      compaction_custody
+  =
   match t.state.active_operation with
   | None -> Ok ()
   | Some operation when Agent_protocol.Id.Operation.compare operation.id operation_id <> 0
     -> Ok ()
   | Some operation ->
     let open Result.Let_syntax in
+    let publication = t.foreground_publication in
     let belongs operation =
       Option.exists operation ~f:(Agent_protocol.Id.Operation.equal operation_id)
     in
@@ -26532,6 +27899,7 @@ let worker_terminal ?idle_completion t operation_id outcome compaction_custody =
     let%bind job_custody = prepare_terminal_job_custody t jobs in
     let%bind _ =
       transition
+        ?check_before_commit
         ?idle_completion_step:
           (Option.map idle_completion ~f:(fun completion ->
              completion, Idle_completion_write.Kind.Retire_turn))
@@ -26559,6 +27927,10 @@ let worker_terminal ?idle_completion t operation_id outcome compaction_custody =
     t.idle_moderator_borrowed <- Option.is_some idle_completion || moderator_is_borrowed t;
     t.invocation_executions <- independent;
     t.active_cancel <- None;
+    if Option.equal phys_equal publication t.foreground_publication
+    then (
+      t.live_operator_rollover <- None;
+      t.foreground_publication <- None);
     (match t.state.lifecycle.desired, t.state.halted with
      | Stopped, _ | _, true -> cancel_independent_moderator t
      | Running, false -> ());
@@ -26578,7 +27950,41 @@ let worker_terminal ?idle_completion t operation_id outcome compaction_custody =
     else Ok ()
 ;;
 
-let cancel_operation_internal t attachment_id operation_id =
+let worker_publication_terminal
+      t
+      (publication : Foreground_publication.t)
+      outcome
+      compaction_custody
+  =
+  let operation_id = publication.operation.id in
+  if foreground_publication_matches t publication
+  then (
+    let cancelled =
+      Option.exists t.state.active_operation ~f:(fun operation ->
+        match operation.state with
+        | Cancelling -> true
+        | Starting | Running | Completed | Failed _ | Cancelled | Interrupted _ -> false)
+    in
+    let outcome =
+      match cancelled, outcome with
+      | true, Operation_worker.Completed _ ->
+        Operation_worker.Cancelled { reason = "operation cancelled" }
+      | _ -> outcome
+    in
+    record_runtime_terminal t operation_id publication.completion (fun () ->
+      let check_before_commit () = check_foreground_publication t publication in
+      worker_terminal ~check_before_commit t operation_id outcome compaction_custody))
+  else (
+    (* A displaced worker still owns its original factual return. In particular,
+       a stale result cannot close a completion slot reused by the successor. *)
+    match publication.completion with
+    | Some original
+      when not (Option.exists t.operation_completion ~f:(phys_equal original)) ->
+      record_runtime_terminal t operation_id (Some original) (fun () -> Ok ())
+    | Some _ | None -> Ok ())
+;;
+
+let cancel_operation_internal ?check_at_writer t attachment_id operation_id =
   let open Result.Let_syntax in
   let%bind _ = write_attachment t attachment_id in
   let%bind operation = current_operation t operation_id in
@@ -26591,6 +27997,8 @@ let cancel_operation_internal t attachment_id operation_id =
     let%bind session =
       transition
         t
+        ?check_before_commit:check_at_writer
+        ?check_model_turn_at_writer:check_at_writer
         ~delta:(Session_delta.Active_operation_changed (Some operation))
         ~payloads:
           [ Agent_protocol.Event.Durable.Payload.Session_updated
@@ -26843,13 +28251,12 @@ let invocation_agent_actor t execution invocation =
   in
   Ok
     (Option.map actor ~f:(fun actor ->
-       Operator_authorization.guarded
-         ~principal:(Operator_authorization.principal actor)
+       Operator_authorization.restrict
+         actor
          ~is_current:(fun () ->
            Atomic.get execution.authority_live
            && Result.is_ok (check_execution_descendant t (Inference_invocation execution))
-           && owner_current ()
-           && Operator_authorization.is_current actor)))
+           && owner_current ())))
 ;;
 
 (* Caller preparation is a fresh-effect boundary. Existing settlement selectors
@@ -28587,8 +29994,113 @@ let with_idle_moderator_observation_tools t ~observer f =
       true)
 ;;
 
-let worker_capabilities t operation completion live id_source buffer =
+let run_authored_rollover_hook t (lease : Authored_rollover_hook.t) =
+  let module Manager = Chat_response.Moderator_manager in
+  let module H = Recovery_rollover_hooks in
+  let current () =
+    if t.stopped || not (Option.exists t.authored_rollover_hook ~f:(phys_equal lease))
+    then Error "rollover hook lease ended"
+    else if not (phys_equal t.state lease.admitted)
+    then Error "rollover hook source cut changed"
+    else
+      let open Result.Let_syntax in
+      let%bind () =
+        Result.map_error (require_runtime_admission t) ~f:(fun failure ->
+          failure.Agent_protocol.Error.message)
+      in
+      Result.map_error (lease.check_authority ()) ~f:(fun failure ->
+        failure.Agent_protocol.Error.message)
+  in
+  let failure = ref H.Interrupted in
+  let result =
+    Exn.protect
+      ~finally:(fun () ->
+        Eio.Cancel.protect (fun () ->
+          ignore
+            (call t (Context_request (Rollover (Hook_release (lease, !failure))))
+             : (unit, Agent_protocol.Error.t) result)))
+      ~f:(fun () ->
+        let receipt decision outcome snapshot =
+          let%bind.Result () = current () in
+          Ok
+            { Manager.persist =
+                (fun () ->
+                  Eio.Cancel.protect (fun () ->
+                    call
+                      t
+                      (Context_request
+                         (Rollover (Hook_complete (lease, decision, outcome, snapshot))))
+                    |> Result.map_error ~f:(fun error ->
+                      error.Agent_protocol.Error.message)))
+            ; install = ignore
+            }
+        in
+        with_moderator_gate t (fun () ->
+          let result =
+            Manager.handle_context_rollover
+              lease.manager
+              ~session_id:
+                (Agent_protocol.Id.Session.to_string t.state.identity.session_id)
+              ~now_ms:
+                (Time_ns.diff
+                   (Agent_protocol.Timestamp.to_time_ns (t.services.now ()))
+                   Time_ns.epoch
+                 |> Time_ns.Span.to_ms
+                 |> Float.to_int)
+              ~event:lease.event
+              ~authorize:current
+              ~on_tool_call:(fun ~name:_ ~args:_ ->
+                Error "tool effects are unavailable during context rollover")
+              ~prepare:(fun ~decision ~outcome ~snapshot ->
+                receipt decision outcome snapshot)
+          in
+          match result with
+          | Ok _ -> Ok ()
+          | Error _ ->
+            failure := if Result.is_ok (current ()) then Failed else Authority_lost;
+            Ok ()))
+  in
+  result
+;;
+
+let foreground_rollover_port t (publication : Foreground_publication.t) =
+  let module R = Chat_response.Capacity_rollover in
+  let inspect stage =
+    call t (Context_request (Rollover (Capacity_inspect (publication, stage))))
+  in
+  let request ~trigger ~stage =
+    let open Result.Let_syntax in
+    let settle () =
+      Eio.Cancel.protect (fun () ->
+        call
+          t
+          (Context_request (Rollover (Capacity_request (publication, trigger, stage)))))
+    in
+    match%bind settle () with
+    | decision, None -> Ok decision
+    | _, Some lease ->
+      let%bind () = run_authored_rollover_hook t lease in
+      let%map decision, _ = settle () in
+      decision
+  in
+  R.{ inspect; request }
+;;
+
+let worker_capabilities t worker (publication : Foreground_publication.t) id_source buffer
+  =
+  let { Foreground_publication.operation; live; completion; _ } = publication in
   let operation_id = operation.Agent_protocol.Operation.id in
+  let automatic =
+    Operation_worker.supports_capacity_rollover worker
+    && Option.is_some publication.window
+    && Option.exists
+         (current_context_capacity_basis t)
+         ~f:Configuration_capture.Capacity_basis.automatic
+    && Result.is_ok (automatic_capacity_principal t operation_id)
+    && not
+         (Option.exists t.foreground_successor ~f:(fun selected ->
+            Agent_protocol.Id.Operation.equal selected.operation operation_id))
+  in
   Operation_worker.Capabilities.
     { id_source =
         History_id_source.as_history_entry_source
@@ -28630,23 +30142,23 @@ let worker_capabilities t operation completion live id_source buffer =
               else Error (error Conflict "delegated policy operation owner ended")))
     ; original_agent_actor =
         (fun () -> call t (Borrow_operation_agent_actor operation_id))
-    ; commit_entry = (fun entry -> call t (Commit_worker_entry (operation_id, entry)))
+    ; commit_entry = (fun entry -> call t (Commit_worker_entry (publication, entry)))
     ; prepare_authoring_input =
         (fun materialization ~history ~effective ->
           Eio.Cancel.protect (fun () ->
             call
               t
-              (Prepare_authoring_input (operation_id, materialization, history, effective))))
+              (Prepare_authoring_input (publication, materialization, history, effective))))
     ; commit_invocation_call =
         (fun ~invocation entry ->
           Eio.Cancel.protect (fun () ->
-            call t (Commit_invocation_call (operation_id, invocation, entry))))
+            call t (Commit_invocation_call (publication, invocation, entry))))
     ; publish_invocation_output =
         (fun ~invocation_id entry ->
           Eio.Cancel.protect (fun () ->
-            call t (Publish_invocation_output (operation_id, invocation_id, entry))))
+            call t (Publish_invocation_output (publication, invocation_id, entry))))
     ; commit_moderator =
-        (fun snapshot -> call t (Commit_worker_moderator (operation_id, snapshot)))
+        (fun snapshot -> call t (Commit_worker_moderator (publication, snapshot)))
     ; with_moderator_invocation = with_moderator_invocation t operation_id
     ; with_moderator_observation = with_moderator_observation t operation_id
     ; with_next_moderator_observation = with_next_moderator_observation t operation_id
@@ -28662,13 +30174,119 @@ let worker_capabilities t operation completion live id_source buffer =
         with_current_queued_moderator_event_tools t ~operation_id:(Some operation_id)
     ; manage_moderator_follow_up =
         (fun ~observer -> call t (Manage_moderator_follow_up (operation_id, observer)))
-    ; admit_moderator_turn = (fun () -> call t (Admit_moderator_turn operation_id))
-    ; admit_notification_turn = (fun () -> call t (Admit_notification_turn operation_id))
+    ; admit_moderator_turn =
+        (fun () -> call t (Model_turn (Admit_moderator_turn operation_id)))
+    ; admit_notification_turn =
+        (fun () -> call t (Model_turn (Admit_notification_turn operation_id)))
     ; with_invocation = with_invocation t operation_id
+    ; model_admission =
+        Option.bind t.configuration_policy ~f:(fun _ ->
+          current_context_capacity_basis t
+          |> Option.filter ~f:Configuration_capture.Capacity_basis.has_policy
+          |> Option.map ~f:(fun _ ->
+            Operation_worker.Model_admission.
+              { check =
+                  (fun ~managed ->
+                    call t (Model_turn (Check_model_turn (operation_id, managed))))
+              ; admit =
+                  (fun ~managed prepared attempt ->
+                    call
+                      t
+                      (Model_turn
+                         (Admit_ordinary_model_write
+                            (publication, managed, prepared, attempt))))
+              }))
     ; root_context =
         Option.map t.configuration_policy ~f:(fun _ ->
-          root_configuration_context t operation_id)
-    ; consume_deferred = (fun () -> call t (Consume_deferred operation_id))
+          root_configuration_context t publication ~automatic)
+    ; capacity_rollover =
+        (if automatic then Some (foreground_rollover_port t publication) else None)
+    ; settle_tool_batch =
+        Option.map (current_context_capacity_basis t) ~f:(fun _ batch ->
+          let open Result.Let_syntax in
+          let settle () =
+            Eio.Cancel.protect (fun () ->
+              call t (Context_request (Rollover (Worker_settled (publication, batch)))))
+          in
+          match%bind settle () with
+          | decision, None -> Ok decision
+          | _, Some lease ->
+            let%bind () = run_authored_rollover_hook t lease in
+            let%map decision, _ = settle () in
+            decision)
+    ; select_rollover_followup =
+        (fun select ->
+          let open Result.Let_syntax in
+          let%bind handoff =
+            call t (Context_request (Rollover (Successor_handoff publication)))
+          in
+          match handoff with
+          | None -> Ok ()
+          | Some handoff ->
+            let%bind hook =
+              Eio.Cancel.protect (fun () ->
+                call t (Context_request (Rollover (Successor_hook handoff))))
+            in
+            let%bind () =
+              Option.value_map hook ~default:(Ok ()) ~f:(run_authored_rollover_hook t)
+            in
+            let decision : Recovery_rollover_continuation.Hook.decision =
+              match select with
+              | None ->
+                (match handoff.view.checkpoint with
+                 | `Checkpointed -> Continue
+                 | `Archive_only when Option.is_some handoff.capacity_stage -> Continue
+                 | `Archive_only -> Wait)
+              | Some select ->
+                (try select handoff.view with
+                 | Eio.Cancel.Cancelled _ as cancel -> raise cancel
+                 | _ -> Wait)
+            in
+            call t (Context_request (Rollover (Successor_selection (handoff, decision)))))
+    ; successor_hint_references =
+        Option.bind t.foreground_successor ~f:(fun selected ->
+          if Agent_protocol.Id.Operation.equal operation_id selected.operation
+          then successor_hint_witness t publication selected
+          else None)
+    ; successor_inference =
+        Option.bind t.foreground_successor ~f:(fun selected ->
+          Option.some_if
+            (Agent_protocol.Id.Operation.equal operation_id selected.operation)
+            Chat_response.Root_context.Successor.
+              { pending = selected.pending
+              ; optional_hint = None
+              ; check_prepared =
+                  (fun ~optional_hint prepared ->
+                    let keep =
+                      call
+                        t
+                        (Context_request
+                           (Rollover
+                              (Successor_prepared (selected, optional_hint, prepared))))
+                      |> Result.map_error ~f:(fun (failure : Agent_protocol.Error.t) ->
+                        failure.message)
+                      |> Result.ok_or_failwith
+                    in
+                    if not keep
+                    then raise Chat_response.Root_context.Successor.Omit_optional_hint)
+              ; guard =
+                  (fun attempt ->
+                    call
+                      t
+                      (Context_request (Rollover (Successor_dispatch (selected, attempt))))
+                    |> Result.map_error ~f:(fun (failure : Agent_protocol.Error.t) ->
+                      failure.message)
+                    |> Result.ok_or_failwith)
+              })
+    ; consume_deferred = (fun () -> call t (Consume_deferred publication))
+    ; consume_notifications =
+        (fun plan ->
+          Eio.Cancel.protect (fun () ->
+            call t (Consume_notifications (publication, plan))))
+    ; consume_initial_notifications =
+        (fun plan ->
+          Eio.Cancel.protect (fun () ->
+            call t (Consume_initial_notifications (publication, plan))))
     ; request_permission =
         (fun ~permission ~timeout_seconds ~fallback ~review_on_timeout ->
           request_permission_with_review_internal
@@ -28681,13 +30299,19 @@ let worker_capabilities t operation completion live id_source buffer =
         (fun ~permission ~review -> request_review_internal t ~permission ~review)
     ; responder_available =
         (fun () ->
-          call t Has_writer_attachment |> Result.ok |> Option.value ~default:false)
-    ; invocation_granted =
-        (fun ~tool_name ~identity_digest ->
-          call t (Invocation_granted (tool_name, identity_digest))
+          call t Has_interactive_permission_responder
           |> Result.ok
           |> Option.value ~default:false)
-    ; publish_live = publish_worker_live t buffer
+    ; invocation_granted =
+        (fun ~tool_name ~identity_digest ->
+          call t (Invocation_granted (tool_name, Some identity_digest))
+          |> Result.ok
+          |> Option.value ~default:false)
+    ; publish_live =
+        (fun payload ->
+          match check_live_foreground_publication t publication with
+          | Ok () -> publish_worker_live t buffer payload
+          | Error _ -> ())
     }
 ;;
 
@@ -28847,28 +30471,33 @@ let run_worker_operation ?held ?descendant_guard t worker input capabilities can
   | `Cancelled -> Operation_worker.Cancelled { reason = "operation cancelled" }
 ;;
 
-let run_worker ?held ?descendant_guard ~completion t worker operation live history =
+let run_worker
+      ?held
+      ?descendant_guard
+      t
+      worker
+      (publication : Foreground_publication.t)
+      history
+  =
+  let operation = publication.operation in
   let operation_id = operation.Agent_protocol.Operation.id in
   let id_source =
     History_id_source.create
-      ~namespace:(Agent_protocol.Id.Session.to_string t.state.identity.session_id)
+      ~namespace:(Agent_protocol.Id.Session.to_string publication.session)
       ~block_size:64
-      ~reserve:(fun ~count -> call t (Reserve_history_block count))
+      ~reserve:(fun ~count -> call t (Reserve_history_block (Some publication, count)))
   in
   match id_source with
   | Error failure -> Operation_worker.Failed failure
   | Ok id_source ->
     let buffer =
-      Live_event_buffer.create
-        ~capacity:2_048
-        ~session_id:t.state.identity.session_id
-        ~operation_id
+      Live_event_buffer.create ~capacity:2_048 ~session_id:publication.session ~operation_id
     in
-    let capabilities = worker_capabilities t operation completion live id_source buffer in
+    let capabilities = worker_capabilities t worker publication id_source buffer in
     let input =
       Operation_worker.Input.
-        { session_id = t.state.identity.session_id
-        ; session_generation = t.state.identity.generation
+        { session_id = publication.session
+        ; session_generation = publication.generation
         ; operation
         ; history
         }
@@ -28876,7 +30505,9 @@ let run_worker ?held ?descendant_guard ~completion t worker operation live histo
     let cancelled, cancel_resolver = Eio.Promise.create () in
     let cancel () = ignore (Eio.Promise.try_resolve cancel_resolver ()) in
     (try
-       match call t ~priority:Priority (Worker_ready (operation_id, cancel)) with
+       match
+         call t ~priority:Priority (Worker_ready (Foreground publication, cancel))
+       with
        | Error failure -> Operation_worker.Failed failure
        | Ok () ->
          run_worker_operation
@@ -28925,24 +30556,27 @@ let launch_worker t operation =
       then owner.descendant_guard
       else None)
   in
-  let inference_live = Atomic.make true in
-  let retire_authority () =
-    Atomic.set inference_live false;
-    Option.iter custody ~f:retire_agent_admission;
-    Option.iter held ~f:Held_operation.retire;
-    Option.iter descendant_guard ~f:Operation_descendant_guard.retire
-  in
   let history =
     let open Result.Let_syntax in
     let%bind () = reconcile_foreground_invocations t in
     History_codec.all_of_protocol t.state.conversation.canonical_history
+  in
+  (* Select ownership alongside the actual reconciled history, before forking.
+     A later launch can replace the slot but cannot rewrite this capture. *)
+  let publication = Foreground_publication.capture t.state ~operation ~completion in
+  t.foreground_publication <- Some publication;
+  let retire_authority () =
+    Atomic.set publication.live false;
+    Option.iter custody ~f:retire_agent_admission;
+    Option.iter held ~f:Held_operation.retire;
+    Option.iter descendant_guard ~f:Operation_descendant_guard.retire
   in
   match history with
   | Error failure ->
     retire_authority ();
     Eio.Fiber.fork ~sw:t.sw (fun () ->
       ignore
-        (call t ~priority:Priority (Worker_terminal (operation_id, Failed failure, None))
+        (call t ~priority:Priority (Worker_terminal (publication, Failed failure, None))
          : (unit, Agent_protocol.Error.t) result))
   | Ok history ->
     Eio.Fiber.fork ~sw:t.sw (fun () ->
@@ -28952,15 +30586,7 @@ let launch_worker t operation =
           let outcome =
             match worker with
             | Some worker ->
-              run_worker
-                ?held
-                ?descendant_guard
-                ~completion
-                t
-                worker
-                operation
-                inference_live
-                history
+              run_worker ?held ?descendant_guard t worker publication history
             | None ->
               Operation_worker.Failed
                 (error Invalid_state "session has no foreground operation worker")
@@ -28991,7 +30617,7 @@ let launch_worker t operation =
             (call
                t
                ~priority:Priority
-               (Worker_terminal (operation_id, outcome, !compaction_custody))
+               (Worker_terminal (publication, outcome, !compaction_custody))
              : (unit, Agent_protocol.Error.t) result))
         ~finally:(fun () -> Option.iter !compaction_custody ~f:retire_agent_custody))
 ;;
@@ -30433,6 +32059,7 @@ let finish_inherited_turn
       else Error (error Conflict "Goal Resume runtime changed after acknowledgement")
     | Goal_subscription selected -> check_idle_turn_source t selected.turn
     | Idle source -> check_idle_turn_source t (Idle_source.turn source)
+    | Managed { successor = Some _; origin; _ } -> check_inherited_managed_origin origin
     | Message _ | Managed _ | Run_user _ | Held_input _ -> Ok ()
   in
   let%bind admitted = inherited_turn_admitted_guard t acknowledged ~confirmation ~views in
@@ -30511,6 +32138,9 @@ let finish_inherited_turn
       else Error (error Conflict "ACKed managed receipt identity changed")
     in
     complete_inherited_turn_handoff t acknowledged;
+    Option.iter source.successor ~f:(fun selected ->
+      let check () = Operation_descendant_guard.check_current acknowledged.guard in
+      t.foreground_successor <- Some { selected with check });
     launch_worker t source.operation;
     Ok receipt
   | Run_user (source, reply) ->
@@ -30597,6 +32227,8 @@ let submit_authorized_message
   | false, Some _, _
   | false, None, (Running_turn _ | Compacting _ | Waiting_for_permission _) ->
     submit_deferred_message ?original_actor ~extra_deltas ~owner ~timing t entry
+  | false, None, Idle when Session_delta.awaiting_settled_foreground t.state ->
+    submit_deferred_message ?original_actor ~extra_deltas ~owner ~timing t entry
   | false, None, Idle ->
     submit_idle_message ?original_actor ~extra_deltas ~owner ~timing t entry
   | false, None, (Stopped | Queued_for_slot | Starting | Recovering | Stopping | Failed _)
@@ -30636,7 +32268,7 @@ let submit_message
     match
       t.idle_moderator_borrowed, t.state.active_operation, t.state.lifecycle.observed
     with
-    | false, None, Idle -> true
+    | false, None, Idle -> not (Session_delta.awaiting_settled_foreground t.state)
     | (true | false), (Some _ | None), _ -> false
   in
   let requirement = if idle then inherited_turn_required t.state else Ordinary in
@@ -32033,6 +33665,65 @@ let retained_managed_receipt t candidate =
        ~error:(error Invalid_state "managed send did not retain its receipt")
 ;;
 
+let active_rollover_window t =
+  let module P = Agent_protocol in
+  let module L = Recovery_window_ledger in
+  let open Option.Let_syntax in
+  let%bind storage = t.canonical_persistence in
+  let%bind owner = Canonical_backend_binding_data.session_owner storage in
+  let%bind ledger = t.state.recovery_windows in
+  if
+    Canonical_backend_binding_data.is_available storage
+    && P.Session_ref.equal owner (L.owner ledger)
+  then Some (L.Window.scope (L.active ledger))
+  else None
+;;
+
+let prepare_foreground_successor t ~id ~(expected : Recovery_rollover.Expected.t) ~check =
+  let module P = Agent_protocol in
+  let open Result.Let_syntax in
+  let%bind () = require_selected_execution t in
+  let%bind target = Configuration_transition.target t.state in
+  let%bind policy =
+    context_capacity_selection
+      t
+      ~owner:(P.Recovery_window.Scope.session expected.Recovery_rollover.Expected.scope)
+      ~target
+    |> Result.of_option
+         ~error:(error Invalid_state "successor has no selected context policy")
+  in
+  let capacity_basis =
+    Configuration_capture.Capacity_basis.capture t.state ~selection:policy
+  in
+  let%bind input =
+    Recovery_rollover_input.capture
+      t.state
+      ~runtime_admission_open:(runtime_admission_open t)
+  in
+  let%bind pending =
+    History_codec.all_of_protocol (Recovery_rollover_input.entries input)
+  in
+  let operation = create_turn_operation t Recovery_retry in
+  let%bind admission =
+    Turn_admission.create t.state ~operation ~notification_wakes:[] ~adopt_deferred:false
+  in
+  let selected : Foreground_successor.t =
+    { owner = id
+    ; scope = expected.scope
+    ; operation = operation.id
+    ; input
+    ; pending
+    ; capacity_basis
+    ; policy
+    ; check
+    ; prepared = None
+    ; admitted = None
+    ; hold = Preparation_interrupted
+    }
+  in
+  Ok (selected, operation, admission)
+;;
+
 let capture_inherited_managed t ~capture (input : Inherited_turn.Input.managed) receipt =
   let open Result.Let_syntax in
   let%bind () = require_available_descendant_admission_slot t in
@@ -32066,7 +33757,13 @@ let capture_inherited_managed t ~capture (input : Inherited_turn.Input.managed) 
         in
         let source =
           Inherited_turn.Source.Managed
-            { origin = input.origin; receipt; operation; custody; entry = input.entry }
+            { origin = input.origin
+            ; receipt
+            ; operation
+            ; custody
+            ; entry = input.entry
+            ; successor = None
+            }
         in
         let%map decision =
           capture_inherited_turn_plan
@@ -32079,6 +33776,98 @@ let capture_inherited_managed t ~capture (input : Inherited_turn.Input.managed) 
         in
         transferred := true;
         decision))
+;;
+
+let capture_inherited_managed_successor
+      t
+      ~capture
+      (input : Inherited_turn.Input.managed)
+      (receipt : Managed_submission.t)
+      ~continuation
+      ~predecessor
+  =
+  let module P = Agent_protocol in
+  let open Result.Let_syntax in
+  let check () = check_inherited_managed_origin input.origin in
+  let%bind () = check () in
+  let%bind () = require_submit_ready t in
+  let%bind () = require_rollover_recovered t in
+  let%bind () = require_available_descendant_admission_slot t in
+  let%bind current =
+    Session_delta.foreground_continuation t.state
+    |> Option.filter ~f:(fun selected ->
+      P.Id.Operation.equal selected.owner continuation
+      && P.Id.Operation.equal selected.predecessor predecessor)
+    |> Result.of_option ~error:(error Conflict "managed rollover owner changed")
+  in
+  let%bind () =
+    if
+      Int.equal receipt.generation t.state.identity.generation
+      && P.History.Id.equal input.entry.id receipt.history_id
+      && P.History.Content_revision.equal
+           input.entry.content_revision
+           P.History.Content_revision.zero
+      && P.History.equal_role input.entry.role User
+      && P.History.equal_kind input.entry.kind Message
+      && P.History.equal_provenance input.entry.provenance Canonical
+      && (not input.entry.redacted)
+      && List.exists
+           t.state.conversation.canonical_history
+           ~f:(P.History.equal_entry input.entry)
+    then Ok ()
+    else Error (error Conflict "managed rollover input changed")
+  in
+  let%bind scope =
+    active_rollover_window t
+    |> Result.of_option ~error:(error Conflict "managed rollover window is unavailable")
+  in
+  let%bind expected =
+    Recovery_rollover.Expected.create scope ~revision:t.state.counters.revision
+  in
+  let%bind expected =
+    match current.phase, t.state.active_operation with
+    | Preparing operation, None ->
+      let change =
+        Recovery_rollover_continuation.Hold
+          { operation; reason = Preparation_interrupted }
+      in
+      let%bind _ =
+        transition
+          t
+          ~check_before_commit:check
+          ~delta:
+            (Recovery_rollover_changed (Schedule { id = continuation; expected; change }))
+          ~payloads:[]
+      in
+      Recovery_rollover.Expected.create scope ~revision:t.state.counters.revision
+    | _ -> Ok expected
+  in
+  (* The native borrow is checked through this child writer. After parent
+     confirmation the actual inherited descendant guard owns the new operation. *)
+  let%bind selected, operation, admission =
+    prepare_foreground_successor t ~id:continuation ~expected ~check
+  in
+  let source =
+    Inherited_turn.Source.Managed
+      { origin = input.origin
+      ; receipt
+      ; operation
+      ; custody = None
+      ; entry = input.entry
+      ; successor = Some selected
+      }
+  in
+  let schedule =
+    Session_delta.Recovery_rollover_changed
+      (Schedule { id = continuation; expected; change = Begin operation.id })
+  in
+  capture_inherited_turn_plan
+    t
+    ~capture
+    ~source
+    ~commit_attempted:(ref false)
+    ~delta:(Batch (schedule :: Turn_admission.deltas admission))
+    ~payloads:(Turn_admission.payloads admission)
 ;;
 
 let submit_managed_message
@@ -32110,9 +33899,24 @@ let submit_managed_message
   in
   match List.find t.state.managed_submissions ~f:(M.same_key candidate) with
   | Some receipt ->
-    if String.equal receipt.request_sha256 input.request_sha256
-    then Ok (Inherited_turn.Decision.Completed receipt)
-    else Error (error Conflict "managed send key was used for a different request")
+    if not (String.equal receipt.request_sha256 input.request_sha256)
+    then Error (error Conflict "managed send key was used for a different request")
+    else (
+      match
+        ( receipt.status
+        , input.origin
+        , t.state.active_operation
+        , inherited_turn_required t.state )
+      with
+      | Suspended_rollover { continuation; predecessor }, Native _, None, Scoped ->
+        capture_inherited_managed_successor
+          t
+          ~capture
+          input
+          receipt
+          ~continuation
+          ~predecessor
+      | _ -> Ok (Inherited_turn.Decision.Completed receipt))
   | None ->
     let%bind () = require_selected_execution t in
     let%bind () =
@@ -34550,6 +36354,7 @@ let claim_job_invocation t scope (invocation : Agent_protocol.Invocation.t) =
     { owner = Background_job scope
     ; policy_source
     ; native_goal = None
+    ; context_rollover_basis = None
     ; dispatched
     ; accepts_children = true
     ; authority_live = Atomic.make true
@@ -35130,8 +36935,21 @@ let execution_basis ?admitted t (origins : execution_origin_lookup) execution =
     Option.value_map admission ~default:(Ok ()) ~f:check_agent_admission
   in
   let operation id generation =
-    let%bind work = Agent_protocol.Run_work.create ~key:(Operation id) ~generation in
-    Goal_work_attribution.run_of_work t.state work
+    let module P = Agent_protocol in
+    let%bind work = P.Run_work.create ~key:(Operation id) ~generation in
+    let%bind owner = Goal_work_attribution.run_of_work t.state work in
+    match
+      owner, t.foreground_successor, Session_delta.foreground_continuation t.state
+    with
+    | None, Some selected, Some { phase = Preparing operation; owner; predecessor }
+      when Int.equal generation t.state.identity.generation
+           && P.Id.Operation.equal id selected.operation
+           && P.Id.Operation.equal operation id
+           && P.Id.Operation.equal owner selected.owner ->
+      (* Preparation and the physical write have one Run origin. Its work
+         ownership moves only when this exact successor is admitted. *)
+      Run_rollover_work.dispatch_owner t.state ~predecessor
+    | _ -> Ok owner
   in
   let basis ?operation_id ?invocation_id ?preparation run =
     let%map attribution =
@@ -40535,9 +42353,14 @@ let capture_descendant_root
     | Commit attempt ->
       let%bind () = descendant_route_actor t ~factual:false attempt.route in
       let%bind () = Descendant_preparation.check_basis attempt.preparation in
-      if phys_equal attempt.basis.state t.state
-      then Ok (attempt.route.source_owner, attempt.route.records)
-      else Error (error Conflict "root reserve original basis changed")
+      let%map () =
+        check_child_accounting_capture
+          ~on_state_change:(fun () ->
+            Descendant_preparation.observe_parent_state_change attempt.preparation)
+          t
+          attempt.basis
+      in
+      attempt.route.source_owner, attempt.route.records
     | Reconcile attempt ->
       let%map () = descendant_route_actor t ~factual:true attempt.route in
       attempt.route.source_owner, attempt.route.records
@@ -40575,6 +42398,12 @@ let capture_descendant_root
   Q.{ basis; records; operation }
 ;;
 
+let note_descendant_root_state_change (captured : _ Descendant_root_request.capture) () =
+  Option.iter
+    (Descendant_root_request.prewriter_preparation captured.operation)
+    ~f:Descendant_preparation.observe_parent_state_change
+;;
+
 (* Outer phase only, after capture reply. No Actor/Owner/Registry lock held. *)
 let observe_descendant_root
   : type outcome.
@@ -40585,7 +42414,11 @@ let observe_descendant_root
   fun t captured ->
   let module D = Agent_store.Delegation_store in
   let open Result.Let_syntax in
-  let%bind () = check_child_accounting_capture t captured.basis in
+  let on_state_change = note_descendant_root_state_change captured in
+  let check_capture () =
+    check_child_accounting_capture ~on_state_change t captured.basis
+  in
+  let%bind () = check_capture () in
   let factual = Descendant_root_request.factual captured.operation in
   let%bind () =
     List.fold_result captured.records ~init:() ~f:(fun () expected ->
@@ -40594,7 +42427,7 @@ let observe_descendant_root
           captured.basis.controller
           (D.reference expected)
       in
-      let%bind () = check_child_accounting_capture t captured.basis in
+      let%bind () = check_capture () in
       let%bind actual = result in
       if
         if factual
@@ -40610,14 +42443,14 @@ let observe_descendant_root
     match captured.operation with
     | Import (_, observation) ->
       let result = observation.Child_usage_observation.refresh_read () in
-      let%bind () = check_child_accounting_capture t captured.basis in
+      let%bind () = check_capture () in
       let%bind current = result in
       let result =
         Recurrence_controller.resolve_delegation
           captured.basis.controller
           observation.reference
       in
-      let%bind () = check_child_accounting_capture t captured.basis in
+      let%bind () = check_capture () in
       let%bind record = result in
       let%bind children =
         Result.of_option
@@ -40646,14 +42479,18 @@ let observe_descendant_root
   let result =
     Recurrence_controller.observe captured.basis.controller captured.basis.state
   in
-  let%bind () = check_child_accounting_capture t captured.basis in
+  let%bind () = check_capture () in
   let%bind current = result in
-  let%map () = check_child_accounting_basis t captured.basis ~current in
+  let%map () = check_child_accounting_basis ~on_state_change t captured.basis ~current in
   Descendant_root_request.{ captured; current; child_current }
 ;;
 
 let descendant_observed_check t (observed : _ Descendant_root_request.observed) =
-  check_child_accounting_basis t observed.captured.basis ~current:observed.current
+  check_child_accounting_basis
+    ~on_state_change:(note_descendant_root_state_change observed.captured)
+    t
+    observed.captured.basis
+    ~current:observed.current
 ;;
 
 let descendant_pending state (route : Descendant_admission_data.Root_route.t) =
@@ -42349,9 +44186,37 @@ let prepare_legacy_attempt
          ~submission_guard:Inference_runtime.Submission_guard.empty))
 ;;
 
+let plan_recovery_attempt t execution configuration handle ~tracking =
+  let open Option.Let_syntax in
+  match execution, (Inference_ledger.Handle.scope handle).relation with
+  | Inference_operation (operation, _), Root ->
+    let%bind source_revision =
+      Configuration_capture.recovery_source_revision
+        t.configuration_capture
+        ~operation_id:operation.id
+        ~configuration
+    in
+    Recovery_effective_receipts.allocate
+      t.state
+      ~source_revision
+      handle
+      ~tracking
+      configuration
+  | _ -> None
+;;
+
 let prepare_runtime_attempt ?origin_observation t execution owner relation configuration =
   let open Result.Let_syntax in
   let%bind () = require_settled_inference_usage t in
+  let%bind () =
+    match execution, relation with
+    | Inference_operation (operation, _), Transcript.Scope.Root ->
+      Configuration_capture.check_allocation
+        t.configuration_capture
+        ~operation_id:operation.id
+        configuration
+    | _ -> Ok ()
+  in
   let%bind () =
     match execution with
     | Inference_initialization _ ->
@@ -42539,8 +44404,12 @@ let prepare_runtime_attempt ?origin_observation t execution owner relation confi
       in
       Inherited_attempt.Prepared.Inherited plan)
     else (
+      let recovery_allocation =
+        plan_recovery_attempt t execution configuration handle ~tracking
+      in
       let%bind () =
         commit_inference_ledger
+          ?recovery_allocation
           ?allocation_acknowledgement
           ?run_preparation:basis.preparation
           ?admission
@@ -43009,25 +44878,36 @@ let commit_inherited_attempt t (plan : Inherited_attempt.Plan.t) before_writer =
         ]
       else []
     in
-    let delta =
-      Session_delta.Batch
-        ((Session_delta.inference_ledger_update
-            ?policy_update:(Canonical_usage_update.policy_update accounting)
-            plan.after
-            ~delegated_usage:(Canonical_usage_update.delegated_usage accounting)
-          :: accounting_deltas)
-         @
-         match included with
-         | None -> []
-         | Some (update, _) -> [ Goal_descendants_changed update ])
+    let recovery_allocation =
+      match plan.original with
+      | Legacy _ -> None
+      | Runtime { execution; _ } ->
+        plan_recovery_attempt
+          t
+          execution
+          plan.configuration
+          plan.handle
+          ~tracking:plan.tracking
+    in
+    let changes =
+      (Session_delta.inference_ledger_update
+         ?policy_update:(Canonical_usage_update.policy_update accounting)
+         plan.after
+         ~delegated_usage:(Canonical_usage_update.delegated_usage accounting)
+       :: accounting_deltas)
+      @
+      match included with
+      | None -> []
+      | Some (update, _) -> [ Session_delta.Goal_descendants_changed update ]
     in
     let run_preparation = inherited_attempt_preparation plan in
     let previous = t.state in
     let%bind candidate =
-      prepare_transition
+      prepare_inference_transition
         ?run_preparation
         t
-        ~delta
+        ~changes
+        ~recovery_allocation
         ~payloads:
           [ Agent_protocol.Event.Durable.Payload.Session_updated
               (Session_state.summary { t.state with inference_ledger = plan.after })
@@ -48270,11 +50150,17 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Finish_moderator_invocation _
   | Set_idle_moderator_cancel _
   | Configuration
+  | Context_request (Capacity (Read _ | Publish _))
+  | Context_request
+      (Rollover (Native_remaining _ | Successor_handoff _ | Capacity_inspect _))
   | Finish_configuration_capture _
   | Lifecycle_state _
   | Retire_lifecycle _
   | Abort_lifecycle _
   | Goal_request (Read _)
+  | Context_request (Recovery_note (Read _ | List _ | Query _ | Shared_operation _))
+  | Context_request
+      (Recovery_note_share (Management_revision _ | Inspect_management _ | Select _))
   | State
   | Observe_resource_state
   | Snapshot
@@ -48292,7 +50178,7 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Commit_worker_entry _
   | Publish_invocation_output _
   | Commit_worker_moderator _
-  | Has_writer_attachment
+  | Has_interactive_permission_responder
   | Invocation_granted _
   | Worker_ready _
   | Worker_terminal _
@@ -48362,8 +50248,7 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Claim_job_moderator _
   | Claim_job_event _
   | Manage_moderator_follow_up _
-  | Admit_moderator_turn _
-  | Admit_notification_turn _
+  | Model_turn _
   | Claim_ordinary_event _
   | Claim_queued_event _
   | Claim_legacy_callback _
@@ -48401,6 +50286,9 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Commit_extensions _
   | Set_organization_admission _
   | Set_configuration_policy _
+  | Context_request (Capacity (Set_host _ | Claim_reminder _ | Accept_reminder _))
+  | Context_request (Soft_checkpoint _)
+  | Context_request (Recovery_effective _)
   | Prepare_configuration_update _
   | Commit_configuration_update _
   | Begin_configuration_capture _
@@ -48478,7 +50366,26 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Activate_queued_start
   | Update_organization _
   | Goal_request (Apply _)
-  | Apply_instruction_command _
+  | Context_request
+      (Instruction_command _ | Recovery_note (Mutate _) | Enable_recovery_windows _ | Expire_recovery_window _)
+  | Context_request (Recovery_note_share (Establish_target _ | Create _ | Revoke _))
+  | Context_request
+      (Rollover
+         ( Native_new_window _
+         | Native_checkpoint _
+         | Worker_settled _
+         | Hook_complete _
+         | Hook_release _
+         | Successor_hook _
+         | Successor_selection _
+         | Successor_prepared _
+         | Successor_dispatch _
+         | Successor_control _
+         | Operator_request _
+         | Operator_publish _
+         | Operator_settle _
+         | Operator_checkpoint _
+         | Capacity_request _ ))
   | Set_recurrence_controller _
   | Set_recurrence_planning_host _
   | Recurrence_due_ids
@@ -55502,6 +57409,8 @@ let retire_execution_custody t =
         ~f:retire_agent_admission
     | Waiting | Activated _ | Callback_acknowledged _ | Released -> ());
   t.operation_completion <- None;
+  t.foreground_publication <- None;
+  t.live_operator_rollover <- None;
   retire_descendant_host t;
   List.iter t.descendant_policy_cells ~f:Goal_root_policy.retire;
   t.descendant_policy_cells <- [];
@@ -56340,6 +58249,3033 @@ let startup_disposal_request_allowed : type a. t -> a request -> bool =
     | _ -> false)
 ;;
 
+let recovery_note_access t ~access ~effect_kind =
+  let open Result.Let_syntax in
+  let%bind owner =
+    Option.bind
+      t.canonical_persistence
+      ~f:Canonical_backend_binding_data.recovery_note_owner
+    |> Result.of_option
+         ~error:(error Invalid_state "durable recovery notes are unavailable")
+  in
+  let%bind () = Recovery_note_session.check_owner t.state.recovery_notes ~owner in
+  let%bind checked = Recovery_note_access.check_now access t.state ~owner ~effect_kind in
+  match checked with
+  | Operator { principal; attachment_id } ->
+    Ok (owner, Recovery_note_request.Operator { principal; attachment_id })
+  | Native invocation ->
+    let%bind execution =
+      List.find t.invocation_executions ~f:(fun execution ->
+        Agent_protocol.Invocation.equal execution.dispatched invocation)
+      |> Result.of_option
+           ~error:(error Permission_denied "recovery note invocation is not executing")
+    in
+    let%bind () =
+      if Atomic.get execution.authority_live
+      then Ok ()
+      else Error (error Permission_denied "recovery note invocation authority is closed")
+    in
+    let%bind operation_id =
+      match execution.owner, invocation.context.origin with
+      | Foreground operation_id, (Model | Script) ->
+        running_operation t operation_id |> Result.map ~f:(fun _ -> operation_id)
+      | _ ->
+        Error
+          (error Permission_denied "recovery notes require a live foreground invocation")
+    in
+    let%bind current = authorized_native_child_basis t (Inference_invocation execution) in
+    let%map () = current.check_current () in
+    owner, Recovery_note_request.Native (invocation, operation_id)
+;;
+
+let recovery_note_mutation_identity t ~access ~effect_kind route =
+  let open Result.Let_syntax in
+  let%bind owner, checked = recovery_note_access t ~access ~effect_kind in
+  let%map identity =
+    match route, checked with
+    | ( Recovery_note_request.Operator_key key
+      , Operator { principal; attachment_id = Some attachment_id } ) ->
+      let%bind attachment = write_attachment t attachment_id in
+      let lease_principal =
+        Option.bind attachment.owner_lease ~f:(fun lease -> lease.principal_id)
+      in
+      if
+        Option.exists lease_principal ~f:(fun id ->
+          not (Agent_protocol.Id.Principal.equal id principal))
+      then
+        Error
+          (error
+             Permission_denied
+             "recovery note writer attachment belongs to another principal")
+      else Ok (Recovery_notes.Catalog.Mutation_identity.Client { principal; key })
+    | Native_invocation, Native (invocation, _) ->
+      Ok (Recovery_notes.Catalog.Mutation_identity.Native invocation.context.id)
+    | Operator_key _, (Operator { attachment_id = None; _ } | Native _)
+    | Native_invocation, Operator _ ->
+      Error
+        (error
+           Permission_denied
+           "recovery note mutation requires its original writer route")
+  in
+  owner, identity
+;;
+
+let require_recovery_owner_writer t ~principal ~attachment_id =
+  Writer_attachment.require_recovery_owner
+    t.state ~principal ~attachment_id ~now:t.services.now
+;;
+
+let enable_recovery_windows_internal t actor attachment_id authorize =
+  let module P = Agent_protocol in
+  let open Result.Let_syntax in
+  let scope ledger = Recovery_window_ledger.(Window.scope (active ledger)) in
+  let%bind owner =
+    Option.bind t.canonical_persistence ~f:Canonical_backend_binding_data.session_owner
+    |> Result.of_option
+         ~error:(error Invalid_state "durable recovery window storage is unavailable")
+  in
+  let check () =
+    let principal = Operator_authorization.principal actor in
+    let%bind () =
+      if
+        Operator_authorization.is_current actor
+        && P.Principal.has_scope principal Send_messages
+      then authorize t.state
+      else Error (error Permission_denied "recovery window writer authority expired")
+    in
+    require_recovery_window_owner t ~actor ~attachment_id
+  in
+  let%bind () = check () in
+  match t.state.recovery_windows with
+  | Some ledger when P.Session_ref.equal owner (Recovery_window_ledger.owner ledger) ->
+    Ok (scope ledger)
+  | Some _ -> Error (error Invalid_state "recovery window owner differs from this host")
+  | None ->
+    let check_basis () =
+      if not (Recovery_window_capture.can_bootstrap t.state)
+      then
+        Error
+          (error
+             Conflict
+             "recovery window enablement requires settled or stopped seeded history")
+      else (
+        match t.state.runtime_initialization with
+        | Pending _
+          when Option.is_some t.initialization_scope || Option.is_some t.run_preparation ->
+          Error (error Conflict "seed initialization is already in progress")
+        | Ready | Pending _ -> Ok ())
+    in
+    let%bind () = check_basis () in
+    let check_before_commit () =
+      let%bind () = check () in
+      check_basis ()
+    in
+    let previous = t.state in
+    let window = P.Id.Context_window.create () in
+    let run_preparation =
+      Option.map t.run_source_binding ~f:(fun binding ->
+        binding.Source_binding.preparation)
+    in
+    let%bind candidate =
+      prepare_transition
+        ?run_preparation
+        t
+        ~delta:(Recovery_window_enabled (owner, window))
+        ~payloads:[]
+    in
+    let%bind ledger =
+      Result.of_option
+        candidate.state.recovery_windows
+        ~error:(error Internal_error "recovery window candidate has no ledger")
+    in
+    let commit_observation =
+      Session_commit_observation.Owner.create_guarded
+        ~previous
+        ~candidate
+        ~check_at_writer:check_before_commit
+    in
+    let%bind () =
+      persist_transition
+        ?run_preparation
+        t
+        candidate
+        ~check_before_commit
+        ~commit_observation
+    in
+    install_committed_transition ?run_preparation t candidate;
+    publish_committed_transition t candidate;
+    Ok (scope ledger)
+;;
+
+let persist_recovery_delta
+      ?(rollover = false)
+      ?(payloads = [])
+      ?(after_install = fun () -> ())
+      t
+      ~delta
+      ~check_before_commit
+  =
+  let open Result.Let_syntax in
+  let previous = t.state in
+  let run_preparation =
+    Option.map t.run_source_binding ~f:(fun binding -> binding.Source_binding.preparation)
+  in
+  let%bind candidate = prepare_transition ?run_preparation t ~delta ~payloads in
+  let commit_observation =
+    Session_commit_observation.Owner.create_guarded
+      ~previous
+      ~candidate
+      ~check_at_writer:check_before_commit
+  in
+  let persist () =
+    persist_transition
+      ?run_preparation
+      t
+      candidate
+      ~check_before_commit
+      ~commit_observation
+  in
+  let%bind () =
+    if not rollover
+    then persist ()
+    else
+      Exn.protect ~f:persist ~finally:(fun () ->
+        match Session_commit_observation.outcome commit_observation with
+        | Not_called | Returned (Ok ()) -> ()
+        | In_progress | Returned (Error _) | Raised _ ->
+          (match Session_commit_observation.progress commit_observation with
+           | Before_writer -> ()
+           | Unobserved | Writer_entered _ | Journal_acknowledged _ ->
+             t.rollover_requires_recovery <- true))
+  in
+  install_committed_transition ?run_preparation t candidate;
+  after_install ();
+  publish_committed_transition t candidate;
+  Ok ()
+;;
+
+module Soft_checkpoint_host = struct
+  module P = Agent_protocol
+  module R = Inference_runtime
+  module O = Recovery_checkpoint_opportunity
+  module Candidate = Recovery_checkpoint_candidate
+  module Scope = P.Recovery_window.Scope
+  module Policy = R.Context_capacity.Policy
+  module Checkpoint = Recovery_rollover.Checkpoint
+  module Id = Inference.Observation.Observation_id
+
+  let unavailable () = error Conflict "checkpoint opportunity is no longer current"
+
+  let retained state ~scope =
+    let open Option.Let_syntax in
+    let%bind ledger = state.Session_state.recovery_rollover in
+    let%bind opportunity = Recovery_rollover.checkpoint_opportunity ledger in
+    Option.some_if (Scope.equal (O.claim opportunity).expected.scope scope) opportunity
+  ;;
+
+  let basis t ((publication, capture) : Soft_checkpoint_request.owner) ~scope ~attempt =
+    let open Result.Let_syntax in
+    let%bind () = check_live_foreground_publication t publication in
+    let%bind () = require_runtime_admission t in
+    let%bind actor =
+      operation_agent_actor t publication.operation.id
+      >>= Result.of_option ~error:(unavailable ())
+    in
+    let principal = Operator_authorization.principal actor in
+    let%bind () =
+      if
+        Operator_authorization.is_current actor
+        && P.Principal.has_scope principal Send_messages
+        && P.Principal.has_scope principal View_session_transcript
+        && Option.exists (current_recovery_preparation_scope t) ~f:(Scope.equal scope)
+        && not t.rollover_requires_recovery
+      then Ok ()
+      else Error (unavailable ())
+    in
+    let%map policy =
+      Configuration_capture.checkpoint_policy
+        t.configuration_capture
+        capture
+        ~scope
+        ~current:(current_context_capacity_basis t)
+        ~attempt
+      |> Result.of_option ~error:(unavailable ())
+    in
+    actor, policy
+  ;;
+
+  let current_plan t owner (plan : Soft_checkpoint_request.plan) ~attempt =
+    let%bind.Result actor, policy = basis t owner ~scope:plan.expected.scope ~attempt in
+    if phys_equal actor plan.original && phys_equal policy plan.policy
+    then Ok ()
+    else Error (unavailable ())
+  ;;
+
+  let persist t change ~check =
+    persist_recovery_delta
+      t
+      ~rollover:true
+      ~delta:(Recovery_rollover_changed (Checkpoint_opportunity change))
+      ~check_before_commit:check
+  ;;
+
+  let usable_checkpoint state ~scope =
+    let open Option.Let_syntax in
+    let%bind ledger = state.Session_state.recovery_rollover in
+    let%bind checkpoint = Recovery_rollover.checkpoint ledger in
+    let current = (Checkpoint.expected checkpoint).scope in
+    if not (Scope.equal current scope)
+    then None
+    else (
+      let usable =
+        match Checkpoint.recipe checkpoint with
+        | Owner_selection _ ->
+          Checkpoint.check_contents
+            checkpoint
+            ~history:state.conversation.canonical_history
+            ~catalog:state.recovery_notes
+        | Authored _ -> Recovery_checkpoint_cut.check_checkpoint state checkpoint
+      in
+      Option.some_if (Result.is_ok usable) checkpoint)
+  ;;
+
+  let qualified t opportunity pair =
+    let open Option.Let_syntax in
+    let%bind binding =
+      Recovery_checkpoint_cut.opportunity_checkpoint t.state opportunity
+    in
+    let%bind invocation =
+      List.find
+        t.state.invocations
+        ~f:(Recovery_authored_checkpoint.matches_invocation binding)
+    in
+    let exact_pair (pair : Chat_response.Settled_tool_batch.pair) =
+      String.equal
+        (P.History.Id.to_string binding.call)
+        (History_entry.Id.to_string pair.call)
+      && Option.exists invocation.output_entry_id ~f:(fun output ->
+        String.equal
+          (P.History.Id.to_string output)
+          (History_entry.Id.to_string pair.output))
+    in
+    Option.some_if
+      (Option.for_all pair ~f:exact_pair)
+      (O.Checkpointed
+         { invocation = binding.invocation; attempt_ordinal = binding.attempt_ordinal })
+  ;;
+
+  let policy_matches t (claim : O.Claim.t) =
+    Int64.equal claim.configuration_revision t.state.spec.configuration_revision
+    && Option.exists
+         (Option.bind
+            (current_context_capacity_basis t)
+            ~f:Configuration_capture.Capacity_basis.automatic_policy)
+         ~f:(fun policy ->
+           Chatml_source.Digest.equal claim.policy (Policy.revision policy))
+  ;;
+
+  let settle_retained t opportunity outcome ~check =
+    let claim = O.claim opportunity in
+    let%bind.Result expected =
+      O.Expected.create claim.expected.scope ~revision:t.state.counters.revision
+    in
+    persist t (Settle { id = claim.id; expected; outcome }) ~check
+  ;;
+
+  let plan t ((publication, _) as owner) tools baseline =
+    let open Result.Let_syntax in
+    let previous = t.state in
+    match current_recovery_preparation_scope t with
+    | None -> Ok None
+    | Some scope ->
+      (match basis t owner ~scope ~attempt:None with
+       | Error _ -> Ok None
+       | Ok (actor, policy) ->
+         (match Candidate.pressure policy baseline with
+          | Some Checkpoint_due ->
+            (match retained previous ~scope with
+             | Some opportunity ->
+               let claim = O.claim opportunity in
+               if
+                 Option.is_none (O.outcome opportunity)
+                 && not (P.Id.Operation.equal publication.operation.id claim.owner)
+               then (
+                 let check () =
+                   let%bind _ = basis t owner ~scope ~attempt:None in
+                   if phys_equal previous t.state then Ok () else Error (unavailable ())
+                 in
+                 let outcome =
+                   Option.value (qualified t opportunity None) ~default:O.Interrupted
+                 in
+                 let%map () = settle_retained t opportunity outcome ~check in
+                 None)
+               else Ok None
+             | None when Option.is_some (usable_checkpoint previous ~scope) -> Ok None
+             | None ->
+               let%bind expected =
+                 O.Expected.create scope ~revision:previous.counters.revision
+               in
+               let%map catalog =
+                 Recovery_note_session.for_owner
+                   previous.recovery_notes
+                   ~owner:(Scope.session scope)
+               in
+               let id = P.Id.Operation.create () in
+               let candidate =
+                 if
+                   Recovery_effective_ledger.has_record_capacity
+                     previous.recovery_effective
+                 then
+                   Result.of_option
+                     (Candidate.create ~scope ~id ~tools catalog)
+                     ~error:O.No_recipe
+                 else Error O.Unproven_source
+               in
+               Some
+                 Soft_checkpoint_request.
+                   { id; expected; original = actor; policy; candidate })
+          | Some (Below_warning | Near_limit | Hard_limit_exceeded) | None -> Ok None))
+  ;;
+
+  let admit
+        t
+        ((publication, _) as owner)
+        (plan : Soft_checkpoint_request.plan)
+        decision
+        prepared
+    =
+    let open Result.Let_syntax in
+    let policy = Policy.revision plan.policy in
+    let principal = (Operator_authorization.principal plan.original).id in
+    let check () =
+      let%bind () = current_plan t owner plan ~attempt:None in
+      if Int64.equal plan.expected.revision t.state.counters.revision
+      then Ok ()
+      else Error (unavailable ())
+    in
+    let%bind () = check () in
+    let decision, source =
+      match decision with
+      | O.Withhold _ -> decision, None
+      | Offer _ ->
+        (match O.Source.capture t.state.conversation.canonical_history with
+         | Ok source -> decision, Some source
+         | Error _ -> O.Withhold Unproven_source, None)
+    in
+    let%bind claim =
+      O.Claim.create
+        ~id:plan.id
+        plan.expected
+        ~owner:publication.operation.id
+        ~principal
+        ~configuration_revision:t.state.spec.configuration_revision
+        ~preparation:(R.Prepared.preparation_id prepared)
+        ~policy
+        ~decision
+        ~source
+    in
+    let%map () = persist t (Admit claim) ~check in
+    claim
+  ;;
+
+  let check_claim t owner plan (claim : O.Claim.t) attempt =
+    let open Result.Let_syntax in
+    let%bind () = current_plan t owner plan ~attempt:(Some attempt) in
+    let%bind opportunity =
+      retained t.state ~scope:claim.expected.scope
+      |> Result.of_option ~error:(unavailable ())
+    in
+    if O.Claim.equal claim (O.claim opportunity) && Option.is_none (O.outcome opportunity)
+    then Ok opportunity
+    else Error (unavailable ())
+  ;;
+
+  let accept t owner plan (claim : O.Claim.t) prepared attempt =
+    let open Result.Let_syntax in
+    let previous = t.state in
+    let accounting = R.Attempt.accounting_id attempt in
+    let valid_prepared = R.Prepared.binding_guard prepared in
+    let check () =
+      let%bind opportunity = check_claim t owner plan claim attempt in
+      if
+        phys_equal previous t.state
+        && Option.is_none (O.attempt opportunity)
+        && valid_prepared ()
+        && R.Prepared.owns_attempt prepared attempt
+      then Ok ()
+      else Error (unavailable ())
+    in
+    let%bind () = check () in
+    let%bind expected =
+      O.Expected.create claim.expected.scope ~revision:previous.counters.revision
+    in
+    let%map () =
+      persist t (Accept { id = claim.id; expected; attempt = accounting }) ~check
+    in
+    fun () ->
+      let valid =
+        check_claim t owner plan claim attempt
+        |> Result.ok
+        |> Option.exists ~f:(fun current ->
+          valid_prepared () && Option.exists (O.attempt current) ~f:(Id.equal accounting))
+      in
+      if not valid then raise (Native_tool_dispatch.Dispatch_error (unavailable ()))
+  ;;
+
+  let settle t ((publication, _) as owner) plan (claim : O.Claim.t) attempt outcome =
+    let open Result.Let_syntax in
+    let previous = t.state in
+    let accounting = R.Attempt.accounting_id attempt in
+    let current () =
+      match outcome with
+      | Chat_response.Soft_checkpoint.Interrupted ->
+        (* Interruption bookkeeping survives the original actor losing permission.
+           The exact physical foreground slot and the retained offer still match. *)
+        let%bind () = check_foreground_publication t publication in
+        let%bind opportunity =
+          retained t.state ~scope:claim.expected.scope
+          |> Result.of_option ~error:(unavailable ())
+        in
+        if
+          (not t.rollover_requires_recovery)
+          && O.Claim.equal claim (O.claim opportunity)
+          && Option.is_none (O.outcome opportunity)
+        then Ok opportunity
+        else Error (unavailable ())
+      | Settled _ | Ineligible -> check_claim t owner plan claim attempt
+    in
+    let%bind selected = current () in
+    let check () =
+      let%bind effective = current () in
+      if
+        phys_equal previous t.state
+        && Option.for_all (O.attempt effective) ~f:(Id.equal accounting)
+      then Ok ()
+      else Error (unavailable ())
+    in
+    let outcome =
+      match outcome with
+      | Chat_response.Soft_checkpoint.Settled pair ->
+        Option.value
+          (qualified t selected (Some pair))
+          ~default:(O.Unavailable Checkpoint_refused)
+      | Ineligible -> Unavailable Ineligible_response
+      | Interrupted -> Interrupted
+    in
+    settle_retained t selected outcome ~check
+  ;;
+
+  let handle : type a. t -> a Soft_checkpoint_request.t -> (a, P.Error.t) result =
+    fun t request ->
+    match request with
+    | Plan (owner, tools, baseline) -> plan t owner tools baseline
+    | Admit (owner, planned, decision, prepared) ->
+      admit t owner planned decision prepared
+    | Accept (owner, planned, claim, prepared, attempt) ->
+      accept t owner planned claim prepared attempt
+    | Settle (owner, planned, claim, attempt, outcome) ->
+      settle t owner planned claim attempt outcome
+  ;;
+end
+
+let prepare_recovery_note_delivery
+      t
+      ~source
+      ~(invocation : Agent_protocol.Invocation.t)
+      catalog
+      query
+  =
+  let module P = Agent_protocol in
+  let open Result.Let_syntax in
+  let unavailable () = Error (error Invalid_state "recovery note disclosure is unavailable") in
+  let%bind original = Result.of_option t.operation_agent_custody ~error:(error Invalid_state "recovery note has no live operation") in
+  let generation = invocation.context.generation in
+  let observe () =
+    if
+      t.stopped
+      || t.canonical_write_in_progress
+      || Option.is_some t.lifecycle_fence
+      || not (Int.equal t.runtime_source_domain (Stdlib.Domain.self () :> int))
+      || not (Option.exists t.operation_agent_custody ~f:(phys_equal original))
+    then unavailable ()
+    else (
+      let%bind binding =
+        Result.of_option t.canonical_persistence
+          ~error:(error Invalid_state "durable recovery notes are unavailable")
+      in
+      let%bind operation = running_operation t original.operation_id in
+      let%bind () =
+        if
+          Canonical_backend_binding_data.is_available binding
+          && Option.exists (Canonical_backend_binding_data.session_owner binding)
+               ~f:(P.Session_ref.equal source)
+          && Int.equal operation.generation generation
+          && Int.equal operation.generation t.state.identity.generation
+        then check_agent_admission original.admission
+        else unavailable ()
+      in
+      let%bind actor = operation_agent_actor t original.operation_id in
+      match actor with
+      | Some actor
+        when Operator_authorization.is_current actor
+             && P.Principal.has_scope
+                  (Operator_authorization.principal actor)
+                  View_session_transcript ->
+        Recovery_note_session.for_owner t.state.recovery_notes ~owner:source
+      | Some _ | None -> unavailable ())
+  in
+  match invocation.context.origin, invocation.context.call_entry_id with
+  | Model, Some _ ->
+    let%bind _ = observe () in
+    let%map plan = Recovery_note_query.prepare query catalog in
+    { source
+    ; materialize = (fun () -> Result.bind (observe ()) ~f:(Recovery_note_query.render plan))
+    ; check_current = (fun () -> (match observe () with
+       | Ok catalog -> Recovery_note_query.current plan catalog
+       | Error _ -> false))
+    }
+  | (Model | Moderator | Script | Delegated_agent | External_adapter), _ -> unavailable ()
+;;
+
+let admit_recovery_rollover
+      ?(check_basis = fun () -> Ok ())
+      ?(after_admit = fun _ -> ())
+      t
+      ~check
+      ~expected
+  =
+  let module R = Recovery_rollover in
+  let module P = Agent_protocol in
+  let open Result.Let_syntax in
+  let%bind requester = check () in
+  let%bind () = require_rollover_recovered t in
+  let%bind retained = R.previous t.state.recovery_rollover ~requester ~expected in
+  match retained with
+  | Some receipt -> Ok receipt
+  | None ->
+    let check_policy () =
+      let%bind () =
+        if Session_delta.awaiting_settled_foreground t.state
+        then Error (error Conflict "the active window has a pending continuation")
+        else Ok ()
+      in
+      let%bind _ =
+        Result.of_option (current_context_capacity_basis t)
+          ~error:(error Invalid_state "local context mode is disabled")
+      in
+      let%map _ =
+        Result.of_option (active_rollover_window t)
+          ~error:(error Invalid_state "recovery window ledger is unavailable")
+      in
+      ()
+    in
+    let%bind () = check_policy () in
+    let%bind () = check_basis () in
+    let id = P.Id.Operation.create () in
+    let intent =
+      R.Intent.create ~id ~expected ~requester ~admitted_at:(t.services.now ())
+    in
+    let check_before_commit () =
+      let%bind () = check_policy () in
+      let%bind () = check_basis () in
+      let%bind current = check () in
+      if R.Requester.equal current requester
+      then Ok ()
+      else Error (error Permission_denied "rollover requester authority changed")
+    in
+    let%bind () =
+      persist_recovery_delta t
+        ~rollover:true
+        ~delta:(Recovery_rollover_changed (Admit intent))
+        ~after_install:(fun () -> after_admit intent)
+        ~check_before_commit
+    in
+    Option.bind t.state.recovery_rollover ~f:(fun ledger -> R.find ledger ~id)
+    |> Result.of_option ~error:(error Internal_error "durable rollover receipt missing")
+;;
+
+let context_native_execution t ~access ~effect_kind =
+  let module P = Agent_protocol in
+  let open Result.Let_syntax in
+  let%bind principal, invocation =
+    Recovery_context_service.check_now access t.state ~effect_kind
+  in
+  let%bind execution =
+    List.find t.invocation_executions ~f:(fun execution ->
+      P.Invocation.equal execution.dispatched invocation)
+    |> Result.of_option ~error:(error Permission_denied "context invocation is not active")
+  in
+  let%bind operation_id =
+    match execution.owner with
+    | Foreground operation_id when Atomic.get execution.authority_live -> Ok operation_id
+    | _ -> Error (error Permission_denied "context tools require a live foreground invocation")
+  in
+  let%bind current = authorized_native_child_basis t (Inference_invocation execution) in
+  let%map () = current.check_current () in
+  principal, execution, operation_id
+;;
+
+let rollover_operator t actor ~attachment_id ~authorize =
+  let module P = Agent_protocol in
+  let open Result.Let_syntax in
+  let principal = Operator_authorization.principal actor in
+  let%bind () =
+    if
+      Operator_authorization.is_current actor
+      && P.Principal.has_scope principal Send_messages
+    then authorize t.state
+    else Error (error Permission_denied "rollover operator authority expired")
+  in
+  let%bind () =
+    if Operator_authorization.is_current actor
+    then require_recovery_window_owner t ~actor ~attachment_id
+    else Error (error Permission_denied "rollover operator authority expired")
+  in
+  Ok principal
+;;
+
+let check_rollover_cut t ~previous ~(expected : Recovery_rollover.Expected.t) ~check =
+  let open Result.Let_syntax in
+  let%bind _ = check () in
+  let%bind () = require_runtime_admission t in
+  match active_rollover_window t, t.state.lifecycle.observed with
+  | Some scope, (Idle | Stopped)
+    when phys_equal previous t.state
+         && Agent_protocol.Recovery_window.Scope.equal scope expected.scope
+         && Int64.equal t.state.counters.revision expected.revision
+         && Option.is_none t.state.active_operation
+         && List.is_empty t.invocation_executions
+         && (not t.idle_moderator_borrowed)
+         && not (moderator_is_borrowed t) -> Ok ()
+  | _ -> Error (error Conflict "rollover cut or runtime authority changed")
+;;
+
+let record_context_checkpoint_internal t ~check expected notes =
+  let module P = Agent_protocol in
+  let module R = Recovery_rollover in
+  let open Result.Let_syntax in
+  let prior = t.state in
+  let%bind (principal : P.Principal.t) = check () in
+  let%bind () =
+    if P.Principal.has_scope principal View_session_transcript
+    then Ok ()
+    else Error (error Permission_denied "checkpoint requires transcript authority")
+  in
+  let check_before_commit () =
+    let%bind () = check_rollover_cut t ~previous:prior ~expected ~check in
+    if Option.is_some (current_context_capacity_basis t)
+    then Ok ()
+    else Error (error Invalid_state "local context mode is disabled")
+  in
+  let%bind () = check_before_commit () in
+  let%bind checkpoint =
+    R.Checkpoint.capture
+      expected
+      ~history:prior.conversation.canonical_history
+      ~catalog:prior.recovery_notes
+      ~notes
+      ~recipe:(Owner_selection principal.id)
+  in
+  let%map () =
+    persist_recovery_delta
+      t
+      ~rollover:true
+      ~delta:(Recovery_rollover_changed (Record_checkpoint checkpoint))
+      ~check_before_commit
+  in
+  checkpoint
+;;
+
+let record_authored_checkpoint t ~access (request : Recovery_authored_checkpoint.Request.t) =
+  let module A = Recovery_authored_checkpoint in
+  let module B = Recovery_checkpoint_cut in
+  let module C = Recovery_rollover.Checkpoint in
+  let module P = Agent_protocol in
+  let module R = Recovery_rollover in
+  let module Scope = P.Recovery_window.Scope in
+  let open Result.Let_syntax in
+  let%bind principal, execution, operation =
+    context_native_execution t ~access ~effect_kind:Checkpoint
+  in
+  let%bind () =
+    if A.selected_invocation execution.dispatched
+    then Ok ()
+    else Error (error Permission_denied "checkpoint requires its selected model call")
+  in
+  match active_rollover_window t with
+  | None -> Ok A.Receipt.Stale
+  | Some scope when not (P.Id.Context_window.equal request.window (Scope.window scope)) ->
+    Ok Stale
+  | Some _ when t.rollover_requires_recovery -> Ok Uncertain
+  | Some scope ->
+    let prior = t.state in
+    let previous =
+      Option.bind prior.recovery_rollover ~f:(fun ledger ->
+        R.authored_checkpoint ledger ~scope ~principal ~key:request.key)
+    in
+    (match previous, request.action with
+     | Some selected, action ->
+       let applicable =
+         match action with
+         | Readback -> true
+         | Register notes -> List.equal Recovery_notes.Catalog.equal_selection notes (C.notes selected)
+       in
+       let current =
+         Option.bind prior.recovery_rollover ~f:R.checkpoint
+         |> Option.exists ~f:(C.equal selected)
+       in
+       let qualified =
+         match C.recipe selected with
+         | Owner_selection _ -> false
+         | Authored binding -> Result.is_ok (B.check_metadata prior ~scope binding)
+       in
+       Ok (if applicable && current && qualified then Accepted else Stale)
+     | None, Readback -> Ok Absent
+     | None, Register notes ->
+       let check_before_commit () =
+         let%bind caller, current, foreground =
+           context_native_execution t ~access ~effect_kind:Checkpoint
+         in
+         let%bind () = require_runtime_admission t in
+         let%bind () =
+           match Soft_checkpoint_host.retained prior ~scope with
+           | Some opportunity ->
+             let module O = Recovery_checkpoint_opportunity in
+             let claim = O.claim opportunity in
+             if
+               P.Id.Operation.equal operation claim.owner
+               && Option.is_none (O.outcome opportunity)
+             then (
+               let key =
+                 Chatml_source.Digest.of_contents
+                   (P.Id.Operation.to_string claim.id)
+                   ~checkpoint:ignore
+               in
+               match claim.decision with
+               | Offer Register
+                 when P.Id.Principal.equal principal claim.principal
+                      && Chatml_source.Digest.equal key request.key
+                      && Soft_checkpoint_host.policy_matches t claim
+                      && Option.is_some (O.attempt opportunity) -> Ok ()
+               | Offer _ | Withhold _ ->
+                 Error
+                   (error
+                      Conflict
+                      "checkpoint registration is outside its accepted opportunity"))
+             else Ok ()
+           | None -> Ok ()
+         in
+         let%bind capacity = read_context_capacity t operation in
+         match capacity with
+         | Current _
+           when phys_equal execution current
+                && phys_equal prior t.state
+                && P.Id.Principal.equal caller principal
+                && P.Id.Operation.equal foreground operation
+                && Option.exists (active_rollover_window t) ~f:(Scope.equal scope) ->
+           Ok ()
+         | Current _ | Disabled | Awaiting_preparation _ | Stale_preparation _ ->
+           Error (error Conflict "authored checkpoint cut or capacity policy changed")
+       in
+       let candidate =
+         let%bind () = check_before_commit () in
+         let%bind binding =
+           B.capture_checkpoint
+             prior
+             ~scope
+             ~principal
+             ~operation
+             ~invocation:execution.dispatched
+             ~key:request.key
+         in
+         let%bind expected = R.Expected.create scope ~revision:prior.counters.revision in
+         C.capture
+           expected
+           ~history:prior.conversation.canonical_history
+           ~catalog:prior.recovery_notes
+           ~notes
+           ~recipe:(Authored binding)
+       in
+       (match candidate with
+        | Error { code = Conflict; _ } -> Ok Stale
+        | Error failure -> Error failure
+        | Ok checkpoint ->
+          (match
+             persist_recovery_delta
+               t
+               ~rollover:true
+               ~delta:(Recovery_rollover_changed (Record_checkpoint checkpoint))
+               ~check_before_commit
+           with
+           | Ok () -> Ok Accepted
+           | Error _ when t.rollover_requires_recovery -> Ok Uncertain
+           | Error { code = Conflict; _ } -> Ok Stale
+           | Error failure -> Error failure)))
+;;
+
+let settle_context_rollover_internal
+      ?(cancel_reason = Recovery_rollover.Receipt.Cancelled)
+      ?batch
+      ?capacity
+      ?checkpoint_history
+      ?check_live_cut
+      ?after_commit_install
+      t
+      ~check
+      ~authorize_force
+      ~id
+      (expected : Recovery_rollover.Expected.t)
+      (settlement : Recovery_rollover.Settlement.t)
+  =
+  let module P = Agent_protocol in
+  let module R = Recovery_rollover in
+  let module Scope = P.Recovery_window.Scope in
+  let open Result.Let_syntax in
+  let%bind principal = check () in
+  let%bind () = require_rollover_recovered t in
+  let find () =
+    Option.bind t.state.recovery_rollover ~f:(fun ledger -> R.find ledger ~id)
+    |> Result.of_option ~error:(error Conflict "rollover intent is unavailable")
+  in
+  let%bind receipt = find () in
+  match receipt.status with
+  | Terminal _ -> Ok receipt
+  | Pending
+    when match receipt.intent.requester, capacity with
+         | Automatic { cut; _ }, Some current ->
+           not (Recovery_rollover_capacity.equal cut current)
+         | Automatic _, None | (Native _ | Operator _), Some _ -> true
+         | (Native _ | Operator _), None -> false ->
+    Error (error Permission_denied "capacity rollover requires its original worker cut")
+  | Pending ->
+    let previous = t.state in
+    let check_cut () =
+      match check_live_cut with
+      | None -> check_rollover_cut t ~previous ~expected ~check
+      | Some validate ->
+        let%bind _ = check () in
+        let%bind () = require_runtime_admission t in
+        if phys_equal previous t.state
+        then validate ()
+        else Error (error Conflict "settled rollover prestate changed")
+    in
+    let%bind () = check_cut () in
+    let persist ?(payloads = []) ?after_install delta ~check_before_commit =
+      let%bind () =
+        persist_recovery_delta
+          t
+          ~rollover:true
+          ~payloads
+          ?after_install
+          ~delta
+          ~check_before_commit
+      in
+      find ()
+    in
+    let supersede reason =
+      persist
+        (Recovery_rollover_changed (Settle { id; terminal = Superseded reason }))
+        ~check_before_commit:check_cut
+    in
+    if not (Scope.equal receipt.intent.expected.scope expected.scope)
+    then supersede Basis_changed
+    else (
+      match settlement with
+      | Cancel -> supersede cancel_reason
+      | Publish { checkpoint; retain } ->
+        let%bind basis =
+          Result.of_option
+            (current_context_capacity_basis t)
+            ~error:(error Invalid_state "local context mode is disabled")
+        in
+        let%bind quality =
+          match checkpoint with
+          | None -> Ok (Error R.Receipt.Checkpoint_missing)
+          | Some checkpoint when P.Principal.has_scope principal View_session_transcript
+            ->
+            let stored = Option.value_exn previous.recovery_rollover in
+            (match
+               R.check_checkpoint
+                 ?checkpoint_history
+                 ~validate_authored:(Recovery_checkpoint_cut.check_checkpoint ?checkpoint_history previous)
+                 stored
+                 checkpoint
+                 ~expected
+                 ~history:previous.conversation.canonical_history
+                 ~catalog:previous.recovery_notes
+             with
+             | Ok () -> Ok (Ok (R.Receipt.Checkpointed checkpoint))
+             | Error _ -> Ok (Error R.Receipt.Checkpoint_unavailable))
+          | Some _ ->
+            Error (error Permission_denied "checkpoint requires transcript authority")
+        in
+        let check_force () =
+          match receipt.intent.requester, authorize_force, capacity with
+          | Operator { force = true; _ }, Some authorized, None -> authorized t.state
+          | Automatic { cut; _ }, _, Some current
+            when Recovery_rollover_capacity.equal cut current -> Ok ()
+          | _ ->
+            Error
+              (error
+                 Permission_denied
+                 "archive-only rollover requires current force authority")
+        in
+        let commit quality =
+          let check_before_commit () =
+            let%bind () = check_cut () in
+            let%bind () =
+              if
+                Option.exists
+                  (current_context_capacity_basis t)
+                  ~f:(Configuration_capture.Capacity_basis.equal basis)
+              then Ok ()
+              else Error (error Conflict "rollover target or policy changed")
+            in
+            match quality with
+            | R.Receipt.Archive_only _ ->
+              let%bind () = check_force () in
+              Option.value_map check_live_cut ~default:(Ok ()) ~f:(fun validate ->
+                if phys_equal previous t.state
+                then validate ()
+                else Error (error Conflict "settled rollover prestate changed"))
+            | Checkpointed _ ->
+              (* The checked immutable checkpoint and note revisions are still at [previous]. *)
+              Ok ()
+          in
+          let%bind () = check_before_commit () in
+          let%bind archive =
+            t.persistence.archive_reference ~previous ~kind:Rollover id
+          in
+          let%bind archive =
+            Chatml_source.Digest.of_hex archive.sha256
+            |> Result.map_error ~f:(fun _ ->
+              error Persistence_error "rollover archive digest is invalid")
+          in
+          let%bind successor =
+            Scope.create
+              ~session:(Scope.session expected.scope)
+              ~generation:(Scope.generation expected.scope)
+              ~window:(P.Id.Context_window.create ())
+          in
+          let schedule_foreground = Option.is_some batch || Option.is_some capacity in
+          let%bind retired_at =
+            match schedule_foreground, previous.active_operation with
+            | false, _ -> Ok None
+            | true, Some operation ->
+              let now = t.services.now () in
+              Ok
+                (Some
+                   (if P.Timestamp.compare now operation.updated_at < 0
+                    then operation.updated_at
+                    else now))
+            | true, None -> Error (error Conflict "rollover predecessor is absent")
+          in
+          let%bind change =
+            R.Commit.create
+              ?batch
+              ?capacity
+              ?retired_at
+              ~schedule_foreground
+              receipt.intent
+              ~expected
+              ~successor
+              ~archive
+              ~checkpoint:quality
+              ~retain
+          in
+          let%bind retained = Session_delta.rollover_retained_history previous change in
+          let%bind retirement =
+            R.Commit.retirement change ~active:previous.active_operation
+          in
+          let payloads =
+            [ P.Event.Durable.Payload.History_replaced
+                (Session_state.history_window retained)
+            ]
+            @ Option.to_list
+                (Option.map retirement ~f:(fun operation ->
+                   P.Event.Durable.Payload.Operation_interrupted operation))
+            @ Option.to_list
+                (Option.map (R.Commit.predecessor change) ~f:(fun _ ->
+                   P.Event.Durable.Payload.Session_state_changed
+                     { desired_state = previous.lifecycle.desired; observed_state = Idle }))
+          in
+          persist
+            (Recovery_rollover_committed change)
+            ~payloads
+            ?after_install:after_commit_install
+            ~check_before_commit
+        in
+        (match quality, receipt.intent.requester with
+         | Ok quality, _ -> commit quality
+         | Error reason, (Operator { force = true; _ } | Automatic _) ->
+           commit (Archive_only reason)
+         | Error _, (Operator _ | Native _) -> supersede Checkpoint_required))
+;;
+
+let publish_operator_rollover
+      t
+      actor
+      ~authorize
+      ~authorize_force
+      (request : Agent_protocol.Recovery_rollover_control.Request.t)
+  =
+  let module R = Recovery_rollover in
+  let open Result.Let_syntax in
+  let attachment_id = request.attachment_id in
+  let check () =
+    let%bind principal = rollover_operator t actor ~attachment_id ~authorize in
+    let%map () = if request.force then authorize_force t.state else Ok () in
+    principal
+  in
+  let module Key = Agent_protocol.Idempotency_key in
+  let%bind key = Key.of_string (Key.to_string request.key) in
+  let%bind expected =
+    R.Expected.create request.expected.scope ~revision:request.expected.revision
+  in
+  let%bind principal = check () in
+  let%bind () = require_rollover_recovered t in
+  let requester =
+    R.Requester.Operator { principal = principal.id; key; force = request.force }
+  in
+  let%bind retained = R.previous t.state.recovery_rollover ~requester ~expected in
+  let settle (receipt : R.Receipt.t) =
+    match receipt.status with
+    | Terminal _ -> Ok receipt
+    | Pending ->
+      let current =
+        active_rollover_window t
+        |> Option.bind ~f:(fun scope ->
+          R.Expected.create scope ~revision:t.state.counters.revision |> Result.ok)
+      in
+      (* Admission consumes precisely one session revision. A later quiescent
+         cut can settle this intent as superseded but cannot publish its archive. *)
+      let admitted_revision = Int64.succ expected.revision in
+      (match current with
+       | Some cut
+         when R.Expected.equal cut expected
+              || Result.is_error
+                   (check_rollover_cut t ~previous:t.state ~expected:cut ~check) ->
+         Ok receipt
+       | None -> Ok receipt
+       | Some cut ->
+         let exact =
+           Agent_protocol.Recovery_window.Scope.equal cut.scope expected.scope
+           && Int64.equal cut.revision admitted_revision
+         in
+         let settlement =
+           if exact
+           then
+             R.Settlement.Publish
+               { checkpoint = Option.bind t.state.recovery_rollover ~f:R.checkpoint
+               ; retain = []
+               }
+           else Cancel
+         in
+         settle_context_rollover_internal
+           ~cancel_reason:Basis_changed
+           t
+           ~check
+           ~authorize_force:(Option.some_if request.force authorize_force)
+           ~id:receipt.intent.id
+           cut
+           settlement)
+  in
+  let%bind receipt =
+    match retained with
+    | Some receipt -> settle receipt
+    | None ->
+      let previous = t.state in
+      let check_basis () = check_rollover_cut t ~previous ~expected ~check in
+      let check_requester () =
+        let%map _ = check () in
+        requester
+      in
+      let%bind receipt =
+        admit_recovery_rollover t ~check:check_requester ~check_basis ~expected
+      in
+      settle receipt
+  in
+  Recovery_rollover_projection.receipt receipt
+;;
+
+let settled_rollover_authority t publication (intent : Recovery_rollover.Intent.t) =
+  let module P = Agent_protocol in
+  let open Result.Let_syntax in
+  let operation = publication.Foreground_publication.operation.id in
+  match intent.requester with
+  | Operator _ ->
+    Option.bind t.live_operator_rollover ~f:(fun selected ->
+      Option.some_if
+        (P.Id.Operation.equal intent.id selected.id
+         && phys_equal selected.publication publication)
+        (selected.check, selected.authorize_force))
+  | Native requester when P.Id.Operation.equal requester.operation operation ->
+    let check () =
+      let%bind () = check_operation_descendant t operation in
+      let%bind admission = operation_agent_admission t operation in
+      let%bind admission =
+        Result.of_option
+          admission
+          ~error:(error Permission_denied "rollover requester is unavailable")
+      in
+      let%bind () = Execution_custody.Admission.check admission in
+      let%bind custody =
+        Execution_custody.Admission.custody admission
+        |> Result.of_option
+             ~error:
+               (error Permission_denied "rollover requester has no current authority")
+      in
+      let%bind actor = Execution_custody.actor custody in
+      let principal = Operator_authorization.principal actor in
+      if
+        P.Id.Principal.equal principal.id requester.principal
+        && P.Principal.has_scope principal Send_messages
+      then Ok principal
+      else Error (error Permission_denied "rollover requester authority changed")
+    in
+    Some (check, None)
+  | Native _ | Automatic _ -> None
+;;
+
+let successor_expected t scope =
+  Recovery_rollover.Expected.create scope ~revision:t.state.counters.revision
+;;
+
+let retained_rollover_receipt t id =
+  Option.bind t.state.recovery_rollover ~f:(fun ledger ->
+    Recovery_rollover.find ledger ~id)
+;;
+
+let qualified_rollover_hook t =
+  Option.filter
+    t.moderator_manager
+    ~f:Chat_response.Moderator_manager.has_context_rollover
+;;
+
+let persist_rollover_hook t ~id ~scope ~change ?moderator ~check () =
+  let open Result.Let_syntax in
+  let%bind expected = successor_expected t scope in
+  let hook = Session_delta.Recovery_rollover_changed (Hook { id; expected; change }) in
+  let delta =
+    match moderator with
+    | None -> hook
+    | Some raw -> Session_delta.Batch [ hook; Moderator_changed (Some raw) ]
+  in
+  persist_recovery_delta t ~rollover:true ~delta ~check_before_commit:check
+;;
+
+let claim_rollover_hook
+      t
+      ~owner
+      ~predecessor
+      ~scope
+      ~phase
+      ~manager
+      ~make_event
+      ~view_transcript
+      ~check_authority
+  =
+  let module H = Recovery_rollover_hooks in
+  let open Result.Let_syntax in
+  let previous = t.state in
+  let check () =
+    let%bind () = require_rollover_recovered t in
+    if
+      phys_equal previous t.state
+      && (not (moderator_is_borrowed t || t.idle_moderator_borrowed))
+      && Option.exists (qualified_rollover_hook t) ~f:(phys_equal manager)
+      && Option.exists
+           (active_rollover_window t)
+           ~f:(Agent_protocol.Recovery_window.Scope.equal scope)
+    then check_authority ()
+    else Error (error Conflict "authored rollover source is no longer available")
+  in
+  let%bind () = check () in
+  let%bind observer = Moderator_checkpoint.observer previous.moderator in
+  let%bind observer =
+    Result.of_option
+      observer
+      ~error:(error Conflict "authored rollover has no installed source")
+  in
+  let%bind claim =
+    H.Claim.create
+      ~execution:(Agent_protocol.Id.Moderator_execution.create ())
+      ~predecessor
+      ~window:scope
+      ~revision:previous.counters.revision
+      ~observer
+  in
+  let%map () =
+    persist_rollover_hook t ~id:owner ~scope ~change:(Claim (phase, claim)) ~check ()
+  in
+  let lease : Authored_rollover_hook.t =
+    { owner
+    ; phase
+    ; claim
+    ; manager
+    ; event = make_event claim.revision
+    ; view_transcript
+    ; admitted = t.state
+    ; check_authority
+    }
+  in
+  t.authored_rollover_hook <- Some lease;
+  Some lease
+;;
+
+let hook_pressure t operation =
+  let module H = Chat_response.Context_rollover_hook in
+  let module A = Inference_runtime.Context_capacity.Assessment in
+  match read_context_capacity t operation with
+  | Ok (Current { assessment; _ }) ->
+    (match A.view assessment with
+     | Unavailable _ -> H.Unknown
+     | Assessed { pressure = Below_warning; _ } -> Within_budget
+     | Assessed { pressure = Near_limit | Checkpoint_due; _ } -> Near_limit
+     | Assessed { pressure = Hard_limit_exceeded; _ } -> Over_limit)
+  | _ -> H.Unknown
+;;
+
+let check_authored_rollover_hook t (lease : Authored_rollover_hook.t) =
+  let open Result.Let_syntax in
+  let%bind () = require_runtime_admission t in
+  if
+    (not t.stopped)
+    && Option.exists t.authored_rollover_hook ~f:(phys_equal lease)
+    && phys_equal t.state lease.admitted
+    && Option.exists t.moderator_manager ~f:(phys_equal lease.manager)
+  then lease.check_authority ()
+  else Error (error Conflict "authored rollover source or custody changed")
+;;
+
+let complete_rollover_hook t (lease : Authored_rollover_hook.t) decision outcome snapshot =
+  let open Result.Let_syntax in
+  let check () = check_authored_rollover_hook t lease in
+  let%bind () = check () in
+  let%bind change =
+    Recovery_rollover_hook_policy.resolve
+      t.state
+      ~event:lease.event
+      ~execution:lease.claim.execution
+      ~view_transcript:lease.view_transcript
+      decision
+  in
+  let%bind moderator =
+    Recovery_rollover_hook_snapshot.prepare t.state.moderator ~outcome ~snapshot
+  in
+  persist_rollover_hook
+    t
+    ~id:lease.owner
+    ~scope:lease.claim.window
+    ~change
+    ?moderator
+    ~check
+    ()
+;;
+
+let release_rollover_hook t (lease : Authored_rollover_hook.t) failure =
+  if not (Option.exists t.authored_rollover_hook ~f:(phys_equal lease))
+  then Ok ()
+  else
+    Exn.protect
+      ~finally:(fun () -> t.authored_rollover_hook <- None)
+      ~f:(fun () ->
+        let module H = Recovery_rollover_hooks in
+        match
+          Option.bind (retained_rollover_receipt t lease.owner) ~f:(fun receipt ->
+            receipt.hooks)
+        with
+        | None -> Ok ()
+        | Some hooks ->
+          let running =
+            match lease.phase with
+            | Before ->
+              (match H.before hooks with
+               | Claimed _ -> true
+               | _ -> false)
+            | After ->
+              (match H.after hooks with
+               | Claimed _ -> true
+               | _ -> false)
+          in
+          if not running
+          then Ok ()
+          else
+            persist_rollover_hook
+              t
+              ~id:lease.owner
+              ~scope:lease.claim.window
+              ~change:(Stop (lease.phase, lease.claim.execution, failure))
+              ~check:(fun () -> require_rollover_recovered t)
+              ())
+;;
+
+let claim_successor_hook t (handoff : Foreground_successor.Handoff.t) =
+  let module H = Recovery_rollover_hooks in
+  let module Hook = Chat_response.Context_rollover_hook in
+  let open Result.Let_syntax in
+  match retained_rollover_receipt t handoff.owner with
+  | Some { status = Terminal (Committed committed); hooks = Some hooks; intent }
+    when match H.after hooks with
+         | Pending -> true
+         | _ -> false ->
+    let check_authority () =
+      if Option.exists t.foreground_successor_handoff ~f:(phys_equal handoff)
+      then handoff.hook_authority ()
+      else Error (error Conflict "successor handoff changed")
+    in
+    let view_transcript =
+      Option.exists handoff.custody ~f:(fun custody ->
+        match Execution_custody.actor custody with
+        | Ok actor ->
+          Agent_protocol.Principal.has_scope
+            (Operator_authorization.principal actor)
+            View_session_transcript
+        | Error _ -> false)
+    in
+    let checkpoint () =
+      match committed.checkpoint with
+      | Archive_only _ -> Hook.Archive_only
+      | Checkpointed selection when view_transcript -> Recovery_rollover_hook_policy.checkpoint_offer (Some selection)
+      | Checkpointed _ -> Hook.Checkpointed []
+    in
+    (match qualified_rollover_hook t, check_authority () with
+     | Some manager, Ok () ->
+       let%bind observer = Moderator_checkpoint.observer t.state.moderator in
+       let correct_source =
+         Option.exists
+           (H.claim (H.before hooks))
+           ~f:(fun prior ->
+             Option.exists
+               observer
+               ~f:(Agent_protocol.Invocation.equal_observer prior.observer))
+       in
+       if not correct_source
+       then Ok None
+       else
+         claim_rollover_hook
+           t
+           ~owner:handoff.owner
+           ~predecessor:handoff.predecessor.operation.id
+           ~scope:committed.successor
+           ~phase:After
+           ~manager
+           ~view_transcript
+           ~check_authority
+           ~make_event:(fun _ ->
+             Hook.After
+               { intent = handoff.owner
+               ; previous = intent.expected.scope
+               ; window = committed.successor
+               ; cut_revision = committed.cut_revision
+               ; checkpoint = checkpoint ()
+               })
+     | _ -> Ok None)
+  | _ -> Ok None
+;;
+
+let save_successor_phase ?check_at_writer t ~id ~expected ~change ~check =
+  let module C = Recovery_rollover_continuation in
+  let open Result.Let_syntax in
+  let%bind work =
+    match change, Session_delta.foreground_continuation t.state with
+    | (C.Finish reason | Stop_preparation { reason; _ }), Some current
+      when Agent_protocol.Id.Operation.equal current.owner id ->
+      let outcome : Agent_protocol.Run_work.Terminal.outcome =
+        match reason with
+        | Script_finished -> Interrupted
+        | Cancelled -> Cancelled
+      in
+      (match%bind Run_rollover_work.owner t.state ~predecessor:current.predecessor with
+       | Unowned | Retired -> Ok []
+       | Unresolved _ ->
+         Run_transition.settle_operation
+           t.state
+           ~operation_id:current.predecessor
+           ~outcome
+           ~now:(t.services.now ()))
+    | _ -> Ok []
+  in
+  let schedule =
+    Session_delta.Recovery_rollover_changed (Schedule { id; expected; change })
+  in
+  let delta =
+    match work with
+    | [] -> schedule
+    | _ -> Session_delta.Batch (schedule :: work)
+  in
+  transition
+    t
+    ~check_before_commit:check
+    ?check_model_turn_at_writer:check_at_writer
+    ~delta
+    ~payloads:[]
+  |> Result.map ~f:ignore
+;;
+
+let check_successor_selected t (selected : Foreground_successor.t) =
+  let open Result.Let_syntax in
+  let module P = Agent_protocol in
+  let%bind _ = running_operation t selected.operation in
+  let%bind () =
+    if
+      Option.exists t.foreground_successor ~f:(phys_equal selected)
+      && Option.exists
+           (active_rollover_window t)
+           ~f:(P.Recovery_window.Scope.equal selected.scope)
+      && Option.exists
+           (current_context_capacity_basis t)
+           ~f:(Configuration_capture.Capacity_basis.equal selected.capacity_basis)
+    then Ok ()
+    else Error (error Conflict "successor operation, window or model selection changed")
+  in
+  let%bind () = require_selected_execution t in
+  let%bind () = check_operation_descendant t selected.operation in
+  selected.check ()
+;;
+
+let begin_successor ?check_at_writer t ~id ~expected ~check custody =
+  let open Result.Let_syntax in
+  let%bind () = check () in
+  let%bind () =
+    match inherited_turn_required t.state with
+    | Ordinary | Need_private_origin -> Ok ()
+    | Scoped ->
+      Error
+        (error
+           Permission_denied
+           "governed successor requires a fresh inherited admission")
+  in
+  let%bind selected, operation, admission =
+    prepare_foreground_successor t ~id ~expected ~check
+  in
+  let check_admission authority () =
+    let%bind () = authority () in
+    check_turn_custody t custody
+  in
+  let check_at_writer = Option.map check_at_writer ~f:check_admission in
+  let%map _ =
+    transition
+      t
+      ~check_before_commit:(check_admission check)
+      ?check_model_turn_at_writer:check_at_writer
+      ~delta:
+        (Batch
+           (Recovery_rollover_changed
+              (Schedule { id; expected; change = Begin operation.id })
+            :: Turn_admission.deltas admission))
+      ~payloads:(Turn_admission.payloads admission)
+  in
+  t.foreground_successor <- Some selected;
+  install_operation_agent_custody t operation custody;
+  launch_worker t operation
+;;
+
+let check_successor_input t (selected : Foreground_successor.t) =
+  Recovery_rollover_input.check
+    selected.input
+    t.state
+    ~operation:selected.operation
+    ~runtime_admission_open:(runtime_admission_open t)
+;;
+
+let check_successor_prepared t (selected : Foreground_successor.t) ~optional_hint prepared
+  =
+  let module R = Inference_runtime in
+  let module Capacity = R.Context_capacity.Assessment in
+  let open Result.Let_syntax in
+  let hold reason message =
+    selected.hold <- reason;
+    Error (error Conflict message)
+  in
+  let%bind () =
+    Result.map_error (check_successor_selected t selected) ~f:(fun failure ->
+      selected.hold <- Authority_unavailable;
+      failure)
+  in
+  let%bind () =
+    Result.map_error (check_successor_input t selected) ~f:(fun failure ->
+      selected.hold <- Required_input_unavailable;
+      failure)
+  in
+  let%bind () =
+    if Recovery_rollover_input.wakes_authorized selected.input
+    then Ok ()
+    else hold Authority_unavailable "successor wake publisher is unavailable"
+  in
+  let%bind () =
+    match selected.prepared with
+    | None
+      when R.Prepared.binding_guard prepared ()
+           && R.Prepared.includes_history
+                prepared
+                (Recovery_rollover_input.required selected.input) -> Ok ()
+    | _ ->
+      hold
+        Preparation_interrupted
+        "successor preparation is not the selected first request"
+  in
+  let policy = Session_context_capacity.Selection.policy selected.policy in
+  let assessment = R.Prepared.assess_capacity ?policy prepared in
+  match Capacity.view assessment with
+  | Assessed { pressure = Hard_limit_exceeded; _ } when optional_hint -> Ok false
+  | Assessed { pressure = Hard_limit_exceeded; _ } ->
+    hold Capacity "successor required input exceeds the selected limit"
+  | Unavailable _ when optional_hint -> Ok false
+  | Unavailable _ ->
+    hold Capacity_unknown "successor required input has no qualified capacity"
+  | Assessed _ ->
+    selected.prepared <- Some prepared;
+    Ok true
+;;
+
+let successor_attempt_ordinal t (selected : Foreground_successor.t) attempt =
+  let module R = Inference_runtime in
+  let module H = Inference_ledger.Handle in
+  let module P = Agent_protocol in
+  List.find_map (Inference_ledger.rows t.state.inference_ledger) ~f:(fun row ->
+    let handle = Inference_ledger.Row.handle row in
+    Option.some_if
+      (Option.equal P.Id.Operation.equal (H.operation_id handle) (Some selected.operation)
+       && Option.is_none (H.invocation_id handle)
+       && Transcript.Scope.equal (H.scope handle) (R.Attempt.scope attempt)
+       && Inference.Observation.Observation_id.equal
+            (H.accounting_id handle)
+            (R.Attempt.accounting_id attempt))
+      (H.ordinal handle))
+  |> Result.of_option
+       ~error:(error Conflict "successor attempt has no exact durable admission")
+;;
+
+let admit_successor_dispatch t (selected : Foreground_successor.t) attempt =
+  let module P = Agent_protocol in
+  let module R = Inference_runtime in
+  let open Result.Let_syntax in
+  let current () = check_successor_selected t selected in
+  let%bind () = current () in
+  let%bind prepared =
+    selected.prepared
+    |> Result.of_option ~error:(error Conflict "successor has no selected preparation")
+  in
+  let%bind () =
+    if R.Prepared.owns_attempt prepared attempt && R.Prepared.binding_guard prepared ()
+    then Ok ()
+    else Error (error Conflict "dispatch does not own the successor preparation")
+  in
+  let final_check () =
+    (match current () with
+     | Ok () -> ()
+     | Error failure -> failwith failure.message);
+    if not (R.Prepared.binding_guard prepared ())
+    then failwith "successor model preparation changed before submission"
+  in
+  match selected.admitted with
+  | Some (previous, _) when phys_equal previous attempt -> Ok final_check
+  | Some _ -> Error (error Conflict "successor is already admitted")
+  | None ->
+    let%bind ordinal = successor_attempt_ordinal t selected attempt in
+    let check () =
+      let%bind () = current () in
+      check_successor_input t selected
+    in
+    let%bind () = check () in
+    let%bind expected = successor_expected t selected.scope in
+    let%bind pending =
+      prepare_pending
+        t
+        (Adopt
+           { boundary = Successor selected.operation
+           ; runtime_admission_open = runtime_admission_open t
+           })
+    in
+    let entries = Pending_plan.adopted_entries (Pending_transition.plan pending) in
+    let%bind () =
+      if
+        List.equal
+          P.History.equal_entry
+          entries
+          (Recovery_rollover_input.entries selected.input)
+      then Ok ()
+      else Error (error Conflict "successor FIFO selection changed")
+    in
+    let%bind wakes =
+      List.map (Recovery_rollover_input.wakes selected.input) ~f:(fun value ->
+        let%map wake = P.Delivery.accept_wake value ~operation_id:selected.operation in
+        Session_delta.Delivery_wake_changed wake)
+      |> Result.all
+    in
+    let schedule =
+      Session_delta.Recovery_rollover_changed
+        (Schedule
+           { id = selected.owner
+           ; expected
+           ; change = Admit { operation = selected.operation; ordinal }
+           })
+    in
+    let pending_deltas, payloads =
+      match entries with
+      | [] -> [], []
+      | _ ->
+        ( [ Pending_transition.delta pending ]
+        , [ P.Event.Durable.Payload.History_appended entries ] )
+    in
+    let%bind continuation =
+      Result.of_option
+        (Session_delta.foreground_continuation t.state)
+        ~error:(error Conflict "foreground rollover continuation is absent")
+    in
+    let%bind transfer =
+      Run_rollover_work.prepare
+        t.state
+        ~predecessor:continuation.predecessor
+        ~successor:selected.operation
+        ~now:(t.services.now ())
+    in
+    let%bind run_authority =
+      match transfer with
+      | None -> Ok None
+      | Some (run, _) ->
+        let%map binding =
+          Run_authorities.find t.run_authorities run
+          |> Result.of_option
+               ~error:(error Permission_denied "run no longer has live host authority")
+        in
+        Some (run, binding)
+    in
+    let check () =
+      let%bind () = check () in
+      Option.value_map run_authority ~default:(Ok ()) ~f:(fun (_, binding) ->
+        Run_admission.Scope.authorize (Run_authorities.scope binding) t.state)
+    in
+    let admission =
+      match transfer with
+      | None -> [ schedule ]
+      | Some (_, index) -> [ schedule; Session_delta.Run_state_changed index ]
+    in
+    let delta = Session_delta.Batch (pending_deltas @ wakes @ admission) in
+    let completion_sample = producer_completion_sample t ~delta in
+    let%bind candidate = prepare_transition ?completion_sample t ~delta ~payloads in
+    let model_turn_writer =
+      Option.map run_authority ~f:(fun (run, binding) ->
+        let check_at_writer () =
+          let%bind () = current () in
+          if Run_authorities.is_current t.run_authorities binding ~run_id:run
+          then Run_admission.Scope.check_current (Run_authorities.scope binding)
+          else Error (error Permission_denied "successor Run authority changed")
+        in
+        Session_commit_observation.Owner.create_guarded
+          ~previous:t.state
+          ~candidate
+          ~check_at_writer)
+    in
+    let%map () =
+      install
+        ?model_turn_writer
+        ~protected_successor_append:(selected, attempt)
+        ?completion_sample
+        ~check_before_commit:check
+        t
+        candidate
+    in
+    selected.admitted <- Some (attempt, ordinal);
+    final_check
+;;
+
+let qualify_before_rollover_hook
+      t
+      ~publication
+      ~intent
+      ?checkpoint_history
+      ~check_authority
+      ~check_cut
+      ()
+  =
+  let module H = Recovery_rollover_hooks in
+  let module Hook = Chat_response.Context_rollover_hook in
+  let module R = Recovery_rollover in
+  let module P = Agent_protocol in
+  let open Result.Let_syntax in
+  let id = intent.R.Intent.id in
+  let scope = intent.expected.scope in
+  let predecessor = publication.Foreground_publication.operation.id in
+  let check () =
+    let%bind () = check_cut () in
+    let%map _ = check_authority () in
+    ()
+  in
+  let stop reason =
+    let%map () =
+      persist_recovery_delta
+        t
+        ~rollover:true
+        ~delta:(Recovery_rollover_changed (Settle { id; terminal = Superseded reason }))
+        ~check_before_commit:(fun () ->
+          let%bind () = require_rollover_recovered t in
+          check_live_foreground_publication t publication)
+    in
+    if
+      Option.exists t.live_operator_rollover ~f:(fun selected ->
+        P.Id.Operation.equal id selected.id)
+    then t.live_operator_rollover <- None;
+    `Held
+  in
+  match
+    Option.bind (retained_rollover_receipt t id) ~f:(fun receipt -> receipt.hooks)
+  with
+  | Some hooks ->
+    (match H.before hooks with
+     | Completed (_, Proceed _) ->
+       let%map () = check () in
+       `Ready
+     | Completed (_, Veto) -> stop Hook_vetoed
+     | Stopped _ -> stop Hook_failed
+     | Claimed _ | Pending -> Ok `Held)
+  | None ->
+    (match qualified_rollover_hook t with
+     | None -> Ok `Ready
+     | Some manager ->
+       let%bind principal = check_authority () in
+       let view_transcript = P.Principal.has_scope principal View_session_transcript in
+       let checkpoint =
+         let open Option.Let_syntax in
+         let%bind ledger =
+           Option.filter t.state.recovery_rollover ~f:(fun _ -> view_transcript)
+         in
+         let%bind selection = R.checkpoint ledger in
+         let expected =
+           R.Expected.create scope ~revision:t.state.counters.revision |> Result.ok
+         in
+         let%bind expected = expected in
+         Result.map
+           (R.check_checkpoint
+              ?checkpoint_history
+              ~validate_authored:
+                (Recovery_checkpoint_cut.check_checkpoint ?checkpoint_history t.state)
+              ledger
+              selection
+              ~expected
+              ~history:t.state.conversation.canonical_history
+              ~catalog:t.state.recovery_notes)
+           ~f:(fun () -> selection)
+         |> Result.ok
+       in
+       let pressure =
+         match intent.requester with
+         | Automatic { cut = { trigger = Provider_context_limit; _ }; _ } ->
+           Hook.Over_limit
+         | _ -> hook_pressure t predecessor
+       in
+       let%map lease =
+         claim_rollover_hook
+           t
+           ~owner:id
+           ~predecessor
+           ~scope
+           ~phase:Before
+           ~manager
+           ~view_transcript
+           ~check_authority:check
+           ~make_event:(fun revision ->
+             Hook.Before
+               { intent = id
+               ; window = scope
+               ; expected_revision = revision
+               ; pressure
+               ; checkpoint = Recovery_rollover_hook_policy.checkpoint_offer checkpoint
+               })
+       in
+       `Hook lease)
+;;
+
+let close_orphaned_after_hook t ~id ~scope ~check =
+  let module H = Recovery_rollover_hooks in
+  match
+    Option.bind (retained_rollover_receipt t id) ~f:(fun receipt -> receipt.hooks)
+  with
+  | Some hooks ->
+    (match H.after hooks with
+     | Claimed claim ->
+       if Option.is_some t.authored_rollover_hook
+       then Error (error Conflict "the authored after-hook is still running")
+       else
+         persist_rollover_hook
+           t
+           ~id
+           ~scope
+           ~change:(Stop (After, claim.execution, Interrupted))
+           ~check
+           ()
+     | _ -> Ok ())
+  | None -> Ok ()
+;;
+
+let successor_control t actor attachment_id authorize id expected action =
+  let module P = Agent_protocol in
+  let module C = Recovery_rollover_continuation in
+  let open Result.Let_syntax in
+  let check () =
+    rollover_operator t actor ~attachment_id ~authorize |> Result.map ~f:ignore
+  in
+  let find () =
+    let%bind () = check () in
+    match Session_delta.foreground_continuation t.state with
+    | Some current when P.Id.Operation.equal current.owner id -> Ok current
+    | _ -> Error (error Invalid_state "successor continuation is unavailable")
+  in
+  let%bind current = find () in
+  let%bind () =
+    let%bind actual = successor_expected t expected.Recovery_rollover.Expected.scope in
+    if
+      Recovery_rollover.Expected.equal actual expected
+      && Option.exists
+           (active_rollover_window t)
+           ~f:(P.Recovery_window.Scope.equal expected.scope)
+    then Ok ()
+    else Error (error Conflict "successor continuation cut changed")
+  in
+  let%bind () =
+    if Option.is_some t.foreground_successor_handoff
+    then Error (error Conflict "successor follow-up still has a live owner")
+    else close_orphaned_after_hook t ~id ~scope:expected.scope ~check
+  in
+  let%bind expected = successor_expected t expected.scope in
+  let%bind current, expected =
+    match current.phase, t.state.active_operation with
+    | C.Preparing operation, None ->
+      let%bind () =
+        save_successor_phase
+          t
+          ~id
+          ~expected
+          ~change:(Hold { operation; reason = Preparation_interrupted })
+          ~check
+          ~check_at_writer:check
+      in
+      let%bind current = find () in
+      let%map expected = successor_expected t expected.scope in
+      current, expected
+    | _ -> Ok (current, expected)
+  in
+  let%bind () =
+    match action, current.phase with
+    | C.Continue, (Admitted _ | Finished _)
+    | Wait_for_wake, Waiting
+    | Finish_followup, Finished Script_finished
+    | Cancel_followup, Finished Cancelled -> Ok ()
+    | C.Continue, _ ->
+      let custody = create_agent_custody actor in
+      (match
+         begin_successor t ~id ~expected ~check ~check_at_writer:check (Some custody)
+       with
+       | Ok () -> Ok ()
+       | Error failure ->
+         retire_agent_custody custody;
+         Error failure)
+    | Wait_for_wake, _ ->
+      save_successor_phase t ~id ~expected ~change:Wait ~check ~check_at_writer:check
+    | Finish_followup, _ ->
+      save_successor_phase
+        t
+        ~id
+        ~expected
+        ~change:(Finish Script_finished)
+        ~check
+        ~check_at_writer:check
+    | Cancel_followup, Preparing operation ->
+      cancel_operation_internal t attachment_id operation ~check_at_writer:check
+      |> Result.map ~f:ignore
+    | Cancel_followup, _ ->
+      save_successor_phase
+        t
+        ~id
+        ~expected
+        ~change:(Finish Cancelled)
+        ~check
+        ~check_at_writer:check
+  in
+  find ()
+;;
+
+let finish_successor_worker t publication outcome =
+  let open Result.Let_syntax in
+  match t.foreground_successor with
+  | Some selected
+    when Agent_protocol.Id.Operation.equal
+           selected.operation
+           publication.Foreground_publication.operation.id
+         && foreground_publication_matches t publication ->
+    let%map () =
+      if preparing_successor t selected.operation
+      then (
+        let%bind expected = successor_expected t selected.scope in
+        let change =
+          match outcome, t.state.active_operation with
+          | Operation_worker.Cancelled _, _ | _, Some { state = Cancelling; _ } ->
+            Recovery_rollover_continuation.Stop_preparation
+              { operation = selected.operation; reason = Cancelled }
+          | _ -> Hold { operation = selected.operation; reason = selected.hold }
+        in
+        save_successor_phase t ~id:selected.owner ~expected ~change ~check:(fun () ->
+          check_foreground_publication t publication))
+      else Ok ()
+    in
+    t.foreground_successor <- None;
+    outcome
+  | _ -> Ok outcome
+;;
+
+let select_successor_handoff t (handoff : Foreground_successor.Handoff.t) decision =
+  let module P = Agent_protocol in
+  let open Result.Let_syntax in
+  let scope = handoff.view.window in
+  let current () =
+    let%map () = require_runtime_admission t in
+    Option.exists t.foreground_successor_handoff ~f:(phys_equal handoff)
+    && Option.exists (active_rollover_window t) ~f:(P.Recovery_window.Scope.equal scope)
+    && Option.exists (Session_delta.foreground_continuation t.state) ~f:(fun current ->
+      P.Id.Operation.equal current.owner handoff.owner
+      && Recovery_rollover_continuation.equal_phase current.phase Awaiting)
+  in
+  let%bind live = current () in
+  if not live
+  then (
+    if Option.exists t.foreground_successor_handoff ~f:(phys_equal handoff)
+    then (
+      t.foreground_successor_handoff <- None;
+      Option.iter handoff.custody ~f:retire_agent_custody);
+    Ok ())
+  else (
+    let retained = ref false in
+    Exn.protect
+      ~finally:(fun () ->
+        if Option.exists t.foreground_successor_handoff ~f:(phys_equal handoff)
+        then t.foreground_successor_handoff <- None;
+        if not !retained then Option.iter handoff.custody ~f:retire_agent_custody)
+      ~f:(fun () ->
+        let%bind expected = successor_expected t scope in
+        let check_current () =
+          let%bind live = current () in
+          if live
+          then Ok ()
+          else Error (error Conflict "successor selection was superseded")
+        in
+        let select change =
+          save_successor_phase t ~id:handoff.owner ~expected ~change ~check:check_current
+        in
+        match decision, handoff.view.checkpoint, handoff.custody with
+        | Recovery_rollover_continuation.Hook.Finish, _, _ ->
+          (match handoff.check () with
+           | Ok () -> select (Finish Script_finished)
+           | Error _ -> select Wait)
+        | Continue, `Archive_only, _ when Option.is_none handoff.capacity_stage ->
+          select Wait
+        | Wait, _, _ | Continue, _, None -> select Wait
+        | Continue, (`Checkpointed | `Archive_only), Some custody ->
+          (match
+             begin_successor
+               t
+               ~id:handoff.owner
+               ~expected
+               ~check:handoff.check
+               (Some custody)
+           with
+           | Ok () ->
+             retained := true;
+             Ok ()
+           | Error _ ->
+             let%bind () = require_runtime_admission t in
+             select Wait)))
+;;
+
+let clear_rollover_predecessor t publication =
+  if Option.exists t.foreground_publication ~f:(phys_equal publication)
+  then (
+    t.live_operator_rollover <- None;
+    t.foreground_publication <- None;
+    t.foreground_moderator <- None;
+    t.notification_inputs <- None;
+    t.active_cancel <- None)
+;;
+
+let install_rollover_handoff
+      ?capacity_stage
+      t
+      ~publication
+      ~(intent : Recovery_rollover.Intent.t)
+      ~(committed : Recovery_rollover.Receipt.committed)
+      ~custody
+      ~check_operator
+  =
+  let module P = Agent_protocol in
+  let open Result.Let_syntax in
+  Option.iter t.foreground_successor_handoff ~f:(fun other ->
+    Option.iter other.custody ~f:retire_agent_custody);
+  let check () =
+    let%bind custody =
+      Result.of_option
+        custody
+        ~error:(error Permission_denied "successor authority unavailable")
+    in
+    let%bind actor = Execution_custody.actor custody in
+    let principal = Operator_authorization.principal actor in
+    if P.Principal.has_scope principal Send_messages
+    then Ok ()
+    else Error (error Permission_denied "successor authority expired")
+  in
+  let hook_authority () =
+    let%bind () = check () in
+    Option.value_map check_operator ~default:(Ok ()) ~f:(fun check -> check ())
+  in
+  let checkpoint =
+    match committed.checkpoint with
+    | Checkpointed _ -> `Checkpointed
+    | Archive_only _ -> `Archive_only
+  in
+  t.foreground_successor_handoff
+  <- Some
+       { owner = intent.id
+       ; predecessor = publication
+       ; view = { window = committed.successor; checkpoint }
+       ; capacity_stage
+       ; check
+       ; hook_authority
+       ; custody
+       }
+;;
+
+let settle_foreground_tool_batch t (publication : Foreground_publication.t) live =
+  let module P = Agent_protocol in
+  let module R = Recovery_rollover in
+  let module B = Recovery_rollover_batch_cut in
+  let module S = Chat_response.Settled_tool_batch in
+  let open Result.Let_syntax in
+  let operation = publication.operation.id in
+  let returned decision = Ok (decision, None) in
+  let admission =
+    let open Option.Let_syntax in
+    let%bind intent = Option.bind t.state.recovery_rollover ~f:R.pending in
+    let%map check, force = settled_rollover_authority t publication intent in
+    intent, check, force
+  in
+  match admission with
+  | _ when not (foreground_publication_matches t publication) -> returned S.Retire
+  | None -> returned S.Continue
+  | Some (intent, check, authorize_force) ->
+    let%bind () = require_rollover_recovered t in
+    let%bind () = check_live_foreground_publication t publication in
+    let%bind scope =
+      Result.of_option
+        (active_rollover_window t)
+        ~error:(error Conflict "settled batch window is unavailable")
+    in
+    let%bind () =
+      if P.Recovery_window.Scope.equal scope intent.expected.scope
+      then Ok ()
+      else Error (error Conflict "settled batch window changed")
+    in
+    let exact_attempt () =
+      if Option.exists publication.finished_root ~f:(phys_equal (S.attempt live))
+      then Ok ()
+      else Error (error Conflict "settled batch is not the worker's acknowledged attempt")
+    in
+    let%bind () =
+      match publication.finished_root with
+      | Some _ -> exact_attempt ()
+      | None -> Ok ()
+    in
+    (match B.capture t.state ~scope ~operation live with
+     | Error _ -> returned S.Continue
+     | Ok batch ->
+       let%bind () = exact_attempt () in
+       let%bind checkpoint_history =
+         B.validate t.state ~scope ~requester:intent.requester batch
+       in
+       let check_live_cut () =
+         let%bind () = check_live_foreground_publication t publication in
+         let%bind () = exact_attempt () in
+         let%bind status = read_context_capacity t operation in
+         match status with
+         | Current _ when not (List.is_empty t.invocation_executions) ->
+           Error (error Conflict "settled batch still has an active invocation")
+         | Current _ when ordinary_moderator_is_borrowed t || t.idle_moderator_borrowed ->
+           Error (error Conflict "settled batch still has an active moderator")
+         | Current _ when t.state.halted ->
+           Error (error Conflict "settled batch belongs to a halted session")
+         | Current _ -> Ok ()
+         | Disabled | Stale_preparation _ | Awaiting_preparation _ ->
+           Error
+             (error Conflict "settled batch selected preparation is no longer current")
+       in
+       let%bind qualification =
+         qualify_before_rollover_hook
+           t
+           ~publication
+           ~intent
+           ?checkpoint_history
+           ~check_authority:check
+           ~check_cut:check_live_cut
+           ()
+       in
+       (match qualification with
+        | `Held -> returned S.Continue
+        | `Hook lease -> Ok (S.Continue, lease)
+        | `Ready ->
+          let%bind expected =
+            R.Expected.create scope ~revision:t.state.counters.revision
+          in
+          let checkpoint = Option.bind t.state.recovery_rollover ~f:R.checkpoint in
+          let%bind retain =
+            Session_delta.successor_retained_history t.state publication.operation
+          in
+          let transferred =
+            let%bind owner = operation_agent_admission t operation in
+            let%bind owner =
+              Result.of_option
+                owner
+                ~error:(error Permission_denied "settled owner is unavailable")
+            in
+            Execution_custody.Admission.transfer owner
+            |> Result.map ~f:Execution_custody.Admission.custody
+          in
+          let receipt =
+            settle_context_rollover_internal
+              ~batch
+              ~after_commit_install:(fun () -> clear_rollover_predecessor t publication)
+              ?checkpoint_history
+              ~check_live_cut
+              t
+              ~check
+              ~authorize_force
+              ~id:intent.id
+              expected
+              (Publish { checkpoint; retain })
+          in
+          (match receipt with
+           | Error failure ->
+             Result.iter transferred ~f:(Option.iter ~f:retire_agent_custody);
+             Error failure
+           | Ok { status = Terminal (Committed committed); _ } ->
+             let custody = Result.ok transferred |> Option.join in
+             let check_operator =
+               match intent.requester with
+               | Operator _ ->
+                 Some
+                   (fun () ->
+                     let%bind _ = check () in
+                     Option.value_map authorize_force ~default:(Ok ()) ~f:(fun check ->
+                       check t.state))
+               | Native _ | Automatic _ -> None
+             in
+             install_rollover_handoff
+               t
+               ~publication
+               ~intent
+               ~committed
+               ~custody
+               ~check_operator;
+             returned S.Retire
+           | Ok { status = Terminal (Superseded _); _ } ->
+             Result.iter transferred ~f:(Option.iter ~f:retire_agent_custody);
+             if
+               Option.exists t.live_operator_rollover ~f:(fun selected ->
+                 P.Id.Operation.equal intent.id selected.id)
+             then t.live_operator_rollover <- None;
+             returned S.Continue
+           | Ok { status = Pending; _ } ->
+             Result.iter transferred ~f:(Option.iter ~f:retire_agent_custody);
+             returned S.Continue)))
+;;
+
+let inspect_capacity_rollover t (publication : Foreground_publication.t) stage =
+  let open Result.Let_syntax in
+  let%bind () = check_live_foreground_publication t publication in
+  let%bind () = require_runtime_admission t in
+  Configuration_capture.capacity_rollover
+    t.configuration_capture
+    ~operation_id:publication.operation.id
+    ~current:(current_context_capacity_basis t)
+    ~state:t.state
+    stage
+;;
+
+let check_auto_capacity_stage t (publication : Foreground_publication.t) trigger stage =
+  let module C = Chat_response.Capacity_rollover in
+  let module H = Inference_ledger.Handle in
+  let module P = Agent_protocol in
+  let open Result.Let_syntax in
+  let%bind pressure = inspect_capacity_rollover t publication stage in
+  let observed =
+    match pressure, trigger with
+    | C.Checkpoint_opportunity, C.Trigger.Soft_input_limit
+    | Hard_limit, Hard_input_limit
+    | Qualified_rejection, Provider_context_limit -> true
+    | _ -> false
+  in
+  let operation = publication.operation.id in
+  let live_inference =
+    List.exists t.inference_owners ~f:(fun custody ->
+      let live = ref false in
+      Graph_owner.iter_registrations
+        (Inference_graph_custody.owner custody)
+        ~f:(fun registration ->
+          let handle = Inference_owner.Registration.handle registration in
+          if Option.exists (H.operation_id handle) ~f:(P.Id.Operation.equal operation)
+          then live := true);
+      !live)
+  in
+  let exact_completion =
+    match stage with
+    | C.Unsent _ -> true
+    | Rejected rejection ->
+      Option.exists publication.finished_root ~f:(phys_equal (C.attempt rejection))
+  in
+  if
+    observed
+    && exact_completion
+    && (not live_inference)
+    && List.is_empty t.invocation_executions
+    && not (ordinary_moderator_is_borrowed t || t.idle_moderator_borrowed)
+  then Ok ()
+  else
+    Error (error Conflict "capacity rollover is outside the complete original root cut")
+;;
+
+let settle_automatic_capacity t (publication : Foreground_publication.t) trigger stage =
+  let module P = Agent_protocol in
+  let module R = Recovery_rollover in
+  let module Cut = Recovery_rollover_capacity_cut in
+  let module S = Chat_response.Settled_tool_batch in
+  let open Result.Let_syntax in
+  let operation = publication.operation.id in
+  let returned decision = Ok (decision, None) in
+  let%bind () = require_rollover_recovered t in
+  match t.foreground_successor_handoff with
+  | Some handoff when phys_equal handoff.predecessor publication ->
+    let module C = Chat_response.Capacity_rollover in
+    (match handoff.capacity_stage with
+     | Some (original_trigger, original_stage)
+       when C.Trigger.equal trigger original_trigger && C.same_stage stage original_stage
+       ->
+       let%bind () = handoff.check () in
+       returned S.Retire
+     | None | Some _ ->
+       Error (error Conflict "automatic rollover retry changed its original cut"))
+  | _ ->
+    let%bind () = check_auto_capacity_stage t publication trigger stage in
+    let%bind scope =
+      Result.of_option
+        (active_rollover_window t)
+        ~error:(error Conflict "automatic rollover has no active recovery window")
+    in
+    let%bind principal = automatic_capacity_principal t operation in
+    let%bind cut = Cut.capture t.state ~operation ~trigger stage in
+    let check () =
+      let%bind current = automatic_capacity_principal t operation in
+      if P.Id.Principal.equal principal.id current.id
+      then Ok current
+      else Error (error Permission_denied "automatic rollover original principal changed")
+    in
+    let check_live_cut () =
+      let%bind () = check_auto_capacity_stage t publication trigger stage in
+      Cut.validate t.state cut
+    in
+    let%bind receipt =
+      match R.automatic_for_operation t.state.recovery_rollover ~operation with
+      | Some receipt -> Ok receipt
+      | None ->
+        let%bind expected = successor_expected t scope in
+        let requester () =
+          let%map principal = check () in
+          R.Requester.Automatic { principal = principal.id; cut }
+        in
+        admit_recovery_rollover t ~check:requester ~check_basis:check_live_cut ~expected
+    in
+    let%bind () =
+      match receipt.intent.requester with
+      | Automatic { principal = expected; cut = saved }
+        when P.Id.Principal.equal principal.id expected
+             && Recovery_rollover_capacity.equal cut saved -> Ok ()
+      | _ -> Error (error Conflict "automatic rollover retry changed its original cut")
+    in
+    (match receipt.status with
+     | Terminal (Superseded _) -> returned S.Continue
+     | Terminal (Committed _) ->
+       Error (error Conflict "automatic rollover worker was retired")
+     | Pending ->
+       let intent = receipt.intent in
+       let%bind qualification =
+         qualify_before_rollover_hook
+           t
+           ~publication
+           ~intent
+           ~check_authority:check
+           ~check_cut:check_live_cut
+           ()
+       in
+       (match qualification with
+        | `Held -> returned S.Continue
+        | `Hook lease -> Ok (S.Continue, lease)
+        | `Ready ->
+          let%bind expected = successor_expected t scope in
+          let checkpoint =
+            if P.Principal.has_scope principal View_session_transcript
+            then Option.bind t.state.recovery_rollover ~f:R.checkpoint
+            else None
+          in
+          let%bind retain =
+            Session_delta.successor_retained_history
+              ~retain_accepted_wakes:true
+              t.state
+              publication.operation
+          in
+          let%bind admission = operation_agent_admission t operation in
+          let missing () =
+            error Permission_denied "automatic rollover lost successor authority"
+          in
+          let%bind admission = Result.of_option admission ~error:(missing ()) in
+          let%bind transferred = Execution_custody.Admission.transfer admission in
+          let%bind custody =
+            Result.of_option
+              (Execution_custody.Admission.custody transferred)
+              ~error:(missing ())
+          in
+          let installed = ref false in
+          Exn.protect
+            ~finally:(fun () -> if not !installed then retire_agent_custody custody)
+            ~f:(fun () ->
+              let%bind receipt =
+                settle_context_rollover_internal
+                  ~capacity:cut
+                  ~after_commit_install:(fun () ->
+                    clear_rollover_predecessor t publication)
+                  ~check_live_cut
+                  t
+                  ~check
+                  ~authorize_force:None
+                  ~id:intent.id
+                  expected
+                  (Publish { checkpoint; retain })
+              in
+              match receipt.status with
+              | Terminal (Committed committed) ->
+                install_rollover_handoff
+                  ~capacity_stage:(trigger, stage)
+                  t
+                  ~publication
+                  ~intent
+                  ~committed
+                  ~custody:(Some custody)
+                  ~check_operator:None;
+                installed := true;
+                returned S.Retire
+              | Pending | Terminal (Superseded _) -> returned S.Continue)))
+;;
+
+let handle_recovery_rollover
+  : type a. t -> a Recovery_rollover_request.t -> (a, Agent_protocol.Error.t) result
+  =
+  fun t request ->
+  let module P = Agent_protocol in
+  let module R = Recovery_rollover in
+  let open Result.Let_syntax in
+  match request with
+  | Native_remaining access ->
+    let%bind _, _, operation_id = context_native_execution t ~access ~effect_kind:Remaining in
+    let%map capacity = read_context_capacity t operation_id in
+    Recovery_context_service.
+      { window = active_rollover_window t; revision = t.state.counters.revision; capacity }
+  | Native_new_window (access, window) ->
+    let%bind _, execution, operation_id =
+      context_native_execution t ~access ~effect_kind:New_window
+    in
+    let%bind preparation =
+      Result.of_option execution.context_rollover_basis
+        ~error:(error Conflict "rollover has no captured foreground window")
+    in
+    let scope = Configuration_capture.Native_window.scope preparation in
+    let%bind () =
+      if P.Id.Context_window.equal window (P.Recovery_window.Scope.window scope)
+      then Ok ()
+      else Error (error Conflict "expected recovery window changed")
+    in
+    (* Provider terminal accounting can commit between dispatch and this effect.
+       Retain the dispatch's exact preparation and start the durable CAS here. *)
+    let%bind expected = R.Expected.create scope ~revision:t.state.counters.revision in
+    let check () =
+      let%bind principal, current, operation =
+        context_native_execution t ~access ~effect_kind:New_window
+      in
+      if phys_equal execution current
+      then
+        Ok (R.Requester.Native { principal; operation; invocation = current.dispatched.context.id })
+      else Error (error Permission_denied "rollover invocation authority changed")
+    in
+    let check_basis () =
+      let changed () = Error (error Conflict "rollover prepared window changed") in
+      let%bind capacity = read_context_capacity t operation_id in
+      match capacity with
+      | Current _ ->
+        let%bind target = Configuration_transition.target t.state in
+        let current =
+          Configuration_capture.native_window
+            t.configuration_capture
+            ~operation_id
+            ~configuration_revision:t.state.spec.configuration_revision
+            ~target
+        in
+        if
+          Option.exists current
+            ~f:(Configuration_capture.Native_window.same_preparation preparation)
+          && Option.exists (active_rollover_window t)
+               ~f:(P.Recovery_window.Scope.equal scope)
+          && Int64.equal t.state.counters.revision expected.revision
+        then Ok ()
+        else changed ()
+      | Disabled | Stale_preparation _ | Awaiting_preparation _ -> changed ()
+    in
+    admit_recovery_rollover t ~check ~check_basis ~expected
+  | Native_checkpoint (access, request) -> record_authored_checkpoint t ~access request
+  | Worker_settled (publication, live) -> settle_foreground_tool_batch t publication live
+  | Capacity_inspect (publication, stage) -> inspect_capacity_rollover t publication stage
+  | Capacity_request (publication, trigger, stage) ->
+    settle_automatic_capacity t publication trigger stage
+  | Hook_complete (lease, decision, outcome, snapshot) ->
+    complete_rollover_hook t lease decision outcome snapshot
+  | Hook_release (lease, failure) -> release_rollover_hook t lease failure
+  | Successor_hook handoff -> claim_successor_hook t handoff
+  | Successor_handoff publication ->
+    Ok
+      (Option.filter t.foreground_successor_handoff ~f:(fun handoff ->
+         phys_equal handoff.predecessor publication))
+  | Successor_selection (handoff, decision) ->
+    let hooks =
+      Option.bind (retained_rollover_receipt t handoff.owner) ~f:(fun receipt -> receipt.hooks)
+    in
+    select_successor_handoff
+      t
+      handoff
+      (Recovery_rollover_hook_policy.choose_followup hooks ~default:decision)
+  | Successor_prepared (selected, optional_hint, prepared) ->
+    check_successor_prepared t selected ~optional_hint prepared
+  | Successor_dispatch (selected, attempt) -> admit_successor_dispatch t selected attempt
+  | Successor_control (actor, attachment_id, authorize, id, expected, action) ->
+    successor_control t actor attachment_id authorize id expected action
+  | Operator_request (actor, attachment_id, authorize, force, key, expected) ->
+    let operator () = rollover_operator t actor ~attachment_id ~authorize in
+    let authorize_force =
+      Option.map force ~f:(fun authorize_force state ->
+        let%bind () = authorize_force state in
+        if Operator_authorization.is_current actor
+        then require_recovery_window_owner t ~actor ~attachment_id
+        else Error (error Permission_denied "rollover force authority expired"))
+    in
+    let check () =
+      let%bind principal = operator () in
+      let%map () =
+        Option.value_map authorize_force ~default:(Ok ()) ~f:(fun check -> check t.state)
+      in
+      R.Requester.Operator { principal = principal.id; key; force = Option.is_some force }
+    in
+    let publication = t.foreground_publication in
+    let after_admit (intent : R.Intent.t) =
+      Option.iter publication ~f:(fun publication ->
+        if foreground_publication_matches t publication
+        then
+          t.live_operator_rollover
+          <- Some { id = intent.id; publication; check = operator; authorize_force })
+    in
+    admit_recovery_rollover ~after_admit t ~check ~expected
+  | Operator_publish (actor, authorize, authorize_force, request) ->
+    publish_operator_rollover t actor ~authorize ~authorize_force request
+  | Operator_settle (actor, attachment_id, authorize, authorize_force, id, expected, settlement) ->
+    let check () = rollover_operator t actor ~attachment_id ~authorize in
+    let%map receipt =
+      settle_context_rollover_internal t ~check ~authorize_force ~id expected settlement
+    in
+    (match receipt.status, t.live_operator_rollover with
+     | Terminal _, Some owner when Agent_protocol.Id.Operation.equal owner.id id ->
+       t.live_operator_rollover <- None
+     | _ -> ());
+    receipt
+  | Operator_checkpoint (actor, attachment_id, authorize, expected, notes) ->
+    let check () = rollover_operator t actor ~attachment_id ~authorize in
+    record_context_checkpoint_internal t ~check expected notes
+;;
+
+let expire_recovery_window_internal t actor attachment_id authorize scope =
+  let module P = Agent_protocol in
+  let module L = Recovery_window_ledger in
+  let open Result.Let_syntax in
+  let check () =
+    let principal = Operator_authorization.principal actor in
+    let%bind () =
+      if
+        Operator_authorization.is_current actor
+        && P.Principal.has_scope principal Manage_grants
+        && P.Principal.has_scope principal Send_messages
+      then authorize t.state
+      else
+        Error
+          (error Permission_denied "recovery expiry requires a current source manager")
+    in
+    let%bind () =
+      require_recovery_owner_writer t ~principal:principal.id ~attachment_id
+    in
+    let owner =
+      Option.bind t.canonical_persistence ~f:(fun binding ->
+        if Canonical_backend_binding_data.is_available binding
+        then Canonical_backend_binding_data.session_owner binding
+        else None)
+    in
+    if
+      Option.exists owner ~f:(P.Session_ref.equal (P.Recovery_window.Scope.session scope))
+      && Int.equal t.state.identity.generation (P.Recovery_window.Scope.generation scope)
+    then Ok ()
+    else Error (error Invalid_state "recovery expiry source is unavailable")
+  in
+  let%bind () = check () in
+  let%bind ledger =
+    Result.of_option
+      t.state.recovery_windows
+      ~error:(error Invalid_state "recovery windows are disabled")
+  in
+  let%bind window =
+    List.find (L.windows ledger) ~f:(fun window ->
+      P.Recovery_window.Scope.equal (L.Window.scope window) scope)
+    |> Result.of_option ~error:(error Invalid_state "recovery window is unavailable")
+  in
+  match L.Window.state window with
+  | Open -> Error (error Conflict "the active recovery window cannot expire")
+  | Expired -> Ok ()
+  | Sealed ->
+    persist_recovery_delta
+      t
+      ~delta:(Recovery_window_expired scope)
+      ~check_before_commit:check
+;;
+
+let prepare_soft_checkpoint_note
+      t
+      ~access
+      ~identity
+      mutation
+      ~catalog
+      ~(receipt : Recovery_notes.Catalog.Receipt.t)
+  =
+  let module P = Agent_protocol in
+  let module O = Recovery_checkpoint_opportunity in
+  let module Catalog = Recovery_notes.Catalog in
+  let module Checkpoint = Recovery_rollover.Checkpoint in
+  let module Authored = Recovery_authored_checkpoint in
+  let open Result.Let_syntax in
+  let previous = t.state in
+  let pending =
+    let open Option.Let_syntax in
+    let%bind scope = current_recovery_preparation_scope t in
+    let%bind opportunity = Soft_checkpoint_host.retained previous ~scope in
+    let claim = O.claim opportunity in
+    let%bind operation = previous.active_operation in
+    Option.some_if
+      (P.Id.Operation.equal operation.id claim.owner
+       && Option.is_none (O.outcome opportunity))
+      (scope, claim)
+  in
+  match identity, pending with
+  | Catalog.Mutation_identity.Client _, _ | Native _, None -> Ok None
+  | Native id, Some (scope, claim) ->
+    let check () =
+      let%bind _, access = recovery_note_access t ~access ~effect_kind:Write in
+      match access with
+      | Native (invocation, operation)
+        when phys_equal previous t.state
+             && (not t.rollover_requires_recovery)
+             && Soft_checkpoint_host.policy_matches t claim
+             && P.Id.Operation.equal operation claim.owner
+             && P.Id.Invocation.equal id invocation.context.id
+             && Authored.selected_note_invocation invocation -> Ok invocation
+      | Operator _ | Native _ ->
+        Error (error Conflict "checkpoint note no longer owns its foreground cut")
+    in
+    let%bind invocation = check () in
+    let%bind selected = Recovery_note_access.selected_native_tools access in
+    let%bind () =
+      if
+        Recovery_checkpoint_candidate.checkpoint_selected selected
+        && Catalog.Receipt.equal_kind receipt.kind Created
+        &&
+        match claim.decision with
+        | Offer recipe -> Recovery_checkpoint_candidate.matches_create recipe mutation
+        | Withhold _ -> false
+      then Ok ()
+      else
+        Error (error Permission_denied "checkpoint note is outside the selected recipe")
+    in
+    let key =
+      Chatml_source.Digest.of_contents
+        (P.Id.Operation.to_string claim.id)
+        ~checkpoint:ignore
+    in
+    let%bind binding =
+      Recovery_checkpoint_cut.capture_soft_note
+        previous
+        ~scope
+        ~principal:claim.principal
+        ~operation:claim.owner
+        ~invocation
+        ~key
+        ~catalog
+        ~note:Authored.{ opportunity = claim.id; created = receipt.selection }
+    in
+    let%bind expected =
+      Recovery_rollover.Expected.create scope ~revision:previous.counters.revision
+    in
+    let%map checkpoint =
+      Checkpoint.capture
+        expected
+        ~history:previous.conversation.canonical_history
+        ~catalog:(Some catalog)
+        ~notes:[ receipt.selection ]
+        ~recipe:(Authored binding)
+    in
+    Some (checkpoint, fun () -> Result.map (check ()) ~f:ignore)
+;;
+
+let handle_recovery_note
+  : type a. t -> a Recovery_note_request.t -> (a, Agent_protocol.Error.t) result
+  =
+  fun t request ->
+  let module C = Recovery_notes.Catalog in
+  let open Result.Let_syntax in
+  let catalog ~access ~effect_kind =
+    let%bind owner, _ = recovery_note_access t ~access ~effect_kind in
+    Recovery_note_session.for_owner t.state.recovery_notes ~owner
+  in
+  match request with
+  | Read (access, selection) ->
+    let%bind catalog = catalog ~access ~effect_kind:Read in
+    (match C.read catalog selection with
+     | Ok content -> Ok content
+     | Error Note_not_found -> Error (error Conflict "recovery note is unavailable")
+     | Error (Stale_note_revision _) ->
+       Error (error Conflict "recovery note revision changed"))
+  | List access ->
+    let%map catalog = catalog ~access ~effect_kind:List in
+    C.revision catalog, C.list catalog
+  | Query (access, query) ->
+    let effect_kind = Recovery_note_access.Effect.of_query query in
+    let%bind source, checked = recovery_note_access t ~access ~effect_kind in
+    (match checked with
+     | Operator _ ->
+       Error
+         (error Permission_denied "recovery note delivery requires a model invocation")
+     | Native (invocation, _) ->
+       let%bind catalog =
+         Recovery_note_session.for_owner t.state.recovery_notes ~owner:source
+       in
+       prepare_recovery_note_delivery t ~source ~invocation catalog query)
+  | Shared_operation access ->
+    let%bind recipient, checked = recovery_note_access t ~access ~effect_kind:Read in
+    (match checked with
+     | Native
+         ({ context = { origin = Model; call_entry_id = Some _; _ }; _ }, operation_id) ->
+       Ok (recipient, operation_id)
+     | Operator _ | Native _ -> Error (Recovery_note_share.unavailable ()))
+  | Mutate (access, route, operation) ->
+    let effect_kind = Recovery_note_access.Effect.of_mutation operation in
+    let check () = recovery_note_mutation_identity t ~access ~effect_kind route in
+    let%bind owner, identity = check () in
+    let change = Recovery_note_change.create ~owner ~identity operation in
+    let previous = t.state in
+    let%bind outcome =
+      Recovery_note_change.evaluate
+        change
+        ~previous:previous.recovery_notes
+        ~session_id:previous.identity.session_id
+    in
+    (match outcome with
+     | Replayed receipt -> Ok receipt
+     | Applied (catalog, receipt) ->
+       let%bind checkpoint =
+         prepare_soft_checkpoint_note t ~access ~identity operation ~catalog ~receipt
+       in
+       let delta =
+         match checkpoint with
+         | None -> Session_delta.Recovery_note_changed change
+         | Some (checkpoint, _) ->
+           Recovery_rollover_changed (Record_checkpoint_with_note { checkpoint; note = change })
+       in
+       let check_before_commit () =
+         let%bind _ = check () in
+         Option.value_map checkpoint ~default:(Ok ()) ~f:(fun (_, check) -> check ())
+       in
+       let%map () =
+         persist_recovery_delta
+           t
+           ~rollover:(Option.is_some checkpoint)
+           ~delta
+           ~check_before_commit
+       in
+       receipt)
+;;
+
+let recovery_share_owner t ~check_owner ~publication =
+  let module P = Agent_protocol in
+  let open Result.Let_syntax in
+  let unavailable () = Error (Recovery_note_share.unavailable ()) in
+  if
+    (not (Int.equal t.runtime_source_domain (Stdlib.Domain.self () :> int)))
+    || t.stopped
+    || Option.is_some t.lifecycle_fence
+    || Failed_startup_release_data.Gate.is_closed t.startup_disposal
+  then unavailable ()
+  else (
+    let%bind () = check_owner () in
+    let%bind binding =
+      (if publication then recovery_publication_backend t else require_recovery_backend t)
+      |> Result.map_error ~f:(fun _ -> Recovery_note_share.unavailable ())
+    in
+    let%bind owner =
+      Result.of_option
+        (Canonical_backend_binding_data.session_owner binding)
+        ~error:(Recovery_note_share.unavailable ())
+    in
+    let%bind () = Recovery_note_session.check_owner t.state.recovery_notes ~owner in
+    if
+      Option.for_all t.state.recovery_note_shares ~f:(fun ledger ->
+        P.Session_ref.equal owner (Recovery_note_share.owner ledger))
+    then Ok owner
+    else unavailable ())
+;;
+
+let recovery_share_incarnation t ~check_owner =
+  let open Result.Let_syntax in
+  let%bind _ = recovery_share_owner t ~check_owner ~publication:true in
+  let%bind ledger =
+    Result.of_option
+      t.state.recovery_note_shares
+      ~error:(Recovery_note_share.unavailable ())
+  in
+  Recovery_note_share.incarnation ledger ~generation:t.state.identity.generation
+;;
+
+let recovery_share_unavailable result =
+  Result.map_error result ~f:(fun _ -> Recovery_note_share.unavailable ())
+;;
+
+let recovery_share_witness observe =
+  let open Result.Let_syntax in
+  let%map incarnation = observe () in
+  let check_current () =
+    let%bind current = observe () in
+    if Recovery_note_share.Incarnation.equal incarnation current
+    then Ok ()
+    else Error (Recovery_note_share.unavailable ())
+  in
+  Recovery_note_share_request.{ incarnation; check_current }
+;;
+
+let recovery_share_management ?(publication = false) t ~access ~check_owner =
+  let open Result.Let_syntax in
+  let%bind owner = recovery_share_owner t ~check_owner ~publication in
+  let%bind principal, attachment_id =
+    Recovery_note_access.check_management access t.state ~owner
+  in
+  let%map () = require_recovery_owner_writer t ~principal ~attachment_id in
+  owner, principal
+;;
+
+let recovery_share_revision t =
+  Option.value_map
+    t.state.recovery_note_shares
+    ~default:Recovery_note_share.Revision.initial
+    ~f:Recovery_note_share.revision
+;;
+
+let inspect_recovery_share t path =
+  let module C = Recovery_notes.Catalog in
+  let module Q = Agent_protocol.Recovery_note_share_control in
+  let open Result.Let_syntax in
+  let catalog_revision =
+    Option.value_map t.state.recovery_notes ~default:0L ~f:(fun catalog ->
+      C.Catalog_revision.to_int64 (C.revision catalog))
+  in
+  let share_revision = recovery_share_revision t |> Recovery_note_share.Revision.to_int64 in
+  let%bind basis = Q.Basis.create ~catalog_revision ~share_revision in
+  let note =
+    Option.bind path ~f:(fun path ->
+      Option.bind t.state.recovery_notes ~f:(fun catalog ->
+        List.find (C.list catalog) ~f:(fun metadata -> C.Note_path.equal metadata.path path)))
+  in
+  let%map selection =
+    match note with
+    | None -> Ok None
+    | Some { selection; _ } ->
+      let id = C.Note_id.to_int64 selection.id in
+      let revision = C.Note_revision.to_int64 selection.revision in
+      Result.map (Q.Selection.create ~id ~revision) ~f:Option.some
+  in
+  Q.Metadata.{ basis; selection }
+;;
+
+let recovery_share_new_ledger t ~owner =
+  let nonce = Agent_protocol.Id.Session_incarnation.create () in
+  let change = Recovery_note_share_change.establish ~owner ~nonce in
+  let%map.Result ledger =
+    Recovery_note_share_change.apply
+      change
+      ~previous:None
+      ~catalog:t.state.recovery_notes
+      ~session_id:t.state.identity.session_id
+      ~generation:t.state.identity.generation
+  in
+  ledger, Session_delta.Recovery_note_share_changed change
+;;
+
+let recovery_share_mutate t ~access ~check_owner ~check_target ~check_fresh make_change =
+  let module S = Recovery_note_share in
+  let module Change = Recovery_note_share_change in
+  let open Result.Let_syntax in
+  let check () =
+    let%bind owner, principal = recovery_share_management t ~access ~check_owner in
+    let%map () = check_target () in
+    owner, principal
+  in
+  let%bind owner, principal = check () in
+  let%bind ledger, establishment =
+    match t.state.recovery_note_shares with
+    | Some ledger -> Ok (ledger, None)
+    | None ->
+      let%map ledger, delta = recovery_share_new_ledger t ~owner in
+      ledger, Some delta
+  in
+  let%bind source = S.incarnation ledger ~generation:t.state.identity.generation in
+  let change = make_change ~source ~principal ~now:(t.services.now ()) in
+  let%bind outcome =
+    Change.evaluate
+      change
+      ~previous:(Some ledger)
+      ~catalog:t.state.recovery_notes
+      ~session_id:t.state.identity.session_id
+      ~generation:t.state.identity.generation
+  in
+  match outcome with
+  | Established _ -> Error (error Invalid_state "invalid recovery note share transition")
+  | Replayed receipt -> Ok receipt
+  | Applied (_, receipt) ->
+    let delta = Session_delta.Recovery_note_share_changed change in
+    let delta =
+      Option.value_map establishment ~default:delta ~f:(fun establish ->
+        Session_delta.Batch [ establish; delta ])
+    in
+    let check_before_commit () =
+      let%bind _ = check () in
+      check_fresh ()
+    in
+    let%map () = persist_recovery_delta t ~delta ~check_before_commit in
+    receipt
+;;
+
+let recovery_share_selection t ~check_owner ~reader ~reference =
+  let module S = Recovery_note_share in
+  let open Result.Let_syntax in
+  let unavailable () = S.unavailable () in
+  let%bind _ = recovery_share_owner t ~check_owner ~publication:true in
+  let%bind () = reader.Recovery_note_share_request.check_current () in
+  let%bind ledger =
+    Result.of_option t.state.recovery_note_shares ~error:(unavailable ())
+  in
+  let%bind catalog = Result.of_option t.state.recovery_notes ~error:(unavailable ()) in
+  let%map selection =
+    S.resolve
+      ledger
+      ~source_generation:t.state.identity.generation
+      ~recipient:reader.incarnation
+      ~reference
+      ~now:(t.services.now ())
+  in
+  catalog, selection
+;;
+
+let select_recovery_share t ~check_owner ~reader reference =
+  let module C = Recovery_notes.Catalog in
+  let open Result.Let_syntax in
+  let resolve () =
+    recovery_share_selection t ~check_owner ~reader ~reference
+    |> recovery_share_unavailable
+  in
+  let%bind catalog, selection = resolve () in
+  let%map _ = C.read catalog selection |> recovery_share_unavailable in
+  let materialize () =
+    let%bind catalog, selected = resolve () in
+    if
+      C.Note_id.equal selection.id selected.id
+      && C.Note_revision.equal selection.revision selected.revision
+    then C.read catalog selected |> recovery_share_unavailable
+    else Error (Recovery_note_share.unavailable ())
+  in
+  Recovery_note_share_request.Disclosure materialize
+;;
+
+let handle_recovery_note_share
+  : type a. t -> a Recovery_note_share_request.t -> (a, Agent_protocol.Error.t) result
+  =
+  fun t request ->
+  let open Result.Let_syntax in
+  match request with
+  | Management_revision (access, check_owner) ->
+    let%map _ = recovery_share_management t ~access ~check_owner in
+    recovery_share_revision t
+  | Inspect_management (access, check_owner, path) ->
+    let%bind _ = recovery_share_management t ~access ~check_owner in
+    inspect_recovery_share t path
+  | Establish_target check_owner ->
+    let observe () = recovery_share_incarnation t ~check_owner in
+    let%bind owner = recovery_share_owner t ~check_owner ~publication:false in
+    let%bind () =
+      match t.state.recovery_note_shares with
+      | Some _ -> Ok ()
+      | None ->
+        let%bind _, delta = recovery_share_new_ledger t ~owner in
+        let check_before_commit () =
+          Result.map (recovery_share_owner t ~check_owner ~publication:false) ~f:ignore
+        in
+        persist_recovery_delta t ~delta ~check_before_commit
+    in
+    let%map witness = recovery_share_witness observe in
+    Recovery_note_share_request.Target witness
+  | Select (check_owner, Reader reader, reference) ->
+    select_recovery_share t ~check_owner ~reader reference
+  | Create (access, check_owner, Target target, key, request) ->
+    let check_fresh () =
+      if Agent_protocol.Timestamp.compare (t.services.now ()) request.expires_at < 0
+      then Ok ()
+      else Error (error Invalid_request "recovery note share expiry elapsed")
+    in
+    recovery_share_mutate
+      t
+      ~access
+      ~check_owner
+      ~check_target:target.check_current
+      ~check_fresh
+      (fun ~source ~principal ~now ->
+         Recovery_note_share_change.create
+           ~source
+           ~recipient:target.incarnation
+           ~principal
+           ~key
+           ~now
+           request)
+  | Revoke (access, check_owner, key, request) ->
+    recovery_share_mutate
+      t
+      ~access
+      ~check_owner
+      ~check_target:(fun () -> Ok ())
+      ~check_fresh:(fun () -> Ok ())
+      (fun ~source ~principal ~now ->
+         Recovery_note_share_change.revoke ~source ~principal ~key ~now request)
+;;
+
 let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
   fun t request ->
   if not (startup_disposal_request_allowed t request)
@@ -56375,8 +61311,14 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
          Ok ())
     | Manage_moderator_follow_up (operation_id, observer) ->
       manage_moderator_follow_up t operation_id observer
-    | Admit_moderator_turn operation_id -> admit_moderator_turn t operation_id
-    | Admit_notification_turn operation_id -> admit_notification_turn t operation_id
+    | Model_turn (Check_model_turn (operation_id, managed)) ->
+      check_model_turn t operation_id ~managed
+    | Model_turn (Admit_ordinary_model_write (publication, managed, prepared, attempt))
+      -> admit_ordinary_model_write t publication ~managed prepared attempt
+    | Model_turn (Admit_moderator_turn operation_id) ->
+      admit_moderator_turn t operation_id
+    | Model_turn (Admit_notification_turn operation_id) ->
+      admit_notification_turn t operation_id
     | Claim_delegated_event (capture, request, governance, id, delegation, snapshot, event)
       -> claim_delegated_event t capture request governance id delegation snapshot event
     | Claim_job_event (scope, id, snapshot, event) ->
@@ -56416,8 +61358,9 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
     | Set_queued_event_cancel (borrow, cancel) ->
       Result.map (queued_event_can_commit t borrow) ~f:(fun () ->
         borrow.cancel <- Some cancel)
-    | Commit_invocation_call (operation_id, invocation, entry) ->
-      commit_invocation_call t operation_id invocation entry
+    | Commit_invocation_call (publication, invocation, entry) ->
+      with_foreground_publication t publication (fun operation_id ~check ->
+        commit_invocation_call t operation_id ~check invocation entry)
     | Claim_invocation (operation_id, invocation) ->
       claim_invocation t operation_id invocation
     | Claim_idle_invocation (borrow, invocation) ->
@@ -56712,12 +61655,26 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
     | Set_configuration_policy policy ->
       t.configuration_policy <- Some policy;
       Ok ()
+    | Context_request (Capacity (Set_host host)) ->
+      t.context_capacity_host <- host;
+      Ok ()
+    | Context_request (Capacity (Read operation_id)) ->
+      read_context_capacity t operation_id
     | Prepare_configuration_update request -> prepare_configuration_update t request
     | Commit_configuration_update validated -> commit_configuration_update t validated
-    | Begin_configuration_capture operation_id ->
-      begin_configuration_capture t operation_id
+    | Begin_configuration_capture (operation_id, automatic) ->
+      begin_configuration_capture t operation_id ~automatic
     | Mark_configuration_capture (capture, configuration) ->
       mark_configuration_capture t capture configuration
+    | Context_request (Capacity (Claim_reminder (capture, prepared))) ->
+      claim_recovery_reminder t capture prepared
+    | Context_request (Capacity (Accept_reminder (capture, claim, prepared, attempt))) ->
+      accept_recovery_reminder t capture claim prepared attempt
+    | Context_request (Soft_checkpoint request) -> Soft_checkpoint_host.handle t request
+    | Context_request (Capacity (Publish (capture, observation))) ->
+      mark_context_capacity t capture observation
+    | Context_request (Recovery_effective (capture, input, configuration, binding_is_current)) ->
+      capture_recovery_preparation t capture input ~configuration ~binding_is_current
     | Finish_configuration_capture (capture, success) ->
       finish_configuration_capture t capture success
     | Snapshot -> Ok (current_snapshot t)
@@ -56878,11 +61835,10 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
        | Some custody ->
          Result.map (Execution_custody.actor custody) ~f:(fun actor ->
            Some
-             (Operator_authorization.guarded
-                ~principal:(Operator_authorization.principal actor)
+             (Operator_authorization.restrict
+                actor
                 ~is_current:(fun () ->
-                  Result.is_ok (check_moderator_effect_current t borrow invocation)
-                  && Operator_authorization.is_current actor))))
+                  Result.is_ok (check_moderator_effect_current t borrow invocation)))))
     | Begin_run_initialization (purpose, preparation, expected) ->
       let open Result.Let_syntax in
       let%bind () = check_run_preparation t preparation in
@@ -56895,8 +61851,8 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
     | End_initialization scope -> end_initialization t scope
     | Goal_request (Initialization_completion scope) ->
       initialization_goal_completion_internal t scope
-    | Complete_initialization (scope, candidate, moderator_manager) ->
-      complete_initialization t scope candidate moderator_manager
+    | Complete_initialization (scope, candidate, moderator_manager, installed_originals)
+      -> complete_initialization t scope candidate moderator_manager installed_originals
     | Checkpoint_runtime_construction (scope, moderator, moderator_manager) ->
       checkpoint_runtime_construction t scope moderator moderator_manager
     | Fail_initialization (scope, failure) -> fail_initialization t scope failure
@@ -57416,7 +62372,15 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
       Recurrence_command_admission.receipt prepared
     | Goal_request (Read (actor, authorize)) ->
       Goal_command_admission.read t.state ~actor ~authorize
-    | Apply_instruction_command (admission, source, request) ->
+    | Context_request (Rollover request) -> handle_recovery_rollover t request
+    | Context_request (Recovery_note request) -> handle_recovery_note t request
+    | Context_request (Recovery_note_share request) ->
+      handle_recovery_note_share t request
+    | Context_request (Expire_recovery_window (actor, attachment_id, authorize, scope)) ->
+      expire_recovery_window_internal t actor attachment_id authorize scope
+    | Context_request (Enable_recovery_windows (actor, attachment_id, authorize)) ->
+      enable_recovery_windows_internal t actor attachment_id authorize
+    | Context_request (Instruction_command (admission, source, request)) ->
       let open Result.Let_syntax in
       let%bind decision =
         Instruction_command_admission.prepare_admitted
@@ -57821,38 +62785,112 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
     | Delete_history (attachment_id, revision, history_id) ->
       delete_history_internal t attachment_id revision history_id
     | Adopt_deferred -> adopt_deferred t
-    | Reserve_history_block count -> reserve_history_block t count
-    | Commit_worker_entry (operation_id, entry) ->
-      commit_worker_entry t operation_id entry
-    | Prepare_authoring_input (operation_id, materialization, history, effective) ->
-      prepare_authoring_input t operation_id materialization history effective
-    | Publish_invocation_output (operation_id, invocation_id, entry) ->
-      publish_invocation_output t operation_id invocation_id entry
-    | Consume_deferred operation_id -> consume_deferred t operation_id
-    | Consume_notifications (operation_id, plan) ->
-      consume_notifications_internal t operation_id plan
+    | Reserve_history_block (None, count) -> reserve_history_block t count
+    | Reserve_history_block (Some publication, count) ->
+      with_foreground_publication t publication (fun _ ~check ->
+        reserve_history_block ~check_before_commit:check t count)
+    | Commit_worker_entry (publication, entry) ->
+      with_foreground_publication t publication (fun operation_id ~check ->
+        commit_worker_entry t operation_id ~check entry)
+    | Prepare_authoring_input (publication, materialization, history, effective) ->
+      with_foreground_publication t publication (fun operation_id ~check ->
+        let open Result.Let_syntax in
+        let%bind entries =
+          prepare_authoring_input t operation_id ~check materialization history effective
+        in
+        match t.foreground_successor, entries with
+        | Some selected, _ :: _ when preparing_successor t operation_id ->
+          let%map input =
+            Recovery_rollover_input.record_authoring selected.input t.state entries
+          in
+          selected.input <- input;
+          selected.capacity_basis
+          <- Configuration_capture.Capacity_basis.capture
+               t.state
+               ~selection:selected.policy;
+          entries
+        | _ -> Ok entries)
+    | Publish_invocation_output (publication, invocation_id, entry) ->
+      with_foreground_publication t publication (fun operation_id ~check ->
+        publish_invocation_output t operation_id ~check invocation_id entry)
+    | Consume_deferred publication ->
+      with_foreground_publication t publication (fun operation_id ~check ->
+        if preparing_successor t operation_id
+        then Ok []
+        else consume_deferred t operation_id ~check)
+    | Consume_notifications (publication, plan) ->
+      with_foreground_publication t publication (fun operation_id ~check ->
+        if preparing_successor t operation_id
+        then Ok Chat_response.In_memory_stream.Safe_point_input.empty
+        else consume_notifications_internal ~check t operation_id plan)
     | Admit_standalone_delivery plan -> admit_standalone_delivery_internal t plan
     | Retire_obsolete_moderator_delivery (revision, job) ->
       retire_obsolete_moderator_delivery_internal t revision job
     | Deliver_standalone_completion (revision, job, capabilities, policy) ->
       deliver_standalone_completion_internal t revision job capabilities policy
-    | Consume_initial_notifications (operation_id, proposal) ->
-      consume_notifications_internal
-        ~wakes:proposal.wakes
-        ~discarded_wakes:proposal.discarded_wakes
-        t
-        operation_id
-        proposal.pending
-    | Commit_worker_moderator (operation_id, snapshot) ->
-      commit_worker_moderator t operation_id snapshot
-    | Has_writer_attachment -> Ok (has_writer_attachment t)
+    | Consume_initial_notifications (publication, proposal) ->
+      with_foreground_publication t publication (fun operation_id ~check ->
+        let open Result.Let_syntax in
+        let consume ~track_wakes =
+          consume_notifications_internal
+            ~check
+            ~track_wakes
+            ~wakes:proposal.wakes
+            ~discarded_wakes:proposal.discarded_wakes
+            t
+            operation_id
+            proposal.pending
+        in
+        match t.foreground_successor with
+        | Some selected when preparing_successor t operation_id ->
+          let%bind () = check_successor_input t selected in
+          let%bind batch = consume ~track_wakes:false in
+          let%map input =
+            Recovery_rollover_input.record_notifications
+              selected.input
+              t.state
+              batch.entries
+              ~proposal
+          in
+          selected.input <- input;
+          batch
+        | _ -> consume ~track_wakes:true)
+    | Commit_worker_moderator (publication, snapshot) ->
+      with_foreground_publication t publication (fun operation_id ~check ->
+        commit_worker_moderator t operation_id ~check snapshot)
+    | Has_interactive_permission_responder -> Ok (has_interactive_permission_responder t)
     | Authorize_writer attachment_id -> with_writer t attachment_id (fun () -> Ok ())
     | Invocation_granted (tool_name, identity_digest) ->
       Ok (invocation_granted t ~tool_name ~identity_digest)
-    | Worker_ready (operation_id, cancel) -> worker_ready t operation_id cancel
-    | Worker_terminal (operation_id, outcome, compaction_custody) ->
-      with_runtime_terminal t operation_id (fun () ->
-        worker_terminal t operation_id outcome compaction_custody)
+    | Worker_ready (Compaction operation_id, cancel) -> worker_ready t operation_id cancel
+    | Worker_ready (Foreground publication, cancel) ->
+      if foreground_publication_matches t publication
+      then
+        worker_ready
+          t
+          publication.operation.id
+          ~check_before_commit:(fun () -> check_live_foreground_publication t publication)
+          cancel
+      else (
+        cancel ();
+        Ok ())
+    | Worker_terminal (publication, outcome, compaction_custody) ->
+      let open Result.Let_syntax in
+      let%bind () =
+        match t.foreground_successor_handoff with
+        | Some handoff when phys_equal handoff.predecessor publication ->
+          let%bind () =
+            close_orphaned_after_hook
+              t
+              ~id:handoff.owner
+              ~scope:handoff.view.window
+              ~check:(fun () -> require_rollover_recovered t)
+          in
+          select_successor_handoff t handoff Wait
+        | _ -> Ok ()
+      in
+      let%bind outcome = finish_successor_worker t publication outcome in
+      worker_publication_terminal t publication outcome compaction_custody
     | Compaction_terminal (operation_id, outcome) ->
       with_runtime_terminal t operation_id (fun () ->
         compaction_terminal t operation_id outcome)
@@ -58169,6 +63207,7 @@ let rec run t =
 ;;
 
 let create_internal
+      ~interactive_permission_responder
       ~canonical_persistence
       ~runtime_source_owner
       ~ordinary_execution_admission
@@ -58215,6 +63254,12 @@ let create_internal
     ; permission_waiters = ref Map.Poly.empty
     ; organization_admission = None
     ; configuration_policy = None
+    ; context_capacity_host = Session_context_capacity.Host.off
+    ; rollover_requires_recovery = false
+    ; live_operator_rollover = None
+    ; foreground_successor = None
+    ; foreground_successor_handoff = None
+    ; authored_rollover_hook = None
     ; recurrence_controller = None
     ; recurrence_runtime = Recurrence_runtime.create ~origin:(services.monotonic_now ())
     ; recurrence_creation_owner = ref ()
@@ -58240,7 +63285,9 @@ let create_internal
     ; max_attachments
     ; subscriber_capacity
     ; schedule_permission_timeouts
+    ; interactive_permission_responder
     ; owner_timer_cancel = None
+    ; foreground_publication = None
     ; active_cancel = None
     ; lifecycle_owner = ref ()
     ; lifecycle_fence = None
@@ -58292,6 +63339,10 @@ let create_internal
     ; event_sequence = Atomic.make initial_state.counters.event_sequence
     ; state = initial_state
     ; stopped = false
+    ; recovery_window_cursor = lazy (Recovery_window_page.create ())
+    ; recovery_query_cursor = lazy (Recovery_query_cursor.create ())
+    ; protected_source_custody = None
+    ; canonical_write_in_progress = false
     ; command_audit = None
     }
   in
@@ -58300,6 +63351,16 @@ let create_internal
       binding
       ~session_id:t.state.identity.session_id
       ~commit:t.persistence.commit);
+  Option.iter t.state.recovery_windows ~f:(fun ledger ->
+    let owner =
+      Option.bind t.canonical_persistence ~f:Canonical_backend_binding_data.session_owner
+    in
+    if
+      not
+        (Option.exists
+           owner
+           ~f:(Agent_protocol.Session_ref.equal (Recovery_window_ledger.owner ledger)))
+    then invalid_arg "recovery window state belongs to another canonical writer owner");
   sync_extension_clock t;
   (* A persisted actor outlives the tool/script that created it. Its future
      operations acquire their own budgets and delegated authority; inheriting
@@ -58335,6 +63396,7 @@ let create_with_owner_lease_duration
       ~services
   =
   create_internal
+    ~interactive_permission_responder:Use_writable_attachment
     ~canonical_persistence:None
     ~runtime_source_owner:None
     ~ordinary_execution_admission:(fun () -> Ok ())
@@ -58369,6 +63431,7 @@ let create_with_runtime_source_owner
       ~services
   =
   create_internal
+    ~interactive_permission_responder:Use_writable_attachment
     ~canonical_persistence:None
     ~runtime_source_owner:(Some runtime_source_owner)
     ~ordinary_execution_admission
@@ -58388,6 +63451,7 @@ let create_with_runtime_source_owner
 
 let create_with_bound_runtime_source_owner
       ~canonical_persistence
+      ~interactive_permission_responder
       ~runtime_source_owner
       ~ordinary_execution_admission
       ~schedule_permission_timeouts
@@ -58404,6 +63468,7 @@ let create_with_bound_runtime_source_owner
       ~services
   =
   create_internal
+    ~interactive_permission_responder
     ~canonical_persistence:(Some canonical_persistence)
     ~runtime_source_owner:(Some runtime_source_owner)
     ~ordinary_execution_admission
@@ -58457,6 +63522,238 @@ let snapshot t = call t Snapshot
 let observe t = call t Observe
 let state t = call t State
 let observe_resource_state t = call t Observe_resource_state
+
+module Recovery_history_access = struct
+  module P = Agent_protocol
+  module Query = Recovery_history_query
+  module Tool = Recovery_history_native_request.Tool
+  module Capability = Chat_response.Tool_capability
+  module Admission = Native_tool_invocation.Admission
+
+  type request =
+    | Operator of Operator_authorization.t
+    | Model of Admission.t * Chat_response.Tool_capability.binding
+
+  type proof =
+    { check_current : unit -> (Session_state.t, P.Error.t) result
+    ; read_cursor : P.Page.Cursor.t -> (Query.Continuation.t, P.Error.t) result
+    ; seal_cursor : Query.Continuation.t -> (string, P.Error.t) result
+    }
+
+  let operator actor = Operator actor
+  let model admission ~binding = Model (admission, binding)
+
+  let requires_release_check = function
+    | Model _ -> true
+    | Operator _ -> false
+  ;;
+
+  let denied () = error Permission_denied "recovery history authority is unavailable"
+
+  let query_tool = function
+    | Query.List_items -> Tool.List_items
+    | Search _ -> Tool.Search
+  ;;
+
+  let check_credential actor =
+    let principal = Operator_authorization.principal actor in
+    if
+      Operator_authorization.is_current actor
+      && P.Principal.has_scope principal View_session_transcript
+    then Ok actor
+    else Error (denied ())
+  ;;
+
+  let credential request ~tool =
+    let open Result.Let_syntax in
+    match request with
+    | Operator actor -> check_credential actor
+    | Model (admission, binding) ->
+      let%bind () = Admission.check_now admission ~binding in
+      let expected = Tool.name tool in
+      let invocation = Admission.invocation admission in
+      if
+        (not
+           (Capability.equal_result_contract
+              (Capability.result_contract binding)
+              Protected_recovery_v1))
+        || (not (String.equal expected (Capability.reference binding).name))
+        || not (String.equal expected invocation.context.tool_name)
+      then Error (denied ())
+      else (
+        match invocation.context.origin, invocation.context.call_entry_id with
+        | Model, Some _ ->
+          let%bind actor =
+            Result.of_option (Admission.actor admission) ~error:(denied ())
+          in
+          check_credential actor
+        | _ -> Error (denied ()))
+  ;;
+
+  let principal request ~query =
+    credential request ~tool:(query_tool (Query.action query))
+    |> Result.map ~f:Operator_authorization.principal
+  ;;
+
+  let model_owner (observation : Resource_observation.t) ~invocation ~origin =
+    let open Result.Let_syntax in
+    let t = observation.actor in
+    let%bind execution =
+      List.find t.invocation_executions ~f:(fun execution ->
+        P.Invocation.equal execution.dispatched invocation)
+      |> Result.of_option ~error:(denied ())
+    in
+    let%bind id =
+      match execution.owner with
+      | Foreground id when Atomic.get execution.authority_live -> Ok id
+      | _ -> Error (denied ())
+    in
+    let%bind producer =
+      authorized_native_child_basis t (Inference_invocation execution)
+    in
+    let%bind () = producer.check_current () in
+    let%bind original =
+      match t.operation_agent_custody with
+      | Some owner when P.Id.Operation.equal owner.operation_id id -> Ok owner
+      | _ -> Error (denied ())
+    in
+    let check (state : Session_state.t) =
+      let%bind operation = running_operation t id in
+      if
+        (not (Int.equal operation.generation state.identity.generation))
+        || not (Option.exists t.operation_agent_custody ~f:(phys_equal original))
+      then Error (denied ())
+      else (
+        let%bind () = check_agent_admission original.admission in
+        let%bind actor = operation_agent_actor t id in
+        let%bind actor = Result.of_option actor ~error:(denied ()) in
+        if not (Int.equal origin (Operator_authorization.origin actor))
+        then Error (denied ())
+        else Result.map (check_credential actor) ~f:ignore)
+    in
+    (* The retained cut contains only the exact foreground owner. It does not
+       keep the admission or invocation alive after the native function exits. *)
+    Ok (Some id, check)
+  ;;
+
+  let capture_audience (observation : Resource_observation.t) request ~source ~tool =
+    let open Result.Let_syntax in
+    let%bind credential = credential request ~tool in
+    let%bind state = Resource_observation.check_recovery_current observation in
+    let session = state.identity.session_id in
+    let generation = state.identity.generation in
+    let origin = Operator_authorization.origin credential in
+    let%bind () =
+      if P.Id.Session.equal session (P.Session_ref.session_id source)
+      then Ok ()
+      else Error (denied ())
+    in
+    let%bind operation, check_audience =
+      match request with
+      | Operator actor -> Ok (None, fun _ -> Result.map (check_credential actor) ~f:ignore)
+      | Model (admission, _) ->
+        let invocation = Admission.invocation admission in
+        let owner =
+          Option.bind
+            observation.actor.canonical_persistence
+            ~f:Canonical_backend_binding_data.session_owner
+        in
+        if
+          P.Id.Session.equal invocation.context.session_id session
+          && Int.equal invocation.context.generation generation
+          && Option.exists owner ~f:(P.Session_ref.equal source)
+        then model_owner observation ~invocation ~origin
+        else Error (denied ())
+    in
+    let check_current () =
+      let%bind current = Resource_observation.check_recovery_current observation in
+      let%map () = check_audience current in
+      current
+    in
+    let%map _ = check_current () in
+    state, credential, origin, operation, check_current
+  ;;
+
+  let capture (observation : Resource_observation.t) request ~query =
+    let open Result.Let_syntax in
+    let source = Query.source query in
+    let tool = query_tool (Query.action query) in
+    let%map state, _, origin, operation, check_current =
+      capture_audience observation request ~source ~tool
+    in
+    let audience =
+      [%sexp
+        (P.Session_ref.to_json source |> Jsonaf.to_string : string)
+      , (Chatml_source.Digest.to_hex (Query.digest query) : string)
+      , (origin : int)
+      , (operation : P.Id.Operation.t option)
+      , (state.identity.generation : int)
+      , (state.spec.prompt_revision_id : P.Id.Prompt_revision.t)
+      , (state.spec.configuration_revision : int64)
+      , (state.counters.owner_lease_generation : int64)
+      , (state.stop_epoch : int64)
+      , (state.parent_stop_epoch : int64 option)]
+      |> Sexp.to_string_mach
+    in
+    let t = observation.actor in
+    let with_cursor f =
+      let%bind _ = check_current () in
+      f (Lazy.force t.recovery_query_cursor) ~now:(t.services.monotonic_now ()) ~audience
+    in
+    { check_current
+    ; read_cursor =
+        (fun cursor ->
+          with_cursor (fun t ~now ~audience ->
+            Recovery_query_cursor.read t ~now ~audience cursor))
+    ; seal_cursor =
+        (fun cursor ->
+          with_cursor (fun t ~now ~audience ->
+            Recovery_query_cursor.seal t ~now ~audience cursor))
+    }
+  ;;
+
+  type native_read =
+    { native_current : unit -> (Session_state.t, P.Error.t) result
+    ; native_principal : P.Principal.t
+    ; native_origin : int
+    ; native_operation : P.Id.Operation.t
+    ; native_signer : Recovery_window_page.signer Lazy.t
+    }
+
+  let capture_native observation admission ~binding ~source ~tool =
+    let open Result.Let_syntax in
+    let%bind _, credential, native_origin, operation, native_current =
+      capture_audience observation (Model (admission, binding)) ~source ~tool
+    in
+    let%map native_operation = Result.of_option operation ~error:(denied ()) in
+    { native_current
+    ; native_principal = Operator_authorization.principal credential
+    ; native_origin
+    ; native_operation
+    ; native_signer = observation.actor.recovery_window_cursor
+    }
+  ;;
+
+  let native_current t = t.native_current ()
+  let native_principal t = t.native_principal
+
+  let list_native_windows t page =
+    let%bind.Result state = native_current t in
+    Recovery_window_page.list_for_origin
+      (Lazy.force t.native_signer)
+      state
+      ~origin:t.native_origin
+      ~operation:(Some t.native_operation)
+      ~generation:None
+      ~state:None
+      page
+  ;;
+
+  let check_current t = t.check_current ()
+  let read_cursor t cursor = t.read_cursor cursor
+  let seal_cursor t cursor = t.seal_cursor cursor
+end
+
 let due_schedules t = call t Due_schedules
 
 let commit_extensions t ~generation ~expected_revision changes =
@@ -59584,8 +64881,10 @@ let retire_initialization_resource t ~scope ~moderator_manager =
   call t ~priority:Priority (Retire_initialization_resource (scope, moderator_manager))
 ;;
 
-let complete_initialization ?moderator_manager t ~scope ~candidate =
-  call t (Complete_initialization (scope, candidate, moderator_manager))
+let complete_initialization ?moderator_manager ?installed_originals t ~scope ~candidate =
+  call
+    t
+    (Complete_initialization (scope, candidate, moderator_manager, installed_originals))
 ;;
 
 let checkpoint_runtime_construction ?moderator_manager t ~scope moderator =
@@ -59796,10 +65095,17 @@ let should_retry_turn_cleanup : type outcome. t -> outcome Inherited_turn.Input.
     && List.is_empty t.state.conversation.deferred_user_entries
   | History _ -> false
   | Managed source ->
-    not
-      (List.exists t.state.managed_submissions ~f:(fun (receipt : Managed_submission.t) ->
-         Agent_store.Delegation_store.Reference.equal receipt.reference source.reference
-         && Agent_protocol.Idempotency_key.equal receipt.key source.key))
+    let retained =
+      List.find t.state.managed_submissions ~f:(fun (receipt : Managed_submission.t) ->
+        Agent_store.Delegation_store.Reference.equal receipt.reference source.reference
+        && Agent_protocol.Idempotency_key.equal receipt.key source.key)
+    in
+    (match retained, source.origin with
+     | None, _ -> true
+     | Some { status = Suspended_rollover _; request_sha256; _ }, Native _ ->
+       String.equal request_sha256 source.request_sha256
+       && Result.is_ok (check_inherited_managed_origin source.origin)
+     | Some _, _ -> false)
   | Run_user (source, _) ->
     (match source.request.input, source.entry with
      | Authored_start, (None | Some _) | User_submission _, None -> false
@@ -60429,17 +65735,7 @@ let open_policy_restoration_inference_owner t ~restoration ~source =
   call t (Policy_restoration (Open_graph (restoration, source)))
 ;;
 
-let reserve_history_block t ~count = call t (Reserve_history_block count)
-
-let commit_worker_entry t ~operation_id entry =
-  call t (Commit_worker_entry (operation_id, entry))
-;;
-
-let consume_deferred t ~operation_id = call t (Consume_deferred operation_id)
-
-let consume_notifications t ~operation_id plan =
-  call t (Consume_notifications (operation_id, plan))
-;;
+let reserve_history_block t ~count = call t (Reserve_history_block (None, count))
 
 let deliver_idle_notifications t plan =
   submit_turn_input t (Inherited_turn.Input.Idle (Notifications plan))
@@ -60457,10 +65753,6 @@ let retire_obsolete_moderator_delivery t ~revision ~job =
 let deliver_standalone_completion t ~revision ~job ~current_capabilities ~policy =
   Eio.Cancel.protect (fun () ->
     call t (Deliver_standalone_completion (revision, job, current_capabilities, policy)))
-;;
-
-let consume_initial_notifications t ~operation_id plan =
-  call t (Consume_initial_notifications (operation_id, plan))
 ;;
 
 let cancel_operation t ~attachment_id ~operation_id =
@@ -61186,8 +66478,10 @@ let apply_observation_follow_up t =
 let apply_moderator_follow_up = apply_observation_follow_up
 
 let invocation_granted t ~tool_name ~identity_digest =
-  call t (Invocation_granted (tool_name, identity_digest))
+  call t (Invocation_granted (tool_name, Some identity_digest))
 ;;
+
+let invocation_named_granted t ~tool_name = call t (Invocation_granted (tool_name, None))
 
 let complete_idle_moderator t drain =
   call t ~priority:Priority (Idle_completion (Complete drain))
@@ -61256,6 +66550,36 @@ let commit_ingress_submission t proposal ~before ~snapshot =
 ;;
 
 module For_testing = struct
+  let with_stale_foreground t ~window f =
+    let sealed_predecessor =
+      Option.exists t.state.recovery_windows ~f:(fun ledger ->
+        List.exists (Recovery_window_ledger.windows ledger) ~f:(fun candidate ->
+          let module Window = Recovery_window_ledger.Window in
+          Window.equal_state (Window.state candidate) Sealed
+          && Agent_protocol.Recovery_window.Scope.equal (Window.scope candidate) window))
+    in
+    match t.foreground_publication with
+    | Some current when sealed_predecessor && foreground_publication_matches t current ->
+      (* Exercise the same physical-operation slot so that only the stale window
+         distinguishes this callback from the still-running fixture worker. *)
+      f { current with window = Some window }
+    | Some _ | None -> Error (error Invalid_state "fixture requires a sealed predecessor")
+  ;;
+
+  let deliver_stale_foreground_entry t ~window entry =
+    with_stale_foreground t ~window (fun publication ->
+      call t (Commit_worker_entry (publication, entry)))
+  ;;
+
+  let deliver_stale_foreground_result t ~window ~history =
+    let outcome =
+      Operation_worker.Completed
+        { final_history = history; moderator_snapshot = None; runtime_requests = [] }
+    in
+    with_stale_foreground t ~window (fun publication ->
+      call t ~priority:Priority (Worker_terminal (publication, outcome, None)))
+  ;;
+
   let deliver_compaction_result t ~operation_id ~history =
     call t ~priority:Priority (Compaction_terminal (operation_id, Compacted history))
   ;;
@@ -61274,6 +66598,12 @@ let update_metadata t ?command_audit ~attachment_id ~expected_metadata_revision 
 
 let configuration t = call t Configuration
 let set_configuration_policy t policy = call t (Set_configuration_policy policy)
+let set_context_capacity_host t host = call t (Context_request (Capacity (Set_host host)))
+
+let context_capacity t ~operation_id =
+  Session_context_capacity.Port.create ~read:(fun () ->
+    call t (Context_request (Capacity (Read operation_id))))
+;;
 
 let update_configuration t ?command_audit request =
   let open Result.Let_syntax in
@@ -61318,6 +66648,297 @@ let goal_command t ~actor ~authorize ~session ~request =
 
 let read_goals t ~actor ~authorize = call t (Goal_request (Read (actor, authorize)))
 
+let context_remaining_native t ~access =
+  call t (Context_request (Rollover (Native_remaining access)))
+;;
+
+let context_new_window_native t ~access ~window =
+  call t (Context_request (Rollover (Native_new_window (access, window))))
+;;
+
+let context_checkpoint_native t ~access request =
+  call t (Context_request (Rollover (Native_checkpoint (access, request))))
+;;
+
+let inspect_context_rollover
+      (observation : Resource_observation.t)
+      ~actor
+      ~authorize
+      ~authorize_writer
+      ~authorize_force
+      (request : Agent_protocol.Recovery_rollover_control.Inspect.t)
+  =
+  let module P = Agent_protocol in
+  let module Wire = P.Recovery_rollover_control in
+  let module R = Recovery_rollover in
+  let module L = Recovery_window_ledger in
+  let module Scope = P.Recovery_window.Scope in
+  let open Result.Let_syntax in
+  let%bind state = Resource_observation.check_recovery_current observation in
+  let principal = Operator_authorization.principal actor in
+  let%bind () =
+    if
+      Operator_authorization.is_current actor
+      && P.Principal.has_scope principal View_session_transcript
+    then authorize state
+    else Error (error Permission_denied "rollover inspection authority expired")
+  in
+  let t = observation.actor in
+  match active_rollover_window t, state.recovery_windows with
+  | Some scope, Some windows ->
+    let revision = state.counters.revision in
+    let%bind current = Wire.Basis.create scope ~revision in
+    let%bind expected = R.Expected.create scope ~revision in
+    let active = L.active windows in
+    let previous =
+      match L.Window.origin active with
+      | Root -> None
+      | Successor { previous; _ } | New_generation { previous } ->
+        List.find_map (L.windows windows) ~f:(fun window ->
+          if P.Id.Context_window.equal previous (L.Window.id window)
+          then Some (L.Window.scope window)
+          else None)
+    in
+    let retained =
+      Option.bind state.recovery_rollover ~f:(fun ledger ->
+        match request.key with
+        | None -> R.latest ledger ~scope
+        | Some key -> R.find_operator ledger ~principal:principal.id ~key)
+    in
+    let%bind receipt =
+      match retained with
+      | None -> Ok None
+      | Some receipt ->
+        Result.map (Recovery_rollover_projection.receipt receipt) ~f:Option.some
+    in
+    let capacity_basis = current_context_capacity_basis t in
+    let capacity =
+      Configuration_capture.inspect_capacity
+        t.configuration_capture
+        ~current:capacity_basis
+      |> Recovery_rollover_projection.capacity state
+    in
+    let rollover =
+      Option.is_some capacity_basis
+      && Result.is_ok (require_rollover_recovered t)
+      && (not (Session_delta.awaiting_settled_foreground state))
+      && (not
+            (Option.exists state.recovery_rollover ~f:(fun ledger ->
+               Option.is_some (R.pending ledger))))
+      && Option.exists request.attachment_id ~f:(fun attachment_id ->
+        let check () =
+          rollover_operator t actor ~attachment_id ~authorize:authorize_writer
+        in
+        Result.is_ok (check_rollover_cut t ~previous:state ~expected ~check))
+    in
+    let force = rollover && Result.is_ok (authorize_force state) in
+    Wire.Status.create
+      request.session
+      (Available { current; previous; capacity; receipt; actions = { rollover; force } })
+  | _ -> Wire.Status.create request.session Unavailable
+;;
+
+let publish_context_rollover t ~actor ~authorize ~authorize_force request =
+  call
+    t
+    (Context_request
+       (Rollover (Operator_publish (actor, authorize, authorize_force, request))))
+;;
+
+let request_context_rollover t ~actor ~attachment_id ~authorize ?authorize_force ~key expected =
+  call t
+    (Context_request (Rollover (Operator_request (actor, attachment_id, authorize, authorize_force, key, expected))))
+;;
+
+let settle_context_rollover
+      t
+      ~actor
+      ~attachment_id
+      ~authorize
+      ?authorize_force
+      ~id
+      expected
+      settlement
+  =
+  call
+    t
+    (Context_request
+       (Rollover
+          (Operator_settle
+             (actor, attachment_id, authorize, authorize_force, id, expected, settlement))))
+;;
+
+let control_context_rollover t ~actor ~attachment_id ~authorize ~id expected action =
+  call
+    t
+    (Context_request
+       (Rollover
+          (Successor_control (actor, attachment_id, authorize, id, expected, action))))
+;;
+
+let record_context_checkpoint t ~actor ~attachment_id ~authorize expected ~notes =
+  call
+    t
+    (Context_request
+       (Rollover (Operator_checkpoint (actor, attachment_id, authorize, expected, notes))))
+;;
+
+let expire_recovery_window t ~actor ~attachment_id ~authorize scope =
+  call t (Context_request (Expire_recovery_window (actor, attachment_id, authorize, scope)))
+;;
+
+let enable_recovery_windows t ~actor ~attachment_id ~authorize =
+  call t (Context_request (Enable_recovery_windows (actor, attachment_id, authorize)))
+;;
+
+let read_recovery_note t ~access selection =
+  call t (Context_request (Recovery_note (Read (access, selection))))
+;;
+
+let list_recovery_notes t ~access = call t (Context_request (Recovery_note (List access)))
+
+let prepare_recovery_note_query t ~access query =
+  call t (Context_request (Recovery_note (Query (access, query))))
+;;
+
+let shared_recovery_note_operation t ~access =
+  call t (Context_request (Recovery_note (Shared_operation access)))
+;;
+
+let mutate_recovery_note_operator t ~access ~key operation =
+  call t (Context_request (Recovery_note (Mutate (access, Operator_key key, operation))))
+;;
+
+let mutate_recovery_note_native t ~access operation =
+  call t (Context_request (Recovery_note (Mutate (access, Native_invocation, operation))))
+;;
+
+module Recovery_note_shares = struct
+  type actor = t
+
+  open Recovery_note_share_request
+
+  type nonrec check_owner = check_owner
+  type nonrec reader = reader
+  type nonrec target = target
+  type nonrec disclosure = disclosure
+
+  let request t request = call t (Context_request (Recovery_note_share request))
+
+  let management_revision t ~access ~check_owner =
+    request t (Management_revision (access, check_owner))
+  ;;
+
+  let inspect_management t ~access ~check_owner path =
+    request t (Inspect_management (access, check_owner, path))
+  ;;
+
+  let check_management_now t ~access ~check_owner =
+    recovery_share_management t ~access ~check_owner ~publication:true |> Result.map ~f:ignore
+  ;;
+
+  let establish_target t ~check_owner = request t (Establish_target check_owner)
+
+  let create t ~access ~check_owner ~target ~key create =
+    request t (Create (access, check_owner, target, key, create))
+  ;;
+
+  let revoke t ~access ~check_owner ~key revoke =
+    request t (Revoke (access, check_owner, key, revoke))
+  ;;
+
+  let reader t ~access ~check_owner =
+    let open Result.Let_syntax in
+    let observe () =
+      let%bind incarnation = recovery_share_incarnation t ~check_owner in
+      let%map _ = recovery_note_access t ~access ~effect_kind:Read in
+      incarnation
+    in
+    let%map witness = recovery_share_witness observe |> recovery_share_unavailable in
+    Reader witness
+  ;;
+
+  let reader_for_delivery t ~operation_id ~check_owner =
+    let module P = Agent_protocol in
+    let open Result.Let_syntax in
+    let unavailable () = Error (Recovery_note_share.unavailable ()) in
+    let get_operation_owner () =
+      match t.operation_agent_custody with
+      | Some owner when P.Id.Operation.equal owner.operation_id operation_id -> Ok owner
+      | Some _ | None -> unavailable ()
+    in
+    let reader =
+      let%bind _ = recovery_share_incarnation t ~check_owner in
+      let%bind original = get_operation_owner () in
+      let observe () =
+        let%bind incarnation = recovery_share_incarnation t ~check_owner in
+        let%bind operation = running_operation t operation_id in
+        let%bind current = get_operation_owner () in
+        if
+          (not (phys_equal original current))
+          || not (Int.equal operation.generation t.state.identity.generation)
+        then unavailable ()
+        else (
+          let%bind () = check_agent_admission current.admission in
+          let%bind actor =
+            Result.bind (operation_agent_actor t operation_id) ~f:(fun actor ->
+              Result.of_option actor ~error:(Recovery_note_share.unavailable ()))
+          in
+          if
+            Operator_authorization.is_current actor
+            && P.Principal.has_scope
+                 (Operator_authorization.principal actor)
+                 View_session_transcript
+          then Ok incarnation
+          else unavailable ())
+      in
+      let%map witness = recovery_share_witness observe in
+      Reader witness
+    in
+    recovery_share_unavailable reader
+  ;;
+
+  let select t ~check_owner ~reader reference =
+    request t (Select (check_owner, reader, reference)) |> recovery_share_unavailable
+  ;;
+
+  let with_source_custody t ~check_owner ~f =
+    let current () =
+      recovery_share_owner t ~check_owner ~publication:true |> Result.is_ok
+    in
+    if (not (current ())) || Option.is_some t.protected_source_custody
+    then Error (Recovery_note_share.unavailable ())
+    else (
+      let lease = ref () in
+      t.protected_source_custody <- Some lease;
+      Exn.protect
+        ~finally:(fun () -> t.protected_source_custody <- None)
+        ~f:(fun () ->
+          Ok
+            (f (fun () ->
+               Option.exists t.protected_source_custody ~f:(phys_equal lease)
+               && current ()))))
+  ;;
+
+  let select_for_delivery t ~check_owner ~reader:(Reader reader) reference =
+    let unavailable () = Error (Recovery_note_share.unavailable ()) in
+    if not (Int.equal t.runtime_source_domain (Stdlib.Domain.self () :> int))
+    then unavailable ()
+    else (
+      match t.protected_source_custody with
+      | None -> unavailable ()
+      | Some lease ->
+        let check_owner () =
+          if Option.exists t.protected_source_custody ~f:(phys_equal lease)
+          then check_owner ()
+          else unavailable ()
+        in
+        select_recovery_share t ~check_owner ~reader reference)
+  ;;
+
+  let materialize (Disclosure disclose) = disclose ()
+end
+
 let instruction_selection_current t (basis : Session_state.t) =
   (not t.stopped)
   && Int.equal t.state.identity.generation basis.identity.generation
@@ -61327,7 +66948,7 @@ let instruction_selection_current t (basis : Session_state.t) =
 let instruction_command_admitted t ~admission ~source ~request =
   (* Instruction receipts are journaled with selection state. They are not
      external server-request idempotency records and cannot mint command_audit. *)
-  call t (Apply_instruction_command (admission, source, request))
+  call t (Context_request (Instruction_command (admission, source, request)))
 ;;
 
 let instruction_command t ~admission ~source ~request =

@@ -232,6 +232,7 @@ let provider_failure (error : W.Provider_error.t) =
   match error.code with
   | Value ("invalid_request_error" | "invalid_request") ->
     E.Terminal.Provider_failure.Invalid_request
+  | Value "context_length_exceeded" -> Context_window_exceeded
   | Value ("permission_denied" | "insufficient_permissions") -> Denied
   | Value ("rate_limit_exceeded" | "rate_limit_error") -> Rate_limited
   | Value ("server_error" | "service_unavailable") -> Unavailable
@@ -239,6 +240,7 @@ let provider_failure (error : W.Provider_error.t) =
 ;;
 
 let failure : D.Terminal.failure -> E.Terminal.transport_failure = function
+  | Http_context_limit -> Http_context_limit
   | Http_status status -> Http_status status
   | Invalid_http -> Invalid_http
   | Invalid_content_type -> Invalid_content_type

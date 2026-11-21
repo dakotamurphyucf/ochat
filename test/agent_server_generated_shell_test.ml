@@ -87,7 +87,14 @@ let run (lifetime : Agent_server.Session_factory.generated_lifetime) =
 </shell_access>
 <tool name="fixed_echo" type="shell" mode="fixed" runtime="direct" command="/bin/echo delegated-shell" result="stdout"/>|};
         let profile = { permission_profile with tool_default = Ask } in
-        let configuration = config ~profile root root prompt_file in
+        let base = config ~profile root root prompt_file in
+        (* A wall-time snapshot can reserve the child's lifecycle between its
+           completed shell turn and grandchild creation. Drive snapshots by
+           event count in this shell-delegation fixture. *)
+        let durability =
+          { base.server.durability with snapshot_every_ms = Int.max_value }
+        in
+        let configuration = { base with server = { base.server with durability } } in
         let requests = ref 0 in
         let start sw =
           Daemon.start

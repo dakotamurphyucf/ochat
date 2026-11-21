@@ -5,6 +5,9 @@ reminders, and a new summary. This is lossy context reduction, not a guarantee
 that every important detail survives. Export first when the original transcript
 matters. See [TUI behavior](../guide/chat_tui.md#context-compaction-compact--current-behavior)
 and [daemon history](../agent-server/sessions-and-workspaces.md#history-and-synchronization).
+Use [local context recovery](../examples/learning/context-recovery/README.md)
+when you need an exact citation and original text from an authorized retained
+window.
 
 ## Overview
 

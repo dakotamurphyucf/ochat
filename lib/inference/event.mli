@@ -37,11 +37,13 @@ module Terminal : sig
     | Session_closed
     | Session_busy
     | Http_status of int
+    | Http_context_limit
   [@@deriving equal, sexp_of]
 
   module Provider_failure : sig
     type t =
       | Invalid_request
+      | Context_window_exceeded
       | Denied
       | Rate_limited
       | Unavailable
@@ -79,6 +81,10 @@ module Terminal : sig
   val scope : t -> Transcript.Scope.t
   val delivery : t -> delivery
   val outcome : t -> outcome
+
+  (** An exact, structured rejection observed for this attempt. Hosts must still
+      qualify the target, current window, safe boundary and original authority. *)
+  val is_context_window_rejection : t -> bool
   val equal : t -> t -> bool
   val sexp_of_t : t -> Sexp.t
   val to_json : t -> Jsonaf.t

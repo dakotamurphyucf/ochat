@@ -130,15 +130,37 @@ let status entry runtime operation invocation_id =
   Option.value_exn !observed
 ;;
 
+(* Each observed provider or Actor handoff has its own finite deadline. The
+   enclosing fixture watchdog catches teardown and any unclassified stage. *)
+let fixture_watchdog = 120.
+
+let within_resume env entry counters phase f =
+  Fixture_phase.within
+    ~clock:(Eio.Stdenv.mono_clock env)
+    ~on_timeout:(fun () ->
+      [ [%sexp (!(counters.providers) : int)]; Fixture_phase.snapshot (state entry) ])
+    phase
+    f
+;;
+
+let await_resume_quiet env entry phase =
+  Fixture_phase.await_actor
+    ~clock:(Eio.Stdenv.mono_clock env)
+    ~phase
+    entry
+    (fun current -> Option.some_if (is_quiet current) current)
+;;
+
 let%expect_test
     "legacy and v1 native Resume survives callback close and returns before provider \
      completion"
   =
   List.iter [ false; true ] ~f:(fun v1 ->
     with_callback
+      ~timeout:fixture_watchdog
       ~v1
       (fun
-          _env
+          env
            daemon
            entry
            runtime
@@ -184,14 +206,14 @@ let%expect_test
          assert (
            Option.is_none (Actor.select_native_goal_resume entry.actor |> protocol_ok));
          release_ordinary ();
-         let rec ordinary_joined () =
-           match (state entry).active_operation with
-           | Some current when P.Id.Operation.equal current.id operation.id ->
-             Eio.Fiber.yield ();
-             ordinary_joined ()
-           | Some _ | None -> ()
-         in
-         ordinary_joined ();
+         Fixture_phase.await_actor
+           ~clock:(Eio.Stdenv.mono_clock env)
+           ~phase:"retiring the original Resume fixture turn"
+           entry
+           (fun current ->
+              match current.active_operation with
+              | Some current when P.Id.Operation.equal current.id operation.id -> None
+              | Some _ | None -> Some ());
          let driver = Driver.create ~factory:(Daemon.factory daemon) in
          Exn.protect
            ~finally:(fun () -> Driver.close driver)
@@ -199,7 +221,12 @@ let%expect_test
              (* No direct dispatcher call before this barrier. Only the genuine
                 Daemon schedule host can consume the accepted command after the
                 ordinary callback and runtime leases have joined. *)
-             Eio.Promise.await resumed_entered;
+             within_resume
+               env
+               entry
+               counters
+               "entering the scheduled Resume provider"
+               (fun () -> Eio.Promise.await resumed_entered);
              (* The actual provider remains blocked: neither callback nor dispatcher
            synchronously waits for arbitrary workflow completion. *)
              [%test_eq: int] 3 !(counters.providers);
@@ -264,7 +291,7 @@ let%expect_test
                assert (result |> protocol_ok);
                assert (Option.is_some (G.achievement_request (Goal.goal (state entry)))));
              release_resumed ();
-             let settled = await_quiet entry in
+             let settled = await_resume_quiet env entry "committing the resumed turn" in
              if v1
              then (
                match
@@ -298,9 +325,10 @@ let%expect_test
     "post-callback host policy revocation cannot dispatch its retained command loan"
   =
   with_callback
+    ~timeout:fixture_watchdog
     ~v1:true
     (fun
-        _env
+        env
          daemon
          entry
          runtime
@@ -316,15 +344,15 @@ let%expect_test
          ~release_resumed
          ~reopen:_
        ->
-       let enabled = ref true
-       and denied = ref false in
+       let enabled = ref true in
+       let denied, deny = Eio.Promise.create () in
        let current_host_policy actor current =
          let open Result.Let_syntax in
          let%bind () = authorize actor current in
          if !enabled
          then Ok ()
          else (
-           denied := true;
+           if not (Eio.Promise.is_resolved denied) then Eio.Promise.resolve deny ();
            Error
              (P.Error.create
                 Permission_denied
@@ -344,28 +372,29 @@ let%expect_test
        let invocation = List.hd_exn invocations in
        enabled := false;
        release_ordinary ();
-       ignore (await_quiet entry : A.Session_state.t);
-       let rec selected () =
-         if not !denied
-         then (
-           Eio.Fiber.yield ();
-           selected ())
-       in
-       selected ();
-       ignore (await_quiet entry : A.Session_state.t);
+       ignore
+         (await_resume_quiet env entry "retiring the policy-probe turn"
+          : A.Session_state.t);
+       within_resume env entry counters "rechecking the revoked host policy" (fun () ->
+         Eio.Promise.await denied);
+       ignore
+         (await_resume_quiet env entry "joining the denied Resume" : A.Session_state.t);
        assert (Option.is_none (Eio.Promise.peek resumed_entered));
        [%test_eq: int] 2 !(counters.providers);
        assert (G.equal (Goal.goal held) (Goal.goal (state entry)));
        assert (P.Run.equal (goal_run held admission) (goal_run (state entry) admission));
        assert (Option.is_none (Actor.select_native_goal_resume entry.actor |> protocol_ok));
        let _reader = ordinary ~key:"native-goal-revoked-status" daemon entry in
-       Eio.Promise.await resumed_entered;
+       within_resume env entry counters "entering the status-reader provider" (fun () ->
+         Eio.Promise.await resumed_entered);
        let reader = Option.value_exn (state entry).active_operation in
        (match status entry runtime reader invocation.context.id with
         | Native.Status.Interrupted_before_dispatch _ -> ()
         | _ -> failwith "policy-revoked accepted DATA retained execution custody");
        release_resumed ();
-       ignore (await_quiet entry : A.Session_state.t));
+       ignore
+         (await_resume_quiet env entry "retiring the status-reader turn"
+          : A.Session_state.t));
   print_endline
     "native borrow expires; transferred loan still obeys current host policy; accepted \
      DATA does not reissue it";
@@ -502,9 +531,10 @@ let%expect_test
     completed_response "actual selected Goal Resume provider"
   in
   Staging.with_episode
+    ~timeout:fixture_watchdog
     ~prompt_text:selected_prompt
     ~post_stream
-    (fun _env daemon entry _runtime counters session admission _old_live paused ->
+    (fun env daemon entry _runtime counters session admission _old_live paused ->
        Exn.protect
          ~finally:(fun () ->
            if Option.is_none (Eio.Promise.peek release)
@@ -521,7 +551,9 @@ let%expect_test
              Staging.exact_request paused ~key:"selected-resume-paused"
            in
            selected_submit daemon entry ~key:"selected-resume-pause-probe" (input false);
-           let after_denial = await_quiet entry in
+           let after_denial =
+             await_resume_quiet env entry "settling the selected pause probe"
+           in
            let denied =
              Goal_resume_runtime_tests.one_actual
                "native operator pause denial"
@@ -549,7 +581,12 @@ let%expect_test
                ~source:run.source
            in
            selected_submit daemon entry ~key:"selected-resume-probe" (input true);
-           Eio.Promise.await entered;
+           within_resume
+             env
+             entry
+             counters
+             "entering the selected Resume provider"
+             (fun () -> Eio.Promise.await entered);
            let current = state entry in
            let invocation, intent =
              List.filter_map (selected_invocations current) ~f:(fun invocation ->
@@ -587,7 +624,9 @@ let%expect_test
              List.exists current_run.owned_work ~f:(fun work ->
                P.Run_work.Key.equal work.key (Operation operation.id)));
            Eio.Promise.resolve release_u ();
-           ignore (await_quiet entry : A.Session_state.t);
+           ignore
+             (await_resume_quiet env entry "retiring the selected Resume turn"
+              : A.Session_state.t);
            [%test_eq: int] 4 !(counters.providers);
            [%test_eq: int] 3 (List.length (selected_invocations (state entry)))));
   print_endline

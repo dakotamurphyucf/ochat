@@ -1,0 +1,23 @@
+type checkpoint = [ `Missing | `Checkpointed(json array) | `Archive_only ]
+type policy = [ `Require_checkpoint | `Allow_archive ]
+type continuation = [ `Continue | `Wait | `Finish ]
+type before_decision = [
+  `Veto
+  | `Proceed({hints:[ `None | `Some(json array) ];
+              continuation:[ `None | `Some(continuation) ]})
+]
+
+let before : fun(checkpoint, policy) -> before_decision = fun checkpoint policy ->
+  let without_checkpoint = fun () -> match policy with
+    | `Require_checkpoint -> `Veto
+    | `Allow_archive -> `Proceed({hints = `Some([]); continuation = `None}) in
+  match checkpoint with
+  | `Checkpointed(notes) -> `Proceed({hints = `Some(notes); continuation = `None})
+  | `Missing -> without_checkpoint()
+  | `Archive_only -> without_checkpoint()
+
+let after : fun(checkpoint) -> continuation = fun checkpoint ->
+  match checkpoint with
+  | `Checkpointed(_) -> `Continue
+  | `Missing -> `Wait
+  | `Archive_only -> `Wait

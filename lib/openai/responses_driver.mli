@@ -243,6 +243,7 @@ module Terminal : sig
     | Session_closed
     | Session_busy
     | Http_status of int
+    | Http_context_limit
     | Invalid_http
     | Invalid_content_type
     | Body_limit
@@ -345,9 +346,12 @@ end
     nonyieldingly rechecks the same lease and enters model-request submission.
     The guard may yield during its refresh phase; its final check phase must
     not yield. Connection/handshake can precede this application-effect point.
-    No telemetry callback is treated as authorization. *)
+    No telemetry callback is treated as authorization.
+    An isolated request uses a new ephemeral WS channel without reading or
+    installing prefix state. It still honors the actual transport policy. *)
 val run_with_transport
   :  ?cache_assets:Inference.Request.Asset.t list
+  -> ?isolated:bool
   -> ?submission_guard:Inference_runtime.Submission_guard.t
   -> t
   -> session:Websocket_session.t option

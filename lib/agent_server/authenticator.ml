@@ -21,7 +21,7 @@ type bearer_validator =
 
 type record =
   { digest : string
-  ; principal : Agent_protocol.Principal.t
+  ; actor : Operator_authorization.t
   ; expires_at : Agent_protocol.Timestamp.t option
   }
 
@@ -162,7 +162,7 @@ let parse_record sexp =
   let%bind digest = field fields "token_sha256" >>= atom "token_sha256" >>= decode_hex in
   let%bind principal = parse_principal fields in
   let%map expires_at = optional_field fields "expires_at" >>= parse_expiration in
-  { digest; principal; expires_at }
+  { digest; actor = Operator_authorization.nonexpiring_static principal; expires_at }
 ;;
 
 let parse contents =
@@ -213,7 +213,8 @@ let active ~now record =
 let authenticate_bearer t ~now ~token =
   let digest = Digestif.SHA256.digest_string token |> Digestif.SHA256.to_raw_string in
   match List.find t ~f:(fun record -> constant_time_equal digest record.digest) with
-  | Some record when active ~now record -> Ok record.principal
+  | Some record when active ~now record ->
+    Ok (Operator_authorization.principal record.actor)
   | Some _ -> Error (protocol_error "bearer token has expired")
   | None -> Error (protocol_error "bearer token is invalid")
 ;;
@@ -224,9 +225,13 @@ let authenticate_bearer_actor t ~now ~token =
   | None -> Error (protocol_error "bearer token is invalid")
   | Some record ->
     (match record.expires_at with
-     | None -> Ok (Operator_authorization.nonexpiring_static record.principal)
+     | None ->
+       Ok (Operator_authorization.restrict record.actor ~is_current:(fun () -> true))
      | Some expires_at ->
-       Operator_authorization.bounded ~principal:record.principal ~now ~expires_at)
+       let is_current () = Agent_protocol.Timestamp.compare (now ()) expires_at < 0 in
+       if is_current ()
+       then Ok (Operator_authorization.restrict record.actor ~is_current)
+       else Error (protocol_error "bearer token has expired"))
 ;;
 
 let client_host (identity : Request_identity.t) =

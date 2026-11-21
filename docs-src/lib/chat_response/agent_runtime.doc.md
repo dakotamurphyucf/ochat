@@ -241,7 +241,8 @@ type extension_resources =
   ; managed : Managed_tool_registry.t
   }
 
-(** Select exact live native bindings from an already constructed parent runtime.
+(** Select exact live native bindings for a generated child's owned foreground
+    runtime from an already constructed parent runtime.
     Retains their runners, resource context, shell redaction and classifications;
     constructs no resources and exposes no unselected tools. [managed] retains
     checked standalone handlers and their private dependency closure; the host

@@ -62,6 +62,7 @@ end
     exception. No extra source acquisition occurs during publish/commit/retire. *)
 val prepare
   :  t
+  -> ?retain_document_originals:Agent_protocol.Id.Prompt_definition.t list
   -> mode:Prompt_catalog_publication.Mode.t
   -> created_at:Agent_protocol.Timestamp.t
   -> checkpoint:(unit -> unit)

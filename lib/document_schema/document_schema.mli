@@ -97,6 +97,18 @@ module Json : sig
     -> t
     -> (int, Error.t) Result.t
 
+  (** Meter an admitted validation without materializing encoded output. Charge
+      each examined node, each bounded chunk of string or key bytes and the
+      bytes of number and UTF-8 scans before that work begins. A failed
+      validation retains charges for work already admitted. [charge_work] and
+      [checkpoint] may abort with their original exception. *)
+  val validate_and_measure_with_work
+    :  limits:Limits.t
+    -> checkpoint:(unit -> unit)
+    -> charge_work:(int -> unit)
+    -> t
+    -> (int, Error.t) Result.t
+
   (** Lookup on a validated tree preserves absence separately from explicit null. *)
   val field : t -> name:string -> presence
 
@@ -328,9 +340,13 @@ module Domain_codec : sig
       changes fail before adoption. Unknown fields from either side survive;
       different values at the same unknown path conflict. Array alignment uses
       the common current projection, never positions in an older template.
+      With [merge_required_semantics], retain the union of both admitted lists
+      of required semantics for a family whose requirements can accumulate.
+      Other envelope fields use the ordinary conflict rule in either mode.
       No input carrier or document is mutated. *)
   val adopt
-    :  'a t
+    :  ?merge_required_semantics:bool
+    -> 'a t
     -> previous:'a Extension_carrier.t
     -> incoming:'a Extension_carrier.t
     -> ('a Extension_carrier.t, Error.t) Result.t

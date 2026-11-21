@@ -236,6 +236,10 @@ val row_view
 
 val revision : t -> int64
 
+(** Native high-water proof of an actual allocated ordinal, including an ACK
+    for an attempt whose detailed accounting is unavailable. *)
+val last_attempt_ordinal : t -> int64
+
 (** Private captured document codec. Preserve future carrier fields through edits;
     public queries select typed safe fields only. Retirement conflicts must be
     explicitly classified during planning, never catch/authored-reset fallback.

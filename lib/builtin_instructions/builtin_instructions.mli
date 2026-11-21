@@ -44,8 +44,8 @@ val installed_ids
 
 (** Reviewed assets: [chatml], [goals], [recurrence], [skills],
     [project-instructions], [context-recovery], [packages] and [lifecycle].
-    These are guidance, not capability activation. Context recovery supplies policy
-    only, with no context-management functionality. Unknown IDs reject without
+    The context recovery asset describes the separately selected native tools.
+    Importing any asset captures guidance. Unknown IDs reject without
     fallback. Captured replay retains its selected edition and never repeats lookup;
     only a fresh explicit capture selects the currently installed bytes. *)
 val find : Id.t -> (Asset.t, Error.t) Result.t

@@ -432,7 +432,7 @@ let implementation_sources =
   ; ( "lib/chatml/chatml_semantic_host.ml"
     , "2ff634267cb8c7bbe9031a25fb20dfaeba337bfe72cc5e53b393bbd2118df886" )
   ; ( "lib/chatml_linked/chatml_checked_graph.ml"
-    , "adaaa0b865497746cc52612c382ffb859793157233c9822de6da35b9b749a263" )
+    , "e3a8171b848a8ace56662056d5a6b7bda034b45a5269e938b568a425f265ba56" )
   ; ( "lib/chatml/chatml_builtin_callback.ml"
     , "dcab6dc6fb6995c46f2064706cac671abf1996bca5085cd467bf530f2b4c8e5b" )
   ; ( "lib/chatml/chatml_builtin_composition.ml"
@@ -450,7 +450,7 @@ let implementation_sources =
   ; ( "lib/chatml/chatml_configured_resolution.ml"
     , "105f42d8f9d3127c6df78cfc317b6c148dc47b104175c462049aa10e728344a5" )
   ; ( "lib/chatml/chatml_configured_check.ml"
-    , "4ae148f2369073f0c5372b9a74d1273fa044dcbbf5d2210591094899d416ec63" )
+    , "e78a396dcf886c484f5e2c490edda0b112d49a48938500632e39b19dd6dd1af0" )
   ; ( "lib/chatml/chatml_repl_type_roots.ml"
     , "0bac19ea0e5ff7c82793bcd50b4d0f76071dede9950dfd2e04ed1d020e0c3af5" )
   ; ( "lib/chatml/chatml_repl_typing.ml"
@@ -466,11 +466,11 @@ let implementation_sources =
   ; ( "lib/chatml/chatml_static_surface.ml"
     , "07c8f7a97e1e6da286ff4e103181ce4b22b12ebb6f370ac19918f171c0723111" )
   ; ( "lib/chatml/chatml_compiler_contract.ml"
-    , "85a8d9efb0d8eee24819512c0fc4afaa62c49456d3e0d19e112f78852dcb86a6" )
+    , "dbf88963eb09f069bb4627524586b1a0e4c1498c63c9ce983a2e2fc0cba45291" )
   ; ( "lib/chatml/chatml_module_reference.ml"
     , "f2e9c1ff541b67a243effe6b4f04b8c0f15763000f9cd42603d6a9a746d0a728" )
   ; ( "lib/chatml/chatml_contract_encoding.ml"
-    , "7f8c6c1a49818abaf5ecbfe7cc1df2f4511930939cc1c573e3d422c94548c138" )
+    , "b0576ce50db5b3eef518e4d816857f8412596cbba5fa52129bd300760b713c43" )
   ; ( "lib/chatml_linked/chatml_linked_program.ml"
     , "a1e4203a423527acfc538471ed848004f5211ae57231700d1a6760ef3204ab47" )
   ; ( "lib/chatml/chatml_binding_pattern.ml"

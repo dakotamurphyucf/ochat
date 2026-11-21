@@ -145,13 +145,25 @@ let workflow source =
 ;;
 
 let check_project example ~env ~home_parent ~bundle ~entry ~required =
-  match example with
-  | "goal-recurrence" ->
-    (* Mirrors the tutorial's external grant for sibling ordinary libraries. *)
+  let external_roots =
+    match example with
+    | "goal-recurrence" -> [ "examples/libraries" ]
+    | "context-recovery" ->
+      [ "libraries/recovery-rollover"
+      ; "libraries/lifecycle"
+      ; "learning/lifecycle-composition/components/review"
+      ]
+    | _ -> []
+  in
+  match external_roots with
+  | [] -> Docs_project_bundle.check ~env ~home_parent ~bundle ~entry ~required
+  | _ ->
+    (* Mirror the tutorial hosts' explicit grants for sibling projects. *)
     let project_sources =
       Agent_server.Project_source_configuration.
         { external_roots =
-            [ Eio.Path.native_exn Eio.Path.(bundle / "examples/libraries") ]
+            List.map external_roots ~f:(fun root ->
+              Eio.Path.native_exn Eio.Path.(bundle / root))
         ; git = None
         }
     in
@@ -162,7 +174,6 @@ let check_project example ~env ~home_parent ~bundle ~entry ~required =
       ~bundle
       ~entry
       ~required
-  | _ -> Docs_project_bundle.check ~env ~home_parent ~bundle ~entry ~required
 ;;
 
 let run env root scratch =

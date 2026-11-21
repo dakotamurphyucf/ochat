@@ -13,7 +13,24 @@ module Input : sig
     }
 end
 
+module Model_admission : sig
+  type t =
+    { check : managed:bool -> (unit, Agent_protocol.Error.t) result
+    ; admit :
+        managed:bool
+        -> Inference_runtime.Prepared.t
+        -> Inference_runtime.Attempt.t
+        -> (unit -> unit, Agent_protocol.Error.t) result
+    }
+end
+
 module Capabilities : sig
+  type 'plan notification_consumer =
+    'plan
+    -> ( Chat_response.In_memory_stream.Safe_point_input.batch
+         , Agent_protocol.Error.t )
+         result
+
   type event_handler =
     executing:Agent_protocol.Moderator_execution.t
     -> policy_caller:Delegated_policy_caller.t option
@@ -219,8 +236,25 @@ module Capabilities : sig
       (** Every root provider request checks the running operation and atomically
           accepts its consumed notification wakes, including without a moderator.
           A failed save prevents provider dispatch. *)
+    ; model_admission : Model_admission.t option
     ; root_context : Chat_response.Root_context.t option
+    ; capacity_rollover : Chat_response.Capacity_rollover.t option
+    ; select_rollover_followup :
+        (Recovery_rollover_continuation.Hook.view
+         -> Recovery_rollover_continuation.Hook.decision)
+          option
+        -> (unit, Agent_protocol.Error.t) result
+    ; successor_inference : Chat_response.Root_context.Successor.t option
+    ; successor_hint_references : Recovery_rollover_hint_ref.Witness.t option
+    ; settle_tool_batch :
+        (Chat_response.Settled_tool_batch.t
+         -> (Chat_response.Settled_tool_batch.decision, Agent_protocol.Error.t) result)
+          option
     ; consume_deferred : unit -> (History_entry.t list, Agent_protocol.Error.t) result
+    ; consume_notifications : Notification_delivery.t notification_consumer
+      (** These consumers retain the physical launch's window ownership. Delivery
+          preparation may yield before invoking them. *)
+    ; consume_initial_notifications : Notification_delivery.idle notification_consumer
     ; request_permission :
         permission:Agent_protocol.Permission.t
         -> timeout_seconds:float option
@@ -264,7 +298,17 @@ type outcome =
   | Cancelled of cancellation
   | Failed of Agent_protocol.Error.t
 
+type run = sw:Eio.Switch.t -> input:Input.t -> Capabilities.t -> outcome
 type t
 
-val create : run:(sw:Eio.Switch.t -> input:Input.t -> Capabilities.t -> outcome) -> t
+val create : run:run -> t
+
+(** Trusted stock workers which apply the supplied capacity port before any
+    root allocation, including withholding an oversize wire on stale/veto. *)
+val create_capacity_aware : run:run -> t
+
+(** Wrap the installed runner while preserving its admission capabilities. *)
+val map_run : t -> f:(run -> run) -> t
+
+val supports_capacity_rollover : t -> bool
 val run : t -> sw:Eio.Switch.t -> input:Input.t -> Capabilities.t -> outcome

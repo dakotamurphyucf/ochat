@@ -34,7 +34,10 @@ type options =
   ; quota_limits : Agent_session.Quota_manager.limits
   ; reviewer_resolver : Catalog_builder.reviewer_resolver option
   ; policy_evaluator_resolver : Catalog_builder.policy_evaluator_resolver option
+  ; interactive_permission_responder :
+      Agent_session.Permission_policy.interactive_responder
   ; inference_policy : Session_factory.inference_policy
+  ; context_capacity_host : Agent_session.Session_context_capacity.Host.t
   ; qualify_chatml_extensions : bool
   ; session_helpers : Agent_session.Session_management_channel.grant list
   ; independent_lifetime_policy : string option
@@ -158,6 +161,7 @@ let default_protocol_limits : Agent_protocol.Initialize.Limits.t =
 let default_options =
   { startup_mode = Execute
   ; root_invocation = Ui
+  ; interactive_permission_responder = Use_writable_attachment
   ; implementation_name = "ochat-agent-server"
   ; implementation_version = "dev"
   ; extension_host = Daemon
@@ -242,6 +246,7 @@ let default_options =
       }
   ; reviewer_resolver = None
   ; policy_evaluator_resolver = None
+  ; context_capacity_host = Agent_session.Session_context_capacity.Host.off
   ; inference_policy =
       { capture_inference_target =
           (fun ~prompt_revision_id:_ ~config:_ ->
@@ -630,6 +635,7 @@ let build_catalog
   let%bind prepared =
     Prompt_catalog_host.prepare
       host
+      ~retain_document_originals:built.retain_document_originals
       ~mode:Build
       ~created_at:(timestamp env)
       ~checkpoint:Eio.Fiber.check
@@ -1035,6 +1041,7 @@ let config_watcher
       let%bind revisions =
         Prompt_catalog_host.prepare
           project_catalog
+          ~retain_document_originals:built.retain_document_originals
           ~mode
           ~created_at:(timestamp env)
           ~checkpoint
@@ -1152,6 +1159,7 @@ let compose
       ~provider_operator
       ~project_catalog
       ~project_sources
+      ~local_recovery_host
       store
       built
       prompts
@@ -1341,6 +1349,16 @@ let compose
   Option.iter
     recurrence_automation
     ~f:(Startup_cleanup.adopt_recurrence_host_exn startup_cleanup);
+  let%bind context_capacity_host =
+    match options.startup_mode, config.server.recovery_capacity with
+    | Operator_only, _ -> Ok Agent_session.Session_context_capacity.Host.off
+    | (Execute | On_demand), None -> Ok options.context_capacity_host
+    | (Execute | On_demand), Some configuration ->
+      Recovery_capacity_host.create
+        configuration
+        ~prompts
+        ~inference:options.inference_policy
+  in
   let factory =
     Session_factory.create
       ~sw
@@ -1358,6 +1376,9 @@ let compose
       ~tool_dir
       ~home
       ~inference_policy:options.inference_policy
+      ~interactive_permission_responder:options.interactive_permission_responder
+      ~context_capacity_host
+      ~local_recovery_host
       ~qualify_chatml_extensions:options.qualify_chatml_extensions
       ~session_helpers:options.session_helpers
       ~independent_lifetime_policy:options.independent_lifetime_policy
@@ -2073,6 +2094,11 @@ let compose
       | Session_runs _
       | Session_run _
       | Recurrence_query _
+      | Recovery_windows _
+      | Recovery_status _
+      | Recovery_history _
+      | Recovery_range _
+      | Recovery_asset_read _
       | Goal_query _
       | Session_pending_inputs _
       | Session_pending_input _
@@ -2105,6 +2131,10 @@ let compose
       | Session_cancel_operation _
       | Session_run_start _
       | Recurrence_control _
+      | Recovery_enable _
+      | Recovery_note_shares _
+      | Recovery_rollover _
+      | Recovery_followup _
       | Goal_control _
       | Session_send_message _
       | Session_cancel_pending_input _
@@ -2215,6 +2245,7 @@ let start
       ?(options = default_options)
       ?before_activation
       ?local_setup
+      ?local_recovery_host
       ()
   =
   Mirage_crypto_rng_unix.use_default ();
@@ -2233,6 +2264,19 @@ let start
   in
   let open Result.Let_syntax in
   let validate_startup_config (config : Config.t) =
+    let%bind () =
+      if
+        Option.is_some config.server.recovery_capacity
+        && not
+             (Agent_session.Session_context_capacity.Host.is_off
+                options.context_capacity_host)
+      then
+        Error
+          (Agent_protocol.Error.invalid_request
+             "configure recovery capacity through either daemon options or server \
+              configuration")
+      else Ok ()
+    in
     let%bind () =
       match options.developer, config.server.developer, options.startup_mode with
       | None, None, _ | _, _, (Execute | On_demand) -> Ok ()
@@ -2387,6 +2431,7 @@ let start
       ~provider_operator
       ~project_catalog
       ~project_sources
+      ~local_recovery_host
       store
       built
       (Prompt_catalog_host.catalog project_catalog))

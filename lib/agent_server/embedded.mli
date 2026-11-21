@@ -56,6 +56,7 @@ val start
   -> ?root_invocation:
        Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.t
   -> ?project_sources:Project_source_configuration.t
+  -> ?recovery_capacity:Recovery_capacity_configuration.t
   -> ?local_policy:Config_validator.Embedded_local.t
   -> ?authoring_package_files:string list
        (** Absolute paths captured through the shared bounded loader before store
@@ -101,6 +102,7 @@ val open_local_host
   -> ?root_invocation:
        Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.t
   -> ?project_sources:Project_source_configuration.t
+  -> ?recovery_capacity:Recovery_capacity_configuration.t
   -> ?local_policy:Config_validator.Embedded_local.t
   -> ?authoring_package_files:string list
   -> ?authoring_budget:Chat_response.Authoring_validation.context_budget
@@ -129,6 +131,7 @@ val with_local_host
   -> ?root_invocation:
        Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.t
   -> ?project_sources:Project_source_configuration.t
+  -> ?recovery_capacity:Recovery_capacity_configuration.t
   -> ?local_policy:Config_validator.Embedded_local.t
   -> ?authoring_package_files:string list
   -> ?authoring_budget:Chat_response.Authoring_validation.context_budget
@@ -147,6 +150,10 @@ val host_connection : host -> Agent_client.Connection.t
     dispatch further restricts executable methods. Provider scopes belong to the
     separate operator service contract. *)
 val host_principal : host -> Agent_protocol.Principal.t
+
+(** Mint the original operator proof for one transport owned by this local
+    host. Each call creates a distinct authentication origin. *)
+val host_connection_authority : host -> Operator_authorization.t
 
 val host_dispatcher : host -> Dispatcher.t
 
@@ -215,6 +222,7 @@ val session_id : t -> Agent_protocol.Id.Session.t
 val attachment : t -> Agent_protocol.Session.Attachment.t
 val dispatcher : t -> Dispatcher.t
 val principal : t -> Agent_protocol.Principal.t
+val connection_authority : t -> Operator_authorization.t
 
 (** Compatibility API: caller must retain an open host; closed hosts raise. *)
 val connect : t -> Agent_client.Connection.t

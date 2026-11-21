@@ -20,7 +20,9 @@ end
 
 (** One actual stopped authored create/seed or anchored retained selection.
     New code is captured through existing Embedded/Catalog with Headless; retained
-    Spec/role/target always win. No bootstrap attachment. The selected versioned
+    Spec/role/target always win. Explicit recovery enrollment borrows a temporary
+    unsubscribed owner attachment and relinquishes it before selecting the execution
+    anchor. Ordinary invocation goes directly to selection. The selected versioned
     moderator admits Authored_start on Managed_completion_cli's sole subscribed
     handle in the explicit mode; consumed startup is a typed failure, never a
     history/state guess followed by fallback. An explicit retained run uses its
@@ -61,7 +63,9 @@ end
     The actual owning Switch closes reader/handle before connection/host/provider.
     Original callbacks, cancellation and backtraces remain original. *)
 val run
-  :  Options.t
+  :  ?enable_recovery:bool
+  -> ?recovery_capacity:Agent_server.Recovery_capacity_configuration.t
+  -> Options.t
   -> env:Eio_unix.Stdenv.base
   -> daemon_options:Agent_server.Daemon.options
   -> project_sources:Agent_server.Project_source_configuration.t option

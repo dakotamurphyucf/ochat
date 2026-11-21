@@ -142,6 +142,58 @@ authority/revision/lifecycle and retains the previous state before replacement.
 See [archive storage](compaction_archive.doc.md) and
 [operator initializer restrictions](../../agent-server/operations.md#reset-rebuild-and-upgrade-initializers).
 
+The optional `recovery_windows` state field stores ordered context-window
+membership and physical source coordinates. Each ledger has one host-qualified
+owner and a single open window at the end of its chain. A sealed window locates
+each canonical member in a checksummed summary archive by exact reference and
+source ordinal. Live locations are checked against the selected occurrence and
+content revision in canonical state. Archive bytes still require an
+authorized, fully verified read. A citation and its membership never confer
+read authority.
+
+The named-field codec preserves unknown window, member and source fields.
+A change that would move an unknown field to a different source kind fails
+with an extension conflict. Enabled documents mark the required recovery
+semantics, and the absent field keeps legacy and default-off sessions on their
+existing path. The codec admits up to 64 windows, 8,192 members and 2 MiB of
+encoded ledger data including retained fields. This storage contract carries
+canonical evidence. A durable actor enables it explicitly with the current
+operator writer and the Store's host-qualified owner. Bootstrap records only
+the admitted canonical view. Ordinary appends and pending adoption reuse their
+existing journal changes. A summary compaction keeps the current window and
+relocates removed members to the exact prestate archive before publishing the
+replacement. A prestate file left by a failed commit supplies no membership.
+On reset or rebuild the selected generation starts a fresh root. Its
+administrative archive retains the preceding ledger as historical evidence.
+Editing an occurrence withdraws its previous revision and discarded suffix.
+Deleting a bound tool result withdraws its paired call. Each withdrawn citation
+keeps its original window ordinal, including copies in overlapping windows.
+The new edit revision receives its own citation. The journal marks the changed
+visibility semantics so a reader that predates withdrawal support rejects that
+transaction. Authorized retrieval must resolve a citation against the current
+source state, including moderator tombstones, before reading and again before
+releasing bytes after a wait. [Recovery selection interface](../../../lib/agent_session/recovery_visibility.mli). [Ledger interface](../../../lib/agent_session/recovery_window_ledger.mli),
+[local context recovery design](../../design/local-context-recovery.md).
+
+An enabled root preparation records body-free effective source coordinates
+after the runtime accepts the final neutral request. The actor checks the
+original operation and durable window owner, then matches each eligible request
+position to the exact committed moderator projection by occurrence and semantic
+digest. The durable record includes distinct request, effective and optional
+canonical ordinals. Protected tool delivery, unsupported payloads and synthetic
+positions without an exact source supply no recoverable member. Evidence is
+bounded before digesting. The shared moderator ordering pass uses occurrence
+identities. Recovery decodes canonical payloads only at matched, bounded source
+positions. Oversized coordinate views yield no observation. The per-generation
+ledger admits up to 64 preparations, 8,192 members and 2 MiB. Saturation preserves
+prior records and allows ordinary turns to continue.
+Readers require the exact retained source revision, window, overlay incarnation,
+occurrence, origin and digest, as well as current visibility and authorization.
+The required journal semantics cover preparation and source proof validation on
+replay. The prepare hook runs before attempt allocation or provider I/O.
+Historical source relocation and provider submission reconciliation have separate
+lifecycles. See the [effective preparation interface](../../../lib/agent_session/recovery_effective_capture.mli).
+
 Original source access has its own retained directory owner, shared revocable
 catalog policy and runtime loan. Captured prompt revisions remain immutable when
 that access is unavailable or revoked. See [original source ownership](../../../lib/agent_session/original_sources.md)

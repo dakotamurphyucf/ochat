@@ -292,5 +292,20 @@
       "/docs/reference/chatml/execution-tracing/"
     ],
     "maxRank": 3
+  },
+  {
+    "query": "context recovery",
+    "expected": [
+      "/docs/guides/local-context-recovery/",
+      "/docs/tutorials/context-recovery/"
+    ],
+    "maxRank": 5
+  },
+  {
+    "query": "recovery note share",
+    "expected": [
+      "/docs/reference/recovery/recovery-note-shares/"
+    ],
+    "maxRank": 5
   }
 ]

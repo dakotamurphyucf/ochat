@@ -12,6 +12,16 @@ type t =
   | Workspace_changed of Workspace_instance.t
   | Canonical_entries_appended of Agent_protocol.History.entry list
   | Canonical_history_replaced of Agent_protocol.History.entry list
+  | Recovery_window_expired of (Agent_protocol.Recovery_window.Scope.t[@sexp.opaque])
+  | Recovery_window_enabled of
+      Agent_protocol.Session_ref.t * Agent_protocol.Id.Context_window.t
+  | Recovery_effective_prepared of (Recovery_effective_record.t[@sexp.opaque])
+  | Recovery_reminder_changed of (Recovery_reminder.Change.t[@sexp.opaque])
+  | Recovery_effective_attempt_changed of (Recovery_effective_receipts.t[@sexp.opaque])
+  | Recovery_summary_compacted of
+      Session_state.Compaction_archive.t
+      * Agent_protocol.History.entry list
+      * [ `Canonical | `Canonical_and_effective ]
   | Authoring_references_forgotten of Agent_protocol.History.Id.t list
   | Authoring_publication_changed of Chat_response.Authoring_publication.context
   | Initial_prompt_count_changed of int
@@ -69,6 +79,10 @@ type t =
   | Goal_catalog_changed of Goal_catalog.t
   | Goal_accounts_changed of (Goal_accounts.t[@sexp.opaque])
   | Instruction_selection_changed of Instruction_selection.t
+  | Recovery_note_changed of (Recovery_note_change.t[@sexp.opaque])
+  | Recovery_note_share_changed of (Recovery_note_share_change.t[@sexp.opaque])
+  | Recovery_rollover_changed of (Recovery_rollover.Change.t[@sexp.opaque])
+  | Recovery_rollover_committed of (Recovery_rollover.Commit.t[@sexp.opaque])
   | Recurrence_catalog_changed of Recurrence_catalog.t
   | Run_state_changed of Run_state.t
   | Moderator_changed of Jsonaf.t option
@@ -187,6 +201,12 @@ let rec contains_policy_usage = function
   | Workspace_changed _
   | Canonical_entries_appended _
   | Canonical_history_replaced _
+  | Recovery_window_expired _
+  | Recovery_window_enabled _
+  | Recovery_effective_prepared _
+  | Recovery_reminder_changed _
+  | Recovery_effective_attempt_changed _
+  | Recovery_summary_compacted _
   | Authoring_references_forgotten _
   | Authoring_publication_changed _
   | Initial_prompt_count_changed _
@@ -231,6 +251,10 @@ let rec contains_policy_usage = function
   | Goal_catalog_changed _
   | Goal_accounts_changed _
   | Instruction_selection_changed _
+  | Recovery_note_changed _
+  | Recovery_note_share_changed _
+  | Recovery_rollover_changed _
+  | Recovery_rollover_committed _
   | Recurrence_catalog_changed _
   | Run_state_changed _
   | Moderator_changed _
@@ -263,6 +287,12 @@ let rec contains_goal_policy = function
   | Workspace_changed _
   | Canonical_entries_appended _
   | Canonical_history_replaced _
+  | Recovery_window_expired _
+  | Recovery_window_enabled _
+  | Recovery_effective_prepared _
+  | Recovery_reminder_changed _
+  | Recovery_effective_attempt_changed _
+  | Recovery_summary_compacted _
   | Authoring_references_forgotten _
   | Authoring_publication_changed _
   | Initial_prompt_count_changed _
@@ -306,6 +336,10 @@ let rec contains_goal_policy = function
   | Goal_catalog_changed _
   | Goal_accounts_changed _
   | Instruction_selection_changed _
+  | Recovery_note_changed _
+  | Recovery_note_share_changed _
+  | Recovery_rollover_changed _
+  | Recovery_rollover_committed _
   | Recurrence_catalog_changed _
   | Run_state_changed _
   | Moderator_changed _
@@ -329,8 +363,552 @@ let requires_goal_policy_tracking delta ~previous ~canonical =
   Option.is_some previous || Option.is_some canonical || contains_goal_policy delta
 ;;
 
+let with_canonical_history (state : Session_state.t) canonical_history ~recovery_windows =
+  (* Observe the outgoing history as well. This bootstraps legacy authoring
+     references without scanning archives on each ordinary append. *)
+  let%map.Result authoring_reference_index =
+    remember_authoring state [ state.conversation.canonical_history; canonical_history ]
+  in
+  { state with
+    conversation =
+      { state.conversation with canonical_history; authoring_reference_index }
+  ; recovery_windows
+  }
+;;
+
+let replace_canonical_history state canonical_history ~retired =
+  let%bind.Result recovery_windows =
+    Recovery_window_capture.replace state ~history:canonical_history ~retired
+  in
+  with_canonical_history state canonical_history ~recovery_windows
+;;
+
+let attach_archive (state : Session_state.t) archive =
+  { state with
+    conversation =
+      { state.conversation with
+        compaction_archives = archive :: state.conversation.compaction_archives
+      }
+  }
+;;
+
+let rec contains_rollover_publication = function
+  | Recovery_rollover_committed _
+  | Recovery_rollover_changed (Record_checkpoint _ | Record_checkpoint_with_note _) ->
+    true
+  | Batch deltas -> List.exists deltas ~f:contains_rollover_publication
+  | _ -> false
+;;
+
+let validate_rollover_transaction delta =
+  let module P = Agent_protocol in
+  let invalid message = Error (P.Error.invalid_request message) in
+  let rec leaves = function
+    | Batch deltas -> List.concat_map deltas ~f:leaves
+    | delta -> [ delta ]
+  in
+  match delta with
+  | Batch
+      [ ( Recovery_rollover_committed _
+        | Recovery_rollover_changed (Record_checkpoint _ | Record_checkpoint_with_note _) )
+      ] -> Ok ()
+  | Batch deltas when List.exists deltas ~f:contains_rollover_publication ->
+    invalid "rollover archive or checkpoint requires a standalone delta"
+  | _ ->
+    let changes = leaves delta in
+    let successor_operations =
+      List.filter_map changes ~f:(function
+        | Pending_inputs_changed (mutation, _, _) ->
+          Pending_mutation.successor_operation mutation
+        | _ -> None)
+    in
+    let admission =
+      List.filter_map changes ~f:(function
+        | Recovery_rollover_changed (Schedule { change = Admit { operation; _ }; _ }) ->
+          Some operation
+        | _ -> None)
+    in
+    (match successor_operations, admission with
+     | [], ([] | [ _ ]) -> Ok ()
+     | [ pending ], [ operation ] when P.Id.Operation.equal pending operation -> Ok ()
+     | _ -> invalid "successor inputs must share their exact admission transaction")
+;;
+
+let validate_successor_dispatch state delta =
+  let module P = Agent_protocol in
+  let open Result.Let_syntax in
+  let deltas =
+    match delta with
+    | Batch deltas -> deltas
+    | leaf -> [ leaf ]
+  in
+  let admission =
+    List.find_map deltas ~f:(function
+      | Recovery_rollover_changed (Schedule { change = Admit { operation; _ }; _ }) ->
+        Some operation
+      | _ -> None)
+  in
+  let accept_wake_from selected delta =
+    match delta with
+    | Delivery_wake_changed { wake_disposition = Some (Accepted_wake operation); _ } ->
+      P.Id.Operation.equal operation selected
+    | _ -> false
+  in
+  match admission with
+  | None ->
+    (match state.Session_state.recovery_windows, state.recovery_rollover with
+     | Some windows, Some receipts ->
+       let scope = Recovery_window_record.scope (Recovery_window_ledger.active windows) in
+       (match Recovery_rollover.foreground receipts ~scope with
+        | Some { phase = Preparing operation; _ }
+          when List.exists deltas ~f:(accept_wake_from operation) ->
+          Error
+            (P.Error.invalid_request "successor wake requires its admission transaction")
+        | _ -> Ok ())
+     | _ -> Ok ())
+  | Some operation ->
+    let%bind entries, wakes =
+      Recovery_rollover_input.dispatch_selection state ~operation
+    in
+    let%bind expected_wakes =
+      List.map wakes ~f:(P.Delivery.accept_wake ~operation_id:operation) |> Result.all
+    in
+    let actual_wakes =
+      List.filter_map deltas ~f:(function
+        | Delivery_wake_changed wake -> Some wake
+        | _ -> None)
+    in
+    let pending =
+      List.filter_map deltas ~f:(function
+        | Pending_inputs_changed (mutation, _, _) ->
+          Pending_mutation.successor_operation mutation
+        | _ -> None)
+    in
+    if
+      List.equal P.Delivery.equal expected_wakes actual_wakes
+      &&
+      if List.is_empty entries
+      then List.is_empty pending
+      else List.equal P.Id.Operation.equal pending [ operation ]
+    then Ok ()
+    else
+      Error (P.Error.invalid_request "successor dispatch did not claim its exact inputs")
+;;
+
+let rollover_retained_history
+      (state : Session_state.t)
+      (change : Recovery_rollover.Commit.t)
+  =
+  let module P = Agent_protocol in
+  let by_id = Hashtbl.create (module P.History.Id) in
+  List.iter state.conversation.canonical_history ~f:(fun entry ->
+    Hashtbl.set by_id ~key:entry.P.History.id ~data:entry);
+  List.map change.retain ~f:(fun id ->
+    Result.of_option
+      (Hashtbl.find by_id id)
+      ~error:(P.Error.invalid_request "rollover carries an unavailable occurrence"))
+  |> Result.all
+;;
+
+let successor_retained_history
+      ?(retain_accepted_wakes = false)
+      (state : Session_state.t)
+      (operation : Agent_protocol.Operation.t)
+  =
+  let module P = Agent_protocol in
+  let history = state.conversation.canonical_history in
+  let prompt, rest = List.split_n history state.conversation.initial_prompt_entry_count in
+  let managed_ids =
+    List.filter_map state.managed_submissions ~f:(fun receipt ->
+      match receipt.status with
+      | Assigned id when P.Id.Operation.equal id operation.id -> Some receipt.history_id
+      | _ -> None)
+  in
+  let required =
+    match managed_ids, operation.kind with
+    | [], Turn User_submit ->
+      List.find_map (List.rev rest) ~f:(fun entry ->
+        match entry.role, entry.kind, entry.provenance with
+        | User, Message, Canonical when not entry.redacted -> Some entry.id
+        | _ -> None)
+      |> Option.to_list
+    | [], (Compaction | Turn _) -> []
+    | ids, _ -> ids
+  in
+  let required = Hash_set.of_list (module P.History.Id) required in
+  let available_user (entry : P.History.entry) =
+    P.History.equal_role entry.role User
+    && P.History.equal_kind entry.kind Message
+    && P.History.equal_provenance entry.provenance Canonical
+    && not entry.redacted
+  in
+  let wakes = Hash_set.create (module P.History.Id) in
+  List.iter state.deliveries ~f:(fun delivery ->
+    match delivery.status, delivery.wake_disposition with
+    | Committed { history_id; _ }, Some Pending_wake -> Hash_set.add wakes history_id
+    | Committed { history_id; _ }, Some (Accepted_wake id)
+      when retain_accepted_wakes && P.Id.Operation.equal id operation.id ->
+      Hash_set.add wakes history_id
+    | _ -> ());
+  let entries =
+    List.filter rest ~f:(fun entry ->
+      Hash_set.mem required entry.id || Hash_set.mem wakes entry.id)
+  in
+  if
+    Int.equal
+      (Hash_set.length required)
+      (List.count entries ~f:(fun entry ->
+         Hash_set.mem required entry.id && available_user entry))
+  then Ok (List.map (prompt @ entries) ~f:(fun entry -> entry.id))
+  else Error (P.Error.invalid_request "managed rollover input is unavailable")
+;;
+
+let release_rollover_inputs state (operation : Agent_protocol.Operation.t) ~limits =
+  let module P = Agent_protocol in
+  let open Result.Let_syntax in
+  let actual =
+    { operation with
+      state =
+        P.Operation.Interrupted { reason = "context window retired"; retryable = false }
+    }
+  in
+  let has_barrier =
+    List.exists state.Session_state.conversation.deferred_user_entries ~f:(fun document ->
+      match P.Pending_input.binding (Pending_input_document.value document) with
+      | After_root { operation_id; generation; terminal = None } ->
+        P.Id.Operation.equal operation_id actual.id && Int.equal generation actual.generation
+      | Safe_boundary | Await_idle | After_root _ -> false)
+  in
+  if not has_barrier
+  then Ok state
+  else (
+    let%bind proof = P.Pending_input.Terminal_proof.of_operation actual in
+    let%bind plan =
+      Pending_plan.prepare
+        state
+        ~expected_pending_revision:state.conversation.pending_revision
+        ~change:(Release proof)
+        ~limits
+        ~retention:Pending_disposition.Retention.default
+    in
+    if List.is_empty (Pending_plan.expired_dispositions plan)
+    then Pending_plan.apply plan state
+    else Error (P.Error.invalid_request "rollover release would discard pending evidence"))
+;;
+
+let suspend_managed_rollover receipts ~predecessor ~continuation =
+  List.map receipts ~f:(fun (receipt : Managed_submission.t) ->
+    match receipt.status with
+    | Assigned id when Agent_protocol.Id.Operation.equal id predecessor ->
+      Managed_submission.suspend_rollover receipt ~predecessor ~continuation
+    | _ -> Ok receipt)
+  |> Result.all
+;;
+
+let foreground_continuation (state : Session_state.t) =
+  match state.recovery_windows, state.recovery_rollover with
+  | Some windows, Some receipts ->
+    let scope =
+      Recovery_window_ledger.active windows |> Recovery_window_ledger.Window.scope
+    in
+    Recovery_rollover.foreground receipts ~scope
+  | _ -> None
+;;
+
+let validate_rollover_run_work (state : Session_state.t) delta =
+  let module P = Agent_protocol in
+  let rec adds_relinquishment = function
+    | Run_state_changed next ->
+      Run_rollover_work.adds_operation_relinquishment ~previous:state.run_state next
+    | Batch deltas -> List.exists deltas ~f:adds_relinquishment
+    | _ -> false
+  in
+  let rec has_run_update = function
+    | Run_state_changed _ -> true
+    | Batch deltas -> List.exists deltas ~f:has_run_update
+    | _ -> false
+  in
+  let rec has_admission = function
+    | Recovery_rollover_changed (Schedule { change = Admit _; _ }) -> true
+    | Batch deltas -> List.exists deltas ~f:has_admission
+    | _ -> false
+  in
+  if not (adds_relinquishment delta || (has_run_update delta && has_admission delta))
+  then Ok ()
+  else (
+    let invalid =
+      Error
+        (P.Error.invalid_request
+           "Run Operation relinquishment requires its exact rollover admission")
+    in
+    match delta, foreground_continuation state, state.active_operation with
+    | ( Batch deltas
+      , Some { owner; predecessor; phase = Preparing selected }
+      , Some { id = running; generation; kind = Turn Recovery_retry; state = Running; _ }
+      ) ->
+      (match List.rev deltas with
+       | Run_state_changed index
+         :: Recovery_rollover_changed
+              (Schedule { id; expected; change = Admit { operation; _ } })
+         :: prefix
+         when P.Id.Operation.equal id owner
+              && P.Id.Operation.equal operation selected
+              && P.Id.Operation.equal operation running
+              && Int.equal generation state.identity.generation
+              && Int64.equal expected.revision state.counters.revision
+              && Option.exists state.recovery_windows ~f:(fun ledger ->
+                P.Recovery_window.Scope.equal
+                  expected.scope
+                  (Recovery_window_ledger.Window.scope
+                     (Recovery_window_ledger.active ledger)))
+              && List.for_all prefix ~f:(function
+                | Pending_inputs_changed _ | Delivery_wake_changed _ -> true
+                | _ -> false) ->
+         Run_rollover_work.validate state ~predecessor ~successor:operation index
+       | _ -> invalid)
+    | _ -> invalid)
+;;
+
+let awaiting_settled_foreground state =
+  Option.exists
+    (foreground_continuation state)
+    ~f:Recovery_rollover_continuation.is_pending
+;;
+
+let permits_successor_operation
+      (state : Session_state.t)
+      (operation : Agent_protocol.Operation.t)
+  =
+  match foreground_continuation state with
+  | Some { phase = Preparing id; _ } ->
+    Agent_protocol.Id.Operation.equal id operation.id
+    && Int.equal operation.generation state.identity.generation
+    &&
+      (match operation.kind, operation.state with
+      | Turn _, Starting -> true
+      | _ -> false)
+  | _ -> false
+;;
+
+let check_continuation_change (state : Session_state.t) change =
+  let quiescent =
+    match state.active_operation, state.lifecycle.observed with
+    | None, Idle -> true
+    | _ -> false
+  in
+  match change with
+  | (Recovery_rollover_continuation.Begin _ | Wait | Finish _) when quiescent -> Ok ()
+  | (Hold { operation; _ } | Stop_preparation { operation; _ })
+    when Option.for_all state.active_operation ~f:(fun current ->
+           Agent_protocol.Id.Operation.equal operation current.id) -> Ok ()
+  | Admit { operation; ordinal } ->
+    let module P = Agent_protocol in
+    let%bind.Result active =
+      Option.value_map
+        state.active_operation
+        ~default:(Error (P.Error.invalid_request "successor has no running operation"))
+        ~f:(fun current ->
+          match current.kind, current.state with
+          | Turn _, Running when P.Id.Operation.equal operation current.id -> Ok current
+          | _ -> Error (P.Error.invalid_request "successor dispatch operation changed"))
+    in
+    (match Inference_ledger.find state.inference_ledger ~ordinal with
+     | Some row ->
+       let handle = Inference_ledger.Row.handle row in
+       let scope = Inference_ledger.Handle.scope handle in
+       if
+         Option.equal
+           P.Id.Operation.equal
+           (Inference_ledger.Handle.operation_id handle)
+           (Some active.id)
+         && Option.is_none (Inference_ledger.Handle.invocation_id handle)
+         &&
+         match scope.relation with
+         | Root -> true
+         | Nested _ -> false
+       then Ok ()
+       else
+         Error (P.Error.invalid_request "continuation attempt is owned by another root")
+     | None -> Error (P.Error.invalid_request "continuation has no admitted attempt"))
+  | Begin _ | Wait | Hold _ | Finish _ | Stop_preparation _ ->
+    Error (Agent_protocol.Error.invalid_request "rollover continuation lifecycle changed")
+;;
+
+let settle_managed_continuation receipts ~owner change =
+  List.map receipts ~f:(fun (receipt : Managed_submission.t) ->
+    match receipt.status with
+    | Suspended_rollover { continuation; _ }
+      when Agent_protocol.Id.Operation.equal owner continuation ->
+      (match change with
+       | Recovery_rollover_continuation.Admit { operation; _ } ->
+         Managed_submission.claim_rollover receipt ~continuation ~successor:operation
+       | Finish _ | Stop_preparation _ ->
+         Managed_submission.finish_rollover receipt ~continuation
+       | Wait | Begin _ | Hold _ -> Ok receipt)
+    | _ -> Ok receipt)
+  |> Result.all
+;;
+
+let require_quiescent_rollover_cut (state : Session_state.t) =
+  match
+    state.active_operation, state.runtime_initialization, state.lifecycle.observed
+  with
+  | None, Ready, (Idle | Stopped) -> Ok ()
+  | _ ->
+    Error
+      (Agent_protocol.Error.invalid_request "rollover requires a quiescent canonical cut")
+;;
+
+let apply_rollover (state : Session_state.t) (change : Recovery_rollover.Commit.t) ~limits
+  =
+  let open Result.Let_syntax in
+  let module P = Agent_protocol in
+  let module R = Recovery_rollover in
+  let module W = Recovery_window_ledger in
+  let%bind windows =
+    Result.of_option
+      state.recovery_windows
+      ~error:(P.Error.invalid_request "rollover has no active window")
+  in
+  let%bind receipts =
+    Result.of_option
+      state.recovery_rollover
+      ~error:(P.Error.invalid_request "rollover has no admitted intent")
+  in
+  let predecessor = W.Window.scope (W.active windows) in
+  let history = state.conversation.canonical_history in
+  let%bind checkpoint_history =
+    match change.batch, change.capacity with
+    | None, None -> Result.map (require_quiescent_rollover_cut state) ~f:(fun () -> None)
+    | _, Some cut ->
+      Result.map (Recovery_rollover_capacity_cut.validate state cut) ~f:(fun () -> None)
+    | Some batch, None ->
+      let%bind intent =
+        R.pending receipts
+        |> Result.of_option
+             ~error:(P.Error.invalid_request "settled rollover has no intent")
+      in
+      Recovery_rollover_batch_cut.validate
+        state
+        ~scope:predecessor
+        ~requester:intent.requester
+        batch
+  in
+  let%bind recovery_rollover =
+    R.commit
+      ?checkpoint_history
+      ~validate_authored:
+        (Recovery_checkpoint_cut.check_checkpoint ?checkpoint_history state)
+      receipts
+      change
+      ~active:predecessor
+      ~revision:state.counters.revision
+      ~history
+      ~catalog:state.recovery_notes
+  in
+  let%bind retained = rollover_retained_history state change in
+  let initial = Hash_set.create (module P.History.Id) in
+  List.iter
+    (List.take history state.conversation.initial_prompt_entry_count)
+    ~f:(fun entry -> Hash_set.add initial entry.id);
+  let initial_prompt_entry_count =
+    List.take_while change.retain ~f:(Hash_set.mem initial) |> List.length
+  in
+  let archive = Session_state.Compaction_archive.of_rollover change in
+  let%bind windows =
+    Recovery_window_seal.prepare
+      state
+      ~predecessor
+      ~successor:change.successor
+      ~archive
+      ~retained
+  in
+  let%bind recovery_effective = Recovery_effective_capture.relocate state ~archive in
+  let%bind state =
+    match R.Commit.predecessor change with
+    | None -> Ok state
+    | Some _ when not change.schedule_foreground -> Ok state
+    | Some predecessor ->
+      let%bind operation =
+        Result.of_option
+          state.active_operation
+          ~error:(P.Error.invalid_request "rollover operation unavailable")
+      in
+      let%bind expected_retained =
+        successor_retained_history
+          ~retain_accepted_wakes:(Option.is_some change.capacity)
+          state
+          operation
+      in
+      let%bind () =
+        if List.equal P.History.Id.equal expected_retained change.retain
+        then Ok ()
+        else Error (P.Error.invalid_request "successor changed the required local input")
+      in
+      let%bind managed_submissions =
+        suspend_managed_rollover
+          state.managed_submissions
+          ~predecessor
+          ~continuation:change.id
+      in
+      let%map state = release_rollover_inputs state operation ~limits in
+      { state with managed_submissions }
+  in
+  let%bind retirement = R.Commit.retirement change ~active:state.active_operation in
+  let%bind inference_ledger =
+    let ledger = state.inference_ledger in
+    match retirement with
+    | None -> Ok ledger
+    | Some operation ->
+      (match
+         Inference_ledger.find_turn_handle
+           ledger
+           ~operation_id:operation.id
+           ~generation:operation.generation
+       with
+       | None -> Ok ledger
+       | Some handle ->
+         Inference_ledger.finish_turn ledger handle operation
+         |> Result.map_error ~f:(fun _ ->
+           P.Error.invalid_request
+             "rollover could not finish its retained predecessor Turn"))
+  in
+  let%bind delegated_usage =
+    if phys_equal inference_ledger state.inference_ledger
+    then Ok state.delegated_usage
+    else
+      Option.value_map state.delegated_usage ~default:(Ok None) ~f:(fun usage ->
+        Delegated_usage.reconcile
+          usage
+          ~before:state.inference_ledger
+          ~after:inference_ledger
+        |> Result.map ~f:Option.some)
+  in
+  let%map next = with_canonical_history state retained ~recovery_windows:(Some windows) in
+  attach_archive
+    { next with
+      conversation = { next.conversation with initial_prompt_entry_count }
+    ; recovery_rollover = Some recovery_rollover
+    ; recovery_effective
+    ; inference_ledger
+    ; delegated_usage
+    ; active_operation =
+        (match R.Commit.predecessor change with
+         | None -> next.active_operation
+         | Some _ -> None)
+    ; lifecycle =
+        (match R.Commit.predecessor change with
+         | None -> next.lifecycle
+         | Some _ -> { next.lifecycle with observed = Idle })
+    }
+    archive
+;;
+
 let rec apply ?(limits = native_limits) (state : Session_state.t) = function
-  | Batch deltas -> List.fold_result deltas ~init:state ~f:(apply ~limits)
+  | Batch deltas as delta ->
+    let%bind.Result () = validate_rollover_transaction delta in
+    let%bind.Result () = validate_successor_dispatch state delta in
+    List.fold_result deltas ~init:state ~f:(apply ~limits)
   | Created created ->
     let open Result.Let_syntax in
     let%bind () =
@@ -342,12 +920,79 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
     in
     let%bind created = Session_state.upgrade_schema created in
     let%bind () =
+      if awaiting_settled_foreground state && Option.is_some created.active_operation
+      then
+        Error
+          (Agent_protocol.Error.invalid_request
+             "replacement cannot claim a pending foreground continuation")
+      else Ok ()
+    in
+    let%bind () =
+      Recovery_window_capture.check_replacement_archive state ~incoming:created
+    in
+    let%bind recovery_windows =
+      Recovery_window_capture.replacement state ~incoming:created
+    in
+    let recovery_effective =
+      Recovery_effective_capture.replacement state ~incoming:created
+    in
+    let%bind recovery_installed_originals =
+      match
+        ( Int.equal state.identity.generation created.identity.generation
+        , state.runtime_initialization
+        , created.runtime_initialization
+        , state.recovery_installed_originals )
+      with
+      | false, _, _, _ -> Ok None
+      | true, Pending _, Ready, None -> Ok created.recovery_installed_originals
+      | true, _, _, previous ->
+        if
+          Option.equal
+            Recovery_installed_originals.equal
+            previous
+            created.recovery_installed_originals
+        then Ok previous
+        else
+          Error
+            (Agent_protocol.Error.invalid_request
+               "replacement changed the installed original initialization receipt")
+    in
+    let created =
+      { created with recovery_windows; recovery_effective; recovery_installed_originals }
+    in
+    let%bind () =
       Inference_ledger.validate_update
         state.inference_ledger
         ~incoming:created.inference_ledger
       |> Result.map_error ~f:(fun error ->
         Agent_protocol.Error.invalid_request
           (Sexp.to_string_hum (Inference_ledger.Error.sexp_of_t error)))
+    in
+    let%bind () =
+      Recovery_note_session.check_unchanged
+        state.recovery_notes
+        ~incoming:created.recovery_notes
+    in
+    let%bind () =
+      Recovery_note_share.check_unchanged
+        state.recovery_note_shares
+        ~incoming:created.recovery_note_shares
+    in
+    let%bind () =
+      Recovery_reminder.check_unchanged
+        state.recovery_reminders
+        ~incoming:created.recovery_reminders
+    in
+    let%bind _ =
+      Recovery_window_capture.rollover_replacement_archive
+        ~pending_archive_staged:true
+        state
+        ~incoming:created
+    in
+    let%bind () =
+      Session_state.Compaction_archive.check_rollover_unchanged
+        state.conversation.compaction_archives
+        ~incoming:created.conversation.compaction_archives
     in
     let%bind () =
       match state.instruction_selection, created.instruction_selection with
@@ -524,6 +1169,16 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
       |> Result.of_option
            ~error:(Agent_protocol.Error.invalid_request "managed submission is absent")
     in
+    let%bind () =
+      match previous.status, receipt.status with
+      | Suspended_rollover _, Terminal (_, Invalidated)
+      | Suspended_rollover _, Suspended_rollover _ -> Ok ()
+      | Suspended_rollover _, _ | _, Suspended_rollover _ ->
+        Error
+          (Agent_protocol.Error.invalid_request
+             "managed assignment requires its owning rollover transition")
+      | _ -> Ok ()
+    in
     let%map () = Managed_submission.validate_transition ~previous receipt in
     { state with
       managed_submissions =
@@ -608,6 +1263,7 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
     }
   | Canonical_entries_appended entries ->
     let open Result.Let_syntax in
+    let%bind recovery_windows = Recovery_window_capture.append state entries in
     let%map authoring_reference_index = remember_authoring state [ entries ] in
     { state with
       conversation =
@@ -615,19 +1271,52 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
           canonical_history = state.conversation.canonical_history @ entries
         ; authoring_reference_index
         }
+    ; recovery_windows
     }
-  | Canonical_history_replaced canonical_history ->
+  | Canonical_history_replaced history ->
+    replace_canonical_history state history ~retired:[]
+  | Recovery_window_expired scope ->
     let open Result.Let_syntax in
-    (* Observe the outgoing history at the replacement boundary as well. This
-       bootstraps legacy snapshots without scanning archives or every old entry
-       on each ordinary append. Both changes are part of the same transaction. *)
-    let%map authoring_reference_index =
-      remember_authoring state [ state.conversation.canonical_history; canonical_history ]
+    let%bind ledger = Result.of_option state.recovery_windows ~error:(Agent_protocol.Error.invalid_request "recovery windows are disabled") in
+    let%map ledger = Recovery_window_ledger.expire ledger scope in
+    { state with recovery_windows = Some ledger }
+  | Recovery_window_enabled (owner, window) ->
+    let%map.Result ledger = Recovery_window_capture.bootstrap state ~owner ~window in
+    { state with recovery_windows = Some ledger }
+  | Recovery_reminder_changed change ->
+    let open Result.Let_syntax in
+    let unavailable =
+      Agent_protocol.Error.invalid_request "reminder has no active window or operation"
     in
-    { state with
-      conversation =
-        { state.conversation with canonical_history; authoring_reference_index }
-    }
+    let%bind windows = Result.of_option state.recovery_windows ~error:unavailable in
+    let%bind operation = Result.of_option state.active_operation ~error:unavailable in
+    let scope =
+      Recovery_window_ledger.Window.scope (Recovery_window_ledger.active windows)
+    in
+    let%map ledger =
+      Recovery_reminder.apply
+        state.recovery_reminders
+        change
+        ~scope
+        ~operation:operation.id
+    in
+    { state with recovery_reminders = Some ledger }
+  | Recovery_effective_prepared record ->
+    let%map.Result ledger = Recovery_effective_capture.apply state record in
+    { state with recovery_effective = Some ledger }
+  | Recovery_effective_attempt_changed receipt ->
+    let%map.Result ledger = Recovery_effective_receipts.apply state receipt in
+    { state with recovery_effective = Some ledger }
+  | Recovery_summary_compacted (archive, history, capture) ->
+    let open Result.Let_syntax in
+    let%bind ledger = Recovery_window_capture.summarize state ~archive ~history in
+    let%bind recovery_effective =
+      match capture with
+      | `Canonical -> Ok state.recovery_effective
+      | `Canonical_and_effective -> Recovery_effective_capture.relocate state ~archive
+    in
+    let%map next = with_canonical_history state history ~recovery_windows:(Some ledger) in
+    attach_archive { next with recovery_effective } archive
   | Authoring_references_forgotten ids ->
     let open Result.Let_syntax in
     let%map index = Session_state.authoring_references state in
@@ -650,13 +1339,16 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
         Error
           (Agent_protocol.Error.invalid_request "history deletion archive basis differs")
     in
+    let retired = History_deletion.retired_ids plan in
+    let%bind next =
+      replace_canonical_history state (History_deletion.canonical_history plan) ~retired
+    in
     let%bind next =
       apply
         ~limits
-        state
+        next
         (Batch
-           [ Canonical_history_replaced (History_deletion.canonical_history plan)
-           ; Authoring_references_forgotten (History_deletion.retired_ids plan)
+           [ Authoring_references_forgotten retired
            ; Initial_prompt_count_changed
                (History_deletion.initial_prompt_entry_count plan)
            ; Compaction_archived archive
@@ -677,26 +1369,35 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
       else
         Error (Agent_protocol.Error.invalid_request "history edit archive basis differs")
     in
+    let retired = History_edit.retired_ids plan in
+    let%bind next =
+      replace_canonical_history
+        state
+        (History_edit.canonical_history plan)
+        ~retired:(Agent_protocol.History_edit.history_id edit :: retired)
+    in
     let%bind next =
       apply
         ~limits
-        state
+        next
         (Batch
-           [ Canonical_history_replaced (History_edit.canonical_history plan)
-           ; Authoring_references_forgotten (History_edit.retired_ids plan)
+           [ Authoring_references_forgotten retired
            ; Initial_prompt_count_changed (History_edit.initial_prompt_entry_count plan)
            ; Compaction_archived archive
            ])
     in
     retire_pending_dispositions next ~history_ids:(History_edit.retired_ids plan) ~limits
   | Compaction_archived archive ->
-    Ok
-      { state with
-        conversation =
-          { state.conversation with
-            compaction_archives = archive :: state.conversation.compaction_archives
-          }
-      }
+    if Session_state.Compaction_archive.equal_kind archive.kind Rollover
+    then Error (Agent_protocol.Error.invalid_request "rollover archive requires atomic publication")
+    else if
+      Option.is_some state.recovery_windows
+      && Session_state.Compaction_archive.equal_kind archive.kind Compaction
+    then
+      Error
+        (Agent_protocol.Error.invalid_request
+           "enabled compaction requires exact window capture")
+    else Ok (attach_archive state archive)
   | Deferred_entries_enqueued entries ->
     let%bind.Result additions =
       List.map entries ~f:(fun entry ->
@@ -745,6 +1446,16 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
             Option.to_list archive @ next.conversation.compaction_archives
         }
     }
+  | Active_operation_changed (Some operation)
+    when Option.is_none state.active_operation
+         && awaiting_settled_foreground state
+         && not (permits_successor_operation state operation) ->
+    Error
+      (Agent_protocol.Error.create
+         Conflict
+         ~message:"successor continuation must claim foreground admission"
+         ~retryable:true
+         ())
   | Active_operation_changed active_operation ->
     let automatic_turn_budget =
       match active_operation, state.active_operation with
@@ -756,7 +1467,15 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
           Automatic_turn_budget.note_operation budget operation)
       | None, _ -> state.automatic_turn_budget
     in
-    Ok { state with active_operation; automatic_turn_budget }
+    let%map.Result recovery_rollover =
+      match state.active_operation, active_operation with
+      | Some predecessor, None ->
+        Recovery_rollover.abandon_automatic
+          state.recovery_rollover
+          ~operation:predecessor.id
+      | _ -> Ok state.recovery_rollover
+    in
+    { state with active_operation; automatic_turn_budget; recovery_rollover }
   | Automatic_turn_budget_enabled policy ->
     (match state.automatic_turn_budget with
      | Some budget when Chat_response.Runtime_semantics.equal_policy budget.policy policy
@@ -1459,21 +2178,22 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
       List.exists state.conversation.canonical_history ~f:(fun old ->
         History_entry.Id.equal old.id entry.id)
     then invalid "notification history identity already exists"
-    else
-      Ok
-        { state with
-          deliveries =
-            replace_by
-              Agent_protocol.Id.Delivery.compare
-              c.id
-              delivery
-              state.deliveries
-              ~id_of:(fun d -> d.Agent_protocol.Delivery.context.id)
-        ; conversation =
-            { state.conversation with
-              canonical_history = state.conversation.canonical_history @ [ entry ]
-            }
-        }
+    else (
+      let%map recovery_windows = Recovery_window_capture.append state [ entry ] in
+      { state with
+        recovery_windows
+      ; deliveries =
+          replace_by
+            Agent_protocol.Id.Delivery.compare
+            c.id
+            delivery
+            state.deliveries
+            ~id_of:(fun d -> d.Agent_protocol.Delivery.context.id)
+      ; conversation =
+          { state.conversation with
+            canonical_history = state.conversation.canonical_history @ [ entry ]
+          }
+      })
   | Delivery_wake_changed delivery ->
     let open Result.Let_syntax in
     let module P = Agent_protocol in
@@ -1653,6 +2373,106 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
     let previous = Option.value state.goal_catalog ~default:Goal_catalog.empty in
     let%map () = Goal_catalog.validate_transition previous ~incoming:catalog in
     { state with goal_catalog = Some catalog }
+  | Recovery_note_changed change ->
+    let%map.Result catalog =
+      Recovery_note_change.apply
+        change
+        ~previous:state.recovery_notes
+        ~session_id:state.identity.session_id
+    in
+    { state with recovery_notes = Some catalog }
+  | Recovery_rollover_changed change ->
+    let open Result.Let_syntax in
+    let module Checkpoint = Recovery_rollover.Checkpoint in
+    let invalid () =
+      Error
+        (Agent_protocol.Error.invalid_request
+           "checkpoint note requires its exact atomic creation")
+    in
+    let%bind state =
+      match change with
+      | Record_checkpoint checkpoint ->
+        (match Checkpoint.recipe checkpoint with
+         | Authored binding when Option.is_some binding.soft_note -> invalid ()
+         | Owner_selection _ ->
+           let%map () = require_quiescent_rollover_cut state in
+           state
+         | Authored _ ->
+           let%map () =
+             Recovery_checkpoint_cut.check_checkpoint_registration state checkpoint
+           in
+           state)
+      | Record_checkpoint_with_note { checkpoint; note } ->
+        (match Checkpoint.recipe checkpoint with
+         | Authored binding when Option.is_some binding.soft_note ->
+           let%bind catalog =
+             Recovery_note_change.apply
+               note
+               ~previous:state.recovery_notes
+               ~session_id:state.identity.session_id
+           in
+           let state = { state with recovery_notes = Some catalog } in
+           let%map () =
+             Recovery_checkpoint_cut.check_checkpoint_registration state checkpoint
+           in
+           state
+         | Owner_selection _ | Authored _ -> invalid ())
+      | Schedule { change; _ } ->
+        let%map () = check_continuation_change state change in
+        state
+      | Checkpoint_opportunity change ->
+        let%map () = Recovery_checkpoint_cut.check_opportunity_change state change in
+        state
+      | Admit { requester = Automatic { cut; _ }; _ } ->
+        if awaiting_settled_foreground state
+        then
+          Error
+            (Agent_protocol.Error.invalid_request
+               "capacity rollover has a pending successor")
+        else
+          let%map () = Recovery_rollover_capacity_cut.validate state cut in
+          state
+      | Admit _ | Settle _ | Hook _ -> Ok state
+    in
+    let%bind windows =
+      Result.of_option
+        state.recovery_windows
+        ~error:
+          (Agent_protocol.Error.invalid_request "recovery window ledger is unavailable")
+    in
+    let active = Recovery_window_record.scope (Recovery_window_ledger.active windows) in
+    let%bind ledger =
+      Recovery_rollover.apply
+        state.recovery_rollover
+        ~active
+        ~revision:state.counters.revision
+        ~history:state.conversation.canonical_history
+        ~catalog:state.recovery_notes
+        change
+    in
+    let%map managed_submissions =
+      match change with
+      | Schedule { id; change; _ } ->
+        settle_managed_continuation state.managed_submissions ~owner:id change
+      | Admit _
+      | Record_checkpoint _
+      | Record_checkpoint_with_note _
+      | Settle _
+      | Hook _
+      | Checkpoint_opportunity _ -> Ok state.managed_submissions
+    in
+    { state with recovery_rollover = Some ledger; managed_submissions }
+  | Recovery_rollover_committed change -> apply_rollover state change ~limits
+  | Recovery_note_share_changed change ->
+    let%map.Result shares =
+      Recovery_note_share_change.apply
+        change
+        ~previous:state.recovery_note_shares
+        ~catalog:state.recovery_notes
+        ~session_id:state.identity.session_id
+        ~generation:state.identity.generation
+    in
+    { state with recovery_note_shares = Some shares }
   | Instruction_selection_changed selection ->
     let open Result.Let_syntax in
     let previous =
@@ -1679,7 +2499,13 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
     let%map.Result () =
       Moderator_checkpoint.validate_update ~previous:state.moderator moderator
     in
-    { state with moderator }
+    let recovery_effective =
+      Recovery_effective_capture.moderator_changed
+        state.recovery_effective
+        ~previous:state.moderator
+        ~next:moderator
+    in
+    { state with moderator; recovery_effective }
   | Shell_changed shell -> Ok { state with shell }
   | History_block_reserved reserved_history_through ->
     if
@@ -1734,6 +2560,11 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
            ~message:"session generation did not advance"
            ~retryable:false
            ())
+    else if Option.is_some state.recovery_windows
+    then
+      Error
+        (Agent_protocol.Error.invalid_request
+           "enabled recovery requires an archived administrative generation change")
     else
       let open Result.Let_syntax in
       let%bind inference_ledger =
@@ -1768,6 +2599,7 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
       ; delegated_usage
       ; policy_canonical_usage
       ; identity = { state.identity with generation }
+      ; recovery_installed_originals = None
       ; run_state = Option.map state.run_state ~f:Run_state.clear_moderator_lifecycle
       ; pending_initial_start = false
       ; conversation =
@@ -1853,6 +2685,12 @@ let validate_goal_accounts delta ~(previous : Session_state.t) ~(next : Session_
     | Workspace_changed _
     | Canonical_entries_appended _
     | Canonical_history_replaced _
+    | Recovery_window_expired _
+    | Recovery_window_enabled _
+    | Recovery_effective_prepared _
+    | Recovery_reminder_changed _
+    | Recovery_effective_attempt_changed _
+    | Recovery_summary_compacted _
     | Authoring_references_forgotten _
     | Authoring_publication_changed _
     | Initial_prompt_count_changed _
@@ -1897,6 +2735,10 @@ let validate_goal_accounts delta ~(previous : Session_state.t) ~(next : Session_
     | Delivery_committed _
     | Delivery_wake_changed _
     | Instruction_selection_changed _
+    | Recovery_note_changed _
+    | Recovery_note_share_changed _
+    | Recovery_rollover_changed _
+    | Recovery_rollover_committed _
     | Recurrence_catalog_changed _
     | Run_state_changed _
     | Moderator_changed _
@@ -1983,6 +2825,16 @@ let validate_goal_descendants
     | Active_operation_changed operation ->
       let%map cursor = O.advance cursor (Active_operation operation) in
       accounts, cursor
+    | Recovery_rollover_committed ({ batch = Some _; _ } | { capacity = Some _; _ }) ->
+      (* Publication is standalone. Its only canonical ledger change can be the
+         deterministic terminal edge for the exact retired Turn. *)
+      let%bind cursor =
+        if phys_equal previous.inference_ledger next.inference_ledger
+        then Ok cursor
+        else O.advance cursor (Canonical next.inference_ledger)
+      in
+      let%map cursor = O.advance cursor (Active_operation None) in
+      accounts, cursor
     | Invocation_changed invocation | Invocation_reconciled invocation ->
       let%map cursor = O.advance cursor (Invocation invocation) in
       accounts, cursor
@@ -2000,6 +2852,12 @@ let validate_goal_descendants
     | Workspace_changed _
     | Canonical_entries_appended _
     | Canonical_history_replaced _
+    | Recovery_window_expired _
+    | Recovery_window_enabled _
+    | Recovery_effective_prepared _
+    | Recovery_reminder_changed _
+    | Recovery_effective_attempt_changed _
+    | Recovery_summary_compacted _
     | Authoring_references_forgotten _
     | Authoring_publication_changed _
     | Initial_prompt_count_changed _
@@ -2033,6 +2891,10 @@ let validate_goal_descendants
     | Delivery_committed _
     | Delivery_wake_changed _
     | Instruction_selection_changed _
+    | Recovery_note_changed _
+    | Recovery_note_share_changed _
+    | Recovery_rollover_changed _
+    | Recovery_rollover_committed _
     | Recurrence_catalog_changed _
     | Run_state_changed _
     | Moderator_changed _
@@ -2098,6 +2960,12 @@ let rec validate_descendant_publication delta ~revision =
   | Workspace_changed _
   | Canonical_entries_appended _
   | Canonical_history_replaced _
+  | Recovery_window_expired _
+  | Recovery_window_enabled _
+  | Recovery_effective_prepared _
+  | Recovery_reminder_changed _
+  | Recovery_effective_attempt_changed _
+  | Recovery_summary_compacted _
   | Authoring_references_forgotten _
   | Authoring_publication_changed _
   | Initial_prompt_count_changed _
@@ -2141,6 +3009,10 @@ let rec validate_descendant_publication delta ~revision =
   | Delivery_committed _
   | Delivery_wake_changed _
   | Instruction_selection_changed _
+  | Recovery_note_changed _
+  | Recovery_note_share_changed _
+  | Recovery_rollover_changed _
+  | Recovery_rollover_committed _
   | Recurrence_catalog_changed _
   | Run_state_changed _
   | Moderator_changed _
@@ -2176,7 +3048,8 @@ let policy_usage_step delta ~(previous : Session_state.t) ~(next : Session_state
       (Some
          (O.Canonical
             { before = previous.inference_ledger; after = next.inference_ledger; update }))
-  | Inference_ledger_changed _ | Delegated_inference_ledger_changed _ ->
+  | Inference_ledger_changed _ | Delegated_inference_ledger_changed _
+  | Recovery_rollover_committed { retired_at = Some _; _ } ->
     Ok
       (Some
          (O.Ordinary_canonical
@@ -2216,6 +3089,12 @@ let policy_usage_step delta ~(previous : Session_state.t) ~(next : Session_state
   | Workspace_changed _
   | Canonical_entries_appended _
   | Canonical_history_replaced _
+  | Recovery_window_expired _
+  | Recovery_window_enabled _
+  | Recovery_effective_prepared _
+  | Recovery_reminder_changed _
+  | Recovery_effective_attempt_changed _
+  | Recovery_summary_compacted _
   | Authoring_references_forgotten _
   | Authoring_publication_changed _
   | Initial_prompt_count_changed _
@@ -2249,6 +3128,10 @@ let policy_usage_step delta ~(previous : Session_state.t) ~(next : Session_state
   | Delivery_committed _
   | Delivery_wake_changed _
   | Instruction_selection_changed _
+  | Recovery_note_changed _
+  | Recovery_note_share_changed _
+  | Recovery_rollover_changed _
+  | Recovery_rollover_committed _
   | Recurrence_catalog_changed _
   | Shell_changed _
   | History_block_reserved _
@@ -2331,7 +3214,8 @@ let goal_policy_step delta ~(previous : Session_state.t) ~(next : Session_state.
             ; after = next.inference_ledger
             ; policy = Some update
             }))
-  | Inference_ledger_changed _ | Delegated_inference_ledger_changed _ ->
+  | Inference_ledger_changed _ | Delegated_inference_ledger_changed _
+  | Recovery_rollover_committed { retired_at = Some _; _ } ->
     Ok
       (Some
          (O.Canonical
@@ -2348,6 +3232,12 @@ let goal_policy_step delta ~(previous : Session_state.t) ~(next : Session_state.
   | Workspace_changed _
   | Canonical_entries_appended _
   | Canonical_history_replaced _
+  | Recovery_window_expired _
+  | Recovery_window_enabled _
+  | Recovery_effective_prepared _
+  | Recovery_reminder_changed _
+  | Recovery_effective_attempt_changed _
+  | Recovery_summary_compacted _
   | Authoring_references_forgotten _
   | Authoring_publication_changed _
   | Initial_prompt_count_changed _
@@ -2385,6 +3275,10 @@ let goal_policy_step delta ~(previous : Session_state.t) ~(next : Session_state.
   | Delivery_committed _
   | Delivery_wake_changed _
   | Instruction_selection_changed _
+  | Recovery_note_changed _
+  | Recovery_note_share_changed _
+  | Recovery_rollover_changed _
+  | Recovery_rollover_committed _
   | Recurrence_catalog_changed _
   | Run_state_changed _
   | Moderator_changed _

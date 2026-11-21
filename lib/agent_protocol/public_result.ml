@@ -42,6 +42,15 @@ module Non_history = struct
     | Session_configuration_get _
     | Session_configuration_update _
     | Instructions _
+    | Recovery_enable _
+    | Recovery_windows _
+    | Recovery_history _
+    | Recovery_range _
+    | Recovery_asset_read _
+    | Recovery_status _
+    | Recovery_note_shares _
+    | Recovery_rollover _
+    | Recovery_followup _
     | Goal_query _
     | Goal_control _
     | Recurrence_query _

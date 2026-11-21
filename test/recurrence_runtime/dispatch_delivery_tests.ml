@@ -237,6 +237,47 @@ let run_page connection session =
   |> fun page -> page.P.Page.items
 ;;
 
+let watch_run_terminal ~sw ~clock connection session (admission : P.Run_receipt.t) =
+  let views =
+    Client.Run_views.create connection ~server_id:(P.Session_ref.server_id session)
+  in
+  let terminal, report = Eio.Promise.create () in
+  let finish result = ignore (Eio.Promise.try_resolve report result : bool) in
+  let on_error error = finish (Error error) in
+  let on_result = function
+    | P.Run_query.Outcome.Available view ->
+      (match view.run.lifecycle with
+       | Admitted | Active | Waiting _ -> ()
+       | Terminal (Completed _) ->
+         assert (Option.exists view.admission_receipt ~f:(P.Run_receipt.equal admission));
+         finish (Ok (Option.value_exn view.terminal_receipt))
+       | Terminal _ -> raise_s [%sexp (view : P.Run_query.View.t)])
+    | Unavailable _ -> failwith "admitted recurrence Run became unavailable"
+  in
+  let observe =
+    Client.Run_views.watch
+      views
+      ~sw
+      ~request:{ session; run_id = admission.run_id }
+      ~on_result
+      ~on_error
+  in
+  let observer =
+    Client.Session_handle.attach
+      ~sw
+      ~clock
+      ~connection
+      ~session_id:(P.Session_ref.session_id session)
+      ~mode:Read_only
+      ~on_update:(fun projection ->
+        if Option.is_none (Eio.Promise.peek terminal) then observe projection)
+      ~on_error
+      ()
+    |> protocol_ok
+  in
+  observer, terminal
+;;
+
 let frontier_diagnostic (current : A.Session_state.t) =
   Option.value_map current.recurrence_catalog ~default:[] ~f:C.entries
   |> List.map ~f:(fun recurrence ->
@@ -481,7 +522,7 @@ let%expect_test "embedded sole timer imports before a same-target progress senti
          second
          release_second
        ->
-       let first_receipt =
+       let first_receipt, first_terminal =
          Eio.Switch.run (fun sw ->
            let host =
              Embedded.open_host
@@ -506,50 +547,67 @@ let%expect_test "embedded sole timer imports before a same-target progress senti
                release_second ();
                Embedded.close_host host)
              (fun () ->
-                let stage = ref "first provider" in
-                with_diagnostics
-                  env
-                  ~stage
-                  ~count
-                  ~diagnose:(fun () -> embedded_diagnostic host session_id)
+                let during stage f =
+                  with_diagnostics
+                    env
+                    ~stage:(ref stage)
+                    ~count
+                    ~diagnose:(fun () -> embedded_diagnostic host session_id)
+                    f
+                in
+                let connection, session, receipt, observer, terminal =
+                  during "first provider and Run admission" (fun () ->
+                    Eio.Promise.await entered;
+                    let connection = Embedded.host_connection host in
+                    let initialized =
+                      Client.Connection.initialization connection |> Option.value_exn
+                    in
+                    let session =
+                      P.Session_ref.create ~server_id:initialized.server_id ~session_id
+                    in
+                    (* The held provider exposes only its own admitted Run. *)
+                    let first =
+                      match run_page connection session with
+                      | [ first ] -> first
+                      | runs -> raise_s [%sexp (runs : P.Run_query.View.t list)]
+                    in
+                    let receipt = Option.value_exn first.admission_receipt in
+                    assert (P.Run.Mode.equal first.run.mode Single_turn);
+                    [%test_eq: int] 1 !count;
+                    let observer, terminal =
+                      watch_run_terminal
+                        ~sw
+                        ~clock:(Eio.Stdenv.clock env)
+                        connection
+                        session
+                        receipt
+                    in
+                    connection, session, receipt, observer, terminal)
+                in
+                protect_cleanup
+                  ~finally:(fun () -> Client.Session_handle.close observer)
                   (fun () ->
-                     Eio.Promise.await entered;
-                     let connection = Embedded.host_connection host in
-                     let initialized =
-                       Client.Connection.initialization connection |> Option.value_exn
-                     in
-                     let session =
-                       P.Session_ref.create ~server_id:initialized.server_id ~session_id
-                     in
-                     let first = run_page connection session |> List.hd_exn in
-                     let receipt = Option.value_exn first.admission_receipt in
-                     assert (P.Run.Mode.equal first.run.mode Single_turn);
-                     [%test_eq: int] 1 !count;
-                     (* A busy exact target still presents only its admitted Run.
-                        The existing sentinel below proves ordinary progress. *)
-                     [%test_eq: int] 1 (List.length (run_page connection session));
                      release ();
-                     (* This second admission is a same-target progress sentinel.
-                     The joined immutable read below independently validates
-                     the exact first controller terminal import. *)
-                     stage := "same-target second provider sentinel";
-                     Eio.Promise.await second;
-                     let first =
-                       run_page connection session
-                       |> List.find_exn ~f:(fun view ->
-                         P.Id.Run.equal view.P.Run_query.View.run.id receipt.run_id)
+                     let imported =
+                       during "first Run terminal" (fun () ->
+                         Eio.Promise.await terminal |> protocol_ok)
                      in
-                     (match first.run.lifecycle with
-                      | Terminal (Completed _) -> ()
-                      | _ -> raise_s [%sexp (first : P.Run_query.View.t)]);
-                     assert (
-                       P.Run_receipt.equal
-                         receipt
-                         (Option.value_exn first.admission_receipt));
-                     assert (Option.is_some first.terminal_receipt);
-                     [%test_eq: int] 2 !count;
+                     (* The same-target Run must also enter the real provider after
+                     retirement of the first. The observation never starts work. *)
+                     during "same-target second provider sentinel" (fun () ->
+                       Eio.Promise.await second;
+                       let runs = run_page connection session in
+                       [%test_eq: int] 2 (List.length runs);
+                       let successor =
+                         List.find_exn runs ~f:(fun view ->
+                           not
+                             (P.Id.Run.equal view.P.Run_query.View.run.id receipt.run_id))
+                       in
+                       assert (P.Run.Mode.equal successor.run.mode Single_turn);
+                       assert (Option.is_some successor.admission_receipt);
+                       [%test_eq: int] 2 !count);
                      release_second ();
-                     receipt)))
+                     receipt, imported)))
        in
        (* Joined host close releases the same root. An operator-only immutable read
        checks the actual persisted first import without selecting or replaying. *)
@@ -585,6 +643,7 @@ let%expect_test "embedded sole timer imports before a same-target progress senti
          let _, receipt, reference = terminal saved "485_first" in
          assert (P.Run_receipt.equal first_receipt receipt);
          assert (P.Id.Run.equal first_receipt.run_id (Terminal.run_id reference));
+         assert (P.Run_receipt.equal first_terminal (Terminal.receipt reference));
          [%test_eq: int] 0 (Registry.stats (Daemon.registry daemon)).loaded;
          [%test_eq: int] 2 !count));
   print_endline

@@ -22,23 +22,42 @@ let create
       ~for_fork
   =
   let selected = N.borrowed_capabilities borrowed |> require in
+  let claims ~name =
+    match C.find selected ~name with
+    | Ok binding -> Result.is_error (C.require_plain_invocation binding)
+    | Error _ -> false
+  in
+  let protection =
+    Option.some_if
+      (List.exists (C.references selected) ~f:(fun r -> claims ~name:r.name))
+      D.{ claims; take = (fun () -> []); close = ignore }
+  in
   let parent = N.borrowed_invocation borrowed in
   let check (request : D.request) =
     let open Result.Let_syntax in
     let%bind _ = N.borrowed_capabilities borrowed in
-    match request.source, request.parent_call_id with
-    | Some actual_source, Some actual_parent
-      when String.equal actual_source source && String.equal actual_parent parent_call_id
-      -> Ok ()
-    | _ ->
+    if claims ~name:request.original_name || claims ~name:request.name
+    then
       Error
         (Agent_protocol.Error.invalid_request
-           "fork tool request belongs to another branch")
+           "protected calls require their owning session")
+    else (
+      match request.source, request.parent_call_id with
+      | Some actual_source, Some actual_parent
+        when String.equal actual_source source
+             && String.equal actual_parent parent_call_id -> Ok ()
+      | _ ->
+        Error
+          (Agent_protocol.Error.invalid_request
+             "fork tool request belongs to another branch"))
   in
   let validate_original ~kind ~name ~payload =
     let open Result.Let_syntax in
     let%bind binding =
       C.find selected ~name |> Result.map_error ~f:(fun error -> error.C.message)
+    in
+    let%bind () =
+      C.require_plain_invocation binding |> Result.map_error ~f:(fun e -> e.message)
     in
     let%bind () =
       match kind, (C.descriptor binding).type_ with
@@ -122,7 +141,8 @@ let create
         }
   in
   D.
-    { for_fork = Some for_fork
+    { protection
+    ; for_fork = Some for_fork
     ; commit_call =
         (fun request ->
           check request |> require;

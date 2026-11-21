@@ -369,9 +369,13 @@ let%expect_test "hosted captured Agent child uses its saved source and tracked m
   let control_submitting = ref false in
   let first_entered, first_entered_u = Eio.Promise.create () in
   let second_entered, second_entered_u = Eio.Promise.create () in
+  let selected_content_entered, selected_content_entered_u = Eio.Promise.create () in
+  let selected_file_entered, selected_file_entered_u = Eio.Promise.create () in
   let selected_parent_entered, selected_parent_entered_u = Eio.Promise.create () in
   let release_first, release_first_u = Eio.Promise.create () in
   let release_selected_parent, release_selected_parent_u = Eio.Promise.create () in
+  let spawn_parent_entered, spawn_parent_entered_u = Eio.Promise.create () in
+  let worker_one_entered, worker_one_entered_u = Eio.Promise.create () in
   let worker_two_entered, worker_two_entered_u = Eio.Promise.create () in
   let release_worker_two, release_worker_two_u = Eio.Promise.create () in
   let first_released = ref false in
@@ -395,6 +399,14 @@ let%expect_test "hosted captured Agent child uses its saved source and tracked m
     ~on_model_body:(fun body ->
       model_bodies := body :: !model_bodies;
       !advance_deep_runtime body;
+      let notice marker resolver =
+        if String.is_substring body ~substring:marker
+        then ignore (Eio.Promise.try_resolve resolver () : bool)
+      in
+      notice "from selected Model content" selected_content_entered_u;
+      notice "from selected Model.call" selected_file_entered_u;
+      notice "Selected spawn parent instructions" spawn_parent_entered_u;
+      notice "Selected worker one instructions" worker_one_entered_u;
       if String.is_substring body ~substring:"Selected Model parent instructions"
       then selected_parent_submitting := true;
       if String.is_substring body ~substring:"Selected worker two instructions"
@@ -423,10 +435,21 @@ let%expect_test "hosted captured Agent child uses its saved source and tracked m
         control_submitting := false;
         Eio.Promise.await worker_two_entered))
     (fun env sw anchor create _ ->
-       let elapsed_clock = Runtime_elapsed_clock.create (Eio.Stdenv.mono_clock env) in
-       let mono_clock = Runtime_elapsed_clock.resource elapsed_clock in
-       (* Real elapsed time continues normally. One explicit advance below models
-          nested provider runtime without sleeping or pausing startup budgets. *)
+       let real_mono = Eio.Stdenv.mono_clock env in
+       let mono_clock, pause, resume, advance =
+         Agent_server_test_support.controlled_monotonic_clock real_mono
+       in
+       (* Only the intentional elapsed-time checks borrow a paused clock. The
+          provider/fixture waits still use physical time. *)
+       let advance_child_runtime () =
+         pause ();
+         let before = Eio.Time.Mono.now mono_clock in
+         advance 6.;
+         assert (
+           Mtime.Span.equal
+             Mtime.Span.(6 * s)
+             (Mtime.span before (Eio.Time.Mono.now mono_clock)))
+       in
        let env =
          object
            method fs = env#fs
@@ -444,10 +467,32 @@ let%expect_test "hosted captured Agent child uses its saved source and tracked m
            method backend_id = env#backend_id
          end
        in
-       Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 60. (fun () ->
+       let phase = ref ("saved children", Eio.Time.Mono.now real_mono) in
+       let deadline () =
+         Mtime.add_span (snd !phase) Mtime.Span.(30 * s) |> Option.value_exn
+       in
+       let check_phase now =
+         if not (Mtime.is_earlier now ~than:(deadline ()))
+         then
+           raise_s
+             [%sexp
+               "hosted child phase timed out", (fst !phase : string), (!requests : int)]
+       in
+       let enter_phase name =
+         let now = Eio.Time.Mono.now real_mono in
+         check_phase now;
+         phase := name, now
+       in
+       let rec watch_phase () =
+         Eio.Time.Mono.sleep_until real_mono (deadline ());
+         check_phase (Eio.Time.Mono.now real_mono);
+         watch_phase ()
+       in
+       Eio.Fiber.first watch_phase (fun () ->
          Fun.protect
            ~finally:(fun () ->
              (advance_deep_runtime := fun _ -> ());
+             resume ();
              if not !first_released then Eio.Promise.resolve release_first_u ();
              if not !selected_parent_released
              then Eio.Promise.resolve release_selected_parent_u ();
@@ -1103,6 +1148,7 @@ let on_event : context -> state -> event -> state task =
                     (String.is_substring
                        body
                        ~substring:"Edited hosted child instructions")));
+              enter_phase "selected child tools";
               let tool_request =
                 S.Daemon.Developer.Request.create
                   ~route:
@@ -1261,6 +1307,7 @@ let on_event : context -> state -> event -> state task =
                         "tool is not in the selected capability set")
                   | _ -> failwith "selected child returned unexpected tool results")
                | _ -> failwith "selected child model request count changed");
+              enter_phase "nested selected content";
               (* Level two has completed preparation and reached model I/O. Age
                  its waiting parent's startup clock past compile_seconds=5 while
                  remaining inside the unchanged native runtime allowance of 30s.
@@ -1273,10 +1320,7 @@ let on_event : context -> state -> event -> state task =
                       (advance_deep_runtime := fun _ -> ());
                       [%test_eq: int] !requests 7;
                       incr deep_runtime_advances;
-                      let before = Eio.Time.Mono.now mono_clock in
-                      Runtime_elapsed_clock.advance elapsed_clock ~seconds:6.;
-                      let elapsed = Mtime.span before (Eio.Time.Mono.now mono_clock) in
-                      assert (Float.(Mtime.Span.to_float_ns elapsed >= 6e9))));
+                      advance_child_runtime ()));
               let deep_request =
                 S.Daemon.Developer.Request.create
                   ~route:
@@ -1346,6 +1390,7 @@ let on_event : context -> state -> event -> state task =
                     await_deep ()
                 in
                 await_deep ());
+              resume ();
               (advance_deep_runtime := fun _ -> ());
               [%test_eq: int] !deep_runtime_advances 1;
               assert !deep_tools_sent;
@@ -1363,6 +1408,49 @@ let on_event : context -> state -> event -> state task =
                 match value with
                 | `Object fields -> List.Assoc.find_exn fields ~equal:String.equal name
                 | _ -> failwith "deep provider request is not an object"
+              in
+              let await_provider ~phase ~run_id ~job_id ~requests_before entered =
+                let clock = Eio.Stdenv.clock env in
+                match
+                  Eio.Time.with_timeout_exn clock 10. (fun () ->
+                    Eio.Promise.await entered)
+                with
+                | () -> ()
+                | exception Eio.Time.Timeout ->
+                  let module A = Inference.Observation.Attempt_record in
+                  let attempts =
+                    List.filter_map (rows ~run:run_id "inference_attempts") ~f:(fun row ->
+                      let id = P.Id.Job.of_json (field row "job_id") |> ok in
+                      if P.Id.Job.equal id job_id
+                      then (
+                        let record =
+                          A.of_json
+                            (field row "record")
+                            ~limits:Inference.Observation.Admission.attempt
+                          |> Result.map_error ~f:(fun _ -> "invalid provider attempt row")
+                          |> Result.ok_or_failwith
+                        in
+                        let state =
+                          match A.state record with
+                          | Prepared -> "prepared"
+                          | Running -> "running"
+                          | Terminal _ -> "terminal"
+                          | Interrupted _ -> "interrupted"
+                        in
+                        Some
+                          ( Inference.Observation.Configuration.model
+                              (A.configuration record)
+                          , state ))
+                      else None)
+                  in
+                  raise_s
+                    [%sexp
+                      "hosted provider progress timed out"
+                    , (phase : string)
+                    , (P.Developer_job.state (job ~run:run_id job_id)
+                       : P.Developer_job.State.t)
+                    , (!requests - requests_before : int)
+                    , (attempts : (string * string) list)]
               in
               let string = function
                 | `String value -> value
@@ -1435,6 +1523,7 @@ let on_event : context -> state -> event -> state task =
                    , (result : R.value option)]);
               [%test_eq: int] !requests model_requests_before_denial;
               [%test_eq: int] (List.length (jobs ~run:deep_run_id ())) jobs_before_denial;
+              enter_phase "selected Model continuation";
               let requests_before_model = !requests in
               let model_request =
                 S.Daemon.Developer.Request.create
@@ -1486,27 +1575,22 @@ let on_event : context -> state -> event -> state task =
                 | result ->
                   raise_s [%sexp "expected selected Model Job", (result : R.value option)]
               in
-              (match
-                 Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
-                   Eio.Promise.await selected_parent_entered)
-               with
-               | () -> ()
-               | exception Eio.Time.Timeout ->
-                 raise_s
-                   [%sexp
-                     "selected parent provider was not reached"
-                   , (P.Developer_job.state (job ~run:model_run_id model_job)
-                      : P.Developer_job.State.t)
-                   , (!requests - requests_before_model : int)]);
+              let await_selected phase =
+                await_provider
+                  ~phase
+                  ~run_id:model_run_id
+                  ~job_id:model_job
+                  ~requests_before:requests_before_model
+              in
+              await_selected "selected content model" selected_content_entered;
+              await_selected "selected File model" selected_file_entered;
+              await_selected "selected parent model" selected_parent_entered;
               (* The content child and first File Model call have completed.
                  Advance runtime while the prepared parent awaits its provider;
                  the next Captured Model call must get its own compilation
                  deadline while retaining aggregate preparation accounting. *)
               [%test_eq: int] (!requests - requests_before_model) 3;
-              let before = Eio.Time.Mono.now mono_clock in
-              Runtime_elapsed_clock.advance elapsed_clock ~seconds:6.;
-              let elapsed = Mtime.span before (Eio.Time.Mono.now mono_clock) in
-              assert (Float.(Mtime.Span.to_float_ns elapsed >= 6e9));
+              advance_child_runtime ();
               Eio.Path.unlink Eio.Path.(Eio.Stdenv.fs env / model_grand);
               selected_parent_released := true;
               Eio.Promise.resolve release_selected_parent_u ();
@@ -1529,6 +1613,7 @@ let on_event : context -> state -> event -> state task =
                     await_model ()
                 in
                 await_model ());
+              resume ();
               (match (P.Developer_job.state (job ~run:model_run_id model_job)).result with
                | Some
                    (P.Developer_job.Result_value.Inline
@@ -1707,6 +1792,7 @@ let on_event : context -> state -> event -> state task =
                 in
                 model, effort
               in
+              enter_phase "mixed selected content and Model";
               let requests_before_mixed = !requests in
               let mixed_run_id, mixed_job =
                 submit_one "model_mixed" "mixed" "hosted-selected-mixed"
@@ -1780,34 +1866,21 @@ let on_event : context -> state -> event -> state task =
                 ; "synthetic-mixed-leaf"
                 ; "synthetic-mixed-outer"
                 ];
+              enter_phase "selected Model spawn";
               let requests_before_spawn = !requests in
               let spawn_run_id, spawn_job =
                 submit_one "model_spawn" "spawn" "hosted-selected-spawn"
               in
-              (match
-                 Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
-                   Eio.Promise.await worker_two_entered)
-               with
-               | () -> ()
-               | exception Eio.Time.Timeout ->
-                 raise_s
-                   [%sexp
-                     "second selected spawn did not enter provider"
-                   , (P.Developer_job.state (job ~run:spawn_run_id spawn_job)
-                      : P.Developer_job.State.t)
-                   , (!requests - requests_before_spawn : int)
-                   , (List.map (List.take !model_bodies 2) ~f:(fun body ->
-                        List.find_map
-                          [ "Selected worker one instructions"
-                          ; "Selected spawn parent instructions"
-                          ; "Selected worker two instructions"
-                          ; "Selected control instructions"
-                          ]
-                          ~f:(fun marker ->
-                            if String.is_substring body ~substring:marker
-                            then Some marker
-                            else None))
-                      : string option list)]);
+              let await_spawn phase =
+                await_provider
+                  ~phase
+                  ~run_id:spawn_run_id
+                  ~job_id:spawn_job
+                  ~requests_before:requests_before_spawn
+              in
+              await_spawn "selected spawn parent" spawn_parent_entered;
+              await_spawn "first selected spawn worker" worker_one_entered;
+              await_spawn "second selected spawn worker" worker_two_entered;
               await_succeeded ~run_id:spawn_run_id spawn_job;
               worker_two_released := true;
               Eio.Promise.resolve release_worker_two_u ();
@@ -1924,7 +1997,9 @@ let on_event : context -> state -> event -> state task =
                 ; "synthetic-worker-one", "completed"
                 ; "synthetic-worker-two", "cancelled/possibly_submitted"
                 ];
+              enter_phase "shutdown";
               S.Daemon.shutdown daemon |> ok;
+              check_phase (Eio.Time.Mono.now real_mono);
               print_endline
                 "hosted captured, content, and selected Model children used their sources")));
   [%expect {| hosted captured, content, and selected Model children used their sources |}]

@@ -164,7 +164,14 @@ let create
     Option.value_map authoring ~default:[] ~f:Authoring_installation.available_features
   in
   let operator_features =
-    [ Agent_protocol.Goal_query.Features.inspect, Option.is_some goal_read
+    [ Agent_protocol.Recovery_query.Features.windows, Option.is_some seed_factory
+    ; Agent_protocol.Recovery_history_request.feature, Option.is_some seed_factory
+    ; Agent_protocol.Recovery_text_range.feature, Option.is_some seed_factory
+    ; Agent_protocol.Recovery_asset_read.feature, Option.is_some seed_factory
+    ; Agent_protocol.Recovery_rollover_control.feature, Option.is_some seed_factory
+    ; Agent_protocol.Recovery_followup.feature, Option.is_some seed_factory
+    ; Agent_protocol.Recovery_note_share_control.feature, Option.is_some seed_factory
+    ; Agent_protocol.Goal_query.Features.inspect, Option.is_some goal_read
     ; Agent_protocol.Goal_control.Features.control, Option.is_some goal_operator
     ; Agent_protocol.Recurrence_query.Features.inspect, Option.is_some recurrence_read
     ; ( Agent_protocol.Recurrence_control.Features.control
@@ -508,7 +515,16 @@ let idempotency = function
   | Agent_protocol.Command.Instructions _ -> None
   (* Goal writers reconcile their exact receipts at the canonical owner. The
      general command journal cannot authorize their replay or fabricate absence. *)
-  | Agent_protocol.Command.Goal_query _
+  | Agent_protocol.Command.Recovery_enable _
+  | Recovery_windows _
+  | Recovery_history _
+  | Recovery_range _
+  | Recovery_asset_read _
+  | Recovery_status _
+  | Recovery_rollover _
+  | Recovery_followup _
+  | Recovery_note_shares _
+  | Goal_query _
   | Goal_control _
   | Recurrence_query _
   | Recurrence_control _
@@ -1304,6 +1320,12 @@ let with_attached_writer t context ~session_id ~attachment_id f =
   f entry
 ;;
 
+let recovery_window_operator t context actor =
+  Recovery_window_operator.create
+    t.seed_factory ~context ~actor ~registry:t.registry
+    ~server_id:(Agent_store.Session_store.server_id t.session_store)
+;;
+
 let pending_service t context =
   Pending_service.create
     (Connection_context.principal context)
@@ -2090,7 +2112,15 @@ let run_start_result = function
   | Rejected failure | Uncertain failure -> Error failure
 ;;
 
-let handle_send_message t ~agent_actor ?prepared_writer context command_audit request =
+let handle_send_message
+      t
+      ~actor
+      ~agent_actor
+      ?prepared_writer
+      context
+      command_audit
+      request
+  =
   let open Result.Let_syntax in
   let%bind () = check_original_agent_actor agent_actor in
   let content = request.Agent_protocol.Session.Send_message_request.content in
@@ -2107,59 +2137,78 @@ let handle_send_message t ~agent_actor ?prepared_writer context command_audit re
     ~attachment_id:request.attachment_id
     (fun entry ->
        let%bind () = require_connection_writer context request.attachment_id in
-       let%bind history_entry =
-         Runtime_owner.with_loaded_runtime entry.runtime (fun runtime ->
-           let%bind history_id =
-             Agent_session.History_id_source.allocate entry.history_ids
-           in
-           runtime.parse_user_content ~id:history_id content)
+       let submit asset_submission =
+         let asset_capture = Option.map asset_submission ~f:fst in
+         let%bind history_entry =
+           Runtime_owner.with_loaded_runtime entry.runtime (fun runtime ->
+             let%bind history_id =
+               Agent_session.History_id_source.allocate entry.history_ids
+             in
+             runtime.parse_user_content ?asset_capture ~id:history_id content)
+         in
+         let history_entry = Agent_session.History_codec.to_protocol history_entry in
+         Option.iter asset_submission ~f:(fun (_, arm) -> arm history_entry);
+         let%bind submission =
+           actor_command
+             command_audit
+             ~plain:(fun () ->
+               match agent_actor with
+               | Some actor ->
+                 Agent_session.Session_actor.submit_message_authenticated
+                   entry.actor
+                   ~actor
+                   ~timing:request.timing
+                   ~attachment_id:request.attachment_id
+                   history_entry
+               | None ->
+                 Agent_session.Session_actor.submit_message
+                   entry.actor
+                   ~submitting_principal:(Connection_context.principal context).id
+                   ~timing:request.timing
+                   ~attachment_id:request.attachment_id
+                   history_entry)
+             ~audited:(fun command_audit ->
+               match agent_actor with
+               | Some actor ->
+                 Agent_session.Session_actor
+                 .submit_message_authenticated_with_command_audit
+                   entry.actor
+                   ~actor
+                   ~command_audit
+                   ~timing:request.timing
+                   ~attachment_id:request.attachment_id
+                   history_entry
+               | None ->
+                 Agent_session.Session_actor.submit_message_with_command_audit
+                   entry.actor
+                   ~submitting_principal:(Connection_context.principal context).id
+                   ~command_audit
+                   ~timing:request.timing
+                   ~attachment_id:request.attachment_id
+                   history_entry)
+         in
+         Ok
+           (Agent_protocol.Method_result.Session_send_message
+              { history_id = submission.history_id
+              ; disposition = submission.disposition
+              ; operation_id = submission.operation_id
+              ; mutation = mutation submission.session
+              })
        in
-       let history_entry = Agent_session.History_codec.to_protocol history_entry in
-       let%bind submission =
-         actor_command
-           command_audit
-           ~plain:(fun () ->
-             match agent_actor with
-             | Some actor ->
-               Agent_session.Session_actor.submit_message_authenticated
-                 entry.actor
-                 ~actor
-                 ~timing:request.timing
-                 ~attachment_id:request.attachment_id
-                 history_entry
-             | None ->
-               Agent_session.Session_actor.submit_message
-                 entry.actor
-                 ~submitting_principal:(Connection_context.principal context).id
-                 ~timing:request.timing
-                 ~attachment_id:request.attachment_id
-                 history_entry)
-           ~audited:(fun command_audit ->
-             match agent_actor with
-             | Some actor ->
-               Agent_session.Session_actor.submit_message_authenticated_with_command_audit
-                 entry.actor
-                 ~actor
-                 ~command_audit
-                 ~timing:request.timing
-                 ~attachment_id:request.attachment_id
-                 history_entry
-             | None ->
-               Agent_session.Session_actor.submit_message_with_command_audit
-                 entry.actor
-                 ~submitting_principal:(Connection_context.principal context).id
-                 ~command_audit
-                 ~timing:request.timing
-                 ~attachment_id:request.attachment_id
-                 history_entry)
-       in
-       Ok
-         (Agent_protocol.Method_result.Session_send_message
-            { history_id = submission.history_id
-            ; disposition = submission.disposition
-            ; operation_id = submission.operation_id
-            ; mutation = mutation submission.session
-            }))
+       match content.kind, t.seed_factory with
+       | Chatmd, Some factory ->
+         Session_factory.Recovery_assets.with_submission
+           factory
+           ~entry
+           ~actor
+           ~attachment_id:request.attachment_id
+           ~connection_current:(fun () ->
+             Connection_context.owns_attachment
+               context
+               ~session_id:request.session_id
+               ~attachment_id:request.attachment_id)
+           ~f:submit
+       | (Plain_text | Chatmd), _ -> submit None)
 ;;
 
 let render_export request snapshot entries =
@@ -3005,6 +3054,15 @@ let prepared_writer_attachment command =
   | Session_runs _
   | Session_run _
   | Session_run_start _
+  | Recovery_enable _
+  | Recovery_windows _
+  | Recovery_history _
+  | Recovery_range _
+  | Recovery_asset_read _
+  | Recovery_status _
+  | Recovery_rollover _
+  | Recovery_followup _
+  | Recovery_note_shares _
   | Goal_query _
   | Goal_control _
   | Recurrence_query _
@@ -3077,6 +3135,7 @@ let authorize_mutation t ?prepared_writer context command =
 let dispatch_authorized
       t
       ?prepared_writer
+      ~on_release
       ~actor
       ~agent_actor
       ~context
@@ -3172,6 +3231,67 @@ let dispatch_authorized
     handle_session_stop t ?prepared_writer context command_audit request
   | Session_cancel_operation request ->
     handle_session_cancel_operation t ?prepared_writer context command_audit request
+  | Recovery_enable request ->
+    let open Result.Let_syntax in
+    let%bind service = recovery_window_operator t context actor in
+    with_attached_writer t context
+      ~session_id:(Agent_protocol.Session_ref.session_id request.session)
+      ~attachment_id:request.attachment_id (fun entry ->
+        let%map scope = Recovery_window_operator.enable service entry ~on_release request in
+        Agent_protocol.Method_result.Recovery_enable scope)
+  | Recovery_status request ->
+    let open Result.Let_syntax in
+    let%bind service = recovery_window_operator t context actor in
+    let%map status = Recovery_window_operator.inspect_rollover service ~on_release request in
+    Agent_protocol.Method_result.Recovery_status status
+  | Recovery_rollover request ->
+    let module P = Agent_protocol in
+    let open Result.Let_syntax in
+    let%bind service = recovery_window_operator t context actor in
+    let session = P.Recovery_rollover_control.Request.session request in
+    with_attached_writer t context
+      ~session_id:(P.Session_ref.session_id session)
+      ~attachment_id:request.attachment_id (fun entry ->
+        let%map receipt = Recovery_window_operator.rollover service entry ~on_release request in
+        Agent_protocol.Method_result.Recovery_rollover receipt)
+  | Recovery_followup request ->
+    let module P = Agent_protocol in
+    let open Result.Let_syntax in
+    let%bind service = recovery_window_operator t context actor in
+    let session = P.Recovery_followup.session request in
+    with_attached_writer t context
+      ~session_id:(P.Session_ref.session_id session)
+      ~attachment_id:request.attachment_id (fun entry ->
+        let%map status = Recovery_window_operator.followup service entry ~on_release request in
+        P.Method_result.Recovery_followup status)
+  | Recovery_note_shares request ->
+    let%map.Result result =
+      Recovery_note_share_operator.dispatch t.seed_factory ~context ~actor
+        ~registry:t.registry
+        ~server_id:(Agent_store.Session_store.server_id t.session_store)
+        ~on_release request
+    in
+    Agent_protocol.Method_result.Recovery_note_shares result
+  | Recovery_windows request ->
+    let open Result.Let_syntax in
+    let%bind service = recovery_window_operator t context actor in
+    let%map page = Recovery_window_operator.list service ~on_release request in
+    Agent_protocol.Method_result.Recovery_windows page
+  | Recovery_history request ->
+    let open Result.Let_syntax in
+    let%bind service = recovery_window_operator t context actor in
+    let%map page = Recovery_window_operator.query service ~on_release request in
+    Agent_protocol.Method_result.Recovery_history page
+  | Recovery_range request ->
+    let open Result.Let_syntax in
+    let%bind service = recovery_window_operator t context actor in
+    let%map slice = Recovery_window_operator.read_text service ~on_release request in
+    Agent_protocol.Method_result.Recovery_range slice
+  | Recovery_asset_read request ->
+    let open Result.Let_syntax in
+    let%bind service = recovery_window_operator t context actor in
+    let%map chunk = Recovery_window_operator.read_asset service ~on_release request in
+    Agent_protocol.Method_result.Recovery_asset_read chunk
   | Goal_query request ->
     let open Result.Let_syntax in
     let%bind read =
@@ -3220,7 +3340,14 @@ let dispatch_authorized
   | Session_run_start request ->
     handle_run_start t ~actor context command_audit request |> run_start_result
   | Session_send_message request ->
-    handle_send_message t ~agent_actor ?prepared_writer context command_audit request
+    handle_send_message
+      t
+      ~actor
+      ~agent_actor
+      ?prepared_writer
+      context
+      command_audit
+      request
   | Session_runs request -> handle_runs t ~actor context request
   | Session_run request -> handle_run t ~actor context request
   | Session_pending_inputs request -> handle_pending_inputs t context request
@@ -3277,6 +3404,7 @@ let dispatch_authorized
 let handle_authorized
       t
       ?prepared_writer
+      ~on_release
       ~actor
       ~agent_actor
       ~context
@@ -3290,6 +3418,7 @@ let handle_authorized
     dispatch_authorized
       t
       ?prepared_writer
+      ~on_release
       ~actor
       ~agent_actor
       ~context
@@ -3361,6 +3490,28 @@ let command_session_id = function
   | Recurrence_query request ->
     Some (Agent_protocol.Session_ref.session_id request.session)
   | Recurrence_control request ->
+    Some (Agent_protocol.Session_ref.session_id request.session)
+  | Recovery_enable request -> Some (Agent_protocol.Session_ref.session_id request.session)
+  | Recovery_note_shares request ->
+    let source = Agent_protocol.Recovery_note_share_control.Request.source request in
+    Some (Agent_protocol.Session_ref.session_id source.session)
+  | Recovery_windows request -> Some (Agent_protocol.Session_ref.session_id request.session)
+  | Recovery_status request -> Some (Agent_protocol.Session_ref.session_id request.session)
+  | Recovery_followup request ->
+    Some (Agent_protocol.Session_ref.session_id (Agent_protocol.Recovery_followup.session request))
+  | Recovery_rollover request ->
+    Some
+      (Agent_protocol.Recovery_rollover_control.Request.session request
+       |> Agent_protocol.Session_ref.session_id)
+  | Recovery_range request ->
+    Some
+      (Agent_protocol.Recovery_text_range.session request
+       |> Agent_protocol.Session_ref.session_id)
+  | Recovery_asset_read request ->
+    Some
+      (Agent_protocol.Recovery_asset_read.session request
+       |> Agent_protocol.Session_ref.session_id)
+  | Recovery_history request ->
     Some (Agent_protocol.Session_ref.session_id request.session)
   | Goal_query request -> Some (Agent_protocol.Session_ref.session_id request.session)
   | Goal_control request ->
@@ -3561,6 +3712,15 @@ let receipt_summary ~session_id result =
   | Schedule_list _
   | Schedule_get _
   | Ingress_submit _
+  | Recovery_enable _
+  | Recovery_windows _
+  | Recovery_history _
+  | Recovery_range _
+  | Recovery_asset_read _
+  | Recovery_status _
+  | Recovery_rollover _
+  | Recovery_followup _
+  | Recovery_note_shares _
   | Goal_query _
   | Goal_control _
   | Recurrence_query _
@@ -4002,7 +4162,7 @@ let handle_seed t ~actor context request =
          "seed authority changed after receipt admission; outcome is unknown")
 ;;
 
-let execute t ~actor ~agent_actor context ~inference_budget command =
+let execute t ~on_release ~actor ~agent_actor context ~inference_budget command =
   match command with
   | Agent_protocol.Command.Session_seed request -> handle_seed t ~actor context request
   | Agent_protocol.Command.Prompt_dependencies_status -> dependency_status t
@@ -4039,6 +4199,7 @@ let execute t ~actor ~agent_actor context ~inference_budget command =
      | None ->
        handle_authorized
          t
+         ~on_release
          ~actor
          ~agent_actor
          ~context
@@ -4058,6 +4219,7 @@ let execute t ~actor ~agent_actor context ~inference_budget command =
          fun command_audit ->
            handle_authorized
              t
+             ~on_release
              ?prepared_writer
              ~actor
              ~agent_actor
@@ -4067,7 +4229,7 @@ let execute t ~actor ~agent_actor context ~inference_budget command =
              command))
 ;;
 
-let handle t ?actor ~context ~inference_budget command =
+let handle t ?actor ?(on_release = ignore) ~context ~inference_budget command =
   let open Result.Let_syntax in
   let agent_actor = Option.first_some actor (Connection_context.original_actor context) in
   let%bind actor = Connection_context.request_actor context actor in
@@ -4117,9 +4279,11 @@ let handle t ?actor ~context ~inference_budget command =
         read_visible_state t context request.session_id |> Result.map ~f:(fun _ -> ())
       | _ -> Ok ()
     in
+    let release = ref None in
+    let register check = release := Some check in
     let outcome =
       Result.bind
-        (execute t ~actor ~agent_actor context ~inference_budget command)
+        (execute t ~on_release:register ~actor ~agent_actor context ~inference_budget command)
         ~f:(Principal_projection.result (Connection_context.principal context))
     in
     let outcome =
@@ -4133,6 +4297,15 @@ let handle t ?actor ~context ~inference_budget command =
     in
     let operator =
       match command with
+      | Recovery_enable _
+      | Recovery_windows _
+      | Recovery_history _
+      | Recovery_range _
+      | Recovery_asset_read _
+      | Recovery_status _
+      | Recovery_rollover _
+      | Recovery_followup _
+      | Recovery_note_shares _ -> Some "context recovery"
       | Goal_query _ | Goal_control _ -> Some "Goal"
       | Recurrence_query _ | Recurrence_control _ -> Some "Recurrence"
       | _ -> None
@@ -4143,6 +4316,24 @@ let handle t ?actor ~context ~inference_budget command =
       Error (error Permission_denied (name ^ " authority expired or was revoked"))
     | Ok _, Ok _, Some _ ->
       (match command, t.recurrence_operator with
+       | ( ( Recovery_enable _
+           | Recovery_windows _
+           | Recovery_history _
+           | Recovery_range _
+           | Recovery_asset_read _
+           | Recovery_status _
+           | Recovery_rollover _
+           | Recovery_followup _
+           | Recovery_note_shares _ )
+         , _ ) ->
+         let%bind check =
+           Result.of_option
+             !release
+             ~error:(error Permission_denied "missing recovery response authority")
+         in
+         let%bind () = check () in
+         on_release check;
+         outcome
        | Recurrence_control request, Some operator ->
          Result.bind (operator.check_disclosure ~actor ~context request) ~f:(fun () ->
            outcome)

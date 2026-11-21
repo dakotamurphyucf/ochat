@@ -417,7 +417,8 @@ let moderator_v1 =
   Surface.merge
     { Surface.empty with
       modules =
-        ingress_module
+        Chatml_context_rollover.builtin
+        :: ingress_module
         :: notification_module
         :: schedule_module
         :: subscription_module
@@ -428,6 +429,7 @@ let moderator_v1 =
         :: overrides
     ; type_aliases =
         tool_v1.type_aliases
+        @ Chatml_context_rollover.aliases
         @ List.map
             [ "tool_invocation", invocation_event_ty
             ; "wake_policy", wake_policy_ty

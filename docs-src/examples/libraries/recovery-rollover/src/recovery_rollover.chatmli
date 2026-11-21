@@ -1,0 +1,20 @@
+(* Pure policy for the host's typed on_context_rollover callback. Pass the
+   checkpoint value from the current offer or committed event. References
+   are opaque and body-free. The host verifies their exact scope and revision. *)
+type checkpoint = [ `Missing | `Checkpointed(json array) | `Archive_only ]
+type policy = [ `Require_checkpoint | `Allow_archive ]
+type continuation = [ `Continue | `Wait | `Finish ]
+type before_decision = [
+  `Veto
+  | `Proceed({hints:[ `None | `Some(json array) ];
+              continuation:[ `None | `Some(continuation) ]})
+]
+
+(* A qualified checkpoint preserves the supplied hint order. With Allow_archive,
+   an unqualified offer may proceed with empty hints only if the host separately
+   admits an archive-only transition. *)
+val before : fun(checkpoint, policy) -> before_decision
+
+(* Continue after a qualified commit. Hold after archive-only recovery until
+   an authorized wake or operator action supplies the next step. *)
+val after : fun(checkpoint) -> continuation

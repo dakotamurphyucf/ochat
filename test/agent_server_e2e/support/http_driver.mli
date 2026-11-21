@@ -67,7 +67,8 @@ val request_without_history
   -> (Agent_protocol.Method_result.t, Agent_protocol.Error.t) result
 
 val initialize
-  :  t
+  :  ?features:string list
+  -> t
   -> (Agent_protocol.Initialize.Response.t * response, Agent_protocol.Error.t) result
 
 val notify : t -> Agent_protocol.Command.t -> (response, string) result

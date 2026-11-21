@@ -6,6 +6,7 @@ module O = Prompt.Chat_markdown.Document_occurrence
 module Record = Content_record
 module R = Content_rendered
 module Storage = Agent_store.Prompt_program_bundle
+module Originals = Agent_store.Installed_document_originals
 module Projection = Prompt.Chat_markdown.Document_projection
 
 type t =
@@ -159,11 +160,11 @@ let capture ~parsed_contexts ~rendered ~budget =
         else
           Ok ((), (input + R.input_bytes value, output + String.length (R.contents value))))
   in
-  let%bind inputs, roots, records, used =
+  let%bind inputs, roots, records, used, originals =
     List.fold_result
       parsed_contexts
-      ~init:(String.Map.empty, [], [], [])
-      ~f:(fun (inputs, roots, records, used) parsed ->
+      ~init:(String.Map.empty, [], [], [], [])
+      ~f:(fun (inputs, roots, records, used, originals) parsed ->
         let%bind input_count =
           B.count budget (Parsed.inputs parsed) ~maximum:(B.Limits.parser_inputs limits)
         in
@@ -188,11 +189,11 @@ let capture ~parsed_contexts ~rendered ~budget =
             ~maximum:(B.Limits.occurrences limits)
         in
         let root = Parsed.root_input parsed in
-        let%bind records, used =
+        let%bind records, used, originals =
           List.fold_result
             (Parsed.document_occurrences parsed)
-            ~init:(records, used)
-            ~f:(fun (records, used) occurrence ->
+            ~init:(records, used, originals)
+            ~f:(fun (records, used, originals) occurrence ->
               let%bind () = B.work budget 2 in
               let%bind found =
                 List.fold_result rendered ~init:None ~f:(fun found value ->
@@ -226,7 +227,7 @@ let capture ~parsed_contexts ~rendered ~budget =
                       , value :: used )
               in
               let%bind src_digest = B.hash budget (O.src occurrence) in
-              let%map record =
+              let%bind record =
                 Record.create
                   ~root
                   ~range:(O.range occurrence)
@@ -239,10 +240,38 @@ let capture ~parsed_contexts ~rendered ~budget =
                   ~kind
                   ~budget
               in
-              record :: records, used)
+              let%map originals =
+                match Option.bind found ~f:R.original, kind with
+                | ( Some raw
+                  , Record.Kind.Captured
+                      { provenance = Local _; input_digest; input_bytes; _ } ) ->
+                  let%bind () = B.work budget (input_bytes + 256) in
+                  let media_type =
+                    if O.markdown occurrence || O.cleanup_html occurrence
+                    then "text/html"
+                    else "application/octet-stream"
+                  in
+                  let%bind occurrence =
+                    Originals.Occurrence.of_digest (Record.key record)
+                    |> Result.map_error ~f:B.Error.storage
+                  in
+                  let%map entry =
+                    Originals.Entry.create
+                      ~occurrence
+                      ~sha256:input_digest
+                      ~byte_length:input_bytes
+                      ~media_type
+                    |> Result.map_error ~f:B.Error.storage
+                  in
+                  (entry, raw) :: originals
+                | None, _ -> Ok originals
+                | Some _, (Record.Kind.Dynamic | Record.Kind.Captured _) ->
+                  invalid "original document requires captured local provenance"
+              in
+              record :: records, used, originals)
         in
         let%bind () = B.work budget 1 in
-        Ok (inputs, root :: roots, records, used))
+        Ok (inputs, root :: roots, records, used, originals))
   in
   let%bind () =
     List.fold_result rendered ~init:() ~f:(fun () value ->
@@ -254,11 +283,79 @@ let capture ~parsed_contexts ~rendered ~budget =
       if found then Ok () else invalid "surplus rendered value")
   in
   let%bind () = B.work_product budget 2 (Map.length inputs) in
-  create
-    ~inputs:(Map.data inputs)
-    ~roots:(List.rev roots)
-    ~records:(List.rev records)
-    ~budget
+  let%bind inventory =
+    create
+      ~inputs:(Map.data inputs)
+      ~roots:(List.rev roots)
+      ~records:(List.rev records)
+      ~budget
+  in
+  let%map originals =
+    match originals with
+    | [] -> Ok None
+    | _ :: _ ->
+      Originals.create originals
+      |> Result.map ~f:Option.some
+      |> Result.map_error ~f:B.Error.storage
+  in
+  inventory, originals
+;;
+
+let find_occurrence records ~root ~occurrence ~budget =
+  let open Result.Let_syntax in
+  List.fold_result records ~init:None ~f:(fun found record ->
+    let%bind equal = Record.matches record ~root occurrence ~budget in
+    if not equal
+    then Ok found
+    else (
+      match found with
+      | None -> Ok (Some record)
+      | Some _ -> invalid "ambiguous content occurrence"))
+;;
+
+module Original_keys = struct
+  type t = (O.t * Originals.Occurrence.t) Int.Map.t
+
+  let empty = Int.Map.empty
+
+  let find t occurrence =
+    match Map.find t (O.ordinal occurrence) with
+    | Some (actual, key) when phys_equal actual occurrence -> Some key
+    | _ -> None
+  ;;
+
+  let add t ~occurrence ~record ~budget =
+    let open Result.Let_syntax in
+    let%bind () = B.map_work budget (Map.length t) in
+    let%map key =
+      Originals.Occurrence.of_digest (Record.key record)
+      |> Result.map_error ~f:B.Error.storage
+    in
+    Map.set t ~key:(O.ordinal occurrence) ~data:(occurrence, key)
+  ;;
+end
+
+let original_key t ~parsed ~occurrence ~budget =
+  let open Result.Let_syntax in
+  let%bind present =
+    List.fold_result
+      (Parsed.document_occurrences parsed)
+      ~init:false
+      ~f:(fun found value ->
+        let%map () = B.work budget 1 in
+        found || phys_equal occurrence value)
+  in
+  if not present
+  then invalid "original document occurrence belongs to a different parser result"
+  else (
+    let%bind record =
+      find_occurrence t.records ~root:(Parsed.root_input parsed) ~occurrence ~budget
+    in
+    match Option.map record ~f:Record.kind, record with
+    | Some (Record.Kind.Captured { provenance = Local _; _ }), Some record ->
+      Originals.Occurrence.of_digest (Record.key record)
+      |> Result.map_error ~f:B.Error.storage
+    | _ -> invalid "installed document original requires a local captured occurrence")
 ;;
 
 let materialize t ~parsed ~budget =
@@ -284,21 +381,12 @@ let materialize t ~parsed ~budget =
         let%map equal = Record.input_equal (Record.root record) root ~budget in
         if equal then record :: selected else selected)
     in
-    let%bind pairs, matched =
+    let%bind pairs, matched, originals =
       List.fold_result
         (Parsed.document_occurrences parsed)
-        ~init:([], String.Set.empty)
-        ~f:(fun (pairs, matched) occurrence ->
-          let%bind found =
-            List.fold_result selected ~init:None ~f:(fun found record ->
-              let%bind equal = Record.matches record ~root occurrence ~budget in
-              if not equal
-              then Ok found
-              else (
-                match found with
-                | None -> Ok (Some record)
-                | Some _ -> invalid "ambiguous content occurrence"))
-          in
+        ~init:([], String.Set.empty, Original_keys.empty)
+        ~f:(fun (pairs, matched, originals) occurrence ->
+          let%bind found = find_occurrence selected ~root ~occurrence ~budget in
           match found with
           | None -> invalid "actual document occurrence differs from retained custody"
           | Some record ->
@@ -324,7 +412,13 @@ let materialize t ~parsed ~budget =
               | Dynamic -> pairs
               | Captured { contents; _ } -> (occurrence, contents) :: pairs
             in
-            Ok (pairs, Set.add matched (Record.key record)))
+            let%map originals =
+              match Record.kind record with
+              | Captured { provenance = Local _; _ } ->
+                Original_keys.add originals ~occurrence ~record ~budget
+              | Dynamic | Captured _ -> Ok originals
+            in
+            pairs, Set.add matched (Record.key record), originals)
     in
     let%bind count =
       B.count budget selected ~maximum:(B.Limits.occurrences (B.limits budget))
@@ -346,7 +440,7 @@ let materialize t ~parsed ~budget =
           B.Error.invalid "bounded document projection failed")
       in
       let%map () = B.work budget (Projection.work_steps projection) in
-      projection))
+      projection, originals))
 ;;
 
 let preserves t ~previous ~budget =

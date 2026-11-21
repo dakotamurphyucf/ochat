@@ -1,0 +1,3 @@
+(library
+ (name provider_websocket_fixture)
+ (libraries core eio eio.unix digestif base64 jsonaf))

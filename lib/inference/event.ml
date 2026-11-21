@@ -45,11 +45,13 @@ module Terminal = struct
     | Session_closed
     | Session_busy
     | Http_status of int
+    | Http_context_limit
   [@@deriving equal, sexp_of]
 
   module Provider_failure = struct
     type t =
       | Invalid_request
+      | Context_window_exceeded
       | Denied
       | Rate_limited
       | Unavailable
@@ -100,6 +102,8 @@ module Terminal = struct
     in
     let%map () =
       match outcome with
+      | Failed (Transport Http_context_limit) when equal_delivery delivery Definitely_not_submitted ->
+        Error "a context-limit HTTP rejection requires submission evidence"
       | Failed (Transport (Http_status status)) when status < 100 || status > 599 ->
         Error "HTTP status must be in 100..599"
       | Completed | Refused | Incomplete _ | Failed _ -> Ok ()
@@ -110,6 +114,12 @@ module Terminal = struct
   let scope t = t.scope
   let delivery t = t.delivery
   let outcome t = t.outcome
+
+  let is_context_window_rejection t =
+    match t.outcome with
+    | Failed (Provider Context_window_exceeded | Transport Http_context_limit) -> true
+    | Completed | Refused | Incomplete _ | Failed _ -> false
+  ;;
 
   let equal a b =
     Transcript.Scope.equal a.scope b.scope
@@ -141,6 +151,7 @@ module Terminal = struct
 
   let provider_name : Provider_failure.t -> string = function
     | Invalid_request -> "invalid_request"
+    | Context_window_exceeded -> "context_window_exceeded"
     | Denied -> "denied"
     | Rate_limited -> "rate_limited"
     | Unavailable -> "unavailable"
@@ -165,6 +176,7 @@ module Terminal = struct
         | Unsupported_transport -> "unsupported_transport", []
         | Session_closed -> "session_closed", []
         | Session_busy -> "session_busy", []
+        | Http_context_limit -> "http_context_limit", []
         | Http_status status ->
           "http_status", [ "status", `Number (Int.to_string status) ]
       in
@@ -204,6 +216,7 @@ module Terminal = struct
        | _ -> Error "unknown authentication failure")
     | "provider" ->
       (match reason with
+       | "context_window_exceeded" -> Ok (Provider Context_window_exceeded)
        | "invalid_request" -> Ok (Provider Invalid_request)
        | "denied" -> Ok (Provider Denied)
        | "rate_limited" -> Ok (Provider Rate_limited)
@@ -212,6 +225,7 @@ module Terminal = struct
        | _ -> Error "unknown provider failure")
     | "transport" ->
       (match reason with
+       | "http_context_limit" -> Ok (Transport Http_context_limit)
        | "connection" -> Ok (Transport Connection)
        | "timeout" -> Ok (Transport Timeout)
        | "invalid_http" -> Ok (Transport Invalid_http)

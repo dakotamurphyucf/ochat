@@ -206,29 +206,44 @@ module Context = struct
 
     let check t =
       let open Result.Let_syntax in
-      let%bind () = check_basis t in
       let context = t.context in
-      let%bind () =
-        if self context
-        then Ok ()
-        else (
-          let controller =
-            Intent.occurrence context.intent
-            |> A.Recurrence_identity.Occurrence.definition
-            |> A.Recurrence_identity.Definition.controller
-          in
-          Factory.check_registered_entry
+      let check_target () =
+        let%bind () =
+          Factory.check_registered_owner
             context.service.factory
-            context.controller
-            ~session:controller)
+            context.target
+            ~session:(Intent.target context.intent)
+        in
+        check_basis t
       in
-      let%bind () =
-        Factory.check_registered_owner
+      let%bind () = check_basis t in
+      if self context
+      then check_target ()
+      else (
+        let controller =
+          Intent.occurrence context.intent
+          |> A.Recurrence_identity.Occurrence.definition
+          |> A.Recurrence_identity.Definition.controller
+        in
+        Factory.await_held_recurrence_controller
           context.service.factory
-          context.target
-          ~session:(Intent.target context.intent)
-      in
-      check_basis t
+          context.controller
+          ~session:controller
+          ~check_current:(fun ~resumed ->
+            let%bind () = check_target () in
+            if not resumed
+            then Ok ()
+            else if
+              Operator_authorization.is_current context.controller_actor
+              && Operator_authorization.is_current context.target_actor
+            then check_target ()
+            else
+              Error
+                (P.Error.create
+                   Permission_denied
+                   ~message:"held recurrence activation authority is no longer current"
+                   ~retryable:false
+                   ())))
     ;;
 
     let create context ~prepared ~held ~attempt =

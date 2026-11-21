@@ -14,6 +14,16 @@ type t =
   | Workspace_changed of Workspace_instance.t
   | Canonical_entries_appended of Agent_protocol.History.entry list
   | Canonical_history_replaced of Agent_protocol.History.entry list
+  | Recovery_window_expired of (Agent_protocol.Recovery_window.Scope.t[@sexp.opaque])
+  | Recovery_window_enabled of
+      Agent_protocol.Session_ref.t * Agent_protocol.Id.Context_window.t
+  | Recovery_effective_prepared of (Recovery_effective_record.t[@sexp.opaque])
+  | Recovery_reminder_changed of (Recovery_reminder.Change.t[@sexp.opaque])
+  | Recovery_effective_attempt_changed of (Recovery_effective_receipts.t[@sexp.opaque])
+  | Recovery_summary_compacted of
+      Session_state.Compaction_archive.t
+      * Agent_protocol.History.entry list
+      * [ `Canonical | `Canonical_and_effective ]
   | Authoring_references_forgotten of Agent_protocol.History.Id.t list
   | Authoring_publication_changed of Chat_response.Authoring_publication.context
   (** Trusted model-input policy/context binding, retained for result publication
@@ -87,6 +97,10 @@ type t =
   | Goal_catalog_changed of Goal_catalog.t
   | Goal_accounts_changed of (Goal_accounts.t[@sexp.opaque])
   | Instruction_selection_changed of Instruction_selection.t
+  | Recovery_note_changed of (Recovery_note_change.t[@sexp.opaque])
+  | Recovery_note_share_changed of (Recovery_note_share_change.t[@sexp.opaque])
+  | Recovery_rollover_changed of (Recovery_rollover.Change.t[@sexp.opaque])
+  | Recovery_rollover_committed of (Recovery_rollover.Commit.t[@sexp.opaque])
   | Recurrence_catalog_changed of Recurrence_catalog.t
   | Run_state_changed of Run_state.t
   | Moderator_changed of Jsonaf.t option
@@ -121,6 +135,35 @@ val apply
   -> Session_state.t
   -> t
   -> (Session_state.t, Agent_protocol.Error.t) result
+
+val validate_rollover_transaction : t -> (unit, Agent_protocol.Error.t) result
+
+val validate_successor_dispatch
+  :  Session_state.t
+  -> t
+  -> (unit, Agent_protocol.Error.t) result
+
+(** Operation work can move only with the exact ordered successor admission.
+    Preexisting admission records without a Run work move retain their replay
+    meaning. This check supplies no live writer authority. *)
+val validate_rollover_run_work
+  :  Session_state.t
+  -> t
+  -> (unit, Agent_protocol.Error.t) result
+
+val successor_retained_history
+  :  ?retain_accepted_wakes:bool
+  -> Session_state.t
+  -> Agent_protocol.Operation.t
+  -> (Agent_protocol.History.Id.t list, Agent_protocol.Error.t) result
+
+val foreground_continuation : Session_state.t -> Recovery_rollover_continuation.t option
+val awaiting_settled_foreground : Session_state.t -> bool
+
+val rollover_retained_history
+  :  Session_state.t
+  -> Recovery_rollover.Commit.t
+  -> (Agent_protocol.History.entry list, Agent_protocol.Error.t) result
 
 (** Live host admission only: append an immutable source binding next to every
     genuinely new Model_call Job_changed using the then-selected captured source.

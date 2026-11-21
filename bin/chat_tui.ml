@@ -1222,6 +1222,8 @@ end
 module Cli = struct
   type raw_flags =
     { typeahead_config : Chat_tui.Type_ahead_config.t Or_error.t
+    ; enable_recovery : bool
+    ; recovery_capacity_file : string option
     ; inference_transport : string option
     ; conversation_file : string
     ; local : bool
@@ -2237,6 +2239,8 @@ module Embedded_interactive = struct
   ;;
 
   let run
+        ~enable_recovery
+        ~recovery_capacity_file
         ~transport_policy
         ~typeahead_config
         ~env
@@ -2261,9 +2265,9 @@ module Embedded_interactive = struct
         ; tool_dir = workspace
         ; home
         ; storage
-        ; start_immediately = Option.is_none import_transcript
+        ; start_immediately = Option.is_none import_transcript && not enable_recovery
         ; permission_profile = interactive_permission_profile ~authorize_shell_manifest
-        ; attachment_mode = Agent_protocol.Session.Read_write
+        ; attachment_mode = (if enable_recovery then Owner_read_write else Read_write)
         ; event_capacity = 4096
         }
     in
@@ -2371,8 +2375,13 @@ module Embedded_interactive = struct
         |> Result.map ~f:Option.some
     in
     let result =
+      let open Result.Let_syntax in
+      let%bind recovery_capacity =
+        Local_recovery_cli.load_capacity ~env recovery_capacity_file
+      in
       Result.bind imported ~f:(fun imported ->
         Agent_server.Embedded.with_local_host
+          ?recovery_capacity
           ~daemon_options
           ~sw
           ~env
@@ -2385,17 +2394,43 @@ module Embedded_interactive = struct
               let%bind connection = Agent_server.Embedded.connect_host host in
               Eio.Switch.on_release client_sw (fun () ->
                 Agent_client.Connection.close connection);
+              let enroll client =
+                if not enable_recovery
+                then Ok ()
+                else (
+                  let%bind attachment =
+                    Result.of_option
+                      (Chat_tui.Agent_session_client.attachment client)
+                      ~error:
+                        (Agent_protocol.Error.invalid_request
+                           "local owner attachment closed")
+                  in
+                  let fields =
+                    Chat_tui.Agent_projection.fields
+                      (Chat_tui.Agent_session_client.projection client)
+                  in
+                  Local_recovery_cli.enroll connection fields.session ~attachment)
+              in
+              let start client =
+                Chat_tui.Agent_session_client.start client ~queue_if_limited:true
+                |> Result.map ~f:ignore
+              in
               let%bind client =
                 match session_id, imported with
                 | None, None ->
                   let%bind spec = Agent_server.Embedded.session_spec options in
-                  Chat_tui.Agent_session_client.create_with_spec
+                  let%bind client =
+                    Chat_tui.Agent_session_client.create_with_spec
                     ~sw:client_sw
                     ~clock:(Eio.Stdenv.clock env)
                     ~connection
                     ~spec
                     ~mode:options.attachment_mode
                     ()
+                  in
+                  let%bind () = enroll client in
+                  let%map () = if enable_recovery then start client else Ok () in
+                  client
                 | None, Some transcript ->
                   let%bind _ =
                     Agent_client.Session_handle.initialize
@@ -2444,9 +2479,8 @@ module Embedded_interactive = struct
                       ~mode:options.attachment_mode
                       ()
                   in
-                  let%map _ =
-                    Chat_tui.Agent_session_client.start client ~queue_if_limited:true
-                  in
+                  let%bind () = enroll client in
+                  let%map () = start client in
                   client
                 | Some id, None ->
                   let%bind id = Agent_protocol.Id.Session.of_string id in
@@ -2465,6 +2499,7 @@ module Embedded_interactive = struct
                       (Chat_tui.Agent_session_client.projection client)
                   in
                   let session = fields.session in
+                  let%bind () = enroll client in
                   let%map () =
                     match session.desired_state, session.observed_state with
                     | Stopped, Stopped ->
@@ -2660,7 +2695,13 @@ let run_env_action ~env (action : Cli.action) =
   | Embedded_interactive _ -> ()
 ;;
 
-let run_action ~transport_policy ~typeahead_config (action : Cli.action) =
+let run_action
+      ~enable_recovery
+      ~recovery_capacity_file
+      ~transport_policy
+      ~typeahead_config
+      (action : Cli.action)
+  =
   match action with
   | Interactive
       { session_id
@@ -2713,6 +2754,8 @@ let run_action ~transport_policy ~typeahead_config (action : Cli.action) =
       } ->
     Env.with_env (fun env ->
       Embedded_interactive.run
+        ~enable_recovery
+        ~recovery_capacity_file
         ~transport_policy
         ~typeahead_config
         ~env
@@ -2752,8 +2795,20 @@ let run_from_raw (raw : Cli.raw_flags) =
           "--inference-transport requires a local interactive host; remote and \
            maintenance commands cannot change host policy"
     in
+    let%bind () =
+      match raw.enable_recovery || Option.is_some raw.recovery_capacity_file, action with
+      | false, _ | true, Cli.Embedded_interactive { storage = Default | Durable _; _ } ->
+        Ok ()
+      | true, _ ->
+        Or_error.error_string "recovery options require a durable --local session"
+    in
     let%bind typeahead_config = raw.typeahead_config in
-    run_action ~transport_policy ~typeahead_config action
+    run_action
+      ~enable_recovery:raw.enable_recovery
+      ~recovery_capacity_file:raw.recovery_capacity_file
+      ~transport_policy
+      ~typeahead_config
+      action
 ;;
 
 let raw_flags_param =
@@ -2823,6 +2878,8 @@ let raw_flags_param =
         ~doc:"DIR Absolute durable root for --local (default HOME/.ochat/agent-store)."
     and local_transient =
       flag "--transient" no_arg ~doc:"Use explicit temporary storage with --local."
+    and enable_recovery = Local_recovery_cli.enable_flag
+    and recovery_capacity_file = Local_recovery_cli.capacity_file
     and inference_transport =
       flag
         "--inference-transport"
@@ -3040,6 +3097,8 @@ let raw_flags_param =
            ~history_messages:typeahead_history
            ~debounce_ms:typeahead_debounce
            ~max_output_tokens:typeahead_tokens
+     ; enable_recovery
+     ; recovery_capacity_file
      ; inference_transport
      ; conversation_file
      ; local

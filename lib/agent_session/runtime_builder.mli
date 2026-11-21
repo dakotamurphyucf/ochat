@@ -603,7 +603,8 @@ type extension_services =
   ; notification_input :
       source:Agent_protocol.Invocation.observer option
       -> tools:Script_tool_calls.t
-      -> operation_id:Agent_protocol.Id.Operation.t
+      -> consume:
+           Notification_delivery.t Operation_worker.Capabilities.notification_consumer
       -> unit
       -> ( Chat_response.In_memory_stream.Safe_point_input.batch
            , Agent_protocol.Error.t )
@@ -611,7 +612,8 @@ type extension_services =
   ; initial_notification_input :
       source:Agent_protocol.Invocation.observer option
       -> tools:Script_tool_calls.t
-      -> operation_id:Agent_protocol.Id.Operation.t
+      -> consume:
+           Notification_delivery.idle Operation_worker.Capabilities.notification_consumer
       -> unit
       -> ( Chat_response.In_memory_stream.Safe_point_input.batch
            , Agent_protocol.Error.t )
@@ -773,7 +775,8 @@ type t =
     (** Host wall clock shared by foreground, idle and delegated moderation and
         persisted workflow deadlines. Monotonic execution limits are separate. *)
   ; parse_user_content :
-      id:History_entry.Id.t
+      ?asset_capture:Chat_response.Converter_asset_capture.t
+      -> id:History_entry.Id.t
       -> Agent_protocol.Session.Message_content.t
       -> (History_entry.t, Agent_protocol.Error.t) result
   ; parse_prepared_input :
@@ -786,6 +789,8 @@ type t =
       cancellation propagates. Ordinary parse_user_content is unchanged. *)
   ; initial_history : History_entry.t list
   ; initial_prompt_entry_count : int
+  ; initial_installed_originals : Recovery_installed_originals.Initial.t option
+    (** Address-only custody after admission against the exact initial prefix. *)
   ; reserved_history_through : int
   ; moderator_snapshot : unit -> Jsonaf.t option
     (** Latest successfully published startup checkpoint. Runtime record wrappers

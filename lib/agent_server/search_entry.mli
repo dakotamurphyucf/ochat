@@ -4,12 +4,7 @@
     Initial authored prefix exclusion belongs to the owning session reader. *)
 type t
 
-module Part : sig
-  type t = private
-    { index : int
-    ; text : string
-    }
-end
+module Part = Agent_protocol.History_text
 
 (** At most 4096 original parts and 1 MiB of selected UTF-8 text per entry.
     Every selected part is validated before admission. An excluded entry returns

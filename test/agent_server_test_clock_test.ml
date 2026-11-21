@@ -49,7 +49,9 @@ let%expect_test "paused logical clock does not complete an already armed timeout
       assert (not (Eio_mock.Clock.Mono.try_advance real));
       set_time real 100;
       assert (Option.is_none !result);
-      [%test_eq: int64] 3L (logical_seconds clock);
+      (* The compiler reads this same paused clock from a worker domain. *)
+      let worker = Stdlib.Domain.spawn (fun () -> logical_seconds clock) in
+      [%test_eq: int64] 3L (Stdlib.Domain.join worker);
       (* Explicit advancement still satisfies an existing wait while paused. *)
       advance 6.;
       pump ();

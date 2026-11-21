@@ -95,6 +95,18 @@ let run_policy
                admit binding selected dispatched
                |> Result.map ~f:(fun target -> `Managed target))
       in
+      let protected =
+        C.equal_result_contract (C.result_contract binding) Protected_recovery_v1
+      in
+      let%bind live_input =
+        if protected
+        then
+          Protected_native_call.input call ~binding
+          |> Result.of_option
+               ~error:
+                 (fail "recovery.unavailable" "Protected recovery input is unavailable.")
+        else Ok call.input
+      in
       let%bind _ = target binding selected in
       with_selected selected (fun () ->
         let%bind () =
@@ -104,7 +116,7 @@ let run_policy
                "The tool arguments do not satisfy its input schema.")
             (fun () ->
                let%bind schema = S.compile reference.input_schema in
-               S.validate schema call.input)
+               S.validate schema live_input)
         in
         let%bind () =
           checked
@@ -118,11 +130,37 @@ let run_policy
         let%bind target = target binding selected in
         let validate_output ~validate_work ~selected_jobs output =
           let%bind value =
-            checked
-              (fail
-                 "invocation.disclosure_rejected"
-                 "The tool result could not be disclosed.")
-              (fun () -> prepare_output output)
+            if protected
+            then (
+              match Protected_native_call.result call ~binding with
+              | Some (Acknowledged | Deliver _) -> Ok `Null
+              | Some (Rejected Missing) ->
+                Error (fail "recovery.note_missing" "The recovery note is unavailable.")
+              | Some (Rejected Invalid) ->
+                Error (fail "recovery.invalid_request" "The recovery request is invalid.")
+              | Some (Rejected Denied) ->
+                Error
+                  (fail "recovery.permission_denied" "Recovery authority is unavailable.")
+              | Some (Rejected Conflict) ->
+                Error (fail "recovery.conflict" "The recovery note precondition changed.")
+              | Some (Rejected Limit) ->
+                Error
+                  (fail
+                     "recovery.resource_limit"
+                     "A recovery resource limit was reached.")
+              | Some (Rejected Expired_cursor) ->
+                Error (fail "recovery.cursor_expired" "The recovery note cursor expired.")
+              | Some (Rejected Unavailable) | None ->
+                Error
+                  (fail
+                     "recovery.unavailable"
+                     "Protected recovery result is unavailable."))
+            else
+              checked
+                (fail
+                   "invocation.disclosure_rejected"
+                   "The tool result could not be disclosed.")
+                (fun () -> prepare_output output)
           in
           let%bind outcome =
             checked
@@ -130,6 +168,7 @@ let run_policy
               (fun () ->
                  let%bind () = I.validate_outcome (I.Complete value) in
                  match C.result_contract binding with
+                 | Protected_recovery_v1 -> Ok (I.Complete `Null)
                  | Native_output -> Ok (I.Complete value)
                  | Invocation_v1 ->
                    (match value with
@@ -171,7 +210,7 @@ let run_policy
         | `Native implementation ->
           let%bind () = check_halted () in
           let%bind payload =
-            match implementation.info.type_, call.input with
+            match implementation.info.type_, live_input with
             | "function", input -> Ok (Jsonaf.to_string input)
             | "custom", `String input -> Ok input
             | "custom", _ ->
@@ -208,9 +247,20 @@ let run_policy
                          ~check:current
                    in
                    let native = Native.create implementation ~prepare_invocation in
-                   match run_native with
-                   | Some run_native -> Ok (run_native native ~payload)
-                   | None ->
+                   match protected, run_native with
+                   | true, _ ->
+                     (* The driver observes ordinary tool inputs and outputs. A protected
+                        implementation receives only its actual effect check, with no
+                        progress or trace callbacks that could copy private bytes. *)
+                     ignore
+                       (Native.run
+                          native
+                          ~invocation:Ochat_function.Invocation.silent
+                          payload
+                        : Openai.Responses.Tool_output.Output.t);
+                     Ok (Openai.Responses.Tool_output.Output.Text "")
+                   | false, Some run_native -> Ok (run_native native ~payload)
+                   | false, None ->
                      let active = Atomic.make true in
                      let invocation =
                        match native_invocation, on_progress with

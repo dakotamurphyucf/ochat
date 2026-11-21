@@ -203,7 +203,13 @@ let%expect_test "active A capture remains immutable while the next root capture 
                port.with_context
                  ~previous:initial_context
                  ~history:input.history
-                 (fun context ~on_dispatch ->
+                 (fun
+                     context
+                      ~select_checkpoint:_
+                      ~select_prepared:_
+                      ~on_prepared:_
+                      ~on_dispatch
+                    ->
                     assert (
                       String.equal (R.Target.model (Runtime.Context.target context)) "A");
                     Eio.Promise.resolve captured_r ();
@@ -217,7 +223,13 @@ let%expect_test "active A capture remains immutable while the next root capture 
                port.with_context
                  ~previous:initial_context
                  ~history:input.history
-                 (fun context ~on_dispatch ->
+                 (fun
+                     context
+                      ~select_checkpoint:_
+                      ~select_prepared:_
+                      ~on_prepared:_
+                      ~on_dispatch
+                    ->
                     assert (
                       String.equal (R.Target.model (Runtime.Context.target context)) "B");
                     on_dispatch
@@ -320,7 +332,13 @@ let%expect_test "resolution failures and cancellation release preparing ownershi
                       port.with_context
                         ~previous
                         ~history:input.history
-                        (fun _ ~on_dispatch:_ -> assert false))));
+                        (fun
+                            _
+                             ~select_checkpoint:_
+                             ~select_prepared:_
+                             ~on_prepared:_
+                             ~on_dispatch:_
+                           -> assert false))));
                assert (Option.is_none (A.configuration actor |> protocol_ok).capture);
                fail_resolution := false;
                let began, began_r = Eio.Promise.create () in
@@ -330,7 +348,13 @@ let%expect_test "resolution failures and cancellation release preparing ownershi
                     port.with_context
                       ~previous
                       ~history:input.history
-                      (fun _ ~on_dispatch:_ ->
+                      (fun
+                          _
+                           ~select_checkpoint:_
+                           ~select_prepared:_
+                           ~on_prepared:_
+                           ~on_dispatch:_
+                         ->
                          Eio.Promise.resolve began_r ();
                          Eio.Promise.await never))
                  (fun () -> Eio.Promise.await began);
@@ -338,7 +362,13 @@ let%expect_test "resolution failures and cancellation release preparing ownershi
                port.with_context
                  ~previous
                  ~history:input.history
-                 (fun context ~on_dispatch ->
+                 (fun
+                     context
+                      ~select_checkpoint:_
+                      ~select_prepared:_
+                      ~on_prepared:_
+                      ~on_dispatch
+                    ->
                     on_dispatch
                       (T.safe_view (Runtime.Context.target context) |> protocol_ok));
                assert (
@@ -870,4 +900,352 @@ let%expect_test
          graph never reopens"));
   [%expect
     {|candidate failure/cancellation preserve old resource; borrow releases; closed graph never reopens|}]
+;;
+
+let%test_unit
+    "durable capacity follows the actual root preparation while independent local stays \
+     disabled"
+  =
+  let module Capacity = Agent_session.Session_context_capacity in
+  let module Counter = Runtime.Context_capacity in
+  let module O = Inference.Observation in
+  let module S = Agent_session.Session_state in
+  let module Graph = Agent_server.Graph_tracking in
+  let module Worker = Agent_session.Operation_worker in
+  let run
+        ~durable
+        env
+        sw
+        actor
+        attachment_id
+        ~graph
+        ~fixture
+        ~selected
+        ~count_calls
+        ~provider_current
+        ~entered
+        ~release
+        ~next_entered
+        ~next_release
+    =
+    let model_b =
+      R.Target.with_model selected ~model:"B" ~limits:document_limits |> inference_ok
+    in
+    let capacity_policy target =
+      Counter.Policy.create
+        ~target
+        ~encoder:Openai_responses_v1
+        ~model_limit:(Bounded { total = 500L; input = Some 450L; output = None })
+        ~allowance:
+          { host_total = None
+          ; session_total = Some 480L
+          ; omitted_output_default = Some 50L
+          ; checkpoint_reserve = 20L
+          ; warning_lead = 10L
+          }
+        ~estimate:None
+      |> Result.map_error ~f:(fun _ -> "invalid test capacity policy")
+      |> Result.ok_or_failwith
+    in
+    let host =
+      Capacity.Host.create
+        ~mode_for_session:(fun owner ->
+          if Agent_protocol.Session_ref.equal owner Recovery_note_actor_tests.owner
+          then Some Capacity.Mode.Automatic
+          else None)
+        ~targets:
+          [ capacity_policy selected, `Automatic; capacity_policy model_b, `Manual ]
+      |> Result.map_error ~f:(fun _ -> "invalid test host")
+      |> Result.ok_or_failwith
+    in
+    let policy =
+      Agent_session.Configuration_policy.
+        { select_profile =
+            (fun ~current:_ ~profile:_ ->
+              Error (Agent_protocol.Error.invalid_request "not configured"))
+        ; approve = (fun ~current:_ ~proposed:_ -> Ok ())
+        ; resolve =
+            (fun target ->
+              Inference_fixture.resolve fixture target
+              |> Result.map_error ~f:(fun _ ->
+                Agent_protocol.Error.invalid_request "unavailable"))
+        }
+    in
+    A.set_configuration_policy actor policy |> protocol_ok;
+    if durable then A.set_context_capacity_host actor host |> protocol_ok;
+    let context = Inference_fixture.resolve fixture selected |> runtime_ok in
+    let attempt_preparation = ref None in
+    let tools = String.Table.create () in
+    Hashtbl.set tools ~key:"finish_first" ~data:(fun ~invocation:_ _ ->
+      Openai.Responses.Tool_output.Output.Text "recorded");
+    let config =
+      Authoring_input_tests.worker_config env (fun ~sw:_ ~inputs:_ -> Seq.empty)
+    in
+    let identity allocate =
+      match graph with
+      | Some graph -> Graph.bind_identity graph ~allocate
+      | None -> Inference_fixture.identity fixture
+    in
+    let track f value = Option.iter graph ~f:(fun graph -> f graph value) in
+    let worker =
+      Agent_session.Turn_worker.create
+        ~root_binding:(Chat_response.Root_binding.create (Runtime.Session.create ~sw))
+        { config with
+          inference_context = context
+        ; inference_identity = identity
+        ; tool_tbl = tools
+        ; permission_profile =
+            permission_policy
+              ~tool_default:Allow
+              ~fallback:Fallback_deny
+              ~evaluator:None
+              ~reviewer:None
+        ; on_inference_attempt =
+            (fun attempt ->
+              track Graph.on_attempt attempt;
+              let configuration = Runtime.Attempt.configuration attempt in
+              attempt_preparation := Some (O.Configuration.preparation_id configuration))
+        ; on_inference_observation = track Graph.on_observation
+        ; on_inference_completion = track Graph.on_completion
+        }
+    in
+    let finished, publish_finished = Eio.Promise.create () in
+    let worker =
+      Worker.map_run worker ~f:(fun run ~sw ~input caps ->
+        let outcome = run ~sw ~input caps in
+        Eio.Promise.resolve publish_finished outcome;
+        outcome)
+    in
+    let wait stage f =
+      Agent_server_test_support.with_stage_timeout
+        ~clock:(Eio.Stdenv.clock env)
+        ~seconds:15.
+        ~stage
+        f
+    in
+    let require_complete stage = function
+      | Worker.Completed _ -> ()
+      | Failed failure ->
+        raise_s [%sexp (stage : string), (failure : Agent_protocol.Error.t)]
+      | Cancelled { reason } -> failwithf "%s: %s" stage reason ()
+    in
+    let await_provider stage entered =
+      wait stage (fun () ->
+        Eio.Fiber.first
+          (fun () -> Eio.Promise.await entered)
+          (fun () ->
+             require_complete stage (Eio.Promise.await finished);
+             failwithf "%s: worker completed before provider entry" stage ()))
+    in
+    A.set_operation_worker actor (Some worker) |> protocol_ok;
+    if durable then A.start actor ~attachment_id |> protocol_ok |> ignore;
+    let user =
+      Agent_session.History_codec.user_text ~id:(history_id "capacity-user") "hello"
+      |> Agent_session.History_codec.to_protocol
+    in
+    A.submit_message ~submitting_principal:principal_id actor ~attachment_id user
+    |> protocol_ok
+    |> ignore;
+    await_provider "capacity A provider entry" entered;
+    let current = A.state actor |> protocol_ok in
+    let operation = Option.value_exn current.active_operation in
+    let port = A.context_capacity actor ~operation_id:operation.id in
+    let status () = Capacity.Port.read port |> protocol_ok in
+    let check_attempt configuration assessment model =
+      assert (String.equal (O.Configuration.model configuration) model);
+      assert (
+        String.equal
+          (Counter.Assessment.preparation_id assessment)
+          (Option.value_exn !attempt_preparation))
+    in
+    if durable
+    then (
+      let first =
+        match status () with
+        | Current { availability; phase = Effective; configuration; assessment } ->
+          assert (Capacity.Mode.equal availability.requested Automatic);
+          assert (Capacity.Mode.equal availability.effective Manual);
+          check_attempt configuration assessment "A";
+          (match Counter.Assessment.view assessment with
+           | Assessed { evidence = Measured actual; remaining = Available left; _ } ->
+             assert (Int64.equal actual 100L && Int64.equal left 330L)
+           | _ -> assert false);
+          O.Configuration.preparation_id configuration
+        | _ -> assert false
+      in
+      let request =
+        C.Update_request.
+          { session_id
+          ; attachment_id
+          ; expected_generation = 0
+          ; expected_revision = 0L
+          ; patch = patch "B"
+          ; idempotency_key =
+              Agent_protocol.Idempotency_key.of_string "capacity-model-B" |> protocol_ok
+          }
+      in
+      A.update_configuration actor request |> protocol_ok |> ignore;
+      (match status () with
+       | Stale_preparation { requested = Automatic; effective = Manual } -> ()
+       | _ -> assert false);
+      Eio.Promise.resolve release ();
+      await_provider "capacity B provider entry" next_entered;
+      (match status () with
+       | Current { availability; configuration; assessment; phase = Effective } ->
+         assert (Capacity.Mode.equal availability.effective Manual);
+         check_attempt configuration assessment "B";
+         assert (not (String.equal first (O.Configuration.preparation_id configuration)));
+         (match Counter.Assessment.view assessment with
+          | Unavailable (Coverage_incomplete Image) -> ()
+          | _ -> assert false)
+       | _ -> assert false);
+      provider_current := false;
+      (match status () with
+       | Stale_preparation _ -> ()
+       | _ -> assert false);
+      provider_current := true;
+      (match status () with
+       | Stale_preparation _ -> ()
+       | _ -> assert false);
+      Eio.Promise.resolve next_release ();
+      assert (!count_calls = 2))
+    else (
+      (match status () with
+       | Disabled -> ()
+       | _ -> assert false);
+      (* Even a trusted explicit host config cannot enable a local actor without
+         its canonical durable writer. *)
+      A.set_context_capacity_host actor host |> protocol_ok;
+      (match status () with
+       | Disabled -> ()
+       | _ -> assert false);
+      Eio.Promise.resolve release ();
+      assert (!count_calls = 0));
+    wait "capacity foreground completion" (fun () ->
+      require_complete "capacity foreground completion" (Eio.Promise.await finished);
+      await_idle actor |> ignore);
+    assert (Result.is_error (Capacity.Port.read port))
+  in
+  List.iter [ false; true ] ~f:(fun durable ->
+    let entered, entered_resolver = Eio.Promise.create () in
+    let release, release_resolver = Eio.Promise.create () in
+    let next_entered, next_entered_resolver = Eio.Promise.create () in
+    let next_release, next_release_resolver = Eio.Promise.create () in
+    let count_calls = ref 0 in
+    let provider_current = ref true in
+    let attempts = ref 0 in
+    let fixture =
+      Inference_fixture.create_with_capacity
+        ~namespace:"capacity-fixture"
+        ~default_model:"A"
+        ~binding_is_current:(fun () -> !provider_current)
+        ~capacity_source:(fun request ->
+          Counter.Source.create ~encoder:Openai_responses_v1 ~read:(fun () ->
+            incr count_calls;
+            if String.equal (R.Target.model (R.target request)) "A"
+            then
+              Covered
+                (O.Count.create (Actual 100L)
+                 |> Result.map_error ~f:(fun _ -> "invalid fixture count")
+                 |> Result.ok_or_failwith)
+            else Incomplete Image))
+        ~post_stream:(fun ~sw:_ ~inputs:_ ->
+          incr attempts;
+          match !attempts, durable with
+          | 1, _ ->
+            Eio.Promise.resolve entered_resolver ();
+            Eio.Promise.await release;
+            if durable
+            then
+              let open Openai.Responses.Response_stream in
+              let item =
+                Item.Function_call
+                  { name = "finish_first"
+                  ; arguments = "{}"
+                  ; call_id = "capacity-first"
+                  ; _type = "function_call"
+                  ; id = Some "capacity-item"
+                  ; status = Some "completed"
+                  }
+              in
+              Stdlib.List.to_seq
+                [ Output_item_done
+                    { item; output_index = 0; type_ = "response.output_item.done" }
+                ]
+            else Seq.empty
+          | 2, true ->
+            Eio.Promise.resolve next_entered_resolver ();
+            Eio.Promise.await next_release;
+            Seq.empty
+          | _ -> failwith "unexpected capacity model request")
+    in
+    let selected =
+      Inference_fixture.capture_config fixture Chat_response.Config.default |> runtime_ok
+    in
+    let prepare_state (state : S.t) =
+      let inference_target =
+        Inference.Selection.captured selected ~limits:document_limits |> inference_ok
+      in
+      { state with spec = { state.spec with inference_target } }
+    in
+    let run env sw actor attachment_id ~graph =
+      run
+        ~durable
+        env
+        sw
+        actor
+        attachment_id
+        ~graph
+        ~fixture
+        ~selected
+        ~count_calls
+        ~provider_current
+        ~entered
+        ~release:release_resolver
+        ~next_entered
+        ~next_release:next_release_resolver
+    in
+    if durable
+    then
+      with_actor_workspace (fun env workspace_instance ->
+        Eio.Switch.run (fun sw ->
+          let module P = Agent_session.Session_persistence in
+          let initial =
+            actor_state ~workspace_instance ~liveness:Detached ~start_immediately:false
+            |> prepare_state
+          in
+          let directory =
+            Filename.concat
+              workspace_instance.canonical_root.native_path
+              "capacity-journal"
+          in
+          let journal =
+            Recovery_note_actor_tests.journal Agent_store.Journal.create env directory
+          in
+          Recovery_note_actor_tests.with_actor
+            env
+            sw
+            journal
+            (P.Restored.authored initial)
+            ~latest_sequence:0L
+            ~previous_transaction_hash:None
+            ~snapshot_payload_limit:1048576
+            ~before_commit:None
+            ~state_committed:(fun _ _ -> ())
+            (fun actor _ ->
+               let attachment_id = Recovery_note_actor_tests.attach actor Read_write in
+               (* The durable foreground must qualify the actual root attempt
+                  at the ordinary provider write, as in the installed host. *)
+               let graph =
+                 Inference_tracking_tests.create_fixture_graph
+                   actor
+                   ~source_name:"capacity-fixture"
+                   fixture
+               in
+               run env sw actor attachment_id ~graph:(Some graph);
+               Graph.seal graph |> protocol_ok;
+               Graph.finish graph |> protocol_ok)))
+    else
+      Job_fixtures.with_actor ~prepare_state (fun env sw actor attachment _ ->
+        run env sw actor attachment.id ~graph:None))
 ;;

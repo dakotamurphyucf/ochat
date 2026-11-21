@@ -529,6 +529,8 @@ let%expect_test "physical retry carrier survives reopen and complete result coll
             in
             let collection =
               Agent_server.Result_retention.collect
+                ~sessions
+                ~blobs:old_storage.blobs
                 ~runtime
                 ~actor
                 ~publisher

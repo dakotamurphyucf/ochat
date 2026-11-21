@@ -27,6 +27,26 @@ val create_with_observer
   -> post_stream:post_stream
   -> t
 
+(** Exercise host capacity publication with an explicit offline count and live
+    target guard. The resolver and inference path are unchanged. *)
+val create_with_capacity
+  :  capacity_source:(Inference.Request.t -> Inference_runtime.Context_capacity.Source.t)
+  -> binding_is_current:(unit -> bool)
+  -> namespace:string
+  -> default_model:string
+  -> post_stream:post_stream
+  -> t
+
+(** Exercise capacity against the same isolated request-guidance test adapter. *)
+val create_with_capacity_and_guidance
+  :  request_guidance:bool
+  -> capacity_source:(Inference.Request.t -> Inference_runtime.Context_capacity.Source.t)
+  -> binding_is_current:(unit -> bool)
+  -> namespace:string
+  -> default_model:string
+  -> post_stream:post_stream
+  -> t
+
 (** Explicitly opts into the actual pure OpenAI input translator and final
     submission guard. Default fixtures preserve history-only DTO input and reject
     request guidance. Synthetic outputs remain reconstructed. *)

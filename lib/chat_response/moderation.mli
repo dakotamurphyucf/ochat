@@ -33,6 +33,8 @@ module Phase : sig
     | Internal_event
     | Tool_invoked
     | Tool_observed
+    | Before_context_rollover
+    | After_context_rollover
   [@@deriving sexp, compare]
 
   val to_string : t -> string
@@ -256,6 +258,20 @@ module Identity_overlay : sig
   [@@deriving sexp]
 
   val empty : t
+
+  type 'entry source =
+    | Unchanged of 'entry
+    | Inserted of inserted
+    | Replaced of 'entry * replacement
+
+  (** Apply the same order, tombstones and replacements as [apply] using only
+      canonical occurrence identities. This traverses no canonical payload. *)
+  val sources
+    :  t
+    -> 'entry list
+    -> occurrence:('entry -> History_entry.Id.t)
+    -> 'entry source list
+
   val apply : t -> History_entry.t list -> Effective_entry.t list
 end
 

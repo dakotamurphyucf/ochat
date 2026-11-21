@@ -41,3 +41,18 @@ val with_request
       -> reserved_input_tokens:int
       -> 'a)
   -> ('a, Agent_protocol.Error.t) result
+
+(** Apply an independently scoped, optional recovery hint at User priority.
+    Existing installed guidance is preserved and the exact combined request is
+    re-admitted. An oversized optional addition is omitted before preparation.
+    The caller must rerun at most once without the hint on a capacity rejection. *)
+val with_optional_hint
+  :  t option
+  -> request:Inference.Request.t
+  -> submission_guard:Inference_runtime.Submission_guard.t
+  -> limits:Document_schema.Limits.t
+  -> (Inference.Request.t
+      -> guard:Inference_runtime.Submission_guard.t
+      -> included:bool
+      -> 'a)
+  -> ('a, Agent_protocol.Error.t) result

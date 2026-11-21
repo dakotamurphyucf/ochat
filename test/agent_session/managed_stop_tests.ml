@@ -21,11 +21,11 @@ let%expect_test
        let entered, enter = Eio.Promise.create () in
        let exited = ref 0 in
        let worker =
-         Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input:_ _caps ->
+         Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input:_ capabilities ->
            Exn.protect
              ~finally:(fun () -> Int.incr exited)
              ~f:(fun () ->
-               Eio.Promise.resolve enter ();
+               Eio.Promise.resolve enter capabilities;
                Eio.Fiber.await_cancel ()))
        in
        A.set_operation_worker actor (Some worker) |> protocol_ok;
@@ -36,7 +36,7 @@ let%expect_test
          (Managed_submission_tests.input 400 "Keep running until cancelled.")
        |> protocol_ok
        |> ignore;
-       Eio.Promise.await entered;
+       let capabilities = Eio.Promise.await entered in
        A.submit_message
          ~submitting_principal:principal_id
          actor
@@ -74,9 +74,7 @@ let%expect_test
        [%test_eq: int] 1 (List.length graceful.managed_stops);
        [%test_eq: int] 0 !exited;
        assert (Option.is_some graceful.active_operation);
-       let operation = Option.value_exn graceful.active_operation in
-       assert (
-         List.is_empty (A.consume_deferred actor ~operation_id:operation.id |> protocol_ok));
+       assert (List.is_empty (capabilities.consume_deferred () |> protocol_ok));
        assert_same_session_snapshot graceful (A.state actor |> protocol_ok);
        let saved_transition = List.last_exn !transitions in
        let replayed =

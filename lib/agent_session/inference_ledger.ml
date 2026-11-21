@@ -193,6 +193,7 @@ type t =
 
 let value t = Candidate.value t.candidate
 let revision t = (value t).revision
+let last_attempt_ordinal t = (value t).last_ordinal
 let rows t = Map.data (value t).rows
 let find t ~ordinal = Map.find (value t).rows ordinal
 let str s = `String s
@@ -305,12 +306,14 @@ module Shape = struct
          ; "invalid_credential"
          ; "timed_out"
          ; "invalid_request"
+         ; "context_window_exceeded"
          ; "rate_limited"
          ; "unavailable"
          ; "unknown"
          ; "connection"
          ; "timeout"
          ; "invalid_http"
+         ; "http_context_limit"
          ; "invalid_content_type"
          ; "body_limit"
          ; "framing_limit"

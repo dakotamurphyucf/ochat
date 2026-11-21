@@ -50,6 +50,7 @@ end
     existing paths. *)
 val create
   :  ?root_binding:Chat_response.Root_binding.t
+  -> ?checkpoint_tools:Chat_response.Soft_checkpoint.tools
   -> ?runtime_policy:Chat_response.Runtime_semantics.policy
   -> ?authoring_context:
        (input:Operation_worker.Input.t
@@ -58,6 +59,13 @@ val create
        (input:Operation_worker.Input.t
         -> capabilities:Operation_worker.Capabilities.t
         -> Chat_response.Agent_guidance.t)
+  -> ?successor_guidance:
+       (input:Operation_worker.Input.t
+        -> capabilities:Operation_worker.Capabilities.t
+        -> Chat_response.Agent_guidance.t)
+  -> ?after_rollover:
+       (Recovery_rollover_continuation.Hook.view
+        -> Recovery_rollover_continuation.Hook.decision)
   -> ?dispatch_tool:
        (input:Operation_worker.Input.t
         -> capabilities:Operation_worker.Capabilities.t
@@ -69,13 +77,13 @@ val create
              , Agent_protocol.Error.t )
              result)
   -> ?notification_input:
-       (input:Operation_worker.Input.t
+       (capabilities:Operation_worker.Capabilities.t
         -> unit
         -> ( Chat_response.In_memory_stream.Safe_point_input.batch
              , Agent_protocol.Error.t )
              result)
   -> ?initial_notification_input:
-       (input:Operation_worker.Input.t
+       (capabilities:Operation_worker.Capabilities.t
         -> unit
         -> ( Chat_response.In_memory_stream.Safe_point_input.batch
              , Agent_protocol.Error.t )

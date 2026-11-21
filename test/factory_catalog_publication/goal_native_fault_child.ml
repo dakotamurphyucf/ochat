@@ -110,6 +110,8 @@ let () =
   | [ _; root; "constructor-model-terminal-unknown" ] ->
     Constructor_model_fault_tests.run_terminal_child root
   | [ _; root; "goal-finish-checkpoint-unknown" ] -> Goal_finish_tests.run_child root
+  | [ _; root; "goal-recurrence-window-restart" ] ->
+    Goal_recurrence_window_tests.run_child root
   | [ _; root; "callback-terminal-writer-unknown" ] ->
     Callback_retirement_fault_tests.run_child root
   | [ _; root; "callback-cancelled-publication" ] ->

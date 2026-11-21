@@ -67,7 +67,13 @@ module Compaction_archive = struct
     | Edit
     | Delete
     | Pending_input
-  [@@deriving equal, sexp]
+    | Rollover
+  [@@deriving equal, enumerate, sexp]
+
+  let of_recovery_source : Recovery_window_ledger.Source.archive_kind -> kind = function
+    | Summary -> Compaction
+    | Rollover -> Rollover
+  ;;
 
   type invocation_disposition =
     { invocation_id : Agent_protocol.Id.Invocation.t
@@ -85,6 +91,32 @@ module Compaction_archive = struct
     ; invocation_dispositions : invocation_disposition list [@sexp.list]
     }
   [@@deriving sexp]
+
+  let of_rollover (change : Recovery_rollover.Commit.t) =
+    { operation_id = change.id
+    ; revision = change.expected.revision
+    ; sha256 = Chatml_source.Digest.to_hex change.archive
+    ; kind = Rollover
+    ; invocation_dispositions = []
+    }
+  ;;
+
+  let check_rollover_unchanged previous ~incoming =
+    let select = List.filter ~f:(fun t -> equal_kind t.kind Rollover) in
+    let equal left right =
+      Agent_protocol.Id.Operation.equal left.operation_id right.operation_id
+      && Int64.equal left.revision right.revision
+      && String.equal left.sha256 right.sha256
+      && List.is_empty left.invocation_dispositions
+      && List.is_empty right.invocation_dispositions
+    in
+    if List.equal equal (select previous) (select incoming)
+    then Ok ()
+    else
+      Error
+        (Agent_protocol.Error.invalid_request
+           "replacement changed rollover archive custody")
+  ;;
 end
 
 module Conversation = struct
@@ -144,6 +176,10 @@ type 'spec fields =
   ; conversation : Conversation.t
   ; active_operation : Agent_protocol.Operation.t option
   ; automatic_turn_budget : Automatic_turn_budget.t option [@sexp.option]
+  ; recovery_windows : (Recovery_window_ledger.t option[@sexp.opaque])
+  ; recovery_installed_originals : (Recovery_installed_originals.t option[@sexp.opaque])
+  ; recovery_effective : (Recovery_effective_ledger.t option[@sexp.opaque])
+  ; recovery_reminders : (Recovery_reminder.t option[@sexp.opaque])
   ; permissions : Agent_protocol.Permission.t list
   ; grants : Agent_protocol.Grant.t list
   ; jobs : Agent_protocol.Job.t list
@@ -163,6 +199,9 @@ type 'spec fields =
   ; policy_canonical_usage : (Policy_canonical_usage.t option[@sexp.opaque])
   ; goal_policy_contributions : (Goal_policy_contributions.t option[@sexp.opaque])
   ; instruction_selection : Instruction_selection.t option [@sexp.option]
+  ; recovery_notes : (Recovery_note_session.t[@sexp.opaque]) option [@sexp.option]
+  ; recovery_note_shares : (Recovery_note_share.t[@sexp.opaque]) option [@sexp.option]
+  ; recovery_rollover : (Recovery_rollover.t[@sexp.opaque]) option [@sexp.option]
   ; recurrence_catalog : Recurrence_catalog.t option [@sexp.option]
   ; subscriptions : Agent_protocol.Subscription.t list [@sexp.list]
   ; deliveries : Agent_protocol.Delivery.t list [@sexp.list]
@@ -755,6 +794,10 @@ let create_fields ~(identity : Identity.t) ~spec ~desired ~initial_history =
       }
   ; active_operation = None
   ; automatic_turn_budget = None
+  ; recovery_windows = None
+  ; recovery_installed_originals = None
+  ; recovery_effective = None
+  ; recovery_reminders = None
   ; permissions = []
   ; grants = []
   ; jobs = []
@@ -774,6 +817,9 @@ let create_fields ~(identity : Identity.t) ~spec ~desired ~initial_history =
   ; policy_canonical_usage = None
   ; goal_policy_contributions = None
   ; instruction_selection = None
+  ; recovery_notes = None
+  ; recovery_note_shares = None
+  ; recovery_rollover = None
   ; recurrence_catalog = None
   ; subscriptions = []
   ; deliveries = []
@@ -909,8 +955,27 @@ let validate_model_job_targets (t : t) =
     | Compaction -> Ok ())
 ;;
 
-let validate_domain (t : t) =
+let validate_domain (t : t) ~recovery_revision =
   let open Result.Let_syntax in
+  let%bind () =
+    Option.value_map t.recovery_notes ~default:(Ok ()) ~f:(fun catalog ->
+      Recovery_note_session.validate catalog ~session_id:t.identity.session_id)
+  in
+  let%bind () =
+    match t.recovery_note_shares with
+    | None -> Ok ()
+    | Some shares ->
+      let owner = Recovery_note_share.owner shares in
+      if
+        Agent_protocol.Id.Session.equal
+          (Agent_protocol.Session_ref.session_id owner)
+          t.identity.session_id
+      then Recovery_note_session.check_owner t.recovery_notes ~owner
+      else
+        Error
+          (Agent_protocol.Error.invalid_request
+             "recovery note shares belong to another session")
+  in
   let%bind () =
     if Int64.(t.spec.configuration_revision < 0L)
     then Error (Agent_protocol.Error.invalid_request "negative configuration revision")
@@ -1044,6 +1109,92 @@ let validate_domain (t : t) =
     match t.automatic_turn_budget with
     | None -> Ok ()
     | Some budget -> Automatic_turn_budget.validate budget
+  in
+  let%bind () =
+    Option.value_map t.recovery_installed_originals ~default:(Ok ()) ~f:(fun receipt ->
+      Recovery_installed_originals.validate
+        receipt
+        ~session_id:t.identity.session_id
+        ~generation:t.identity.generation)
+  in
+  let%bind () =
+    match t.recovery_windows with
+    | None -> Ok ()
+    | Some ledger ->
+      let archives = Hashtbl.create (module Agent_protocol.Id.Operation) in
+      List.iter t.conversation.compaction_archives ~f:(fun archive ->
+        match archive.kind with
+        | Compaction | Rollover ->
+          Hashtbl.add_multi archives ~key:archive.operation_id ~data:archive
+        | Reset | Rebuild | Upgrade | Edit | Delete | Pending_input -> ());
+      let reference operation ~f =
+        Option.exists (Hashtbl.find archives operation) ~f:(List.exists ~f)
+      in
+      let has_archive (source : Recovery_window_ledger.Source.archive) =
+        reference source.operation ~f:(fun archive ->
+          Compaction_archive.equal_kind
+            archive.kind
+            (Compaction_archive.of_recovery_source source.kind)
+          && Int64.equal archive.revision source.basis.revision
+          && String.equal archive.sha256 (Chatml_source.Digest.to_hex source.digest))
+      in
+      let has_summary_operation operation =
+        reference operation ~f:(fun archive ->
+          Compaction_archive.equal_kind archive.kind Compaction)
+      in
+      Recovery_window_ledger.validate_state
+        ledger
+        ~session_id:t.identity.session_id
+        ~generation:t.identity.generation
+        ~revision:recovery_revision
+        ~history:t.conversation.canonical_history
+        ~has_archive
+        ~has_summary_operation
+  in
+  let%bind () =
+    Option.value_map t.recovery_effective ~default:(Ok ()) ~f:(fun ledger ->
+      Recovery_effective_ledger.validate_state
+        ledger
+        ~windows:t.recovery_windows
+        ~publication_revision:recovery_revision
+        ~accounting:t.inference_ledger
+        ~has_archive:(fun reference ->
+          let module Source = Recovery_effective_archive in
+          let kind = Compaction_archive.of_recovery_source (Source.kind reference) in
+          let operation = Source.operation reference in
+          let revision = Source.revision reference in
+          let sha256 = Chatml_source.Digest.to_hex (Source.digest reference) in
+          List.exists t.conversation.compaction_archives ~f:(fun archive ->
+            Compaction_archive.equal_kind archive.kind kind
+            && Agent_protocol.Id.Operation.equal archive.operation_id operation
+            && Int64.equal archive.revision revision
+            && String.equal archive.sha256 sha256)))
+  in
+  let%bind () =
+    Option.value_map t.recovery_reminders ~default:(Ok ()) ~f:(fun ledger ->
+      Recovery_reminder.validate_state
+        ledger
+        ~session:t.identity.session_id
+        ~generation:t.identity.generation
+        ~owner:(Option.map t.recovery_windows ~f:Recovery_window_ledger.owner))
+  in
+  let%bind () =
+    Option.value_map t.recovery_rollover ~default:(Ok ()) ~f:(fun ledger ->
+      Recovery_rollover.validate_state
+        ledger
+        ~windows:t.recovery_windows
+        ~revision:recovery_revision
+        ~has_archive:(fun ~id ~revision digest ->
+          let matching (archive : Compaction_archive.t) =
+            Compaction_archive.equal_kind archive.kind Rollover
+            && Agent_protocol.Id.Operation.equal archive.operation_id id
+          in
+          match List.filter t.conversation.compaction_archives ~f:matching with
+          | [ archive ] ->
+            Int64.equal archive.revision revision
+            && String.equal archive.sha256 (Chatml_source.Digest.to_hex digest)
+            && List.is_empty archive.invocation_dispositions
+          | _ -> false))
   in
   let seen_invocations = Hash_set.create (module Agent_protocol.Id.Invocation) in
   let%bind () =
@@ -1287,7 +1438,7 @@ let validate_domain (t : t) =
       let current =
         match receipt.status with
         | Terminal _ -> true
-        | Deferred | Ready | Assigned _ ->
+        | Deferred | Ready | Assigned _ | Suspended_rollover _ ->
           Int.equal receipt.generation t.identity.generation
           && Option.exists
                t.spec.delegation
@@ -1295,6 +1446,18 @@ let validate_domain (t : t) =
       in
       let correlation =
         match receipt.status with
+        | Suspended_rollover { predecessor; continuation } ->
+          Option.exists t.recovery_windows ~f:(fun windows ->
+            let scope =
+              Recovery_window_ledger.Window.scope (Recovery_window_ledger.active windows)
+            in
+            Option.exists t.recovery_rollover ~f:(fun receipts ->
+              Option.exists
+                (Recovery_rollover.foreground receipts ~scope)
+                ~f:(fun schedule ->
+                  Recovery_rollover_continuation.is_pending schedule
+                  && Agent_protocol.Id.Operation.equal schedule.predecessor predecessor
+                  && Agent_protocol.Id.Operation.equal schedule.owner continuation)))
         | Assigned id ->
           Option.exists t.active_operation ~f:(fun operation ->
             Agent_protocol.Id.Operation.equal id operation.id
@@ -1545,10 +1708,10 @@ module Native_validation = struct
     t
   ;;
 
-  let validate_remaining (t : t) ~policy_revision =
+  let validate_at (t : t) ~policy_revision ~recovery_revision =
     let open Result.Let_syntax in
     let%bind () = validate_goal_policy t ~session_revision:policy_revision in
-    let%bind () = validate_domain t in
+    let%bind () = validate_domain t ~recovery_revision in
     let instruction_clear =
       Option.value_map t.instruction_selection ~default:0 ~f:(fun selection ->
         let summary = Instruction_selection.summary selection in
@@ -1605,6 +1768,22 @@ module Native_validation = struct
       ~generation:t.identity.generation
     |> Result.map_error ~f:ledger_error
   ;;
+
+  let validate_remaining t ~policy_revision =
+    validate_at t ~policy_revision ~recovery_revision:t.counters.revision
+  ;;
+
+  let validate_ordered_prefix t ~policy_revision =
+    let revision = t.counters.revision in
+    if Option.is_none t.recovery_windows
+    then validate_remaining t ~policy_revision
+    else if Int64.equal revision Int64.max_value
+    then
+      Error
+        (Agent_protocol.Error.invalid_request
+           "recovery window publication revision exhausted")
+    else validate_at t ~policy_revision ~recovery_revision:(Int64.succ revision)
+  ;;
 end
 
 let validate (t : t) =
@@ -1615,7 +1794,7 @@ let validate (t : t) =
 let validate_administration_candidate t ~previous =
   let open Result.Let_syntax in
   let%bind () = validate previous in
-  let%bind () = validate_domain t in
+  let%bind () = validate_domain t ~recovery_revision:t.counters.revision in
   let%bind before =
     Inference_ledger.to_document previous.inference_ledger
     |> Result.map_error ~f:ledger_error

@@ -93,6 +93,12 @@ type inference_policy =
       -> (runtime_inference_ports, Inference_runtime.Preparation_error.t) Result.t
   }
 
+(** Same immutable prompt target capture used by new durable sessions. *)
+val capture_prompt_inference_target
+  :  inference_policy
+  -> Agent_session.Prompt_revision.t
+  -> (Inference.Request.Target.t, Inference_runtime.Preparation_error.t) result
+
 type model_job_inference =
   { context : Inference_runtime.Context.t
   ; capture_recipe_target :
@@ -345,6 +351,10 @@ val create
   -> tool_dir:string
   -> home:string option
   -> inference_policy:inference_policy
+  -> interactive_permission_responder:
+       Agent_session.Permission_policy.interactive_responder
+  -> context_capacity_host:Agent_session.Session_context_capacity.Host.t
+  -> local_recovery_host:Operator_authorization.Local_recovery_host.t option
   -> qualify_chatml_extensions:bool
   -> session_helpers:Agent_session.Session_management_channel.grant list
   -> independent_lifetime_policy:string option
@@ -730,6 +740,305 @@ val check_registered_entry
   -> Session_registry.entry
   -> session:Agent_protocol.Session_ref.t
   -> (unit, Agent_protocol.Error.t) result
+
+(** Post-ACK controller check for a distinct target's live Held activation.
+    Revalidate the same Factory/Store controller entry and the caller's live
+    owner/authority check before and after waiting on exact loaded retention.
+    [check_current] is nonyielding and receives [resumed:true] after waiting.
+    Every other reservation remains a conflict.
+    This joins without taking a Registry lease. Fresh admission and retained
+    reconciliation use [check_registered_entry]. *)
+val await_held_recurrence_controller
+  :  t
+  -> Session_registry.entry
+  -> session:Agent_protocol.Session_ref.t
+  -> check_current:(resumed:bool -> (unit, Agent_protocol.Error.t) result)
+  -> (unit, Agent_protocol.Error.t) result
+
+(** Exact recovery of a bounded UTF-8 range under the current Factory's
+    physical source custody. The host reauthorizes the exact selection and
+    view before reading and at release. A later delivery must reauthorize
+    at its own write boundary. *)
+module Recovery_history : sig
+  module Text = Agent_session.Recovery_item_text
+
+  type error =
+    | Source of Agent_session.Recovery_source_reader.error
+    | Range of Agent_protocol.Error.t
+  [@@deriving sexp_of]
+
+  (** Read bounded status from the exact retained owner and supply its
+      nonyielding disclosure check for the eventual transport write. *)
+  val inspect_rollover
+    :  t
+    -> on_release:((unit -> (unit, Agent_protocol.Error.t) result) -> unit)
+    -> actor:Operator_authorization.t
+    -> authorize:(Agent_session.Session_state.t -> (unit, Agent_protocol.Error.t) result)
+    -> authorize_writer:(Agent_session.Session_state.t -> (unit, Agent_protocol.Error.t) result)
+    -> authorize_force:(Agent_session.Session_state.t -> (unit, Agent_protocol.Error.t) result)
+    -> Agent_protocol.Recovery_rollover_control.Inspect.t
+    -> (Agent_protocol.Recovery_rollover_control.Status.t, Agent_protocol.Error.t) result
+
+  (** Check the current authenticated principal and session visibility, then
+      list window identities and status under the retained actor. Each page
+      requires a fresh current proof. *)
+  val list_windows
+    :  t
+    -> ?on_release:((unit -> (unit, Agent_protocol.Error.t) result) -> unit)
+    -> actor:Operator_authorization.t
+    -> session:Agent_protocol.Session_ref.t
+    -> ?generation:int
+    -> ?state:Agent_session.Recovery_window_record.state
+    -> Agent_protocol.Page.Request.t
+    -> ( Agent_session.Recovery_window_page.summary Agent_protocol.Page.t
+         , Agent_protocol.Error.t )
+         result
+
+  (** List or search one explicit canonical or prepared-effective text family
+      using current authenticated operator or native model admission. Ordinary
+      user and assistant text is the default authorized view. Other views
+      require a trusted host [authorize_view] decision. [selection = None]
+      admits the requested view. [Some selection] checks the exact item before
+      reading and again before returning its contents. Queued model delivery
+      requires registration of the nonyielding [on_release] proof and its use
+      at the actual write cut. *)
+  val query
+    :  t
+    -> access:Agent_session.Session_actor.Recovery_history_access.request
+    -> ?authorize_view:
+         (Agent_protocol.Principal.t
+          -> Agent_session.Session_state.t
+          -> Text.view
+          -> selection:Text.selection option
+          -> (unit, Agent_protocol.Error.t) result)
+    -> ?cursor:Agent_protocol.Page.Cursor.t
+    -> ?on_release:((unit -> bool) -> unit)
+    -> Agent_session.Recovery_history_query.t
+    -> (Jsonaf.t, Agent_protocol.Error.t) result
+
+  (** A queued transport registers the nonyielding release proof and checks it
+      at the actual write. Retiring or replacing the accepted source invalidates it. *)
+  val read_text
+    :  t
+    -> ?on_release:((unit -> (unit, Agent_protocol.Error.t) result) -> unit)
+    -> authorize:
+         (Text.selection
+          -> Text.view
+          -> Agent_session.Session_state.t
+          -> (unit, Agent_protocol.Error.t) result)
+    -> Text.selection
+    -> view:Text.view
+    -> part:int
+    -> start:int
+    -> stop:int
+    -> ?max_bytes:int
+    -> unit
+    -> (Agent_protocol.History_text.Slice.t, error) result
+end
+
+module Recovery_assets : sig
+  (** The actual local Factory captures the retained Registry entry and actor,
+      and holds source exclusion across bounded private I/O. [authorize] is
+      a trusted nonyielding check of the original host/actor request. Future
+      protected output must acquire its own current delivery authority. *)
+  type authorize = Agent_session.Session_state.t -> (unit, Agent_protocol.Error.t) result
+
+  val read
+    :  t
+    -> sw:Eio.Switch.t
+    -> authorize:authorize
+    -> Agent_protocol.Recovery_window.Citation.t
+    -> part:int
+    -> max_bytes:int
+    -> ( Agent_store.Recovery_asset_reference.t * string
+         , Agent_session.Recovery_source_reader.error )
+         result
+
+  type read_error =
+    | Source of Agent_session.Recovery_source_reader.error
+    | Request of Agent_protocol.Error.t
+
+  (** Ordinary canonical originals only. Install the exact source and authority
+      check for the later queued transport release. The reply contains one
+      bounded chunk without its private storage identity. *)
+  val read_chunk
+    :  t
+    -> sw:Eio.Switch.t
+    -> authorize:authorize
+    -> on_release:((unit -> (unit, Agent_protocol.Error.t) result) -> unit)
+    -> Agent_protocol.Recovery_asset_read.t
+    -> (Agent_protocol.Recovery_asset_read.Reply.t, read_error) result
+
+  val resume
+    :  t
+    -> sw:Eio.Switch.t
+    -> authorize:authorize
+    -> Agent_protocol.Recovery_window.Citation.t
+    -> part:int
+    -> max_bytes:int
+    -> ( Agent_store.Recovery_asset_reference.t
+         , Agent_session.Recovery_source_reader.error )
+         result
+
+  val publish_inline
+    :  t
+    -> sw:Eio.Switch.t
+    -> authorize:authorize
+    -> Agent_protocol.Recovery_window.Citation.t
+    -> part:int
+    -> principal:Agent_protocol.Id.Principal.t
+    -> now:Agent_protocol.Timestamp.t
+    -> max_bytes:int
+    -> ( Agent_store.Recovery_asset_reference.t
+         , Agent_session.Recovery_source_reader.error )
+         result
+
+  (** Local converter integration supplies an exact original attribution.
+      This API performs no fetch. *)
+  val publish_converted_file
+    :  t
+    -> sw:Eio.Switch.t
+    -> authorize:authorize
+    -> principal:Agent_protocol.Id.Principal.t
+    -> now:Agent_protocol.Timestamp.t
+    -> max_bytes:int
+    -> Agent_session.Recovery_asset.Attribution.t
+    -> ( Agent_store.Recovery_asset_reference.t
+         , Agent_session.Recovery_source_reader.error )
+         result
+
+  (** Attempt optional installed originals for this exact committed active
+      window. Use the original authenticated writer and connection from
+      enablement. Each eligible part is independently idempotent; absent or
+      revoked installed custody leaves its independently rendered text in place.
+      Neither this call nor its result supplies general blob access. *)
+  val adopt_installed
+    :  t
+    -> sw:Eio.Switch.t
+    -> actor:Operator_authorization.t
+    -> attachment_id:Agent_protocol.Id.Attachment.t
+    -> connection_current:(unit -> bool)
+    -> Agent_protocol.Recovery_window.Scope.t
+    -> (unit, Agent_session.Recovery_source_reader.error) result
+
+  (** Optional local originals for an actual authenticated daemon send. The
+      supplied callback arms the exact converted row before Actor submission.
+      Original ownership ends with the submitting writer or the finite local
+      reservation. Once adopted, access is through the protected reader. *)
+  val with_submission
+    :  t
+    -> entry:Session_registry.entry
+    -> actor:Operator_authorization.t
+    -> attachment_id:Agent_protocol.Id.Attachment.t
+    -> connection_current:(unit -> bool)
+    -> f:
+         ((Chat_response.Converter_asset_capture.t
+          * (Agent_protocol.History.entry -> unit))
+            option
+          -> ('a, Agent_protocol.Error.t) result)
+    -> ('a, Agent_protocol.Error.t) result
+end
+
+(** Source-owned durable sharing on this Factory's actual same-host Store and
+    Registry. Existing source visibility/management authority and scoped recipient
+    read authority enter through their distinct original access proofs. *)
+module Recovery_note_shares : sig
+  val management_revision
+    :  t
+    -> source:Session_registry.entry
+    -> access:Agent_session.Recovery_note_access.t
+    -> (Agent_session.Recovery_note_share.Revision.t, Agent_protocol.Error.t) result
+
+  val inspect_management
+    :  t
+    -> source:Session_registry.entry
+    -> access:Agent_session.Recovery_note_access.t
+    -> Agent_protocol.Recovery_note_share_control.Path.t option
+    -> (Agent_protocol.Recovery_note_share_control.Metadata.t, Agent_protocol.Error.t) result
+
+  val check_management_now
+    :  t
+    -> source:Session_registry.entry
+    -> access:Agent_session.Recovery_note_access.t
+    -> (unit, Agent_protocol.Error.t) result
+
+  val create
+    :  t
+    -> source:Session_registry.entry
+    -> access:Agent_session.Recovery_note_access.t
+    -> recipient:Agent_protocol.Session_ref.t
+    -> key:Agent_protocol.Idempotency_key.t
+    -> Agent_session.Recovery_note_share.create
+    -> (Agent_session.Recovery_note_share.Receipt.t, Agent_protocol.Error.t) result
+
+  val revoke
+    :  t
+    -> source:Session_registry.entry
+    -> access:Agent_session.Recovery_note_access.t
+    -> key:Agent_protocol.Idempotency_key.t
+    -> Agent_session.Recovery_note_share.revoke
+    -> (Agent_session.Recovery_note_share.Receipt.t, Agent_protocol.Error.t) result
+
+  (** Resolve a single explicit share. [f] owns a bounded source read lease
+      and calls synchronous [Session_actor.Recovery_note_shares.materialize]
+      immediately before publishing. Both original scopes and exact owner
+      tuples are rechecked at that point. A disclosure is invalid after this
+      callback ends and cannot be stored as a later provider final check.
+      For a yielding provider write, use [prepare_operation_delivery]. *)
+  val with_disclosure
+    :  t
+    -> recipient:Session_registry.entry
+    -> access:Agent_session.Recovery_note_access.t
+    -> Agent_session.Recovery_note_share.Reference.t
+    -> f:
+         (Agent_session.Session_actor.Recovery_note_shares.disclosure
+          -> ('a, Agent_protocol.Error.t) result)
+    -> ('a, Agent_protocol.Error.t) result
+
+  (** Protected provider input uses the exact still-running recipient operation
+      and its live original custody instead of a completed native tool borrow. *)
+  val with_operation_disclosure
+    :  t
+    -> recipient:Session_registry.entry
+    -> operation_id:Agent_protocol.Id.Operation.t
+    -> Agent_session.Recovery_note_share.Reference.t
+    -> f:
+         (Agent_session.Session_actor.Recovery_note_shares.disclosure
+          -> ('a, Agent_protocol.Error.t) result)
+    -> ('a, Agent_protocol.Error.t) result
+
+  (** Retain one actual same-host source session through a bounded provider
+      application write. Each output must independently revalidate authority
+      for its original source and recipient. *)
+  val source_custody
+    :  t
+    -> Agent_protocol.Session_ref.t
+    -> Inference_runtime.Protected_delivery.custody
+
+  type operation_delivery =
+    { custody : Inference_runtime.Protected_delivery.custody
+    ; materialize :
+        unit
+        -> ( History_entry.Payload.Output.t
+             , Inference_runtime.Protected_delivery.error )
+             result
+    ; refresh : scope:Transcript.Scope.t -> unit -> bool
+    }
+
+  (** Prepare callbacks for the protected output of an actual recipient
+      operation. The explicit share reference pins the revision. Bind these
+      callbacks to that operation's committed call/output via the native
+      delivery port. Selection checks the explicit grant before returning the
+      callbacks. The nonyielding renderer returns bounded tool data under fresh
+      source admission when the output is materialized. *)
+  val prepare_operation_delivery
+    :  t
+    -> recipient:Session_registry.entry
+    -> operation_id:Agent_protocol.Id.Operation.t
+    -> Agent_session.Recovery_note_share.Reference.t
+    -> render:(Recovery_notes.Catalog.Content.t -> History_entry.Payload.Output.t)
+    -> (operation_delivery, Agent_protocol.Error.t) result
+end
 
 (** Rebuild missing-index projections through immutable owned reads without
     actors/providers. Retain the eager-recovery marker for actual Execute recovery. *)

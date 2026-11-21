@@ -327,6 +327,12 @@ let validate_input reference input =
     Agent_protocol.Error.invalid_request "background tool input does not match its schema")
 ;;
 
+let require_plain_tool binding =
+  C.require_plain_invocation binding
+  |> Result.map_error ~f:(fun error ->
+    Agent_protocol.Error.invalid_request error.C.message)
+;;
+
 let tool ~capabilities ~(reference : C.reference) ~input ~policy =
   let open Result.Let_syntax in
   let%bind binding =
@@ -334,6 +340,7 @@ let tool ~capabilities ~(reference : C.reference) ~input ~policy =
     |> Result.map_error ~f:(fun error ->
       Agent_protocol.Error.invalid_request error.C.message)
   in
+  let%bind () = require_plain_tool binding in
   let%bind () = validate_input (C.reference binding) input in
   let t =
     { target = Tool_target reference.name
@@ -507,6 +514,7 @@ let prepare ~env ~current_capabilities ~policy t =
       |> Result.map_error ~f:(fun error ->
         Agent_protocol.Error.invalid_request error.C.message)
     in
+    let%bind () = require_plain_tool binding in
     let reference = C.reference binding in
     let%map () = validate_input reference t.input in
     Tool { capabilities = selected; reference; input = t.input; policy = t.policy }

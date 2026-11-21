@@ -120,8 +120,15 @@ module Tool_dispatch : sig
       End-session requests
       suppress further moderator hooks and follow-up turns after pending outputs
       are handled. Other requests participate in the normal turn-end decision. *)
+  type protection =
+    { claims : name:string -> bool
+    ; take : unit -> Inference_runtime.Protected_delivery.t list
+    ; close : unit -> unit
+    }
+
   type t =
-    { for_fork : (source:string -> parent_call_id:string -> t) option
+    { protection : protection option
+    ; for_fork : (source:string -> parent_call_id:string -> t) option
       (** Called inside the executing built-in fork to capture its actual owner.
           The returned service owns child tool admission, not root provider
           history. It must validate the branch identity and expiring parent
@@ -411,10 +418,17 @@ val run_completion_stream_in_memory_entries
   :  env:Eio_unix.Stdenv.base
   -> inference_context:Inference_runtime.Context.t
   -> ?root_context:Root_context.t
+  -> ?foreground_capacity:Foreground_capacity.t
+  -> ?ordinary_write_admission:
+       (Inference_runtime.Prepared.t -> Inference_runtime.Attempt.t -> unit -> unit)
+  -> ?on_settled_batch:(Settled_tool_batch.t -> Settled_tool_batch.decision)
+  -> ?successor:Root_context.Successor.t
   -> inference_identity:Neutral_turn.Identity.t
   -> on_inference_attempt:(Inference_runtime.Attempt.t -> unit)
   -> on_inference_completion:(Inference_client.Completion.t -> unit)
   -> ?agent_guidance:Agent_guidance.t
+  -> ?take_protected_delivery:(unit -> Inference_runtime.Protected_delivery.t list)
+  -> ?protect_tool_arguments:bool
   -> ?submission_guard:Inference_runtime.Submission_guard.t
   -> ?inference_relation:Transcript.Scope.relation
   -> ?on_inference_observation:(Inference.Observation.t -> unit)

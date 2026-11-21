@@ -23,10 +23,13 @@ type error =
 
 (** Native text is opaque unless its actual host registration explicitly opts
     into the versioned invocation outcome envelope. Submitted code, tool names
-    and output text cannot choose or change this contract. *)
+    and output text cannot choose or change this contract. [Protected_recovery_v1]
+    requires the owning session to provide transient arguments and a safe durable
+    result. Its identity differs from both ordinary result contracts. *)
 type result_contract =
   | Native_output
   | Invocation_v1
+  | Protected_recovery_v1
 [@@deriving sexp, equal]
 
 type binding
@@ -80,12 +83,35 @@ val descriptor : binding -> Openai.Completions.tool
 
 val native_implementation : binding -> Ochat_function.t option
 
+(** Check before admitting arguments to a native route that stores ordinary
+    invocation input. A protected registration needs the operation-owned
+    session dispatcher, including when reached through a redirect. *)
+val require_plain_invocation : binding -> (unit, error) result
+
 (** Check host-supplied restrictions on transferring an implementation to a
     generated session. Restrictions bind the actual registration and participate
     in live/permission identity; authored help or a name cannot remove them.
     Absence is the trusted host's declaration of support, not an execution grant.
     Managed implementations also require checking their captured dependencies. *)
 val check_delegation : binding -> (unit, error) result
+
+module Local_history_tool : sig
+  type t =
+    | List_windows
+    | List_items
+    | Search
+    | Read_text
+    | Read_media
+  [@@deriving enumerate, equal]
+
+  val name : t -> string
+  val implementation_revision : t -> string
+end
+
+(** Admit exact stock history registrations as direct generated selections for
+    the new child's owned foreground dispatcher. This is not invocation authority.
+    Transitive dependencies and unowned paths must use [check_delegation]. *)
+val check_generated_foreground : binding -> (unit, error) result
 
 (** Trusted admission of captured managed definitions alongside existing native
     bindings. The host must validate sources/schemas/dependencies first, bind

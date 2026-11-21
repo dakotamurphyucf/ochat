@@ -6,6 +6,11 @@ module M = Chat_response.Moderation.Capabilities
 module E = Agent_protocol.Moderator_execution
 module Managed = Chat_response.Managed_tool_registry
 
+type successor_guidance =
+  input:Operation_worker.Input.t
+  -> capabilities:Operation_worker.Capabilities.t
+  -> Chat_response.Agent_guidance.t
+
 type managed_service =
   { env : Eio_unix.Stdenv.base
   ; definition : Managed.t
@@ -81,6 +86,10 @@ type t =
   ; generated_creation_service : Generated_session_request.service option
   ; managed_session_service : Managed_session_service.t option
   ; instruction_service : Instruction_service.t option
+  ; recovery_history_service : Recovery_history_native_service.t option
+  ; recovery_note_service : Recovery_note_native_service.t option
+  ; successor_guidance : successor_guidance option
+  ; recovery_context_service : Recovery_context_service.t option
   ; recurrence_service : Recurrence_service.t option
   ; goal_metadata_service : Goal_native_metadata_service.t option
   ; inference_tracking : Inference_tracking.t option
@@ -102,12 +111,33 @@ type native_services =
 
 let native_services_key = Eio.Fiber.create_key ()
 
-let implementation_revision t selected (reference : C.reference) =
+let protected_binding selected (reference : C.reference) =
+  match C.resolve selected ~id:reference.id ~fingerprint:reference.fingerprint with
+  | Ok binding
+    when C.equal_result_contract (C.result_contract binding) Protected_recovery_v1 ->
+    Some binding
+  | Ok _ | Error _ -> None
+;;
+
+let implementation_revision
+      ?(protected_write = false)
+      t
+      selected
+      (reference : C.reference)
+  =
   let open Result.Let_syntax in
   let%bind binding =
     C.resolve selected ~id:reference.id ~fingerprint:reference.fingerprint
     |> Result.map_error ~f:(fun error ->
       Agent_protocol.Error.invalid_request error.C.message)
+  in
+  let%bind () =
+    if protected_write && Recovery_note_access.Effect.is_mutation_binding binding
+    then Ok ()
+    else
+      C.require_plain_invocation binding
+      |> Result.map_error ~f:(fun error ->
+        Agent_protocol.Error.invalid_request error.C.message)
   in
   match C.implementation binding, t.managed with
   | Managed _, Some service ->
@@ -486,6 +516,10 @@ let create
   ; generated_creation_service = None
   ; managed_session_service = None
   ; instruction_service = None
+  ; recovery_history_service = None
+  ; recovery_note_service = None
+  ; successor_guidance = None
+  ; recovery_context_service = None
   ; recurrence_service = None
   ; goal_metadata_service = None
   ; inference_tracking = None
@@ -498,6 +532,22 @@ let create
 let with_shell_context t services = { t with shell_context = Some services }
 let with_instruction_service t service = { t with instruction_service = Some service }
 let instruction_service t = t.instruction_service
+let with_recovery_history_service t service =
+  { t with recovery_history_service = Some service }
+;;
+
+let recovery_history_service t = t.recovery_history_service
+let with_recovery_note_service t service = { t with recovery_note_service = Some service }
+let recovery_note_service t = t.recovery_note_service
+
+let with_successor_guidance t service = { t with successor_guidance = Some service }
+let successor_guidance t = t.successor_guidance
+
+let with_recovery_context_service t service =
+  { t with recovery_context_service = Some service }
+;;
+
+let recovery_context_service t = t.recovery_context_service
 let with_recurrence_service t service = { t with recurrence_service = Some service }
 let recurrence_service t = t.recurrence_service
 let with_goal_metadata_service t service = { t with goal_metadata_service = Some service }
@@ -778,6 +828,7 @@ let call_payload kind input =
 let prepare_host_call
       ?(native_origin = "script")
       ?caller
+      ?(projected_model_input = false)
       t
       ~selected
       ~session_id
@@ -792,7 +843,9 @@ let prepare_host_call
     let open Result.Let_syntax in
     let original = prepared.reference in
     let kind = call_kind selected original in
-    let original_payload = call_payload kind prepared.input in
+    let protected_call = Option.is_some (protected_binding selected original) in
+    let project input = if protected_call then `Object [] else input in
+    let original_payload = call_payload kind (project prepared.input) in
     let fingerprint value : I.payload_fingerprint =
       { sha256 = Chatmd_shell_spec.Source_ref.digest value
       ; byte_length = String.length value
@@ -813,7 +866,7 @@ let prepare_host_call
               prepared.routing
               ~default:(fingerprint original_payload)
               ~f:(fun r -> r.original_payload)
-        ; final_payload = fingerprint (call_payload final_kind input)
+        ; final_payload = fingerprint (call_payload final_kind (project input))
         ; canonical_payload = None
         ; preparation
         }
@@ -824,16 +877,26 @@ let prepare_host_call
       Ok (route original prepared.input preparation (Some (fail code message)))
     in
     let validate reference input =
-      let%bind _ =
+      let%bind binding =
         C.resolve selected ~id:reference.C.id ~fingerprint:reference.fingerprint
         |> Result.map_error ~f:(fun e -> e.C.message)
       in
-      let%bind schema =
-        Chatmd_shell_spec.Tool_schema.compile reference.input_schema
-        |> Result.map_error ~f:(fun _ -> "invalid tool input schema")
-      in
-      Chatmd_shell_spec.Tool_schema.validate schema input
-      |> Result.map_error ~f:(fun _ -> "invalid tool input")
+      if projected_model_input
+      then (
+        match owner, input with
+        | Model_call _, `Object []
+          when String.equal reference.name original.name
+               && C.equal_result_contract
+                    (C.result_contract binding)
+                    Protected_recovery_v1 -> Ok ()
+        | _ -> Error "invalid protected model input projection")
+      else (
+        let%bind schema =
+          Chatmd_shell_spec.Tool_schema.compile reference.input_schema
+          |> Result.map_error ~f:(fun _ -> "invalid tool input schema")
+        in
+        Chatmd_shell_spec.Tool_schema.validate schema input
+        |> Result.map_error ~f:(fun _ -> "invalid tool input"))
     in
     (match validate original prepared.input with
      | Error _ ->
@@ -861,7 +924,7 @@ let prepare_host_call
        let call : Chat_response.Moderation.Tool_call.t =
          { id = Agent_protocol.Id.Invocation.to_string id
          ; name = original.name
-         ; args = prepared.input
+         ; args = project prepared.input
          ; kind
          ; payload_text = original_payload
          ; meta
@@ -914,6 +977,11 @@ let prepare_host_call
             Pre_tool_rejected
             "invocation.pre_tool_rejected"
             "Host policy rejected the call."
+        | Ok (Some (Rewrite_args _ | Redirect _)) when protected_call ->
+          reject
+            Pre_tool_rejected
+            "invocation.protected_owner_required"
+            "Protected arguments cannot be rewritten or redirected."
         | Ok decision ->
           let name, input =
             match decision with
@@ -989,6 +1057,17 @@ let with_model_preparation
           |> Result.map ~f:C.reference
           |> Result.map_error ~f:(fun error -> error.C.message)
         in
+        (* The streaming dispatcher validates original arguments before host
+           policy sees the empty projection. Native dispatch validates the
+           real arguments again in its isolated input scope. *)
+        let projected_model_input =
+          Option.is_some (protected_binding selected reference)
+        in
+        let%bind () =
+          if projected_model_input && not (String.equal request.name request.original_name)
+          then Error "a protected model call cannot transfer its selection"
+          else Ok ()
+        in
         let%bind value =
           Stream_invocation.parse_input ~kind:request.kind ~payload:request.payload
         in
@@ -997,6 +1076,7 @@ let with_model_preparation
           with_preparation_caller t (Execution capture_caller) (fun caller ->
             prepare_host_call
               ?caller
+              ~projected_model_input
               t
               ~selected
               ~session_id:input.session_id
@@ -1041,6 +1121,7 @@ let validate_script_value ~limits value =
 
 let with_scope_results
       ?(caller_source = Native_scope)
+      ?(allow_authored_note_write = false)
       ~result_of_invocation
       ~result_of_error
       ?prepare
@@ -1110,141 +1191,187 @@ let with_scope_results
       with
       | None -> tool_error "invocation.unselected_tool"
       | Some reference ->
-        let execute () =
-          let open Result.Let_syntax in
-          let%bind () = checked `Input (fun () -> validate_value args) in
-          let id = Agent_protocol.Id.Invocation.create () in
-          let%bind prepared =
-            checked `Admission (fun () ->
-              match prepare with
-              | None -> Ok { reference; input = args; routing = None; rejection = None }
-              | Some prepare -> prepare ~id reference args)
-          in
-          let%bind prepared =
-            checked `Admission (fun () ->
-              let owner =
-                match parent with
-                | Invocation parent -> Native_call parent.context.id
-                | Event parent -> Moderator_event parent.context.id
-              in
-              with_preparation_caller t caller_source (fun caller ->
-                prepare_host_call
-                  ?caller
-                  t
-                  ~selected
-                  ~session_id
-                  ~generation
-                  ~owner
-                  ~id
-                  prepared))
-          in
-          let reference = prepared.reference in
-          let%bind () = checked `Input (fun () -> validate_value prepared.input) in
-          let%bind invocation =
-            checked `Admission (fun () ->
-              let%bind implementation_revision =
-                implementation_revision t selected reference
-              in
-              I.create
-                ?observer
-                ?parent_event
-                ?routing:prepared.routing
-                { id
-                ; session_id
-                ; generation
-                ; origin
-                ; provider_call_id = None
-                ; call_entry_id = None
-                ; parent_invocation
-                ; parent_job = None
-                ; tool_name = reference.name
-                ; implementation_revision
-                ; capability_fingerprint = C.fingerprint selected
-                ; input = prepared.input
-                ; created_at = t.now ()
-                ; deadline
-                })
-          in
-          let moderation = Native_tool_moderation.capture () in
-          let execute ~invocation f =
-            execute ~invocation (fun ~(dispatched : I.t) ~capabilities ->
-              (* A borrowed executor restores its lending context. This call's
+        let protected = protected_binding selected reference in
+        let direct_write =
+          match protected, origin, parent, t.recovery_note_service with
+          | Some binding, I.Script, Invocation model, Some _
+            when allow_authored_note_write
+                 && (match model.context.origin with
+                     | Model -> Option.is_some model.context.call_entry_id
+                     | Script ->
+                       Option.is_some model.context.parent_invocation
+                       && Option.is_none model.context.parent_job
+                     | Moderator | Delegated_agent | External_adapter -> false)
+                 && Recovery_note_access.Effect.is_mutation_binding binding ->
+            Some binding
+          | _ -> None
+        in
+        if Option.is_some protected && Option.is_none direct_write
+        then tool_error "invocation.protected_owner_required"
+        else (
+          let execute () =
+            let open Result.Let_syntax in
+            let%bind () = checked `Input (fun () -> validate_value args) in
+            let id = Agent_protocol.Id.Invocation.create () in
+            let%bind prepared =
+              checked `Admission (fun () ->
+                match prepare with
+                | None -> Ok { reference; input = args; routing = None; rejection = None }
+                | Some prepare -> prepare ~id reference args)
+            in
+            let%bind prepared =
+              checked `Admission (fun () ->
+                let owner =
+                  match parent with
+                  | Invocation parent -> Native_call parent.context.id
+                  | Event parent -> Moderator_event parent.context.id
+                in
+                with_preparation_caller t caller_source (fun caller ->
+                  prepare_host_call
+                    ?caller
+                    t
+                    ~selected
+                    ~session_id
+                    ~generation
+                    ~owner
+                    ~id
+                    prepared))
+            in
+            let selected_reference = prepared.reference in
+            let%bind () =
+              if
+                Option.is_some direct_write
+                && not (String.equal reference.fingerprint selected_reference.fingerprint)
+              then Error `Admission
+              else checked `Input (fun () -> validate_value prepared.input)
+            in
+            let reference = selected_reference in
+            let%bind invocation =
+              checked `Admission (fun () ->
+                let%bind implementation_revision =
+                  implementation_revision
+                    ~protected_write:(Option.is_some direct_write)
+                    t
+                    selected
+                    reference
+                in
+                I.create
+                  ?observer
+                  ?parent_event
+                  ?routing:prepared.routing
+                  { id
+                  ; session_id
+                  ; generation
+                  ; origin
+                  ; provider_call_id = None
+                  ; call_entry_id = None
+                  ; parent_invocation
+                  ; parent_job = None
+                  ; tool_name = reference.name
+                  ; implementation_revision
+                  ; capability_fingerprint = C.fingerprint selected
+                  ; input =
+                      (if Option.is_some direct_write then `Null else prepared.input)
+                  ; created_at = t.now ()
+                  ; deadline
+                  })
+            in
+            let moderation = Native_tool_moderation.capture () in
+            let execute ~invocation f =
+              execute ~invocation (fun ~(dispatched : I.t) ~capabilities ->
+                (* A borrowed executor restores its lending context. This call's
                  actual host pre-hook scope may have been installed afterwards;
                  retain it for descendants without extending its lifetime. *)
-              Native_tool_moderation.with_context moderation (fun () ->
-                with_native_services
-                  t
-                  ~session_id:dispatched.context.session_id
-                  ~generation:dispatched.context.generation
-                  (fun () -> f ~dispatched ~capabilities)))
-          in
-          let%bind resolved =
-            checked `Admission (fun () ->
-              match prepared.rejection with
-              | Some outcome ->
-                execute ~invocation (fun ~dispatched:_ ~capabilities:_ -> Ok outcome)
-              | None when Option.is_none prepare && t.requires_active_moderator reference
-                ->
-                execute ~invocation (fun ~dispatched:_ ~capabilities:_ ->
-                  Ok
-                    (fail
-                       "moderator_reentrancy"
-                       "Tool execution requires a decision from the active moderator."))
-              | None when reentrant reference.name ->
-                execute ~invocation (fun ~dispatched:_ ~capabilities:_ ->
-                  Ok
-                    (fail
-                       "moderator_reentrancy"
-                       "Tool execution would re-enter the active moderator."))
-              | None ->
-                let moderator_target =
-                  match
-                    C.resolve selected ~id:reference.id ~fingerprint:reference.fingerprint
-                  with
-                  | Ok binding ->
-                    (match C.implementation binding with
-                     | Managed (Moderator _) -> true
-                     | _ -> false)
-                  | Error _ -> false
+                Native_tool_moderation.with_context moderation (fun () ->
+                  with_native_services
+                    t
+                    ~session_id:dispatched.context.session_id
+                    ~generation:dispatched.context.generation
+                    (fun () -> f ~dispatched ~capabilities)))
+            in
+            let resolve () =
+              checked `Admission (fun () ->
+                match prepared.rejection with
+                | Some outcome ->
+                  execute ~invocation (fun ~dispatched:_ ~capabilities:_ -> Ok outcome)
+                | None
+                  when Option.is_none prepare && t.requires_active_moderator reference ->
+                  execute ~invocation (fun ~dispatched:_ ~capabilities:_ ->
+                    Ok
+                      (fail
+                         "moderator_reentrancy"
+                         "Tool execution requires a decision from the active moderator."))
+                | None when reentrant reference.name ->
+                  execute ~invocation (fun ~dispatched:_ ~capabilities:_ ->
+                    Ok
+                      (fail
+                         "moderator_reentrancy"
+                         "Tool execution would re-enter the active moderator."))
+                | None ->
+                  let moderator_target =
+                    match
+                      C.resolve
+                        selected
+                        ~id:reference.id
+                        ~fingerprint:reference.fingerprint
+                    with
+                    | Ok binding ->
+                      (match C.implementation binding with
+                       | Managed (Moderator _) -> true
+                       | _ -> false)
+                    | Error _ -> false
+                  in
+                  (match moderator_target, t.moderator, moderator_execute with
+                   | true, Some install, Some moderator_execute ->
+                     install
+                       t
+                       ~execute:moderator_execute
+                       ~native_execute:execute
+                       ~selected
+                       ~reference
+                       ~invocation
+                       ~prepare_output
+                   | _ ->
+                     Native_tool_invocation.run_scoped_current_with_managed
+                       ~execution_check:t.execution_check
+                       ~on_progress:(progress_for t reference)
+                       ~managed:(Option.map t.managed ~f:(fun install -> install t))
+                       ~moderator_execute
+                       ~execute
+                       ~registry
+                       ~reference
+                       ~invocation
+                       ~is_halted:t.is_halted
+                       ~authorize:t.authorize
+                       ~prepare_output))
+            in
+            let%bind resolved =
+              match direct_write with
+              | None -> resolve ()
+              | Some binding ->
+                let resolved, _ =
+                  Protected_native_call.with_ack_input
+                    ~invocation
+                    ~binding
+                    ~input:prepared.input
+                    resolve
                 in
-                (match moderator_target, t.moderator, moderator_execute with
-                 | true, Some install, Some moderator_execute ->
-                   install
-                     t
-                     ~execute:moderator_execute
-                     ~native_execute:execute
-                     ~selected
-                     ~reference
-                     ~invocation
-                     ~prepare_output
-                 | _ ->
-                   Native_tool_invocation.run_scoped_current_with_managed
-                     ~execution_check:t.execution_check
-                     ~on_progress:(progress_for t reference)
-                     ~managed:(Option.map t.managed ~f:(fun install -> install t))
-                     ~moderator_execute
-                     ~execute
-                     ~registry
-                     ~reference
-                     ~invocation
-                     ~is_halted:t.is_halted
-                     ~authorize:t.authorize
-                     ~prepare_output))
+                resolved
+            in
+            let%map () =
+              match resolved.observation with
+              | None -> Ok ()
+              | Some _ -> checked `Observation (fun () -> t.defer_observation resolved)
+            in
+            result_of_invocation resolved
           in
-          let%map () =
-            match resolved.observation with
-            | None -> Ok ()
-            | Some _ -> checked `Observation (fun () -> t.defer_observation resolved)
-          in
-          result_of_invocation resolved
-        in
-        (match execute () with
-         | Ok result -> Ok result
-         | Error `Observation -> tool_error "invocation.observation_failed"
-         | Error `Input -> tool_error "invocation.invalid_input"
-         | Error `Admission -> tool_error "invocation.admission_failed"
-         | exception (Eio.Cancel.Cancelled _ as exn) -> raise exn
-         | exception _ -> tool_error "invocation.host_failed"))
+          match execute () with
+          | Ok result -> Ok result
+          | Error `Observation -> tool_error "invocation.observation_failed"
+          | Error `Input -> tool_error "invocation.invalid_input"
+          | Error `Admission -> tool_error "invocation.admission_failed"
+          | exception (Eio.Cancel.Cancelled _ as exn) -> raise exn
+          | exception _ -> tool_error "invocation.host_failed"))
   in
   Exn.protect
     ~finally:(fun () -> Atomic.set active false)
@@ -1419,7 +1546,9 @@ let with_script_native_results
       }
   in
   let prepare ~id (original : C.reference) input =
-    let original_payload = payload original input in
+    let protected_call = Option.is_some (protected_binding selected original) in
+    let project input = if protected_call then `Object [] else input in
+    let original_payload = payload original (project input) in
     let route reference input preparation rejection =
       let routing : I.routing =
         { kind =
@@ -1428,7 +1557,7 @@ let with_script_native_results
              | Function -> Function)
         ; original_name = original.name
         ; original_payload = fingerprint original_payload
-        ; final_payload = fingerprint (payload reference input)
+        ; final_payload = fingerprint (payload reference (project input))
         ; canonical_payload = None
         ; preparation
         }
@@ -1450,7 +1579,7 @@ let with_script_native_results
       let call : Chat_response.Moderation.Tool_call.t =
         { id = Agent_protocol.Id.Invocation.to_string id
         ; name = original.name
-        ; args = input
+        ; args = project input
         ; kind = kind original
         ; payload_text = original_payload
         ; meta =
@@ -1470,6 +1599,11 @@ let with_script_native_results
            Pre_tool_rejected
            "invocation.pre_tool_rejected"
            "Pre-tool moderation rejected the call."
+       | Ok (Some (Rewrite_args _ | Redirect _)) when protected_call ->
+         reject
+           Pre_tool_rejected
+           "invocation.protected_owner_required"
+           "Protected arguments cannot be rewritten or redirected."
        | Ok action ->
          let name, args =
            match action with
@@ -1492,6 +1626,7 @@ let with_script_native_results
   Native_tool_moderation.with_handler ~observer ~prepare:moderate (fun () ->
     with_scope_results
       ?caller_source
+      ~allow_authored_note_write:true
       ~result_of_invocation
       ~result_of_error
       ~prepare

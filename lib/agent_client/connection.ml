@@ -114,7 +114,16 @@ let has_command_receipt = function
   | Provider_login_challenge _
   | Ingress_submit _
   | Instructions _
+  | Recovery_windows _
+  | Recovery_history _
+  | Recovery_range _
+  | Recovery_asset_read _
+  | Recovery_status _
+  | Recovery_note_shares _
+  | Recovery_rollover _
+  | Recovery_followup _
   | Goal_query _
+  | Recovery_enable _
   | Goal_control _
   | Recurrence_query _
   | Recurrence_control _
@@ -1016,8 +1025,7 @@ let close t =
   if Atomic.compare_and_set t.closed false true then Transport.close t.transport
 ;;
 
-let request_without_history t command =
-  match request t command with
+let non_history_response = function
   | Ok (Agent_protocol.Public.Result.Non_history value) ->
     Ok (Agent_protocol.Public.Result.Non_history.value value)
   | Ok (Private_provider_challenge _) ->
@@ -1027,6 +1035,45 @@ let request_without_history t command =
   | Ok (Session_get _ | Session_attach _ | Session_create _) ->
     Error (Agent_protocol.Error.invalid_request "unexpected history-bearing result")
   | Error _ as failure -> failure
+;;
+
+let request_without_history t command = non_history_response (request t command)
+
+type recovery_command =
+  | Enable of P.Recovery_query.Enable.t
+  | List_windows of P.Recovery_query.List_windows.t
+  | Query_history of P.Recovery_history_request.t
+  | Read_text of P.Recovery_text_range.t
+  | Read_asset of P.Recovery_asset_read.t
+  | Inspect_rollover of P.Recovery_rollover_control.Inspect.t
+  | Request_rollover of P.Recovery_rollover_control.Request.t
+  | Control_followup of P.Recovery_followup.t
+  | Note_shares of P.Recovery_note_share_control.Request.t
+
+let request_recovery t ~initialized_as command =
+  let command =
+    match command with
+    | Enable request -> P.Command.Recovery_enable request
+    | List_windows request -> P.Command.Recovery_windows request
+    | Query_history request -> P.Command.Recovery_history request
+    | Read_text request -> P.Command.Recovery_range request
+    | Read_asset request -> P.Command.Recovery_asset_read request
+    | Inspect_rollover request -> P.Command.Recovery_status request
+    | Request_rollover request -> P.Command.Recovery_rollover request
+    | Control_followup request -> P.Command.Recovery_followup request
+    | Note_shares request -> P.Command.Recovery_note_shares request
+  in
+  let check () =
+    if Option.exists (initialization t) ~f:(phys_equal initialized_as)
+    then Ok ()
+    else Error (P.Error.create Interrupted ~message:"recovery connection changed" ~retryable:false ())
+  in
+  with_request_lock t (fun () ->
+    let open Result.Let_syntax in
+    let%bind () = check () in
+    let%bind result = non_history_response (request_locked t command) in
+    let%map () = check () in
+    result)
 ;;
 
 let pending_identity pending = pending.recovery_identity

@@ -38,6 +38,11 @@ let required_scope = function
   | Session_runs _
   | Session_run _
   | Recurrence_query _
+  | Recovery_windows _
+  | Recovery_status _
+  | Recovery_history _
+  | Recovery_range _
+  | Recovery_asset_read _
   | Goal_query _
   | Session_pending_inputs _
   | Session_pending_input _
@@ -61,6 +66,9 @@ let required_scope = function
   | Session_resume _
   | Session_run_start _
   | Recurrence_control _
+  | Recovery_enable _
+  | Recovery_rollover _
+  | Recovery_followup _
   | Goal_control _
   | Session_send_message _
   | Session_cancel_pending_input _
@@ -75,7 +83,7 @@ let required_scope = function
   | Session_delete _ | Session_restore _ -> Some Delete_sessions
   | Permission_list _ -> Some View_security_state
   | Permission_respond _ -> Some Answer_approvals
-  | Grant_list _ | Grant_revoke _ -> Some Manage_grants
+  | Grant_list _ | Grant_revoke _ | Recovery_note_shares _ -> Some Manage_grants
   | Audit_read _ -> Some Read_audit
   | Ingress_submit _ -> Some Submit_ingress
   | Job_list _
@@ -166,7 +174,11 @@ let authorize ?(installed_authoring = false) principal command =
          ~message:"pending controls require transcript visibility"
          ~retryable:false
          ())
-  | (Agent_protocol.Command.Recurrence_control _ | Agent_protocol.Command.Goal_control _)
+  | ( Agent_protocol.Command.Recovery_enable _
+    | Agent_protocol.Command.Recovery_rollover _
+    | Agent_protocol.Command.Recovery_followup _
+    | Agent_protocol.Command.Recurrence_control _
+    | Agent_protocol.Command.Goal_control _ )
     when not (Agent_protocol.Principal.has_scope principal View_session_transcript) ->
     Error
       (Agent_protocol.Error.create
@@ -217,8 +229,12 @@ let authorize ?(installed_authoring = false) principal command =
   | _ -> Ok ()
 ;;
 
-let session_visible_to principal (session : Agent_protocol.Session.t) =
+let session_creator_visible_to principal ~creator =
   Agent_protocol.Principal.has_scope principal Administer_configuration
-  || Option.exists session.creator ~f:(fun creator ->
+  || Option.exists creator ~f:(fun creator ->
     Agent_protocol.Id.Principal.equal creator principal.Agent_protocol.Principal.id)
+;;
+
+let session_visible_to principal (session : Agent_protocol.Session.t) =
+  session_creator_visible_to principal ~creator:session.creator
 ;;

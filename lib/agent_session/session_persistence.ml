@@ -91,13 +91,23 @@ let accepted_at_ns state =
   |> Int64.of_int
 ;;
 
-let transaction t ~state_document ~command_audit previous transition =
+let transaction t ~previous_hash ~state_document ~command_audit previous transition =
   let open Result.Let_syntax in
   let%bind delta =
     Session_delta_document.create
       transition.Session_transition.delta
       ~limits:t.limits
       ~state_document:(Session_state_document.with_value state_document)
+    |> Result.map_error ~f:document_error
+  in
+  let contains_withdrawal (state : Session_state.t) =
+    Option.exists state.recovery_windows ~f:Recovery_window_ledger.has_withdrawals
+  in
+  let%bind delta =
+    Session_storage_semantics.require_recovery_withdrawals
+      (Session_delta_document.document delta)
+      ~required:(contains_withdrawal previous || contains_withdrawal transition.state)
+      ~limits:t.limits
     |> Result.map_error ~f:document_error
   in
   let%bind events =
@@ -113,13 +123,13 @@ let transaction t ~state_document ~command_audit previous transition =
       ~session_id:previous.Session_state.identity.session_id
       ~generation:transition.state.identity.generation
       ~transaction_sequence:transition.state.counters.transaction_sequence
-      ~previous_transaction_hash:t.previous_transaction_hash
+      ~previous_transaction_hash:previous_hash
       ~session_revision:transition.state.counters.revision
       ~first_event_sequence
       ~last_event_sequence
       ~accepted_at_ns:(accepted_at_ns transition.state)
       ~command_audit
-      ~delta:(Session_delta_document.document delta)
+      ~delta
       ~durable_events:(List.map events ~f:Durable_event_document.document)
   in
   transaction, events
@@ -145,7 +155,205 @@ let admit_state_document state_document ~limits =
   payload, state_document
 ;;
 
-let commit t ?observation ~command_audit ~(previous : Session_state.t) transition =
+let snapshot_at_payload
+      restored
+      ~limits
+      ~transaction_hash
+      (state : Session_state.t)
+      payload
+  =
+  let args create =
+    create
+      ~limits
+      ~transaction_sequence:state.Session_state.counters.transaction_sequence
+      ~transaction_hash
+      ~event_sequence:state.counters.event_sequence
+      ~created_at:state.identity.updated_at
+      ~prompt_artifact:(P.Id.Prompt_revision.to_string state.spec.prompt_revision_id)
+      ~workspace_identity:state.spec.workspace_instance.conflict_domain
+      ~payload
+  in
+  match restored.Restored.snapshot with
+  | None -> args (Store.Snapshot.create ~session_id:state.identity.session_id)
+  | Some snapshot -> args (Store.Snapshot.update snapshot)
+;;
+
+let admit_recovery_storage
+      t
+      ~snapshot_payload_limit
+      ~previous
+      ~transition
+      ~admitted
+      transaction
+  =
+  let open Result.Let_syntax in
+  let state = transition.Session_transition.state in
+  let other_recovery_unchanged =
+    Option.equal phys_equal previous.Session_state.recovery_notes state.recovery_notes
+    && Option.equal phys_equal previous.recovery_note_shares state.recovery_note_shares
+    && Option.equal phys_equal previous.recovery_rollover state.recovery_rollover
+    && Option.equal phys_equal previous.recovery_reminders state.recovery_reminders
+    && Option.equal phys_equal previous.recovery_windows state.recovery_windows
+    && Option.equal
+         phys_equal
+         previous.recovery_installed_originals
+         state.recovery_installed_originals
+  in
+  if
+    other_recovery_unchanged
+    && Option.equal phys_equal previous.recovery_effective state.recovery_effective
+  then Ok ()
+  else (
+    let%bind snapshot_payload_limit =
+      match snapshot_payload_limit with
+      | Some limit -> Ok limit
+      | None ->
+        Error (Store.Store_error.Corrupt "recovery writer has no bound snapshot profile")
+    in
+    let%bind limits =
+      Persistence_codec.limits ~max_bytes:snapshot_payload_limit
+      |> Result.map_error ~f:document_error
+    in
+    (* An exact compact receipt progression consumes only its admitted phase
+       byte. It follows the same snapshot policy as the associated accounting
+       mutation. A new preparation, bind or locator still admits a full
+       prospective snapshot with the real carrier, counters and markers. *)
+    let%bind () =
+      if
+        other_recovery_unchanged
+        && Option.equal
+             Recovery_effective_ledger.same_storage_reservation
+             previous.recovery_effective
+             state.recovery_effective
+      then Ok ()
+      else
+        snapshot_at_payload
+          t.restored
+          ~limits
+          ~transaction_hash:(Some (Store.Transaction.hash transaction))
+          state
+          (Session_state_document.Admitted.document admitted)
+        |> Result.map ~f:ignore
+    in
+    if
+      String.length (Store.Transaction.encode transaction)
+      > Store.Commit_writer.max_payload_length t.writer
+    then Error (document_error (D.Error.Limit_exceeded "recovery transaction payload"))
+    else Ok ())
+;;
+
+type recovery_preflight_error =
+  | Store of Store.Store_error.t
+  | Protocol of P.Error.t
+
+let reserve_rollover_supersession t ~snapshot_payload_limit ~state_document current =
+  let open Result.Let_syntax in
+  let state = Session_state_document.value state_document in
+  match Option.bind state.recovery_rollover ~f:Recovery_rollover.pending with
+  | None -> Ok ()
+  | Some intent ->
+    (* Reserve the largest typed no-archive terminal for the actual next head,
+       including unrelated writes while the pending intent is retained. *)
+    let delta =
+      Session_delta.Recovery_rollover_changed
+        (Settle { id = intent.id; terminal = Superseded Checkpoint_required })
+    in
+    let%bind transition =
+      Session_transition.apply ~now:state.identity.updated_at state ~delta ~payloads:[]
+      |> Result.map_error ~f:(fun error -> Protocol error)
+    in
+    let%bind admitted =
+      Session_document_transition.admit_encoded
+        state_document
+        ~delta
+        ~next:transition.state
+        ~limits:t.archive_limits
+      |> Result.map_error ~f:(fun error -> Store (document_error error))
+    in
+    let%bind future, _ =
+      transaction
+        t
+        ~previous_hash:(Some (Store.Transaction.hash current))
+        ~state_document
+        ~command_audit:None
+        state
+        transition
+      |> Result.map_error ~f:(fun error -> Store error)
+    in
+    admit_recovery_storage
+      t
+      ~snapshot_payload_limit
+      ~previous:state
+      ~transition
+      ~admitted
+      future
+    |> Result.map_error ~f:(fun error -> Store error)
+;;
+
+let encode_candidate t transition =
+  let open Result.Let_syntax in
+  let%bind admitted =
+    Session_document_transition.admit_encoded
+      t.restored.state_document
+      ~delta:transition.Session_transition.delta
+      ~next:transition.state
+      ~limits:t.archive_limits
+    |> Result.map_error ~f:document_error
+  in
+  let%map state_document =
+    Session_state_document.decode_after
+      (Session_state_document.Admitted.state_document admitted)
+      ~limits:t.archive_limits
+      (Session_state_document.Admitted.document admitted)
+    |> Result.map_error ~f:document_error
+  in
+  admitted, state_document
+;;
+
+let check_recovery_admission t ~snapshot_payload_limit ~command_audit ~previous transition
+  =
+  let check =
+    let open Result.Let_syntax in
+    let store result = Result.map_error result ~f:(fun error -> Store error) in
+    let%bind admitted, state_document = store (encode_candidate t transition) in
+    let%bind transaction, _ =
+      transaction
+        t
+        ~previous_hash:t.previous_transaction_hash
+        ~state_document
+        ~command_audit
+        previous
+        transition
+      |> store
+    in
+    let%bind () =
+      admit_recovery_storage
+        t
+        ~snapshot_payload_limit
+        ~previous
+        ~transition
+        ~admitted
+        transaction
+      |> store
+    in
+    reserve_rollover_supersession t ~snapshot_payload_limit ~state_document transaction
+  in
+  match check with
+  | Ok () -> Ok Canonical_backend_binding_data.Recovery_admission.Fits
+  | Error (Store (Store.Store_error.Document (D.Error.Limit_exceeded _))) ->
+    Ok Capacity_exhausted
+  | Error (Store error) -> Error (protocol_error error)
+  | Error (Protocol error) -> Error error
+;;
+
+let commit_with_profile
+      t
+      ~snapshot_payload_limit
+      ?observation
+      ~command_audit
+      ~(previous : Session_state.t)
+      transition
+  =
   let open Result.Let_syntax in
   let%bind observation =
     Option.value_map observation ~default:(Ok None) ~f:(fun observation ->
@@ -155,24 +363,12 @@ let commit t ?observation ~command_audit ~(previous : Session_state.t) transitio
         ~candidate:transition
       |> Result.map ~f:Option.some)
   in
-  let%bind admitted =
-    Session_document_transition.admit_encoded
-      t.restored.state_document
-      ~delta:transition.Session_transition.delta
-      ~next:transition.state
-      ~limits:t.archive_limits
-    |> Result.map_error ~f:(fun error -> protocol_error (document_error error))
-  in
   (* Ordered admission already validated and encoded this exact original native
      candidate. Decode that immutable encoding once to materialize the complete
      next preservation basis. All admission and transaction validation still
      precedes archive/journal effects. *)
-  let%bind state_document =
-    Session_state_document.decode_after
-      (Session_state_document.Admitted.state_document admitted)
-      ~limits:t.archive_limits
-      (Session_state_document.Admitted.document admitted)
-    |> Result.map_error ~f:(fun e -> protocol_error (document_error e))
+  let%bind admitted, state_document =
+    encode_candidate t transition |> Result.map_error ~f:protocol_error
   in
   let next = { t.restored with state_document } in
   let%bind terminal =
@@ -198,14 +394,40 @@ let commit t ?observation ~command_audit ~(previous : Session_state.t) transitio
       ~max_payload_length:(Store.Commit_writer.max_payload_length t.writer)
   in
   let%bind transaction, events =
-    transaction t ~state_document ~command_audit previous transition
+    transaction
+      t
+      ~previous_hash:t.previous_transaction_hash
+      ~state_document
+      ~command_audit
+      previous
+      transition
     |> Result.map_error ~f:protocol_error
+  in
+  let%bind () =
+    admit_recovery_storage
+      t
+      ~snapshot_payload_limit
+      ~previous
+      ~transition
+      ~admitted
+      transaction
+    |> Result.map_error ~f:protocol_error
+  in
+  let%bind () =
+    reserve_rollover_supersession t ~snapshot_payload_limit ~state_document transaction
+    |> Result.map_error ~f:(function
+      | Store error -> protocol_error error
+      | Protocol error -> error)
   in
   let references =
     List.filter transition.state.conversation.compaction_archives ~f:(fun reference ->
       not
         (List.exists previous.conversation.compaction_archives ~f:(fun old ->
-           Int64.equal old.revision reference.revision)))
+           if Session_state.Compaction_archive.equal_kind reference.kind Rollover
+           then
+             Session_state.Compaction_archive.equal_kind old.kind Rollover
+             && P.Id.Operation.equal old.operation_id reference.operation_id
+           else Int64.equal old.revision reference.revision)))
   in
   let%bind archive =
     match references with
@@ -246,7 +468,16 @@ let commit t ?observation ~command_audit ~(previous : Session_state.t) transitio
       | Some document -> t.archive reference document)
   in
   let commit () =
-    Store.Commit_writer.commit t.writer ~durability:t.durability transaction
+    let durability =
+      if
+        Option.equal
+          phys_equal
+          previous.recovery_rollover
+          transition.state.recovery_rollover
+      then t.durability
+      else Store.Journal_segment.Flush
+    in
+    Store.Commit_writer.commit t.writer ~durability transaction
     |> Result.map_error ~f:protocol_error
     |> Result.map ~f:(fun committed ->
       Session_commit_observation.Returned.
@@ -277,20 +508,44 @@ let commit t ?observation ~command_audit ~(previous : Session_state.t) transitio
     t.command_accepted encoded committed.sequence)
 ;;
 
-let actor_persistence t =
+let commit t ?observation ~command_audit ~previous transition =
+  commit_with_profile
+    t
+    ~snapshot_payload_limit:None
+    ?observation
+    ~command_audit
+    ~previous
+    transition
+;;
+
+let actor_persistence_with_profile t ~snapshot_payload_limit =
   Session_actor.
     { commit =
         (fun ?observation ~command_audit ~previous transition ->
-          commit t ?observation ~command_audit ~previous transition)
+          commit_with_profile
+            t
+            ~snapshot_payload_limit
+            ?observation
+            ~command_audit
+            ~previous
+            transition)
     ; archive_reference =
         (fun ~previous ~kind id -> archive_reference t ~previous ~kind id)
     }
 ;;
 
-let actor_persistence_with_startup_disposal t =
-  let persistence = actor_persistence t in
+let actor_persistence t = actor_persistence_with_profile t ~snapshot_payload_limit:None
+
+let actor_persistence_with_startup_disposal ?recovery_notes ?local_recovery_host t =
+  let snapshot_payload_limit = Option.map recovery_notes ~f:snd in
+  let persistence = actor_persistence_with_profile t ~snapshot_payload_limit in
   let binding =
-    Canonical_backend_binding_data.create ~writer:t.writer ~commit:persistence.commit
+    Canonical_backend_binding_data.create
+      ~writer:t.writer
+      ~commit:persistence.commit
+      ~recovery_note_owner:(Option.map recovery_notes ~f:fst)
+      ~local_recovery_host
+      ~check_recovery_admission:(check_recovery_admission t ~snapshot_payload_limit)
   in
   persistence, binding
 ;;
@@ -321,21 +576,8 @@ let prepare_restored_snapshot restored ~max_payload_length ~transaction_hash sta
     |> Result.map_error ~f:document_error
   in
   let restored = { restored with state_document } in
-  let args create =
-    create
-      ~limits
-      ~transaction_sequence:state.Session_state.counters.transaction_sequence
-      ~transaction_hash
-      ~event_sequence:state.counters.event_sequence
-      ~created_at:state.identity.updated_at
-      ~prompt_artifact:(P.Id.Prompt_revision.to_string state.spec.prompt_revision_id)
-      ~workspace_identity:state.spec.workspace_instance.conflict_domain
-      ~payload
-  in
   let%bind snapshot =
-    match restored.snapshot with
-    | None -> args (Store.Snapshot.create ~session_id:state.identity.session_id)
-    | Some snapshot -> args (Store.Snapshot.update snapshot)
+    snapshot_at_payload restored ~limits ~transaction_hash state payload
   in
   Ok (restored, snapshot)
 ;;

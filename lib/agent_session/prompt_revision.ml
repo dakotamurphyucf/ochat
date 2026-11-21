@@ -7,7 +7,7 @@ type t =
   ; parser_context : Prompt.Chat_markdown.Parsed.t option
   ; programs : Chatml_prompt_programs.t option
   ; content : Chatmd_prompt_content.t option
-  ; document_projection : Prompt.Chat_markdown.Document_projection.t option
+  ; materialized_content : Chatmd_prompt_content.Materialized.t option
   ; elements : Prompt.Chat_markdown.top_level_elements list
   }
 
@@ -19,7 +19,7 @@ let create ~definition ~artifact ~materialized_tree ~elements =
   ; parser_context = None
   ; programs = None
   ; content = None
-  ; document_projection = None
+  ; materialized_content = None
   }
 ;;
 
@@ -84,7 +84,17 @@ let root_relative_path t = t.artifact.root_relative_path
 let parser_context t = t.parser_context
 let programs t = t.programs
 let content t = t.content
-let document_projection t = t.document_projection
+
+let document_projection t =
+  Option.map t.materialized_content ~f:Chatmd_prompt_content.Materialized.projection
+;;
+
+let installed_original_key t occurrence =
+  let open Option.Let_syntax in
+  let%bind _ = t.artifact.originals_sha256 in
+  let%bind materialized = t.materialized_content in
+  Chatmd_prompt_content.Materialized.original_key materialized occurrence
+;;
 
 let with_content t ~content ~materialized ~checkpoint =
   let module C = Chatmd_prompt_content in
@@ -132,7 +142,7 @@ let with_content t ~content ~materialized ~checkpoint =
     Ok
       { t with
         content = Some content
-      ; document_projection = Some projection
+      ; materialized_content = Some materialized
       ; elements = Prompt.Chat_markdown.Document_projection.elements projection
       }
 ;;

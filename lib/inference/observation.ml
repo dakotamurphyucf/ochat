@@ -153,6 +153,7 @@ end
 module Estimator = struct
   type method_ =
     | O200k_serialized_history
+    | O200k_serialized_prepared_request
     | Utf8_heuristic
   [@@deriving equal, sexp_of]
 
@@ -177,6 +178,7 @@ module Estimator = struct
         , string
             (match t.method_ with
              | O200k_serialized_history -> "o200k_serialized_history"
+             | O200k_serialized_prepared_request -> "o200k_serialized_prepared_request"
              | Utf8_heuristic -> "utf8_heuristic") )
       ; "version", integer t.version
       ]
@@ -189,6 +191,7 @@ module Estimator = struct
         Decode.tag
           value
           [ "o200k_serialized_history", O200k_serialized_history
+          ; "o200k_serialized_prepared_request", O200k_serialized_prepared_request
           ; "utf8_heuristic", Utf8_heuristic
           ])
     in
@@ -993,11 +996,26 @@ module Configuration = struct
     | name -> Name.to_string name, None
   ;;
 
-  let of_target ?transport_policy target ~preparation_id ~transport ~capabilities ~limits =
+  let of_target
+        ?transport_policy
+        ?(omit_prompt_cache = false)
+        target
+        ~preparation_id
+        ~transport
+        ~capabilities
+        ~limits
+    =
     if List.length capabilities > 64
     then invalid "capabilities" "at most 64 declarations"
     else (
       let raw_settings = Request.Target.settings target in
+      let raw_settings =
+        if omit_prompt_cache
+        then
+          List.filter raw_settings ~f:(fun setting ->
+            not (Request.Setting.is_prompt_cache setting))
+        else raw_settings
+      in
       let known_names = List.map Name.all ~f:(fun name -> fst (source name)) in
       let settings =
         List.map Name.all ~f:(fun name ->
@@ -1248,6 +1266,7 @@ module Diagnostic = struct
       | Missing_required_parameter
       | Unsupported_parameter
       | Invalid_parameter
+      | Context_window_exceeded
       | Unclassified
     [@@deriving equal, sexp_of]
 
@@ -1274,6 +1293,8 @@ module Diagnostic = struct
     let create ~status ~reason ~parameter =
       if status < 100 || status > 599 || status = 200
       then invalid "http_status" "not rejection status"
+      else if equal_reason reason Context_window_exceeded && status <> 400
+      then invalid "http_status" "context-limit rejection requires HTTP 400"
       else Ok { status; reason; parameter }
     ;;
 
@@ -1284,6 +1305,7 @@ module Diagnostic = struct
     let reasons =
       [ "missing_required_parameter", Missing_required_parameter
       ; "unsupported_parameter", Unsupported_parameter
+      ; "context_window_exceeded", Context_window_exceeded
       ; "invalid_parameter", Invalid_parameter
       ; "unclassified", Unclassified
       ]

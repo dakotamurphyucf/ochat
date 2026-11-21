@@ -2,6 +2,7 @@ import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 import sitemap from '@astrojs/sitemap';
 import searchIndex from './scripts/search-index.mjs';
+import protocolStylesheet from './scripts/protocol-stylesheet.mjs';
 import readingAccessibility from './scripts/rehype-reading.mjs';
 import codeAccessibility from './scripts/code-accessibility.mjs';
 import { replLanguage } from './scripts/repl-highlighting.mjs';
@@ -73,6 +74,9 @@ export default defineConfig({
         },
       },
     }),
+    protocolStylesheet(
+      entries.find((entry) => entry.id === 'agent-server/protocol-types').route,
+    ),
     searchIndex(),
   ],
 });

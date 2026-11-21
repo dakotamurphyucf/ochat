@@ -51,6 +51,7 @@ type t =
   { domain : int
   ; previous : Session_state.t
   ; candidate : Session_transition.t
+  ; check_at_writer : (unit -> (unit, P.Error.t) result) option
   ; mutable progress : Progress.t
   ; mutable outcome : Outcome.t
   ; mutable writer_returned : Returned.t option
@@ -74,14 +75,23 @@ module Owner = struct
   type observation = t
   type nonrec t = t
 
-  let create ~previous ~candidate =
+  let create_with_check ~previous ~candidate ~check_at_writer =
     { domain = (Stdlib.Domain.self () :> int)
     ; previous
     ; candidate
+    ; check_at_writer
     ; progress = Unobserved
     ; outcome = Not_called
     ; writer_returned = None
     }
+  ;;
+
+  let create ~previous ~candidate =
+    create_with_check ~previous ~candidate ~check_at_writer:None
+  ;;
+
+  let create_guarded ~previous ~candidate ~check_at_writer =
+    create_with_check ~previous ~candidate ~check_at_writer:(Some check_at_writer)
   ;;
 
   let commit t ~commit =
@@ -98,6 +108,8 @@ module Owner = struct
     | result ->
       let result =
         match result, t.progress with
+        | Ok (), Unobserved when Option.is_some t.check_at_writer ->
+          Error (error "guarded persistence did not reach its writer check")
         | Ok (), (Before_writer | Writer_entered _) ->
           Error
             (error "observed persistence returned without its journal acknowledgement")
@@ -156,6 +168,9 @@ module Host = struct
     in
     (* This mark is immediately before the real canonical writer invocation.
        Even cancellation during bounded queue admission remains conservative. *)
+    let%bind () =
+      Option.value_map t.check_at_writer ~default:(Ok ()) ~f:(fun check -> check ())
+    in
     t.progress <- Writer_entered transaction;
     let%bind returned = commit () in
     t.writer_returned <- Some returned;

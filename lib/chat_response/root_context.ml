@@ -7,7 +7,24 @@ type t =
       previous:Inference_runtime.Context.t
       -> history:History_entry.t list
       -> (Inference_runtime.Context.t
+          -> select_checkpoint:Soft_checkpoint.select option
+          -> select_prepared:Inference_client.Prepared_selection.select option
+          -> on_prepared:(Inference_runtime.Prepared.t -> unit)
           -> on_dispatch:(Inference.Observation.Configuration.t -> unit)
           -> 'a)
       -> 'a
+  ; checkpoint_tools : Soft_checkpoint.tools
   }
+
+(** Exact first root admission of a fresh window. Preview entries remain
+    transient until the selected attempt crosses the guarded submission cut. *)
+module Successor = struct
+  type t =
+    { pending : History_entry.t list
+    ; optional_hint : Agent_guidance.t option
+    ; check_prepared : optional_hint:bool -> Inference_runtime.Prepared.t -> unit
+    ; guard : Inference_runtime.Attempt.t -> unit -> unit
+    }
+
+  exception Omit_optional_hint
+end

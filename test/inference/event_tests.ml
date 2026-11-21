@@ -224,6 +224,7 @@ let%test_unit "terminal outcomes are closed and all known categories roundtrip" 
       ; Incomplete Filtered
       ; Incomplete Other
       ; Incomplete Unavailable
+      ; Failed (Provider Context_window_exceeded)
       ; Failed (Provider Invalid_request)
       ; Failed (Provider Denied)
       ; Failed (Provider Rate_limited)
@@ -236,6 +237,7 @@ let%test_unit "terminal outcomes are closed and all known categories roundtrip" 
       ; Failed (Transport Invalid_content_type)
       ; Failed (Transport Body_limit)
       ; Failed (Transport Framing_limit)
+      ; Failed (Transport Http_context_limit)
       ; Failed (Transport (Http_status 429))
       ]
   in

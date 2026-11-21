@@ -605,6 +605,7 @@ module Terminal = struct
     | Session_closed
     | Session_busy
     | Http_status of int
+    | Http_context_limit
     | Invalid_http
     | Invalid_content_type
     | Body_limit
@@ -1022,6 +1023,19 @@ let io f =
 
 exception Auth_invalidated of Auth.error
 
+let with_application_write submission_guard ~submitted ~check_transport ~f =
+  try
+    Inference_runtime.Submission_guard.with_submission
+      submission_guard
+      ~check_transport
+      ~f
+  with
+  | Inference_runtime.Protected_delivery.Lease_timeout ->
+    if !submitted
+    then transport_failure Timeout
+    else raise (Inference_runtime.Protected_delivery.Rejected Expired)
+;;
+
 module Http_rejection = struct
   module H = Inference.Observation.Diagnostic.Http_rejection
 
@@ -1113,6 +1127,8 @@ module Http_rejection = struct
                  | Some (`String "missing_required_parameter") ->
                    H.Missing_required_parameter
                  | Some (`String "unsupported_parameter") -> Unsupported_parameter
+                 | Some (`String "context_length_exceeded") when status = 400 ->
+                   Context_window_exceeded
                  | Some (`String "invalid_parameter") -> Invalid_parameter
                  | _ -> Unclassified
                in
@@ -1202,10 +1218,6 @@ let dispatch
    | Ok () -> ()
    | Error error -> raise (Auth_invalidated error));
   on_selected ();
-  Inference_runtime.Submission_guard.check submission_guard;
-  (match lease.Auth.check_current () with
-   | Ok () -> ()
-   | Error error -> raise (Auth_invalidated error));
   let header =
     sprintf
       "POST %s HTTP/1.1\r\n\
@@ -1222,10 +1234,17 @@ let dispatch
       additional_headers
       (String.length body)
   in
-  submitted := true;
-  io (fun () ->
-    Eio.Flow.copy_string header flow;
-    Eio.Flow.copy_string body flow);
+  let check_transport () =
+    match lease.Auth.check_current () with
+    | Ok () -> ()
+    | Error error -> raise (Auth_invalidated error)
+  in
+  with_application_write submission_guard ~submitted ~check_transport ~f:(fun () ->
+    check_transport ();
+    submitted := true;
+    io (fun () ->
+      Eio.Flow.copy_string header flow;
+      Eio.Flow.copy_string body flow));
   let reader =
     Eio.Buf_read.of_flow
       flow
@@ -1241,7 +1260,10 @@ let dispatch
     let rejection = Http_rejection.read t reader headers status in
     rejection_emitted := true;
     on_event (Event.Http_rejection { rejection; delivery = Possibly_submitted });
-    transport_failure (Http_status status));
+    let module H = Inference.Observation.Diagnostic.Http_rejection in
+    if H.equal_reason (H.reason rejection) Context_window_exceeded
+    then transport_failure Http_context_limit
+    else transport_failure (Http_status status));
   if
     List.exists headers ~f:(fun (key, value) ->
       String.equal key "content-encoding" && not (String.Caseless.equal value "identity"))
@@ -1719,6 +1741,7 @@ let websocket_dispatch
       ~published
       ~submitted
       ~cache_assets
+      ~isolated
   =
   let channel =
     match session.Websocket_session.channel with
@@ -1750,7 +1773,8 @@ let websocket_dispatch
     loop prefix input
   in
   let continuation =
-    Option.bind channel.cache ~f:(fun cache ->
+    (if isolated then None else channel.cache)
+    |> Option.bind ~f:(fun cache ->
       if
         List.equal Inference.Request.Asset.equal cache_assets cache.assets
         && Document_schema.Json.equal envelope cache.envelope
@@ -1774,14 +1798,15 @@ let websocket_dispatch
   if String.length body > t.max_request_bytes then transport_failure Body_limit;
   check_auth lease;
   on_selected Inference.Observation.Transport_selection.Websocket None;
-  Inference_runtime.Submission_guard.check submission_guard;
-  check_auth lease;
-  (* From this point cancellation or partial write is uncertain; no resend. *)
-  Responses_websocket.begin_response channel.websocket;
-  submitted := true;
-  (match Responses_websocket.write_text channel.websocket body with
-   | Ok () -> ()
-   | Error _ -> transport_failure Protocol);
+  let check_transport () = check_auth lease in
+  with_application_write submission_guard ~submitted ~check_transport ~f:(fun () ->
+    check_transport ();
+    (* From this point cancellation or partial write is uncertain; no resend. *)
+    Responses_websocket.begin_response channel.websocket;
+    submitted := true;
+    match Responses_websocket.write_text channel.websocket body with
+    | Ok () -> ()
+    | Error _ -> transport_failure Protocol);
   channel.cache <- None;
   let profile = Prepared.profile prepared in
   let origin =
@@ -1845,10 +1870,11 @@ let websocket_dispatch
             in
             let retained = `Array prefix in
             if
-              Result.is_ok
-                (Document_schema.Json.validate
-                   ~limits:Transcript.Admission.default
-                   retained)
+              (not isolated)
+              && Result.is_ok
+                   (Document_schema.Json.validate
+                      ~limits:Transcript.Admission.default
+                      retained)
               && Option.is_some channel.identity
             then
               channel.cache
@@ -1868,6 +1894,7 @@ let websocket_dispatch
 
 let run_with_transport
       ?(cache_assets = [])
+      ?(isolated = false)
       ?(submission_guard = Inference_runtime.Submission_guard.empty)
       t
       ~session
@@ -1958,7 +1985,8 @@ let run_with_transport
                        ~on_event
                        ~published
                        ~submitted
-                       ~cache_assets)))
+                       ~cache_assets
+                       ~isolated)))
         in
         let retire () =
           Option.iter !owned ~f:(fun session ->
@@ -1974,7 +2002,7 @@ let run_with_transport
           try
             match
               t.with_timeout (fun () ->
-                match session with
+                match if isolated then None else session with
                 | Some session -> execute session
                 | None ->
                   Eio.Switch.run (fun sw ->
@@ -2012,7 +2040,7 @@ let run_with_transport
           sse
             (Some
                (match reason with
-                | Invalid_http | Http_status _ -> Transport_selection.Upgrade
+                | Invalid_http | Http_status _ | Http_context_limit -> Transport_selection.Upgrade
                 | _ -> Connection))
         | `Failure reason ->
           let terminal = failed reason in

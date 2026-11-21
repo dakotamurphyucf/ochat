@@ -165,6 +165,9 @@ let execute
       context
       ?(history = [])
       ?(table = String.Table.create ())
+      ?root_context
+      ?foreground_capacity
+      ?(on_completion = ignore)
       ?(on_commit = ignore)
       ?(on_attempt = ignore)
       ?(on_admitted_call = ignore)
@@ -176,10 +179,12 @@ let execute
   C.In_memory_stream.run_completion_stream_in_memory_entries
     ~env
     ~inference_context:context
+    ?root_context
+    ?foreground_capacity
     ~inference_identity:(identity ())
     ~on_inference_attempt:on_attempt
     ~on_admitted_call
-    ~on_inference_completion:(fun _ -> ())
+    ~on_inference_completion:on_completion
     ~allocator
     ~history
     ~tools:(Some [])
@@ -1196,4 +1201,105 @@ let%expect_test "fork context forwards admission without inheriting an attempt" 
       !admissions
       !effects);
   [%expect {| nested_attempts=2 admitted=1 effects=1 |}]
+;;
+
+let%expect_test
+    "automatic cuts precede allocation or follow an empty acknowledged rejection"
+  =
+  Eio_main.run (fun env ->
+    List.iter [ `Hard; `Empty; `Partial ] ~f:(fun scenario ->
+      let events = Queue.create () in
+      let note = Queue.enqueue events in
+      let context =
+        context
+          (fun
+              _
+               ~sw:_
+               ~scope
+               ~accounting_id
+               ~note_delivery:_
+               ~on_event
+               ~on_observation:_
+               ~submission_guard:_
+             ->
+             note "provider";
+             let live view =
+               let stream = Transcript.Stream.create view ~limits |> ok in
+               on_event (E.create (Live stream) ~limits |> ok)
+             in
+             live (Source_started { scope; origin = P.Origin.unavailable });
+             (match scenario with
+              | `Partial ->
+                live (Unknown_event { scope; provider_kind = "extension"; raw = `Null })
+              | `Hard | `Empty -> ());
+             Runtime.Receipt.create
+               ~terminal:
+                 (E.Terminal.create
+                    ~scope
+                    ~delivery:Response_started
+                    ~outcome:(Failed (Provider Context_window_exceeded))
+                  |> ok)
+               ~usage:(usage scope accounting_id)
+               ~output:[]
+               ~output_coverage:Response_output
+               ~limits:Runtime.Limits.default
+             |> ok)
+      in
+      let root_context =
+        C.Root_context.
+          { with_context =
+              (fun ~previous ~history:_ f ->
+                Exn.protect
+                  ~finally:(fun () -> note "release")
+                  ~f:(fun () ->
+                    f
+                      previous
+                      ~select_checkpoint:None
+                      ~select_prepared:None
+                      ~on_prepared:ignore
+                      ~on_dispatch:ignore))
+          ; checkpoint_tools = Unselected
+          }
+      in
+      let port =
+        C.Capacity_rollover.
+          { inspect =
+              (function
+                | Unsent _ ->
+                  Ok
+                    (match scenario with
+                     | `Hard -> Hard_limit
+                     | _ -> No_transition)
+                | Rejected _ -> Ok Qualified_rejection)
+          ; request =
+              (fun ~trigger ~stage ->
+                (match trigger, stage with
+                 | Hard_input_limit, Unsent _ | Provider_context_limit, Rejected _ -> ()
+                 | _ -> failwith "unexpected automatic boundary");
+                note "cut";
+                Ok Retire)
+          }
+      in
+      let foreground_capacity =
+        C.Foreground_capacity.create port ~on_retired:(fun () -> note "successor")
+      in
+      (match
+         execute
+           env
+           context
+           ~root_context
+           ~foreground_capacity
+           ~on_attempt:(fun _ -> note "allocate")
+           ~on_completion:(fun _ -> note "ack")
+           ()
+       with
+       | history -> assert (List.is_empty history)
+       | exception C.In_memory_stream.Inference_failed _ -> note "original failure");
+      print_s [%sexp (Queue.to_list events : string list)]));
+  [%expect
+    {|
+    (cut release successor)
+    (allocate provider ack cut release successor)
+    (allocate provider ack release "original failure")
+    |}]
 ;;

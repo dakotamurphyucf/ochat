@@ -38,6 +38,13 @@ val value : t -> Session_state.t
 val with_value : t -> Session_state.t -> t
 val shape : Document_schema.Shape.t
 
+(** Exact retained universal archive carrier, with private recovery notes, sharing
+    grants and rollover control omitted. Compatible unknown fields retain custody. *)
+val archive_document
+  :  t
+  -> limits:Document_schema.Limits.t
+  -> (Document_schema.Document.t, Document_schema.Error.t) result
+
 (** Capacity-only future shape witnesses for this exact already encoded native
     state. The persistence owner supplies its admitted [document]. Witness JSON
     is never decoded as state/evidence or installed; it owns no execution right. *)
@@ -159,6 +166,15 @@ val legacy_model_job_target
 val retire_canonical_suffix
   :  t
   -> retained_ids:Agent_protocol.History.Id.t list
+  -> limits:Document_schema.Limits.t
+  -> (t, Document_schema.Error.t) result
+
+(** Filter only old canonical rows leaving an independently archive-admitted
+    ordinary compaction. Original retained entry envelopes keep their fields.
+    The caller must attach the checked replacement before further admission. *)
+val retire_canonical_compaction
+  :  t
+  -> history:Agent_protocol.History.entry list
   -> limits:Document_schema.Limits.t
   -> (t, Document_schema.Error.t) result
 
@@ -341,7 +357,8 @@ module Transaction : sig
       Requires the identical issued private accounting cursor, exact pure next
       value and unchanged catalog/account/ledger projection; it cannot rebase or
       import another snapshot's evidence. History/archive custody is checked by
-      the actual history owner before this call. *)
+      the actual history owner before this call. Any next-publication window
+      locators are fully validated after the committed revision is stamped. *)
   val continue_after_history
     :  t
     -> admitted:document
@@ -384,6 +401,17 @@ module Transaction : sig
     :  t
     -> limits:Document_schema.Limits.t
     -> (document, Document_schema.Error.t) result
+
+  (** Stage canonical row retirement under the exact archived physical state at
+      the entrance to this transaction. Ordinary and same-generation Created
+      keep their existing raw preservation rules. Call before updating accounting
+      and install the actual [next] before encoding. *)
+  val retire_administrative_history
+    :  t
+    -> original:document
+    -> next:Session_state.t
+    -> limits:Document_schema.Limits.t
+    -> (t, Document_schema.Error.t) result
 
   val transfer_pending
     :  t

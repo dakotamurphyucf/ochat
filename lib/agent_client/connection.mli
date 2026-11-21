@@ -17,6 +17,25 @@ val request_without_history
   -> Agent_protocol.Command.t
   -> (Agent_protocol.Method_result.t, Agent_protocol.Error.t) result
 
+type recovery_command =
+  | Enable of Agent_protocol.Recovery_query.Enable.t
+  | List_windows of Agent_protocol.Recovery_query.List_windows.t
+  | Query_history of Agent_protocol.Recovery_history_request.t
+  | Read_text of Agent_protocol.Recovery_text_range.t
+  | Read_asset of Agent_protocol.Recovery_asset_read.t
+  | Inspect_rollover of Agent_protocol.Recovery_rollover_control.Inspect.t
+  | Request_rollover of Agent_protocol.Recovery_rollover_control.Request.t
+  | Control_followup of Agent_protocol.Recovery_followup.t
+  | Note_shares of Agent_protocol.Recovery_note_share_control.Request.t
+
+(** Process a recovery command on the ordinary request lane under the same
+    successful physical Initialize, including after a suspended reply. *)
+val request_recovery
+  :  t
+  -> initialized_as:Agent_protocol.Initialize.Response.t
+  -> recovery_command
+  -> (Agent_protocol.Method_result.t, Agent_protocol.Error.t) result
+
 (** The last validated successful initialize response on this transport. Failed
     initialization and unrelated responses do not establish support; closed
     connections expose None. Capability selection does not grant authority. *)

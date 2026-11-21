@@ -56,11 +56,27 @@ test('protocol anchors and source excerpts remain usable without JavaScript', as
   try {
     const page = await context.newPage();
     await page.goto('/docs/reference/agent-server/protocol-types/#session');
-    const section = page.locator('#session');
-    await expect(section).toBeVisible();
-    expect(
-      await section.evaluate((element) => element.getBoundingClientRect().top),
-    ).toBeGreaterThan(60);
+    await expect(
+      page.locator('head > style[data-ochat-protocol-code]'),
+    ).toHaveCount(1);
+    const section = page.locator('#session:target');
+    await expect(section).toHaveText('session');
+    await expect
+      .poll(() => page.evaluate(() => document.fonts.status))
+      .toBe('loaded');
+    const placement = await section.evaluate((heading) => {
+      const header = document.querySelector('header.header');
+      if (!header) throw new Error('Missing documentation header');
+      const { top, bottom } = heading.getBoundingClientRect();
+      return {
+        top,
+        bottom,
+        headerBottom: header.getBoundingClientRect().bottom,
+        viewportHeight: innerHeight,
+      };
+    });
+    expect(placement.top).toBeGreaterThanOrEqual(placement.headerBottom);
+    expect(placement.bottom).toBeLessThanOrEqual(placement.viewportHeight);
     await expect(
       page.locator(
         '.sl-markdown-content a[href$="/lib/agent_protocol/session.ml"]',

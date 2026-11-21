@@ -40,6 +40,38 @@ let registry ?(owner = "owner") ?(resource = "root=allowed") pairs =
   |> get
 ;;
 
+let%test_unit "generated foreground requires the host revision of a stock history tool" =
+  Mirage_crypto_rng_unix.use_default ();
+  let module History = C.Local_history_tool in
+  let calls = ref 0 in
+  let name = History.name List_windows in
+  let revision = History.implementation_revision List_windows in
+  let bind ?(delegation_restrictions = []) name revision =
+    let registry =
+      C.create
+        ~owner:"fixture-owner"
+        ~resource_fingerprint:(digest "fixture resources")
+        ~result_contracts:[ name, C.Protected_recovery_v1 ]
+        ~delegation_restrictions
+        [ revision, tool name calls ]
+      |> get
+    in
+    C.find registry ~name |> get
+  in
+  let stock = bind name revision in
+  get (C.check_generated_foreground stock);
+  assert (Result.is_error (C.require_plain_invocation stock));
+  assert (Result.is_error (C.check_delegation stock));
+  assert (Result.is_error (C.check_generated_foreground (bind name (digest "other code"))));
+  assert (
+    Result.is_error (C.check_generated_foreground (bind "recovery_note_read" revision)));
+  assert (
+    Result.is_error
+      (C.check_generated_foreground
+         (bind ~delegation_restrictions:[ name, "fixture restriction" ] name revision)));
+  assert (!calls = 0)
+;;
+
 let%test_unit "selection retains actual registered implementations and only narrows" =
   Mirage_crypto_rng_unix.use_default ();
   let calls = ref 0 in

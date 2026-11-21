@@ -51,8 +51,15 @@ module Tool_dispatch = struct
     ; runtime_requests : Moderation.Runtime_request.t list
     }
 
+  type protection =
+    { claims : name:string -> bool
+    ; take : unit -> Inference_runtime.Protected_delivery.t list
+    ; close : unit -> unit
+    }
+
   type t =
-    { for_fork : (source:string -> parent_call_id:string -> t) option
+    { protection : protection option
+    ; for_fork : (source:string -> parent_call_id:string -> t) option
     ; commit_call : request -> bool
     ; prepare_call :
         (request -> (Moderation.Tool_moderation.t option, string) Result.t) option
@@ -75,7 +82,14 @@ module Tool_dispatch = struct
       | [ prepare ] -> Some prepare
       | _ -> invalid_arg "tool dispatch requires a single host preparation policy"
     in
+    let protection =
+      match List.filter_map services ~f:(fun service -> service.protection) with
+      | [] -> None
+      | [ owner ] -> Some owner
+      | _ -> invalid_arg "tool dispatch requires a single protected delivery owner"
+    in
     { for_fork
+    ; protection
     ; prepare_call
     ; commit_call =
         (fun request ->
@@ -113,6 +127,7 @@ type driver_pending_call_kind =
 type driver_pending_call =
   { seq : int
   ; call_entry : History_entry.t option
+  ; candidate_key : Transcript.Item.Key.t option
   ; call_id : string
   ; kind : driver_pending_call_kind
   ; name : string
@@ -226,6 +241,11 @@ type 'a prepared_turn =
 type ctx =
   { env : Eio_unix.Stdenv.base
   ; root_context : Root_context.t option
+  ; foreground_capacity : Foreground_capacity.t option
+  ; ordinary_write_admission :
+      (Inference_runtime.Prepared.t -> Inference_runtime.Attempt.t -> unit -> unit) option
+  ; on_settled_batch : (Settled_tool_batch.t -> Settled_tool_batch.decision) option
+  ; successor : Root_context.Successor.t option
   ; inference_context : Inference_runtime.Context.t
   ; fork_depth : int option
   ; inference_identity : Neutral_turn.Identity.t
@@ -234,6 +254,8 @@ type ctx =
   ; on_inference_observation : Inference.Observation.t -> unit
   ; on_admitted_call : Admitted_call.t -> unit
   ; agent_guidance : Agent_guidance.t option
+  ; take_protected_delivery : (unit -> Inference_runtime.Protected_delivery.t list) option
+  ; protect_tool_arguments : bool
   ; submission_guard : Inference_runtime.Submission_guard.t
   ; before_inference_dispatch : Inference_runtime.Prepared.t -> unit
   ; before_tool_effect : (unit -> unit) option
@@ -296,6 +318,11 @@ type ctx =
 type args =
   { env : Eio_unix.Stdenv.base
   ; root_context : Root_context.t option
+  ; foreground_capacity : Foreground_capacity.t option
+  ; ordinary_write_admission :
+      (Inference_runtime.Prepared.t -> Inference_runtime.Attempt.t -> unit -> unit) option
+  ; on_settled_batch : (Settled_tool_batch.t -> Settled_tool_batch.decision) option
+  ; successor : Root_context.Successor.t option
   ; inference_context : Inference_runtime.Context.t
   ; fork_depth : int option
   ; inference_identity : Neutral_turn.Identity.t
@@ -305,6 +332,8 @@ type args =
   ; on_inference_observation : Inference.Observation.t -> unit
   ; on_admitted_call : Admitted_call.t -> unit
   ; agent_guidance : Agent_guidance.t option
+  ; take_protected_delivery : (unit -> Inference_runtime.Protected_delivery.t list) option
+  ; protect_tool_arguments : bool
   ; submission_guard : Inference_runtime.Submission_guard.t
   ; before_inference_dispatch : Inference_runtime.Prepared.t -> unit
   ; before_tool_effect : (unit -> unit) option
@@ -843,8 +872,14 @@ let finish_turn ~(moderator : moderator option) ~available_tools ~now_ms ~histor
   runtime_requests_of_outcomes_result ~source:"turn_end" (outcomes_to_list outer ~drained)
 ;;
 
+let protected_call (c : ctx) name =
+  Option.exists c.dispatch_tool ~f:(fun dispatch ->
+    Option.exists dispatch.protection ~f:(fun protection -> protection.claims ~name))
+;;
+
 let moderate_tool_call_with_event
       ~(moderator : moderator option)
+      ~project_input
       ~run_event
       ~(kind : Tool_call.Kind.t)
       ~(name : string)
@@ -858,14 +893,22 @@ let moderate_tool_call_with_event
   let original_call_item =
     Tool_call.call_item ~kind ~name ~payload ~call_id ~id:item_id
   in
+  let observed_item =
+    let projected = project_input ~name payload in
+    if String.equal projected payload
+    then original_call_item
+    else Tool_call.call_item ~kind ~name ~payload:projected ~call_id ~id:item_id
+  in
   let tool_call =
-    match Moderation.Tool_call.of_response_item original_call_item with
+    match Moderation.Tool_call.of_response_item observed_item with
     | None ->
       failwith "Expected tool call item when moderating a pending tool invocation."
     | Some tool_call -> tool_call
   in
   let%bind outer =
-    run_event ~original_call_item ~event:(Moderation.Event.Pre_tool_call tool_call)
+    run_event
+      ~original_call_item:observed_item
+      ~event:(Moderation.Event.Pre_tool_call tool_call)
   in
   let%bind () = ensure_not_waiting_on_ui moderator in
   let%bind runtime_requests, action =
@@ -914,18 +957,25 @@ let moderate_tool_call_with_event
 ;;
 
 let moderate_tool_call ~moderator ~available_tools ~now_ms ~history =
-  moderate_tool_call_with_event ~moderator ~run_event:(fun ~original_call_item ~event ->
-    run_moderation_event
-      ~moderator
-      ~available_tools
-      ~now_ms
-      ~history:(history @ [ original_call_item ])
-      ~event)
+  moderate_tool_call_with_event
+    ~project_input:(fun ~name:_ payload -> payload)
+    ~moderator
+    ~run_event:(fun ~original_call_item ~event ->
+      run_moderation_event
+        ~moderator
+        ~available_tools
+        ~now_ms
+        ~history:(history @ [ original_call_item ])
+        ~event)
 ;;
 
-let moderate_tool_call_entries ~moderator ~available_tools ~now_ms ~history =
-  moderate_tool_call_with_event ~moderator ~run_event:(fun ~original_call_item:_ ~event ->
-    run_moderation_event_entries ~moderator ~available_tools ~now_ms ~history ~event)
+let moderate_tool_call_entries ~project_input ~moderator ~available_tools ~now_ms ~history
+  =
+  moderate_tool_call_with_event
+    ~project_input
+    ~moderator
+    ~run_event:(fun ~original_call_item:_ ~event ->
+      run_moderation_event_entries ~moderator ~available_tools ~now_ms ~history ~event)
 ;;
 
 let handle_tool_result_with_events
@@ -1425,6 +1475,11 @@ let make_run_fork_admitted
     { ctx with
       allocator = child_allocator
     ; root_context = None
+    ; foreground_capacity = None
+    ; ordinary_write_admission = None
+    ; on_settled_batch = None
+    ; successor = None
+    ; take_protected_delivery = None
     ; inference_context = Inference_runtime.Context.detach ctx.inference_context
     ; fork_depth = Option.map ctx.fork_depth ~f:(fun depth -> depth + 1)
     ; id_source = History_entry.Id_source.of_allocator child_allocator
@@ -1510,9 +1565,12 @@ let add_pending
       ~(kind : [ `Function | `Custom ])
       ~(name : string)
       ?call_entry
+      ?candidate_key
       promise
   =
-  let pending = { seq = st.next_seq; call_entry; call_id; kind; name; promise } in
+  let pending =
+    { seq = st.next_seq; call_entry; candidate_key; call_id; kind; name; promise }
+  in
   { st with
     pending_calls_rev = pending :: st.pending_calls_rev
   ; next_seq = st.next_seq + 1
@@ -1627,6 +1685,8 @@ let prepare_tool_call (c : ctx) ~hist ~st ~kind ~name ~payload ~call_id ~item_id
       try
         let moderate =
           moderate_tool_call_entries
+            ~project_input:(fun ~name payload ->
+              if protected_call c name then "{}" else payload)
             ~moderator:c.moderator
             ~available_tools:c.tools
             ~now_ms:(now_ms c.env)
@@ -1643,6 +1703,11 @@ let prepare_tool_call (c : ctx) ~hist ~st ~kind ~name ~payload ~call_id ~item_id
     (match result with
      | Error message when Option.is_none c.dispatch_tool -> failwith message
      | Error _ -> reject Tool_dispatch.Pre_tool_failed "Pre-tool moderation failed."
+     | Ok moderated when protected_call c name && not (String.equal name moderated.name)
+       ->
+       reject
+         Tool_dispatch.Pre_tool
+         "A protected call cannot transfer its arguments to another tool."
      | Ok moderated
        when Option.is_none moderated.synthetic_result
             && Option.is_some
@@ -1656,12 +1721,15 @@ let prepare_tool_call (c : ctx) ~hist ~st ~kind ~name ~payload ~call_id ~item_id
        , Option.map moderated.synthetic_result ~f:(fun _ -> Tool_dispatch.Pre_tool) ))
 ;;
 
-let rewrite_call_payload payload ~name ~input_bytes =
+let rewrite_call_payload ~protected payload ~name ~input_bytes =
   let module P = History_entry.Payload in
   let semantic = P.semantic payload in
   match P.Semantic.view semantic with
   | Call call ->
-    if String.equal call.name name && String.equal call.input_bytes input_bytes
+    if
+      (not protected)
+      && String.equal call.name name
+      && String.equal call.input_bytes input_bytes
     then payload
     else
       P.Semantic.create
@@ -1705,6 +1773,13 @@ let prepare_host_tool_entry
         ; parent_call_id = c.parent_call_id
         }
     in
+    let request =
+      let project name payload = if protected_call c name then "{}" else payload in
+      { request with
+        original_payload = project original_name original_payload
+      ; payload = project moderated.name moderated.payload
+      }
+    in
     let decision =
       try prepare request with
       | (Eio.Cancel.Cancelled _ | Effect_rejection.Rejected _) as exn -> raise exn
@@ -1723,6 +1798,14 @@ let prepare_host_tool_entry
         , Some Tool_dispatch.Pre_tool_failed )
       | Ok (Some (Rewrite_args args)) ->
         { moderated with payload = payload_of_jsonaf ~kind:moderated.kind args }, None
+      | Ok (Some (Redirect (name, _)))
+        when protected_call c original_name && not (String.equal name original_name) ->
+        ( { moderated with
+            name = original_name
+          ; payload = original_payload
+          ; synthetic_result = Some (Output.Text "Protected tool redirect rejected.")
+          }
+        , Some Tool_dispatch.Pre_tool )
       | Ok (Some (Redirect (name, args))) ->
         ( { moderated with name; payload = payload_of_jsonaf ~kind:moderated.kind args }
         , None )
@@ -1739,6 +1822,7 @@ let prepare_host_tool_entry
     History_entry.with_payload
       entry
       (rewrite_call_payload
+         ~protected:(protected_call c moderated.name)
          (History_entry.payload entry)
          ~name:moderated.name
          ~input_bytes:(c.redact_tool_payload ~name:moderated.name moderated.payload))
@@ -1846,6 +1930,7 @@ let publish_inference_live (c : ctx) ~(st : stream_state) event =
 ;;
 
 let accept_inference_candidate
+      ?(checkpoint_only = false)
       ~turn
       (c : ctx)
       ~hist
@@ -1870,6 +1955,7 @@ let accept_inference_candidate
         match P.Semantic.view (P.semantic payload) with
         | Call { name; input_bytes; _ } ->
           rewrite_call_payload
+            ~protected:(protected_call c name)
             payload
             ~name
             ~input_bytes:(c.redact_tool_payload ~name input_bytes)
@@ -1932,9 +2018,21 @@ let accept_inference_candidate
           ~call_id
           ~item_id:provider_item_id
       in
+      let check_checkpoint_call moderated rejection =
+        if
+          checkpoint_only
+          && (Option.is_some rejection
+              || Option.is_some moderated.synthetic_result
+              || (not (String.equal original_name moderated.name))
+              || (not (String.equal original_payload moderated.payload))
+              || not (List.is_empty moderated.runtime_requests))
+        then raise Soft_checkpoint.Tool_refused
+      in
+      check_checkpoint_call moderated rejection;
       let prepared = ref (moderated, rejection) in
       let payload =
         rewrite_call_payload
+          ~protected:(protected_call c moderated.name)
           payload
           ~name:moderated.name
           ~input_bytes:(c.redact_tool_payload ~name:moderated.name moderated.payload)
@@ -1942,16 +2040,22 @@ let accept_inference_candidate
       let st =
         append_history_entry
           c
-          ~prepare_entry:
-            (prepare_host_tool_entry
-               c
-               ~hist
-               ~st
-               ~original_name
-               ~original_payload
-               ~call_id
-               ~item_id:provider_item_id
-               prepared)
+          ~prepare_entry:(fun entry ->
+            let entry =
+              prepare_host_tool_entry
+                c
+                ~hist
+                ~st
+                ~original_name
+                ~original_payload
+                ~call_id
+                ~item_id:provider_item_id
+                prepared
+                entry
+            in
+            let moderated, rejection = !prepared in
+            check_checkpoint_call moderated rejection;
+            entry)
           ~commit_entry:(fun entry ->
             let moderated, rejection = !prepared in
             commit_tool_call
@@ -2052,6 +2156,7 @@ let accept_inference_candidate
       add_pending
         st
         ~call_entry:call
+        ~candidate_key:(Transcript.Item.key item)
         ~call_id
         ~kind:
           (match kind with
@@ -2061,19 +2166,24 @@ let accept_inference_candidate
         promise)
 ;;
 
-let await_calls (c : ctx) ~(hist : History_entry.t list) (st : stream_state) =
+let await_calls
+      ?(retain_pairs = false)
+      (c : ctx)
+      ~(hist : History_entry.t list)
+      (st : stream_state)
+  =
   let sorted =
     List.sort (List.rev st.pending_calls_rev) ~compare:(fun a b ->
       Int.compare a.seq b.seq)
   in
   List.foldi
     sorted
-    ~init:(st.new_entries_rev, [])
+    ~init:(st.new_entries_rev, [], [])
     ~f:
       (fun
         _
-        (entries_rev, requests_rev)
-        { seq = _; call_entry; call_id; kind; name; promise }
+        (entries_rev, requests_rev, committed_rev)
+        { seq = _; call_entry; candidate_key; call_id; kind; name; promise }
       ->
       let completed = Eio.Promise.await_exn promise in
       let result = completed.Tool_dispatch.output in
@@ -2163,8 +2273,18 @@ let await_calls (c : ctx) ~(hist : History_entry.t list) (st : stream_state) =
       in
       let runtime_requests = completed.runtime_requests @ runtime_requests in
       List.iter runtime_requests ~f:c.on_runtime_request;
-      candidate_entry :: entries_rev, List.rev_append runtime_requests requests_rev)
-  |> fun (entries, requests_rev) -> entries, List.rev requests_rev
+      let committed_rev =
+        match candidate_key, call_entry with
+        | Some key, Some call when retain_pairs || Option.is_some c.on_settled_batch ->
+          (key, Settled_tool_batch.{ call = History_entry.id call; output = id })
+          :: committed_rev
+        | _ -> committed_rev
+      in
+      ( candidate_entry :: entries_rev
+      , List.rev_append runtime_requests requests_rev
+      , committed_rev ))
+  |> fun (entries, requests_rev, committed_rev) ->
+  entries, List.rev requests_rev, List.rev committed_rev
 ;;
 
 let log_request (c : ctx) ~(inputs : Openai.Responses.Item.t list) =
@@ -2178,8 +2298,10 @@ let log_request (c : ctx) ~(inputs : Openai.Responses.Item.t list) =
 ;;
 
 let run_turn (root_ctx : ctx) ~sw ~(history : History_entry.t list) =
+  let exception Retired_foreground of History_entry.t list in
   let sem = lazy (Eio.Semaphore.make 8) in
   let rec turn_with_budget
+            ?(checkpoint_followup = false)
             (c : ctx)
             (hist : History_entry.t list)
             ~(request_turn_budget : int)
@@ -2218,7 +2340,11 @@ let run_turn (root_ctx : ctx) ~sw ~(history : History_entry.t list) =
       (match additions with
        | [] -> ()
        | _ -> History_entry.Id_source.validate c.id_source hist |> Result.ok_or_failwith);
-      let inputs = prepared.inputs @ additions in
+      let pending =
+        Option.value_map c.successor ~default:[] ~f:(fun successor -> successor.pending)
+      in
+      let hist = hist @ pending in
+      let inputs = prepared.inputs @ additions @ pending in
       let inputs =
         match
           Option.bind c.safe_point_input ~f:(fun input ->
@@ -2263,9 +2389,73 @@ let run_turn (root_ctx : ctx) ~sw ~(history : History_entry.t list) =
       in
       c.neutral_items <- Map.empty (module Transcript.Item.Key);
       c.transcript_live <- None;
-      let run_request inference_context ~on_dispatch =
+      let run_request
+            inference_context
+            ~select_checkpoint
+            ~select_prepared
+            ~on_prepared
+            ~on_dispatch
+        =
         let c = { c with inference_context } in
         let admitted_attempt = ref None in
+        let checkpoint = ref None in
+        let checkpoint_entries = ref [] in
+        let settle (selected : Soft_checkpoint.Selected.t) attempt outcome =
+          match selected.settle attempt outcome with
+          | Ok () -> ()
+          | Error failure -> raise (Effect_rejection.Rejected failure)
+        in
+        let select_prepared =
+          match select_checkpoint, c.successor, checkpoint_followup with
+          | Some select, None, false ->
+            Some
+              (fun ~request ~prepare_isolated prepared ->
+                let tools =
+                  Option.value_map
+                    c.root_context
+                    ~default:Soft_checkpoint.Unselected
+                    ~f:(fun root -> root.checkpoint_tools)
+                in
+                match select ~tools ~request ~prepare_isolated prepared with
+                | Some (selected : Soft_checkpoint.Selected.t) ->
+                  checkpoint := Some selected;
+                  Some
+                    (Inference_client.Prepared_selection.choose
+                       selected.candidate
+                       ~for_attempt:selected.for_attempt)
+                | None ->
+                  Option.bind select_prepared ~f:(fun select ->
+                    select ~request ~prepare_isolated prepared))
+          | None, _, _ | Some _, _, _ ->
+            if checkpoint_followup then None else select_prepared
+        in
+        let ordinary_prepared = ref None in
+        let ordinary_guard =
+          match c.ordinary_write_admission with
+          | None -> Inference_runtime.Submission_guard.empty
+          | Some admit ->
+            let accepted = ref None in
+            Inference_runtime.Submission_guard.create_write_admission ~refresh:(fun () ->
+              match !checkpoint, !accepted with
+              | Some _, _ -> (fun () -> ())
+              | None, Some recheck -> recheck
+              | None, None ->
+                let recheck =
+                  admit
+                    (Option.value_exn !ordinary_prepared)
+                    (Option.value_exn !admitted_attempt)
+                in
+                accepted := Some recheck;
+                recheck)
+        in
+        let successor_guard =
+          Option.value_map
+            c.successor
+            ~default:Inference_runtime.Submission_guard.empty
+            ~f:(fun successor ->
+              Inference_runtime.Submission_guard.create_admission ~refresh:(fun () ->
+                successor.guard (Option.value_exn !admitted_attempt)))
+        in
         let request =
           Inference.Request.create
             ~target:(Inference_runtime.Context.target c.inference_context)
@@ -2277,135 +2467,325 @@ let run_turn (root_ctx : ctx) ~sw ~(history : History_entry.t list) =
             Sexp.to_string_hum (Inference.Request.Error.sexp_of_t error))
           |> Result.ok_or_failwith
         in
-        let receipt =
+        let protected_delivery =
+          Option.value_map c.take_protected_delivery ~default:[] ~f:(fun take -> take ())
+        in
+        let capacity =
+          Option.map c.foreground_capacity ~f:(fun control ->
+            let can_roll_over =
+              match c.transcript_relation with
+              | Nested _ -> false
+              | Root ->
+                Option.is_some c.root_context
+                && Option.is_none c.successor
+                && List.is_empty protected_delivery
+            in
+            Foreground_capacity.Request.create control ~can_roll_over)
+        in
+        let run ~with_optional_hint =
           Agent_guidance.with_request
             c.agent_guidance
             ~request
-            ~submission_guard:c.submission_guard
+            ~submission_guard:
+              (Inference_runtime.Submission_guard.compose
+                 c.submission_guard
+                 (Inference_runtime.Submission_guard.compose
+                    successor_guard
+                    ordinary_guard))
             ~limits:Transcript.Admission.default
             (fun request ~guard ~reserved_input_tokens:_ ->
-               Neutral_turn.run
-                 ~submission_guard:guard
-                 c.inference_context
-                 ~sw
-                 ~identity:c.inference_identity
-                 ~relation:c.transcript_relation
+               let hint =
+                 if with_optional_hint
+                 then
+                   Option.bind c.successor ~f:(fun successor -> successor.optional_hint)
+                 else None
+               in
+               Agent_guidance.with_optional_hint
+                 hint
                  ~request
-                 ~before_dispatch:c.before_inference_dispatch
-                 ~on_attempt:(fun attempt ->
-                   on_dispatch (Inference_runtime.Attempt.configuration attempt);
-                   c.on_inference_attempt attempt;
-                   c.transcript_scope <- Some (Inference_runtime.Attempt.scope attempt);
-                   admitted_attempt := Some attempt)
-                 ~on_event:(fun event ->
-                   match Inference.Event.view event with
-                   | Live event -> publish_inference_live c ~st:!st event
-                   | Candidate_ready { item; payload; local_execution } ->
-                     st
-                     := accept_inference_candidate
-                          ~turn:turn_for_fork
-                          c
-                          ~hist
-                          ~st:!st
-                          ~sem
-                          ~attempt:!admitted_attempt
-                          ~item
-                          ~payload
-                          ~local_execution
-                   | Terminal _ -> ())
-                 ~on_observation:c.on_inference_observation
-                 ~on_completion:c.on_inference_completion
-               |> Result.map_error ~f:(fun error ->
-                 Sexp.to_string_hum (Neutral_turn.Error.sexp_of_t error))
+                 ~submission_guard:guard
+                 ~limits:Transcript.Admission.default
+                 (fun request ~guard ~included:optional_hint ->
+                    Neutral_turn.run
+                      ?select_prepared
+                      ~submission_guard:guard
+                      ~protected_delivery
+                      ~protect_tool_arguments:(c.protect_tool_arguments || optional_hint)
+                      c.inference_context
+                      ~sw
+                      ~identity:c.inference_identity
+                      ~relation:c.transcript_relation
+                      ~request
+                      ~on_receipt:(fun attempt receipt ->
+                        Option.iter !checkpoint ~f:(fun selected ->
+                          let outcome =
+                            match
+                              Soft_checkpoint.Selected.completed_call
+                                selected
+                                attempt
+                                receipt
+                            with
+                            | Some event ->
+                              (match Inference.Event.view event with
+                               | Candidate_ready { item; payload; local_execution } ->
+                                 (try
+                                    st
+                                    := accept_inference_candidate
+                                         ~checkpoint_only:true
+                                         ~turn:turn_for_fork
+                                         c
+                                         ~hist
+                                         ~st:!st
+                                         ~sem
+                                         ~attempt:(Some attempt)
+                                         ~item
+                                         ~payload
+                                         ~local_execution;
+                                    let entries, _, committed =
+                                      await_calls ~retain_pairs:true c ~hist !st
+                                    in
+                                    checkpoint_entries := entries;
+                                    match committed with
+                                    | [ (_, pair) ] -> Soft_checkpoint.Settled pair
+                                    | _ -> Ineligible
+                                  with
+                                  | Soft_checkpoint.Tool_refused -> Ineligible)
+                               | Live _ | Terminal _ -> Ineligible)
+                            | None ->
+                              (match
+                                 Inference.Event.Terminal.delivery
+                                   (Inference_runtime.Receipt.terminal receipt)
+                               with
+                               | Possibly_submitted -> Interrupted
+                               | Definitely_not_submitted | Response_started -> Ineligible)
+                          in
+                          settle selected attempt outcome))
+                      ~before_dispatch:(fun prepared ->
+                        Option.iter c.successor ~f:(fun successor ->
+                          successor.check_prepared ~optional_hint prepared);
+                        on_prepared prepared;
+                        match !checkpoint with
+                        | None ->
+                          Option.iter capacity ~f:(fun cut ->
+                            Foreground_capacity.Request.before_dispatch cut prepared);
+                          c.before_inference_dispatch prepared;
+                          ordinary_prepared := Some prepared
+                        | Some selected ->
+                          if
+                            not
+                              (phys_equal
+                                 prepared
+                                 (Inference_client.Prepared_selection.prepared
+                                    selected.candidate))
+                          then
+                            raise (Inference_runtime.Contract_violation Invalid_candidate))
+                      ~on_attempt:(fun attempt ->
+                        on_dispatch (Inference_runtime.Attempt.configuration attempt);
+                        c.on_inference_attempt attempt;
+                        c.transcript_scope
+                        <- Some (Inference_runtime.Attempt.scope attempt);
+                        admitted_attempt := Some attempt)
+                      ~on_event:(fun event ->
+                        match !checkpoint with
+                        | Some _ -> ()
+                        | None ->
+                          Option.iter capacity ~f:(fun cut ->
+                            Foreground_capacity.Request.observe cut event);
+                          (match Inference.Event.view event with
+                           | Live event -> publish_inference_live c ~st:!st event
+                           | Candidate_ready { item; payload; local_execution } ->
+                             st
+                             := accept_inference_candidate
+                                  ~turn:turn_for_fork
+                                  c
+                                  ~hist
+                                  ~st:!st
+                                  ~sem
+                                  ~attempt:!admitted_attempt
+                                  ~item
+                                  ~payload
+                                  ~local_execution
+                           | Terminal _ -> ()))
+                      ~on_observation:c.on_inference_observation
+                      ~on_completion:(fun completion ->
+                        c.on_inference_completion completion;
+                        match
+                          !checkpoint, Inference_client.Completion.outcome completion
+                        with
+                        | Some selected, Interrupted _ ->
+                          settle
+                            selected
+                            (Inference_client.Completion.attempt completion)
+                            Interrupted
+                        | None, _ | Some _, Returned _ -> ())
+                    |> Result.map_error ~f:(fun error ->
+                      Sexp.to_string_hum (Neutral_turn.Error.sexp_of_t error))
+                    |> Result.ok_or_failwith)
+               |> Result.map_error ~f:(fun failure ->
+                 failure.Agent_protocol.Error.message)
                |> Result.ok_or_failwith)
           |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
           |> Result.ok_or_failwith
         in
-        c, receipt
+        let run () =
+          try run ~with_optional_hint:true with
+          | Root_context.Successor.Omit_optional_hint -> run ~with_optional_hint:false
+        in
+        let run_and_release () =
+          if List.is_empty protected_delivery
+          then run ()
+          else
+            Exn.protect ~f:run ~finally:(fun () ->
+              List.iter protected_delivery ~f:Inference_runtime.Protected_delivery.retire)
+        in
+        match
+          let receipt = run_and_release () in
+          (if Option.is_none !checkpoint
+           then Option.iter capacity ~f:(fun cut ->
+            Option.iter !admitted_attempt ~f:(fun attempt ->
+              Foreground_capacity.Request.after_receipt
+                cut
+                ~attempt
+                ~receipt
+                ~finish_source:(fun () ->
+                  Option.iter c.transcript_scope ~f:(fun scope ->
+                    publish_neutral_view
+                      c
+                      (Source_finished { scope; completion = Failed }));
+                  c.transcript_scope <- None))));
+          `Returned
+            ( { c with successor = None }
+            , !admitted_attempt
+            , receipt
+            , Option.map !checkpoint ~f:(fun _ -> !checkpoint_entries) )
+        with
+        | result -> result
+        | exception Foreground_capacity.Request.Retired -> `Retired
       in
-      let c, receipt =
+      let outcome =
         match c.root_context with
-        | None -> run_request c.inference_context ~on_dispatch:(fun _ -> ())
+        | None ->
+          run_request
+            c.inference_context
+            ~select_checkpoint:None
+            ~select_prepared:None
+            ~on_prepared:ignore
+            ~on_dispatch:ignore
         | Some source ->
           source.with_context ~previous:c.inference_context ~history:inputs run_request
       in
-      let st = !st in
-      let new_entries_rev, tool_requests = await_calls c ~hist st in
-      let completion =
-        match
-          Inference_runtime.Receipt.terminal receipt |> Inference.Event.Terminal.outcome
-        with
-        | Completed | Refused -> Transcript.Stream.Complete
-        | Incomplete _ -> Incomplete
-        | Failed _ -> Failed
+      let c, attempt, receipt, checkpoint_entries =
+        match outcome with
+        | `Retired -> raise (Retired_foreground hist)
+        | `Returned result -> result
       in
-      Option.iter c.transcript_scope ~f:(fun scope ->
-        publish_neutral_view c (Source_finished { scope; completion }));
-      c.transcript_scope <- None;
-      (match
-         Inference.Event.Terminal.outcome (Inference_runtime.Receipt.terminal receipt)
-       with
-       | Failed _ -> raise (Inference_failed (Inference_runtime.Receipt.terminal receipt))
-       | Completed | Refused | Incomplete _ -> ());
-      let hist = List.append hist (List.rev new_entries_rev) in
-      if Option.is_some (Runtime_semantics.should_end_session tool_requests)
-      then hist
-      else (
-        let deferred =
-          consume_safe_point_entries ~safe_point:Turn_start_boundary c.safe_point_input
-        in
-        let hist, appended_requests =
-          append_deferred_entries c ~history:hist deferred.entries
-        in
-        let finish_requests =
-          match Runtime_semantics.should_end_session appended_requests with
-          | Some _ -> []
-          | None ->
-            finish_turn_entries
-              ~moderator:c.moderator
-              ~available_tools:c.tools
-              ~now_ms:(now_ms c.env)
-              ~history:hist
-            |> Result.ok_or_failwith
-        in
-        let finish_requests =
+      match checkpoint_entries with
+      | Some entries ->
+        c.transcript_scope <- None;
+        turn_with_budget
+          ~checkpoint_followup:true
+          c
+          (hist @ List.rev entries)
+          ~request_turn_budget
+      | None ->
+        let st = !st in
+        let new_entries_rev, tool_requests, committed = await_calls c ~hist st in
+        let completion =
           match
-            deferred.request_turn, Runtime_semantics.should_end_session appended_requests
+            Inference_runtime.Receipt.terminal receipt |> Inference.Event.Terminal.outcome
           with
-          | true, None -> Runtime_semantics.collapse (Request_turn :: finish_requests)
-          | _ -> finish_requests
+          | Completed | Refused -> Transcript.Stream.Complete
+          | Incomplete _ -> Incomplete
+          | Failed _ -> Failed
         in
-        List.iter finish_requests ~f:c.on_runtime_request;
-        let policy =
-          Option.value_or_thunk c.runtime_policy ~default:(fun () ->
-            match c.moderator with
-            | None -> Runtime_semantics.default_policy
-            | Some m -> m.runtime_policy)
-        in
+        Option.iter c.transcript_scope ~f:(fun scope ->
+          publish_neutral_view c (Source_finished { scope; completion }));
+        c.transcript_scope <- None;
+        (match
+           Inference.Event.Terminal.outcome (Inference_runtime.Receipt.terminal receipt)
+         with
+         | Failed _ -> raise (Inference_failed (Inference_runtime.Receipt.terminal receipt))
+         | Completed | Refused | Incomplete _ -> ());
+        let hist = List.append hist (List.rev new_entries_rev) in
         let decision =
-          Runtime_semantics.decide_after_turn_end
-            ~policy
-            ~tool_followup:(st.run_again || deferred.user_input)
-            (tool_requests @ appended_requests @ finish_requests)
+          if Option.is_some (Runtime_semantics.should_end_session tool_requests)
+          then Settled_tool_batch.Retire
+          else if
+            List.exists tool_requests ~f:(function
+              | Moderation.Runtime_request.Request_compaction -> true
+              | Request_turn | End_session _ -> false)
+          then Continue
+          else (
+            match c.on_settled_batch, attempt with
+            | Some settle, Some attempt ->
+              Option.value_map
+                (Settled_tool_batch.create attempt receipt committed)
+                ~default:Settled_tool_batch.Continue
+                ~f:settle
+            | _ -> Continue)
         in
-        match decision.end_session_reason with
-        | Some _ -> hist
-        | None ->
-          (match decision.continue with
-           | `Stop -> hist
-           | `Continue ->
-             if st.run_again || deferred.user_input
-             then turn_with_budget c hist ~request_turn_budget:0
-             else (
-               let next_budget =
-                 Runtime_semantics.next_self_triggered_turn_budget
-                   ~policy
-                   ~request_turn_budget
-                 |> Result.ok_or_failwith
-               in
-               turn_with_budget c hist ~request_turn_budget:next_budget))))
+        match decision with
+        | Retire -> hist
+        | Continue ->
+          let deferred =
+            consume_safe_point_entries ~safe_point:Turn_start_boundary c.safe_point_input
+          in
+          let hist, appended_requests =
+            append_deferred_entries c ~history:hist deferred.entries
+          in
+          let finish_requests =
+            match Runtime_semantics.should_end_session appended_requests with
+            | Some _ -> []
+            | None ->
+              finish_turn_entries
+                ~moderator:c.moderator
+                ~available_tools:c.tools
+                ~now_ms:(now_ms c.env)
+                ~history:hist
+              |> Result.ok_or_failwith
+          in
+          let finish_requests =
+            match
+              deferred.request_turn, Runtime_semantics.should_end_session appended_requests
+            with
+            | true, None -> Runtime_semantics.collapse (Request_turn :: finish_requests)
+            | _ -> finish_requests
+          in
+          List.iter finish_requests ~f:c.on_runtime_request;
+          let policy =
+            Option.value_or_thunk c.runtime_policy ~default:(fun () ->
+              match c.moderator with
+              | None -> Runtime_semantics.default_policy
+              | Some m -> m.runtime_policy)
+          in
+          let decision =
+            Runtime_semantics.decide_after_turn_end
+              ~policy
+              ~tool_followup:(st.run_again || deferred.user_input)
+              (tool_requests @ appended_requests @ finish_requests)
+          in
+          (match decision.end_session_reason with
+           | Some _ -> hist
+           | None ->
+             (match decision.continue with
+              | `Stop -> hist
+              | `Continue ->
+                if st.run_again || deferred.user_input
+                then turn_with_budget c hist ~request_turn_budget:0
+                else (
+                  let next_budget =
+                    Runtime_semantics.next_self_triggered_turn_budget
+                      ~policy
+                      ~request_turn_budget
+                    |> Result.ok_or_failwith
+                  in
+                  turn_with_budget c hist ~request_turn_budget:next_budget))))
   in
-  turn_with_budget root_ctx history ~request_turn_budget:0
+  match turn_with_budget root_ctx history ~request_turn_budget:0 with
+  | result -> result
+  | exception Retired_foreground history ->
+    Option.iter root_ctx.foreground_capacity ~f:Foreground_capacity.on_retired;
+    history
 ;;
 
 let setup_ctx ~(sw : Eio.Switch.t) (a : args) =
@@ -2416,6 +2796,10 @@ let setup_ctx ~(sw : Eio.Switch.t) (a : args) =
   let c =
     { env = a.env
     ; root_context = a.root_context
+    ; foreground_capacity = a.foreground_capacity
+    ; ordinary_write_admission = a.ordinary_write_admission
+    ; on_settled_batch = a.on_settled_batch
+    ; successor = a.successor
     ; inference_context = a.inference_context
     ; fork_depth = a.fork_depth
     ; inference_identity = a.inference_identity
@@ -2424,6 +2808,8 @@ let setup_ctx ~(sw : Eio.Switch.t) (a : args) =
     ; on_inference_observation = a.on_inference_observation
     ; on_admitted_call = a.on_admitted_call
     ; agent_guidance = a.agent_guidance
+    ; take_protected_delivery = a.take_protected_delivery
+    ; protect_tool_arguments = a.protect_tool_arguments
     ; submission_guard = a.submission_guard
     ; before_inference_dispatch = a.before_inference_dispatch
     ; before_tool_effect = a.before_tool_effect
@@ -2491,10 +2877,16 @@ let run_completion_stream_in_memory_entries
       ~env
       ~inference_context
       ?root_context
+      ?foreground_capacity
+      ?ordinary_write_admission
+      ?on_settled_batch
+      ?successor
       ~inference_identity
       ~on_inference_attempt
       ~on_inference_completion
       ?agent_guidance
+      ?take_protected_delivery
+      ?(protect_tool_arguments = false)
       ?(submission_guard = Inference_runtime.Submission_guard.empty)
       ?(inference_relation = Transcript.Scope.Root)
       ?(on_inference_observation = fun _ -> ())
@@ -2540,6 +2932,21 @@ let run_completion_stream_in_memory_entries
       ?sw
       ()
   =
+  let protection =
+    Option.bind dispatch_tool ~f:(fun (dispatch : Tool_dispatch.t) -> dispatch.protection)
+  in
+  let protect_tool_arguments = protect_tool_arguments || Option.is_some protection in
+  let take_protected_delivery =
+    match protection, take_protected_delivery with
+    | Some owner, None -> Some owner.take
+    | None, take -> take
+    | Some _, Some _ -> invalid_arg "protected input has two delivery owners"
+  in
+  let redact_tool_payload ~name payload =
+    if Option.exists protection ~f:(fun owner -> owner.claims ~name)
+    then "{}"
+    else redact_tool_payload ~name payload
+  in
   if Option.is_some post_stream
   then
     invalid_arg
@@ -2605,6 +3012,10 @@ let run_completion_stream_in_memory_entries
   let args =
     { env
     ; root_context
+    ; foreground_capacity
+    ; ordinary_write_admission
+    ; on_settled_batch
+    ; successor
     ; inference_context
     ; fork_depth
     ; inference_identity
@@ -2614,6 +3025,8 @@ let run_completion_stream_in_memory_entries
     ; on_inference_observation
     ; on_admitted_call
     ; agent_guidance
+    ; take_protected_delivery
+    ; protect_tool_arguments
     ; submission_guard
     ; before_inference_dispatch
     ; before_tool_effect
@@ -2656,11 +3069,16 @@ let run_completion_stream_in_memory_entries
     ; parent_call_id
     }
   in
-  let entries =
+  let run () =
     match sw with
     | Some sw -> run_completion_stream_in_memory_entries_impl ~sw args
     | None ->
       Eio.Switch.run (fun sw -> run_completion_stream_in_memory_entries_impl ~sw args)
+  in
+  let entries =
+    match protection with
+    | None -> run ()
+    | Some owner -> Exn.protect ~finally:owner.close ~f:run
   in
   History_entry.Id_source.validate id_source entries |> Result.ok_or_failwith;
   entries

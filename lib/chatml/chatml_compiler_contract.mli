@@ -40,6 +40,10 @@ val target_name : t -> string
 val static_surface : t -> Static.t
 val required_bindings : t -> (string * Chatml_builtin_spec.ty) list
 
+(** Optional local entrypoints share the grouped state contract when present.
+    Imported members cannot select an optional host callback. *)
+val optional_bindings : t -> (string * Chatml_builtin_spec.ty) list
+
 (** Pure native metadata context for compile-only/custom graph consumers.
     Compute identity from this supplied static surface AND exact selected
     required bindings, under a distinct native compiler identity. No supplied
@@ -51,8 +55,9 @@ val for_static_surface
   -> required_bindings:(string * Chatml_builtin_spec.ty) list
   -> t
 
-(** Preserve existing compiler.v1 identity exactly: version/target, actual
-    projected globals/module exports/aliases and grouped entrypoint contracts. *)
+(** The canonical compiler identity includes its version and target, projected
+    globals, module exports and alias bodies, grouped required entrypoints and
+    the optional-entrypoint section when present. *)
 val identity : t -> checkpoint:(unit -> unit) -> Sexp.t
 
 (** Return the actual canonical encoded identity byte length. [allocate] debits
@@ -69,11 +74,11 @@ module Identity_summary : sig
   val fingerprint : t -> Chatml_source.Digest.t
 end
 
-(** Construct the actual compiler.v1/native identity and encode it once under
-    the same [allocate] debit as [input_bytes], then derive the canonical
-    fingerprint from those exact bytes before releasing the encoded string.
-    This is startup comparison data, not a target or runtime grant. Callback
-    exceptions and cancellation retain identity/backtrace. *)
+(** Emit the canonical compiler identity in one traversal, under the same
+    [allocate] debit as [input_bytes]. Derive both the encoded length and
+    fingerprint from those exact bytes and retain only that summary. This
+    comparison evidence carries no runtime authority. Callback exceptions and
+    cancellation retain identity and backtrace. *)
 val summarize_identity
   :  t
   -> checkpoint:(unit -> unit)

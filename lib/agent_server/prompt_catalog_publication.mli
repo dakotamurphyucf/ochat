@@ -100,6 +100,7 @@ end
     never additional source anchors, Git handles, readers or grants. *)
 val prepare
   :  t
+  -> ?retain_document_originals:Agent_protocol.Id.Prompt_definition.t list
   -> sources:Agent_session.Prompt_script_preparation.Host.t
   -> sw:Eio.Switch.t
   -> env:Eio_unix.Stdenv.base

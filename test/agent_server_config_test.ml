@@ -2,7 +2,7 @@ open Core
 
 let () = Mirage_crypto_rng_unix.use_default ()
 
-let with_fixture f =
+let with_fixture ?(tokens = [ "test-token" ]) f =
   Eio_main.run (fun env ->
     let base = Sys.getenv "TMPDIR" |> Option.value ~default:"/tmp" in
     let temporary =
@@ -24,18 +24,17 @@ let with_fixture f =
           ~create:(`Exclusive 0o600)
           Eio.Path.(Eio.Stdenv.fs env / prompt)
           "<developer>You are a test agent.</developer>";
-        let digest =
-          Digestif.SHA256.digest_string "test-token" |> Digestif.SHA256.to_hex
-        in
         let principal = Agent_protocol.Id.Principal.create () in
+        let record token =
+          let digest = Digestif.SHA256.(digest_string token |> to_hex) in
+          sprintf
+            "((token_sha256 %s) (principal_id %s) (scopes (diagnostics.read)) (attributes ()) (expires_at none))"
+            digest (Agent_protocol.Id.Principal.to_string principal)
+        in
         Eio.Path.save
           ~create:(`Exclusive 0o600)
           Eio.Path.(Eio.Stdenv.fs env / token_file)
-          (sprintf
-             "(((token_sha256 %s) (principal_id %s) (scopes (diagnostics.read)) \
-              (attributes ()) (expires_at none)))"
-             digest
-             (Agent_protocol.Id.Principal.to_string principal));
+          ("(" ^ String.concat ~sep:" " (List.map tokens ~f:record) ^ ")");
         f env temporary workspace prompt token_file)
       ~finally:(fun () -> Eio.Path.rmtree ~missing_ok:true root))
 ;;
@@ -917,28 +916,54 @@ let%test_unit "configuration polling publishes edits without an explicit reload"
 ;;
 
 let%expect_test "static bearer authentication accepts only the configured token" =
-  with_fixture (fun env _temporary _workspace _prompt token_file ->
-    let authenticator =
-      Agent_server.Authenticator.load_static_file ~env ~path:token_file
-      |> function
-      | Ok value -> value
-      | Error error -> raise_s [%sexp (error : Agent_protocol.Error.t)]
-    in
-    let accepted =
-      Agent_server.Authenticator.authenticate_bearer
-        authenticator
-        ~now:(Agent_protocol.Timestamp.now ())
-        ~token:"test-token"
-      |> Result.is_ok
-    in
-    let rejected =
-      Agent_server.Authenticator.authenticate_bearer
-        authenticator
-        ~now:(Agent_protocol.Timestamp.now ())
-        ~token:"wrong-token"
-      |> Result.is_error
-    in
-    print_s [%sexp { accepted : bool; rejected : bool }]);
+  with_fixture
+    ~tokens:[ "test-token"; "other-token" ]
+    (fun env _temporary _workspace _prompt token_file ->
+       let authenticator =
+         Agent_server.Authenticator.load_static_file ~env ~path:token_file
+         |> function
+         | Ok value -> value
+         | Error error -> raise_s [%sexp (error : Agent_protocol.Error.t)]
+       in
+       let accepted =
+         Agent_server.Authenticator.authenticate_bearer
+           authenticator
+           ~now:(Agent_protocol.Timestamp.now ())
+           ~token:"test-token"
+         |> Result.is_ok
+       in
+       let rejected =
+         Agent_server.Authenticator.authenticate_bearer
+           authenticator
+           ~now:(Agent_protocol.Timestamp.now ())
+           ~token:"wrong-token"
+         |> Result.is_error
+       in
+       (* A reauthentication gets a fresh proof. Only an unchanged physical
+       token record may resume a signed cursor, even for the same principal. *)
+       let auth database token =
+         Agent_server.Authenticator.authenticate_bearer_actor
+           database
+           ~now:Agent_protocol.Timestamp.now
+           ~token
+         |> Result.ok
+         |> Option.value_exn
+       in
+       let issue = auth authenticator "test-token" in
+       let retry = auth authenticator "test-token" in
+       assert (not (phys_equal issue retry));
+       [%test_eq: int]
+         (Operator_authorization.origin issue)
+         (Operator_authorization.origin retry);
+       let closed = Operator_authorization.restrict issue ~is_current:(fun () -> false) in
+       assert (not (Operator_authorization.is_current closed));
+       let other = auth authenticator "other-token" in
+       assert (
+         Agent_protocol.Id.Principal.equal
+           (Operator_authorization.principal issue).id
+           (Operator_authorization.principal other).id);
+       assert (Operator_authorization.origin issue <> Operator_authorization.origin other);
+       print_s [%sexp { accepted : bool; rejected : bool }]);
   [%expect {| ((accepted true) (rejected true)) |}]
 ;;
 
