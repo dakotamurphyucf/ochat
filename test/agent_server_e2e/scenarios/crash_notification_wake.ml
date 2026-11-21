@@ -65,7 +65,9 @@ let no_pending state =
 ;;
 
 let run env environment boundary =
-  let fixture = F.fixture env environment ("notification-" ^ boundary) in
+  let fixture =
+    F.fixture ~snapshot_policy:Journal_replay env environment ("notification-" ^ boundary)
+  in
   F.write env (C.prompt_path fixture) source;
   let directory = Filename.dirname (C.prompt_path fixture) in
   F.write env (Filename.concat directory "any.json") "true";

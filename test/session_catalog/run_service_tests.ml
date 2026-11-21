@@ -5,7 +5,7 @@ module C = Agent_client
 module S = Agent_server
 module A = Agent_session
 
-let authenticated_connection daemon ~actor =
+let authenticated_connection ?(observe_command = ignore) daemon ~actor =
   let notifications = Eio.Stream.create 256 in
   let context =
     S.Connection_context.create_authenticated
@@ -17,6 +17,7 @@ let authenticated_connection daemon ~actor =
   in
   C.In_memory.create
     ~request:(fun command ->
+      observe_command command;
       S.Dispatcher.dispatch_command (S.Daemon.dispatcher daemon) ~context command)
     ~notifications
     ~close:(fun () -> S.Daemon.close_connection daemon context)

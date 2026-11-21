@@ -56,9 +56,11 @@ type provider_action =
   | Fail_first
   | Return_second
 
-let current_job (subject : S.probe) id =
-  List.find_exn (state subject.parent).jobs ~f:(fun job -> P.Id.Job.equal job.id id)
+let find_job (current : A.Session_state.t) id =
+  List.find_exn current.jobs ~f:(fun job -> P.Id.Job.equal job.id id)
 ;;
+
+let current_job (subject : S.probe) id = find_job (state subject.parent) id
 
 let immutable (before : P.Job.t) (after : P.Job.t) =
   assert (P.Id.Job.equal before.id after.id);
@@ -157,17 +159,11 @@ let native_successor current (job : P.Job.t) =
      | _ -> failwith "native retry proof checked at the wrong actual state")
 ;;
 
-let await env fixture phase f =
-  Model.within env phase (fun () ->
-    let rec loop () =
-      S.Failure.raise_if_present fixture.S.failure;
-      match f () with
-      | Some value -> value
-      | None ->
-        Eio.Fiber.yield ();
-        loop ()
-    in
-    loop ())
+let await_job (fixture : S.fixture) select =
+  S.Failure.restore fixture.failure (fun () ->
+    Eio.Fiber.first
+      (fun () -> Fixture_phase.await_change fixture.probe.parent select)
+      (fun () -> S.Failure.await_and_raise fixture.failure))
 ;;
 
 let admit fixture =
@@ -296,17 +292,35 @@ let%expect_test
        phase := Awaiting_first born;
        fixture.resume ();
        let pair, queued =
-         await env fixture "actual failed Model retry and parked scheduler" (fun () ->
-           match !phase with
-           | First_observed pair ->
-             let job = current_job subject born.id in
-             (match job.status with
-              | Queued when S.parked daemon fixture.clock_now -> Some (pair, job)
-              | _ -> None)
-           | Awaiting_admission | Awaiting_first _ -> None
-           | Awaiting_second _ | Second_observed _ ->
-             failwith "retry crossed the parked first failure")
+         Model.within env "actual failed Model retry and parked scheduler" (fun () ->
+           let pair, queued =
+             await_job fixture (fun current ->
+               match !phase with
+               | First_observed pair ->
+                 let job = find_job current born.id in
+                 (match job.status with
+                  | Queued -> Some (pair, job)
+                  | _ -> None)
+               | Awaiting_admission | Awaiting_first _ -> None
+               | Awaiting_second _ | Second_observed _ ->
+                 failwith "retry crossed the parked first failure")
+           in
+           let rec await_park () =
+             S.Failure.raise_if_present fixture.failure;
+             if not (S.parked daemon fixture.clock_now)
+             then (
+               Eio.Fiber.yield ();
+               await_park ())
+           in
+           await_park ();
+           let parked_job = current_job subject born.id in
+           assert (S.parked daemon fixture.clock_now);
+           assert (Sexp.equal (P.Job.sexp_of_t queued) (P.Job.sexp_of_t parked_job));
+           pair, parked_job)
        in
+       Fixture_progress.mark
+         (Some fixture.progress)
+         "deliver the retry of the same Model Job";
        immutable born queued;
        direct_parent subject queued;
        [%test_eq: int] 1 queued.attempt;
@@ -347,14 +361,18 @@ let%expect_test
        phase := Awaiting_second pair;
        fixture.resume ();
        let final_model =
-         await env fixture "actual same Model attempt2 success and delivery" (fun () ->
-           let current = current_job subject born.id in
-           match !phase, current.status, current.delivery with
-           | Second_observed _, Succeeded, Delivered _ -> Some current
-           | _, (Failed _ | Cancelled | Interrupted _), _ ->
-             failwith "actual second Model attempt failed"
-           | _ -> None)
+         Model.within env "actual same Model attempt2 success and delivery" (fun () ->
+           await_job fixture (fun current ->
+             let job = find_job current born.id in
+             match !phase, job.status, job.delivery with
+             | Second_observed _, Succeeded, Delivered _ -> Some job
+             | _, (Failed _ | Cancelled | Interrupted _), _ ->
+               failwith "actual second Model attempt failed"
+             | _ -> None))
        in
+       Fixture_progress.mark
+         (Some fixture.progress)
+         "finish the Async worker and child after H2 delivery";
        let pair, second =
          match !phase with
          | Second_observed (pair, second) -> pair, second

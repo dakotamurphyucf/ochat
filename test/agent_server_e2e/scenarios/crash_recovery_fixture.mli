@@ -12,7 +12,8 @@ val read : Eio_unix.Stdenv.base -> string -> string
 val write : Eio_unix.Stdenv.base -> string -> string -> unit
 
 val fixture
-  :  Eio_unix.Stdenv.base
+  :  ?snapshot_policy:Support.Config_fixture.snapshot_policy
+  -> Eio_unix.Stdenv.base
   -> Support.Temporary_environment.t
   -> string
   -> Support.Config_fixture.t

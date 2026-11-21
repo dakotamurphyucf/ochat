@@ -85,6 +85,7 @@ let on_event ctx state event = match event with
 
 let with_child
       ?(wrap_env = Fn.id)
+      ?configure
       ?(on_inference_ports = ignore)
       ?(on_post_stream = ignore)
       f
@@ -108,6 +109,7 @@ let with_child
   in
   Creation_tests.with_daemon
     ~wrap_env
+    ?configure
     ~prompt_text:Source.prompt_text
     ~qualify_chatml_extensions:true
     ~policy

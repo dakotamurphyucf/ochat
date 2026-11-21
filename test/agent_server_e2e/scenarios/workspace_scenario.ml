@@ -90,6 +90,13 @@ let configure_fixture fixture variable =
   let configuration =
     Config_fixture.configuration fixture ()
     |> String.substr_replace_all
+         ~pattern:
+           (Sexp.to_string_mach (Sexp.Atom (Config_fixture.physical_workspace fixture)))
+         ~with_:"workspace"
+    |> String.substr_replace_all
+         ~pattern:(Sexp.to_string_mach (Sexp.Atom (Config_fixture.prompt_path fixture)))
+         ~with_:"smoke.chatmd"
+    |> String.substr_replace_all
          ~pattern:"(manifest_authorization deny)"
          ~with_:"(manifest_authorization assume_authorized)"
   in
@@ -148,13 +155,15 @@ let with_daemon env environment fixture ~name f =
   let launch_directory = Filename.concat roots.root (name ^ "-launch") in
   Eio.Path.mkdir ~perm:0o700 (Temporary_environment.path environment launch_directory);
   Eio.Switch.run (fun sw ->
+    let config_path = Config_fixture.config_path fixture in
     let daemon =
-      Daemon_process.start_in_directory
+      Daemon_process.start_in_directory_with_environment_overrides
         ~sw
         ~env
         ~fixture
         ~cwd:(Temporary_environment.path environment launch_directory)
-        ~config_path:(Config_fixture.config_path fixture)
+        ~environment_overrides:[ "PWD", Filename.dirname config_path ]
+        ~config_path
     in
     Exn.protect
       ~f:(fun () ->

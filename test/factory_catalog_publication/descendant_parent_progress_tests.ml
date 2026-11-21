@@ -60,13 +60,22 @@ let owns_input text request =
     | _ -> false)
 ;;
 
+type selected =
+  { parent : P.Id.Session.t
+  ; child : P.Session_ref.t
+  ; journal : string
+  ; delegation_record : string
+  }
+
 let%expect_test "ordinary parent progress closes the exact unstarted child Attempt" =
   let text = "741 ordinary managed provider request" in
   let queued = ref None in
   let selected = ref None in
   let armed = ref false in
-  let first_occurrence = ref None in
   let closed = ref None in
+  let first_reserve, signal_reserve = Eio.Promise.create () in
+  let native_send, signal_native_send = Eio.Promise.create () in
+  let child_preparing, signal_child_preparing = Eio.Promise.create () in
   let parent_running, signal_parent = Eio.Promise.create () in
   let finish_parent, release_parent = Eio.Promise.create () in
   let before_read, signal_reader = Eio.Promise.create () in
@@ -77,7 +86,10 @@ let%expect_test "ordinary parent progress closes the exact unstarted child Attem
     if Option.is_none (Eio.Promise.peek promise) then Eio.Promise.resolve resolver ()
   in
   let capacity_source request =
-    if owns_input text request then Eio.Promise.await parent_running;
+    if owns_input text request
+    then (
+      release signal_child_preparing child_preparing;
+      Eio.Promise.await parent_running);
     Inference_runtime.Context_capacity.Source.create
       ~encoder:Openai_responses_v1
       ~read:(fun () -> Incomplete Counter_unavailable)
@@ -103,23 +115,26 @@ let%expect_test "ordinary parent progress closes the exact unstarted child Attem
           env
           ~boundary:After_sync
           ~matches:(fun path ->
-            Option.is_some !selected
-            && String.is_substring path ~substring:"/journal/"
-            && String.is_suffix path ~suffix:".log")
+            Option.is_none !closed
+            && String.is_suffix path ~suffix:".log"
+            && Option.exists !selected ~f:(fun target ->
+              String.equal (Filename.dirname path) target.journal))
           ~reached:(fun path ->
-            let parent, child, _ = Option.value_exn !selected in
+            let target = Option.value_exn !selected in
             Option.iter (transaction native_env path) ~f:(fun transaction ->
-              if P.Id.Session.equal transaction.session_id parent
+              if P.Id.Session.equal transaction.session_id target.parent
               then
                 List.iter (reasons transaction) ~f:(function
                   | Reserve { occurrence; _ }
-                    when Option.is_none !first_occurrence
-                         && is_attempt_of occurrence child ->
-                    first_occurrence := Some occurrence;
-                    armed := true
+                    when (not (Eio.Promise.is_resolved first_reserve))
+                         && is_attempt_of occurrence target.child ->
+                    armed := true;
+                    Eio.Promise.resolve signal_reserve occurrence
                   | Close_before_writer pending
-                    when Option.exists !first_occurrence ~f:(fun occurrence ->
-                           Occurrence.equal (Pending.occurrence pending) occurrence) ->
+                    when Option.exists
+                           (Eio.Promise.peek first_reserve)
+                           ~f:(fun occurrence ->
+                             Occurrence.equal (Pending.occurrence pending) occurrence) ->
                     closed := Some pending
                   | _ -> ())))
       in
@@ -128,7 +143,8 @@ let%expect_test "ordinary parent progress closes the exact unstarted child Attem
         ~boundary:Before_open_in
         ~matches:(fun path ->
           !armed
-          && Option.exists !selected ~f:(fun (_, _, marker) -> String.equal path marker))
+          && Option.exists !selected ~f:(fun target ->
+            String.equal path target.delegation_record))
         ~reached:(fun _ ->
           armed := false;
           Eio.Promise.resolve signal_reader ();
@@ -143,6 +159,7 @@ let%expect_test "ordinary parent progress closes the exact unstarted child Attem
         match !queued with
         | Some arguments ->
           queued := None;
+          Eio.Promise.resolve signal_native_send ();
           function_response "agent_send" arguments
         | None
           when Option.is_some !selected && not (Eio.Promise.is_resolved parent_running) ->
@@ -154,6 +171,9 @@ let%expect_test "ordinary parent progress closes the exact unstarted child Attem
     (fun env _sw daemon parent child scope reference _ ->
        Descendant_ancestry_support.start_legacy daemon child;
        let parent_id = (state parent).identity.session_id in
+       let journal =
+         Store.Handle.journal_directory (Option.value_exn parent.store_handle)
+       in
        let child_owner =
          A.Goal_descendants.session (Option.value_exn (state child).goal_descendants)
        in
@@ -176,7 +196,9 @@ let%expect_test "ordinary parent progress closes the exact unstarted child Attem
            release release_reader finish_read;
            selected := None)
          (fun () ->
-            selected := Some (parent_id, child_owner, delegation_record);
+            selected
+            := Some
+                 { parent = parent_id; child = child_owner; journal; delegation_record };
             queued
             := Some
                  (`Object
@@ -190,16 +212,26 @@ let%expect_test "ordinary parent progress closes the exact unstarted child Attem
               (request parent "741-parent-progress" "Send once.")
             |> admitted
             |> ignore;
-            within env "parent observation after child reserve" (fun () ->
+            (* The managed child can start preparing before the parent follows
+               its published native result. Preserve both witnesses and bound
+               each wait. The parent follow-up releases child preparation. *)
+            within env "parent adapter selected native send" (fun () ->
+              Eio.Promise.await native_send);
+            within env "managed child reached capacity preparation" (fun () ->
+              Eio.Promise.await child_preparing);
+            within env "parent follow-up provider request" (fun () ->
+              Eio.Promise.await parent_running);
+            let first_occurrence =
+              within env "child Attempt reservation fsync" (fun () ->
+                Eio.Promise.await first_reserve)
+            in
+            within env "reserved child delegation read" (fun () ->
               Eio.Promise.await before_read);
             let first =
               within env "existing reserved parent branch" (fun () ->
                 GD.Branch.pending (branch parent scope reference) |> Option.value_exn)
             in
-            assert (
-              Occurrence.equal
-                (Pending.occurrence first)
-                (Option.value_exn !first_occurrence));
+            assert (Occurrence.equal (Pending.occurrence first) first_occurrence);
             let sent = managed child reference key in
             let operation =
               match sent.status with

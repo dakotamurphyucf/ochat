@@ -593,6 +593,13 @@ let%expect_test
     ~finally:(fun () -> Stdlib.Printexc.record_backtrace recording)
     ~f:(fun () ->
       Existing.with_child
+        ~configure:(fun _root (config : Agent_server.Config.t) ->
+          (* The fixture drives reservation and child creation separately. Keep
+             the elapsed-time snapshot trigger from starting a retention lease
+             between those calls. Event-count snapshots still work normally. *)
+          let server = config.server in
+          let durability = { server.durability with snapshot_every_ms = Int.max_value } in
+          { config with server = { server with durability } })
         ~wrap_env:(fun env ->
           Crash_fault_io.wrap
             (Native.Cache_failure.wrap

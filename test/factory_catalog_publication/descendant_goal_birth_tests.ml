@@ -103,6 +103,7 @@ let with_native_goal_child
       ?independent_lifetime_policy
       ?test_root
       ?timeout
+      ?progress
       ?entry_cleanup
       ?(parent_extra_tools = [])
       ?(inherited_tools = [])
@@ -121,6 +122,7 @@ let with_native_goal_child
     ?independent_lifetime_policy
     ?test_root
     ?timeout
+    ?progress
     ?entry_cleanup
     ~wrap_env
     ~prompt_text:
@@ -248,6 +250,9 @@ let with_native_goal_child
           are separate operations. Bound each phase while retaining the exact
           original publication-plus-quiescence predicate at the final handoff. *)
        let _ = within "child publication" (await_created ~require_idle:false) in
+       Fixture_progress.mark
+         progress
+         "join the parent turn after actual child publication";
        let current, value =
          within "parent turn completion" (await_created ~require_idle:true)
        in

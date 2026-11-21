@@ -71,11 +71,9 @@ module Failure = struct
   ;;
 
   let await t = ignore (Eio.Promise.await t.failure)
-
-  let raise_if_present t =
-    Option.iter (Eio.Promise.peek t.failure) ~f:(fun (exn, backtrace) ->
-      Exn.raise_with_original_backtrace exn backtrace)
-  ;;
+  let raise_captured (exn, backtrace) = Exn.raise_with_original_backtrace exn backtrace
+  let await_and_raise t = raise_captured (Eio.Promise.await t.failure)
+  let raise_if_present t = Option.iter (Eio.Promise.peek t.failure) ~f:raise_captured
 
   let guard t f =
     match f () with

@@ -50,7 +50,9 @@ let root state =
 ;;
 
 let test env environment =
-  let fixture = F.fixture env environment "queued-chatml-launch" in
+  let fixture =
+    F.fixture ~snapshot_policy:Journal_replay env environment "queued-chatml-launch"
+  in
   let marker = Filename.concat (C.physical_workspace fixture) "queued.effect" in
   F.write
     env

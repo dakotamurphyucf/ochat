@@ -28,7 +28,7 @@ let write env native contents =
   Eio.Path.save ~create:(`Or_truncate 0o600) (path env native) contents
 ;;
 
-let fixture env environment name =
+let fixture ?snapshot_policy env environment name =
   let port =
     Eio.Switch.run (fun sw ->
       let reservation = Support.Port_reservation.create ~sw ~env in
@@ -36,7 +36,7 @@ let fixture env environment name =
       Support.Port_reservation.release reservation;
       port)
   in
-  Config_fixture.create environment ~name ~http_port:port
+  Config_fixture.create ?snapshot_policy environment ~name ~http_port:port
 ;;
 
 let with_client ~sw env fixture f =

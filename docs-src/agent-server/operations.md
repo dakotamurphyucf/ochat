@@ -14,11 +14,16 @@ ochat-agent-server -config /absolute/private/server.sexp
 ```
 
 These paths are placeholders. Use a service manager to run the same foreground
-command under a dedicated account, with an explicit cwd/environment, restart
-policy, private writable data directory and bounded shutdown grace. Do not
-background it by tying its stdin/lifetime to a stdio client. Unix sockets are
-always enabled; optional HTTP should bind loopback unless deployment policy
-explicitly protects a broader listener.
+command under a dedicated account, with an explicit working directory and
+environment, restart policy, private writable data directory and bounded
+shutdown grace. The daemon resolves `${tool_dir}` from its actual launch
+directory even when `PWD` is unset or stale. Relative paths inside the
+configuration resolve from the configuration file's directory. A session's
+`${workspace}` comes from its workspace selection.
+
+Do not background the daemon by tying its stdin or lifetime to a stdio client.
+Unix sockets are always enabled. Optional HTTP should bind loopback unless
+deployment policy explicitly protects a broader listener.
 
 Check initialization/`server.health` or authenticated `/v1/health`; inspect typed
 failure and diagnostics, not merely existence of a socket file. Keep stderr/log

@@ -125,7 +125,9 @@ let check_artifact env fixture selected =
 ;;
 
 let test env environment =
-  let fixture = F.fixture env environment "selected-child-source" in
+  let fixture =
+    F.fixture ~snapshot_policy:Journal_replay env environment "selected-child-source"
+  in
   let directory = Filename.dirname (C.prompt_path fixture) in
   let child_path = Filename.concat directory "child.chatmd" in
   F.write env (C.prompt_path fixture) source;

@@ -146,14 +146,13 @@ let message entry text =
   |> A.History_codec.to_protocol
 ;;
 
-let published entry call_id =
-  let current = state entry in
-  let invocation =
-    List.find current.invocations ~f:(fun invocation ->
-      String.equal invocation.P.Invocation.context.tool_name "agent_create"
-      && Option.exists invocation.context.provider_call_id ~f:(String.equal call_id))
-  in
-  match invocation with
+let creation_invocation (current : A.Session_state.t) call_id =
+  List.find current.invocations ~f:(fun invocation ->
+    String.equal invocation.P.Invocation.context.tool_name "agent_create"
+    && Option.exists invocation.context.provider_call_id ~f:(String.equal call_id))
+;;
+
+let published_result : P.Invocation.t option -> Jsonaf.t option = function
   | Some { status = Published (Complete value); _ } -> Some value
   | Some { status = Resolved (Fail failure) | Published (Fail failure); _ } ->
     raise_s [%sexp "real tree birth failed", (failure : P.Invocation.tool_error)]
@@ -165,6 +164,38 @@ let published entry call_id =
       ; _
       }
   | None -> None
+;;
+
+let published entry call_id = published_result (creation_invocation (state entry) call_id)
+
+let tree_birth current call_id =
+  match creation_invocation current call_id with
+  | Some { status = Resolved (Cancelled reason) | Published (Cancelled reason); _ } ->
+    raise_s [%sexp "real tree birth cancelled", (call_id : string), (reason : string)]
+  | Some { publication_discarded = Some reason; _ } ->
+    raise_s
+      [%sexp
+        "real tree birth publication discarded", (call_id : string), (reason : string)]
+  | Some { status = Published (Pending _); _ } ->
+    raise_s [%sexp "synchronous tree birth published pending work", (call_id : string)]
+  | invocation -> published_result invocation
+;;
+
+let await_tree_progress env entry ~phase ~calls select =
+  Fixture_phase.await_actor
+    ~clock:(Eio.Stdenv.mono_clock env)
+    ~phase
+    ~details:(fun current ->
+      List.map calls ~f:(fun call_id ->
+        let status =
+          Option.map (creation_invocation current call_id) ~f:(fun i -> i.status)
+        in
+        [%sexp (call_id : string), (status : P.Invocation.status option)]))
+    entry
+    (fun current ->
+       Option.iter current.failure ~f:(fun failure ->
+         raise_s [%sexp "tree actor failed", (phase : string), (failure : P.Error.t)]);
+       select current)
 ;;
 
 let member daemon parent value =
@@ -269,9 +300,15 @@ let with_tree ~wrap_env ~before_provider f =
   let provider_phase = ref Provider_phase.Root_intermediate in
   let tree = ref None in
   let failure = ref None in
+  let progress = Fixture_progress.create () in
   let phase = ref "actual root Goal and two native children" in
+  let begin_phase description =
+    phase := description;
+    Fixture_progress.mark (Some progress) description
+  in
   with_recoverable_fixture
     ~timeout:90.
+    ~progress
     ~wrap_env
     ~prompt_text:(Deferred_source_support.prompt_text ^ "<tool name=\"agent_create\"/>")
     ~post_stream:(fun inputs ->
@@ -350,17 +387,37 @@ let with_tree ~wrap_env ~before_provider f =
            |> protocol_ok
            |> Goal.activated
          in
-         let rec await_roots () =
-           match
-             published root "554-tree-intermediate", published root "554-tree-sibling"
-           with
-           | Some intermediate, Some sibling
-             when Option.is_none (state root).active_operation -> intermediate, sibling
-           | (Some _ | None), (Some _ | None) ->
-             Eio.Fiber.yield ();
-             await_roots ()
+         let intermediate_call = "554-tree-intermediate" in
+         let sibling_call = "554-tree-sibling" in
+         let both_roots current =
+           let open Option.Let_syntax in
+           let%bind intermediate = tree_birth current intermediate_call in
+           let%map sibling = tree_birth current sibling_call in
+           intermediate, sibling
          in
-         let intermediate, sibling = within env "both genuine root births" await_roots in
+         (* These are successive tool publications and the final provider
+            response in the same root operation. Wait on actual committed
+            progress, then resample both results with root quiescence. *)
+         await_tree_progress
+           env
+           root
+           ~phase:"root publishes intermediate"
+           ~calls:[ intermediate_call ]
+           (fun current -> tree_birth current intermediate_call)
+         |> ignore;
+         let calls = [ intermediate_call; sibling_call ] in
+         await_tree_progress env root ~phase:"root publishes sibling" ~calls both_roots
+         |> ignore;
+         let intermediate, sibling =
+           await_tree_progress
+             env
+             root
+             ~phase:"root finishes its two births"
+             ~calls
+             (fun current ->
+                let births = both_roots current in
+                if Option.is_none current.active_operation then births else None)
+         in
          let intermediate = member daemon root intermediate in
          let sibling = member daemon root sibling in
          assert (not (D.Reference.equal intermediate.reference sibling.reference));
@@ -372,25 +429,39 @@ let with_tree ~wrap_env ~before_provider f =
              P.Run_receipt.equal
                root_admission
                (P.Goal_episode.admission (O.Scope.creator_episode member.scope))));
-         phase
-         := "actual unbound intermediate creates grandchild through private ancestry";
+         begin_phase
+           "actual unbound intermediate creates grandchild through private ancestry";
          start_legacy daemon intermediate.entry;
-         with_writer intermediate.entry (fun writer ->
-           let message = message intermediate.entry "554 create the genuine grandchild" in
-           let submitted =
-             Actor.submit_message_authenticated
-               intermediate.entry.actor
-               ~actor:original
-               ~attachment_id:writer.id
-               message
-             |> protocol_ok
-           in
-           assert (Option.is_some submitted.operation_id);
-           within env "actual intermediate native completion" (fun () ->
-             Goal_native_test_support.await_quiet intermediate.entry)
-           |> ignore);
          let value =
-           published intermediate.entry "554-tree-grandchild" |> Option.value_exn
+           with_writer intermediate.entry (fun writer ->
+             let message =
+               message intermediate.entry "554 create the genuine grandchild"
+             in
+             let submitted =
+               Actor.submit_message_authenticated
+                 intermediate.entry.actor
+                 ~actor:original
+                 ~attachment_id:writer.id
+                 message
+               |> protocol_ok
+             in
+             assert (Option.is_some submitted.operation_id);
+             let call = "554-tree-grandchild" in
+             await_tree_progress
+               env
+               intermediate.entry
+               ~phase:"intermediate publishes grandchild"
+               ~calls:[ call ]
+               (fun current -> tree_birth current call)
+             |> ignore;
+             await_tree_progress
+               env
+               intermediate.entry
+               ~phase:"intermediate finishes its grandchild birth"
+               ~calls:[ call ]
+               (fun current ->
+                  let value = tree_birth current call in
+                  if Goal_native_test_support.is_quiet current then value else None))
          in
          let grandchild = member daemon intermediate.entry value in
          assert (O.Scope.equal intermediate.scope grandchild.scope);
@@ -399,6 +470,7 @@ let with_tree ~wrap_env ~before_provider f =
              (P.Id.Session.equal
                 grandchild.record.key.parent_session_id
                 (state root).identity.session_id));
+         begin_phase "start the actual branches and verify captured ancestry";
          start_legacy daemon grandchild.entry;
          start_legacy daemon sibling.entry;
          assert_source
@@ -449,7 +521,7 @@ let with_tree ~wrap_env ~before_provider f =
            }
          in
          tree := Some current;
-         phase := "actual cross-branch count competition";
+         begin_phase "exercise the constructed tree";
          f current;
          raise_failure current
        with
