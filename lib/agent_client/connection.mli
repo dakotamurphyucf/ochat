@@ -21,6 +21,7 @@ type recovery_command =
   | Enable of Agent_protocol.Recovery_query.Enable.t
   | List_windows of Agent_protocol.Recovery_query.List_windows.t
   | Query_history of Agent_protocol.Recovery_history_request.t
+  | Read_text of Agent_protocol.Recovery_text_range.t
 
 (** Process a recovery command on the ordinary request lane under the same
     successful physical Initialize, including after a suspended reply. *)

@@ -33,6 +33,7 @@
   recovery_window
   recovery_query
   recovery_history_request
+  recovery_text_range
   recovery_history_page
   recovery_attempt_evidence
   history_edit

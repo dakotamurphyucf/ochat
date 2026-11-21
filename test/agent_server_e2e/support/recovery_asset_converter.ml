@@ -143,6 +143,33 @@ let check_history_query factory entry ~attachment_id ~authenticate ~typed ~obser
     | [ { projection = Match hit; _ } ] -> P.Search_snippet.text hit.snippet
     | _ -> failwith "unexpected recovery search projection"
   in
+  let hit = List.hd_exn remote_first.rows in
+  let range citation ~start ~stop =
+    P.Recovery_text_range.create citation ?preparation_revision:hit.preparation_revision
+      ~part:0 ~start ~stop ~max_bytes:7 () |> protocol_ok
+  in
+  let read = Agent_client.Recovery_windows.read_text typed in
+  let stop = String.length first in
+  let initial = read (range hit.citation ~start:0 ~stop) |> protocol_ok in
+  require (String.equal initial.text "history" && Option.equal Int.equal initial.next_offset (Some 7))
+    "remote range did not preserve bytes and continuation";
+  let last = read (range hit.citation ~start:(stop - 1) ~stop) |> protocol_ok in
+  require (String.equal last.text "0" && Option.is_none last.next_offset)
+    "remote terminal range did not match the quoted occurrence";
+  (match read (range hit.citation ~start:0 ~stop:(stop + 1)) with
+   | Error failure when P.Error.equal_code failure.code Invalid_request -> ()
+   | _ -> failwith "remote range allowed a byte beyond the source");
+  let stale =
+    let module C = P.Recovery_window.Citation in
+    let revision =
+      match C.version hit.citation with
+      | Canonical revision -> P.History.Content_revision.succ revision |> protocol_ok
+      | Effective _ -> failwith "expected canonical search result"
+    in
+    C.create (C.scope hit.citation) ~occurrence:(C.occurrence hit.citation)
+      ~version:(P.Recovery_item_version.canonical revision) |> protocol_ok
+  in
+  require (Result.is_error (read (range stale ~start:0 ~stop))) "stale revision released text";
   let remote_cursor = Option.value_exn remote_first.next in
   require (String.equal first (match_text remote_first)) "wrong remote search result";
   (match Http_driver.request_without_history observer (Recovery_history (wire List_items)) with
@@ -645,7 +672,13 @@ let run env environment =
       P.Recovery_history_request.create ~session:owner ~window:scope ~family:Canonical
         ~page:request.page List_items |> protocol_ok
     in
-    let held = [ hold (P.Command.Recovery_windows request); hold (Recovery_history query) ] in
+    let range = P.Recovery_text_range.create retained ~part:0 ~start:0 ~stop:1 () |> protocol_ok in
+    let held =
+      [ hold (P.Command.Recovery_windows request)
+      ; hold (Recovery_history query)
+      ; hold (Recovery_range range)
+      ]
+    in
     List.iter held ~f:(fun output ->
       require (D.Output.requires_check output) "queued recovery output lost its release guard");
     Actor.expire_recovery_window entry.actor ~actor:proof ~attachment_id ~authorize scope

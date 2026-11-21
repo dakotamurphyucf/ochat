@@ -40,6 +40,7 @@ let required_scope = function
   | Recurrence_query _
   | Recovery_windows _
   | Recovery_history _
+  | Recovery_range _
   | Goal_query _
   | Session_pending_inputs _
   | Session_pending_input _

@@ -139,3 +139,32 @@ let query t ~on_release (request : P.Recovery_history_request.t) =
   let%map () = P.Recovery_history_page.validate page ~request in
   page
 ;;
+
+let read_text t ~on_release (request : P.Recovery_text_range.t) =
+  let module Range = P.Recovery_text_range in
+  let module History = Session_factory.Recovery_history in
+  let open Result.Let_syntax in
+  let%bind () = require_feature t Range.feature in
+  let principal = Operator_authorization.principal t.actor in
+  let selection =
+    match request.preparation_revision with
+    | None -> History.Text.Canonical request.citation
+    | Some source_revision -> Prepared { citation = request.citation; source_revision }
+  in
+  let authorize _selection _view (state : A.Session_state.t) =
+    let%bind () = require_feature t Range.feature in
+    if P.Principal.has_scope principal View_session_transcript
+       && Authorization.session_creator_visible_to principal ~creator:state.identity.creating_principal
+    then Ok ()
+    else Error (error Permission_denied "recovery text is unavailable")
+  in
+  History.read_text t.factory ~on_release ~authorize selection ~view:Ordinary
+    ~part:request.part ~start:request.start ~stop:request.stop ~max_bytes:request.max_bytes ()
+  |> Result.map ~f:Range.Reply.of_slice
+  |> Result.map_error ~f:(function
+    | History.Range error -> error
+    | Source Denied -> error Permission_denied "recovery text is unavailable"
+    | Source (Limit | Budget_exhausted) -> error Resource_limit "recovery text examination limit"
+    | Source (Stale | Expired | Withdrawn) -> error Conflict "recovery text revision is no longer visible"
+    | Source (Missing | Unavailable | Unsupported | Corrupt) -> error Interrupted "recovery text source is unavailable")
+;;

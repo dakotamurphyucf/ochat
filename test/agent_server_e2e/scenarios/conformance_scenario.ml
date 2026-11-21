@@ -4283,6 +4283,7 @@ let method_coverage =
   ; "session.run.start", "conformance.run-admission"
   ; "session.recovery.enable", "daemon-recovery.converter-adoption"
   ; "session.recovery.query", "daemon-recovery.converter-adoption"
+  ; "session.recovery.read_text", "daemon-recovery.converter-adoption"
   ; "session.recovery.windows", "daemon-recovery.converter-adoption"
   ; "session.goals", "conformance.goal-operator"
   ; "session.goal", "conformance.goal-operator"

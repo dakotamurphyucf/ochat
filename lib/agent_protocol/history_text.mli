@@ -6,6 +6,11 @@ type t = private
   ; text : string
   }
 
+val max_parts : int
+val max_part_bytes : int
+val default_slice_bytes : int
+val max_slice_bytes : int
+
 (** Admit up to 1 MiB of UTF-8 at an original index in [0, 4096). *)
 val create : index:int -> text:string -> (t, Error.t) result
 

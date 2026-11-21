@@ -418,6 +418,7 @@ type t =
   | Recovery_enable of (Recovery_window.Scope.t[@sexp.opaque])
   | Recovery_windows of (Recovery_query.Summary.t Page.t[@sexp.opaque])
   | Recovery_history of (Recovery_history_page.t[@sexp.opaque])
+  | Recovery_range of (Recovery_text_range.Reply.t[@sexp.opaque])
   | Goal_query of (Goal_query.Result.t[@sexp.opaque])
   | Goal_control of (Goal_control.Result.t[@sexp.opaque])
   | Recurrence_query of (Recurrence_query.Result.t[@sexp.opaque])
@@ -511,6 +512,7 @@ let method_name = function
   | Recovery_enable _ -> Recovery_query.Enable.method_name
   | Recovery_windows _ -> Recovery_query.List_windows.method_name
   | Recovery_history _ -> Recovery_history_request.method_name
+  | Recovery_range _ -> Recovery_text_range.method_name
   | Goal_query result -> Goal_query.Result.method_name result
   | Goal_control result -> Goal_control.Result.method_name result
   | Recurrence_query result -> Recurrence_query.Result.method_name result
@@ -607,6 +609,7 @@ let to_json = function
   | Recovery_enable v -> Recovery_window.Scope.to_json v
   | Recovery_windows v -> Recovery_query.Summary.page_to_json v
   | Recovery_history v -> Recovery_history_page.to_json v
+  | Recovery_range v -> Recovery_text_range.Reply.to_json v
   | Goal_query result -> Goal_query.Result.payload result
   | Goal_control result -> Goal_control.Result.payload result
   | Recurrence_query result -> Recurrence_query.Result.payload result
@@ -778,6 +781,7 @@ let decoders =
   ; Recovery_query.Enable.method_name, map Recovery_window.Scope.of_json (fun x -> Recovery_enable x)
   ; Recovery_query.List_windows.method_name, map Recovery_query.Summary.page_of_json (fun x -> Recovery_windows x)
   ; Recovery_history_request.method_name, map Recovery_history_page.of_json (fun x -> Recovery_history x)
+  ; Recovery_text_range.method_name, map Recovery_text_range.Reply.of_json (fun x -> Recovery_range x)
   ; "session.runs", map (Page.of_json Run_query.View.of_json) (fun x -> Session_runs x)
   ; "session.run", map Run_query.Outcome.of_json (fun x -> Session_run x)
   ; ( "session.pending_inputs"

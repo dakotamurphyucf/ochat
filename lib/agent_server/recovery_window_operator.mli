@@ -34,3 +34,9 @@ val query
   -> on_release:(release -> unit)
   -> Agent_protocol.Recovery_history_request.t
   -> (Agent_protocol.Recovery_history_page.t, Agent_protocol.Error.t) result
+
+val read_text
+  :  t
+  -> on_release:(release -> unit)
+  -> Agent_protocol.Recovery_text_range.t
+  -> (Agent_protocol.Recovery_text_range.Reply.t, Agent_protocol.Error.t) result

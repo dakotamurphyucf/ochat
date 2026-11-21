@@ -19,3 +19,9 @@ val query
   :  Connection.t
   -> Agent_protocol.Recovery_history_request.t
   -> (Agent_protocol.Recovery_history_page.t, Agent_protocol.Error.t) result
+
+(** Read an exact UTF-8 byte range in an ordinary visible message. *)
+val read_text
+  :  Connection.t
+  -> Agent_protocol.Recovery_text_range.t
+  -> (Agent_protocol.Recovery_text_range.Reply.t, Agent_protocol.Error.t) result

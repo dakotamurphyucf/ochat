@@ -575,3 +575,15 @@ empty. A null `next` with `complete` ends the search. A null `next` with
 `source_unavailable` means some source data could not be examined. On
 `Cursor_expired`, start again without a cursor. The typed OCaml entry point
 is `Agent_client.Recovery_windows.query`.
+
+### Read an exact recovery text range
+
+To read beyond a snippet, negotiate `recovery.text_range` and call
+`session.recovery.read_text` with its `citation`, original `part` index,
+and half-open UTF-8 byte offsets `start` and `stop`. For an effective
+item, also send the returned `preparation_revision`. Both offsets must
+land on character boundaries. The default reply budget is 4 KiB. Set
+`max_bytes` up to 16 KiB and continue at `next_offset` when present.
+An empty range at a valid boundary succeeds. The host checks access again
+when writing the reply. If the source changes in the meantime, submit a
+fresh read against a currently visible citation. The typed client exposes `Agent_client.Recovery_windows.read_text`.

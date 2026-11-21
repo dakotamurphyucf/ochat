@@ -104,3 +104,52 @@ let%test_unit "admission enforces scope, exact member uniqueness, bounds and wir
   let members = List.init 350 ~f:(fun i -> cite ~namespace i (V.canonical R.zero)) in
   assert (Result.is_error (W.create here members))
 ;;
+
+let%test_unit "a recovery range binds preparation, byte count and continuation" =
+  let module Range = P.Recovery_text_range in
+  let canonical = cite 0 (V.canonical R.zero) in
+  let prepared = cite 0 (effective (Unchanged R.zero)) in
+  List.iter
+    [ canonical, false; prepared, true ]
+    ~f:(fun (citation, needs_preparation) ->
+      List.iter [ None; Some Int64.max_value ] ~f:(fun preparation_revision ->
+        let request =
+          Range.create
+            citation
+            ?preparation_revision
+            ~part:1
+            ~start:3
+            ~stop:7
+            ~max_bytes:4
+            ()
+        in
+        assert (
+          Bool.equal
+            (Result.is_ok request)
+            (Bool.equal needs_preparation (Option.is_some preparation_revision)));
+        Result.iter request ~f:(fun request ->
+          let wire = Range.to_json request in
+          assert (
+            Document_schema.Json.equal wire (Range.of_json wire |> get |> Range.to_json));
+          List.iter
+            [ "β", Some 5, true
+            ; "β", Some 4, false
+            ; "β", None, false
+            ; "ββ", None, true
+            ; "ββ", Some 7, false
+            ; "", Some 3, false
+            ; "βββ", None, false
+            ]
+            ~f:(fun (text, next, expected) ->
+              let reply =
+                `Object
+                  (("text", `String text)
+                   :: Option.to_list
+                        (Option.map next ~f:(fun n ->
+                           "next_offset", `Number (Int.to_string n))))
+                |> Range.Reply.of_json
+                |> get
+              in
+              assert (
+                Bool.equal expected (Result.is_ok (Range.Reply.validate reply ~request)))))))
+;;

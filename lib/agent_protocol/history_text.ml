@@ -1,5 +1,10 @@
 open! Core
 
+let max_parts = 4096
+let max_part_bytes = 1_048_576
+let default_slice_bytes = 4096
+let max_slice_bytes = 16_384
+
 type t =
   { index : int
   ; text : string
@@ -8,9 +13,9 @@ type t =
 let limit message = Protocol_error.create Resource_limit ~message ~retryable:false ()
 
 let create ~index ~text =
-  if index < 0 || index >= 4096
+  if index < 0 || index >= max_parts
   then Error (Protocol_error.invalid_request "invalid history text part index")
-  else if String.length text > 1_048_576
+  else if String.length text > max_part_bytes
   then Error (limit "history text part exceeds 1 MiB")
   else if not (Stdlib.String.is_valid_utf_8 text)
   then Error (Protocol_error.invalid_request "search entry is not valid UTF-8")
@@ -35,8 +40,8 @@ module Slice = struct
     }
 end
 
-let read ?(max_bytes = 4096) t ~start ~stop =
-  if max_bytes <= 0 || max_bytes > 16_384
+let read ?(max_bytes = default_slice_bytes) t ~start ~stop =
+  if max_bytes <= 0 || max_bytes > max_slice_bytes
   then Error (Protocol_error.invalid_request "invalid history text byte budget")
   else if
     start < 0

@@ -787,8 +787,11 @@ module Recovery_history : sig
     -> Agent_session.Recovery_history_query.t
     -> (Jsonaf.t, Agent_protocol.Error.t) result
 
+  (** A queued transport registers the nonyielding release proof and checks it
+      at the actual write. Retiring or replacing the accepted source invalidates it. *)
   val read_text
     :  t
+    -> ?on_release:((unit -> (unit, Agent_protocol.Error.t) result) -> unit)
     -> authorize:
          (Text.selection
           -> Text.view

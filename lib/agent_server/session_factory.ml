@@ -14628,7 +14628,7 @@ module Recovery_history = struct
       query
   ;;
 
-  let read_text t ~authorize selection ~view ~part ~start ~stop ?max_bytes () =
+  let read_text t ?on_release ~authorize selection ~view ~part ~start ~stop ?max_bytes () =
     let citation =
       match selection with
       | Text.Canonical citation | Prepared { citation; _ } -> citation
@@ -14649,11 +14649,11 @@ module Recovery_history = struct
     in
     let open Result.Let_syntax in
     let%bind range =
-      Recovery_source_host.with_source
+      Recovery_source_host.with_observed_source
         t
         source
         ~authorize
-        ~f:(fun handle ~observation:_ ~current ->
+        ~f:(fun handle ~observation ~current ~check_owner ->
           Source.with_allowance ~checkpoint t.store ~handle ~f:(fun allowance ->
             let%bind item =
               Text.resolve
@@ -14673,8 +14673,26 @@ module Recovery_history = struct
             in
             let range = P.History_text.read ?max_bytes selected ~start ~stop in
             checkpoint ();
-            let%map _ = current () |> Result.map_error ~f:(fun _ -> Source.Denied) in
-            range))
+            let%map accepted = current () |> Result.map_error ~f:(fun _ -> Source.Denied) in
+            Result.map range ~f:(fun slice ->
+              Option.iter on_release ~f:(fun register ->
+                register (fun () ->
+                  let denied () =
+                    P.Error.create Permission_denied ~message:"recovery text authority expired"
+                      ~retryable:false ()
+                  in
+                  let%bind () = check_owner () |> Result.map_error ~f:(fun _ -> denied ()) in
+                  let%bind latest =
+                    Agent_session.Session_actor.Resource_observation.check_current observation
+                    |> Result.map_error ~f:(fun _ -> denied ())
+                  in
+                  (* The slice was read under this immutable source snapshot. A change
+                     between preparation and delivery requires a fresh bounded read. *)
+                  if phys_equal latest accepted
+                     && Agent_store.Session_store.retained_lifecycle_available t.store handle
+                  then authorize latest
+                  else Error (denied ())));
+              slice)))
       |> Result.map_error ~f:(fun e -> Source e)
     in
     Result.map_error range ~f:(fun e -> Range e)

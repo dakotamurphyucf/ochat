@@ -116,6 +116,7 @@ let has_command_receipt = function
   | Instructions _
   | Recovery_windows _
   | Recovery_history _
+  | Recovery_range _
   | Goal_query _
   | Recovery_enable _
   | Goal_control _
@@ -1037,6 +1038,7 @@ type recovery_command =
   | Enable of P.Recovery_query.Enable.t
   | List_windows of P.Recovery_query.List_windows.t
   | Query_history of P.Recovery_history_request.t
+  | Read_text of P.Recovery_text_range.t
 
 let request_recovery t ~initialized_as command =
   let command =
@@ -1044,6 +1046,7 @@ let request_recovery t ~initialized_as command =
     | Enable request -> P.Command.Recovery_enable request
     | List_windows request -> P.Command.Recovery_windows request
     | Query_history request -> P.Command.Recovery_history request
+    | Read_text request -> P.Command.Recovery_range request
   in
   let check () =
     if Option.exists (initialization t) ~f:(phys_equal initialized_as)

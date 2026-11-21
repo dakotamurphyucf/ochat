@@ -70,3 +70,17 @@ let query connection (request : P.Recovery_history_request.t) =
     page
   | _ -> Error (P.Error.invalid_request "unexpected recovery history result")
 ;;
+
+let read_text connection request =
+  let module Range = P.Recovery_text_range in
+  let open Result.Let_syntax in
+  let%bind initialized_as =
+    check_host connection ~feature:Range.feature (Range.session request)
+  in
+  let%bind result = Connection.request_recovery connection ~initialized_as (Read_text request) in
+  match result with
+  | Recovery_range slice ->
+    let%map () = Range.Reply.validate slice ~request in
+    slice
+  | _ -> Error (P.Error.invalid_request "unexpected recovery text range result")
+;;
