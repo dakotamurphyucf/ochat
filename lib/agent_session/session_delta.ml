@@ -615,6 +615,60 @@ let foreground_continuation (state : Session_state.t) =
   | _ -> None
 ;;
 
+let validate_rollover_run_work (state : Session_state.t) delta =
+  let module P = Agent_protocol in
+  let rec adds_relinquishment = function
+    | Run_state_changed next ->
+      Run_rollover_work.adds_operation_relinquishment ~previous:state.run_state next
+    | Batch deltas -> List.exists deltas ~f:adds_relinquishment
+    | _ -> false
+  in
+  let rec has_run_update = function
+    | Run_state_changed _ -> true
+    | Batch deltas -> List.exists deltas ~f:has_run_update
+    | _ -> false
+  in
+  let rec has_admission = function
+    | Recovery_rollover_changed (Schedule { change = Admit _; _ }) -> true
+    | Batch deltas -> List.exists deltas ~f:has_admission
+    | _ -> false
+  in
+  if not (adds_relinquishment delta || (has_run_update delta && has_admission delta))
+  then Ok ()
+  else (
+    let invalid =
+      Error
+        (P.Error.invalid_request
+           "Run Operation relinquishment requires its exact rollover admission")
+    in
+    match delta, foreground_continuation state, state.active_operation with
+    | ( Batch deltas
+      , Some { owner; predecessor; phase = Preparing selected }
+      , Some { id = running; generation; kind = Turn Recovery_retry; state = Running; _ }
+      ) ->
+      (match List.rev deltas with
+       | Run_state_changed index
+         :: Recovery_rollover_changed
+              (Schedule { id; expected; change = Admit { operation; _ } })
+         :: prefix
+         when P.Id.Operation.equal id owner
+              && P.Id.Operation.equal operation selected
+              && P.Id.Operation.equal operation running
+              && Int.equal generation state.identity.generation
+              && Int64.equal expected.revision state.counters.revision
+              && Option.exists state.recovery_windows ~f:(fun ledger ->
+                P.Recovery_window.Scope.equal
+                  expected.scope
+                  (Recovery_window_ledger.Window.scope
+                     (Recovery_window_ledger.active ledger)))
+              && List.for_all prefix ~f:(function
+                | Pending_inputs_changed _ | Delivery_wake_changed _ -> true
+                | _ -> false) ->
+         Run_rollover_work.validate state ~predecessor ~successor:operation index
+       | _ -> invalid)
+    | _ -> invalid)
+;;
+
 let awaiting_settled_foreground state =
   Option.exists
     (foreground_continuation state)

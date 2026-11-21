@@ -143,6 +143,14 @@ val validate_successor_dispatch
   -> t
   -> (unit, Agent_protocol.Error.t) result
 
+(** Operation work can move only with the exact ordered successor admission.
+    Preexisting admission records without a Run work move retain their replay
+    meaning. This check supplies no live writer authority. *)
+val validate_rollover_run_work
+  :  Session_state.t
+  -> t
+  -> (unit, Agent_protocol.Error.t) result
+
 val successor_retained_history
   :  ?retain_accepted_wakes:bool
   -> Session_state.t

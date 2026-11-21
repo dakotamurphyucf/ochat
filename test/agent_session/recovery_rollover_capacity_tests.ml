@@ -298,6 +298,169 @@ let check_receipt ~initial_scope ~scenario ~original_operation ~archive state =
   | Terminal _ | Pending -> assert false
 ;;
 
+let rec successor_dispatch restored = function
+  | [] -> failwith "missing physical successor admission"
+  | (transaction : Agent_store.Transaction.t) :: later ->
+    let delta =
+      A.Session_delta_document.decode ~limits:document_limits transaction.delta
+      |> document_ok
+      |> A.Session_delta_document.value
+    in
+    let changes =
+      match delta with
+      | Batch changes -> changes
+      | leaf -> [ leaf ]
+    in
+    (match
+       List.find_map changes ~f:(function
+         | A.Session_delta.Recovery_rollover_changed
+             (Schedule { change = Admit { operation; _ }; _ }) -> Some operation
+         | _ -> None)
+     with
+     | Some operation ->
+       A.Session_persistence.Restored.state restored, changes, operation, transaction
+     | None ->
+       let restored =
+         A.Session_persistence.apply_transaction
+           ~limits:document_limits
+           restored
+           transaction
+         |> store_ok
+       in
+       successor_dispatch restored later)
+;;
+
+let retained_run state ~predecessor =
+  let generation = state.A.Session_state.identity.generation in
+  let source =
+    A.Run_source_installation.captured Run_state_tests.installed ~generation
+    |> protocol_ok
+  in
+  let owned = P.Run_work.create ~key:(Operation predecessor) ~generation |> protocol_ok in
+  let run =
+    P.Run.create
+      ~id:(P.Id.Run.create ())
+      ~session:(P.Recovery_window.Scope.session (W.scope state))
+      ~principal_id
+      ~source
+      ~mode:Single_turn
+      ~lifecycle:Admitted
+      ~revision:0L
+      ~owned_work:[ owned ]
+      ~relinquished_work:[]
+      ~terminal_work:[]
+      ~created_at:state.identity.created_at
+      ~updated_at:state.identity.updated_at
+    |> protocol_ok
+  in
+  let receipt =
+    P.Run_receipt.create
+      ~run_id:run.id
+      ~principal_id
+      ~source
+      ~key:(Recovery_note_actor_tests.key "rollover-run")
+      ~request_sha256:(String.make 64 '1')
+      ~kind:Admission
+      ~run_revision:run.revision
+      ~session_revision:state.counters.revision
+      ~committed_at:state.identity.updated_at
+    |> protocol_ok
+  in
+  let index =
+    A.Run_state.commit Run_state_tests.index ~run ~receipt ~intent:None |> protocol_ok
+  in
+  { state with run_state = Some index }, run
+;;
+
+let check_run_transfer initial transactions =
+  let state, changes, successor, physical = successor_dispatch initial transactions in
+  let predecessor =
+    (Option.value_exn (A.Session_delta.foreground_continuation state)).predecessor
+  in
+  let before, run = retained_run state ~predecessor in
+  let now = before.identity.updated_at in
+  let plan ~successor =
+    let id, index =
+      A.Run_rollover_work.prepare before ~predecessor ~successor ~now
+      |> protocol_ok
+      |> Option.value_exn
+    in
+    assert (P.Id.Run.equal id run.id);
+    A.Session_delta.Run_state_changed index
+  in
+  let restored = A.Session_persistence.Restored.authored before in
+  let document = A.Session_persistence.Restored.state_document restored in
+  let prepare delta = A.Session_transition.apply ~now before ~delta ~payloads:[] in
+  let transaction delta (candidate : A.Session_transition.t) =
+    let payloads = List.map candidate.events ~f:event_document in
+    Agent_store.Transaction.create
+      ~limits:document_limits
+      ~session_id:before.identity.session_id
+      ~generation:before.identity.generation
+      ~transaction_sequence:candidate.state.counters.transaction_sequence
+      ~previous_transaction_hash:physical.previous_transaction_hash
+      ~session_revision:candidate.state.counters.revision
+      ~first_event_sequence:
+        (Option.map (List.hd candidate.events) ~f:(fun event -> event.sequence))
+      ~last_event_sequence:
+        (Option.map (List.last candidate.events) ~f:(fun event -> event.sequence))
+      ~accepted_at_ns:physical.accepted_at_ns
+      ~command_audit:None
+      ~delta:(delta_document delta)
+      ~durable_events:payloads
+    |> store_ok
+  in
+  let replay candidate delta =
+    A.Session_persistence.apply_transaction
+      ~limits:document_limits
+      restored
+      (transaction delta candidate)
+  in
+  let legacy = prepare (Batch changes) |> protocol_ok in
+  let historical =
+    replay legacy legacy.delta |> store_ok |> A.Session_persistence.Restored.state
+  in
+  assert (Option.equal A.Run_state.equal before.run_state historical.run_state);
+  let move = plan ~successor in
+  let qualified = prepare (Batch (changes @ [ move ])) |> protocol_ok in
+  ignore
+    (A.Session_document_transition.admit_encoded
+       document
+       ~delta:qualified.delta
+       ~next:qualified.state
+       ~limits:document_limits
+     |> document_ok
+     : A.Session_state_document.Admitted.t);
+  let adopted =
+    replay qualified qualified.delta |> store_ok |> A.Session_persistence.Restored.state
+  in
+  assert (Option.equal A.Run_state.equal qualified.state.run_state adopted.run_state);
+  let index = Option.value_exn adopted.run_state in
+  let settled = A.Run_state.find index run.id |> Option.value_exn in
+  let work =
+    P.Run_work.create ~key:(Operation successor) ~generation:run.source.generation
+    |> protocol_ok
+  in
+  assert (List.equal P.Run_work.equal settled.owned_work [ work ]);
+  assert (List.equal P.Run_work.equal settled.relinquished_work run.owned_work);
+  assert (List.is_empty settled.terminal_work);
+  assert (
+    List.equal
+      P.Run_receipt.equal
+      (A.Run_state.receipts index)
+      (A.Run_state.receipts (Option.value_exn before.run_state)));
+  assert (Result.is_error (A.Run_rollover_work.dispatch_owner adopted ~predecessor));
+  List.iter
+    [ move
+    ; Batch (move :: changes)
+    ; Batch (changes @ [ Run_state_changed (Option.value_exn before.run_state) ])
+    ; Batch (changes @ [ plan ~successor:(P.Id.Operation.create ()) ])
+    ]
+    ~f:(fun delta ->
+      assert (Result.is_error (prepare delta));
+      assert (Result.is_error (replay qualified delta)))
+;;
+
 let exercise scenario =
   with_actor_workspace (fun env workspace_instance ->
     Eio.Switch.run (fun storage_scope ->
@@ -445,6 +608,8 @@ let exercise scenario =
         assert (P.Recovery_window.Scope.equal scope (W.scope replay));
         assert (Option.is_none replay.recovery_rollover)
       | Hard | Rejected ->
+        if equal_scenario scenario Hard
+        then check_run_transfer initial recovered.transactions;
         [%test_eq: bool list]
           (List.rev !writes)
           (if equal_scenario scenario Hard then [ false ] else [ true; false ]);

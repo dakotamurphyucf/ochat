@@ -45,6 +45,10 @@ let prepare previous_document ~delta:transaction ~limits =
   in
   let previous_value = Session_state_document.value previous_document in
   let%bind.Result () =
+    Session_delta.validate_rollover_run_work previous_value transaction
+    |> X.document_result
+  in
+  let%bind.Result () =
     Session_delta.validate_successor_dispatch previous_value transaction
     |> X.document_result
   in

@@ -295,6 +295,7 @@
   moderator_lifecycle
   policy_restore_basis
   run_state
+  run_rollover_work
   run_transition
   run_work_settlement
   run_subscription_evidence
