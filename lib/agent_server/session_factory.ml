@@ -18884,6 +18884,11 @@ let managed_send t borrowed child_id ~key ~message =
     |> Sexp.to_string_mach
     |> Chatmd_shell_spec.Source_ref.digest
   in
+  let scoped =
+    Option.bind initial.goal_descendants ~f:Agent_session.Goal_descendants.origin
+    |> Option.exists ~f:(fun origin ->
+      not (List.is_empty (Agent_store.Delegation_goal_origin.scopes origin)))
+  in
   let%bind receipt =
     match
       List.find initial.managed_submissions ~f:(fun receipt ->
@@ -18891,9 +18896,27 @@ let managed_send t borrowed child_id ~key ~message =
         && P.Idempotency_key.equal receipt.key key)
     with
     | Some receipt ->
-      (match String.equal request_sha256 receipt.request_sha256 with
-       | true -> Ok receipt
-       | false -> Error (unavailable Conflict "managed send input changed") |> protocol)
+      (match String.equal request_sha256 receipt.request_sha256, receipt.status with
+       | false, _ -> Error (unavailable Conflict "managed send input changed") |> protocol
+       | true, Suspended_rollover _ when scoped ->
+         let%bind entry =
+           List.find initial.conversation.canonical_history ~f:(fun entry ->
+             P.History.Id.equal entry.id receipt.history_id)
+           |> Result.of_option
+                ~error:(unavailable Conflict "managed input is unavailable")
+           |> protocol
+         in
+         A.submit_managed_message_native
+           child.actor
+           ~borrowed
+           ~reference
+           ~key
+           ~request_sha256
+           ~generation:initial.identity.generation
+           ~max_receipts:t.limits.managed_submission_max_count
+           entry
+         |> protocol
+       | true, _ -> Ok receipt)
     | None ->
       let%bind () =
         match

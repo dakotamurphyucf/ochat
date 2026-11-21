@@ -154,6 +154,7 @@ end
     Production compositions must supply actual tracking. *)
 let make_inference_policy
       ?(on_prepare = ignore)
+      ?capacity_source
       ~request_guidance
       ~default_model
       ~post_stream
@@ -164,14 +165,22 @@ let make_inference_policy
     Agent_protocol.Id.Transaction.create () |> Agent_protocol.Id.Transaction.to_string
   in
   let fixture =
-    if request_guidance
-    then
+    match capacity_source, request_guidance with
+    | Some capacity_source, request_guidance ->
+      Inference_fixture.create_with_capacity_and_guidance
+        ~request_guidance
+        ~capacity_source
+        ~binding_is_current:(fun () -> true)
+        ~namespace
+        ~default_model
+        ~post_stream
+    | None, true ->
       Inference_fixture.create_with_request_guidance
         ~on_prepare
         ~namespace
         ~default_model
         ~post_stream
-    else
+    | None, false ->
       Inference_fixture.create_with_observer
         ~on_prepare
         ~namespace

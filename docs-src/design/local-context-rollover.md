@@ -491,8 +491,18 @@ The standard turn worker exposes a body-free post-commit selection to the
 authored lifecycle integration. Its `Continue`, `Wait` and `Finish` outcomes
 apply only to the exact retired foreground owner and committed successor.
 A current inherited Goal root requires a fresh inherited admission before
-any successor dispatch. A missing live proof or archive-only cut waits for
-current authority. Recovery never reconstructs a retired process credential.
+any successor dispatch. An authorized parent can repeat its native managed
+send with the original key and input. The child selects the retained user
+occurrence and stages the new Turn through the existing parent reservation,
+child acknowledgement and parent confirmation. The selected operation starts
+only after that handoff. Its newly prepared provider attempt must also pass
+the inherited admission protocol before accepting the continuation. The
+managed receipt stays suspended until this exact attempt commits. Interrupted
+admission preserves the retained input and reconciles its acknowledgements
+through the existing descendant lifecycle. An authorized controller can use
+`agent_wait` with the retained receipt ID to observe its suspended state.
+Recovery never reconstructs a retired process credential. An archive-only
+cut waits for current authority.
 
 The optional successor hint port borrows its authorized source during
 preparation and request execution. The hint is request-only User guidance,

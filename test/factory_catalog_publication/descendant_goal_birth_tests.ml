@@ -96,6 +96,7 @@ let native_effect_registry calls =
 ;;
 
 let with_native_goal_child
+      ?capacity_source
       ?(parent_prompt_text = Deferred_source_support.prompt_text)
       ?sources
       ?chatml_runtime_policy
@@ -114,6 +115,7 @@ let with_native_goal_child
   =
   let first = ref true in
   with_recoverable_fixture
+    ?capacity_source
     ?sources
     ?chatml_runtime_policy
     ?independent_lifetime_policy

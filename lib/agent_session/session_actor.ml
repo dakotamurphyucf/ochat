@@ -4772,6 +4772,7 @@ module Inherited_turn = struct
       ; operation : Agent_protocol.Operation.t
       ; custody : agent_custody option
       ; entry : Agent_protocol.History.entry
+      ; successor : Foreground_successor.t option
       }
 
     type run_user =
@@ -31356,6 +31357,7 @@ let finish_inherited_turn
       else Error (error Conflict "Goal Resume runtime changed after acknowledgement")
     | Goal_subscription selected -> check_idle_turn_source t selected.turn
     | Idle source -> check_idle_turn_source t (Idle_source.turn source)
+    | Managed { successor = Some _; origin; _ } -> check_inherited_managed_origin origin
     | Message _ | Managed _ | Run_user _ | Held_input _ -> Ok ()
   in
   let%bind admitted = inherited_turn_admitted_guard t acknowledged ~confirmation ~views in
@@ -31434,6 +31436,9 @@ let finish_inherited_turn
       else Error (error Conflict "ACKed managed receipt identity changed")
     in
     complete_inherited_turn_handoff t acknowledged;
+    Option.iter source.successor ~f:(fun selected ->
+      let check () = Operation_descendant_guard.check_current acknowledged.guard in
+      t.foreground_successor <- Some { selected with check });
     launch_worker t source.operation;
     Ok receipt
   | Run_user (source, reply) ->
@@ -32958,6 +32963,65 @@ let retained_managed_receipt t candidate =
        ~error:(error Invalid_state "managed send did not retain its receipt")
 ;;
 
+let active_rollover_window t =
+  let module P = Agent_protocol in
+  let module L = Recovery_window_ledger in
+  let open Option.Let_syntax in
+  let%bind storage = t.canonical_persistence in
+  let%bind owner = Canonical_backend_binding_data.session_owner storage in
+  let%bind ledger = t.state.recovery_windows in
+  if
+    Canonical_backend_binding_data.is_available storage
+    && P.Session_ref.equal owner (L.owner ledger)
+  then Some (L.Window.scope (L.active ledger))
+  else None
+;;
+
+let prepare_foreground_successor t ~id ~(expected : Recovery_rollover.Expected.t) ~check =
+  let module P = Agent_protocol in
+  let open Result.Let_syntax in
+  let%bind () = require_selected_execution t in
+  let%bind target = Configuration_transition.target t.state in
+  let%bind policy =
+    context_capacity_selection
+      t
+      ~owner:(P.Recovery_window.Scope.session expected.Recovery_rollover.Expected.scope)
+      ~target
+    |> Result.of_option
+         ~error:(error Invalid_state "successor has no selected context policy")
+  in
+  let capacity_basis =
+    Configuration_capture.Capacity_basis.capture t.state ~selection:policy
+  in
+  let%bind input =
+    Recovery_rollover_input.capture
+      t.state
+      ~runtime_admission_open:(runtime_admission_open t)
+  in
+  let%bind pending =
+    History_codec.all_of_protocol (Recovery_rollover_input.entries input)
+  in
+  let operation = create_turn_operation t Recovery_retry in
+  let%bind admission =
+    Turn_admission.create t.state ~operation ~notification_wakes:[] ~adopt_deferred:false
+  in
+  let selected : Foreground_successor.t =
+    { owner = id
+    ; scope = expected.scope
+    ; operation = operation.id
+    ; input
+    ; pending
+    ; capacity_basis
+    ; policy
+    ; check
+    ; prepared = None
+    ; admitted = None
+    ; hold = Preparation_interrupted
+    }
+  in
+  Ok (selected, operation, admission)
+;;
+
 let capture_inherited_managed t ~capture (input : Inherited_turn.Input.managed) receipt =
   let open Result.Let_syntax in
   let%bind () = require_available_descendant_admission_slot t in
@@ -32991,7 +33055,13 @@ let capture_inherited_managed t ~capture (input : Inherited_turn.Input.managed) 
         in
         let source =
           Inherited_turn.Source.Managed
-            { origin = input.origin; receipt; operation; custody; entry = input.entry }
+            { origin = input.origin
+            ; receipt
+            ; operation
+            ; custody
+            ; entry = input.entry
+            ; successor = None
+            }
         in
         let%map decision =
           capture_inherited_turn_plan
@@ -33004,6 +33074,98 @@ let capture_inherited_managed t ~capture (input : Inherited_turn.Input.managed) 
         in
         transferred := true;
         decision))
+;;
+
+let capture_inherited_managed_successor
+      t
+      ~capture
+      (input : Inherited_turn.Input.managed)
+      (receipt : Managed_submission.t)
+      ~continuation
+      ~predecessor
+  =
+  let module P = Agent_protocol in
+  let open Result.Let_syntax in
+  let check () = check_inherited_managed_origin input.origin in
+  let%bind () = check () in
+  let%bind () = require_submit_ready t in
+  let%bind () = require_rollover_recovered t in
+  let%bind () = require_available_descendant_admission_slot t in
+  let%bind current =
+    Session_delta.foreground_continuation t.state
+    |> Option.filter ~f:(fun selected ->
+      P.Id.Operation.equal selected.owner continuation
+      && P.Id.Operation.equal selected.predecessor predecessor)
+    |> Result.of_option ~error:(error Conflict "managed rollover owner changed")
+  in
+  let%bind () =
+    if
+      Int.equal receipt.generation t.state.identity.generation
+      && P.History.Id.equal input.entry.id receipt.history_id
+      && P.History.Content_revision.equal
+           input.entry.content_revision
+           P.History.Content_revision.zero
+      && P.History.equal_role input.entry.role User
+      && P.History.equal_kind input.entry.kind Message
+      && P.History.equal_provenance input.entry.provenance Canonical
+      && (not input.entry.redacted)
+      && List.exists
+           t.state.conversation.canonical_history
+           ~f:(P.History.equal_entry input.entry)
+    then Ok ()
+    else Error (error Conflict "managed rollover input changed")
+  in
+  let%bind scope =
+    active_rollover_window t
+    |> Result.of_option ~error:(error Conflict "managed rollover window is unavailable")
+  in
+  let%bind expected =
+    Recovery_rollover.Expected.create scope ~revision:t.state.counters.revision
+  in
+  let%bind expected =
+    match current.phase, t.state.active_operation with
+    | Preparing operation, None ->
+      let change =
+        Recovery_rollover_continuation.Hold
+          { operation; reason = Preparation_interrupted }
+      in
+      let%bind _ =
+        transition
+          t
+          ~check_before_commit:check
+          ~delta:
+            (Recovery_rollover_changed (Schedule { id = continuation; expected; change }))
+          ~payloads:[]
+      in
+      Recovery_rollover.Expected.create scope ~revision:t.state.counters.revision
+    | _ -> Ok expected
+  in
+  (* The native borrow is checked through this child writer. After parent
+     confirmation the actual inherited descendant guard owns the new operation. *)
+  let%bind selected, operation, admission =
+    prepare_foreground_successor t ~id:continuation ~expected ~check
+  in
+  let source =
+    Inherited_turn.Source.Managed
+      { origin = input.origin
+      ; receipt
+      ; operation
+      ; custody = None
+      ; entry = input.entry
+      ; successor = Some selected
+      }
+  in
+  let schedule =
+    Session_delta.Recovery_rollover_changed
+      (Schedule { id = continuation; expected; change = Begin operation.id })
+  in
+  capture_inherited_turn_plan
+    t
+    ~capture
+    ~source
+    ~commit_attempted:(ref false)
+    ~delta:(Batch (schedule :: Turn_admission.deltas admission))
+    ~payloads:(Turn_admission.payloads admission)
 ;;
 
 let submit_managed_message
@@ -33035,9 +33197,24 @@ let submit_managed_message
   in
   match List.find t.state.managed_submissions ~f:(M.same_key candidate) with
   | Some receipt ->
-    if String.equal receipt.request_sha256 input.request_sha256
-    then Ok (Inherited_turn.Decision.Completed receipt)
-    else Error (error Conflict "managed send key was used for a different request")
+    if not (String.equal receipt.request_sha256 input.request_sha256)
+    then Error (error Conflict "managed send key was used for a different request")
+    else (
+      match
+        ( receipt.status
+        , input.origin
+        , t.state.active_operation
+        , inherited_turn_required t.state )
+      with
+      | Suspended_rollover { continuation; predecessor }, Native _, None, Scoped ->
+        capture_inherited_managed_successor
+          t
+          ~capture
+          input
+          receipt
+          ~continuation
+          ~predecessor
+      | _ -> Ok (Inherited_turn.Decision.Completed receipt))
   | None ->
     let%bind () = require_selected_execution t in
     let%bind () =
@@ -57567,20 +57744,6 @@ let prepare_recovery_note_delivery t ~source ~(invocation : Agent_protocol.Invoc
   | (Model | Moderator | Script | Delegated_agent | External_adapter), _ -> unavailable ()
 ;;
 
-let active_rollover_window t =
-  let module P = Agent_protocol in
-  let module L = Recovery_window_ledger in
-  let open Option.Let_syntax in
-  let%bind storage = t.canonical_persistence in
-  let%bind owner = Canonical_backend_binding_data.session_owner storage in
-  let%bind ledger = t.state.recovery_windows in
-  if
-    Canonical_backend_binding_data.is_available storage
-    && P.Session_ref.equal owner (L.owner ledger)
-  then Some (L.Window.scope (L.active ledger))
-  else None
-;;
-
 let admit_recovery_rollover
       ?(check_basis = fun () -> Ok ())
       ?(after_admit = fun _ -> ())
@@ -58069,10 +58232,8 @@ let check_successor_selected t (selected : Foreground_successor.t) =
 ;;
 
 let begin_successor t ~id ~expected ~check custody =
-  let module P = Agent_protocol in
   let open Result.Let_syntax in
   let%bind () = check () in
-  let%bind () = require_selected_execution t in
   let%bind () =
     match inherited_turn_required t.state with
     | Ordinary | Need_private_origin -> Ok ()
@@ -58082,43 +58243,8 @@ let begin_successor t ~id ~expected ~check custody =
            Permission_denied
            "governed successor requires a fresh inherited admission")
   in
-  let%bind target = Configuration_transition.target t.state in
-  let%bind policy =
-    context_capacity_selection
-      t
-      ~owner:(P.Recovery_window.Scope.session expected.Recovery_rollover.Expected.scope)
-      ~target
-    |> Result.of_option
-         ~error:(error Invalid_state "successor has no selected context policy")
-  in
-  let capacity_basis =
-    Configuration_capture.Capacity_basis.capture t.state ~selection:policy
-  in
-  let%bind input =
-    Recovery_rollover_input.capture
-      t.state
-      ~runtime_admission_open:(runtime_admission_open t)
-  in
-  let%bind pending =
-    History_codec.all_of_protocol (Recovery_rollover_input.entries input)
-  in
-  let operation = create_turn_operation t Recovery_retry in
-  let%bind admission =
-    Turn_admission.create t.state ~operation ~notification_wakes:[] ~adopt_deferred:false
-  in
-  let selected : Foreground_successor.t =
-    { owner = id
-    ; scope = expected.scope
-    ; operation = operation.id
-    ; input
-    ; pending
-    ; capacity_basis
-    ; policy
-    ; check
-    ; prepared = None
-    ; admitted = None
-    ; hold = Preparation_interrupted
-    }
+  let%bind selected, operation, admission =
+    prepare_foreground_successor t ~id ~expected ~check
   in
   let%map _ =
     transition
@@ -62794,10 +62920,17 @@ let should_retry_turn_cleanup : type outcome. t -> outcome Inherited_turn.Input.
     && List.is_empty t.state.conversation.deferred_user_entries
   | History _ -> false
   | Managed source ->
-    not
-      (List.exists t.state.managed_submissions ~f:(fun (receipt : Managed_submission.t) ->
-         Agent_store.Delegation_store.Reference.equal receipt.reference source.reference
-         && Agent_protocol.Idempotency_key.equal receipt.key source.key))
+    let retained =
+      List.find t.state.managed_submissions ~f:(fun (receipt : Managed_submission.t) ->
+        Agent_store.Delegation_store.Reference.equal receipt.reference source.reference
+        && Agent_protocol.Idempotency_key.equal receipt.key source.key)
+    in
+    (match retained, source.origin with
+     | None, _ -> true
+     | Some { status = Suspended_rollover _; request_sha256; _ }, Native _ ->
+       String.equal request_sha256 source.request_sha256
+       && Result.is_ok (check_inherited_managed_origin source.origin)
+     | Some _, _ -> false)
   | Run_user (source, _) ->
     (match source.request.input, source.entry with
      | Authored_start, (None | Some _) | User_submission _, None -> false

@@ -86,6 +86,7 @@ type counters =
   }
 
 let with_recoverable_fixture
+      ?capacity_source
       ?chatml_runtime_policy
       ?independent_lifetime_policy
       ?sources
@@ -100,12 +101,17 @@ let with_recoverable_fixture
   =
   let counters = { inference_ports = ref 0; providers = ref 0; transcripts = ref [] } in
   let base =
-    inference_policy ~default_model:"fixture-model" ~post_stream:(fun ~sw:_ ~inputs ->
-      Int.incr counters.providers;
-      counters.transcripts
-      := !(counters.transcripts)
-         @ [ `Array (List.map inputs ~f:Res.Item.jsonaf_of_t) |> Jsonaf.to_string ];
-      post_stream inputs)
+    make_inference_policy
+      ?capacity_source
+      ~request_guidance:false
+      ~default_model:"fixture-model"
+      ~post_stream:(fun ~sw:_ ~inputs ->
+        Int.incr counters.providers;
+        counters.transcripts
+        := !(counters.transcripts)
+           @ [ `Array (List.map inputs ~f:Res.Item.jsonaf_of_t) |> Jsonaf.to_string ];
+        post_stream inputs)
+      ()
   in
   let policy =
     { base with

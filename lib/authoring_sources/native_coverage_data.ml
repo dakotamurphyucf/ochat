@@ -452,7 +452,7 @@ let implementation_sources =
   ; ( "lib/agent_server/descendant_accounting_host.ml"
     , "3baff14cf9c606e899c08f95805cc3ca9f070827b46ec531e1c230314820b0fd" )
   ; ( "lib/agent_server/session_factory.ml"
-    , "4d77b900577562763dc73a6f3ffb78bca41c5a7736e20f7564ef08a066a11452" )
+    , "6c88776373a1ec610fde1c687dc1dcabe165b572437ec236ea7dfae1fad17dac" )
   ; ( "lib/agent_session/authoring_context_tool.ml"
     , "6e318b45f799b485f802dc6d5e4d8bc031721e379cc8800f6ed484d59694840d" )
   ; ( "lib/agent_session/authoring_reference_scope.ml"
