@@ -313,6 +313,28 @@ let find_occurrence records ~root ~occurrence ~budget =
       | Some _ -> invalid "ambiguous content occurrence"))
 ;;
 
+module Original_keys = struct
+  type t = (O.t * Originals.Occurrence.t) Int.Map.t
+
+  let empty = Int.Map.empty
+
+  let find t occurrence =
+    match Map.find t (O.ordinal occurrence) with
+    | Some (actual, key) when phys_equal actual occurrence -> Some key
+    | _ -> None
+  ;;
+
+  let add t ~occurrence ~record ~budget =
+    let open Result.Let_syntax in
+    let%bind () = B.map_work budget (Map.length t) in
+    let%map key =
+      Originals.Occurrence.of_digest (Record.key record)
+      |> Result.map_error ~f:B.Error.storage
+    in
+    Map.set t ~key:(O.ordinal occurrence) ~data:(occurrence, key)
+  ;;
+end
+
 let original_key t ~parsed ~occurrence ~budget =
   let open Result.Let_syntax in
   let%bind present =
@@ -359,11 +381,11 @@ let materialize t ~parsed ~budget =
         let%map equal = Record.input_equal (Record.root record) root ~budget in
         if equal then record :: selected else selected)
     in
-    let%bind pairs, matched =
+    let%bind pairs, matched, originals =
       List.fold_result
         (Parsed.document_occurrences parsed)
-        ~init:([], String.Set.empty)
-        ~f:(fun (pairs, matched) occurrence ->
+        ~init:([], String.Set.empty, Original_keys.empty)
+        ~f:(fun (pairs, matched, originals) occurrence ->
           let%bind found = find_occurrence selected ~root ~occurrence ~budget in
           match found with
           | None -> invalid "actual document occurrence differs from retained custody"
@@ -390,7 +412,13 @@ let materialize t ~parsed ~budget =
               | Dynamic -> pairs
               | Captured { contents; _ } -> (occurrence, contents) :: pairs
             in
-            Ok (pairs, Set.add matched (Record.key record)))
+            let%map originals =
+              match Record.kind record with
+              | Captured { provenance = Local _; _ } ->
+                Original_keys.add originals ~occurrence ~record ~budget
+              | Dynamic | Captured _ -> Ok originals
+            in
+            pairs, Set.add matched (Record.key record), originals)
     in
     let%bind count =
       B.count budget selected ~maximum:(B.Limits.occurrences (B.limits budget))
@@ -412,7 +440,7 @@ let materialize t ~parsed ~budget =
           B.Error.invalid "bounded document projection failed")
       in
       let%map () = B.work budget (Projection.work_steps projection) in
-      projection))
+      projection, originals))
 ;;
 
 let preserves t ~previous ~budget =

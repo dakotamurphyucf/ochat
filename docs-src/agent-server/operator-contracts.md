@@ -531,6 +531,15 @@ The owner needs message-send and transcript access. Repeating enable in the
 same generation returns its active window. A stale generation returns a
 conflict. Recovery starts only when requested.
 
+When an installed prompt retained document originals, enablement attempts to
+adopt the originals for exact initial message parts covered by the active
+window. The same connection and owner writer must remain current through
+publication. Each enablement uses a single time and byte allowance.
+Repeating enablement can resume interrupted adoption and skips completed
+parts. Missing or revoked installed custody leaves the window and rendered text
+available. A committed original follows the session's recovery visibility
+and retention.
+
 Use `session.recovery.windows` to list the windows in lineage order. A
 reader with session and transcript access can do this without attaching.
 Supply the host-qualified `session` and a `limit` from 1 to 50. Omit

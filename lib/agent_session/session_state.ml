@@ -174,6 +174,7 @@ type 'spec fields =
   ; active_operation : Agent_protocol.Operation.t option
   ; automatic_turn_budget : Automatic_turn_budget.t option [@sexp.option]
   ; recovery_windows : (Recovery_window_ledger.t option[@sexp.opaque])
+  ; recovery_installed_originals : (Recovery_installed_originals.t option[@sexp.opaque])
   ; recovery_effective : (Recovery_effective_ledger.t option[@sexp.opaque])
   ; permissions : Agent_protocol.Permission.t list
   ; grants : Agent_protocol.Grant.t list
@@ -790,6 +791,7 @@ let create_fields ~(identity : Identity.t) ~spec ~desired ~initial_history =
   ; active_operation = None
   ; automatic_turn_budget = None
   ; recovery_windows = None
+  ; recovery_installed_originals = None
   ; recovery_effective = None
   ; permissions = []
   ; grants = []
@@ -1102,6 +1104,13 @@ let validate_domain (t : t) ~recovery_revision =
     match t.automatic_turn_budget with
     | None -> Ok ()
     | Some budget -> Automatic_turn_budget.validate budget
+  in
+  let%bind () =
+    Option.value_map t.recovery_installed_originals ~default:(Ok ()) ~f:(fun receipt ->
+      Recovery_installed_originals.validate
+        receipt
+        ~session_id:t.identity.session_id
+        ~generation:t.identity.generation)
   in
   let%bind () =
     match t.recovery_windows with

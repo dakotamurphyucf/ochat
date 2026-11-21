@@ -17,6 +17,7 @@ val moderator_lifecycle : string
 (** Typed source-bound local recovery ledger, independent of ordinary history. *)
 val recovery_windows : string
 
+val recovery_installed_originals : string
 val recovery_effective : string
 val recovery_effective_archive : string
 val recovery_effective_attempt : string

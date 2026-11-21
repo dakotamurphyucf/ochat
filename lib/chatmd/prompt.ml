@@ -1834,11 +1834,20 @@ module Chat_markdown = struct
       ; elements : top_level_elements list
       ; work_steps : int
       ; content_agents : (agent_content * agent_content) list option
+      ; local_captures :
+          (basic_content_item * Document_occurrence.t) Map.M(Document_occurrence.Slot).t
       }
 
     let parsed t = t.parsed
     let elements t = t.elements
     let work_steps t = t.work_steps
+
+    let local_capture t ~top_level ~part literal =
+      let slot = Document_occurrence.Slot.create ~top_level ~items:[ part ] in
+      match Map.find t.local_captures slot with
+      | Some (projected, occurrence) when phys_equal projected literal -> Some occurrence
+      | _ -> None
+    ;;
   end
 
   let content_agent_reference parsed ?projection ~max_work_steps ~checkpoint agent =
@@ -2031,7 +2040,7 @@ module Chat_markdown = struct
             else
               Ok
                 ( bytes + String.length contents
-                , Map.set replacements ~key:slot ~data:contents )))
+                , Map.set replacements ~key:slot ~data:(occurrence, contents) )))
     in
     let%bind () =
       List.fold_result
@@ -2061,6 +2070,7 @@ module Chat_markdown = struct
       List.rev reversed
     in
     let content_agents = ref [] in
+    let local_captures = ref (Map.empty (module Document_occurrence.Slot)) in
     let rec items top_level path_rev (values : content_item list) =
       map values ~f:(fun index (item : content_item) ->
         match item with
@@ -2076,19 +2086,28 @@ module Chat_markdown = struct
               ~top_level
               ~items:(List.rev (index :: path_rev))
           in
-          Ok
-            (match Map.find replacements slot with
-             | None -> item
-             | Some text ->
-               Basic
-                 { type_ = "text"
-                 ; text = Some text
-                 ; image_url = None
-                 ; document_url = None
-                 ; is_local = false
-                 ; cleanup_html = false
-                 ; markdown = false
-                 })
+          (match Map.find replacements slot with
+           | None -> Ok item
+           | Some (occurrence, text) ->
+             let literal =
+               { type_ = "text"
+               ; text = Some text
+               ; image_url = None
+               ; document_url = None
+               ; is_local = false
+               ; cleanup_html = false
+               ; markdown = false
+               }
+             in
+             let%map () =
+               match path_rev, Document_occurrence.selection occurrence with
+               | [], Local_capture ->
+                 let%map () = slot_work slot in
+                 local_captures
+                 := Map.set !local_captures ~key:slot ~data:(literal, occurrence)
+               | _ -> Ok ()
+             in
+             Basic literal)
         | Agent agent ->
           let%bind () = charge 2 in
           let%bind items = items top_level (index :: path_rev) agent.items in
@@ -2152,6 +2171,7 @@ module Chat_markdown = struct
        ; work_steps = Projection_work.used work
        ; content_agents =
            (if Map.is_empty replacements then None else Some !content_agents)
+       ; local_captures = !local_captures
        }
        : Document_projection.t)
   ;;

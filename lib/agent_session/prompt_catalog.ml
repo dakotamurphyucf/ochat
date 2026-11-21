@@ -810,6 +810,7 @@ let find_by_name t name =
 ;;
 
 let with_installed_original
+      ?admit
       t
       ~definition
       ~revision
@@ -876,6 +877,7 @@ let with_installed_original
       let%bind original, contents =
         try
           Agent_store.Prompt_artifact_store.read_original
+            ?admit
             t.artifact_store
             artifact
             ~occurrence

@@ -213,6 +213,12 @@ let resume t ~sw ~current citation ~part ~max_bytes =
     |> Result.map_error ~f:store_error)
 ;;
 
+let has_recorded_file_commit t ~current citation ~part =
+  let check () = Result.is_ok (current ()) in
+  Store.has_recorded_file_commit t.store ~check citation ~part
+  |> Result.map_error ~f:store_error
+;;
+
 let read t ~sw ~current citation ~part ~max_bytes =
   with_part t ~current citation ~part ~f:(fun _ selected ~check ->
     let open Result.Let_syntax in

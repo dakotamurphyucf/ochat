@@ -41,6 +41,13 @@ val content : t -> Chatmd_prompt_content.t option
     revision's original parser identity. No reparse or materialization occurs. *)
 val document_projection : t -> Prompt.Chat_markdown.Document_projection.t option
 
+(** Private installed source identity for an actual projected local capture.
+    This does not open its manifest or authorize publication. *)
+val installed_original_key
+  :  t
+  -> Prompt.Chat_markdown.Document_occurrence.t
+  -> Agent_store.Installed_document_originals.Occurrence.t option
+
 (** Attach a projection created by the SAME admitted content owner and original
     Parsed already held by this revision. Verify exact artifact metadata/private
     payload bytes before replacing elements; parser/script ownership stays on the

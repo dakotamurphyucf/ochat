@@ -789,6 +789,8 @@ type t =
       cancellation propagates. Ordinary parse_user_content is unchanged. *)
   ; initial_history : History_entry.t list
   ; initial_prompt_entry_count : int
+  ; initial_installed_originals : Recovery_installed_originals.Initial.t option
+    (** Address-only custody after admission against the exact initial prefix. *)
   ; reserved_history_through : int
   ; moderator_snapshot : unit -> Jsonaf.t option
     (** Latest successfully published startup checkpoint. Runtime record wrappers

@@ -6044,6 +6044,7 @@ type _ request =
       Initialization_scope_data.t
       * Session_state.t
       * Chat_response.Moderator_manager.t option
+      * Recovery_installed_originals.Initial.t option
       -> Agent_protocol.Session.t request
   | Checkpoint_runtime_construction :
       Initialization_scope_data.t
@@ -18911,7 +18912,13 @@ let initialization_transition ?admission_hold ?job_custody t scope ~delta ~paylo
     candidate
 ;;
 
-let complete_initialization t scope (candidate : Session_state.t) moderator_manager =
+let complete_initialization
+      t
+      scope
+      (candidate : Session_state.t)
+      moderator_manager
+      installed_originals
+  =
   let open Result.Let_syntax in
   let%bind () = validate_initialization_scope t scope in
   (* Reject before any Manager snapshot can reacquire the active callback gate. *)
@@ -18955,9 +18962,34 @@ let complete_initialization t scope (candidate : Session_state.t) moderator_mana
     else Ok ()
   in
   let current = t.state in
+  let%bind recovery_installed_originals =
+    match
+      ( current.recovery_installed_originals
+      , installed_originals
+      , Option.bind
+          t.canonical_persistence
+          ~f:Canonical_backend_binding_data.session_owner )
+    with
+    | (Some _ as previous), _, _ -> Ok previous
+    | None, Some initial, Some owner
+      when Recovery_installed_originals.Initial.matches_source
+             initial
+             ~definition:current.spec.prompt_definition_id
+             ~revision:current.spec.prompt_revision_id ->
+      Recovery_installed_originals.admit
+        initial
+        ~owner
+        ~generation:current.identity.generation
+        ~initial_rows:
+          (List.take
+             candidate.conversation.canonical_history
+             candidate.conversation.initial_prompt_entry_count)
+    | _ -> Ok None
+  in
   let state =
     { current with
       runtime_initialization = Ready
+    ; recovery_installed_originals
     ; failure = None
     ; lifecycle =
         { current.lifecycle with
@@ -58785,8 +58817,8 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
     | End_initialization scope -> end_initialization t scope
     | Goal_request (Initialization_completion scope) ->
       initialization_goal_completion_internal t scope
-    | Complete_initialization (scope, candidate, moderator_manager) ->
-      complete_initialization t scope candidate moderator_manager
+    | Complete_initialization (scope, candidate, moderator_manager, installed_originals)
+      -> complete_initialization t scope candidate moderator_manager installed_originals
     | Checkpoint_runtime_construction (scope, moderator, moderator_manager) ->
       checkpoint_runtime_construction t scope moderator moderator_manager
     | Fail_initialization (scope, failure) -> fail_initialization t scope failure
@@ -61694,8 +61726,10 @@ let retire_initialization_resource t ~scope ~moderator_manager =
   call t ~priority:Priority (Retire_initialization_resource (scope, moderator_manager))
 ;;
 
-let complete_initialization ?moderator_manager t ~scope ~candidate =
-  call t (Complete_initialization (scope, candidate, moderator_manager))
+let complete_initialization ?moderator_manager ?installed_originals t ~scope ~candidate =
+  call
+    t
+    (Complete_initialization (scope, candidate, moderator_manager, installed_originals))
 ;;
 
 let checkpoint_runtime_construction ?moderator_manager t ~scope moderator =

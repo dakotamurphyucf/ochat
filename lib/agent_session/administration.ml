@@ -55,6 +55,7 @@ let reset_state (state : Session_state.t) options =
   ; spec = { spec with protocol = { spec.protocol with labels } }
   ; lifecycle = { desired = Stopped; observed = Stopped }
   ; pending_initial_start = false
+  ; recovery_installed_originals = None
   ; conversation = conversation state options
   ; active_operation = None
   ; permissions = []

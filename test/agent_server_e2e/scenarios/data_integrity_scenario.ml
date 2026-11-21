@@ -8,6 +8,7 @@ let cases =
   ; "daemon-recovery.converter-adoption", Support.Recovery_asset_converter.run
   ; "daemon-recovery.configured-capacity", Recovery_capacity_scenario.run
   ; "daemon-recovery.installed-originals", Support.Installed_originals.run
+  ; "daemon-recovery.installed-handoff", Support.Installed_originals.run_handoff
   ; "http.export-atomic-success", Support.Data_integrity_http.test_export
   ; "http-peer.export-atomic-failures", Support.Data_integrity_download.run
   ; ( "http-peer.export-atomic-cancellation"

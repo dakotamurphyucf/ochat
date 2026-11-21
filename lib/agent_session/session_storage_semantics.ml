@@ -1261,3 +1261,60 @@ let check_delta document =
     ~name:recovery_effective_name
     ~required:(recovery_effective_delta_requires (D.Document.payload document))
 ;;
+
+let installed_originals_name =
+  Agent_protocol.Session_storage_semantics.recovery_installed_originals
+;;
+
+let installed_originals_state_requires payload =
+  match D.Json.field payload ~name:"recovery_installed_originals" with
+  | Absent -> false
+  | Null | Value _ -> true
+;;
+
+let installed_originals_delta_requires payload =
+  match D.Json.field payload ~name:"changes" with
+  | Value (`Array changes) ->
+    List.exists changes ~f:(fun change ->
+      match D.Json.field change ~name:"kind", D.Json.field change ~name:"state" with
+      | Value (`String "created"), Value state ->
+        (match D.Json.field state ~name:"payload" with
+         | Value state -> installed_originals_state_requires state
+         | Absent | Null -> false)
+      | _ -> false)
+  | Absent | Null | Value _ -> false
+;;
+
+let require_state document ~limits =
+  let%bind.Result document = require_state document ~limits in
+  require
+    document
+    ~name:installed_originals_name
+    ~required:(installed_originals_state_requires (D.Document.payload document))
+    ~limits
+;;
+
+let check_state document =
+  let%bind.Result () = check_state document in
+  check
+    document
+    ~name:installed_originals_name
+    ~required:(installed_originals_state_requires (D.Document.payload document))
+;;
+
+let require_delta document ~limits =
+  let%bind.Result document = require_delta document ~limits in
+  require
+    document
+    ~name:installed_originals_name
+    ~required:(installed_originals_delta_requires (D.Document.payload document))
+    ~limits
+;;
+
+let check_delta document =
+  let%bind.Result () = check_delta document in
+  check
+    document
+    ~name:installed_originals_name
+    ~required:(installed_originals_delta_requires (D.Document.payload document))
+;;

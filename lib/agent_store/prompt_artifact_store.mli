@@ -159,9 +159,11 @@ val load : t -> Agent_protocol.Id.Prompt_revision.t -> (Artifact.t, Store_error.
     installed publication and the exact occurrence, length and digest. Supplying
     rendered artifact metadata does not authorize release. The current host
     must hold and recheck the installed source admission around this operation.
-    Ordinary [load] never opens this optional pool. *)
+    [admit] reserves an aggregate caller budget against the verified entry
+    before its body is opened. Ordinary [load] never opens this optional pool. *)
 val read_original
-  :  t
+  :  ?admit:(Installed_document_originals.Entry.t -> bool)
+  -> t
   -> Artifact.t
   -> occurrence:Installed_document_originals.Occurrence.t
   -> max_bytes:int

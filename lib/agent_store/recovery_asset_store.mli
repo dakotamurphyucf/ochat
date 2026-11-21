@@ -63,6 +63,17 @@ val resume
   -> max_bytes:int
   -> (Reference.t, error) result
 
+(** Body-free progress check for a bounded publication retry. It verifies the
+    exact paired intent and commit frames. A positive result reserves the slot
+    for the recorded file. It supplies no verified blob, synchronization or
+    authority to disclose the descriptor or content. *)
+val has_recorded_file_commit
+  :  t
+  -> check:check
+  -> P.Recovery_window.Citation.t
+  -> part:int
+  -> (bool, error) result
+
 (** Exact committed lookup and verified whole-byte read. A fresh read
     stabilizes an earlier uncertain directory sync before using the commit.
     A pending selection alone remains unavailable. Return protected bytes to

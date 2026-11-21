@@ -964,6 +964,7 @@ let%expect_test "runtime owner drains observation batches and applies durable te
                (fun ?asset_capture:_ ~id:_ _ -> failwith "unexpected input")
            ; initial_history = []
            ; initial_prompt_entry_count = 0
+           ; initial_installed_originals = None
            ; reserved_history_through = 0
            ; moderator_snapshot = snapshot
            ; moderator_manager = Some manager
@@ -1437,6 +1438,7 @@ let%expect_test
                    (fun ?asset_capture:_ ~id:_ _ -> failwith "unexpected input")
                ; initial_history = []
                ; initial_prompt_entry_count = 0
+               ; initial_installed_originals = None
                ; reserved_history_through = 0
                ; moderator_snapshot = (fun () -> initial.moderator)
                ; moderator_manager = Some manager

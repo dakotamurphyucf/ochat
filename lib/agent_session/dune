@@ -370,6 +370,7 @@
   recovery_window_page
   recovery_window_ledger
   recovery_window_capture
+  recovery_installed_originals
   recovery_effective_projection
   recovery_effective_archive
   recovery_effective_attempt

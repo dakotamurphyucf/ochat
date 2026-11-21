@@ -551,7 +551,30 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
     let recovery_effective =
       Recovery_effective_capture.replacement state ~incoming:created
     in
-    let created = { created with recovery_windows; recovery_effective } in
+    let%bind recovery_installed_originals =
+      match
+        ( Int.equal state.identity.generation created.identity.generation
+        , state.runtime_initialization
+        , created.runtime_initialization
+        , state.recovery_installed_originals )
+      with
+      | false, _, _, _ -> Ok None
+      | true, Pending _, Ready, None -> Ok created.recovery_installed_originals
+      | true, _, _, previous ->
+        if
+          Option.equal
+            Recovery_installed_originals.equal
+            previous
+            created.recovery_installed_originals
+        then Ok previous
+        else
+          Error
+            (Agent_protocol.Error.invalid_request
+               "replacement changed the installed original initialization receipt")
+    in
+    let created =
+      { created with recovery_windows; recovery_effective; recovery_installed_originals }
+    in
     let%bind () =
       Inference_ledger.validate_update
         state.inference_ledger
@@ -2087,6 +2110,7 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
       ; delegated_usage
       ; policy_canonical_usage
       ; identity = { state.identity with generation }
+      ; recovery_installed_originals = None
       ; run_state = Option.map state.run_state ~f:Run_state.clear_moderator_lifecycle
       ; pending_initial_start = false
       ; conversation =

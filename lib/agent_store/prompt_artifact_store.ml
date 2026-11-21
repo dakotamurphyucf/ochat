@@ -565,7 +565,7 @@ let load_manifest t directory revision_id =
   Publication.of_bytes encoded ~revision_id ~expected_sha256:(String.strip checksum)
 ;;
 
-let read_original t artifact ~occurrence ~max_bytes ~checkpoint =
+let read_original ?(admit = fun _ -> true) t artifact ~occurrence ~max_bytes ~checkpoint =
   let open Result.Let_syntax in
   if max_bytes < 0 || max_bytes > Program_bundle.max_payload_bytes
   then Error (Store_error.Corrupt "invalid installed original read allowance")
@@ -609,6 +609,11 @@ let read_original t artifact ~occurrence ~max_bytes ~checkpoint =
         Error
           (Store_error.Document
              (Document_schema.Error.Limit_exceeded "installed document original bytes"))
+      else if not (admit entry)
+      then
+        Error
+          (Store_error.Admission_capacity
+             (Document_schema.Error.Limit_exceeded "installed original transfer budget"))
       else (
         let%bind contents =
           Retention_reader.read_promised_file_with_checkpoint

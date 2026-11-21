@@ -1602,7 +1602,7 @@ module Domain_codec = struct
     | (Object _ | Array _), _, _ -> Error (Error.Extension_conflict path)
   ;;
 
-  let adopt t ~previous ~incoming =
+  let adopt ?(merge_required_semantics = false) t ~previous ~incoming =
     let open Result.Let_syntax in
     let%bind previous =
       encode t (Extension_carrier.with_value previous incoming.Extension_carrier.value)
@@ -1628,6 +1628,17 @@ module Domain_codec = struct
       combine_fields (fields previous) (fields incoming) ~f:(fun name previous incoming ->
         if String.equal name "payload"
         then combine t.shape previous incoming [ name ]
+        else if merge_required_semantics && String.equal name "required_semantics"
+        then (
+          (* Encoding admitted both sets against this codec's supported semantics. *)
+          match previous, incoming with
+          | `Array previous, `Array incoming ->
+            Ok
+              (`Array
+                  (previous
+                   @ List.filter incoming ~f:(fun marker ->
+                     not (List.mem previous marker ~equal:Json.equal))))
+          | _, _ -> same_unknown previous incoming [ name ])
         else same_unknown previous incoming [ name ])
     in
     let%bind document = Document.inspect ~limits:t.limits (`Object fields) in

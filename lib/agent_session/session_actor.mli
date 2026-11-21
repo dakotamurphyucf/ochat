@@ -1702,6 +1702,7 @@ val complete_initialization_model_job
     Marks Ready without a second archive. *)
 val complete_initialization
   :  ?moderator_manager:Chat_response.Moderator_manager.t
+  -> ?installed_originals:Recovery_installed_originals.Initial.t
   -> t
   -> scope:Initialization_scope.t
   -> candidate:Session_state.t

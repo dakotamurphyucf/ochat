@@ -193,6 +193,10 @@ let admit_recovery_storage
     && Option.equal phys_equal previous.recovery_note_shares state.recovery_note_shares
     && Option.equal phys_equal previous.recovery_rollover state.recovery_rollover
     && Option.equal phys_equal previous.recovery_windows state.recovery_windows
+    && Option.equal
+         phys_equal
+         previous.recovery_installed_originals
+         state.recovery_installed_originals
   in
   if
     other_recovery_unchanged

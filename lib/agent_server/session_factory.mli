@@ -860,6 +860,20 @@ module Recovery_assets : sig
          , Agent_session.Recovery_source_reader.error )
          result
 
+  (** Attempt optional installed originals for this exact committed active
+      window. Use the original authenticated writer and connection from
+      enablement. Each eligible part is independently idempotent; absent or
+      revoked installed custody leaves its independently rendered text in place.
+      Neither this call nor its result supplies general blob access. *)
+  val adopt_installed
+    :  t
+    -> sw:Eio.Switch.t
+    -> actor:Operator_authorization.t
+    -> attachment_id:Agent_protocol.Id.Attachment.t
+    -> connection_current:(unit -> bool)
+    -> Agent_protocol.Recovery_window.Scope.t
+    -> (unit, Agent_session.Recovery_source_reader.error) result
+
   (** Optional local originals for an actual authenticated daemon send. The
       supplied callback arms the exact converted row before Actor submission.
       Original ownership ends with the submitting writer or the finite local

@@ -143,6 +143,13 @@ module Materialized : sig
 
   val projection : t -> Projection.t
 
+  (** Private identity already admitted for that exact parser
+      occurrence. A key neither proves installation nor authorizes reading bytes. *)
+  val original_key
+    :  t
+    -> Occurrence.t
+    -> Agent_store.Installed_document_originals.Occurrence.t option
+
   (** Deliberate immutable content-owner affinity, in addition to the projection
       retaining its original Parsed. No equality or native authority claim. *)
   val belongs_to : t -> content:content -> bool

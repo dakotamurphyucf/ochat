@@ -11235,6 +11235,10 @@ let build_runtime_for_actor_cold
                  let%bind _ =
                    Agent_session.Session_actor.complete_initialization
                      ?moderator_manager:runtime.moderator_manager
+                     ?installed_originals:
+                       (if fresh_history
+                        then runtime.initial_installed_originals
+                        else None)
                      actor
                      ~scope
                      ~candidate
@@ -14742,18 +14746,179 @@ module Recovery_assets = struct
 
   let submission_max_bytes = 1_048_576
 
-  let owner_writer ~(state : A.Session_state.t) ~principal ~attachment_id ~now =
+  let adopt_installed t ~sw ~actor ~attachment_id ~connection_current scope =
+    let module Receipt = A.Recovery_installed_originals in
+    let module Scope = P.Recovery_window.Scope in
+    let module Ledger = A.Recovery_window_ledger in
+    let module Original = Agent_store.Installed_document_originals.Entry in
     let open Result.Let_syntax in
-    let%bind attachment = A.Writer_attachment.require state ~attachment_id ~now in
-    let owner =
-      match attachment.mode, attachment.owner_lease, state.spec.protocol.liveness with
-      | Owner_read_write, Some lease, Owner_bound _ -> lease.principal_id
-      | Owner_read_write, None, Detached -> state.identity.creating_principal
-      | _ -> None
+    let session = Scope.session scope in
+    let generation = Scope.generation scope in
+    let principal = Operator_authorization.principal actor in
+    let clock = Eio.Stdenv.mono_clock t.env in
+    let started = Eio.Time.Mono.now clock in
+    let within_deadline () =
+      Mtime.Span.compare
+        (Mtime.span started (Eio.Time.Mono.now clock))
+        (Mtime.Span.of_uint64_ns 5_000_000_000L)
+      < 0
     in
-    if Option.exists owner ~f:(P.Id.Principal.equal principal)
-    then Ok ()
-    else Error (denied ())
+    let authorize (state : A.Session_state.t) =
+      let%bind () =
+        if
+          within_deadline ()
+          && connection_current ()
+          && Operator_authorization.is_current actor
+          && P.Principal.has_scope principal Send_messages
+          && P.Principal.has_scope principal View_session_transcript
+          && Authorization.session_creator_visible_to
+               principal
+               ~creator:state.identity.creating_principal
+        then Ok ()
+        else Error (denied ())
+      in
+      let%bind () =
+        A.Writer_attachment.require_recovery_owner
+          state
+          ~principal:principal.id
+          ~attachment_id
+          ~now:(fun () -> now t)
+      in
+      match
+        state.runtime_initialization, state.active_operation, state.recovery_windows
+      with
+      | Ready, None, Some ledger
+        when Scope.equal scope (Ledger.Window.scope (Ledger.active ledger)) -> Ok ()
+      | _ -> Error (denied ())
+    in
+    Recovery_source_host.with_source
+      t
+      session
+      ~authorize
+      ~f:(fun handle ~observation:_ ~current ->
+        let%bind state = current () |> Result.map_error ~f:(fun _ -> Source.Denied) in
+        match state.recovery_installed_originals with
+        | None -> Ok ()
+        | Some receipt ->
+          let definition = Receipt.definition receipt in
+          let revision = Receipt.revision receipt in
+          if
+            not
+              (Receipt.belongs_to receipt ~owner:session ~generation
+               && Option.exists
+                    state.spec.prompt_definition_id
+                    ~f:(P.Id.Prompt_definition.equal definition)
+               && P.Id.Prompt_revision.equal revision state.spec.prompt_revision_id)
+          then Error Source.Stale
+          else (
+            let max_bytes =
+              Int64.min
+                (Int64.of_int Agent_store.Prompt_program_bundle.max_payload_bytes)
+                (Agent_store.Blob_store.max_upload_bytes t.blob_store)
+              |> Int64.to_int_exn
+            in
+            let max_frame_bytes = t.limits.max_journal_payload in
+            (* Bound combined original reads and publication attempts. A rejected
+               larger entry leaves room for any later entry that still fits. *)
+            let remaining_body_bytes = ref (2 * max_bytes) in
+            let unavailable_bodies = Hash_set.create (module String) in
+            let%bind asset =
+              Asset.create t.blob_store ~sessions:t.store ~handle ~max_frame_bytes
+            in
+            let transfer (binding : Receipt.Binding.t) citation =
+              let%bind () =
+                if !remaining_body_bytes > 0 then Ok () else Error Source.Limit
+              in
+              let%bind row =
+                Source.read
+                  t.store
+                  ~handle
+                  ~current
+                  ~max_frame_bytes
+                  citation
+                  ~project:(fun row -> Ok row)
+              in
+              let selected = ref None in
+              let admit entry =
+                let length = Original.byte_length entry in
+                let digest = Original.sha256 entry in
+                if
+                  length > !remaining_body_bytes
+                  || Hash_set.mem unavailable_bodies digest
+                  || not (within_deadline ())
+                then false
+                else (
+                  remaining_body_bytes := !remaining_body_bytes - length;
+                  selected := Some digest;
+                  true)
+              in
+              (* The catalog lends a lexical check for the exact configured
+                 revision. The target actor is already borrowed, so neither
+                 check waits on a mailbox or a catalog lock at the writer. *)
+              let outcome =
+                A.Prompt_catalog.with_installed_original
+                  ~admit
+                  t.prompts
+                  ~definition
+                  ~revision
+                  ~occurrence:binding.original
+                  ~max_bytes
+                  ~authorize:(fun () -> Result.map (current ()) ~f:ignore)
+                  ~checkpoint:Eio.Fiber.check
+                  ~f:(fun ~check entry original ->
+                    let combined () =
+                      let%bind () = check () in
+                      current ()
+                    in
+                    Ok
+                      (let%bind attribution =
+                         Asset.Attribution.create
+                           citation
+                           ~part:binding.part
+                           ~row
+                           ~media_type:(Original.media_type entry)
+                           ~original
+                       in
+                       Asset.publish_converted_file
+                         asset
+                         ~sw
+                         ~current:combined
+                         ~principal:principal.id
+                         ~now:(now t)
+                         ~max_bytes
+                         attribution
+                       |> Result.map ~f:ignore))
+              in
+              match outcome with
+              | Ok outcome -> outcome
+              | Error error ->
+                (* A failed original read must never make all neighboring
+                   occurrences of that damaged body spend the same budget. *)
+                Option.iter !selected ~f:(Hash_set.add unavailable_bodies);
+                Error
+                  (match error.P.Error.code with
+                   | Permission_denied -> Source.Denied
+                   | Resource_limit -> Source.Limit
+                   | _ -> Source.Unavailable)
+            in
+            let adopt (binding : Receipt.Binding.t) =
+              let%bind citation =
+                P.Recovery_window.Citation.create
+                  scope
+                  ~occurrence:binding.row
+                  ~version:(P.Recovery_item_version.canonical binding.revision)
+                |> Result.map_error ~f:(fun _ -> Source.Corrupt)
+              in
+              let%bind recorded =
+                Asset.has_recorded_file_commit asset ~current citation ~part:binding.part
+              in
+              if recorded then Ok () else transfer binding citation
+            in
+            List.fold (Receipt.bindings receipt) ~init:(Ok ()) ~f:(fun prior binding ->
+              let outcome = adopt binding in
+              match prior with
+              | Ok () -> outcome
+              | Error _ -> prior)))
   ;;
 
   let submit_originals t ~authorize ~principal reservation row originals =
@@ -14855,8 +15020,8 @@ module Recovery_assets = struct
         in
         let%bind _ = Observation.check_current observation in
         let%bind () =
-          owner_writer ~state ~principal:principal.id ~attachment_id ~now:(fun () ->
-            now t)
+          A.Writer_attachment.require_recovery_owner
+            state ~principal:principal.id ~attachment_id ~now:(fun () -> now t)
         in
         match state.recovery_windows with
         | Some ledger

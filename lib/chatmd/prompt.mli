@@ -435,6 +435,16 @@ module Chat_markdown : sig
     val parsed : t -> Parsed.t
     val elements : t -> top_level_elements list
 
+    (** Find the parser occurrence that supplied this exact projected literal
+        at the given top-level message item. Copied literals, nested agents,
+        dynamic reads and built-in captures do not supply an installed original. *)
+    val local_capture
+      :  t
+      -> top_level:int
+      -> part:int
+      -> basic_content_item
+      -> Document_occurrence.t option
+
     (** Logical traversal/comparison/list-copy units consumed by materialization. *)
     val work_steps : t -> int
   end

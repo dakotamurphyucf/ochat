@@ -298,9 +298,21 @@ Installed captured documents retain rendered content by default. An operator
 can opt in to original retention per installed definition. The catalog binds
 the actual local capture occurrence to exact original bytes in a private
 immutable prompt-revision pool. Missing or revoked originals leave rendered
-text available. An installed original is a potential source for independent
-session adoption under the current owner writer and exact window member.
-Installation alone grants no session recovery visibility.
+text available. An ordinary authored start records a private address for each
+eligible exact initial part when it commits the canonical history. A daemon
+restart preserves those addresses. They contain the installed revision and
+occurrence, canonical row and revision, and emitted part index. The original
+bytes stay in the installed pool until adoption.
+
+Adoption requires an enabled window that covers the exact canonical row and
+the authenticated owner writer on the activation connection. The daemon checks
+the current installed selection and the target session at the private asset
+commit. Repeating the adoption with fresh authority can finish an interrupted
+write to the same part. A committed copy follows the session asset's own
+visibility and expiry. Older transcripts without initialization addresses,
+aggregated assistant and tool-call text, and nested agent output retain their
+ordinary rendered text. Installing a prompt leaves its sessions' recovery
+settings unchanged.
 
 [Publisher and collector](../../lib/agent_store/recovery_asset_store.mli),
 [exact source adapter](../../lib/agent_session/recovery_asset.mli).

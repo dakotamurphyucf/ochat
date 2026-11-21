@@ -340,9 +340,13 @@ module Domain_codec : sig
       changes fail before adoption. Unknown fields from either side survive;
       different values at the same unknown path conflict. Array alignment uses
       the common current projection, never positions in an older template.
+      With [merge_required_semantics], retain the union of both admitted lists
+      of required semantics for a family whose requirements can accumulate.
+      Other envelope fields use the ordinary conflict rule in either mode.
       No input carrier or document is mutated. *)
   val adopt
-    :  'a t
+    :  ?merge_required_semantics:bool
+    -> 'a t
     -> previous:'a Extension_carrier.t
     -> incoming:'a Extension_carrier.t
     -> ('a Extension_carrier.t, Error.t) Result.t

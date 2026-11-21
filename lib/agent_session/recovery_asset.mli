@@ -73,6 +73,15 @@ val resume
   -> max_bytes:int
   -> (Ref.t, Recovery_source_reader.error) result
 
+(** Host-only progress for the exact selected slot. The recorded frame is not
+    a verified result and grants no read authority. *)
+val has_recorded_file_commit
+  :  t
+  -> current:current
+  -> P.Recovery_window.Citation.t
+  -> part:int
+  -> (bool, Recovery_source_reader.error) result
+
 (** Resolve the committed, physically owned exact part. The caller rechecks
     original authority again at any later protected output or provider write. *)
 val read

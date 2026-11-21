@@ -62,9 +62,11 @@ val find_revision : t -> Agent_protocol.Id.Prompt_revision.t -> Prompt_revision.
     read. [authorize] and the lent [check] are nonyielding. The borrower must
     check again at the final dependent write and must never expose raw bytes or
     retain the witness outside its lexical scope. Opaque historical revisions
-    and a captured/transported artifact cannot mint this authorization. *)
+    and a captured/transported artifact cannot mint this authorization. [admit]
+    reserves aggregate body work from the exact admitted entry before I/O. *)
 val with_installed_original
-  :  t
+  :  ?admit:(Agent_store.Installed_document_originals.Entry.t -> bool)
+  -> t
   -> definition:Agent_protocol.Id.Prompt_definition.t
   -> revision:Agent_protocol.Id.Prompt_revision.t
   -> occurrence:Agent_store.Installed_document_originals.Occurrence.t

@@ -122,7 +122,7 @@ let exact_intent t ~citation ~part ~intent =
     else Error Corrupt
 ;;
 
-let state t ~citation ~part ~intent ~commit =
+let state ?(stabilize_commit = true) t ~citation ~part ~intent ~commit =
   let open Result.Let_syntax in
   let%bind pending = exact_intent t ~citation ~part ~intent in
   let%bind committed = get commit |> map_store in
@@ -131,11 +131,14 @@ let state t ~citation ~part ~intent ~commit =
   | Some record, None -> Ok (`Pending record)
   | Some record, Some contents when String.equal contents (Record.contents record) ->
     let%map () =
-      Files.stabilize_exact
-        commit
-        ~expected:contents
-        ~max_frame_bytes:Record.max_frame_bytes
-      |> map_store
+      if stabilize_commit
+      then
+        Files.stabilize_exact
+          commit
+          ~expected:contents
+          ~max_frame_bytes:Record.max_frame_bytes
+        |> map_store
+      else Ok ()
     in
     `Committed record
   | None, Some _ | Some _, Some _ -> Error Corrupt
@@ -315,6 +318,19 @@ let resume t ~sw ~check ~accepts citation ~part ~max_bytes =
       if accepts (Record.reference record) contents
       then install t ~sw ~check ~intent ~commit ~max_bytes record contents
       else Error Corrupt)
+;;
+
+let has_recorded_file_commit t ~check citation ~part =
+  authorized t ~check citation ~part ~f:(fun ~env:_ ~intent ~commit ->
+    let%bind.Result state =
+      state ~stabilize_commit:false t ~citation ~part ~intent ~commit
+    in
+    match state with
+    | `Empty | `Pending _ -> Ok false
+    | `Committed record ->
+      if P.Blob.equal_kind (Reference.blob (Record.reference record)).kind File
+      then Ok true
+      else Error Conflict)
 ;;
 
 let read t ~sw ~check citation ~part ~max_bytes =

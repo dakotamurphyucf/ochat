@@ -183,6 +183,7 @@ type 'spec fields =
     (** Qualified host scheduling accounting. Historical absence is preserved
         until the host explicitly enables it; runtime reload cannot reset it. *)
   ; recovery_windows : (Recovery_window_ledger.t option[@sexp.opaque])
+  ; recovery_installed_originals : (Recovery_installed_originals.t option[@sexp.opaque])
   ; recovery_effective : (Recovery_effective_ledger.t option[@sexp.opaque])
     (** The absent field disables local window accounting. Canonical history
         and physical archive custody continue to use their existing owners. *)

@@ -85,6 +85,23 @@ let enable t (entry : Session_registry.entry) ~on_release (request : Q.Enable.t)
       then Ok ()
       else Error (error Conflict "recovery activation has changed")
     in
+    let%bind () = check () in
+    (* Optional source adoption cannot undo the already committed window.
+       Keep the actual negotiated connection and writer live through this
+       bounded host transfer and recheck them for the eventual response. *)
+    let state = Actor.Resource_observation.state observation in
+    Option.iter state.recovery_installed_originals ~f:(fun _ ->
+      Eio.Switch.run (fun sw ->
+        ignore
+          (Session_factory.Recovery_assets.adopt_installed
+             t.factory
+             ~sw
+             ~actor:t.actor
+             ~attachment_id
+             ~connection_current:(fun () ->
+               Connection_context.owns_attachment t.context ~session_id ~attachment_id)
+             scope
+           : (unit, A.Recovery_source_reader.error) result)));
     let%map () = check () in
     on_release check;
     scope)

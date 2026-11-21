@@ -251,6 +251,7 @@ type t =
       -> (Runtime_input_preparation.Prepared_input.t, Agent_protocol.Error.t) result
   ; initial_history : History_entry.t list
   ; initial_prompt_entry_count : int
+  ; initial_installed_originals : Recovery_installed_originals.Initial.t option
   ; reserved_history_through : int
   ; moderator_snapshot : unit -> Jsonaf.t option
   ; moderator_manager : Manager.t option
@@ -1045,29 +1046,44 @@ let initial_items
       ~construction_checkpoint
       ~ctx
       ~elements
+      ~installed_projection
       ~manifest_authorizer
       ~approval_provider
       ~response_dir
   =
+  let run_agent ?prompt_dir ?session_id ~ctx prompt items =
+    (match check_construction construction_checkpoint with
+     | Ok () -> ()
+     | Error failure -> raise (Construction_rejected failure));
+    Chat_response.Driver.run_agent
+      ~history_compaction:false
+      ?prompt_dir
+      ?session_id
+      ~response_dir
+      ~shell_manifest_authorizer:manifest_authorizer
+      ~shell_approval_provider:approval_provider
+      ~ctx
+      prompt
+      items
+  in
   try
     Ok
-      (Converter.to_items
-         ~ctx
-         ~run_agent:(fun ?prompt_dir ?session_id ~ctx prompt items ->
-           (match check_construction construction_checkpoint with
-            | Ok () -> ()
-            | Error failure -> raise (Construction_rejected failure));
-           Chat_response.Driver.run_agent
-             ~history_compaction:false
-             ?prompt_dir
-             ?session_id
-             ~response_dir
-             ~shell_manifest_authorizer:manifest_authorizer
-             ~shell_approval_provider:approval_provider
-             ~ctx
-             prompt
-             items)
-         elements)
+      (match installed_projection with
+       | None ->
+         List.map (Converter.to_items ~ctx ~run_agent elements) ~f:(fun item -> item, [])
+       | Some (revision, projection) ->
+         Converter.to_items_with_installed_documents ~ctx ~run_agent projection
+         |> List.map ~f:(fun (item, captures) ->
+           let captured =
+             List.filter_map captures ~f:(fun (part, occurrence) ->
+               if part >= 4096
+               then None
+               else
+                 Option.map
+                   (Prompt_revision.installed_original_key revision occurrence)
+                   ~f:(fun key -> part, key))
+           in
+           item, captured))
   with
   | Construction_rejected failure -> Error failure
 ;;
@@ -1079,7 +1095,9 @@ let allocate_initial ~namespace ~next_sequence items =
     |> Result.map_error ~f:failure
   in
   let%map history =
-    List.map items ~f:(Openai.Responses_history.create ~allocator)
+    List.map items ~f:(fun (item, originals) ->
+      let%map.Result row = Openai.Responses_history.create ~allocator item in
+      row, originals)
     |> Result.all
     |> Result.map_error ~f:failure
   in
@@ -4286,24 +4304,47 @@ let build_product_attachment
             }
         | tool -> tool)
   in
-  let%bind initial_history, initial_end =
+  let%bind initial_history, initial_end, initial_installed_originals =
     match existing_history with
-    | Some history -> Ok (history, next_history_sequence)
+    | Some history -> Ok (history, next_history_sequence, None)
     | None ->
       let%bind () = check_construction construction_checkpoint in
+      let installed =
+        match source with
+        | Authored { revision; _ } when Option.is_some artifact.originals_sha256 ->
+          let open Option.Let_syntax in
+          let%bind definition = artifact.prompt_definition_id in
+          let%map projection = Prompt_revision.document_projection revision in
+          definition, revision, projection
+        | Authored _ | Captured_artifact _ | Authored_child _ | Generated _ -> None
+      in
+      let installed_projection =
+        Option.map installed ~f:(fun (_, revision, projection) -> revision, projection)
+      in
       let%bind items =
         initial_items
           ~construction_checkpoint
           ~ctx
           ~elements
+          ~installed_projection
           ~manifest_authorizer
           ~approval_provider
           ~response_dir
       in
-      allocate_initial
-        ~namespace:history_namespace
-        ~next_sequence:next_history_sequence
-        items
+      let%bind rows, initial_end =
+        allocate_initial
+          ~namespace:history_namespace
+          ~next_sequence:next_history_sequence
+          items
+      in
+      let%map originals =
+        Option.value_map installed ~default:(Ok None) ~f:(fun (definition, revision, _) ->
+          Recovery_installed_originals.Initial.create
+            ~definition
+            ~revision:(Prompt_revision.id revision)
+            rows)
+      in
+      List.map rows ~f:fst, initial_end, originals
   in
   let reserved_history_through = initial_end + moderator_reservation_size in
   let%bind restored_moderator_snapshot =
@@ -4986,6 +5027,7 @@ let build_product_attachment
         ~worker
         ~initial_history
         ~initial_prompt_entry_count
+        ~initial_installed_originals
         ~moderator_snapshot
         ~authored_start
         ~runtime_resume
@@ -5019,6 +5061,7 @@ let build_product_attachment
               ~tracking))
     ; initial_history
     ; initial_prompt_entry_count
+    ; initial_installed_originals
     ; reserved_history_through
     ; moderator_snapshot
     ; moderator_manager =
@@ -5290,6 +5333,7 @@ let build_product_attachment
       ~worker
       ~initial_history:history
       ~initial_prompt_entry_count
+      ~initial_installed_originals:None
       ~moderator_snapshot:(fun () -> checkpoint)
       ~authored_start:(authored_start_for worker)
       ~runtime_resume:(runtime_resume_for worker)
@@ -5324,6 +5368,7 @@ let build_product_attachment
       ~worker
       ~initial_history
       ~initial_prompt_entry_count
+      ~initial_installed_originals
       ~moderator_snapshot:(fun () -> !published_moderator_snapshot)
       ~authored_start
       ~runtime_resume

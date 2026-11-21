@@ -29,11 +29,20 @@ val capture
   -> budget:B.t
   -> (t * Agent_store.Installed_document_originals.t option, B.Error.t) Result.t
 
+module Original_keys : sig
+  type t
+
+  val find
+    :  t
+    -> Prompt.Chat_markdown.Document_occurrence.t
+    -> Agent_store.Installed_document_originals.Occurrence.t option
+end
+
 val materialize
   :  t
   -> parsed:Parsed.t
   -> budget:B.t
-  -> (Prompt.Chat_markdown.Document_projection.t, B.Error.t) Result.t
+  -> (Prompt.Chat_markdown.Document_projection.t * Original_keys.t, B.Error.t) Result.t
 
 val original_key
   :  t

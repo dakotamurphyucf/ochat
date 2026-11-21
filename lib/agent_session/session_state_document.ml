@@ -839,6 +839,8 @@ let project_fields_with_presence
        [ "recovery_rollover", Recovery_rollover.to_json ledger ])
      @ Option.value_map t.recovery_windows ~default:[] ~f:(fun ledger ->
        [ "recovery_windows", Recovery_window_ledger.to_jsonaf ledger ])
+     @ Option.value_map t.recovery_installed_originals ~default:[] ~f:(fun receipt ->
+       [ "recovery_installed_originals", Recovery_installed_originals.to_jsonaf receipt ])
      @ Option.value_map t.recovery_effective ~default:[] ~f:(fun ledger ->
        [ "recovery_effective", Recovery_effective_ledger.to_jsonaf ledger ])
      @ run_state_fields run_state_field t.run_state
@@ -946,6 +948,13 @@ let state_fields_of_jsonaf ?capture ~limits json =
     | Absent -> Ok None
     | Null -> Error (P.Error.invalid_request "recovery_windows must be a ledger")
     | Value ledger -> Recovery_window_ledger.of_jsonaf ledger |> Result.map ~f:Option.some
+  in
+  let%bind recovery_installed_originals =
+    match D.Json.field json ~name:"recovery_installed_originals" with
+    | Absent -> Ok None
+    | Null -> Error (P.Error.invalid_request "invalid installed original receipt")
+    | Value receipt ->
+      Recovery_installed_originals.of_jsonaf receipt |> Result.map ~f:Option.some
   in
   let%bind recovery_effective =
     match D.Json.field json ~name:"recovery_effective" with
@@ -1119,6 +1128,7 @@ let state_fields_of_jsonaf ?capture ~limits json =
     ; active_operation
     ; automatic_turn_budget
     ; recovery_windows
+    ; recovery_installed_originals
     ; recovery_effective
     ; permissions
     ; grants
@@ -1178,6 +1188,7 @@ let state_shape =
     ; "active_operation", X.nullable_shape Shapes.operation
     ; "automatic_turn_budget", X.nullable_shape Automatic_turn_budget.shape
     ; "recovery_windows", Recovery_window_ledger.shape
+    ; "recovery_installed_originals", Recovery_installed_originals.shape
     ; "recovery_effective", Recovery_effective_ledger.shape
     ; "permissions", X.array_shape_exn ~identity_field:"id" Shapes.permission
     ; "grants", X.array_shape_exn ~identity_field:"id" Shapes.grant
@@ -1314,6 +1325,15 @@ let validate_raw_recovery_window_capacity document =
   | Value ledger -> Recovery_window_ledger.validate_encoded ledger
 ;;
 
+let validate_raw_installed_original_capacity document =
+  match
+    D.Json.field (D.Document.payload document) ~name:"recovery_installed_originals"
+  with
+  | Absent -> Ok ()
+  | Null -> Error (D.Error.Malformed "invalid installed original receipt")
+  | Value receipt -> Recovery_installed_originals.validate_encoded receipt
+;;
+
 let validate_raw_recovery_note_share_capacity document =
   match D.Json.field (D.Document.payload document) ~name:"recovery_note_shares" with
   | Absent -> Ok ()
@@ -1353,6 +1373,7 @@ let validate_run_capacity basis document ~limits =
   let state = Capacity_basis.state basis in
   let open Result.Let_syntax in
   let%bind () = validate_raw_recovery_window_capacity document in
+  let%bind () = validate_raw_installed_original_capacity document in
   let%bind () = validate_raw_effective_capacity document in
   let%bind () = validate_raw_recovery_note_share_capacity document in
   let%bind () = validate_raw_queue_capacity document in
@@ -2113,6 +2134,7 @@ let decode_with_evidence ?previous ~limits document =
   let%bind document = upgrade document ~limits in
   let%bind () = check_storage_semantics document in
   let%bind () = validate_raw_recovery_window_capacity document in
+  let%bind () = validate_raw_installed_original_capacity document in
   let%bind () = validate_raw_effective_capacity document in
   let%bind () = validate_raw_recovery_note_share_capacity document in
   let%bind () = validate_raw_queue_capacity document in
@@ -3320,6 +3342,7 @@ let decode_prefix ?previous ~limits document =
   let open Result.Let_syntax in
   let%bind () = check_storage_semantics document in
   let%bind () = validate_raw_recovery_window_capacity document in
+  let%bind () = validate_raw_installed_original_capacity document in
   let%bind () = validate_raw_effective_capacity document in
   let%bind () = validate_raw_recovery_note_share_capacity document in
   let%bind () = validate_raw_queue_capacity document in
@@ -3427,7 +3450,10 @@ module Encoded = struct
         prefix_codec ~capture:None ~limits ~presence:(prefix_presence previous)
     in
     let%bind carrier =
+      (* A later Created can introduce a recognized state semantics marker.
+         Preserve both sets when replay adopts that historical carrier. *)
       D.Domain_codec.adopt
+        ~merge_required_semantics:true
         merge_codec
         ~previous:previous.carrier
         ~incoming:incoming.carrier
