@@ -51,7 +51,7 @@ let fits t prepared =
 
 let text =
   "This request is nearing its configured context limit. Keep subsequent steps \
-   focused,    and preserve essential decisions if your instructions and available \
+   focused, and preserve essential decisions if your instructions and available \
    recovery tools allow."
 ;;
 

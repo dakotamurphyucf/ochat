@@ -65,6 +65,8 @@ let default_prompt =
 ;;
 
 let with_fixture
+      ?root
+      ?port
       ?(prompt_xml = default_prompt)
       ?on_preparation
       ?recovery_capacity
@@ -76,16 +78,22 @@ let with_fixture
       ~max_sessions
       f
   =
-  let root = (Support.Temporary_environment.roots environment).temporary in
+  let root =
+    Option.value root ~default:(Support.Temporary_environment.roots environment).temporary
+  in
   let prompt = Filename.concat root "recovery-note.chatmd" in
   Eio.Path.save
     ~create:(`Or_truncate 0o600)
     Eio.Path.(Eio.Stdenv.fs env / prompt)
     prompt_xml;
   Eio.Switch.run (fun sw ->
-    let reservation = Support.Port_reservation.create ~sw ~env in
-    let port = Support.Port_reservation.port reservation in
-    Support.Port_reservation.release reservation;
+    let port =
+      Option.value_or_thunk port ~default:(fun () ->
+        let reservation = Support.Port_reservation.create ~sw ~env in
+        let port = Support.Port_reservation.port reservation in
+        Support.Port_reservation.release reservation;
+        port)
+    in
     let provider = Provider.start ~sw ~env ~port in
     let endpoint = sprintf "http://127.0.0.1:%d/v1/responses" port in
     let config = config root root prompt in

@@ -44,11 +44,19 @@ module Host = struct
     create_host ~mode_for_session ~targets ~requires_window:false
   ;;
 
-  let for_enabled_windows ~mode ~targets =
+  let window_host ~mode ~qualification targets =
     create_host
       ~mode_for_session:(fun _ -> Some mode)
-      ~targets:(List.map targets ~f:(fun policy -> policy, `Manual))
+      ~targets:(List.map targets ~f:(fun policy -> policy, qualification))
       ~requires_window:true
+  ;;
+
+  let for_enabled_windows ~mode ~targets =
+    window_host ~mode ~qualification:`Manual targets
+  ;;
+
+  let for_automatic_windows ~targets =
+    window_host ~mode:Automatic ~qualification:`Automatic targets
   ;;
 end
 

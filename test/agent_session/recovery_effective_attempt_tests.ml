@@ -205,7 +205,13 @@ let with_attempts ?snapshot_payload_limit ?on_commit ~pressure f ~finish =
                    root.with_context
                      ~previous
                      ~history:input.history
-                     (fun context ~select_prepared:_ ~on_prepared ~on_dispatch ->
+                     (fun
+                         context
+                          ~select_checkpoint:_
+                          ~select_prepared:_
+                          ~on_prepared
+                          ~on_dispatch
+                        ->
                         let request =
                           Inference.Request.create
                             ~target:(Runtime.Context.target context)

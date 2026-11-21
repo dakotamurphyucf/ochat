@@ -8,6 +8,8 @@ module Authored = Recovery_authored_checkpoint
 module Checkpoint = Recovery_rollover.Checkpoint
 module Scope = P.Recovery_window.Scope
 module Evidence = Recovery_rollover_evidence
+module Opportunity = Recovery_checkpoint_opportunity
+module Catalog = Recovery_notes.Catalog
 
 let conflict message = Error (P.Error.create Conflict ~message ~retryable:true ())
 
@@ -22,11 +24,19 @@ let call_in history id =
   |> Result.of_option ~error:(P.Error.invalid_request "checkpoint call is unavailable")
 ;;
 
-let check_call call =
+let check_call call (binding : Authored.t) =
+  let expected_name =
+    match binding.soft_note with
+    | None -> Authored.name
+    | Some _ -> Authored.note_name
+  in
   let open Result.Let_syntax in
   match%bind Evidence.semantics call with
-  | Call { name; kind = Function; _ }
-    when Evidence.original call && String.equal name Authored.name -> Ok ()
+  | Call { name; kind = Function; input_bytes; _ }
+    when Evidence.original call
+         && String.equal name expected_name
+         && Option.for_all binding.soft_note ~f:(fun _ -> String.equal input_bytes "{}")
+    -> Ok ()
   | _ -> conflict "checkpoint call no longer has its original canonical source"
 ;;
 
@@ -202,13 +212,14 @@ let check_metadata (state : Session_state.t) ~scope binding =
     | Some _ | None -> conflict "checkpoint note catalog changed")
 ;;
 
-let capture_checkpoint
+let capture_binding
       (state : Session_state.t)
       ~scope
       ~principal
       ~operation
       ~invocation
       ~key
+      ~catalog
   =
   let open Result.Let_syntax in
   let context = invocation.P.Invocation.context in
@@ -219,11 +230,6 @@ let capture_checkpoint
   in
   let%bind source_revision, attempt_ordinal =
     registration_attempt state ~scope ~operation ~call
-  in
-  let%bind catalog =
-    Result.of_option
-      state.recovery_notes
-      ~error:(P.Error.invalid_request "checkpoint requires committed local notes")
   in
   let history = state.conversation.canonical_history in
   if Stdlib.List.compare_length_with history Recovery_window_record.max_members > 0
@@ -249,6 +255,124 @@ let capture_checkpoint
       ~covered_rows:(List.length history))
 ;;
 
+let capture_checkpoint state ~scope ~principal ~operation ~invocation ~key =
+  let%bind.Result catalog =
+    Result.of_option
+      state.Session_state.recovery_notes
+      ~error:(P.Error.invalid_request "checkpoint requires committed local notes")
+  in
+  capture_binding state ~scope ~principal ~operation ~invocation ~key ~catalog
+;;
+
+let capture_soft_note state ~scope ~principal ~operation ~invocation ~key ~catalog ~note =
+  let%map.Result binding =
+    capture_binding state ~scope ~principal ~operation ~invocation ~key ~catalog
+  in
+  Authored.with_soft_note binding note
+;;
+
+let check_creation (state : Session_state.t) ~scope (binding : Authored.t) note =
+  let open Result.Let_syntax in
+  let%bind opportunity =
+    Option.bind state.recovery_rollover ~f:Recovery_rollover.checkpoint_opportunity
+    |> Result.of_option
+         ~error:(P.Error.invalid_request "checkpoint opportunity is unavailable")
+  in
+  let claim = Opportunity.claim opportunity in
+  let%bind () =
+    if
+      P.Id.Operation.equal claim.id note.Authored.opportunity
+      && P.Id.Operation.equal claim.owner binding.operation
+      && P.Id.Principal.equal claim.principal binding.principal
+      && Scope.equal claim.expected.scope scope
+      && Int64.equal claim.configuration_revision binding.configuration_revision
+      && Option.is_none (Opportunity.outcome opportunity)
+    then Ok ()
+    else conflict "checkpoint note no longer belongs to the offered opportunity"
+  in
+  let%bind catalog =
+    Result.of_option
+      state.recovery_notes
+      ~error:(P.Error.invalid_request "checkpoint note catalog is unavailable")
+  in
+  let%bind record, handle, _ =
+    Evidence.require_attempt state ~scope ~operation:binding.operation
+  in
+  let module Id = Opportunity.Attempt_id in
+  let%bind () =
+    if
+      Option.exists
+        (Opportunity.attempt opportunity)
+        ~f:(Id.equal (H.accounting_id handle))
+      && String.equal (R.preparation_id record) (Id.to_string claim.preparation)
+    then Ok ()
+    else conflict "checkpoint note differs from its accepted prepared attempt"
+  in
+  match claim.decision, Catalog.retained_receipt catalog (Native binding.invocation) with
+  | Offer (Create_note { path; catalog = prior }), Some receipt
+    when Catalog.Receipt.equal_kind receipt.kind Created
+         && Catalog.equal_selection receipt.selection note.created
+         && Catalog.Catalog_revision.equal
+              receipt.catalog_revision
+              (Catalog.revision catalog)
+         && Int64.(
+              Catalog.Catalog_revision.to_int64 receipt.catalog_revision
+              - Catalog.Catalog_revision.to_int64 prior
+              = 1L)
+         && List.exists (Catalog.list catalog) ~f:(fun row ->
+           Catalog.Note_path.equal row.path path
+           && Catalog.equal_selection row.selection note.created) -> Ok ()
+  | _ -> conflict "checkpoint note has no exact committed creation receipt"
+;;
+
+let check_claim_history (state : Session_state.t) (claim : Opportunity.Claim.t) ~own_call =
+  Option.value_map claim.source ~default:(Ok ()) ~f:(fun source ->
+    Opportunity.Source.check source state.conversation.canonical_history ~own_call)
+;;
+
+let check_registration_source state ~scope (binding : Authored.t) =
+  let retained =
+    Option.bind
+      state.Session_state.recovery_rollover
+      ~f:Recovery_rollover.checkpoint_opportunity
+  in
+  match retained with
+  | Some opportunity
+    when Option.is_none (Opportunity.outcome opportunity)
+         && P.Id.Operation.equal (Opportunity.claim opportunity).owner binding.operation
+    ->
+    let open Result.Let_syntax in
+    let open Opportunity in
+    let exact_claim = claim opportunity in
+    let key =
+      Chatml_source.Digest.of_contents
+        (P.Id.Operation.to_string exact_claim.id)
+        ~checkpoint:ignore
+    in
+    let offered_recipe =
+      match exact_claim.decision, binding.soft_note with
+      | Offer Register, None | Offer (Create_note _), Some _ -> true
+      | _ -> false
+    in
+    let%bind record, handle, _ =
+      Evidence.require_attempt state ~scope ~operation:binding.operation
+    in
+    if
+      offered_recipe
+      && Scope.equal exact_claim.expected.scope scope
+      && P.Id.Principal.equal exact_claim.principal binding.principal
+      && Chatml_source.Digest.equal key binding.key
+      && String.equal
+           (R.preparation_id record)
+           (Attempt_id.to_string exact_claim.preparation)
+      && Option.exists
+           (attempt opportunity)
+           ~f:(Attempt_id.equal (H.accounting_id handle))
+    then check_claim_history state exact_claim ~own_call:(Some binding.call)
+    else conflict "checkpoint registration does not belong to its accepted preparation"
+  | None | Some _ -> Ok ()
+;;
+
 let check_checkpoint_registration (state : Session_state.t) checkpoint =
   let open Result.Let_syntax in
   match Checkpoint.recipe checkpoint with
@@ -266,19 +390,29 @@ let check_checkpoint_registration (state : Session_state.t) checkpoint =
       then Ok ()
       else conflict "checkpoint invocation is no longer dispatching at this cut"
     in
-    let%bind request = Authored.Request.of_json invocation.context.input in
     let%bind () =
-      match request.action with
-      | Register notes
-        when P.Id.Context_window.equal request.window (Scope.window scope)
-             && Chatml_source.Digest.equal binding.key request.key
-             && List.equal
-                  Recovery_notes.Catalog.equal_selection
-                  notes
-                  (Checkpoint.notes checkpoint) -> Ok ()
-      | Register _ | Readback ->
-        conflict "checkpoint evidence differs from the selected call"
+      match binding.soft_note with
+      | None ->
+        let%bind request = Authored.Request.of_json invocation.context.input in
+        (match request.action with
+         | Register notes
+           when P.Id.Context_window.equal request.window (Scope.window scope)
+                && Chatml_source.Digest.equal binding.key request.key
+                && List.equal Catalog.equal_selection notes (Checkpoint.notes checkpoint)
+           -> Ok ()
+         | Register _ | Readback ->
+           conflict "checkpoint evidence differs from the selected call")
+      | Some note ->
+        if
+          Document_schema.Json.equal invocation.context.input `Null
+          && List.equal
+               Catalog.equal_selection
+               [ note.created ]
+               (Checkpoint.notes checkpoint)
+        then check_creation state ~scope binding note
+        else conflict "checkpoint note evidence differs from the protected call"
     in
+    let%bind () = check_registration_source state ~scope binding in
     let%bind () = check_metadata state ~scope binding in
     let%bind () = check_pending_revision state binding in
     let%bind source_revision, ordinal =
@@ -294,14 +428,18 @@ let check_checkpoint_registration (state : Session_state.t) checkpoint =
       else conflict "checkpoint coverage or actual foreground attempt changed"
     in
     let%bind call = call_in history binding.call in
-    check_call call
+    check_call call binding
 ;;
-
-let accepted = P.Invocation.Complete (Authored.Receipt.to_json Accepted)
-let accepted_output = Jsonaf.to_string (P.Invocation.outcome_to_json accepted)
 
 let check_acknowledgment state binding invocation ~covered ~suffix =
   let open Result.Let_syntax in
+  let accepted =
+    P.Invocation.Complete
+      (match binding.Authored.soft_note with
+       | None -> Authored.Receipt.to_json Accepted
+       | Some _ -> `Null)
+  in
+  let accepted_output = Jsonaf.to_string (P.Invocation.outcome_to_json accepted) in
   let%bind output =
     Result.of_option
       invocation.P.Invocation.output_entry_id
@@ -317,6 +455,7 @@ let check_acknowledgment state binding invocation ~covered ~suffix =
   in
   let%bind call = call_in covered binding.call in
   let%bind output_row = call_in suffix output in
+  let%bind () = check_call call binding in
   let%bind () = Evidence.pair_is_bound ~call ~output:output_row in
   match%bind Evidence.semantics output_row with
   | Result { output = Text text; _ } when String.equal text accepted_output -> Ok output
@@ -347,4 +486,118 @@ let check_checkpoint ?checkpoint_history (state : Session_state.t) checkpoint =
      | [] when Option.is_some checkpoint_history -> Ok ()
      | [ entry ] when P.History.Id.equal entry.id output -> Ok ()
      | _ -> conflict "substantive history follows the authored checkpoint")
+;;
+
+let matching_opportunity_attempt state (claim : Opportunity.Claim.t) accounting =
+  let module Id = Opportunity.Attempt_id in
+  let open Option.Let_syntax in
+  let%bind record =
+    List.find (Evidence.records state) ~f:(fun source ->
+      Scope.equal (R.scope source) claim.expected.scope
+      && P.Id.Operation.equal (R.operation source) claim.owner
+      && String.equal (R.preparation_id source) (Id.to_string claim.preparation))
+  in
+  let%bind attempt = R.attempt record in
+  let%bind row =
+    Inference_ledger.find
+      state.Session_state.inference_ledger
+      ~ordinal:(E.ordinal attempt)
+  in
+  let handle = Inference_ledger.Row.handle row in
+  Option.some_if
+    (Id.equal accounting (H.accounting_id handle)
+     && E.matches_handle attempt handle
+     && Option.equal P.Id.Operation.equal (H.operation_id handle) (Some claim.owner)
+     && Option.is_none (H.invocation_id handle))
+    (record, attempt)
+;;
+
+let opportunity_checkpoint state opportunity =
+  let open Option.Let_syntax in
+  let claim = Opportunity.claim opportunity in
+  let current =
+    Option.bind state.Session_state.recovery_rollover ~f:Recovery_rollover.checkpoint
+  in
+  let%bind checkpoint = current in
+  let%bind accounting = Opportunity.attempt opportunity in
+  let%bind record, actual = matching_opportunity_attempt state claim accounting in
+  match Checkpoint.recipe checkpoint with
+  | Owner_selection _ -> None
+  | Authored binding ->
+    let key =
+      Chatml_source.Digest.of_contents
+        (P.Id.Operation.to_string claim.id)
+        ~checkpoint:ignore
+    in
+    let recipe_matches =
+      match claim.decision, binding.soft_note with
+      | Offer Register, None -> true
+      | Offer (Create_note _), Some note -> P.Id.Operation.equal note.opportunity claim.id
+      | _ -> false
+    in
+    Option.some_if
+      (Scope.equal (Checkpoint.expected checkpoint).scope claim.expected.scope
+       && P.Id.Operation.equal binding.operation claim.owner
+       && P.Id.Principal.equal binding.principal claim.principal
+       && Chatml_source.Digest.equal binding.key key
+       && Int64.equal binding.source_revision (R.source_revision record)
+       && Int64.equal binding.attempt_ordinal (E.ordinal actual)
+       && recipe_matches
+       && Result.is_ok (check_checkpoint state checkpoint))
+      binding
+;;
+
+let check_opportunity_change (state : Session_state.t) (change : Opportunity.change) =
+  let open Result.Let_syntax in
+  let retained =
+    Option.bind state.recovery_rollover ~f:Recovery_rollover.checkpoint_opportunity
+  in
+  let live_foreground (claim : Opportunity.Claim.t) =
+    Int64.equal claim.configuration_revision state.spec.configuration_revision
+    && Option.exists state.active_operation ~f:(fun operation ->
+      P.Id.Operation.equal operation.id claim.owner
+      && Int.equal operation.generation (Scope.generation claim.expected.scope)
+      &&
+      match operation.kind, operation.state with
+      | Turn _, Running -> true
+      | _ -> false)
+  in
+  match change with
+  | Admit claim when live_foreground claim ->
+    check_claim_history state claim ~own_call:None
+  | Admit _ -> conflict "checkpoint opportunity requires its active foreground operation"
+  | Accept { id; attempt; _ } ->
+    let%bind previous =
+      Result.of_option
+        retained
+        ~error:(P.Error.invalid_request "checkpoint offer is not retained")
+    in
+    let claim = Opportunity.claim previous in
+    if
+      P.Id.Operation.equal claim.id id
+      && live_foreground claim
+      && Option.exists
+           (matching_opportunity_attempt state claim attempt)
+           ~f:(fun (_, matched) ->
+             match E.phase matched with
+             | Running -> true
+             | Allocated | Settled _ -> false)
+    then check_claim_history state claim ~own_call:None
+    else conflict "checkpoint acceptance has no acknowledged foreground attempt"
+  | Settle { id; outcome = Checkpointed { invocation; attempt_ordinal }; _ } ->
+    let exact =
+      let open Option.Let_syntax in
+      let%bind retained = retained in
+      let%bind proof = opportunity_checkpoint state retained in
+      Option.some_if
+        (P.Id.Operation.equal (Opportunity.claim retained).id id
+         && P.Id.Invocation.equal proof.invocation invocation
+         && Int64.equal proof.attempt_ordinal attempt_ordinal)
+        ()
+    in
+    Result.of_option
+      exact
+      ~error:
+        (P.Error.invalid_request "checkpoint settlement has no exact acknowledged proof")
+  | Settle { outcome = Unavailable _ | Interrupted; _ } -> Ok ()
 ;;

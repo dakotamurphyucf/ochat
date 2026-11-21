@@ -321,7 +321,7 @@ have qualified for the selected encoder and deployment.
 
 | Field | Effect |
 | --- | --- |
-| `mode` | `off` disables capacity. `manual` permits an opted-in session to use it. A stock request for `automatic` reports effective `manual` because the stock daemon has no qualified checkpoint and fallback recipe. |
+| `mode` | `off` disables capacity. `manual` permits an opted-in session to use it. `automatic` lets the stock foreground worker start a fresh local window at the configured limits. The session must have recovery windows enabled and its resolved target must match a qualification. An unmatched target or a worker without rollover support reports effective `manual`. |
 | `host_total` | Required positive total-token ceiling in `manual` or `automatic`. Each qualified target's effective total is also bounded by its declared total and optional session ceiling. |
 | `targets` | Up to 32 qualifications with distinct prompt names. An omitted or empty list leaves numeric policy unavailable. |
 | `prompt`, `profile`, `model`, `encoder` | The named prompt and the expected resolved profile, model and encoder. The stock adapter currently qualifies `openai_responses_v1`. |

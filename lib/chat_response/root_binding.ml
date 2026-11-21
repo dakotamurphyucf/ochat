@@ -98,12 +98,13 @@ let wrap ?(fresh = fun () -> false) t (source : Root_context.t) : Root_context.t
         source.with_context
           ~previous
           ~history
-          (fun resolved ~select_prepared ~on_prepared ~on_dispatch ->
+          (fun resolved ~select_checkpoint ~select_prepared ~on_prepared ~on_dispatch ->
              match
                with_context ~fresh:(fresh ()) t ~resolved ~f:(fun context ->
-                 f context ~select_prepared ~on_prepared ~on_dispatch)
+                 f context ~select_checkpoint ~select_prepared ~on_prepared ~on_dispatch)
              with
              | Ok result -> result
              | Error error -> raise_s [%sexp (error : Runtime.Preparation_error.t)]))
+  ; checkpoint_tools = source.checkpoint_tools
   }
 ;;

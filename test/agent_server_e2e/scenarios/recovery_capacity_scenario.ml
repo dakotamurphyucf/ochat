@@ -255,11 +255,11 @@ let assert_status ?window result status =
   capacity
 ;;
 
-let assert_manual_fallback capacity =
+let assert_mode capacity ~effective =
   require
     (String.equal (string capacity "requested_mode") "automatic"
-     && String.equal (string capacity "effective_mode") "manual")
-    "unqualified stock automation did not remain Manual"
+     && String.equal (string capacity "effective_mode") effective)
+    "the effective capacity mode did not match the exact target qualification"
 ;;
 
 let validate_rejects env fixture =
@@ -325,7 +325,7 @@ let run env environment =
       start client session attachment_id "capacity-start-after-restart";
       let observed = observe env provider ~index:2 client session attachment_id in
       let capacity = assert_status ~window observed "current" in
-      assert_manual_fallback capacity;
+      assert_mode capacity ~effective:"automatic";
       require
         (String.equal (string capacity "evidence") "estimated"
          && String.equal (string capacity "estimator") "O200k_serialized_prepared_request"
@@ -372,7 +372,7 @@ let run env environment =
          start client session attachment_id "capacity-start-with-different-qualification";
          let observed = observe env provider ~index:6 client session attachment_id in
          let capacity = assert_status ~window observed "current" in
-         assert_manual_fallback capacity;
+         assert_mode capacity ~effective:"manual";
          require
            (String.equal (string capacity "evidence") "unknown"
             && String.equal (string capacity "reason") "Policy_missing"
@@ -390,7 +390,7 @@ let run env environment =
            observe ~output:120 env provider ~index:8 client current attachment.id
          in
          let capacity = assert_status ~window:current_window observed "current" in
-         assert_manual_fallback capacity;
+         assert_mode capacity ~effective:"automatic";
          require
            (String.equal (string capacity "evidence") "estimated"
             && Document_schema.Json.equal

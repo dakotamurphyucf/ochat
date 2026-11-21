@@ -24,9 +24,13 @@ let limits =
   | Error error -> raise_s [%sexp (error : Document_schema.Error.t)]
 ;;
 
+let decode_text text =
+  Document_schema.Json.decode ~limits text |> Result.map_error ~f:(fun _ -> invalid ())
+;;
+
 let decode_text_exn text =
-  Document_schema.Json.decode ~limits text
-  |> Result.map_error ~f:(fun _ -> (invalid ()).message)
+  decode_text text
+  |> Result.map_error ~f:(fun failure -> failure.P.Error.message)
   |> Result.ok_or_failwith
 ;;
 

@@ -203,7 +203,13 @@ let%expect_test "active A capture remains immutable while the next root capture 
                port.with_context
                  ~previous:initial_context
                  ~history:input.history
-                 (fun context ~select_prepared:_ ~on_prepared:_ ~on_dispatch ->
+                 (fun
+                     context
+                      ~select_checkpoint:_
+                      ~select_prepared:_
+                      ~on_prepared:_
+                      ~on_dispatch
+                    ->
                     assert (
                       String.equal (R.Target.model (Runtime.Context.target context)) "A");
                     Eio.Promise.resolve captured_r ();
@@ -217,7 +223,13 @@ let%expect_test "active A capture remains immutable while the next root capture 
                port.with_context
                  ~previous:initial_context
                  ~history:input.history
-                 (fun context ~select_prepared:_ ~on_prepared:_ ~on_dispatch ->
+                 (fun
+                     context
+                      ~select_checkpoint:_
+                      ~select_prepared:_
+                      ~on_prepared:_
+                      ~on_dispatch
+                    ->
                     assert (
                       String.equal (R.Target.model (Runtime.Context.target context)) "B");
                     on_dispatch
@@ -320,8 +332,13 @@ let%expect_test "resolution failures and cancellation release preparing ownershi
                       port.with_context
                         ~previous
                         ~history:input.history
-                        (fun _ ~select_prepared:_ ~on_prepared:_ ~on_dispatch:_ ->
-                           assert false))));
+                        (fun
+                            _
+                             ~select_checkpoint:_
+                             ~select_prepared:_
+                             ~on_prepared:_
+                             ~on_dispatch:_
+                           -> assert false))));
                assert (Option.is_none (A.configuration actor |> protocol_ok).capture);
                fail_resolution := false;
                let began, began_r = Eio.Promise.create () in
@@ -331,7 +348,13 @@ let%expect_test "resolution failures and cancellation release preparing ownershi
                     port.with_context
                       ~previous
                       ~history:input.history
-                      (fun _ ~select_prepared:_ ~on_prepared:_ ~on_dispatch:_ ->
+                      (fun
+                          _
+                           ~select_checkpoint:_
+                           ~select_prepared:_
+                           ~on_prepared:_
+                           ~on_dispatch:_
+                         ->
                          Eio.Promise.resolve began_r ();
                          Eio.Promise.await never))
                  (fun () -> Eio.Promise.await began);
@@ -339,7 +362,13 @@ let%expect_test "resolution failures and cancellation release preparing ownershi
                port.with_context
                  ~previous
                  ~history:input.history
-                 (fun context ~select_prepared:_ ~on_prepared:_ ~on_dispatch ->
+                 (fun
+                     context
+                      ~select_checkpoint:_
+                      ~select_prepared:_
+                      ~on_prepared:_
+                      ~on_dispatch
+                    ->
                     on_dispatch
                       (T.safe_view (Runtime.Context.target context) |> protocol_ok));
                assert (

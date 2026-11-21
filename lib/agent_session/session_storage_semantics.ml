@@ -884,6 +884,14 @@ let recovery_note_delta_requires ~field ~kind payload =
             | Value payload -> recovery_note_state_requires ~field ~kind payload
             | Absent | Null -> false)
          | Absent | Null -> false)
+      | Value (`String "recovery_rollover_changed")
+        when String.equal kind "recovery_note_changed" ->
+        (match D.Json.field change ~name:"value" with
+         | Value value ->
+           (match D.Json.field value ~name:"kind" with
+            | Value (`String "record_checkpoint_with_note") -> true
+            | _ -> false)
+         | Absent | Null -> false)
       | Value (`String change_kind) -> String.equal change_kind kind
       | Value _ | Absent | Null -> false)
   | Value _ | Absent | Null -> false
@@ -965,7 +973,7 @@ let delta_has_rollover_commit payload =
         (match D.Json.field change ~name:"value" with
          | Value value ->
            (match D.Json.field value ~name:"kind" with
-            | Value (`String "record_checkpoint") -> true
+            | Value (`String ("record_checkpoint" | "record_checkpoint_with_note")) -> true
             | _ -> false)
          | Absent | Null -> false)
       | Value (`String "created") ->
@@ -1662,6 +1670,105 @@ let check_delta document =
     document
     ~name:recovery_capacity_rollover_name
     ~required:(delta_has_capacity_rollover (D.Document.payload document))
+;;
+
+let checkpoint_opportunity_name =
+  Agent_protocol.Session_storage_semantics.recovery_checkpoint_opportunity
+;;
+
+let has_compound_recipe json path =
+  match field_path json (path @ [ "recipe"; "binding" ]) with
+  | Some binding ->
+    (match D.Json.field binding ~name:"soft_note" with
+     | Null | Value _ -> true
+     | Absent -> false)
+  | None -> false
+;;
+
+let state_has_checkpoint_opportunity payload =
+  match field_path payload [ "recovery_rollover" ] with
+  | None -> false
+  | Some ledger ->
+    (match D.Json.field ledger ~name:"checkpoint_opportunity" with
+     | Value _ | Null -> true
+     | Absent ->
+       has_compound_recipe ledger [ "checkpoint" ]
+       || (match field_path ledger [ "authored" ] with
+           | Some (`Array checkpoints) ->
+             List.exists checkpoints ~f:(fun checkpoint ->
+               has_compound_recipe checkpoint [])
+           | _ -> false)
+       ||
+         (match field_path ledger [ "receipts" ] with
+         | Some (`Array receipts) ->
+           List.exists receipts ~f:(fun receipt ->
+             has_compound_recipe receipt [ "status"; "checkpoint"; "selection" ])
+         | _ -> false))
+;;
+
+let delta_has_checkpoint_opportunity payload =
+  match field_path payload [ "changes" ] with
+  | Some (`Array changes) ->
+    List.exists changes ~f:(fun change ->
+      match field_path change [ "kind" ] with
+      | Some (`String "recovery_rollover_changed") ->
+        (match field_path change [ "value"; "kind" ] with
+         | Some (`String "checkpoint_opportunity") -> true
+         | Some (`String "record_checkpoint_with_note") -> true
+         | Some (`String "record_checkpoint") ->
+           has_compound_recipe change [ "value"; "checkpoint" ]
+         | _ -> false)
+      | Some (`String "recovery_rollover_committed") ->
+        has_compound_recipe change [ "value"; "checkpoint"; "selection" ]
+      | Some (`String "created") ->
+        Option.exists
+          (field_path change [ "state"; "payload" ])
+          ~f:state_has_checkpoint_opportunity
+      | _ -> false)
+  | _ -> false
+;;
+
+let require_state_without_checkpoint_opportunity = require_state
+let check_state_without_checkpoint_opportunity = check_state
+let require_delta_without_checkpoint_opportunity = require_delta
+let check_delta_without_checkpoint_opportunity = check_delta
+
+let require_state document ~limits =
+  let%bind.Result document =
+    require_state_without_checkpoint_opportunity document ~limits
+  in
+  require
+    document
+    ~name:checkpoint_opportunity_name
+    ~required:(state_has_checkpoint_opportunity (D.Document.payload document))
+    ~limits
+;;
+
+let check_state document =
+  let%bind.Result () = check_state_without_checkpoint_opportunity document in
+  check
+    document
+    ~name:checkpoint_opportunity_name
+    ~required:(state_has_checkpoint_opportunity (D.Document.payload document))
+;;
+
+let require_delta document ~limits =
+  let%bind.Result document =
+    require_delta_without_checkpoint_opportunity document ~limits
+  in
+  require
+    document
+    ~name:checkpoint_opportunity_name
+    ~required:(delta_has_checkpoint_opportunity (D.Document.payload document))
+    ~limits
+;;
+
+let check_delta document =
+  let%bind.Result () = check_delta_without_checkpoint_opportunity document in
+  check
+    document
+    ~name:checkpoint_opportunity_name
+    ~required:(delta_has_checkpoint_opportunity (D.Document.payload document))
 ;;
 
 let rollover_turn_retirement_name =

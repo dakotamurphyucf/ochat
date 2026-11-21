@@ -247,6 +247,8 @@
   recovery_note_share_change
   recovery_authored_checkpoint
   recovery_rollover_checkpoint
+  recovery_checkpoint_opportunity
+  recovery_checkpoint_candidate
   recovery_rollover_continuation
   recovery_rollover_input
   recovery_rollover_hint_ref

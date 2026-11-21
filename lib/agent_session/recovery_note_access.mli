@@ -13,6 +13,7 @@ module Effect : sig
   [@@deriving enumerate, equal]
 
   val name : t -> string
+  val implementation_revision : t -> string
   val of_query : Recovery_note_query.t -> t
 
   (** Only the exact protected binding selected by the original dispatch can
@@ -64,3 +65,8 @@ val check_management
   -> ( Agent_protocol.Id.Principal.t * Agent_protocol.Id.Attachment.t
        , Agent_protocol.Error.t )
        result
+
+(** Current exact native selection for this access. Operator access cannot borrow it. *)
+val selected_native_tools
+  :  t
+  -> (Chat_response.Tool_capability.t, Agent_protocol.Error.t) result

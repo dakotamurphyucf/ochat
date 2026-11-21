@@ -2783,40 +2783,40 @@ module Coverage = struct
     List.map
       [ ( "delegated_moderator_v1/module/Context_rollover"
         , "874673df3adc8a134eae34a5daf8b7954dc02bda7751b94e3996cd14613bccc7"
-        , "c70cb9ce2a3df3adf6d7271d9cda4b9bd84ba15b7c6db62224f46f776809d18e" )
+        , "2823a2fd2c5ef3dd76447d3ee77a5591a7fd678ed836bf1beafe66a300f739e7" )
       ; ( "delegated_moderator_v1/module_export/Context_rollover.compose"
         , "d7fdc8c1603ecdb9533f00918ffa4c333a87c4a277ec83c098ab0b6f5c1fcc73"
-        , "c70cb9ce2a3df3adf6d7271d9cda4b9bd84ba15b7c6db62224f46f776809d18e" )
+        , "2823a2fd2c5ef3dd76447d3ee77a5591a7fd678ed836bf1beafe66a300f739e7" )
       ; ( "delegated_moderator_v1/type_alias/context_rollover_before"
         , "d9260f9f50dca296e39cf56b681a3e87f1f5d293a3bb3acb7e70188e9fc8c3fb"
-        , "c70cb9ce2a3df3adf6d7271d9cda4b9bd84ba15b7c6db62224f46f776809d18e" )
+        , "2823a2fd2c5ef3dd76447d3ee77a5591a7fd678ed836bf1beafe66a300f739e7" )
       ; ( "delegated_moderator_v1/type_alias/context_rollover_continuation"
         , "d3f80ea259a2d446013e1cf5f1eab9a830456ae8836429c97264205674dd15bc"
-        , "c70cb9ce2a3df3adf6d7271d9cda4b9bd84ba15b7c6db62224f46f776809d18e" )
+        , "2823a2fd2c5ef3dd76447d3ee77a5591a7fd678ed836bf1beafe66a300f739e7" )
       ; ( "delegated_moderator_v1/type_alias/context_rollover_decision"
         , "2af3686d8997fd96b1a97e3f149ef31adf1a705573255424b6e374312dd3b037"
-        , "c70cb9ce2a3df3adf6d7271d9cda4b9bd84ba15b7c6db62224f46f776809d18e" )
+        , "2823a2fd2c5ef3dd76447d3ee77a5591a7fd678ed836bf1beafe66a300f739e7" )
       ; ( "delegated_moderator_v1/type_alias/context_rollover_event"
         , "9050f6df72842bf67efcf5c4bd1c8d44f3b51d452a7c6f813c8374cf14051997"
-        , "c70cb9ce2a3df3adf6d7271d9cda4b9bd84ba15b7c6db62224f46f776809d18e" )
+        , "2823a2fd2c5ef3dd76447d3ee77a5591a7fd678ed836bf1beafe66a300f739e7" )
       ; ( "moderator_v1/module/Context_rollover"
         , "e363a67c2ab47a6a00d68c021c116a98b22361ff2a265ed77cd83a90ddde6489"
-        , "ab826a126a647f94866e13475ab21632d0cb7ccdb38bf503d093770a6fe46980" )
+        , "b1e39f65350bb9ef410ad26ca2a078e513a77328446a42187043d6598c2d4cd5" )
       ; ( "moderator_v1/module_export/Context_rollover.compose"
         , "41da6a3e64c2e82c811d7c6446d998fe3886fdacd049cca395d777fab9ff6703"
-        , "ab826a126a647f94866e13475ab21632d0cb7ccdb38bf503d093770a6fe46980" )
+        , "b1e39f65350bb9ef410ad26ca2a078e513a77328446a42187043d6598c2d4cd5" )
       ; ( "moderator_v1/type_alias/context_rollover_before"
         , "f916b4c3d00c1d4c3fb75936fb9258061347e9df0e00aa9cc171029730a1225d"
-        , "ab826a126a647f94866e13475ab21632d0cb7ccdb38bf503d093770a6fe46980" )
+        , "b1e39f65350bb9ef410ad26ca2a078e513a77328446a42187043d6598c2d4cd5" )
       ; ( "moderator_v1/type_alias/context_rollover_continuation"
         , "cab5f98da303ce911dfe8648475710be0dcba60236b8cea38c826ebcb7f0a5bb"
-        , "ab826a126a647f94866e13475ab21632d0cb7ccdb38bf503d093770a6fe46980" )
+        , "b1e39f65350bb9ef410ad26ca2a078e513a77328446a42187043d6598c2d4cd5" )
       ; ( "moderator_v1/type_alias/context_rollover_decision"
         , "f81dfddeb8c2887ba8424f9b9385c840f7523f48576628337a0aa02ba54a6921"
-        , "ab826a126a647f94866e13475ab21632d0cb7ccdb38bf503d093770a6fe46980" )
+        , "b1e39f65350bb9ef410ad26ca2a078e513a77328446a42187043d6598c2d4cd5" )
       ; ( "moderator_v1/type_alias/context_rollover_event"
         , "84b3833cd572db808d47d9ce4c462b36ae1191c4f156fe96d9d712710019029c"
-        , "ab826a126a647f94866e13475ab21632d0cb7ccdb38bf503d093770a6fe46980" )
+        , "b1e39f65350bb9ef410ad26ca2a078e513a77328446a42187043d6598c2d4cd5" )
       ]
       ~f:(fun (target_id, contract_sha256, topic_closure_sha256) ->
         { target_id
@@ -3799,7 +3799,7 @@ let runtime_foundation ~sources =
          ; review =
              Audited
                { excerpt_sha256 =
-                   [ "21d6b15ac678d588ff349f6de5c142e82823cea40c58393b94b18cacdae02f5f" ]
+                   [ "5d563e2a9288b0cb55088e31a301bae65b589b93ef82fa995e1d1876f5e5cf97" ]
                ; evidence =
                    [ "test/agent_session/recovery_rollover_tests.ml"
                    ; "test/agent_server_e2e/scenarios/recovery_checkpoint_scenario.ml"
