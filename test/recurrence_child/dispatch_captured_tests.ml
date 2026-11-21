@@ -965,7 +965,26 @@ let%expect_test "captured occurrence spends its original Goal's final Attempt on
                    let current = actual_execution parent in
                    assert (Execution.equal execution current);
                    assert (not (Execution.is_pending current));
-                   [%test_eq: int] 1 (List.length (Execution.attempts current));
+                   (* A rejected source preparation can rotate before admission. Only
+                      the admitted Run makes the physical Model call charged to the Goal. *)
+                   let attempts = Execution.attempts current in
+                   List.iter (List.drop_last_exn attempts) ~f:(fun previous ->
+                     assert (Option.is_none (Execution.Attempt.origin previous));
+                     assert (Option.is_none (Execution.Attempt.terminal previous));
+                     A.Recurrence_retry_resolution.validate
+                       (Option.value_exn (Execution.Attempt.retry_resolution previous))
+                       ~intent:(Execution.intent current)
+                       ~attempt:(Execution.Attempt.request previous)
+                     |> protocol_ok);
+                   let admitted = Execution.current_attempt current in
+                   assert (
+                     Option.exists
+                       (Execution.Attempt.origin admitted)
+                       ~f:(Origin.equal origin));
+                   assert (
+                     Option.exists
+                       (Execution.Attempt.terminal admitted)
+                       ~f:(Terminal.equal terminal));
                    let frontier = Entry.frontier (entry parent) |> protocol_ok in
                    [%test_eq: int] 1 (List.length (Frontier.executions frontier));
                    assert (
