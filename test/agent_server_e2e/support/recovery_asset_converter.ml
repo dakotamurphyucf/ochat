@@ -453,6 +453,29 @@ let run env environment =
      | Error _ -> ()
      | Ok _ -> failwith "another connection reused the owner's attachment");
     expect_error Unavailable (read (citation scope legacy) ~part:0);
+    let recovered selected part expected =
+      let _, found =
+        await env (fun () ->
+          match read selected ~part with
+          | Ok result -> Some result
+          | Error (Source.Unavailable | Denied) -> None
+          | Error error ->
+            raise_s [%sexp "unable to read exact original", (error : Source.error)])
+      in
+      require
+        (String.equal found expected)
+        "original bytes crossed parts or were reloaded"
+    in
+    let immediate = send ~name:"converter-immediate" Chatmd (user [ doc first_path ]) in
+    require
+      (P.Method_result.Send_message.equal_disposition immediate.disposition Started)
+      "the enabled immediate conversion was deferred";
+    let immediate_row = row (state entry) immediate.history_id in
+    require
+      (String.is_substring (text immediate_row ~part:0) ~substring:"Equivalent")
+      "the immediate conversion lost its rendered text";
+    recovered (citation scope immediate_row) 0 first;
+    ignore (await_idle env entry : A.Session_state.t);
     let entered, release = hold_next () in
     ignore (send ~name:"converter-hold" Plain_text "hold before adoption" : _);
     Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
@@ -485,22 +508,9 @@ let run env environment =
       (String.equal (text adopted ~part:0) (text adopted ~part:1))
       "distinct original documents did not emit identical Markdown";
     let retained = citation scope adopted in
-    let recovered part expected =
-      let _, found =
-        await env (fun () ->
-          match read retained ~part with
-          | Ok result -> Some result
-          | Error (Source.Unavailable | Denied) -> None
-          | Error error ->
-            raise_s [%sexp "unable to read exact original", (error : Source.error)])
-      in
-      require
-        (String.equal found expected)
-        "original bytes crossed parts or were reloaded"
-    in
-    recovered 0 first;
-    recovered 1 second;
-    recovered 2 image;
+    recovered retained 0 first;
+    recovered retained 1 second;
+    recovered retained 2 image;
     expect_error Corrupt (read retained ~part:3);
     ignore (await_idle env entry : A.Session_state.t);
     let entered, release = hold_next () in
@@ -615,9 +625,9 @@ let run env environment =
          (List.find archived.conversation.canonical_history ~f:(fun row ->
             P.History.Id.equal row.id adopted.id)))
       "the real rollover did not prune the converted occurrence";
-    recovered 0 first;
-    recovered 1 second;
-    recovered 2 image;
+    recovered retained 0 first;
+    recovered retained 1 second;
+    recovered retained 2 image;
     expect_error
       Denied
       (Asset.read
