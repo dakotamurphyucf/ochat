@@ -742,7 +742,15 @@ let%expect_test
           | `Checkpoint -> seed
           | `Pending ->
             let queued =
-              W.history 1 "undelivered user input" |> pending_document ~generation:0
+              P.Pending_input.create
+                ~entry:(W.history 1 "undelivered user input")
+                ~generation:0
+                ~binding:P.Pending_input.Binding.safe_boundary
+              |> protocol_ok
+              |> A.Pending_input_document.authored
+                   ~owner:(Submitting_principal principal_id)
+                   ~limits:document_limits
+              |> document_ok
             in
             { seed with
               conversation =
@@ -817,6 +825,47 @@ let%expect_test
                    (Identity.create "private reset note")
                  |> protocol_ok
                in
+               (match mode with
+                | `Checkpoint -> ()
+                | `Pending ->
+                  let before = W.state actor in
+                  assert (Option.is_none before.recovery_rollover);
+                  let wrapper = List.hd_exn before.conversation.deferred_user_entries in
+                  let entry =
+                    P.Pending_input.entry (A.Pending_input_document.value wrapper)
+                  in
+                  let target =
+                    P.Pending_control.Cancel_request.create
+                      ~session_id
+                      ~attachment_id:writer
+                      ~expected_generation:before.identity.generation
+                      ~expected_pending_revision:before.conversation.pending_revision
+                      ~history_id:entry.id
+                      ~expected_content_revision:entry.content_revision
+                      ~idempotency_key:(Identity.key "edit-before-checkpoint")
+                    |> protocol_ok
+                  in
+                  let replacement =
+                    P.Pending_control.Replace_request.create
+                      ~target
+                      ~text:"amended pending input"
+                    |> protocol_ok
+                  in
+                  can_write := true;
+                  ignore
+                    (Actor.replace_pending
+                       actor
+                       ~principal:principal_id
+                       ~project:Pending_control_tests.project
+                       replacement
+                     |> protocol_ok : P.Pending_control.Result.t);
+                  can_write := false;
+                  let reference =
+                    List.hd_exn (W.state actor).conversation.compaction_archives
+                  in
+                  let archived = W.read_archive fixture reference |> protocol_ok in
+                  assert (Option.is_none archived.recovery_notes);
+                  assert_private_note (W.state actor) note);
                ignore (record_checkpoint actor writer note : R.Checkpoint.t);
                let old_basis = expected actor in
                let old_intent =

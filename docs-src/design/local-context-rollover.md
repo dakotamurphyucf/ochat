@@ -459,7 +459,10 @@ or rebuild syncs an independent archive of the exact prior state before
 publishing the new generation, and preserves references to earlier
 archives. Retired history occurrences keep their original stored fields
 in that archive. Private recovery notes stay in the session catalog.
-The archive omits note data, sharing grants and rollover control records.
+The archive omits note data, sharing grants and rollover control records. The same
+projection protects those records when an owner edits or cancels queued input,
+including before the first checkpoint. The pending-input transaction verifies
+the digest of the archive that was actually written.
 Recovery tools use the current generation and cannot resolve an old
 generation's citations or use its receipts to authorize a new cut.
 

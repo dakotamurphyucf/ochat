@@ -2775,23 +2775,26 @@ let encode t ~limits =
   document
 ;;
 
-let archive_document state ~limits =
+let make_archive_document state ~limits ~encode_original =
   let open Result.Let_syntax in
-  (* History capture excludes private recovery grants, notes and intent keys. *)
+  (* Every archive reference binds this same projection, including those for
+     queued input. The caller may already have encoded the original document. *)
   let value = value state in
-  let state =
+  let%bind state =
     match value.recovery_notes, value.recovery_note_shares, value.recovery_rollover with
-    | None, None, None -> state
+    | None, None, None -> encode_original ()
     | _ ->
-      with_value
-        state
-        { value with
-          recovery_notes = None
-        ; recovery_note_shares = None
-        ; recovery_rollover = None
-        }
+      let redacted =
+        with_value
+          state
+          { value with
+            recovery_notes = None
+          ; recovery_note_shares = None
+          ; recovery_rollover = None
+          }
+      in
+      encode redacted ~limits
   in
-  let%bind state = encode state ~limits in
   (* Admit the encoded child without replacing its captured JSON representation. *)
   let%bind _ = decode ~limits state in
   D.Document.create
@@ -2799,6 +2802,10 @@ let archive_document state ~limits =
     ~kind:"session.compaction_archive"
     ~version:1
     ~payload:(`Object [ "state", D.Document.json state ])
+;;
+
+let archive_document state ~limits =
+  make_archive_document state ~limits ~encode_original:(fun () -> encode state ~limits)
 ;;
 
 let adopt previous ~limits incoming =
@@ -3095,15 +3102,7 @@ let transfer_pending_internal
     | false, None -> Ok ()
     | (true | false), Some reference ->
       let%bind captured =
-        match reference.Session_state.Compaction_archive.kind with
-        | (Reset | Rebuild) when Option.is_some previous.recovery_rollover ->
-          archive_document t ~limits
-        | _ ->
-          D.Document.create
-            ~limits
-            ~kind:"session.compaction_archive"
-            ~version:1
-            ~payload:(`Object [ "state", D.Document.json previous_document ])
+        make_archive_document t ~limits ~encode_original:(fun () -> Ok previous_document)
       in
       let kind_allowed =
         match reference.Session_state.Compaction_archive.kind with
