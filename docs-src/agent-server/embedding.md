@@ -19,6 +19,14 @@ automatic primer/preload budget. Construct it with
 it to native/helper queries, context insertion and delegated sessions. See the
 [budget contract](../guide/authoring-context-tool.md#budgets-and-continuation).
 
+Pass `~recovery_capacity` to `Embedded.with_local_host` or `Embedded.start`
+to configure capacity for that host process. `Config_validator.load_recovery_capacity`
+reads the same policy grammar as the daemon. An authenticated durable local owner
+can then enroll a session with `Agent_client.Recovery_windows.enable` using
+its current owner attachment and generation.
+[Capacity file](configuration.md#local-recovery-capacity-file) ·
+[Window operations](operations.md#local-recovery-windows).
+
 ## Client integration
 
 The complete [compiled client](../examples/agent-server/clients/docs_example.ml)

@@ -465,6 +465,59 @@ let with_pending_diagnostics connection ~env ~session_id ~storage f =
   | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
 ;;
 
+let select_for_execution connection ~env ~enable_recovery session_id =
+  let open Result.Let_syntax in
+  if not enable_recovery
+  then snapshot connection session_id
+  else (
+    (* This enrollment precedes selection of the execution anchor. Its private
+       writes need not produce subscribed projection events. *)
+    let%bind selected =
+      Eio.Switch.run (fun admin_sw ->
+        let%bind owner =
+          C.Session_handle.attach
+            ~sw:admin_sw
+            ~clock:(Eio.Stdenv.clock env)
+            ~connection
+            ~session_id
+            ~mode:Owner_read_write
+            ~subscribe:false
+            ()
+        in
+        let detach_requested = ref false in
+        Eio.Switch.on_release admin_sw (fun () ->
+          if not !detach_requested then C.Session_handle.close owner);
+        let selected =
+          (C.Session_handle.projection owner
+           |> C.Projection.snapshot
+           |> P.Public.Snapshot.fields)
+            .session
+        in
+        let%bind () =
+          Local_recovery_cli.enroll
+            connection
+            selected
+            ~attachment:(C.Session_handle.attachment owner)
+        in
+        detach_requested := true;
+        let%map () = C.Session_handle.detach owner in
+        selected)
+    in
+    let%bind fields = snapshot connection session_id in
+    if
+      Int.equal fields.session.generation selected.generation
+      && Option.equal
+           P.Id.Prompt_revision.equal
+           fields.session.prompt_revision
+           selected.prompt_revision
+    then Ok fields
+    else
+      Error
+        (failure
+           Conflict
+           "selected source changed during local recovery enrollment"))
+;;
+
 let run
       ?(enable_recovery = false)
       ?recovery_capacity
@@ -552,54 +605,7 @@ let run
           Eio.Flow.copy_string
             (sprintf "[managed conversation %s]\n" (P.Id.Session.to_string session_id))
             (Eio.Stdenv.stderr env);
-          let%bind fields =
-            if not enable_recovery
-            then snapshot connection session_id
-            else (
-              (* This enrollment precedes selection of the execution anchor. Its private
-                 writes need not produce subscribed projection events. *)
-              let%bind selected =
-                Eio.Switch.run (fun admin_sw ->
-                  let%bind owner =
-                    C.Session_handle.attach
-                      ~sw:admin_sw
-                      ~clock:(Eio.Stdenv.clock env)
-                      ~connection
-                      ~session_id
-                      ~mode:Owner_read_write
-                      ~subscribe:false
-                      ()
-                  in
-                  Eio.Switch.on_release admin_sw (fun () -> C.Session_handle.close owner);
-                  let selected =
-                    (C.Session_handle.projection owner
-                     |> C.Projection.snapshot
-                     |> P.Public.Snapshot.fields)
-                      .session
-                  in
-                  let%bind () =
-                    Local_recovery_cli.enroll
-                      connection
-                      selected
-                      ~attachment:(C.Session_handle.attachment owner)
-                  in
-                  let%map () = C.Session_handle.detach owner in
-                  selected)
-              in
-              let%bind fields = snapshot connection session_id in
-              if
-                Int.equal fields.session.generation selected.generation
-                && Option.equal
-                     P.Id.Prompt_revision.equal
-                     fields.session.prompt_revision
-                     selected.prompt_revision
-              then Ok fields
-              else
-                Error
-                  (failure
-                     Conflict
-                     "selected source changed during local recovery enrollment"))
-          in
+          let%bind fields = select_for_execution connection ~env ~enable_recovery session_id in
           let%bind completed =
             with_pending_diagnostics
               connection

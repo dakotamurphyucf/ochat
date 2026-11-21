@@ -146,9 +146,9 @@ let options environment fixture storage : Embedded.options =
   }
 ;;
 
-let durable env daemon_options options =
+let durable env daemon_options recovery_capacity options =
   Eio.Switch.run (fun sw ->
-    Embedded.with_local_host ~sw ~env ~daemon_options options ~f:(fun host ->
+    Embedded.with_local_host ~sw ~env ~daemon_options ~recovery_capacity options ~f:(fun host ->
       let connection = Embedded.host_connection host in
       let initialized = initialize connection in
       let spec = Embedded.session_spec options |> ok in
@@ -334,19 +334,17 @@ let run env environment =
   let fixture = Fixture.fixture env environment "recovery-embedded-owner" in
   Support.Provider_fixture.with_host ~env fixture (fun inference_host ->
     let root = S.Local_storage.Root.create ~path:(Config.data_dir fixture) () |> ok in
+    let path = Filename.concat (Filename.dirname (Config.config_path fixture)) "capacity.sexp" in
+    Eio.Path.save ~create:(`Exclusive 0o600) Eio.Path.(Eio.Stdenv.fs env / path)
+      "((mode manual) (host_total 8192))";
     let capacity =
-      Agent_session.Session_context_capacity.Host.for_enabled_windows
-        ~mode:Manual
-        ~targets:[]
-      |> Result.ok
-      |> Option.value_exn
+      match S.Config_validator.load_recovery_capacity ~env ~path with
+      | Ok (Some capacity) -> capacity
+      | Ok None -> Fixture.fail "manual local capacity was disabled"
+      | Error diagnostics -> raise_s [%sexp (diagnostics : S.Config.Diagnostic.t list)]
     in
-    let daemon_options =
-      { (Inference_composition.daemon_options inference_host) with
-        context_capacity_host = capacity
-      }
-    in
+    let daemon_options = Inference_composition.daemon_options inference_host in
     let selected = options environment fixture (Durable root) in
-    durable env daemon_options selected;
+    durable env daemon_options capacity selected;
     transient env daemon_options (options environment fixture Transient))
 ;;

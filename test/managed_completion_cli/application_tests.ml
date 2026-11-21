@@ -127,6 +127,7 @@ let with_application f =
             |> fun root -> Agent_server.Local_storage.Durable root
           in
           let run
+                ?(enable_recovery = false)
                 ?session_id
                 ?run_id
                 ?import_transcript
@@ -152,9 +153,9 @@ let with_application f =
                 ~mode
             in
             Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
-              A.run options ~env ~daemon_options ~project_sources ~transcript_context:ctx)
+              A.run ~enable_recovery options ~env ~daemon_options ~project_sources ~transcript_context:ctx)
           in
-          let stop session_id =
+          let stop ?(expect_window = false) session_id =
             let options : Agent_server.Embedded.options =
               { prompt_file = definition
               ; workspace = root
@@ -231,8 +232,26 @@ let with_application f =
                                   ~observed_revision:(current.revision : int64)
                                   (fresh : P.Extension_status.t list)]
                         in
-                        let%map.Result session =
+                        let%bind.Result session =
                           C.Session_handle.stop handle ~mode:Graceful
+                        in
+                        let%map.Result () =
+                          if not expect_window then Ok ()
+                          else
+                            let%bind.Result page = P.Page.Request.create ~limit:2 () in
+                            let reference =
+                              P.Session_lifecycle.Expected.reference
+                                (P.Session_lifecycle.Observation.expected lifecycle)
+                            in
+                            let%map.Result windows =
+                              C.Recovery_windows.list connection
+                                { session = reference; generation = Some session.generation
+                                ; state = Some Open; page }
+                            in
+                            match windows.items with
+                            | [ row ] -> assert (P.Session_ref.equal reference
+                                (P.Recovery_window.Scope.session row.scope))
+                            | _ -> assert false
                         in
                         assert (
                           P.Session.equal_desired_state session.desired_state Stopped);
@@ -303,6 +322,7 @@ let%test_unit
        save "edited.chatmd" "<user>explicit edited transcript</user>";
        let imported =
          run
+           ~enable_recovery:true
            ~import_transcript:(Filename.concat root "edited.chatmd")
            Workflow
            "imported.chatmd"
@@ -318,7 +338,7 @@ let%test_unit
        Eio.Path.unlink Eio.Path.(Eio.Stdenv.fs env / root / "definition.chatmd");
        (* Observe a stopped session so recovery cannot advance the session
           between the terminal lookup and its exact-revision export. *)
-       stop session.id;
+       stop ~expect_window:true session.id;
        let observed =
          run ~session_id:session.id ~run_id:admission.run_id Workflow "retained.chatmd"
          |> protocol_ok

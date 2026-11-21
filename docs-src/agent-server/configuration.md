@@ -350,6 +350,22 @@ Use `-validate-only` to check configuration shape and token bounds. Actual
 prompt and target qualification occurs during startup. Changes to
 `server.recovery_capacity` take effect on restart.
 
+### Local recovery capacity file
+
+For `ochat chat-completion` or `chat-tui --local`, pass the record inside the
+daemon's `recovery_capacity` setting as a standalone S-expression. For example,
+this file sets a host ceiling and leaves the target list empty:
+
+```sexp
+((mode manual) (host_total 8192))
+```
+
+Pass its path with `-recovery-capacity-file FILE`. To qualify automatic
+operation, use the same target fields as in the daemon example above, set
+`prompt` to `embedded.prompt`, and match the actual selected provider profile
+and model. The file applies for the lifetime of the local process. Window
+capture belongs to the durable session and is selected with `-enable-recovery`.
+
 ### Other server settings
 
 `unix_socket` is always enabled. Its parent directory must already be private,
@@ -399,22 +415,6 @@ commit.
 Job limits are enforced hierarchically for daemon, principal, prompt,
 workspace, session, kind, and nested job depth. Capacity is acquired before a
 job is claimed and released for every terminal or failed-start path.
-
-### Local recovery capacity file
-
-For `ochat chat-completion` or `chat-tui --local`, pass the record inside the
-daemon's `recovery_capacity` setting as a standalone S-expression. For example,
-this file sets a host ceiling and leaves the target list empty:
-
-```sexp
-((mode manual) (host_total 8192))
-```
-
-Pass its path with `-recovery-capacity-file FILE`. To qualify automatic
-operation, use the same target fields as in the daemon example above, set
-`prompt` to `embedded.prompt`, and match the actual selected provider profile
-and model. The file applies for the lifetime of the local process. Window
-capture belongs to the durable session and is selected with `-enable-recovery`.
 
 ## Workspaces
 

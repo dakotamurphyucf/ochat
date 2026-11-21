@@ -20,7 +20,9 @@ end
 
 (** One actual stopped authored create/seed or anchored retained selection.
     New code is captured through existing Embedded/Catalog with Headless; retained
-    Spec/role/target always win. No bootstrap attachment. The selected versioned
+    Spec/role/target always win. Explicit recovery enrollment borrows a temporary
+    unsubscribed owner attachment and relinquishes it before selecting the execution
+    anchor. Ordinary invocation goes directly to selection. The selected versioned
     moderator admits Authored_start on Managed_completion_cli's sole subscribed
     handle in the explicit mode; consumed startup is a typed failure, never a
     history/state guess followed by fallback. An explicit retained run uses its
