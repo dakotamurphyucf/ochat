@@ -19800,6 +19800,56 @@ let operation_agent_admission t id =
     else Error (error Conflict "operation admission belongs to another owner")
 ;;
 
+let successor_hint_witness t publication (selected : Foreground_successor.t) =
+  let module P = Agent_protocol in
+  let module R = Recovery_rollover in
+  let module H = Recovery_rollover_hint_ref in
+  let open Option.Let_syntax in
+  let%bind admission = Result.ok (operation_agent_admission t selected.operation) |> Option.join in
+  let%bind ledger = t.state.recovery_rollover in
+  let%bind receipt = R.find ledger ~id:selected.owner in
+  let%bind reference_selection =
+    match receipt.status with
+    | Terminal (Committed { checkpoint = Checkpointed checkpoint; successor; _ })
+      when P.Recovery_window.Scope.equal successor selected.scope ->
+      List.take (R.Checkpoint.notes checkpoint) H.Selection.max_references
+      |> List.map ~f:H.local_note
+      |> H.Selection.create
+      |> Result.ok
+    | Terminal (Committed { checkpoint = Archive_only _; successor; _ })
+      when P.Recovery_window.Scope.equal successor selected.scope -> Some H.Selection.empty
+    | Pending | Terminal _ -> None
+  in
+  let check_current () =
+    Int.equal t.runtime_source_domain (Stdlib.Domain.self () :> int)
+    && not t.stopped
+    && Option.exists t.foreground_successor ~f:(phys_equal selected)
+    && Option.exists t.state.recovery_windows ~f:(fun windows ->
+      P.Recovery_window.Scope.equal
+        selected.scope
+        (Recovery_window_record.scope (Recovery_window_ledger.active windows)))
+    && Result.is_ok (check_live_foreground_publication t publication)
+    && (match operation_agent_admission t selected.operation with
+        | Ok (Some actual) -> phys_equal admission actual
+        | Ok None | Error _ -> false)
+    && Execution_custody.Admission.Status.(match Execution_custody.Admission.status admission with
+        | Current -> true
+        | Closed | Authority_expired -> false)
+    && Option.exists (Session_delta.foreground_continuation t.state) ~f:(fun current ->
+      P.Id.Operation.equal current.owner selected.owner
+      && match current.phase, selected.admitted with
+         | Preparing operation, None ->
+           P.Id.Operation.equal operation selected.operation
+         | Admitted { operation; ordinal }, Some (_, selected_ordinal) ->
+           P.Id.Operation.equal operation selected.operation
+           && Int64.equal ordinal selected_ordinal
+         | _ -> false)
+  in
+  if check_current ()
+  then Some (H.Witness.create ~references:reference_selection ~check_current)
+  else None
+;;
+
 let parent_of_admission = function
   | None -> Observation_continuation.Parent.Unavailable
   | Some admission -> Observation_continuation.Parent.Available admission
@@ -29492,6 +29542,11 @@ let worker_capabilities t (publication : Foreground_publication.t) id_source buf
                  | _ -> Wait)
             in
             call t (Context_request (Rollover (Successor_selection (handoff, decision)))))
+    ; successor_hint_references =
+        Option.bind t.foreground_successor ~f:(fun selected ->
+          if Agent_protocol.Id.Operation.equal operation_id selected.operation
+          then successor_hint_witness t publication selected
+          else None)
     ; successor_inference =
         Option.bind t.foreground_successor ~f:(fun selected ->
           Option.some_if

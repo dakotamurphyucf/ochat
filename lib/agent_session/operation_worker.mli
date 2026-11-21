@@ -232,6 +232,7 @@ module Capabilities : sig
           option
         -> (unit, Agent_protocol.Error.t) result
     ; successor_inference : Chat_response.Root_context.Successor.t option
+    ; successor_hint_references : Recovery_rollover_hint_ref.Witness.t option
     ; settle_tool_batch :
         (Chat_response.Settled_tool_batch.t
          -> (Chat_response.Settled_tool_batch.decision, Agent_protocol.Error.t) result)
