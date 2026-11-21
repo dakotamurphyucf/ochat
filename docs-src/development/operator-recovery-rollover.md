@@ -132,7 +132,10 @@ been addressed. The actor checks current authority, input and capacity before
 dispatch. `wait` suspends eligible follow-up. `finish` ends that follow-up,
 and `cancel` can also interrupt preparation. A model request already admitted
 uses ordinary operation cancellation. If a connection closes before the
-reply, reconnect, obtain a current owner attachment and inspect again. A stale
+reply, reconnect, obtain a current owner attachment and inspect again. A
+response can also report `interrupted` if the successor started writing
+before its acknowledgement could be delivered. Inspect the phase in that
+case, too. An inspection during a write can briefly return `conflict`. A stale
 basis returns a conflict. An `idle` phase means the current window has no
 foreground follow-up.
 

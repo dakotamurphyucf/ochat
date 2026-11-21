@@ -57,6 +57,18 @@ let execute runtime ~actor ~authorize ~on_release (request : F.t) =
     in
     Ok (current, reply)
   in
+  (* A successful action can start a writer before its status is released.
+     Keep the visibility fence and distinguish this uncertain acknowledgement
+     from an expected-revision conflict before admission. *)
+  let after_action result =
+    Result.map_error result ~f:(fun (failure : P.Error.t) ->
+      match request.selection, failure.code with
+      | Apply _, Conflict ->
+        error
+          Interrupted
+          "follow-up acknowledgement unavailable; inspect the current phase"
+      | _ -> failure)
+  in
   let%bind current, before = inspect () in
   let%bind reply =
     match request.selection with
@@ -85,7 +97,7 @@ let execute runtime ~actor ~authorize ~on_release (request : F.t) =
           exact
           (action selected)
       in
-      let%bind _, result = inspect () in
+      let%bind _, result = after_action (inspect ()) in
       let%map () = F.validate result ~request in
       result
   in
@@ -95,6 +107,6 @@ let execute runtime ~actor ~authorize ~on_release (request : F.t) =
     then Ok ()
     else Error (error Conflict "recovery follow-up changed before release")
   in
-  on_release check;
+  on_release (fun () -> after_action (check ()));
   Ok reply
 ;;

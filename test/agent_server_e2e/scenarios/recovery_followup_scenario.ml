@@ -128,7 +128,10 @@ let exercise env temporary ~cancel =
           if cancel
           then Operator.expect_error (follow (Apply (waiting.basis, Cancel))) Interrupted
           else (
-            ignore (follow (Apply (waiting.basis, Continue)) |> ok : F.Reply.t);
+            (match follow (Apply (waiting.basis, Continue)) with
+             | Ok _ | Error { code = Interrupted; _ } -> ()
+             | Error failure ->
+               raise_s [%sexp "follow-up was rejected", (failure : P.Error.t)]);
             let request = Provider.await_request provider env 1 in
             require
               (Recovery_reminder_scenario.has_entry
