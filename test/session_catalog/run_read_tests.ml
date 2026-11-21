@@ -10,18 +10,23 @@ let permission_denied = function
   | Error _ | Ok _ -> false
 ;;
 
+let within clock stage f = with_stage_timeout ~clock ~seconds:10. ~stage f
+
 module Fixture = struct
   type t =
     { daemon : S.Daemon.t
+    ; clock : float Eio.Time.clock_ty Eio.Resource.t
     ; client : C.Connection.t
     ; entry : S.Session_registry.entry
     ; authorized : bool ref
     ; clients : C.Connection.t list ref
     ; session : P.Session.t
+    ; attachment : P.Session.Attachment.t
     ; reference : P.Session_ref.t
     ; admitted : P.Run_receipt.t
     ; views : C.Run_views.t
     ; request : P.Run_query.Lookup_request.t
+    ; lookups : int ref
     }
 end
 
@@ -69,7 +74,15 @@ let on_event = fun ctx state event -> match event with
                   ~principal:(principal ())
                   ~is_current:(fun () -> !authorized)
               in
-              let client = Run_service_tests.authenticated_connection daemon ~actor in
+              let lookups = ref 0 in
+              let client =
+                Run_service_tests.authenticated_connection
+                  daemon
+                  ~actor
+                  ~observe_command:(function
+                  | Session_run _ -> Int.incr lookups
+                  | _ -> ())
+              in
               clients := client :: !clients;
               initialize client;
               let session, attachment = create_session client in
@@ -107,15 +120,18 @@ let on_event = fun ctx state event -> match event with
               f
                 Fixture.
                   { daemon
+                  ; clock = env#clock
                   ; client
                   ; entry
                   ; authorized
                   ; clients
                   ; session
+                  ; attachment
                   ; reference
                   ; admitted
                   ; views
                   ; request
+                  ; lookups
                   }))))
 ;;
 
@@ -126,22 +142,39 @@ let%expect_test
     ~f:
       (fun
         { Fixture.daemon
+        ; clock
         ; client
         ; entry
         ; authorized
         ; clients
         ; session
+        ; attachment
         ; reference
         ; admitted
         ; views
         ; request
+        ; lookups
         }
       ->
-      let snapshot =
+      (* The real supervisor can also finish this Run. Join the existing
+         activation before taking the baseline, as a late subscriber would. *)
+      within clock "settled authored Run before installing its watch" (fun () ->
+        S.Runtime_owner.with_background_runtime entry.runtime (fun runtime ->
+          match runtime.moderator_activation with
+          | Some activation -> activation.run ()
+          | None -> Error (P.Error.invalid_request "missing startup capability"))
+        |> protocol_ok
+        |> ignore);
+      let current_projection () =
         C.Admin.get_session client session.id
         |> protocol_ok
         |> C.Projection.install_snapshot
       in
+      let projection_fields projection =
+        C.Projection.snapshot projection |> P.Public.Snapshot.fields
+      in
+      let snapshot = current_projection () in
+      let baseline = projection_fields snapshot in
       let callbacks = ref 0 in
       let errors = ref 0 in
       let callback = ref (fun (_ : C.Projection.t) -> ()) in
@@ -173,28 +206,51 @@ let%expect_test
                | Permission_denied -> Eio.Promise.resolve denied_resolver error
                | _ -> failwith "unexpected watch error");
         !callback snapshot;
-        let view = Eio.Promise.await first in
+        let view =
+          within clock "first current Run lookup" (fun () -> Eio.Promise.await first)
+        in
         assert (Option.exists view.admission_receipt ~f:(P.Run_receipt.equal admitted));
+        assert (Option.is_some view.terminal_receipt);
+        assert (P.Run.Lifecycle.equal view.run.lifecycle (Terminal (Completed None)));
         !callback
           (C.Projection.mark_stale snapshot (P.Error.invalid_request "snapshot gap"));
-        Eio.Promise.await stale |> ignore;
-        !callback snapshot;
-        let same_revision = Eio.Promise.await restored in
-        assert (P.Run.equal same_revision.run view.run);
-        S.Runtime_owner.with_background_runtime entry.runtime (fun runtime ->
-          match runtime.moderator_activation with
-          | Some activation -> activation.run ()
-          | None -> Error (P.Error.invalid_request "missing startup capability"))
-        |> protocol_ok
+        within clock "stale Run projection diagnostic" (fun () -> Eio.Promise.await stale)
         |> ignore;
-        let terminal_snapshot =
-          C.Admin.get_session client session.id
-          |> protocol_ok
-          |> C.Projection.install_snapshot
+        !callback snapshot;
+        let same_revision =
+          within clock "refresh after restoring the same revision" (fun () ->
+            Eio.Promise.await restored)
         in
+        assert (P.Run.equal same_revision.run view.run);
+        let fresh =
+          Catalog_service_tests.edit_command
+            session
+            attachment
+            ~revision:baseline.session.metadata_revision
+            ~name:"Run watch revision"
+            ~key_text:"run-watch-fresh-revision"
+          |> Catalog_service_tests.edit client
+          |> protocol_ok
+          |> Catalog_service_tests.mutation
+          |> ignore;
+          current_projection ()
+        in
+        assert (Int64.((projection_fields fresh).revision > baseline.revision));
         authorized := false;
-        !callback terminal_snapshot;
-        let error = Eio.Promise.await denied in
+        [%test_eq: int] 2 !lookups;
+        !callback snapshot;
+        (* A queued wake runs before this fiber resumes. The in-memory transport
+           counts requests before it can yield to the server. *)
+        Eio.Fiber.yield ();
+        [%test_eq: int] 2 !lookups;
+        !callback fresh;
+        let error =
+          within
+            clock
+            "current authorization denial for a fresh Run projection"
+            (fun () -> Eio.Promise.await denied)
+        in
+        [%test_eq: int] 3 !lookups;
         assert (
           match error.code with
           | Permission_denied -> true
@@ -746,15 +802,18 @@ let%expect_test "run authority revoked during an admitted cold read prevents dis
     ~f:
       (fun
         { Fixture.daemon
+        ; clock
         ; entry
         ; authorized
         ; client = _
         ; clients = _
         ; session
+        ; attachment = _
         ; reference
         ; admitted = _
         ; views
         ; request
+        ; lookups = _
         }
       ->
       let state = A.Session_actor.state entry.actor |> protocol_ok in
@@ -773,6 +832,9 @@ let%expect_test "run authority revoked during an admitted cold read prevents dis
       S.Session_registry.index registry indexed;
       let entered, entered_resolver = Eio.Promise.create () in
       let release, release_resolver = Eio.Promise.create () in
+      let release_reader () =
+        ignore (Eio.Promise.try_resolve release_resolver () : bool)
+      in
       let reads = ref 0 in
       S.Session_registry.install_reader registry (fun _ ->
         incr reads;
@@ -784,10 +846,26 @@ let%expect_test "run authority revoked during an admitted cold read prevents dis
           let result =
             Eio.Fiber.fork_promise ~sw (fun () -> C.Run_views.lookup views request)
           in
-          Eio.Promise.await entered;
-          authorized := false;
-          Eio.Promise.resolve release_resolver ();
-          Eio.Promise.await_exn result |> permission_denied)
+          Exn.protect ~finally:release_reader ~f:(fun () ->
+            within clock "cold Run lookup enters the exact indexed reader" (fun () ->
+              Eio.Fiber.first
+                (fun () -> Eio.Promise.await entered)
+                (fun () ->
+                   match Eio.Promise.await_exn result with
+                   | Error error ->
+                     raise_s
+                       [%sexp
+                         "cold Run lookup returned before the reader"
+                       , (error.code : P.Error.code)]
+                   | Ok _ ->
+                     failwith "cold Run lookup disclosed before entering the reader"));
+            authorized := false;
+            release_reader ();
+            within
+              clock
+              "cold Run lookup checks authorization after the reader"
+              (fun () -> Eio.Promise.await_exn result)
+            |> permission_denied))
       in
       let page_request =
         P.Run_query.Request.create
