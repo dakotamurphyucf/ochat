@@ -59,7 +59,7 @@ let documentation name =
   | "goal_progress"
   | "goal_start"
   | "goal_resume" -> "runtime.goal_metadata", shared
-  | "context_remaining" | "context_new_window" -> "runtime.context_windows", shared
+  | "context_remaining" | "context_checkpoint" | "context_new_window" -> "runtime.context_windows", shared
   | "recovery_note_list"
   | "recovery_note_read"
   | "recovery_note_search"
@@ -158,10 +158,13 @@ let%expect_test "runtime native catalog contracts remain paired with reviewed re
      3838b75b95419129bea126eeb2f7da07f229ccb180a83f34c68648a16f0c8fa5)
     (context_remaining runtime.context_windows
      de12f236a29ae49a158f35d12a0c7bffc90e5c79f397ea51affbdc3a95007637
-     0f0f784765b0084b1950b8bcdea115badbaf81ea6f14c44c56055fd3f4aab5eb)
+     1dcbec5b80ca8fa6af94f3d133c0cba66ec60110026a13c80bdb79e8300becab)
     (context_new_window runtime.context_windows
      fe635b6a171ed40ae0080faf8c49f442c23952b5b643741cada85ff000588c30
-     0f0f784765b0084b1950b8bcdea115badbaf81ea6f14c44c56055fd3f4aab5eb)
+     1dcbec5b80ca8fa6af94f3d133c0cba66ec60110026a13c80bdb79e8300becab)
+    (context_checkpoint runtime.context_windows
+     6afaa6adb1cde9ed866dfd4d49631427608f02df7a5e1d098f9d6bdba6a9e0ab
+     1dcbec5b80ca8fa6af94f3d133c0cba66ec60110026a13c80bdb79e8300becab)
     (goal_get runtime.goal_metadata
      c8c1615cb79ccbff4199c462328b97eae95a061c9741fb9c570dc3da791cd617
      b06cac08508c2f3340bb60c47164ebd97bcee15ef04e9a09832552c4e50db111)

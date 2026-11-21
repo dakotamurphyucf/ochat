@@ -2,10 +2,12 @@
 open! Core
 
 module P = Agent_protocol
+module Checkpoint = Recovery_authored_checkpoint
 
 type effect_kind =
   | Remaining
   | New_window
+  | Checkpoint
 [@@deriving equal]
 
 val name : effect_kind -> string
@@ -36,4 +38,6 @@ type t =
   { remaining : access -> (observation, P.Error.t) result
   ; new_window :
       access -> P.Id.Context_window.t -> (Recovery_rollover.Receipt.t, P.Error.t) result
+  ; checkpoint :
+      access -> Checkpoint.Request.t -> (Checkpoint.Receipt.t, P.Error.t) result
   }

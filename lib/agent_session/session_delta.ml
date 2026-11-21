@@ -732,6 +732,8 @@ let apply_rollover (state : Session_state.t) (change : Recovery_rollover.Commit.
   let%bind recovery_rollover =
     R.commit
       ?checkpoint_history
+      ~validate_authored:
+        (Recovery_checkpoint_cut.check_checkpoint ?checkpoint_history state)
       receipts
       change
       ~active:predecessor
@@ -2247,14 +2249,19 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
     let open Result.Let_syntax in
     let%bind () =
       match change with
-      | Record_checkpoint _ -> require_quiescent_rollover_cut state
+      | Record_checkpoint checkpoint ->
+        (match Recovery_rollover.Checkpoint.recipe checkpoint with
+         | Owner_selection _ -> require_quiescent_rollover_cut state
+         | Authored _ ->
+           Recovery_checkpoint_cut.check_checkpoint_registration state checkpoint)
       | Schedule { change; _ } -> check_continuation_change state change
       | Admit _ | Settle _ -> Ok ()
     in
     let%bind windows =
       Result.of_option
         state.recovery_windows
-        ~error:(Agent_protocol.Error.invalid_request "recovery window ledger is unavailable")
+        ~error:
+          (Agent_protocol.Error.invalid_request "recovery window ledger is unavailable")
     in
     let active = Recovery_window_record.scope (Recovery_window_ledger.active windows) in
     let%bind ledger =

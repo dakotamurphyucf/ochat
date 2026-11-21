@@ -3733,7 +3733,7 @@ let runtime_foundation ~sources =
          }
        ]
      @ [ { id = "runtime.context_windows"
-         ; title = "Inspect capacity and request a local context window"
+         ; title = "Inspect capacity, record a checkpoint and request a local context window"
          ; prerequisites = []
          ; surfaces = shared
          ; excerpts =
@@ -3745,9 +3745,10 @@ let runtime_foundation ~sources =
          ; review =
              Audited
                { excerpt_sha256 =
-                   [ "1144c9a8ee941bf76d44bd9aca47a2506f4051cf8c3d4000efaa3bfac4bd238a" ]
+                   [ "bbeb831ef4d9aa68a80611043011a31f053eae1407872768a9b632f2c069b645" ]
                ; evidence =
                    [ "test/agent_session/recovery_rollover_tests.ml"
+                   ; "test/agent_server_e2e/scenarios/recovery_checkpoint_scenario.ml"
                    ]
                }
          }

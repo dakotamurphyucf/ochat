@@ -240,7 +240,7 @@ actual capability selection and visibility rules determine what runs.
 Operator requests use the same actor service with separately verified
 operator authority. [Native dispatch](../../lib/agent_session/native_tool_dispatch.mli).
 
-ChatMD selects `context_remaining` and `context_new_window` individually with
+ChatMD selects `context_remaining`, `context_checkpoint` and `context_new_window` individually with
 `<tool name="…"/>`. The former requires the original transcript scope and
 reports the current window, canonical revision and prepared capacity status.
 The latter requires the original send scope and takes `expected_window`. Its
@@ -349,6 +349,18 @@ the predecessor operation in the pending continuation. Queued entries and
 wake dispositions keep their original identities. The successor scheduler
 claims that continuation under current authority before starting a new
 foreground operation.
+
+The authored `context_checkpoint` registration shares the durable checkpoint
+ledger with the owner-writer path. It records the exact foreground model
+invocation and submitted root attempt, note-catalog revision, immutable
+selection, and digest and length of the canonical prefix at the writer.
+The selected tool returns only receipt status. The key is scoped to the
+original principal and window. Readback can confirm the registration after
+restart, and an exact retry leaves the original coverage cut in place.
+At settlement both the actor and journal reducer require the original
+relation-bound acknowledgment and the exact covered prefix, with eligible
+control occurrences supplied by the verified settled batch. A changed
+configuration, prompt, moderator source or note catalog invalidates coverage.
 
 A native intent requires a recorded eligible checkpoint. A previous proof
 can cover the canonical prefix when the only additional occurrences are the

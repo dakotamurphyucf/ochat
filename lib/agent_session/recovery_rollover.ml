@@ -486,7 +486,19 @@ end
 type t =
   { receipts : Receipt.t list
   ; checkpoint : Checkpoint.t option
+  ; authored : Checkpoint.t list
   }
+
+let max_authored_per_window = 64
+
+let authored_checkpoint t ~scope ~principal ~key =
+  List.find t.authored ~f:(fun candidate ->
+    Scope.equal (Checkpoint.expected candidate).scope scope
+    &&
+    match Checkpoint.recipe candidate with
+    | Authored value -> Recovery_authored_checkpoint.same_key value ~principal ~key
+    | Owner_selection _ -> false)
+;;
 
 let find t ~id =
   List.find t.receipts ~f:(fun receipt ->
@@ -609,7 +621,10 @@ let to_json t =
      ]
      @ Option.to_list
          (Option.map t.checkpoint ~f:(fun value -> "checkpoint", Checkpoint.to_json value))
-    )
+     @
+     match t.authored with
+     | [] -> []
+     | authored -> [ "authored", `Array (List.map authored ~f:Checkpoint.to_json) ])
 ;;
 
 let bounded t =
@@ -640,7 +655,11 @@ let settle t ~id ~terminal =
 
 let apply previous_ledger ~active ~revision ~history ~catalog change =
   let open Result.Let_syntax in
-  let t = Option.value previous_ledger ~default:{ receipts = []; checkpoint = None } in
+  let t =
+    Option.value
+      previous_ledger
+      ~default:{ receipts = []; checkpoint = None; authored = [] }
+  in
   let%bind next =
     match change with
     | Change.Admit intent ->
@@ -662,8 +681,32 @@ let apply previous_ledger ~active ~revision ~history ~catalog change =
         Scope.equal active (Checkpoint.expected checkpoint).scope
         && Int64.equal revision (Checkpoint.expected checkpoint).revision
       then (
-        let%map () = Checkpoint.check_contents checkpoint ~history ~catalog in
-        { t with checkpoint = Some checkpoint })
+        let%bind () = Checkpoint.check_contents checkpoint ~history ~catalog in
+        match Checkpoint.recipe checkpoint with
+        | Owner_selection _ -> Ok { t with checkpoint = Some checkpoint }
+        | Authored binding ->
+          let authored =
+            List.filter t.authored ~f:(fun previous ->
+              Scope.equal (Checkpoint.expected previous).scope active)
+          in
+          if
+            Option.is_some
+              (authored_checkpoint
+                 t
+                 ~scope:active
+                 ~principal:binding.principal
+                 ~key:binding.key)
+          then conflict "authored checkpoint identity already retained"
+          else if Stdlib.List.compare_length_with authored max_authored_per_window >= 0
+          then
+            Error
+              (P.Error.create
+                 Resource_limit
+                 ~message:"authored checkpoint receipt capacity exceeded"
+                 ~retryable:false
+                 ())
+          else
+            Ok { t with checkpoint = Some checkpoint; authored = checkpoint :: authored })
       else conflict "checkpoint recording cut is stale"
     | Settle { terminal = Committed _; _ } ->
       invalid "committed rollover requires its atomic archive and successor delta"
@@ -706,19 +749,45 @@ let apply previous_ledger ~active ~revision ~history ~catalog change =
   next
 ;;
 
-let check_checkpoint ?checkpoint_history t selected ~expected ~history ~catalog =
+let check_checkpoint
+      ?checkpoint_history
+      ?validate_authored
+      t
+      selected
+      ~expected
+      ~history
+      ~catalog
+  =
   match t.checkpoint with
   | Some checkpoint
     when Checkpoint.equal checkpoint selected
          && Scope.equal (Checkpoint.expected checkpoint).scope expected.Expected.scope
          && Int64.((Checkpoint.expected checkpoint).revision < expected.revision) ->
-    (match Checkpoint.check_contents checkpoint ~history ~catalog, checkpoint_history with
-     | Error _, Some history -> Checkpoint.check_contents checkpoint ~history ~catalog
-     | result, _ -> result)
+    (match Checkpoint.recipe checkpoint with
+     | Authored _ ->
+       (match validate_authored with
+        | None ->
+          conflict "authored checkpoint requires exact retained foreground evidence"
+        | Some validate -> validate checkpoint)
+     | Owner_selection _ ->
+       (match
+          Checkpoint.check_contents checkpoint ~history ~catalog, checkpoint_history
+        with
+        | Error _, Some history -> Checkpoint.check_contents checkpoint ~history ~catalog
+        | result, _ -> result))
   | Some _ | None -> conflict "rollover checkpoint is not recorded for the current cut"
 ;;
 
-let commit ?checkpoint_history t (change : Commit.t) ~active ~revision ~history ~catalog =
+let commit
+      ?checkpoint_history
+      ?validate_authored
+      t
+      (change : Commit.t)
+      ~active
+      ~revision
+      ~history
+      ~catalog
+  =
   let open Result.Let_syntax in
   let%bind intent =
     Result.of_option
@@ -739,6 +808,7 @@ let commit ?checkpoint_history t (change : Commit.t) ~active ~revision ~history 
     | Checkpointed selected ->
       check_checkpoint
         ?checkpoint_history
+        ?validate_authored
         t
         selected
         ~expected:change.expected
@@ -747,7 +817,7 @@ let commit ?checkpoint_history t (change : Commit.t) ~active ~revision ~history 
     | Archive_only _ -> Ok ()
   in
   let%bind t = settle t ~id:change.id ~terminal:(Commit.terminal change) in
-  let next = { t with checkpoint = None } in
+  let next = { t with checkpoint = None; authored = [] } in
   let%map () = bounded next in
   next
 ;;
@@ -766,6 +836,40 @@ let of_json json =
   else (
     let%bind receipts = J.required_as fields "receipts" (J.list Receipt.of_json) in
     let%bind checkpoint = J.optional_as fields "checkpoint" Checkpoint.of_json in
+    let%bind authored =
+      J.optional_as fields "authored" (function
+        | `Array values
+          when Stdlib.List.compare_length_with values max_authored_per_window <= 0 ->
+          List.map values ~f:Checkpoint.of_json |> Result.all
+        | _ -> invalid "invalid authored checkpoint receipts")
+    in
+    let authored = Option.value authored ~default:[] in
+    let%bind _ =
+      let scope =
+        Option.map (List.hd authored) ~f:(fun value -> (Checkpoint.expected value).scope)
+      in
+      List.fold_result authored ~init:[] ~f:(fun seen candidate ->
+        match Checkpoint.recipe candidate with
+        | Authored binding
+          when Option.exists scope ~f:(Scope.equal (Checkpoint.expected candidate).scope)
+               && not
+                    (List.exists seen ~f:(fun prior ->
+                       Recovery_authored_checkpoint.same_key
+                         prior
+                         ~principal:binding.principal
+                         ~key:binding.key)) -> Ok (binding :: seen)
+        | Owner_selection _ | Authored _ ->
+          invalid "duplicate or foreign authored checkpoint")
+    in
+    let%bind () =
+      match checkpoint with
+      | Some value ->
+        (match Checkpoint.recipe value with
+         | Authored _ when not (List.mem authored value ~equal:Checkpoint.equal) ->
+           invalid "active authored checkpoint has no receipt"
+         | Authored _ | Owner_selection _ -> Ok ())
+      | None -> Ok ()
+    in
     let ids = Hash_set.create (module P.Id.Operation) in
     let%map _ =
       List.fold_result
@@ -783,7 +887,7 @@ let of_json json =
             Hash_set.add ids receipt.intent.id;
             Ok (active || pending, Set.add requesters key)))
     in
-    { receipts; checkpoint })
+    { receipts; checkpoint; authored })
 ;;
 
 let validate_state t ~windows ~revision ~has_archive =
@@ -807,6 +911,13 @@ let validate_state t ~windows ~revision ~has_archive =
     | Some checkpoint when covers_existing_window (Checkpoint.expected checkpoint) ->
       Ok ()
     | Some _ -> invalid "rollover checkpoint has no owning recovery window"
+  in
+  let%bind () =
+    if
+      List.for_all t.authored ~f:(fun checkpoint ->
+        covers_existing_window (Checkpoint.expected checkpoint))
+    then Ok ()
+    else invalid "authored checkpoint receipt has no owning recovery window"
   in
   List.fold_result t.receipts ~init:() ~f:(fun () (receipt : Receipt.t) ->
     let expected = receipt.intent.expected in
@@ -835,6 +946,7 @@ let check_unchanged t ~incoming =
   let equal left right =
     List.equal Receipt.equal left.receipts right.receipts
     && Option.equal Checkpoint.equal left.checkpoint right.checkpoint
+    && List.equal Checkpoint.equal left.authored right.authored
   in
   if Option.equal equal t incoming
   then Ok ()

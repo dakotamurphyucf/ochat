@@ -63,7 +63,12 @@ let install_tools env ~remaining ~new_window =
         | output -> Ok (Openai.Responses.Tool_output.Output.jsonaf_of_t output))
       ~defer_observation:(fun _ -> Ok ())
     |> fun tools ->
-    A.Script_tool_calls.with_recovery_context_service tools { remaining; new_window }
+    A.Script_tool_calls.with_recovery_context_service
+      tools
+      { remaining
+      ; new_window
+      ; checkpoint = (fun _ _ -> failwith "unexpected authored checkpoint")
+      }
   in
   let dispatch_tool ~input ~capabilities =
     A.Script_tool_calls.native_dispatch service ~declared ~input ~capabilities

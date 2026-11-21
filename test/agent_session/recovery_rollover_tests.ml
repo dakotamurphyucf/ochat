@@ -354,6 +354,7 @@ let%expect_test "selected foreground tools use the real preparation and original
                ; new_window =
                    (fun access window ->
                      Actor.context_new_window_native actor ~access ~window)
+               ; checkpoint = (fun _ _ -> failwith "unexpected authored checkpoint")
                }
            in
            let config =

@@ -37,7 +37,10 @@ end
 
 module Catalog = Recovery_notes.Catalog
 
-type recipe = Owner_selection of P.Id.Principal.t [@@deriving equal, sexp_of]
+type recipe =
+  | Owner_selection of P.Id.Principal.t
+  | Authored of Recovery_authored_checkpoint.t
+[@@deriving equal, sexp_of]
 
 type t =
   { expected : Expected.t
@@ -73,12 +76,18 @@ let history_digest history =
     Chatml_source.Digest.of_contents (Jsonaf.to_string json) ~checkpoint:ignore)
 ;;
 
-let check_notes expected notes ~catalog =
+let check_notes expected notes ~catalog ~recipe =
   match catalog with
   | Some catalog
     when P.Session_ref.equal
            (Catalog.owner catalog)
            (Scope.session expected.Expected.scope)
+         && (match recipe with
+             | Owner_selection _ -> true
+             | Authored binding ->
+               Catalog.Catalog_revision.equal
+                 binding.catalog_revision
+                 (Catalog.revision catalog))
          && List.for_all notes ~f:(fun note -> Result.is_ok (Catalog.read catalog note))
     -> Ok ()
   | Some _ | None -> conflict "rollover checkpoint notes are unavailable"
@@ -87,36 +96,49 @@ let check_notes expected notes ~catalog =
 let capture expected ~history ~catalog ~notes ~recipe =
   let open Result.Let_syntax in
   let%bind () = validate_notes notes in
-  let%bind () = check_notes expected notes ~catalog in
+  let%bind () = check_notes expected notes ~catalog ~recipe in
   let%map through_history = history_digest history in
   { expected; through_history; notes; recipe }
 ;;
 
 let expected t = t.expected
+let recipe t = t.recipe
+let notes t = t.notes
 
 let check_contents t ~history ~catalog =
   let open Result.Let_syntax in
-  let%bind () = check_notes t.expected t.notes ~catalog in
+  let%bind () = check_notes t.expected t.notes ~catalog ~recipe:t.recipe in
   let%bind current = history_digest history in
   if Chatml_source.Digest.equal current t.through_history
   then Ok ()
   else conflict "rollover checkpoint covers different canonical history"
 ;;
 
-let recipe_to_json (Owner_selection principal) =
-  `Object
-    [ "kind", `String "owner_selection"; "principal", P.Id.Principal.to_json principal ]
+let recipe_to_json = function
+  | Owner_selection principal ->
+    `Object
+      [ "kind", `String "owner_selection"; "principal", P.Id.Principal.to_json principal ]
+  | Authored value ->
+    `Object
+      [ "kind", `String "authored"
+      ; "binding", Recovery_authored_checkpoint.to_json value
+      ]
 ;;
 
 let recipe_of_json json =
   let open Result.Let_syntax in
   let%bind fields = J.fields json in
   let%bind kind = J.required_as fields "kind" J.string in
-  if String.equal kind "owner_selection"
-  then (
+  match kind with
+  | "owner_selection" ->
     let%map principal = J.required_as fields "principal" P.Id.Principal.of_json in
-    Owner_selection principal)
-  else invalid "unknown rollover checkpoint recipe"
+    Owner_selection principal
+  | "authored" ->
+    let%map binding =
+      J.required_as fields "binding" Recovery_authored_checkpoint.of_json
+    in
+    Authored binding
+  | _ -> invalid "unknown rollover checkpoint recipe"
 ;;
 
 let note_to_json (note : Catalog.selection) =

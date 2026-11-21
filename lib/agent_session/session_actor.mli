@@ -3889,6 +3889,12 @@ val context_new_window_native
   -> window:Agent_protocol.Id.Context_window.t
   -> (Recovery_rollover.Receipt.t, Agent_protocol.Error.t) result
 
+val context_checkpoint_native
+  :  t
+  -> access:Recovery_context_service.access
+  -> Recovery_context_service.Checkpoint.Request.t
+  -> (Recovery_context_service.Checkpoint.Receipt.t, Agent_protocol.Error.t) result
+
 (** Request under the current writer attachment. Force requires a separate
     trusted authorization check and still binds the exact expected revision. *)
 val request_context_rollover

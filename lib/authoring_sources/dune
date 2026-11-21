@@ -49,6 +49,10 @@
     lib/agent_session/recovery_note_share.ml %{dep:../agent_session/recovery_note_share.ml}
     lib/agent_session/recovery_context_native_tool.ml %{dep:../agent_session/recovery_context_native_tool.ml}
     lib/agent_session/recovery_context_service.ml %{dep:../agent_session/recovery_context_service.ml}
+    lib/agent_session/recovery_authored_checkpoint.ml %{dep:../agent_session/recovery_authored_checkpoint.ml}
+    lib/agent_session/recovery_checkpoint_cut.ml %{dep:../agent_session/recovery_checkpoint_cut.ml}
+    lib/agent_session/recovery_rollover_batch_cut.ml %{dep:../agent_session/recovery_rollover_batch_cut.ml}
+    lib/agent_session/recovery_rollover_evidence.ml %{dep:../agent_session/recovery_rollover_evidence.ml}
     lib/agent_session/recurrence_native_admission.ml %{dep:../agent_session/recurrence_native_admission.ml}
     lib/agent_session/recurrence_native_schema.ml %{dep:../agent_session/recurrence_native_schema.ml}
     lib/agent_session/recurrence_native_request.ml %{dep:../agent_session/recurrence_native_request.ml}

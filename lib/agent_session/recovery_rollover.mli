@@ -51,7 +51,19 @@ module Checkpoint : sig
       the current journal ledger and rechecks its history and note revisions. *)
   type t [@@deriving equal, sexp_of]
 
-  type recipe = Owner_selection of P.Id.Principal.t
+  type recipe =
+    | Owner_selection of P.Id.Principal.t
+    | Authored of Recovery_authored_checkpoint.t
+
+  val expected : t -> Expected.t
+  val recipe : t -> recipe
+  val notes : t -> Recovery_notes.Catalog.selection list
+
+  val check_contents
+    :  t
+    -> history:P.History.entry list
+    -> catalog:Recovery_notes.Catalog.t option
+    -> (unit, P.Error.t) result
 
   val capture
     :  Expected.t
@@ -167,6 +179,13 @@ val foreground
   -> scope:P.Recovery_window.Scope.t
   -> Recovery_rollover_continuation.t option
 
+val authored_checkpoint
+  :  t
+  -> scope:P.Recovery_window.Scope.t
+  -> principal:P.Id.Principal.t
+  -> key:Chatml_source.Digest.t
+  -> Checkpoint.t option
+
 val awaiting_foreground : t -> scope:P.Recovery_window.Scope.t -> bool
 
 (** Exact normalized retries are resolved before comparing current head or
@@ -209,6 +228,7 @@ val apply
 
 val check_checkpoint
   :  ?checkpoint_history:P.History.entry list
+  -> ?validate_authored:(Checkpoint.t -> (unit, P.Error.t) result)
   -> t
   -> Checkpoint.t
   -> expected:Expected.t
@@ -218,6 +238,7 @@ val check_checkpoint
 
 val commit
   :  ?checkpoint_history:P.History.entry list
+  -> ?validate_authored:(Checkpoint.t -> (unit, P.Error.t) result)
   -> t
   -> Commit.t
   -> active:P.Recovery_window.Scope.t

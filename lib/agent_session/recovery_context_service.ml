@@ -4,15 +4,18 @@ module N = Native_tool_invocation.Admission
 module C = Chat_response.Tool_capability
 module Capacity = Session_context_capacity
 module Assessment = Capacity.Capacity.Assessment
+module Checkpoint = Recovery_authored_checkpoint
 
 type effect_kind =
   | Remaining
   | New_window
+  | Checkpoint
 [@@deriving equal]
 
 let name = function
   | Remaining -> "context_remaining"
   | New_window -> "context_new_window"
+  | Checkpoint -> Checkpoint.name
 ;;
 
 type access =
@@ -46,17 +49,20 @@ let check_now t (state : Session_state.t) ~effect_kind =
   let%bind () = N.check_now t.token ~binding:t.binding in
   let invocation = N.invocation t.token in
   let principal = Operator_authorization.principal t.actor in
-  let scope : P.Scope.t =
+  let permitted =
     match effect_kind with
-    | Remaining -> View_session_transcript
-    | New_window -> Send_messages
+    | Remaining -> P.Principal.has_scope principal View_session_transcript
+    | New_window -> P.Principal.has_scope principal Send_messages
+    | Checkpoint ->
+      P.Principal.has_scope principal View_session_transcript
+      && P.Principal.has_scope principal Send_messages
   in
   if
     equal_effect_kind effect_kind t.effect_kind
     && P.Id.Session.equal invocation.context.session_id state.identity.session_id
     && Int.equal invocation.context.generation state.identity.generation
     && Operator_authorization.is_current t.actor
-    && P.Principal.has_scope principal scope
+    && permitted
   then Ok (principal.id, invocation)
   else Error (denied ())
 ;;
@@ -169,4 +175,6 @@ type t =
   { remaining : access -> (observation, P.Error.t) result
   ; new_window :
       access -> P.Id.Context_window.t -> (Recovery_rollover.Receipt.t, P.Error.t) result
+  ; checkpoint :
+      access -> Checkpoint.Request.t -> (Checkpoint.Receipt.t, P.Error.t) result
   }

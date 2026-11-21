@@ -17,7 +17,10 @@ module Expected : sig
 end
 
 type t [@@deriving equal, sexp_of]
-type recipe = Owner_selection of P.Id.Principal.t
+
+type recipe =
+  | Owner_selection of P.Id.Principal.t
+  | Authored of Recovery_authored_checkpoint.t
 
 val capture
   :  Expected.t
@@ -28,6 +31,8 @@ val capture
   -> (t, P.Error.t) result
 
 val expected : t -> Expected.t
+val recipe : t -> recipe
+val notes : t -> Recovery_notes.Catalog.selection list
 
 val check_contents
   :  t

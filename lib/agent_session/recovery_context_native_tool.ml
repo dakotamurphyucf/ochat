@@ -37,6 +37,9 @@ let execute effect_kind json =
     Result.map
       (service.new_window access window)
       ~f:Recovery_rollover.Receipt.to_public_json
+  | Checkpoint, _ ->
+    let%bind request = S.Checkpoint.Request.of_json json in
+    Result.map (service.checkpoint access request) ~f:S.Checkpoint.Receipt.to_json
   | _ -> Error (P.Error.invalid_request "invalid context tool arguments")
 ;;
 
@@ -55,23 +58,25 @@ let registration effect_kind =
             including stale or unknown status."
          | New_window ->
            "Request a local rollover for the expected current window. A pending receipt \
-            means admission only.")
+            means admission only."
+         | Checkpoint ->
+           "Register committed local note revisions at this foreground history cut, or \
+            read back the named checkpoint receipt without writing.")
     ;;
 
     let parameters =
-      let properties, required =
-        match effect_kind with
-        | S.Remaining -> [], []
-        | New_window ->
-          ( [ "expected_window", `Object [ "type", `String "string" ] ]
-          , [ `String "expected_window" ] )
+      let object_ properties =
+        `Object
+          [ "type", `String "object"
+          ; "properties", `Object properties
+          ; "required", `Array (List.map properties ~f:(fun (name, _) -> `String name))
+          ; "additionalProperties", `False
+          ]
       in
-      `Object
-        [ "type", `String "object"
-        ; "properties", `Object properties
-        ; "required", `Array required
-        ; "additionalProperties", `False
-        ]
+      match effect_kind with
+      | S.Checkpoint -> S.Checkpoint.Request.parameters
+      | Remaining -> object_ []
+      | New_window -> object_ [ "expected_window", `Object [ "type", `String "string" ] ]
     ;;
 
     let input_of_string = Jsonaf.of_string

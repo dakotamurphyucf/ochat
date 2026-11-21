@@ -1422,3 +1422,93 @@ let check_delta document =
     ~name:installed_originals_name
     ~required:(installed_originals_delta_requires (D.Document.payload document))
 ;;
+
+let recovery_authored_checkpoint_name =
+  Agent_protocol.Session_storage_semantics.recovery_authored_checkpoint
+;;
+
+let field_path json path =
+  List.fold path ~init:(Some json) ~f:(fun value name ->
+    Option.bind value ~f:(fun json ->
+      match D.Json.field json ~name with
+      | Value value -> Some value
+      | Absent | Null -> None))
+;;
+
+let has_authored_recipe json path =
+  match field_path json (path @ [ "recipe"; "kind" ]) with
+  | Some (`String "authored") -> true
+  | _ -> false
+;;
+
+let state_has_authored_checkpoint payload =
+  match field_path payload [ "recovery_rollover" ] with
+  | None -> false
+  | Some ledger ->
+    (match D.Json.field ledger ~name:"authored" with
+     | Value _ | Null -> true
+     | Absent ->
+       has_authored_recipe ledger [ "checkpoint" ]
+       ||
+         (match field_path ledger [ "receipts" ] with
+         | Some (`Array receipts) ->
+           List.exists receipts ~f:(fun receipt ->
+             has_authored_recipe receipt [ "status"; "checkpoint"; "selection" ])
+         | _ -> false))
+;;
+
+let delta_has_authored_checkpoint payload =
+  match field_path payload [ "changes" ] with
+  | Some (`Array changes) ->
+    List.exists changes ~f:(fun change ->
+      match field_path change [ "kind" ] with
+      | Some (`String "recovery_rollover_changed") ->
+        has_authored_recipe change [ "value"; "checkpoint" ]
+      | Some (`String "recovery_rollover_committed") ->
+        has_authored_recipe change [ "value"; "checkpoint"; "selection" ]
+      | Some (`String "created") ->
+        Option.exists
+          (field_path change [ "state"; "payload" ])
+          ~f:state_has_authored_checkpoint
+      | _ -> false)
+  | _ -> false
+;;
+
+let require_state_without_authored_checkpoint = require_state
+let check_state_without_authored_checkpoint = check_state
+let require_delta_without_authored_checkpoint = require_delta
+let check_delta_without_authored_checkpoint = check_delta
+
+let require_state document ~limits =
+  let%bind.Result document = require_state_without_authored_checkpoint document ~limits in
+  require
+    document
+    ~name:recovery_authored_checkpoint_name
+    ~required:(state_has_authored_checkpoint (D.Document.payload document))
+    ~limits
+;;
+
+let check_state document =
+  let%bind.Result () = check_state_without_authored_checkpoint document in
+  check
+    document
+    ~name:recovery_authored_checkpoint_name
+    ~required:(state_has_authored_checkpoint (D.Document.payload document))
+;;
+
+let require_delta document ~limits =
+  let%bind.Result document = require_delta_without_authored_checkpoint document ~limits in
+  require
+    document
+    ~name:recovery_authored_checkpoint_name
+    ~required:(delta_has_authored_checkpoint (D.Document.payload document))
+    ~limits
+;;
+
+let check_delta document =
+  let%bind.Result () = check_delta_without_authored_checkpoint document in
+  check
+    document
+    ~name:recovery_authored_checkpoint_name
+    ~required:(delta_has_authored_checkpoint (D.Document.payload document))
+;;

@@ -2528,7 +2528,11 @@ let recovery_context_native_service actor_ref =
     let%bind actor = extension_actor actor_ref in
     A.context_new_window_native actor ~access ~window
   in
-  Agent_session.Recovery_context_service.{ remaining; new_window }
+  let checkpoint access request =
+    let%bind actor = extension_actor actor_ref in
+    A.context_checkpoint_native actor ~access request
+  in
+  Agent_session.Recovery_context_service.{ remaining; new_window; checkpoint }
 ;;
 
 let native_script_tools

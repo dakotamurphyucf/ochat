@@ -3661,8 +3661,7 @@ type invocation_execution =
   { owner : invocation_owner
   ; policy_source : Policy_standalone_source.Classification.t
   ; mutable native_goal : (Goal_native_actions.Entry.t * int option) option
-  ; context_rollover_basis :
-      (Configuration_capture.Native_window.t * Recovery_rollover.Expected.t) option
+  ; context_rollover_basis : Configuration_capture.Native_window.t option
   ; dispatched : Agent_protocol.Invocation.t
   ; mutable accepts_children : bool
   ; authority_live : bool Atomic.t
@@ -5557,6 +5556,9 @@ module Recovery_rollover_request = struct
         Recovery_context_service.access -> Recovery_context_service.observation t
     | Native_new_window :
         Recovery_context_service.access * P.Id.Context_window.t -> R.Receipt.t t
+    | Native_checkpoint :
+        Recovery_context_service.access * Recovery_authored_checkpoint.Request.t
+        -> Recovery_authored_checkpoint.Receipt.t t
     | Worker_settled :
         Foreground_publication.t * Chat_response.Settled_tool_batch.t
         -> Chat_response.Settled_tool_batch.decision t
@@ -20224,19 +20226,11 @@ let claim_invocation t operation_id (invocation : Agent_protocol.Invocation.t) =
       else None
     in
     let%bind target = Configuration_transition.target t.state |> Result.ok in
-    let%bind preparation =
-      Configuration_capture.native_window
-        t.configuration_capture
-        ~operation_id
-        ~configuration_revision:t.state.spec.configuration_revision
-        ~target
-    in
-    let scope = Configuration_capture.Native_window.scope preparation in
-    let%map expected =
-      Recovery_rollover.Expected.create scope ~revision:t.state.counters.revision
-      |> Result.ok
-    in
-    preparation, expected
+    Configuration_capture.native_window
+      t.configuration_capture
+      ~operation_id
+      ~configuration_revision:t.state.spec.configuration_revision
+      ~target
   in
   let execution =
     { owner
@@ -49401,6 +49395,7 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Context_request
       (Rollover
          ( Native_new_window _
+         | Native_checkpoint _
          | Worker_settled _
          | Successor_selection _
          | Successor_prepared _
@@ -57680,6 +57675,105 @@ let record_context_checkpoint_internal t ~check expected notes =
   checkpoint
 ;;
 
+let record_authored_checkpoint t ~access (request : Recovery_authored_checkpoint.Request.t) =
+  let module A = Recovery_authored_checkpoint in
+  let module B = Recovery_checkpoint_cut in
+  let module C = Recovery_rollover.Checkpoint in
+  let module P = Agent_protocol in
+  let module R = Recovery_rollover in
+  let module Scope = P.Recovery_window.Scope in
+  let open Result.Let_syntax in
+  let%bind principal, execution, operation =
+    context_native_execution t ~access ~effect_kind:Checkpoint
+  in
+  let%bind () =
+    if A.selected_invocation execution.dispatched
+    then Ok ()
+    else Error (error Permission_denied "checkpoint requires its selected model call")
+  in
+  match active_rollover_window t with
+  | None -> Ok A.Receipt.Stale
+  | Some scope when not (P.Id.Context_window.equal request.window (Scope.window scope)) ->
+    Ok Stale
+  | Some _ when t.rollover_requires_recovery -> Ok Uncertain
+  | Some scope ->
+    let prior = t.state in
+    let previous =
+      Option.bind prior.recovery_rollover ~f:(fun ledger ->
+        R.authored_checkpoint ledger ~scope ~principal ~key:request.key)
+    in
+    (match previous, request.action with
+     | Some selected, action ->
+       let applicable =
+         match action with
+         | Readback -> true
+         | Register notes -> List.equal Recovery_notes.Catalog.equal_selection notes (C.notes selected)
+       in
+       let current =
+         Option.bind prior.recovery_rollover ~f:R.checkpoint
+         |> Option.exists ~f:(C.equal selected)
+       in
+       let qualified =
+         match C.recipe selected with
+         | Owner_selection _ -> false
+         | Authored binding -> Result.is_ok (B.check_metadata prior ~scope binding)
+       in
+       Ok (if applicable && current && qualified then Accepted else Stale)
+     | None, Readback -> Ok Absent
+     | None, Register notes ->
+       let check_before_commit () =
+         let%bind caller, current, foreground =
+           context_native_execution t ~access ~effect_kind:Checkpoint
+         in
+         let%bind () = require_runtime_admission t in
+         let%bind capacity = read_context_capacity t operation in
+         match capacity with
+         | Current _
+           when phys_equal execution current
+                && phys_equal prior t.state
+                && P.Id.Principal.equal caller principal
+                && P.Id.Operation.equal foreground operation
+                && Option.exists (active_rollover_window t) ~f:(Scope.equal scope) ->
+           Ok ()
+         | Current _ | Disabled | Awaiting_preparation _ | Stale_preparation _ ->
+           Error (error Conflict "authored checkpoint cut or capacity policy changed")
+       in
+       let candidate =
+         let%bind () = check_before_commit () in
+         let%bind binding =
+           B.capture_checkpoint
+             prior
+             ~scope
+             ~principal
+             ~operation
+             ~invocation:execution.dispatched
+             ~key:request.key
+         in
+         let%bind expected = R.Expected.create scope ~revision:prior.counters.revision in
+         C.capture
+           expected
+           ~history:prior.conversation.canonical_history
+           ~catalog:prior.recovery_notes
+           ~notes
+           ~recipe:(Authored binding)
+       in
+       (match candidate with
+        | Error { code = Conflict; _ } -> Ok Stale
+        | Error failure -> Error failure
+        | Ok checkpoint ->
+          (match
+             persist_recovery_delta
+               t
+               ~rollover:true
+               ~delta:(Recovery_rollover_changed (Record_checkpoint checkpoint))
+               ~check_before_commit
+           with
+           | Ok () -> Ok Accepted
+           | Error _ when t.rollover_requires_recovery -> Ok Uncertain
+           | Error { code = Conflict; _ } -> Ok Stale
+           | Error failure -> Error failure)))
+;;
+
 let settle_context_rollover_internal
       ?batch
       ?checkpoint_history
@@ -57755,6 +57849,7 @@ let settle_context_rollover_internal
             (match
                R.check_checkpoint
                  ?checkpoint_history
+                 ~validate_authored:(Recovery_checkpoint_cut.check_checkpoint ?checkpoint_history previous)
                  stored
                  checkpoint
                  ~expected
@@ -58464,15 +58559,19 @@ let handle_recovery_rollover
     let%bind _, execution, operation_id =
       context_native_execution t ~access ~effect_kind:New_window
     in
-    let%bind preparation, expected =
+    let%bind preparation =
       Result.of_option execution.context_rollover_basis
         ~error:(error Conflict "rollover has no captured foreground window")
     in
+    let scope = Configuration_capture.Native_window.scope preparation in
     let%bind () =
-      if P.Id.Context_window.equal window (P.Recovery_window.Scope.window expected.scope)
+      if P.Id.Context_window.equal window (P.Recovery_window.Scope.window scope)
       then Ok ()
       else Error (error Conflict "expected recovery window changed")
     in
+    (* Provider terminal accounting can commit between dispatch and this effect.
+       Retain the dispatch's exact preparation and start the durable CAS here. *)
+    let%bind expected = R.Expected.create scope ~revision:t.state.counters.revision in
     let check () =
       let%bind principal, current, operation =
         context_native_execution t ~access ~effect_kind:New_window
@@ -58498,12 +58597,15 @@ let handle_recovery_rollover
         if
           Option.exists current
             ~f:(Configuration_capture.Native_window.same_preparation preparation)
+          && Option.exists (active_rollover_window t)
+               ~f:(P.Recovery_window.Scope.equal scope)
           && Int64.equal t.state.counters.revision expected.revision
         then Ok ()
         else changed ()
       | Disabled | Stale_preparation _ | Awaiting_preparation _ -> changed ()
     in
     admit_recovery_rollover t ~check ~check_basis ~expected
+  | Native_checkpoint (access, request) -> record_authored_checkpoint t ~access request
   | Worker_settled (publication, live) -> settle_foreground_tool_batch t publication live
   | Successor_handoff publication ->
     Ok
@@ -64187,6 +64289,10 @@ let context_remaining_native t ~access =
 
 let context_new_window_native t ~access ~window =
   call t (Context_request (Rollover (Native_new_window (access, window))))
+;;
+
+let context_checkpoint_native t ~access request =
+  call t (Context_request (Rollover (Native_checkpoint (access, request))))
 ;;
 
 let request_context_rollover t ~actor ~attachment_id ~authorize ?authorize_force ~key expected =

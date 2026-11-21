@@ -19,6 +19,7 @@ type t =
   | Instructions_status
   | Context_remaining
   | Context_new_window
+  | Context_checkpoint
   | Goal_get
   | Goal_create
   | Goal_hold
@@ -56,6 +57,7 @@ let name = function
   | Instructions_status -> Instruction_native_admission.Effect.name Status
   | Context_remaining -> Recovery_context_service.name Remaining
   | Context_new_window -> Recovery_context_service.name New_window
+  | Context_checkpoint -> Recovery_context_service.name Checkpoint
   | Goal_get -> Goal_native_admission.Effect.name Get
   | Goal_create -> Goal_native_admission.Effect.name Create
   | Goal_hold -> Goal_native_admission.Effect.name Hold
@@ -132,7 +134,10 @@ let registration ~env ~one_off_policy ~authoring_validation_host kind =
     Instruction_native_tool.registration Deactivate |> present
   | Instructions_status, _ -> Instruction_native_tool.registration Status |> present
   | Context_remaining, _ -> Recovery_context_native_tool.registration Remaining |> present
-  | Context_new_window, _ -> Recovery_context_native_tool.registration New_window |> present
+  | Context_new_window, _ ->
+    Recovery_context_native_tool.registration New_window |> present
+  | Context_checkpoint, _ ->
+    Recovery_context_native_tool.registration Checkpoint |> present
   | ( ( Run_chatml
       | Agent_create
       | Agent_status
