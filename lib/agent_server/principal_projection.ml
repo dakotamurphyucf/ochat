@@ -345,7 +345,7 @@ let project_result principal = function
     operator_result
       value
       ~has_required_scope:(has principal View_session_transcript && has principal Manage_grants)
-  | (Recovery_enable _ | Recovery_rollover _ | Goal_control _ | Recurrence_control _) as value ->
+  | (Recovery_enable _ | Recovery_rollover _ | Recovery_followup _ | Goal_control _ | Recurrence_control _) as value ->
     operator_result
       value
       ~has_required_scope:

@@ -180,3 +180,14 @@ module Note_shares = struct
       Error (P.Error.invalid_request "unexpected note revocation receipt")
   ;;
 end
+
+let followup connection request =
+  let module F = P.Recovery_followup in
+  let open Result.Let_syntax in
+  let%bind initialized_as = check_host connection ~feature:F.feature (F.session request) in
+  match%bind Connection.request_recovery connection ~initialized_as (Control_followup request) with
+  | Recovery_followup reply ->
+    let%map () = F.validate reply ~request in
+    reply
+  | _ -> Error (P.Error.invalid_request "unexpected recovery follow-up result")
+;;

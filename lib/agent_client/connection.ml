@@ -121,6 +121,7 @@ let has_command_receipt = function
   | Recovery_status _
   | Recovery_note_shares _
   | Recovery_rollover _
+  | Recovery_followup _
   | Goal_query _
   | Recovery_enable _
   | Goal_control _
@@ -1046,6 +1047,7 @@ type recovery_command =
   | Read_asset of P.Recovery_asset_read.t
   | Inspect_rollover of P.Recovery_rollover_control.Inspect.t
   | Request_rollover of P.Recovery_rollover_control.Request.t
+  | Control_followup of P.Recovery_followup.t
   | Note_shares of P.Recovery_note_share_control.Request.t
 
 let request_recovery t ~initialized_as command =
@@ -1058,6 +1060,7 @@ let request_recovery t ~initialized_as command =
     | Read_asset request -> P.Command.Recovery_asset_read request
     | Inspect_rollover request -> P.Command.Recovery_status request
     | Request_rollover request -> P.Command.Recovery_rollover request
+    | Control_followup request -> P.Command.Recovery_followup request
     | Note_shares request -> P.Command.Recovery_note_shares request
   in
   let check () =

@@ -481,6 +481,7 @@ let initialize connection =
         ; Agent_protocol.Developer_trace_wire.Features.trace
         ; Agent_protocol.Recovery_query.Features.windows
         ; Agent_protocol.Recovery_rollover_control.feature
+        ; Agent_protocol.Recovery_followup.feature
         ]
       ~event_encodings:[ Json ]
       ~max_inbound_event_bytes:(16 * 1024 * 1024)

@@ -25,6 +25,7 @@ type recovery_command =
   | Read_asset of Agent_protocol.Recovery_asset_read.t
   | Inspect_rollover of Agent_protocol.Recovery_rollover_control.Inspect.t
   | Request_rollover of Agent_protocol.Recovery_rollover_control.Request.t
+  | Control_followup of Agent_protocol.Recovery_followup.t
   | Note_shares of Agent_protocol.Recovery_note_share_control.Request.t
 
 (** Process a recovery command on the ordinary request lane under the same

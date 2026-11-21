@@ -80,3 +80,10 @@ module Note_shares : sig
     -> key:Agent_protocol.Idempotency_key.t
     -> (Wire.Receipt.t, Agent_protocol.Error.t) result
 end
+
+(** Inspect or resolve the retained follow-up using this connection's owner writer.
+    If delivery is uncertain, inspect its current phase before choosing another action. *)
+val followup
+  :  Connection.t
+  -> Agent_protocol.Recovery_followup.t
+  -> (Agent_protocol.Recovery_followup.Reply.t, Agent_protocol.Error.t) result

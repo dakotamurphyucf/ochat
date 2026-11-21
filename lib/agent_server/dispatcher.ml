@@ -112,6 +112,7 @@ let recovery_method name =
 let recovery_control_method name =
   let module R = Agent_protocol.Recovery_rollover_control in
   String.equal name R.Inspect.method_name || String.equal name R.Request.method_name
+  || String.equal name Agent_protocol.Recovery_followup.method_name
 ;;
 
 let recovery_note_share_method method_ =

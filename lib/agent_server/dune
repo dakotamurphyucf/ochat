@@ -247,6 +247,7 @@
   dependency_update_receipt
   instruction_operator_service
   recovery_window_operator
+  recovery_followup_operator
   recovery_note_share_operator
   command_handler
   dispatcher)

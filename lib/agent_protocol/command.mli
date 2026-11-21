@@ -38,6 +38,7 @@ type t =
   | Recovery_asset_read of (Recovery_asset_read.t[@sexp.opaque])
   | Recovery_status of (Recovery_rollover_control.Inspect.t[@sexp.opaque])
   | Recovery_rollover of (Recovery_rollover_control.Request.t[@sexp.opaque])
+  | Recovery_followup of (Recovery_followup.t[@sexp.opaque])
   | Recovery_note_shares of (Recovery_note_share_control.Request.t[@sexp.opaque])
   | Goal_query of (Goal_query.Request.t[@sexp.opaque])
   | Goal_control of (Goal_control.Request.t[@sexp.opaque])

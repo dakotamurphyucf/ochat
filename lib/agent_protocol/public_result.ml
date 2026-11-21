@@ -50,6 +50,7 @@ module Non_history = struct
     | Recovery_status _
     | Recovery_note_shares _
     | Recovery_rollover _
+    | Recovery_followup _
     | Goal_query _
     | Goal_control _
     | Recurrence_query _

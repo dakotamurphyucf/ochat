@@ -58,3 +58,10 @@ val rollover
   -> on_release:(release -> unit)
   -> Agent_protocol.Recovery_rollover_control.Request.t
   -> (Agent_protocol.Recovery_rollover_control.Receipt.t, Agent_protocol.Error.t) result
+
+val followup
+  :  t
+  -> Session_registry.entry
+  -> on_release:(release -> unit)
+  -> Agent_protocol.Recovery_followup.t
+  -> (Agent_protocol.Recovery_followup.Reply.t, Agent_protocol.Error.t) result

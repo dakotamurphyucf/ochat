@@ -33,6 +33,7 @@
   recovery_window
   recovery_query
   recovery_rollover_control
+  recovery_followup
   recovery_note_share_control
   recovery_history_request
   recovery_text_range

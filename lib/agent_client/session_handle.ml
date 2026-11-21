@@ -70,6 +70,7 @@ let initialize connection ~implementation_name ~implementation_version =
          ; Agent_protocol.Recovery_text_range.feature
          ; Agent_protocol.Recovery_asset_read.feature
          ; Agent_protocol.Recovery_rollover_control.feature
+         ; Agent_protocol.Recovery_followup.feature
          ; Agent_protocol.Recovery_note_share_control.feature
          ; Agent_protocol.Goal_query.Features.inspect
          ; Agent_protocol.Goal_control.Features.control

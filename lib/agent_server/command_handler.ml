@@ -169,6 +169,7 @@ let create
     ; Agent_protocol.Recovery_text_range.feature, Option.is_some seed_factory
     ; Agent_protocol.Recovery_asset_read.feature, Option.is_some seed_factory
     ; Agent_protocol.Recovery_rollover_control.feature, Option.is_some seed_factory
+    ; Agent_protocol.Recovery_followup.feature, Option.is_some seed_factory
     ; Agent_protocol.Recovery_note_share_control.feature, Option.is_some seed_factory
     ; Agent_protocol.Goal_query.Features.inspect, Option.is_some goal_read
     ; Agent_protocol.Goal_control.Features.control, Option.is_some goal_operator
@@ -3251,6 +3252,16 @@ let dispatch_authorized
       ~attachment_id:request.attachment_id (fun entry ->
         let%map receipt = Recovery_window_operator.rollover service entry ~on_release request in
         Agent_protocol.Method_result.Recovery_rollover receipt)
+  | Recovery_followup request ->
+    let module P = Agent_protocol in
+    let open Result.Let_syntax in
+    let%bind service = recovery_window_operator t context actor in
+    let session = P.Recovery_followup.session request in
+    with_attached_writer t context
+      ~session_id:(P.Session_ref.session_id session)
+      ~attachment_id:request.attachment_id (fun entry ->
+        let%map status = Recovery_window_operator.followup service entry ~on_release request in
+        P.Method_result.Recovery_followup status)
   | Recovery_note_shares request ->
     let%map.Result result =
       Recovery_note_share_operator.dispatch t.seed_factory ~context ~actor

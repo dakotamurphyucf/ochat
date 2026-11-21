@@ -12,6 +12,8 @@ module Basis : sig
   [@@deriving equal, sexp_of]
 
   val create : Recovery_window.Scope.t -> revision:int64 -> (t, Protocol_error.t) result
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Protocol_error.t) result
 end
 
 module Inspect : sig

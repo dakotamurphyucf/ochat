@@ -210,9 +210,9 @@ let read_asset t ~on_release request =
 
 module Control = P.Recovery_rollover_control
 
-let authorize_control t session (state : A.Session_state.t) =
+let authorize_control ?(feature = Control.feature) t session (state : A.Session_state.t) =
   let open Result.Let_syntax in
-  let%bind () = require_feature t Control.feature in
+  let%bind () = require_feature t feature in
   let principal = Operator_authorization.principal t.actor in
   if
     P.Id.Session.equal state.identity.session_id (P.Session_ref.session_id session)
@@ -224,9 +224,9 @@ let authorize_control t session (state : A.Session_state.t) =
   else Error (error Permission_denied "recovery status is unavailable")
 ;;
 
-let authorize_control_writer t session attachment state =
+let authorize_control_writer ?feature t session attachment state =
   let open Result.Let_syntax in
-  let%bind () = authorize_control t session state in
+  let%bind () = authorize_control ?feature t session state in
   let session_id = P.Session_ref.session_id session in
   if
     Option.exists attachment ~f:(fun attachment_id ->
@@ -301,4 +301,19 @@ let rollover t (entry : Session_registry.entry) ~on_release (request : Control.R
   let%map () = check () in
   on_release check;
   receipt
+;;
+
+let followup t (entry : Session_registry.entry) ~on_release request =
+  let module F = P.Recovery_followup in
+  let open Result.Let_syntax in
+  let session = F.session request in
+  let%bind () = require_feature t F.feature in
+  if not (P.Id.Server.equal t.server_id (P.Session_ref.server_id session))
+  then Error (error Invalid_request "recovery follow-up belongs to another host")
+  else (
+    let authorize state =
+      let%bind () = Session_registry.check_native_metadata_publication t.registry entry in
+      authorize_control_writer ~feature:F.feature t session (Some request.attachment_id) state
+    in
+    Recovery_followup_operator.execute entry.actor ~actor:t.actor ~authorize ~on_release request)
 ;;

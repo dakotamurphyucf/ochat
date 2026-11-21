@@ -2134,6 +2134,7 @@ let compose
       | Recovery_enable _
       | Recovery_note_shares _
       | Recovery_rollover _
+      | Recovery_followup _
       | Goal_control _
       | Session_send_message _
       | Session_cancel_pending_input _

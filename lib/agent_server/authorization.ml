@@ -68,6 +68,7 @@ let required_scope = function
   | Recurrence_control _
   | Recovery_enable _
   | Recovery_rollover _
+  | Recovery_followup _
   | Goal_control _
   | Session_send_message _
   | Session_cancel_pending_input _
@@ -175,6 +176,7 @@ let authorize ?(installed_authoring = false) principal command =
          ())
   | ( Agent_protocol.Command.Recovery_enable _
     | Agent_protocol.Command.Recovery_rollover _
+    | Agent_protocol.Command.Recovery_followup _
     | Agent_protocol.Command.Recurrence_control _
     | Agent_protocol.Command.Goal_control _ )
     when not (Agent_protocol.Principal.has_scope principal View_session_transcript) ->

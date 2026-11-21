@@ -385,41 +385,41 @@ let features =
 
 let implementation_sources =
   [ ( "lib/agent_client/connection.ml"
-    , "9dea98750a699ce8bce024f92a9863d4b189fd147bc9abbdb0fe5150e6166249" )
+    , "cf14ff82b96fff3e80c974f54f33c00bb57868d20223405b64d25d397351ef08" )
   ; ( "lib/agent_client/instruction_controls.ml"
     , "d0de8d5a069a3188af7ccb29cc548c876821a95ea20b8c483259a163cb6431b2" )
   ; ( "lib/agent_client/instruction_controls.mli"
     , "37b662d93ec0b3861ca86143a790b2f181070eebaa4df3f5a1534247469b92b2" )
   ; ( "lib/agent_client/session_handle.ml"
-    , "440aeb57e82404835f7ee904046751e0fb51a79ac54209351ccfbc41e2209071" )
+    , "d26f0568c23d652300c12bc8be3ef7daaff4e991d6e0c8c652b01e4a7f63b933" )
   ; ( "lib/agent_client/session_handle.mli"
     , "9d49f9da818d1040076ad4e0d52cf88d4519194e01cd8b0afeb5eaea08cc7192" )
   ; ( "lib/agent_protocol/command.ml"
-    , "09940a19129a94331e3bd211b0cd91a6f0085b5413337ce46b6c9ff68f35ed7f" )
+    , "ce27c8b161be8bdf1ac629dfae688fb7df4489ce583d338f5cf9aa7a38556fca" )
   ; ( "lib/agent_protocol/command.mli"
-    , "ee6ca98ff45d7ae37f18b5331f2d04414771eada68ae74d0a7986648be817a16" )
+    , "7eb07b3701e53e1f71f19d42fbda18546c3579330e378687d55be8df52cb8ddf" )
   ; ( "lib/agent_protocol/instruction_control.ml"
     , "171128dbfd1dc2f62e9b966ddd5c7ce0e9748ef67923ad1b5abf863f4b4383dc" )
   ; ( "lib/agent_protocol/instruction_control.mli"
     , "714d1af33e80402808046ead8b7a7b6acff53a4b502bf238211e6294b01af13e" )
   ; ( "lib/agent_protocol/method_result.ml"
-    , "0d1e99dd0a6b74854680087cf1c0a8efc3b711fcc8d07507e2cc80681888c719" )
+    , "3b8790761a801cc6a9e68980cd4372b13bfecfe370a37efce1dd550b0abf9de1" )
   ; ( "lib/agent_protocol/method_result.mli"
-    , "03eeb7516d952bfd6e9a9b187e0ef684aaaac2671b36c3777acee4df8e183e0d" )
+    , "fd5bd316d9ae0b21f57d11abd6241392717e91083d75c38e752ee34cbc17b25a" )
   ; ( "lib/agent_protocol/public_result.ml"
-    , "6b5f9526c53daed27f561f84244a52b4d6e8347aa1843b4ef8c3a9e6bac00335" )
+    , "fd93b5ddca5db300826ea295f78e541bd64649b8a6aa1783623090e206ceb6fd" )
   ; ( "lib/agent_server/authorization.ml"
-    , "11cf0a5d3eff05077a2161865872b23a8c7ebcb9374522947ea004c6b45276ef" )
+    , "9424177c0eb3b265a0ec2e3ef83d39c10ca219ac4770a3cef3bcccd042e70bc1" )
   ; ( "lib/agent_server/command_handler.ml"
-    , "95758bb5b492fef5dd43a3bda11b37f8e9063a5790cd91dcbcb8f160666e5524" )
+    , "4089d4bbf2e7e26da65ba0899139cafb32494cebdf1093c80e5266572100a48e" )
   ; ( "lib/agent_server/daemon.ml"
-    , "252dc0ed5b829ea75f1adff136d4ae60bdbf8407121570e8aba5b4b7ca733bb7" )
+    , "1b85fb24f833962ee6d564a7e9f3d281407adbf08b73c91fa0c34f4722974c5f" )
   ; ( "lib/agent_server/instruction_operator_service.ml"
     , "7bcfd6d6f88f311b50c50af7a300b9b94bbcf32641b54aeef9900f902a2d0bc8" )
   ; ( "lib/agent_server/instruction_operator_service.mli"
     , "68ea938a6334edf04432f1e340d5cc11309b603291e961aad8976f029167f31d" )
   ; ( "lib/agent_server/principal_projection.ml"
-    , "17eac470bb2df49d8db45a4022916e797ee1929214945b223dfd608f3caa4b0c" )
+    , "92eee77d3e27adbd36dc9c16989b6ffadc60a44563fc02a26a6b64e8c75cd6ee" )
   ; ( "lib/agent_server/authoring_instruction_sources.ml"
     , "5a43fd47d8b0c1916d562f79dd27dfbd3ceb019dfb3f974cede919fc16a83b8e" )
   ; ( "lib/agent_session/instruction_source_port.ml"
