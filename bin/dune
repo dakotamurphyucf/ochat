@@ -34,10 +34,16 @@
  (preprocess (pps ppx_jane)))
 
 (library
+ (name local_recovery_cli)
+ (modules local_recovery_cli)
+ (libraries core eio eio.unix eio_posix ochat.agent_server ochat.agent_protocol ochat.agent_client)
+ (preprocess (pps ppx_jane)))
+
+(library
  (name managed_completion_command)
  (modules managed_completion_command managed_completion_presentation)
  (private_modules managed_completion_presentation)
- (libraries inference_composition frontend_transcript managed_completion_cli core
+ (libraries local_recovery_cli inference_composition frontend_transcript managed_completion_cli core
   core_unix.command_unix eio eio.unix eio_posix io ochat.agent_protocol
   ochat.agent_client ochat.agent_server ochat.chat_response ochat.history_chatmd
   ochat.document_schema ochat.inference_host ochat.provider_runtime_host
@@ -163,7 +169,7 @@
  (public_name chat-tui)
  (name chat_tui)
  (modules chat_tui)
- (libraries inference_composition frontend_transcript tui_transcript_export ochat.provider_runtime_host
+ (libraries local_recovery_cli inference_composition frontend_transcript tui_transcript_export ochat.provider_runtime_host
   core
   eio_main
   jsonaf

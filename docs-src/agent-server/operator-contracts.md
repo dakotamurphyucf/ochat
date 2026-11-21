@@ -19,6 +19,12 @@ and [command reference](../bin/README.md) for accepted combinations.
 
 `--archive`, `--authoring-package`, `--authorize-shell-manifest`, `--auto-persist`, `--bearer-token-file`, `--build-info`, `--cancel`, `--config`, `--connect`, `--data-root`, `--delete-session`, `--detached`, `--disconnect-grace-ms`, `--dry-run`, `--export-file`, `--export-session`, `--format`, `--help`, `--help-short`, `--import-transcript`, `--inference-transport`, `--json`, `--keep-history`, `--list-sessions`, `--local`, `--new-daemon-session`, `--new-session`, `--no-config`, `--no-parallel-tool-calls`, `--no-persist`, `--out`, `--owner-bound`, `--parallel-tool-calls`, `--print-effective-args`, `--prompt`, `--prompt-file`, `--read-only`, `--rebuild-from-prompt`, `--reset-session`, `--session`, `--session-info`, `--start-session`, `--stop-session`, `--textmate-grammar`, `--transient`, `--typeahead`, `--typeahead-debounce-ms`, `--typeahead-history-messages`, `--typeahead-max-output-tokens`, `--typeahead-model`, `--version`, `--workspace`, `-build-info`, `-file`, `-h`, `-help`, `-prompt-preview-max`, `-query`, `-version`
 
+## local_recovery_cli.ml flag inventory
+
+[Parser/normalizer](../../bin/local_recovery_cli.ml).
+
+`--enable-recovery`, `--recovery-capacity-file`, `-enable-recovery`, `-recovery-capacity-file`
+
 ## ochat_agent_server.ml flag inventory
 
 [Parser/normalizer](../../bin/ochat_agent_server.ml).

@@ -295,6 +295,7 @@ let cli_flags source =
 
 let cli_inventory env root =
   [ "bin/chat_tui.ml"
+  ; "bin/local_recovery_cli.ml"
   ; "bin/ochat_agent_server.ml"
   ; "bin/ochat_agent_stdio.ml"
   ; "bin/provider_commands.ml"

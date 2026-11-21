@@ -2573,24 +2573,7 @@ let validate ~env raw =
       })
 ;;
 
-module Embedded_local = struct
-  type t =
-    { context : context
-    ; sections : (string * Sexp.t) list
-    }
-
-  type bound =
-    { context : context
-    ; operator_id : Agent_protocol.Id.Principal.t
-    ; project_sources : Project_source_configuration.t option
-    ; authoring_project_access : Authoring_project_access_configuration.t option
-    ; authoring_upload_access : Authoring_upload_access_configuration.t option
-    ; developer : Developer_startup_configuration.t
-    ; permission_profile : Config.Permission_profile.t option
-    ; manifest_grants : Config.Manifest_grant.t list
-    ; developer_scopes : Agent_protocol.Scope.Set.t
-    }
-
+module Local_policy_file = struct
   let maximum_file_bytes = 9 * 1024 * 1024
 
   let load ~env ~path =
@@ -2631,25 +2614,58 @@ module Embedded_local = struct
           then Ok ()
           else invalid "local policy exceeds its syntax depth or node budget"
         in
-        let%bind raw = Config_parser.parse_string ~source_file:path contents in
-        let%bind sections = top_fields context raw.forms in
-        let%bind () =
-          ensure_allowed
-            context
-            "$"
-            sections
-            [ "project_sources"
-            ; "authoring_project_access"
-            ; "authoring_upload_access"
-            ; "permission_profiles"
-            ; "manifest_grants"
-            ; "developer"
-            ; "developer_scopes"
-            ]
-        in
-        let%bind _ = required context "$" sections "developer" in
-        let%map _ = required context "$" sections "developer_scopes" in
-        { context; sections })
+        let%map raw = Config_parser.parse_string ~source_file:path contents in
+        context, raw.forms)
+  ;;
+end
+
+let load_recovery_capacity ~env ~path =
+  let open Result.Let_syntax in
+  let%bind context, forms = Local_policy_file.load ~env ~path in
+  match forms with
+  | [ value ] -> parse_recovery_capacity context "recovery_capacity" value
+  | _ -> shape_error context "$" "one recovery capacity record"
+;;
+
+module Embedded_local = struct
+  type t =
+    { context : context
+    ; sections : (string * Sexp.t) list
+    }
+
+  type bound =
+    { context : context
+    ; operator_id : Agent_protocol.Id.Principal.t
+    ; project_sources : Project_source_configuration.t option
+    ; authoring_project_access : Authoring_project_access_configuration.t option
+    ; authoring_upload_access : Authoring_upload_access_configuration.t option
+    ; developer : Developer_startup_configuration.t
+    ; permission_profile : Config.Permission_profile.t option
+    ; manifest_grants : Config.Manifest_grant.t list
+    ; developer_scopes : Agent_protocol.Scope.Set.t
+    }
+
+  let load ~env ~path =
+    let open Result.Let_syntax in
+    let%bind context, forms = Local_policy_file.load ~env ~path in
+    let%bind sections = top_fields context forms in
+    let%bind () =
+      ensure_allowed
+        context
+        "$"
+        sections
+        [ "project_sources"
+        ; "authoring_project_access"
+        ; "authoring_upload_access"
+        ; "permission_profiles"
+        ; "manifest_grants"
+        ; "developer"
+        ; "developer_scopes"
+        ]
+    in
+    let%bind _ = required context "$" sections "developer" in
+    let%map _ = required context "$" sections "developer_scopes" in
+    { context; sections }
   ;;
 
   let bind (t : t) ~env ~operator_id =

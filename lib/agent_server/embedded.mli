@@ -56,6 +56,7 @@ val start
   -> ?root_invocation:
        Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.t
   -> ?project_sources:Project_source_configuration.t
+  -> ?recovery_capacity:Recovery_capacity_configuration.t
   -> ?local_policy:Config_validator.Embedded_local.t
   -> ?authoring_package_files:string list
        (** Absolute paths captured through the shared bounded loader before store
@@ -101,6 +102,7 @@ val open_local_host
   -> ?root_invocation:
        Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.t
   -> ?project_sources:Project_source_configuration.t
+  -> ?recovery_capacity:Recovery_capacity_configuration.t
   -> ?local_policy:Config_validator.Embedded_local.t
   -> ?authoring_package_files:string list
   -> ?authoring_budget:Chat_response.Authoring_validation.context_budget
@@ -129,6 +131,7 @@ val with_local_host
   -> ?root_invocation:
        Chat_response.Script_contract_plan.Program.Role.Moderator_invocation.t
   -> ?project_sources:Project_source_configuration.t
+  -> ?recovery_capacity:Recovery_capacity_configuration.t
   -> ?local_policy:Config_validator.Embedded_local.t
   -> ?authoring_package_files:string list
   -> ?authoring_budget:Chat_response.Authoring_validation.context_budget

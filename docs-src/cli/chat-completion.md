@@ -37,6 +37,19 @@ observations are printed on stderr. Observations can be partial, replaced or
 contain gaps; they are not the final transcript. Stdout is reserved for the
 complete canonical export when `-output-file` is omitted or `/dev/stdout`.
 
+## Capture recoverable context
+
+Add `-enable-recovery` to enroll a new or selected durable conversation. The
+session keeps its window ledger when the process exits. On the next invocation,
+use the same storage root and session ID. Observing an earlier run with
+`-run-id` is read-only and excludes enrollment.
+
+`-recovery-capacity-file FILE` selects the host's capacity policy for this
+invocation. You can supply it independently of enrollment. For automatic
+rollover, enroll the session and supply a policy that qualifies its actual
+model and profile each time you run the local host.
+[Local capacity file](../agent-server/configuration.md#local-recovery-capacity-file).
+
 ## Select execution mode
 
 `-run-mode single-turn` is the default. Ordinary and legacy prompts use their

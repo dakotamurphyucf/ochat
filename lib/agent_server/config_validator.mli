@@ -11,6 +11,14 @@ val validate
   -> Config_parser.Raw_config.t
   -> (Config.t, Config.Diagnostic.t list) result
 
+(** Read one explicitly selected local file containing the value of the daemon's
+    [recovery_capacity] setting. Uses the same target and reserve validation,
+    with bounded input and syntax. [off] yields [None]. *)
+val load_recovery_capacity
+  :  env:Eio_unix.Stdenv.base
+  -> path:string
+  -> (Recovery_capacity_configuration.t option, Config.Diagnostic.t list) result
+
 (** Local-stdio policy uses the same bounded source/read/upload, Prompt
     permission-profile, manifest-grant and Developer section grammars as server
     configuration. Permitted top-level sections are [project_sources],

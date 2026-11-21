@@ -465,9 +465,27 @@ let with_pending_diagnostics connection ~env ~session_id ~storage f =
   | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
 ;;
 
-let run options ~env ~daemon_options ~project_sources ~transcript_context =
+let run
+      ?(enable_recovery = false)
+      ?recovery_capacity
+      options
+      ~env
+      ~daemon_options
+      ~project_sources
+      ~transcript_context
+  =
   let open Result.Let_syntax in
-  if
+  if enable_recovery && Option.is_some options.Options.run_id
+  then
+    Error (invalid "-enable-recovery cannot change a session while observing a prior run")
+  else if
+    (enable_recovery || Option.is_some recovery_capacity)
+    &&
+    match options.storage with
+    | Transient -> true
+    | Default | Durable _ -> false
+  then Error (invalid "local recovery requires durable storage")
+  else if
     Frontend_transcript.Destination.conflicts_with
       ~env
       ~source_file:options.Options.definition_file
@@ -512,6 +530,7 @@ let run options ~env ~daemon_options ~project_sources ~transcript_context =
         ~sw
         ~env
         ~daemon_options
+        ?recovery_capacity
         ~root_invocation:Headless
         ?project_sources
         embedded_options
@@ -533,7 +552,54 @@ let run options ~env ~daemon_options ~project_sources ~transcript_context =
           Eio.Flow.copy_string
             (sprintf "[managed conversation %s]\n" (P.Id.Session.to_string session_id))
             (Eio.Stdenv.stderr env);
-          let%bind fields = snapshot connection session_id in
+          let%bind fields =
+            if not enable_recovery
+            then snapshot connection session_id
+            else (
+              (* This enrollment precedes selection of the execution anchor. Its private
+                 writes need not produce subscribed projection events. *)
+              let%bind selected =
+                Eio.Switch.run (fun admin_sw ->
+                  let%bind owner =
+                    C.Session_handle.attach
+                      ~sw:admin_sw
+                      ~clock:(Eio.Stdenv.clock env)
+                      ~connection
+                      ~session_id
+                      ~mode:Owner_read_write
+                      ~subscribe:false
+                      ()
+                  in
+                  Eio.Switch.on_release admin_sw (fun () -> C.Session_handle.close owner);
+                  let selected =
+                    (C.Session_handle.projection owner
+                     |> C.Projection.snapshot
+                     |> P.Public.Snapshot.fields)
+                      .session
+                  in
+                  let%bind () =
+                    Local_recovery_cli.enroll
+                      connection
+                      selected
+                      ~attachment:(C.Session_handle.attachment owner)
+                  in
+                  let%map () = C.Session_handle.detach owner in
+                  selected)
+              in
+              let%bind fields = snapshot connection session_id in
+              if
+                Int.equal fields.session.generation selected.generation
+                && Option.equal
+                     P.Id.Prompt_revision.equal
+                     fields.session.prompt_revision
+                     selected.prompt_revision
+              then Ok fields
+              else
+                Error
+                  (failure
+                     Conflict
+                     "selected source changed during local recovery enrollment"))
+          in
           let%bind completed =
             with_pending_diagnostics
               connection
@@ -613,6 +679,8 @@ let command =
          ~doc:
            "DIR Explicit external project-source root grant (repeatable); absent means \
             local-only."
+     and enable_recovery = Local_recovery_cli.enable_flag
+     and recovery_capacity_file = Local_recovery_cli.capacity_file
      and storage_root =
        flag
          "-storage-root"
@@ -665,6 +733,12 @@ let command =
        Agent_server.Project_source_configuration.validate_raw raw_project_sources
        |> Or_error.ok_exn;
        Io.run_main (fun env ->
+         let recovery_capacity =
+           Local_recovery_cli.load_capacity ~env recovery_capacity_file
+           |> Result.map_error ~f:(fun error ->
+             Sexp.to_string_hum (P.Error.sexp_of_t error))
+           |> Result.ok_or_failwith
+         in
          let project_sources =
            if List.is_empty project_roots
            then None
@@ -701,6 +775,8 @@ let command =
                ()
            in
            run
+             ~enable_recovery
+             ?recovery_capacity
              options
              ~env
              ~daemon_options:(Inference_composition.daemon_options inference_host)

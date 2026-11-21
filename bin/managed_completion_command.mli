@@ -61,7 +61,9 @@ end
     The actual owning Switch closes reader/handle before connection/host/provider.
     Original callbacks, cancellation and backtraces remain original. *)
 val run
-  :  Options.t
+  :  ?enable_recovery:bool
+  -> ?recovery_capacity:Agent_server.Recovery_capacity_configuration.t
+  -> Options.t
   -> env:Eio_unix.Stdenv.base
   -> daemon_options:Agent_server.Daemon.options
   -> project_sources:Agent_server.Project_source_configuration.t option

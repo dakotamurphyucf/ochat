@@ -478,6 +478,8 @@ let initialize connection =
         ; Agent_protocol.Developer_repl_wire.Features.repl
         ; Agent_protocol.Developer_repl_wire.Features.events
         ; Agent_protocol.Developer_trace_wire.Features.trace
+        ; Agent_protocol.Recovery_query.Features.windows
+        ; Agent_protocol.Recovery_rollover_control.feature
         ]
       ~event_encodings:[ Json ]
       ~max_inbound_event_bytes:(16 * 1024 * 1024)
@@ -1045,6 +1047,7 @@ let open_local_host
       ?(daemon_options = Daemon.default_options)
       ?root_invocation
       ?project_sources
+      ?recovery_capacity
       ?local_policy
       ?(authoring_package_files = [])
       ?authoring_budget
@@ -1067,7 +1070,10 @@ let open_local_host
   let%bind data_root, temporary_root = data_root env options in
   let config = config ~project_sources options data_root in
   let config =
-    { config with server = { config.server with authoring_packages; authoring_budget } }
+    { config with
+      server =
+        { config.server with authoring_packages; authoring_budget; recovery_capacity }
+    }
   in
   open_owned_host
     ~sw
@@ -1097,6 +1103,7 @@ let with_local_host
       ?daemon_options
       ?root_invocation
       ?project_sources
+      ?recovery_capacity
       ?local_policy
       ?authoring_package_files
       ?authoring_budget
@@ -1111,6 +1118,7 @@ let with_local_host
       ?daemon_options
       ?root_invocation
       ?project_sources
+      ?recovery_capacity
       ?local_policy
       ?authoring_package_files
       ?authoring_budget
@@ -1127,6 +1135,7 @@ let start
       ?daemon_options
       ?root_invocation
       ?project_sources
+      ?recovery_capacity
       ?local_policy
       ?authoring_package_files
       ?authoring_budget
@@ -1142,6 +1151,7 @@ let start
       ?project_sources
       ?authoring_package_files
       ?authoring_budget
+      ?recovery_capacity
       ?local_policy
       options
   in
