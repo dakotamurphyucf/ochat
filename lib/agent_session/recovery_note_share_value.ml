@@ -70,32 +70,16 @@ module Revision = struct
 end
 
 module Reference = struct
-  type t =
-    { source : P.Session_ref.t
-    ; nonce : P.Id.Session_incarnation.t
-    ; id : Revision.t
-    }
-  [@@deriving equal]
+  include P.Recovery_note_share_control.Reference
 
-  let source t = t.source
-
-  let to_json t =
-    `Object
-      [ "source", P.Session_ref.to_json t.source
-      ; "nonce", P.Id.Session_incarnation.to_json t.nonce
-      ; "id", counter_to_json t.id
-      ]
-  ;;
-
+  (* Older canonical documents permit additive fields inside their carrier. *)
   let of_json json =
     let open Result.Let_syntax in
     let%bind fields = J.fields json in
     let%bind source = J.required_as fields "source" P.Session_ref.of_json in
     let%bind nonce = J.required_as fields "nonce" P.Id.Session_incarnation.of_json in
     let%bind id = J.required_as fields "id" (counter_of_json Revision.of_int64) in
-    if Int64.(id > 0L)
-    then Ok { source; nonce; id }
-    else Error (invalid "invalid recovery note share ID")
+    create source ~nonce ~id:(Revision.to_int64 id)
   ;;
 end
 

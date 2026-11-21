@@ -62,7 +62,7 @@ let note_to_json ({ selection = { id; revision }; path; content; changed_at } : 
   `Object
     [ "id", counter_to_json id
     ; "revision", counter_to_json revision
-    ; "path", `String path
+    ; "path", `String (Note_path.to_string path)
     ; "content", `String content
     ; "changed_at", counter_to_json changed_at
     ]
@@ -174,13 +174,16 @@ let validate_notes state =
             Int64.(note.changed_at > state.revision)
             || (not (valid_version_at note.selection note.changed_at))
             || Set.mem revisions note.changed_at
-            || Set.mem paths note.path
+            || Set.mem paths (Note_path.to_string note.path)
           then Error (invalid "invalid or duplicate recovery note head")
           else (
             match Map.add by_id ~key:note.selection.id ~data:note with
             | `Duplicate -> Error (invalid "duplicate recovery note ID")
             | `Ok by_id ->
-              Ok (Set.add paths note.path, Set.add revisions note.changed_at, by_id)))
+              Ok
+                ( Set.add paths (Note_path.to_string note.path)
+                , Set.add revisions note.changed_at
+                , by_id )))
     in
     by_id)
 ;;

@@ -119,6 +119,7 @@ let has_command_receipt = function
   | Recovery_range _
   | Recovery_asset_read _
   | Recovery_status _
+  | Recovery_note_shares _
   | Recovery_rollover _
   | Goal_query _
   | Recovery_enable _
@@ -1045,6 +1046,7 @@ type recovery_command =
   | Read_asset of P.Recovery_asset_read.t
   | Inspect_rollover of P.Recovery_rollover_control.Inspect.t
   | Request_rollover of P.Recovery_rollover_control.Request.t
+  | Note_shares of P.Recovery_note_share_control.Request.t
 
 let request_recovery t ~initialized_as command =
   let command =
@@ -1056,6 +1058,7 @@ let request_recovery t ~initialized_as command =
     | Read_asset request -> P.Command.Recovery_asset_read request
     | Inspect_rollover request -> P.Command.Recovery_status request
     | Request_rollover request -> P.Command.Recovery_rollover request
+    | Note_shares request -> P.Command.Recovery_note_shares request
   in
   let check () =
     if Option.exists (initialization t) ~f:(phys_equal initialized_as)

@@ -15403,6 +15403,18 @@ module Recovery_note_shares = struct
       ~check_owner:(check_owner t source ~session)
   ;;
 
+  let inspect_management t ~(source : Session_registry.entry) ~access path =
+    let open Result.Let_syntax in
+    let%bind session = session t source in
+    Actor.inspect_management source.actor ~access ~check_owner:(check_owner t source ~session) path
+  ;;
+
+  let check_management_now t ~(source : Session_registry.entry) ~access =
+    let open Result.Let_syntax in
+    let%bind session = session t source in
+    Actor.check_management_now source.actor ~access ~check_owner:(check_owner t source ~session)
+  ;;
+
   let create t ~(source : Session_registry.entry) ~access ~recipient ~key request =
     let open Result.Let_syntax in
     let%bind source_session = session t source in

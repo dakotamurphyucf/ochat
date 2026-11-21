@@ -932,6 +932,19 @@ module Recovery_note_shares : sig
     -> access:Agent_session.Recovery_note_access.t
     -> (Agent_session.Recovery_note_share.Revision.t, Agent_protocol.Error.t) result
 
+  val inspect_management
+    :  t
+    -> source:Session_registry.entry
+    -> access:Agent_session.Recovery_note_access.t
+    -> Agent_protocol.Recovery_note_share_control.Path.t option
+    -> (Agent_protocol.Recovery_note_share_control.Metadata.t, Agent_protocol.Error.t) result
+
+  val check_management_now
+    :  t
+    -> source:Session_registry.entry
+    -> access:Agent_session.Recovery_note_access.t
+    -> (unit, Agent_protocol.Error.t) result
+
   val create
     :  t
     -> source:Session_registry.entry

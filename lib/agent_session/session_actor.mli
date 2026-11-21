@@ -4091,6 +4091,22 @@ module Recovery_note_shares : sig
     -> check_owner:check_owner
     -> (Recovery_note_share.Revision.t, Agent_protocol.Error.t) result
 
+  (** Snapshot both current revisions and an optional exact path in one mailbox
+      turn. The reply contains at most one identity and revision. *)
+  val inspect_management
+    :  actor
+    -> access:Recovery_note_access.t
+    -> check_owner:check_owner
+    -> Agent_protocol.Recovery_note_share_control.Path.t option
+    -> (Agent_protocol.Recovery_note_share_control.Metadata.t, Agent_protocol.Error.t) result
+
+  (** Nonyielding final response check on this actor's creating domain. *)
+  val check_management_now
+    :  actor
+    -> access:Recovery_note_access.t
+    -> check_owner:check_owner
+    -> (unit, Agent_protocol.Error.t) result
+
   (** Idempotently bind this actual durable target before entering the source
       Actor. Establishes only an owner incarnation, never a local or incoming
       grant. For a trusted host after source management admission. *)

@@ -4,6 +4,7 @@ let cases =
   [ ( "http.audit-attribution-pagination-tamper-restart"
     , Support.Data_integrity_http.test_audit )
   ; "http.blob-bounds-digest-foreign-ownership", Support.Data_integrity_http.test_blobs
+  ; "daemon-recovery.note-share-operator", Recovery_note_share_operator_scenario.run
   ; "daemon-recovery.asset-publication", Support.Data_integrity_http.test_recovery_assets
   ; "daemon-recovery.converter-adoption", Support.Recovery_asset_converter.run
   ; "daemon-recovery.configured-capacity", Recovery_capacity_scenario.run

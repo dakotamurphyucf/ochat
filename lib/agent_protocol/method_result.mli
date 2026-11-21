@@ -165,6 +165,7 @@ type t =
   | Recovery_asset_read of (Recovery_asset_read.Reply.t[@sexp.opaque])
   | Recovery_status of (Recovery_rollover_control.Status.t[@sexp.opaque])
   | Recovery_rollover of (Recovery_rollover_control.Receipt.t[@sexp.opaque])
+  | Recovery_note_shares of (Recovery_note_share_control.Response.t[@sexp.opaque])
   | Goal_query of (Goal_query.Result.t[@sexp.opaque])
   | Goal_control of (Goal_control.Result.t[@sexp.opaque])
   | Recurrence_query of (Recurrence_query.Result.t[@sexp.opaque])

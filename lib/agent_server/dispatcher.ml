@@ -114,6 +114,15 @@ let recovery_control_method name =
   String.equal name R.Inspect.method_name || String.equal name R.Request.method_name
 ;;
 
+let recovery_note_share_method method_ =
+  List.mem Agent_protocol.Recovery_note_share_control.Request.methods method_ ~equal:String.equal
+;;
+
+let recovery_note_share_limits =
+  query_envelope_limits ~max_depth:16 ~max_fields:48 ~max_nodes:96
+    Agent_protocol.Recovery_note_share_control.max_envelope_bytes
+;;
+
 let recovery_control_limits =
   query_envelope_limits ~max_depth:16 ~max_fields:108 ~max_nodes:220
     Agent_protocol.Recovery_rollover_control.max_envelope_bytes
@@ -153,6 +162,8 @@ let operator_query_limits method_ =
   then Some ("Recovery", asset_read_limits)
   else if recovery_control_method method_
   then Some ("Recovery", recovery_control_limits)
+  else if recovery_note_share_method method_
+  then Some ("Recovery note share", recovery_note_share_limits)
   else if recovery_method method_
   then Some ("Recovery", recovery_envelope_limits)
   else if
@@ -525,7 +536,7 @@ end
 let dispatch_output t ?actor ~context = function
   | Agent_protocol.Envelope.Request value ->
     let%bind.Result () =
-      if recovery_method value.method_
+      if recovery_method value.method_ || recovery_note_share_method value.method_
       then bounded_request_id ~family:"recovery" value.id
       else Ok ()
     in

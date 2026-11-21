@@ -3,17 +3,11 @@
     request, serialize mutation of the current catalog, and publish the new
     catalog and receipt together after durable admission. *)
 
-module Note_path : sig
-  type t [@@deriving compare, equal, sexp_of]
-
-  (** Case-sensitive virtual path. One to eight slash-separated components,
-      each at most 63 bytes using ASCII letters, digits, dot, hyphen or
-      underscore. Empty, dot and dot-dot components are invalid. Total length
-      is at most 240 bytes. *)
-  val of_string : string -> (t, Agent_protocol.Error.t) result
-
-  val to_string : t -> string
-end
+(** Case-sensitive virtual path. One to eight slash-separated components,
+    each at most 63 bytes using ASCII letters, digits, dot, hyphen or
+    underscore. Empty, dot and dot-dot components are invalid. Total length
+    is at most 240 bytes. *)
+module Note_path = Agent_protocol.Recovery_note_share_control.Path
 
 module Note_id : sig
   type t [@@deriving compare, equal, sexp_of]

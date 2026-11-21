@@ -11,13 +11,14 @@ let incarnation t ~generation =
 ;;
 
 let owned_reference state (reference : Reference.t) =
-  P.Session_ref.equal reference.source state.owner
-  && P.Id.Session_incarnation.equal reference.nonce state.nonce
+  Reference.matches reference ~source:state.owner ~nonce:state.nonce
 ;;
 
 let find_grant state (reference : Reference.t) =
   if owned_reference state reference
-  then List.find state.grants ~f:(fun grant -> Revision.equal grant.id reference.id)
+  then
+    List.find state.grants ~f:(fun grant ->
+      Int64.equal (Revision.to_int64 grant.id) (Reference.id reference))
   else None
 ;;
 
@@ -63,10 +64,13 @@ module Journal = struct
   ;;
 
   let receipt state (record : recorded_receipt) =
-    Receipt.
-      { reference = { source = state.owner; nonce = state.nonce; id = record.grant_id }
-      ; revision = record.revision
-      }
+    let%map.Result route =
+      Reference.create
+        state.owner
+        ~nonce:state.nonce
+        ~id:(Revision.to_int64 record.grant_id)
+    in
+    Receipt.{ reference = route; revision = record.revision }
   ;;
 
   (* A writer retry retains its original request, even if server time advanced. *)
@@ -166,7 +170,7 @@ module Journal = struct
     match List.find state.receipts ~f:same_key with
     | Some record ->
       if String.equal record.digest digest
-      then Ok (`Replayed (receipt state record))
+      then Result.map (receipt state record) ~f:(fun receipt -> `Replayed receipt)
       else
         Error
           (error Idempotency_conflict "recovery note share key has different arguments")
@@ -176,7 +180,8 @@ module Journal = struct
       in
       let record = { principal; key; digest; grant_id; revision } in
       let receipts = List.take (record :: state.receipts) max_receipts in
+      let%bind receipt = receipt state record in
       let%map next = with_state t { state with revision; grants; receipts } in
-      `Applied (next, receipt state record)
+      `Applied (next, receipt)
   ;;
 end

@@ -82,7 +82,7 @@ let required_scope = function
   | Session_delete _ | Session_restore _ -> Some Delete_sessions
   | Permission_list _ -> Some View_security_state
   | Permission_respond _ -> Some Answer_approvals
-  | Grant_list _ | Grant_revoke _ -> Some Manage_grants
+  | Grant_list _ | Grant_revoke _ | Recovery_note_shares _ -> Some Manage_grants
   | Audit_read _ -> Some Read_audit
   | Ingress_submit _ -> Some Submit_ingress
   | Job_list _

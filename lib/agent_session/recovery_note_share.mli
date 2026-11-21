@@ -28,7 +28,7 @@ module Revision : sig
 end
 
 module Reference : sig
-  type t [@@deriving equal]
+  type t = Agent_protocol.Recovery_note_share_control.Reference.t [@@deriving equal]
 
   val source : t -> Agent_protocol.Session_ref.t
   val to_json : t -> Jsonaf.t

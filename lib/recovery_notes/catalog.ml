@@ -63,7 +63,11 @@ let request_digest mutation =
     in
     match mutation with
     | Create { expected_catalog_revision; path; content } ->
-      [ "create"; Int64.to_string expected_catalog_revision; path; content ]
+      [ "create"
+      ; Int64.to_string expected_catalog_revision
+      ; Note_path.to_string path
+      ; content
+      ]
     | Replace request -> edit_fields "replace" request
     | Append request -> edit_fields "append" request
     | Delete { id; revision } ->

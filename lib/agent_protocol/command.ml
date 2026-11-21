@@ -38,6 +38,7 @@ type t =
   | Recovery_asset_read of (Recovery_asset_read.t[@sexp.opaque])
   | Recovery_status of (Recovery_rollover_control.Inspect.t[@sexp.opaque])
   | Recovery_rollover of (Recovery_rollover_control.Request.t[@sexp.opaque])
+  | Recovery_note_shares of (Recovery_note_share_control.Request.t[@sexp.opaque])
   | Goal_query of (Goal_query.Request.t[@sexp.opaque])
   | Goal_control of (Goal_control.Request.t[@sexp.opaque])
   | Recurrence_query of (Recurrence_query.Request.t[@sexp.opaque])
@@ -135,6 +136,7 @@ let method_name = function
   | Recovery_asset_read _ -> Recovery_asset_read.method_name
   | Recovery_status _ -> Recovery_rollover_control.Inspect.method_name
   | Recovery_rollover _ -> Recovery_rollover_control.Request.method_name
+  | Recovery_note_shares v -> Recovery_note_share_control.Request.method_name v
   | Goal_query request -> Goal_query.Request.method_name request
   | Goal_control request -> Goal_control.Request.method_name request
   | Recurrence_query request -> Recurrence_query.Request.method_name request
@@ -236,6 +238,7 @@ let params = function
   | Recovery_asset_read v -> Recovery_asset_read.to_json v
   | Recovery_status v -> Recovery_rollover_control.Inspect.to_json v
   | Recovery_rollover v -> Recovery_rollover_control.Request.to_json v
+  | Recovery_note_shares v -> Recovery_note_share_control.Request.to_json v
   | Goal_query request -> Goal_query.Request.params request
   | Goal_control request -> Goal_control.Request.params request
   | Recurrence_query request -> Recurrence_query.Request.params request
@@ -486,6 +489,11 @@ let decoders =
     , fun params ->
         Recurrence_query.Request.of_method_and_params ~method_ ~params
         |> Result.map ~f:(fun request -> Recurrence_query request) ))
+  @ List.map Recovery_note_share_control.Request.methods ~f:(fun method_ ->
+    ( method_
+    , fun params ->
+        Recovery_note_share_control.Request.of_method_and_params ~method_ params
+        |> Result.map ~f:(fun request -> Recovery_note_shares request) ))
   @ List.map Recurrence_control.Request.methods ~f:(fun method_ ->
     ( method_
     , fun params ->

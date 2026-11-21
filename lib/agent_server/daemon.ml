@@ -2126,6 +2126,7 @@ let compose
       | Session_run_start _
       | Recurrence_control _
       | Recovery_enable _
+      | Recovery_note_shares _
       | Recovery_rollover _
       | Goal_control _
       | Session_send_message _

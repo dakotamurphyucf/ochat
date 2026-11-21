@@ -5565,6 +5565,9 @@ module Recovery_note_share_request = struct
 
   type _ t =
     | Management_revision : Recovery_note_access.t * check_owner -> S.Revision.t t
+    | Inspect_management :
+        Recovery_note_access.t * check_owner * P.Recovery_note_share_control.Path.t option
+        -> P.Recovery_note_share_control.Metadata.t t
     | Establish_target : check_owner -> target t
     | Select : check_owner * reader * S.Reference.t -> disclosure t
     | Create :
@@ -50061,7 +50064,8 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Abort_lifecycle _
   | Goal_request (Read _)
   | Context_request (Recovery_note (Read _ | List _ | Query _ | Shared_operation _))
-  | Context_request (Recovery_note_share (Management_revision _ | Select _))
+  | Context_request
+      (Recovery_note_share (Management_revision _ | Inspect_management _ | Select _))
   | State
   | Observe_resource_state
   | Snapshot
@@ -60868,14 +60872,47 @@ let recovery_share_witness observe =
   Recovery_note_share_request.{ incarnation; check_current }
 ;;
 
-let recovery_share_management t ~access ~check_owner =
+let recovery_share_management ?(publication = false) t ~access ~check_owner =
   let open Result.Let_syntax in
-  let%bind owner = recovery_share_owner t ~check_owner ~publication:false in
+  let%bind owner = recovery_share_owner t ~check_owner ~publication in
   let%bind principal, attachment_id =
     Recovery_note_access.check_management access t.state ~owner
   in
   let%map () = require_recovery_owner_writer t ~principal ~attachment_id in
   owner, principal
+;;
+
+let recovery_share_revision t =
+  Option.value_map
+    t.state.recovery_note_shares
+    ~default:Recovery_note_share.Revision.initial
+    ~f:Recovery_note_share.revision
+;;
+
+let inspect_recovery_share t path =
+  let module C = Recovery_notes.Catalog in
+  let module Q = Agent_protocol.Recovery_note_share_control in
+  let open Result.Let_syntax in
+  let catalog_revision =
+    Option.value_map t.state.recovery_notes ~default:0L ~f:(fun catalog ->
+      C.Catalog_revision.to_int64 (C.revision catalog))
+  in
+  let share_revision = recovery_share_revision t |> Recovery_note_share.Revision.to_int64 in
+  let%bind basis = Q.Basis.create ~catalog_revision ~share_revision in
+  let note =
+    Option.bind path ~f:(fun path ->
+      Option.bind t.state.recovery_notes ~f:(fun catalog ->
+        List.find (C.list catalog) ~f:(fun metadata -> C.Note_path.equal metadata.path path)))
+  in
+  let%map selection =
+    match note with
+    | None -> Ok None
+    | Some { selection; _ } ->
+      let id = C.Note_id.to_int64 selection.id in
+      let revision = C.Note_revision.to_int64 selection.revision in
+      Result.map (Q.Selection.create ~id ~revision) ~f:Option.some
+  in
+  Q.Metadata.{ basis; selection }
 ;;
 
 let recovery_share_new_ledger t ~owner =
@@ -60981,15 +61018,14 @@ let handle_recovery_note_share
   : type a. t -> a Recovery_note_share_request.t -> (a, Agent_protocol.Error.t) result
   =
   fun t request ->
-  let module S = Recovery_note_share in
   let open Result.Let_syntax in
   match request with
   | Management_revision (access, check_owner) ->
     let%map _ = recovery_share_management t ~access ~check_owner in
-    Option.value_map
-      t.state.recovery_note_shares
-      ~default:S.Revision.initial
-      ~f:S.revision
+    recovery_share_revision t
+  | Inspect_management (access, check_owner, path) ->
+    let%bind _ = recovery_share_management t ~access ~check_owner in
+    inspect_recovery_share t path
   | Establish_target check_owner ->
     let observe () = recovery_share_incarnation t ~check_owner in
     let%bind owner = recovery_share_owner t ~check_owner ~publication:false in
@@ -66581,6 +66617,14 @@ module Recovery_note_shares = struct
 
   let management_revision t ~access ~check_owner =
     request t (Management_revision (access, check_owner))
+  ;;
+
+  let inspect_management t ~access ~check_owner path =
+    request t (Inspect_management (access, check_owner, path))
+  ;;
+
+  let check_management_now t ~access ~check_owner =
+    recovery_share_management t ~access ~check_owner ~publication:true |> Result.map ~f:ignore
   ;;
 
   let establish_target t ~check_owner = request t (Establish_target check_owner)

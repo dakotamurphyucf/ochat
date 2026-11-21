@@ -77,7 +77,9 @@ let read_text connection request =
   let%bind initialized_as =
     check_host connection ~feature:Range.feature (Range.session request)
   in
-  let%bind result = Connection.request_recovery connection ~initialized_as (Read_text request) in
+  let%bind result =
+    Connection.request_recovery connection ~initialized_as (Read_text request)
+  in
   match result with
   | Recovery_range slice ->
     let%map () = Range.Reply.validate slice ~request in
@@ -132,3 +134,49 @@ let request_rollover connection request =
     receipt
   | _ -> Error (P.Error.invalid_request "unexpected recovery rollover result")
 ;;
+
+module Note_shares = struct
+  module Wire = P.Recovery_note_share_control
+  module W = Wire
+
+  let execute connection request =
+    let open Result.Let_syntax in
+    let source = W.Request.source request in
+    let%bind initialized_as = check_host connection ~feature:W.feature source.session in
+    let%bind result =
+      Connection.request_recovery connection ~initialized_as (Note_shares request)
+    in
+    match result with
+    | Recovery_note_shares result ->
+      let%map () = W.Response.validate result ~request in
+      result
+    | _ -> Error (P.Error.invalid_request "unexpected recovery note management reply")
+  ;;
+
+  let inspect connection source ?path () =
+    match%bind.Result execute connection (Inspect { source; path }) with
+    | Inspected metadata -> Ok metadata
+    | Shared _ | Revoked _ ->
+      Error (P.Error.invalid_request "unexpected note metadata reply")
+  ;;
+
+  let create connection source ~expected ~selection ~recipient ~expires_at ~key =
+    match%bind.Result
+      execute
+        connection
+        (Share { source; expected; selection; recipient; expires_at; key })
+    with
+    | Shared receipt -> Ok receipt
+    | Inspected _ | Revoked _ ->
+      Error (P.Error.invalid_request "unexpected note share receipt")
+  ;;
+
+  let revoke connection source ~expected_share_revision reference ~key =
+    match%bind.Result
+      execute connection (Revoke { source; expected_share_revision; reference; key })
+    with
+    | Revoked receipt -> Ok receipt
+    | Inspected _ | Shared _ ->
+      Error (P.Error.invalid_request "unexpected note revocation receipt")
+  ;;
+end

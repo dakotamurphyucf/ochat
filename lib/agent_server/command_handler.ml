@@ -169,6 +169,7 @@ let create
     ; Agent_protocol.Recovery_text_range.feature, Option.is_some seed_factory
     ; Agent_protocol.Recovery_asset_read.feature, Option.is_some seed_factory
     ; Agent_protocol.Recovery_rollover_control.feature, Option.is_some seed_factory
+    ; Agent_protocol.Recovery_note_share_control.feature, Option.is_some seed_factory
     ; Agent_protocol.Goal_query.Features.inspect, Option.is_some goal_read
     ; Agent_protocol.Goal_control.Features.control, Option.is_some goal_operator
     ; Agent_protocol.Recurrence_query.Features.inspect, Option.is_some recurrence_read
@@ -520,6 +521,7 @@ let idempotency = function
   | Recovery_asset_read _
   | Recovery_status _
   | Recovery_rollover _
+  | Recovery_note_shares _
   | Goal_query _
   | Goal_control _
   | Recurrence_query _
@@ -3058,6 +3060,7 @@ let prepared_writer_attachment command =
   | Recovery_asset_read _
   | Recovery_status _
   | Recovery_rollover _
+  | Recovery_note_shares _
   | Goal_query _
   | Goal_control _
   | Recurrence_query _
@@ -3249,6 +3252,14 @@ let dispatch_authorized
       ~attachment_id:request.attachment_id (fun entry ->
         let%map receipt = Recovery_window_operator.rollover service entry ~on_release request in
         Agent_protocol.Method_result.Recovery_rollover receipt)
+  | Recovery_note_shares request ->
+    let%map.Result result =
+      Recovery_note_share_operator.dispatch t.seed_factory ~context ~actor
+        ~registry:t.registry
+        ~server_id:(Agent_store.Session_store.server_id t.session_store)
+        ~on_release request
+    in
+    Agent_protocol.Method_result.Recovery_note_shares result
   | Recovery_windows request ->
     let open Result.Let_syntax in
     let%bind service = recovery_window_operator t context actor in
@@ -3469,6 +3480,9 @@ let command_session_id = function
   | Recurrence_control request ->
     Some (Agent_protocol.Session_ref.session_id request.session)
   | Recovery_enable request -> Some (Agent_protocol.Session_ref.session_id request.session)
+  | Recovery_note_shares request ->
+    let source = Agent_protocol.Recovery_note_share_control.Request.source request in
+    Some (Agent_protocol.Session_ref.session_id source.session)
   | Recovery_windows request -> Some (Agent_protocol.Session_ref.session_id request.session)
   | Recovery_status request -> Some (Agent_protocol.Session_ref.session_id request.session)
   | Recovery_rollover request ->
@@ -3691,6 +3705,7 @@ let receipt_summary ~session_id result =
   | Recovery_asset_read _
   | Recovery_status _
   | Recovery_rollover _
+  | Recovery_note_shares _
   | Goal_query _
   | Goal_control _
   | Recurrence_query _
@@ -4273,7 +4288,8 @@ let handle t ?actor ?(on_release = ignore) ~context ~inference_budget command =
       | Recovery_range _
       | Recovery_asset_read _
       | Recovery_status _
-      | Recovery_rollover _ -> Some "context recovery"
+      | Recovery_rollover _
+      | Recovery_note_shares _ -> Some "context recovery"
       | Goal_query _ | Goal_control _ -> Some "Goal"
       | Recurrence_query _ | Recurrence_control _ -> Some "Recurrence"
       | _ -> None
@@ -4290,7 +4306,8 @@ let handle t ?actor ?(on_release = ignore) ~context ~inference_budget command =
            | Recovery_range _
            | Recovery_asset_read _
            | Recovery_status _
-           | Recovery_rollover _ )
+           | Recovery_rollover _
+           | Recovery_note_shares _ )
          , _ ) ->
          let%bind check =
            Result.of_option

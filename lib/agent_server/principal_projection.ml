@@ -341,6 +341,10 @@ let project_result principal = function
     | Goal_query _
     | Recurrence_query _ ) as value ->
     operator_result value ~has_required_scope:(has principal View_session_transcript)
+  | Recovery_note_shares _ as value ->
+    operator_result
+      value
+      ~has_required_scope:(has principal View_session_transcript && has principal Manage_grants)
   | (Recovery_enable _ | Recovery_rollover _ | Goal_control _ | Recurrence_control _) as value ->
     operator_result
       value

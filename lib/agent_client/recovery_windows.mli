@@ -48,3 +48,35 @@ val request_rollover
   :  Connection.t
   -> Agent_protocol.Recovery_rollover_control.Request.t
   -> (Agent_protocol.Recovery_rollover_control.Receipt.t, Agent_protocol.Error.t) result
+
+(** Owner-writer operations over [recovery.note_share_control]. A reconnect
+    must obtain its own current attachment. Retrying the exact application key
+    and intent re-enters source authorization and the canonical receipt. *)
+module Note_shares : sig
+  module Wire = Agent_protocol.Recovery_note_share_control
+
+  val inspect
+    :  Connection.t
+    -> Wire.Source.t
+    -> ?path:Wire.Path.t
+    -> unit
+    -> (Wire.Metadata.t, Agent_protocol.Error.t) result
+
+  val create
+    :  Connection.t
+    -> Wire.Source.t
+    -> expected:Wire.Basis.t
+    -> selection:Wire.Selection.t
+    -> recipient:Agent_protocol.Session_ref.t
+    -> expires_at:Agent_protocol.Timestamp.t
+    -> key:Agent_protocol.Idempotency_key.t
+    -> (Wire.Receipt.t, Agent_protocol.Error.t) result
+
+  val revoke
+    :  Connection.t
+    -> Wire.Source.t
+    -> expected_share_revision:int64
+    -> Wire.Reference.t
+    -> key:Agent_protocol.Idempotency_key.t
+    -> (Wire.Receipt.t, Agent_protocol.Error.t) result
+end

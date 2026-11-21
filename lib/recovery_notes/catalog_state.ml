@@ -8,31 +8,7 @@ let max_catalog_bytes = 2 * 1024 * 1024
 let max_notes = 128
 let max_receipts = 512
 
-module Note_path = struct
-  type t = string [@@deriving compare, equal, sexp_of]
-
-  let valid_component component =
-    let length = String.length component in
-    length > 0
-    && length <= 63
-    && (not (String.equal component "." || String.equal component ".."))
-    && String.for_all component ~f:(function
-      | 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '.' | '-' | '_' -> true
-      | _ -> false)
-  ;;
-
-  let of_string path =
-    if String.length path > 240
-    then Error (invalid "recovery note path exceeds 240 bytes")
-    else (
-      let components = String.split path ~on:'/' in
-      if List.length components <= 8 && List.for_all components ~f:valid_component
-      then Ok path
-      else Error (invalid "invalid recovery note path component"))
-  ;;
-
-  let to_string t = t
-end
+module Note_path = P.Recovery_note_share_control.Path
 
 module Note_id = struct
   type t = int64 [@@deriving compare, equal, sexp_of]
