@@ -29,9 +29,17 @@ let guarded principal live =
   Operator_authorization.guarded ~principal ~is_current:(fun () -> !live)
 ;;
 
-let with_recoverable_episode ?test_root ?(wrap_env = Fn.id) ?prompt_text ?post_stream f =
+let with_recoverable_episode
+      ?test_root
+      ?timeout
+      ?(wrap_env = Fn.id)
+      ?prompt_text
+      ?post_stream
+      f
+  =
   with_recoverable_fixture
     ?test_root
+    ?timeout
     ~wrap_env
     ?prompt_text
     ?post_stream
@@ -97,8 +105,9 @@ let with_recoverable_episode ?test_root ?(wrap_env = Fn.id) ?prompt_text ?post_s
        f env sw root daemon policy entry runtime counters session admission old_live held)
 ;;
 
-let with_episode ?wrap_env ?prompt_text ?post_stream f =
+let with_episode ?timeout ?wrap_env ?prompt_text ?post_stream f =
   with_recoverable_episode
+    ?timeout
     ?wrap_env
     ?prompt_text
     ?post_stream

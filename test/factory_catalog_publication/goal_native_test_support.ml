@@ -84,15 +84,18 @@ let with_ordinary_owner daemon entry ~v1 f =
          f None))
 ;;
 
+let is_quiet (current : A.Session_state.t) =
+  Option.is_none current.active_operation
+  && List.for_all current.moderator_executions ~f:(fun execution ->
+    match execution.P.Moderator_execution.status with
+    | Completed _ | Failed _ | Interrupted _ -> true
+    | Running -> false)
+;;
+
 let await_quiet entry =
   let rec loop () =
     let current = state entry in
-    if
-      Option.is_none current.active_operation
-      && List.for_all current.moderator_executions ~f:(fun execution ->
-        match execution.P.Moderator_execution.status with
-        | Completed _ | Failed _ | Interrupted _ -> true
-        | Running -> false)
+    if is_quiet current
     then current
     else (
       Eio.Fiber.yield ();
@@ -153,7 +156,7 @@ let await_activation loaded runtime =
   assert (Option.is_none current.active_operation)
 ;;
 
-let with_callback ?test_root ?(wrap_env = Fn.id) ~v1 f =
+let with_callback ?test_root ?timeout ?(wrap_env = Fn.id) ~v1 f =
   let ordinal = ref 0 in
   let ordinary_entered, ordinary_entered_u = Eio.Promise.create () in
   let ordinary_release, ordinary_release_u = Eio.Promise.create () in
@@ -178,6 +181,7 @@ let with_callback ?test_root ?(wrap_env = Fn.id) ~v1 f =
   in
   Staging.with_recoverable_episode
     ?test_root
+    ?timeout
     ~wrap_env
     ~prompt_text:(prompt ~v1)
     ~post_stream
@@ -203,7 +207,11 @@ let with_callback ?test_root ?(wrap_env = Fn.id) ~v1 f =
            let held = set_passive daemon entry in
            let request = Staging.exact_request held ~key:"native-goal-command" in
            with_ordinary_owner daemon entry ~v1 (fun ordinary_receipt ->
-             Eio.Promise.await ordinary_entered;
+             Fixture_phase.within
+               ~clock:(Eio.Stdenv.mono_clock env)
+               ~on_timeout:(fun () -> [ Fixture_phase.snapshot (state entry) ])
+               "entering the held ordinary provider"
+               (fun () -> Eio.Promise.await ordinary_entered);
              let operation = Option.value_exn (state entry).active_operation in
              Option.iter ordinary_receipt ~f:(fun ordinary_receipt ->
                assert (

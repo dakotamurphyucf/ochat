@@ -743,7 +743,7 @@ let with_accepted_start
             | Phased _ -> run ()))
 ;;
 
-let run ?(recurrence = false) ~v1 () =
+let run ?(recurrence = false) ?timeout_scope ~v1 () =
   let providers = ref 0
   and ports = ref 0
   and transcripts = ref [] in
@@ -770,8 +770,18 @@ let run ?(recurrence = false) ~v1 () =
           base.runtime_inference_ports actor)
     }
   in
-  let with_fixture = with_accepted_start ~recurrence ~v1 ~policy ~providers in
+  let with_fixture =
+    with_accepted_start ?timeout_scope ~recurrence ~v1 ~policy ~providers
+  in
   with_fixture (fun env _sw _root daemon entry fixture ->
+    let phase name f =
+      Fixture_phase.within
+        ~clock:(Eio.Stdenv.mono_clock env)
+        ~on_timeout:(fun () ->
+          [ [%sexp (!providers : int)]; Fixture_phase.snapshot (state entry) ])
+        name
+        f
+    in
     protect_cleanup ~finally:release_provider (fun () ->
       let { before = _
           ; invocation
@@ -794,8 +804,10 @@ let run ?(recurrence = false) ~v1 () =
         ~finally:(fun () -> Driver.close driver)
         (fun () ->
            let ports_before = !ports in
-           Driver.process_entry driver entry |> protocol_ok;
-           Eio.Promise.await entered;
+           phase "dispatching the admitted native Start" (fun () ->
+             Driver.process_entry driver entry |> protocol_ok);
+           phase "entering the first native Start provider" (fun () ->
+             Eio.Promise.await entered);
            let during = state entry in
            completed_callbacks during;
            let _, admitted = start_invocation during in
@@ -871,6 +883,7 @@ let run ?(recurrence = false) ~v1 () =
               terminal ACK retires the already-source-closed loan. *)
            release_provider ();
            let rec await_final () =
+             let changed = A.Durable_event_log.changed entry.durable_events in
              let current =
                Actor.with_moderator_checkpoint entry.actor (fun () ->
                  Actor.state entry.actor)
@@ -904,10 +917,10 @@ let run ?(recurrence = false) ~v1 () =
                && ((not v1) || terminal)
              then current
              else (
-               Eio.Fiber.yield ();
+               Eio.Promise.await changed;
                await_final ())
            in
-           let final = await_final () in
+           let final = phase "committing the native Start terminal turn" await_final in
            if recurrence
            then Native_recurrence.check final ~session:fixture.session ~episode;
            let summary = Ledger.summary final.inference_ledger in
@@ -985,7 +998,8 @@ let run ?(recurrence = false) ~v1 () =
              Existing.assert_same final entry;
              [%test_eq: string list] frames (Existing.frames env entry);
              [%test_eq: int * int] counts (!ports, !providers));
-           assert_no_effects_retry final)))
+           phase "verifying the native Start factual retry" (fun () ->
+             assert_no_effects_retry final))))
 ;;
 
 let%expect_test
@@ -1000,7 +1014,7 @@ let%expect_test
 ;;
 
 let%expect_test "fresh v1 native Start reaches actual Goal.finish terminal evidence" =
-  run ~v1:true ~recurrence:true ();
+  run ~v1:true ~recurrence:true ~timeout_scope:(Phased { watchdog_seconds = 120. }) ();
   print_endline
     "actual fresh v1 Create-to-Start admission; one initial input/account; scoped \
      Goal.finish retains exact terminal evidence and no replay; actual native recurrence \

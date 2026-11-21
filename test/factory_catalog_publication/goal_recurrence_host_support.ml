@@ -131,14 +131,14 @@ let await ?(on_timeout = fun () -> []) ~clock ~phase f =
     raise_s [%sexp ("Timed out while " ^ phase : string), (on_timeout () : Sexp.t list)]
 ;;
 
-let healthy entry =
-  let current = state entry in
+let validate_healthy (current : A.Session_state.t) =
   Option.iter current.failure ~f:(fun error -> raise_s [%sexp (error : P.Error.t)]);
   Native.completed_callbacks current;
   assert (not current.halted);
   current
 ;;
 
+let healthy entry = validate_healthy (state entry)
 let goal = Native.Startup_fixture.goal startup
 
 let recurrence (current : A.Session_state.t) =

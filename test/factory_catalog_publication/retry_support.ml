@@ -23,6 +23,52 @@ let protect_cleanup = Creation_tests.protect_cleanup
 let principal = principal ()
 let original = Operator_authorization.trusted_local principal
 
+module Fixture_phase = struct
+  let within ?(seconds = 30.) ?(on_timeout = fun () -> []) ~clock label f =
+    let run seconds f =
+      Eio.Time.Timeout.run (Eio.Time.Timeout.seconds clock seconds) (fun () -> Ok (f ()))
+    in
+    match run seconds f with
+    | Ok value -> value
+    | Error `Timeout ->
+      let details =
+        match run 1. on_timeout with
+        | Ok details -> details
+        | Error `Timeout -> [ Sexp.Atom "actor snapshot unavailable" ]
+      in
+      raise_s [%sexp ("Timed out while " ^ label : string), (details : Sexp.t list)]
+  ;;
+
+  let snapshot (current : A.Session_state.t) =
+    [%sexp
+      (current.counters.revision : int64)
+    , (current.lifecycle.observed : P.Session.observed_state)
+    , (current.active_operation : P.Operation.t option)
+    , (current.failure : P.Error.t option)
+    , (A.Inference_ledger.summary current.inference_ledger : P.Inference_query.Summary.t)
+    , (List.take (List.rev current.moderator_executions) 4 : P.Moderator_execution.t list)]
+  ;;
+
+  let await_actor ?(details = fun _ -> []) ~clock ~phase (entry : Registry.entry) select =
+    within
+      ~clock
+      phase
+      ~on_timeout:(fun () ->
+        let current = state entry in
+        snapshot current :: details current)
+      (fun () ->
+         let rec await () =
+           let changed = A.Durable_event_log.changed entry.durable_events in
+           match select (state entry) with
+           | Some value -> value
+           | None ->
+             Eio.Promise.await changed;
+             await ()
+         in
+         await ())
+  ;;
+end
+
 let authorize current =
   if
     Agent_server.Authorization.session_visible_to
