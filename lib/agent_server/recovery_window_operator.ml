@@ -168,3 +168,35 @@ let read_text t ~on_release (request : P.Recovery_text_range.t) =
     | Source (Stale | Expired | Withdrawn) -> error Conflict "recovery text revision is no longer visible"
     | Source (Missing | Unavailable | Unsupported | Corrupt) -> error Interrupted "recovery text source is unavailable")
 ;;
+
+let read_asset t ~on_release request =
+  let module Wire = P.Recovery_asset_read in
+  let module Assets = Session_factory.Recovery_assets in
+  let open Result.Let_syntax in
+  let%bind () = require_feature t Wire.feature in
+  let principal = Operator_authorization.principal t.actor in
+  let authorize (state : A.Session_state.t) =
+    let%bind () = require_feature t Wire.feature in
+    if
+      P.Principal.has_scope principal View_session_transcript
+      && Authorization.session_creator_visible_to
+           principal
+           ~creator:state.identity.creating_principal
+    then Ok ()
+    else Error (error Permission_denied "recovery asset is unavailable")
+  in
+  Eio.Switch.run (fun sw ->
+    Assets.read_chunk t.factory ~sw ~authorize ~on_release request)
+  |> Result.map_error ~f:(function
+    | Assets.Request error -> error
+    | Source Denied -> error Permission_denied "recovery asset is unavailable"
+    | Source (Limit | Budget_exhausted) ->
+      error Resource_limit "recovery asset examination limit"
+    | Source (Stale | Expired | Withdrawn) ->
+      error Conflict "recovery asset revision is no longer visible"
+    | Source (Missing | Unavailable) ->
+      error Blob_unavailable "recovery asset is unavailable"
+    | Source Unsupported ->
+      error Invalid_request "this part has no supported local original"
+    | Source Corrupt -> error Interrupted "recovery asset could not be verified")
+;;

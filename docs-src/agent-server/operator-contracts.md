@@ -587,3 +587,31 @@ land on character boundaries. The default reply budget is 4 KiB. Set
 An empty range at a valid boundary succeeds. The host checks access again
 when writing the reply. If the source changes in the meantime, submit a
 fresh read against a currently visible citation. The typed client exposes `Agent_client.Recovery_windows.read_text`.
+
+### Read an exact recovery original
+
+Negotiate `recovery.asset_read` and call `session.recovery.read_asset` with
+a currently visible **canonical** citation, the zero-based original
+`part` index, and a zero-based byte `offset`. Start at offset zero.
+Set `max_bytes` to change the 16 KiB default, up to 64 KiB. This works for
+locally retained original documents and supported images in ordinary user
+or assistant messages. The host can read an original of at most 8 MiB.
+An ordinary rendered-text part may have no retained original. The method
+reports `blob_unavailable` if no visible original is available for the
+coordinate and `invalid_request` for an unsupported visible part.
+
+The reply repeats the citation and part. It reports `kind` (`document`
+or `image`), `media_type`, the full original `byte_length` and its lower-case
+`sha256`, plus the actual `offset` and the chunk as canonical
+`data_base64`. If `next_offset` is present, send it with the same citation,
+part and the returned `sha256` as `expected_sha256`. An omitted next offset
+marks the end. For a reassembled original, verify the complete byte count
+and SHA-256 before consuming it. The typed OCaml client exposes decoded
+chunk bytes through `Agent_client.Recovery_windows.read_asset`.
+
+The original stays private to its owning session Store. A citation does
+not grant access, and the host checks the same source revision and current
+authority when delivering each reply. If the window expires or visibility
+or authority changes, queued replies can fail and readers must not continue
+under the previous authorization. This method reads retained bytes through
+the session protocol without fetching an external URI.

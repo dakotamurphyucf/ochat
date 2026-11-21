@@ -5,6 +5,7 @@ module Actor = A.Session_actor
 module Source = A.Recovery_source_reader
 module Asset = Agent_server.Session_factory.Recovery_assets
 module F = Data_integrity_http
+module Wire = P.Recovery_asset_read
 
 let protocol_ok = function
   | Ok value -> value
@@ -303,6 +304,121 @@ let archive_only entry proof attachment_id authorize scope =
   |> ignore
 ;;
 
+let asset_error expected = function
+  | Error (error : P.Error.t) when P.Error.equal_code error.code expected -> ()
+  | Error error ->
+    raise_s [%sexp "unexpected recovery asset protocol error", (error : P.Error.t)]
+  | Ok _ -> failwith "unexpected original-byte disclosure"
+;;
+
+let check_chunked_asset typed retained ~part ~kind ~media_type expected =
+  let read request =
+    Agent_client.Recovery_windows.read_asset typed request |> protocol_ok
+  in
+  let first =
+    Wire.create retained ~part ~offset:0 ~max_bytes:4 () |> protocol_ok |> read
+  in
+  let offset = Option.value_exn first.next_offset in
+  let continuation expected_sha256 =
+    Wire.create retained ~part ~offset ~expected_sha256 () |> protocol_ok
+  in
+  let last = read (continuation first.sha256) in
+  require
+    (String.equal (first.bytes ^ last.bytes) expected
+     && Int.equal first.byte_length (String.length expected)
+     && Int.equal first.byte_length last.byte_length
+     && String.equal first.sha256 last.sha256
+     && String.equal first.sha256 Digestif.SHA256.(digest_string expected |> to_hex)
+     && Wire.Reply.equal_kind first.kind kind
+     && Wire.Reply.equal_kind last.kind kind
+     && String.equal first.media_type media_type
+     && String.equal first.media_type last.media_type
+     && Option.is_none last.next_offset)
+    "negotiated continuations changed original bytes or metadata";
+  let different_sha256 = String.make 64 '0' in
+  asset_error
+    Conflict
+    (Agent_client.Recovery_windows.read_asset typed (continuation different_sha256))
+;;
+
+let check_hidden_asset
+      ~sw
+      ~entry
+      ~factory
+      ~typed
+      ~authorize
+      ~principal
+      ~attachment_id
+      scope
+  =
+  let module Payload = History_entry.Payload in
+  let append ~sequence ~role content =
+    let id =
+      History_entry.Id.create ~namespace:"private-asset-source" ~sequence
+      |> Result.ok_or_failwith
+    in
+    let row =
+      Payload.Semantic.create
+        (Message { form = Input; role; content = [ content ]; phase = Absent })
+        ~metadata:Payload.Metadata.empty
+      |> Result.ok_or_failwith
+      |> Payload.authored
+      |> History_entry.create_with_id ~id
+      |> A.History_codec.to_protocol
+    in
+    let actor = entry.Agent_server.Session_registry.actor in
+    ignore
+      (Actor.append_history actor ~attachment_id [ row ] |> protocol_ok : P.Session.t);
+    row
+  in
+  let row =
+    append
+      ~sequence:0
+      ~role:Developer
+      (Text { text = "private instruction"; annotations = []; logprobs = Absent })
+  in
+  let hidden = citation scope row in
+  let original = "private developer original" in
+  let attribution =
+    match
+      A.Recovery_asset.Attribution.create
+        hidden
+        ~part:0
+        ~row
+        ~media_type:"text/plain"
+        ~original
+    with
+    | Ok attribution -> attribution
+    | Error error ->
+      raise_s [%sexp "developer fixture attribution", (error : Source.error)]
+  in
+  (match
+     Asset.publish_converted_file
+       factory
+       ~sw
+       ~authorize
+       ~principal
+       ~now:(P.Timestamp.now ())
+       ~max_bytes:1024
+       attribution
+   with
+   | Ok _ -> ()
+   | Error error ->
+     raise_s [%sexp "developer fixture publication", (error : Source.error)]);
+  let request = Wire.create hidden ~part:0 ~offset:0 () |> protocol_ok in
+  asset_error Blob_unavailable (Agent_client.Recovery_windows.read_asset typed request);
+  let remote =
+    append
+      ~sequence:1
+      ~role:User
+      (Image { uri = "https://example.invalid/unsupported.png"; detail = Absent })
+  in
+  let unsupported =
+    Wire.create (citation scope remote) ~part:0 ~offset:0 () |> protocol_ok
+  in
+  asset_error Invalid_request (Agent_client.Recovery_windows.read_asset typed unsupported)
+;;
+
 let run env environment =
   let fixture = F.fixture env environment "data-recovery-asset-converter" in
   let workspace = Config_fixture.physical_workspace fixture in
@@ -445,6 +561,12 @@ let run env environment =
     (match Http_driver.request_without_history observer (Recovery_windows request) with
      | Error failure when P.Error.equal_code failure.code Method_not_found -> ()
      | _ -> failwith "recovery was available without negotiating it");
+    let unnegotiated =
+      Wire.create (citation scope legacy) ~part:0 ~offset:0 () |> protocol_ok
+    in
+    asset_error
+      Method_not_found
+      (Http_driver.request_without_history observer (Recovery_asset_read unnegotiated));
     Http_driver.shutdown observer;
     let observer, _ =
       F.connect ~sw ~features:[ P.Recovery_query.Features.windows ] env fixture token
@@ -512,6 +634,68 @@ let run env environment =
     recovered retained 1 second;
     recovered retained 2 image;
     expect_error Corrupt (read retained ~part:3);
+    check_chunked_asset
+      typed
+      retained
+      ~part:0
+      ~kind:Document
+      ~media_type:"text/html"
+      first;
+    check_chunked_asset typed retained ~part:2 ~kind:Image ~media_type:"image/gif" image;
+    let asset_request part = Wire.create retained ~part ~offset:0 () |> protocol_ok in
+    asset_error
+      Interrupted
+      (Agent_client.Recovery_windows.read_asset typed (asset_request 3));
+    let image_request = asset_request 2 in
+    let raw =
+      Http_driver.request client (Recovery_asset_read image_request) |> protocol_ok
+    in
+    require
+      (String.length raw.response.body <= Wire.max_envelope_bytes
+       && not
+            (List.exists
+               [ "blob_id"; "allowed_use"; "creating_principal"; "recovery-asset-blobs" ]
+               ~f:(fun field -> String.is_substring raw.response.body ~substring:field)))
+      "a recovery asset exposed its private storage identity or exceeded its wire bound";
+    let wrong_version =
+      P.Recovery_window.Citation.create
+        scope
+        ~occurrence:adopted.id
+        ~version:
+          (P.Recovery_item_version.canonical
+             (P.History.Content_revision.succ adopted.content_revision |> protocol_ok))
+      |> protocol_ok
+    in
+    let stale = Wire.create wrong_version ~part:2 ~offset:0 () |> protocol_ok in
+    asset_error Blob_unavailable (Agent_client.Recovery_windows.read_asset typed stale);
+    let wrong_host =
+      let session =
+        P.Session_ref.create ~server_id:(P.Id.Server.create ()) ~session_id:session.id
+      in
+      let foreign_scope =
+        P.Recovery_window.Scope.create
+          ~session
+          ~generation:(P.Recovery_window.Scope.generation scope)
+          ~window:(P.Recovery_window.Scope.window scope)
+        |> protocol_ok
+      in
+      Wire.create (citation foreign_scope adopted) ~part:2 ~offset:0 () |> protocol_ok
+    in
+    asset_error
+      Permission_denied
+      (Http_driver.request_without_history client (Recovery_asset_read wrong_host));
+    let foreign, _ =
+      F.connect
+        ~sw
+        ~features:[ Wire.feature ]
+        env
+        fixture
+        (Config_fixture.public_token fixture)
+    in
+    asset_error
+      Permission_denied
+      (Http_driver.request_without_history foreign (Recovery_asset_read image_request));
+    Http_driver.shutdown foreign;
     ignore (await_idle env entry : A.Session_state.t);
     let entered, release = hold_next () in
     ignore
@@ -628,6 +812,28 @@ let run env environment =
     recovered retained 0 first;
     recovered retained 1 second;
     recovered retained 2 image;
+    check_chunked_asset
+      typed
+      retained
+      ~part:0
+      ~kind:Document
+      ~media_type:"text/html"
+      first;
+    check_hidden_asset
+      ~sw
+      ~entry
+      ~factory
+      ~typed
+      ~authorize
+      ~principal
+      ~attachment_id
+      (List.hd_exn next.items).scope;
+    Recovery_asset_stdio.check
+      env
+      ~dispatcher:(Agent_server.Daemon.dispatcher daemon)
+      ~actor:proof
+      image_request
+      ~expected:image;
     expect_error
       Denied
       (Asset.read
@@ -682,11 +888,31 @@ let run env environment =
       P.Recovery_history_request.create ~session:owner ~window:scope ~family:Canonical
         ~page:request.page List_items |> protocol_ok
     in
-    let range = P.Recovery_text_range.create retained ~part:0 ~start:0 ~stop:1 () |> protocol_ok in
+    let range =
+      P.Recovery_text_range.create retained ~part:0 ~start:0 ~stop:1 () |> protocol_ok
+    in
+    let unaffected = hold (Recovery_asset_read image_request) in
+    let append_id =
+      History_entry.Id.create ~namespace:"unrelated-after-asset" ~sequence:0
+      |> Result.ok_or_failwith
+    in
+    let append =
+      A.History_codec.user_text ~id:append_id "unrelated later message"
+      |> A.History_codec.to_protocol
+    in
+    Actor.append_history entry.actor ~attachment_id [ append ] |> protocol_ok |> ignore;
+    (match D.Output.materialize unaffected with
+     | Response { outcome = Ok json; _ } ->
+       let reply = Wire.Reply.of_json json |> protocol_ok in
+       require
+         (String.equal reply.bytes image)
+         "unrelated append changed selected original"
+     | _ -> failwith "unrelated append invalidated independent asset release");
     let held =
       [ hold (P.Command.Recovery_windows request)
       ; hold (Recovery_history query)
       ; hold (Recovery_range range)
+      ; hold (Recovery_asset_read image_request)
       ]
     in
     List.iter held ~f:(fun output ->
@@ -702,5 +928,6 @@ let run env environment =
     D.close_connection_and_wait dispatcher context |> protocol_ok;
     expect_expired (windows ~cursor (authenticate ()));
     expect_error Expired (read retained ~part:0);
+    asset_error Conflict (Agent_client.Recovery_windows.read_asset typed image_request);
     Http_driver.shutdown client)
 ;;

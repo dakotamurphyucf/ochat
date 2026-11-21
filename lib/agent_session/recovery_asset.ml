@@ -4,6 +4,8 @@ module Source = Recovery_source_reader
 module Ref = Agent_store.Recovery_asset_reference
 module Store = Agent_store.Recovery_asset_store
 module Payload = History_entry.Payload
+module Ledger = Recovery_window_ledger
+module Citation = P.Recovery_window.Citation
 
 type t =
   { sessions : Agent_store.Session_store.t
@@ -45,10 +47,18 @@ let projection_limits =
   |> Option.value_exn
 ;;
 
-let selected row ~part =
+let ordinary_provenance (row : P.History.entry) =
+  match row.provenance with
+  | Canonical | Moderator_inserted | Moderator_replaced _ -> true
+  | Runtime_notification _ | Runtime_authoring _ -> false
+;;
+
+let selected ?(ordinary = false) row ~part =
   let open Result.Let_syntax in
   if part < 0 || part >= 4096
   then Error Source.Limit
+  else if ordinary && not (ordinary_provenance row)
+  then Error Source.Unavailable
   else (
     let%bind () =
       Document_schema.Json.validate ~limits:projection_limits row.P.History.payload
@@ -72,15 +82,31 @@ let selected row ~part =
         | Some (Image { uri; _ }) -> Ok (Image_uri uri)
         | Some (Refusal _ | Unknown _) -> Error Source.Unsupported)
     in
-    match semantic with
-    | Message { content; _ } | Result { output = Content content; _ } -> decode content
-    | Result { output = Text text; _ } when Int.equal part 0 -> Ok (Text text)
-    | Result { output = Text _; _ } -> Error Source.Unavailable
-    | Call _ | Reasoning _ | Unknown _ -> Error Source.Unsupported)
+    if ordinary && Context_compaction.History_view.is_reminder entry
+    then Error Source.Unavailable
+    else (
+      match semantic with
+      | Message { role = User | Assistant; content; _ } -> decode content
+      | Message { content; _ } when not ordinary -> decode content
+      | Result { output = Content content; _ } when not ordinary -> decode content
+      | Result { output = Text text; _ } when (not ordinary) && Int.equal part 0 ->
+        Ok (Text text)
+      | Result { output = Text _; _ } when not ordinary -> Error Source.Unavailable
+      | _ when ordinary -> Error Source.Unavailable
+      | Message _ | Result _ | Call _ | Reasoning _ | Unknown _ ->
+        Error Source.Unsupported))
 ;;
 
-let with_part t ~current citation ~part ~f =
+let ordinary_visible citation (state : Session_state.t) =
+  not
+    (Option.exists state.recovery_windows ~f:(fun ledger ->
+       Ledger.is_derived_summary ledger citation))
+;;
+
+let with_part ?(ordinary = false) t ~current citation ~part ~f =
+  let visible = if ordinary then Some (ordinary_visible citation) else None in
   Source.with_entry
+    ?visible
     t.sessions
     ~handle:t.handle
     ~current
@@ -88,7 +114,7 @@ let with_part t ~current citation ~part ~f =
     citation
     ~f:(fun row ~check ->
       let open Result.Let_syntax in
-      let%bind selected = selected row ~part in
+      let%bind selected = selected ~ordinary row ~part in
       f row selected ~check:(fun () -> Result.is_ok (check ())))
 ;;
 
@@ -219,8 +245,8 @@ let has_recorded_file_commit t ~current citation ~part =
   |> Result.map_error ~f:store_error
 ;;
 
-let read t ~sw ~current citation ~part ~max_bytes =
-  with_part t ~current citation ~part ~f:(fun _ selected ~check ->
+let read_with_view t ~ordinary ~sw ~current citation ~part ~max_bytes =
+  with_part t ~ordinary ~current citation ~part ~f:(fun _ selected ~check ->
     let open Result.Let_syntax in
     let%bind accepts = accepts selected ~max_bytes in
     let%bind reference, bytes =
@@ -228,4 +254,55 @@ let read t ~sw ~current citation ~part ~max_bytes =
       |> Result.map_error ~f:store_error
     in
     if accepts reference bytes then Ok (reference, bytes) else Error Source.Corrupt)
+;;
+
+let read t ~sw ~current citation ~part ~max_bytes =
+  read_with_view t ~ordinary:false ~sw ~current citation ~part ~max_bytes
+;;
+
+let release_selection accepted citation =
+  let owner = P.Recovery_window.Scope.session (Citation.scope citation) in
+  let current_member (state : Session_state.t) =
+    let open Result.Let_syntax in
+    if not (ordinary_visible citation state)
+    then Error Source.Unavailable
+    else (
+      let%bind visible =
+        Recovery_visibility.create state ~owner
+        |> Result.map_error ~f:(fun _ -> Source.Corrupt)
+      in
+      match Recovery_visibility.select visible citation with
+      | Eligible member -> Ok member
+      | Unavailable -> Error Source.Unavailable
+      | Withdrawn -> Error Source.Withdrawn
+      | Expired -> Error Source.Expired)
+  in
+  let%map.Result selected = current_member accepted in
+  let windows = accepted.Session_state.recovery_windows in
+  let moderator = accepted.moderator in
+  let generation = accepted.identity.generation in
+  fun (latest : Session_state.t) ->
+    Int.equal generation latest.identity.generation
+    &&
+    if
+      Option.equal phys_equal latest.recovery_windows windows
+      && Option.equal phys_equal latest.moderator moderator
+    then true
+    else
+      Result.ok (current_member latest)
+      |> Option.exists ~f:(fun member ->
+        Ledger.Source.equal (Ledger.Member.source selected) (Ledger.Member.source member)
+        && Int.equal
+             (Ledger.Member.source_ordinal selected)
+             (Ledger.Member.source_ordinal member))
+;;
+
+let read_ordinary t ~sw ~current citation ~part ~max_bytes =
+  let open Result.Let_syntax in
+  let%bind body =
+    read_with_view t ~ordinary:true ~sw ~current citation ~part ~max_bytes
+  in
+  let%bind accepted = current () |> Result.map_error ~f:(fun _ -> Source.Denied) in
+  let%map check = release_selection accepted citation in
+  body, check
 ;;

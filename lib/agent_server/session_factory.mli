@@ -825,6 +825,21 @@ module Recovery_assets : sig
          , Agent_session.Recovery_source_reader.error )
          result
 
+  type read_error =
+    | Source of Agent_session.Recovery_source_reader.error
+    | Request of Agent_protocol.Error.t
+
+  (** Ordinary canonical originals only. Install the exact source and authority
+      check for the later queued transport release. The reply contains one
+      bounded chunk without its private storage identity. *)
+  val read_chunk
+    :  t
+    -> sw:Eio.Switch.t
+    -> authorize:authorize
+    -> on_release:((unit -> (unit, Agent_protocol.Error.t) result) -> unit)
+    -> Agent_protocol.Recovery_asset_read.t
+    -> (Agent_protocol.Recovery_asset_read.Reply.t, read_error) result
+
   val resume
     :  t
     -> sw:Eio.Switch.t

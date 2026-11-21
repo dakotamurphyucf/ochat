@@ -686,6 +686,7 @@ let architecture_methods =
   ; "session.run"
   ; "session.recovery.enable"
   ; "session.recovery.query"
+  ; "session.recovery.read_asset"
   ; "session.recovery.read_text"
   ; "session.recovery.windows"
   ; "session.goals"
@@ -764,7 +765,7 @@ let%expect_test "every architecture method has request and result dispatch" =
           (List.equal String.equal expected (normalize Method_result.supported_methods)
            : bool)
       }];
-  [%expect {| ((method_count 122) (requests true) (results true)) |}]
+  [%expect {| ((method_count 123) (requests true) (results true)) |}]
 ;;
 
 let%expect_test "history deletion requires stable ID, revision and idempotency" =
@@ -858,6 +859,121 @@ let%expect_test "blob reads are bounded and chunks validate exact cursors" =
     {|
     ((request_valid true) (zero_chunk_rejected true) (chunk_valid true))
     |}]
+;;
+
+let%test_unit "recovery asset chunks bind exact ordinary coordinates and bounded bytes" =
+  let module Wire = Recovery_asset_read in
+  let module Reply = Wire.Reply in
+  let session =
+    Session_ref.create
+      ~server_id:(Id.Server.of_string "srv_recovery" |> ok_or_fail)
+      ~session_id:(Id.Session.of_string "ses_recovery" |> ok_or_fail)
+  in
+  let scope =
+    Recovery_window.Scope.create
+      ~session
+      ~generation:1
+      ~window:(Id.Context_window.of_string "win_recovery" |> ok_or_fail)
+    |> ok_or_fail
+  in
+  let citation version =
+    Recovery_window.Citation.create
+      scope
+      ~occurrence:(History.Id.of_string "4:test:7" |> ok_or_fail)
+      ~version
+    |> ok_or_fail
+  in
+  let revision = History.Content_revision.zero in
+  let original = "\000\255binary\n" in
+  let sha256 = Digestif.SHA256.(digest_string original |> to_hex) in
+  let citation = citation (Recovery_item_version.canonical revision) in
+  let request = Wire.create citation ~part:1 ~offset:0 ~max_bytes:3 () |> ok_or_fail in
+  let rewritten json ~name value =
+    match json with
+    | `Object fields ->
+      `Object ((name, value) :: List.Assoc.remove fields ~equal:String.equal name)
+    | _ -> assert false
+  in
+  assert (Result.is_error (Wire.create citation ~part:1 ~offset:3 ()));
+  assert (
+    Result.is_error
+      (Wire.create citation ~part:1 ~offset:0 ~max_bytes:(Wire.max_chunk_bytes + 1) ()));
+  assert (
+    Result.is_error
+      (Wire.create citation ~part:1 ~offset:(Wire.max_original_bytes + 1) ()));
+  assert (
+    Result.is_error
+      (Wire.of_json (rewritten (Wire.to_json request) ~name:"blob_id" `Null)));
+  let project request =
+    Reply.of_verified_original
+      request
+      ~kind:Document
+      ~media_type:"application/pdf"
+      ~sha256
+      original
+    |> ok_or_fail
+  in
+  let first = project request in
+  let first_json = Reply.to_json first in
+  let first = Reply.of_json first_json |> ok_or_fail in
+  Reply.validate first ~request |> ok_or_fail;
+  assert (
+    String.equal first.bytes "\000\255b"
+    && Option.equal Int.equal first.next_offset (Some 3));
+  List.iter
+    [ "data_base64", `String "AA"
+    ; "data_base64", `String (String.make (Wire.max_envelope_bytes + 1) 'A')
+    ; "next_offset", `Number "5"
+    ; "media_type", `String "application/pdf; x=1"
+    ; "blob_id", `String "private"
+    ]
+    ~f:(fun (name, value) ->
+      assert (Result.is_error (Reply.of_json (rewritten first_json ~name value))));
+  let wrong_part =
+    Reply.of_json (rewritten first_json ~name:"part" (`Number "2")) |> ok_or_fail
+  in
+  assert (Result.is_error (Reply.validate wrong_part ~request));
+  let continuation =
+    Wire.create citation ~part:1 ~offset:3 ~expected_sha256:sha256 () |> ok_or_fail
+  in
+  let last = project continuation in
+  Reply.validate last ~request:continuation |> ok_or_fail;
+  assert (
+    String.equal (first.bytes ^ last.bytes) original && Option.is_none last.next_offset);
+  let different =
+    Wire.create citation ~part:1 ~offset:3 ~expected_sha256:(String.make 64 'f') ()
+    |> ok_or_fail
+  in
+  assert (Result.is_error (Reply.validate last ~request:different));
+  let whole = Wire.create citation ~part:1 ~offset:0 () |> ok_or_fail in
+  let changed =
+    rewritten
+      (Reply.to_json (project whole))
+      ~name:"data_base64"
+      (`String (Base64.encode_exn (String.map original ~f:(fun _ -> 'x'))))
+    |> Reply.of_json
+    |> ok_or_fail
+  in
+  assert (Result.is_error (Reply.validate changed ~request:whole));
+  let maximum = String.make Wire.max_original_bytes '\255' in
+  let digest = Digestif.SHA256.(digest_string maximum |> to_hex) in
+  let max_request =
+    Wire.create citation ~part:1 ~offset:0 ~max_bytes:Wire.max_chunk_bytes ()
+    |> ok_or_fail
+  in
+  let project_max =
+    Reply.of_verified_original
+      max_request
+      ~kind:Document
+      ~media_type:"application/pdf"
+      ~sha256:digest
+  in
+  let largest = project_max maximum |> ok_or_fail in
+  let largest_json = Reply.to_json largest in
+  assert (String.length (Jsonaf.to_string largest_json) < Wire.max_envelope_bytes);
+  Reply.validate (Reply.of_json largest_json |> ok_or_fail) ~request:max_request
+  |> ok_or_fail;
+  assert (Result.is_error (project_max (maximum ^ "x")))
 ;;
 
 let%expect_test "typed durable payload derives and validates its event kind" =

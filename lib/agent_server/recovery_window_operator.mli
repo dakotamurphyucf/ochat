@@ -40,3 +40,9 @@ val read_text
   -> on_release:(release -> unit)
   -> Agent_protocol.Recovery_text_range.t
   -> (Agent_protocol.Recovery_text_range.Reply.t, Agent_protocol.Error.t) result
+
+val read_asset
+  :  t
+  -> on_release:(release -> unit)
+  -> Agent_protocol.Recovery_asset_read.t
+  -> (Agent_protocol.Recovery_asset_read.Reply.t, Agent_protocol.Error.t) result

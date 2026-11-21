@@ -14715,6 +14715,14 @@ module Recovery_assets = struct
 
   type authorize = A.Session_state.t -> (unit, P.Error.t) result
 
+  let create_asset t ~handle =
+    Asset.create
+      t.blob_store
+      ~sessions:t.store
+      ~handle
+      ~max_frame_bytes:t.limits.max_journal_payload
+  ;;
+
   let with_source t citation ~authorize ~f =
     let source =
       P.Recovery_window.Citation.scope citation |> P.Recovery_window.Scope.session
@@ -14724,20 +14732,77 @@ module Recovery_assets = struct
       source
       ~authorize
       ~f:(fun handle ~observation:_ ~current ->
-        let open Result.Let_syntax in
-        let%bind asset =
-          Asset.create
-            t.blob_store
-            ~sessions:t.store
-            ~handle
-            ~max_frame_bytes:t.limits.max_journal_payload
-        in
+        let%bind.Result asset = create_asset t ~handle in
         f asset ~current)
   ;;
 
   let read t ~sw ~authorize citation ~part ~max_bytes =
     with_source t citation ~authorize ~f:(fun asset ~current ->
       Asset.read asset ~sw ~current citation ~part ~max_bytes)
+  ;;
+
+  type read_error =
+    | Source of Source.error
+    | Request of P.Error.t
+
+  let read_chunk t ~sw ~authorize ~on_release (request : P.Recovery_asset_read.t) =
+    let module Wire = P.Recovery_asset_read in
+    let module Reference = Agent_store.Recovery_asset_reference in
+    let source = Wire.session request in
+    let open Result.Let_syntax in
+    let%bind projected =
+      Recovery_source_host.with_observed_source
+        t
+        source
+        ~authorize
+        ~f:(fun handle ~observation ~current ~check_owner ->
+          let%bind asset = create_asset t ~handle in
+          let%bind (reference, original), selection_current =
+            Asset.read_ordinary
+              asset
+              ~sw
+              ~current
+              request.citation
+              ~part:request.part
+              ~max_bytes:Wire.max_original_bytes
+          in
+          let%bind () =
+            if
+              P.Recovery_window.Citation.equal
+                request.citation
+                (Reference.citation reference)
+              && Int.equal request.part (Reference.part reference)
+            then Ok ()
+            else Error Source.Corrupt
+          in
+          let blob = Reference.blob reference in
+          let%map kind =
+            match blob.kind with
+            | Image -> Ok Wire.Reply.Image
+            | File -> Ok Wire.Reply.Document
+            | Audio | Binary -> Error Source.Unsupported
+          in
+          Result.map
+            (Wire.Reply.of_verified_original
+               request
+               ~kind
+               ~media_type:blob.media_type
+               ~sha256:blob.digest
+               original)
+            ~f:(fun chunk ->
+              on_release (fun () ->
+                let%bind () = check_owner () in
+                let%bind latest = Observation.check_current observation in
+                let%bind () = authorize latest in
+                if
+                  Agent_store.Session_store.retained_lifecycle_available t.store handle
+                  && selection_current latest
+                then Ok ()
+                else Error (denied ()));
+              chunk))
+      |> Result.map_error ~f:(fun e -> Source e)
+    in
+    Result.map_error projected ~f:(fun e -> Request e)
   ;;
 
   let resume t ~sw ~authorize citation ~part ~max_bytes =

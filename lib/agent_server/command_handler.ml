@@ -167,6 +167,7 @@ let create
     [ Agent_protocol.Recovery_query.Features.windows, Option.is_some seed_factory
     ; Agent_protocol.Recovery_history_request.feature, Option.is_some seed_factory
     ; Agent_protocol.Recovery_text_range.feature, Option.is_some seed_factory
+    ; Agent_protocol.Recovery_asset_read.feature, Option.is_some seed_factory
     ; Agent_protocol.Goal_query.Features.inspect, Option.is_some goal_read
     ; Agent_protocol.Goal_control.Features.control, Option.is_some goal_operator
     ; Agent_protocol.Recurrence_query.Features.inspect, Option.is_some recurrence_read
@@ -515,6 +516,7 @@ let idempotency = function
   | Recovery_windows _
   | Recovery_history _
   | Recovery_range _
+  | Recovery_asset_read _
   | Goal_query _
   | Goal_control _
   | Recurrence_query _
@@ -3050,6 +3052,7 @@ let prepared_writer_attachment command =
   | Recovery_windows _
   | Recovery_history _
   | Recovery_range _
+  | Recovery_asset_read _
   | Goal_query _
   | Goal_control _
   | Recurrence_query _
@@ -3241,6 +3244,11 @@ let dispatch_authorized
     let%bind service = recovery_window_operator t context actor in
     let%map slice = Recovery_window_operator.read_text service ~on_release request in
     Agent_protocol.Method_result.Recovery_range slice
+  | Recovery_asset_read request ->
+    let open Result.Let_syntax in
+    let%bind service = recovery_window_operator t context actor in
+    let%map chunk = Recovery_window_operator.read_asset service ~on_release request in
+    Agent_protocol.Method_result.Recovery_asset_read chunk
   | Goal_query request ->
     let open Result.Let_syntax in
     let%bind read =
@@ -3443,8 +3451,15 @@ let command_session_id = function
   | Recovery_enable request -> Some (Agent_protocol.Session_ref.session_id request.session)
   | Recovery_windows request -> Some (Agent_protocol.Session_ref.session_id request.session)
   | Recovery_range request ->
-    Some (Agent_protocol.Recovery_text_range.session request |> Agent_protocol.Session_ref.session_id)
-  | Recovery_history request -> Some (Agent_protocol.Session_ref.session_id request.session)
+    Some
+      (Agent_protocol.Recovery_text_range.session request
+       |> Agent_protocol.Session_ref.session_id)
+  | Recovery_asset_read request ->
+    Some
+      (Agent_protocol.Recovery_asset_read.session request
+       |> Agent_protocol.Session_ref.session_id)
+  | Recovery_history request ->
+    Some (Agent_protocol.Session_ref.session_id request.session)
   | Goal_query request -> Some (Agent_protocol.Session_ref.session_id request.session)
   | Goal_control request ->
     Some
@@ -3648,6 +3663,7 @@ let receipt_summary ~session_id result =
   | Recovery_windows _
   | Recovery_history _
   | Recovery_range _
+  | Recovery_asset_read _
   | Goal_query _
   | Goal_control _
   | Recurrence_query _
@@ -4224,7 +4240,11 @@ let handle t ?actor ?(on_release = ignore) ~context ~inference_budget command =
     in
     let operator =
       match command with
-      | Recovery_enable _ | Recovery_windows _ | Recovery_history _ | Recovery_range _ -> Some "context recovery"
+      | Recovery_enable _
+      | Recovery_windows _
+      | Recovery_history _
+      | Recovery_range _
+      | Recovery_asset_read _ -> Some "context recovery"
       | Goal_query _ | Goal_control _ -> Some "Goal"
       | Recurrence_query _ | Recurrence_control _ -> Some "Recurrence"
       | _ -> None
@@ -4235,9 +4255,17 @@ let handle t ?actor ?(on_release = ignore) ~context ~inference_budget command =
       Error (error Permission_denied (name ^ " authority expired or was revoked"))
     | Ok _, Ok _, Some _ ->
       (match command, t.recurrence_operator with
-       | (Recovery_enable _ | Recovery_windows _ | Recovery_history _ | Recovery_range _), _ ->
-         let%bind check = Result.of_option !release
-           ~error:(error Permission_denied "missing recovery response authority") in
+       | ( ( Recovery_enable _
+           | Recovery_windows _
+           | Recovery_history _
+           | Recovery_range _
+           | Recovery_asset_read _ )
+         , _ ) ->
+         let%bind check =
+           Result.of_option
+             !release
+             ~error:(error Permission_denied "missing recovery response authority")
+         in
          let%bind () = check () in
          on_release check;
          outcome

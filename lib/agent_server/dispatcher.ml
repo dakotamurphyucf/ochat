@@ -106,6 +106,7 @@ let recovery_method name =
   || String.equal name Agent_protocol.Recovery_query.List_windows.method_name
   || String.equal name Agent_protocol.Recovery_history_request.method_name
   || String.equal name Agent_protocol.Recovery_text_range.method_name
+  || String.equal name Agent_protocol.Recovery_asset_read.method_name
 ;;
 
 let recovery_envelope_limits =
@@ -123,6 +124,14 @@ let text_range_limits =
   query_envelope_limits ~max_depth:18 ~max_fields:64 ~max_nodes:128 ((6 * Agent_protocol.History_text.max_slice_bytes) + 512)
 ;;
 
+let asset_read_limits =
+  query_envelope_limits
+    ~max_depth:18
+    ~max_fields:40
+    ~max_nodes:80
+    Agent_protocol.Recovery_asset_read.max_envelope_bytes
+;;
+
 let operator_query_limits method_ =
   if List.mem Agent_protocol.Goal_query.Request.methods method_ ~equal:String.equal
   then Some ("Goal", goal_query_limits)
@@ -130,7 +139,10 @@ let operator_query_limits method_ =
   then Some ("Recovery", history_envelope_limits)
   else if String.equal method_ Agent_protocol.Recovery_text_range.method_name
   then Some ("Recovery", text_range_limits)
-  else if recovery_method method_ then Some ("Recovery", recovery_envelope_limits)
+  else if String.equal method_ Agent_protocol.Recovery_asset_read.method_name
+  then Some ("Recovery", asset_read_limits)
+  else if recovery_method method_
+  then Some ("Recovery", recovery_envelope_limits)
   else if
     List.mem Agent_protocol.Recurrence_query.Request.methods method_ ~equal:String.equal
   then Some ("Recurrence", recurrence_query_limits)

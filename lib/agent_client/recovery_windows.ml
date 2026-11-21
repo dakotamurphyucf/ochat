@@ -84,3 +84,19 @@ let read_text connection request =
     slice
   | _ -> Error (P.Error.invalid_request "unexpected recovery text range result")
 ;;
+
+let read_asset connection request =
+  let module Asset = P.Recovery_asset_read in
+  let open Result.Let_syntax in
+  let%bind initialized_as =
+    check_host connection ~feature:Asset.feature (Asset.session request)
+  in
+  let%bind result =
+    Connection.request_recovery connection ~initialized_as (Read_asset request)
+  in
+  match result with
+  | Recovery_asset_read chunk ->
+    let%map () = Asset.Reply.validate chunk ~request in
+    chunk
+  | _ -> Error (P.Error.invalid_request "unexpected recovery asset result")
+;;

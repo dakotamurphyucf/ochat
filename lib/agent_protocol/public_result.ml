@@ -46,6 +46,7 @@ module Non_history = struct
     | Recovery_windows _
     | Recovery_history _
     | Recovery_range _
+    | Recovery_asset_read _
     | Goal_query _
     | Goal_control _
     | Recurrence_query _

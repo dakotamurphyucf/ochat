@@ -35,6 +35,7 @@ type t =
   | Recovery_windows of (Recovery_query.List_windows.t[@sexp.opaque])
   | Recovery_history of (Recovery_history_request.t[@sexp.opaque])
   | Recovery_range of (Recovery_text_range.t[@sexp.opaque])
+  | Recovery_asset_read of (Recovery_asset_read.t[@sexp.opaque])
   | Goal_query of (Goal_query.Request.t[@sexp.opaque])
   | Goal_control of (Goal_control.Request.t[@sexp.opaque])
   | Recurrence_query of (Recurrence_query.Request.t[@sexp.opaque])

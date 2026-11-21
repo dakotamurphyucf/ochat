@@ -1159,7 +1159,7 @@ let implementation_sources =
   ; ( "lib/agent_client/developer_trace_connection.ml"
     , "a737c2bc921e42546ae3ae8165eae078a409861563acbb61782db870dcf4adf6" )
   ; ( "lib/agent_client/connection.ml"
-    , "83dd087b76a49d0f83d844c15dee23b9bec203550ba1424069ea1c5aea635916" )
+    , "92a1167b8fbd61c6b6b9d2cababf5201e2f3a55a66d4ace23ef1e0ea07d5d16a" )
   ; ( "lib/agent_client/transport.ml"
     , "d39a1097e48c06192980ded2c44f4d268d7f93d333a3fe2227f30fb8ac0c6ab6" )
   ; ( "lib/agent_client/in_memory.ml"
@@ -1193,7 +1193,7 @@ let implementation_sources =
   ; ( "lib/agent_server/descendant_accounting_host.ml"
     , "3baff14cf9c606e899c08f95805cc3ca9f070827b46ec531e1c230314820b0fd" )
   ; ( "lib/agent_server/session_factory.ml"
-    , "20fce2fa3d6a156e61e0a7c58b3a8f5322c0006974fb52647ed597f57d434996" )
+    , "74ddda2f9067a3005e4060471c2d5fc752201f5630b6bfcf2a45e5f00264b009" )
   ; ( "bin/inference_composition.ml"
     , "1f57451d5543a5fe8f2f23dc0e593374b64946d088cba164acd1c087a7cdce18" )
   ; ( "lib/agent_protocol/developer_command_id.ml"
@@ -1243,7 +1243,7 @@ let implementation_sources =
   ; ( "lib/agent_server/developer_change_hub.ml"
     , "6c034e4b3e9c6010aa9596d468b753f28cee092b01393bea645668d1984f58fc" )
   ; ( "lib/agent_server/dispatcher.ml"
-    , "16a4d690e59b770f6ac7e694bcab560e5758957e6f7e5b026d5396f03c4edbad" )
+    , "c6adf39ff5b5117457cd2dd2148b533162d975808204ea7206b9bbf40d6ce898" )
   ; ( "lib/agent_server/authoring_installation.ml"
     , "c153b07c85dae5395d4a5a4e30a0d430dcf922c23d29cc3f302a70c490b4a94b" )
   ; ( "lib/agent_server/connection_context.ml"
@@ -1271,7 +1271,7 @@ let implementation_sources =
   ; ( "lib/agent_server/developer_model_job_runner.ml"
     , "7604ff6140540e3b53720515526242e7bc1014c97d6895aacadbfb2909bda718" )
   ; ( "lib/agent_server/daemon.ml"
-    , "294f45b96d6020dfe3f14444ad5c154b69d0631291b0baffbae006a059b4734e" )
+    , "69257893caa1579c0b2c77e1c096d8dc459c82a24c1b777b377256ffdfa7bc92" )
   ; ( "lib/agent_session/developer_claimed_resource_owner.ml"
     , "fb251c6e022f9880820b15807018adc5cf240500050a0424321d7507d3e2bc41" )
   ; ( "lib/agent_server/developer_claim_deadline.ml"
@@ -1313,7 +1313,7 @@ let implementation_sources =
   ; ( "lib/agent_session/administration.ml"
     , "aa07d835e69d5d8af13af5c8920801be52a3893cd2866cd7ed74a477f35aea02" )
   ; ( "lib/agent_server/command_handler.ml"
-    , "3475560472d824785f01bdc5576ad92700ecb3112fad9f9b6867a9024f7f2517" )
+    , "f5c16349caca3725de46a5104dfa72ffd1cca140332f367cf80711b48321aca5" )
   ; ( "lib/agent_session/preparation_tracking.ml"
     , "101b922ff06365f9592e1b168a7e4267ddc74f769ae48d4a26ca204865a13732" )
   ; ( "lib/agent_session/turn_admission_staging.ml"

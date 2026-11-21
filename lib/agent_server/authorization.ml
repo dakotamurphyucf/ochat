@@ -41,6 +41,7 @@ let required_scope = function
   | Recovery_windows _
   | Recovery_history _
   | Recovery_range _
+  | Recovery_asset_read _
   | Goal_query _
   | Session_pending_inputs _
   | Session_pending_input _

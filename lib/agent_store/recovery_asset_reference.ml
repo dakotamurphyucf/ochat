@@ -27,37 +27,6 @@ let equal a b =
   && Blob_metadata.blob_equal a.blob b.blob
 ;;
 
-let valid_media_type media_type =
-  let token value =
-    (not (String.is_empty value))
-    && String.for_all value ~f:(function
-      | 'a' .. 'z'
-      | 'A' .. 'Z'
-      | '0' .. '9'
-      | '!'
-      | '#'
-      | '$'
-      | '%'
-      | '&'
-      | '\''
-      | '*'
-      | '+'
-      | '-'
-      | '.'
-      | '^'
-      | '_'
-      | '`'
-      | '|'
-      | '~' -> true
-      | _ -> false)
-  in
-  String.length media_type <= 255
-  &&
-  match String.split media_type ~on:'/' with
-  | [ kind; subtype ] -> token kind && token subtype
-  | _ -> false
-;;
-
 let create citation ~part ~(blob : P.Blob.Metadata.t) =
   let open Result.Let_syntax in
   let%bind () =
@@ -71,7 +40,7 @@ let create citation ~part ~(blob : P.Blob.Metadata.t) =
   in
   if
     Int64.(blob.byte_length < zero)
-    || (not (valid_media_type blob.media_type))
+    || (not (P.Blob.is_media_type blob.media_type))
     || Option.is_some blob.display_name
     || String.length blob.digest <> 64
     || not

@@ -35,6 +35,7 @@ type t =
   | Recovery_windows of (Recovery_query.List_windows.t[@sexp.opaque])
   | Recovery_history of (Recovery_history_request.t[@sexp.opaque])
   | Recovery_range of (Recovery_text_range.t[@sexp.opaque])
+  | Recovery_asset_read of (Recovery_asset_read.t[@sexp.opaque])
   | Goal_query of (Goal_query.Request.t[@sexp.opaque])
   | Goal_control of (Goal_control.Request.t[@sexp.opaque])
   | Recurrence_query of (Recurrence_query.Request.t[@sexp.opaque])
@@ -129,6 +130,7 @@ let method_name = function
   | Recovery_windows _ -> Recovery_query.List_windows.method_name
   | Recovery_history _ -> Recovery_history_request.method_name
   | Recovery_range _ -> Recovery_text_range.method_name
+  | Recovery_asset_read _ -> Recovery_asset_read.method_name
   | Goal_query request -> Goal_query.Request.method_name request
   | Goal_control request -> Goal_control.Request.method_name request
   | Recurrence_query request -> Recurrence_query.Request.method_name request
@@ -227,6 +229,7 @@ let params = function
   | Recovery_windows v -> Recovery_query.List_windows.to_json v
   | Recovery_history v -> Recovery_history_request.to_json v
   | Recovery_range v -> Recovery_text_range.to_json v
+  | Recovery_asset_read v -> Recovery_asset_read.to_json v
   | Goal_query request -> Goal_query.Request.params request
   | Goal_control request -> Goal_control.Request.params request
   | Recurrence_query request -> Recurrence_query.Request.params request
@@ -399,10 +402,16 @@ let decoders =
   ; "session.stop", map Session.Stop_request.of_json (fun x -> Session_stop x)
   ; ( "session.cancel_operation"
     , map Session.Cancel_operation_request.of_json (fun x -> Session_cancel_operation x) )
-  ; Recovery_query.Enable.method_name, map Recovery_query.Enable.of_json (fun x -> Recovery_enable x)
-  ; Recovery_query.List_windows.method_name, map Recovery_query.List_windows.of_json (fun x -> Recovery_windows x)
-  ; Recovery_history_request.method_name, map Recovery_history_request.of_json (fun x -> Recovery_history x)
-  ; Recovery_text_range.method_name, map Recovery_text_range.of_json (fun x -> Recovery_range x)
+  ; ( Recovery_query.Enable.method_name
+    , map Recovery_query.Enable.of_json (fun x -> Recovery_enable x) )
+  ; ( Recovery_query.List_windows.method_name
+    , map Recovery_query.List_windows.of_json (fun x -> Recovery_windows x) )
+  ; ( Recovery_history_request.method_name
+    , map Recovery_history_request.of_json (fun x -> Recovery_history x) )
+  ; ( Recovery_text_range.method_name
+    , map Recovery_text_range.of_json (fun x -> Recovery_range x) )
+  ; ( Recovery_asset_read.method_name
+    , map Recovery_asset_read.of_json (fun x -> Recovery_asset_read x) )
   ; "session.runs", map Run_query.Request.of_json (fun x -> Session_runs x)
   ; "session.run", map Run_query.Lookup_request.of_json (fun x -> Session_run x)
   ; ( "session.pending_inputs"

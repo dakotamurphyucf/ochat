@@ -117,6 +117,7 @@ let has_command_receipt = function
   | Recovery_windows _
   | Recovery_history _
   | Recovery_range _
+  | Recovery_asset_read _
   | Goal_query _
   | Recovery_enable _
   | Goal_control _
@@ -1039,6 +1040,7 @@ type recovery_command =
   | List_windows of P.Recovery_query.List_windows.t
   | Query_history of P.Recovery_history_request.t
   | Read_text of P.Recovery_text_range.t
+  | Read_asset of P.Recovery_asset_read.t
 
 let request_recovery t ~initialized_as command =
   let command =
@@ -1047,6 +1049,7 @@ let request_recovery t ~initialized_as command =
     | List_windows request -> P.Command.Recovery_windows request
     | Query_history request -> P.Command.Recovery_history request
     | Read_text request -> P.Command.Recovery_range request
+    | Read_asset request -> P.Command.Recovery_asset_read request
   in
   let check () =
     if Option.exists (initialization t) ~f:(phys_equal initialized_as)

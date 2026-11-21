@@ -144,7 +144,7 @@ let state ?(stabilize_commit = true) t ~citation ~part ~intent ~commit =
   | None, Some _ | Some _, Some _ -> Error Corrupt
 ;;
 
-let max_asset_bytes = 8 * 1024 * 1024
+let max_asset_bytes = P.Recovery_asset_read.max_original_bytes
 
 let bounded t ~max_bytes length =
   if

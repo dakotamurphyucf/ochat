@@ -7,6 +7,9 @@ type kind =
   | Binary
 [@@deriving compare, equal, sexp]
 
+(** A MIME type with two bounded token components, without parameters. *)
+val is_media_type : string -> bool
+
 module Metadata : sig
   type t =
     { id : Id.Blob.t

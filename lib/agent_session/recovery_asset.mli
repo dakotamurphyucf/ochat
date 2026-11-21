@@ -92,3 +92,16 @@ val read
   -> part:int
   -> max_bytes:int
   -> (Ref.t * string, Recovery_source_reader.error) result
+
+(** Public ordinary semantic view. The additional nonyielding predicate binds
+    an already verified body to its exact selected source/position. The host
+    independently rechecks the owning session and recipient authority at
+    delivery before applying it to the latest state of that same session. *)
+val read_ordinary
+  :  t
+  -> sw:Eio.Switch.t
+  -> current:current
+  -> P.Recovery_window.Citation.t
+  -> part:int
+  -> max_bytes:int
+  -> ((Ref.t * string) * (Session_state.t -> bool), Recovery_source_reader.error) result

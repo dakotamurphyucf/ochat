@@ -25,3 +25,10 @@ val read_text
   :  Connection.t
   -> Agent_protocol.Recovery_text_range.t
   -> (Agent_protocol.Recovery_text_range.Reply.t, Agent_protocol.Error.t) result
+
+(** Read one authorized ordinary original chunk. Read continuations pin the
+    full original SHA-256 and continue at the returned exact byte offset. *)
+val read_asset
+  :  Connection.t
+  -> Agent_protocol.Recovery_asset_read.t
+  -> (Agent_protocol.Recovery_asset_read.Reply.t, Agent_protocol.Error.t) result
