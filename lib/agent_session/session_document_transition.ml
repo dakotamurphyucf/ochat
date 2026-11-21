@@ -244,7 +244,12 @@ let prepare previous_document ~delta:transaction ~limits =
         in
         (* The archive and history carrier remain pre-cut with respect to the Turn.
            Advance canonical accounting only after admitting that exact transfer. *)
-        let next = { state with inference_ledger = previous.inference_ledger } in
+        let next =
+          { state with
+            inference_ledger = previous.inference_ledger
+          ; delegated_usage = previous.delegated_usage
+          }
+        in
         let%bind admitted =
           History_retirement.admit_rollover basis change ~next ~limits
         in

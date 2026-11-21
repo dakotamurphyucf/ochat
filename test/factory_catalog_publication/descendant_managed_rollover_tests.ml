@@ -224,6 +224,13 @@ let%expect_test "managed rollover uses the original native receipt and a fresh G
                  , (usage.turn : int64)
                  , (usage.attempt : int64)]);
             let original_receipt = managed child reference key in
+            let predecessor = Option.value_exn (state child).active_operation in
+            let predecessor_marks = marks child in
+            let turn_totals state =
+              L.summary state.A.Session_state.inference_ledger
+              |> P.Inference_query.Summary.turns
+            in
+            let predecessor_turns = turn_totals (state child) in
             (match reported with
              | Published (Complete reported) ->
                assert (Jsonaf.exactly_equal reported (M.to_json original_receipt))
@@ -267,6 +274,32 @@ let%expect_test "managed rollover uses the original native receipt and a fresh G
                     : (string * P.Invocation.status) list)
                  , (!dispatches : int)]);
             let retained = state child in
+            let cut_turns = turn_totals retained in
+            let cut_marks = marks child in
+            [%test_eq: int64] predecessor_marks.turn cut_marks.turn;
+            [%test_eq: int64] predecessor_marks.attempt cut_marks.attempt;
+            [%test_eq: int64] (Int64.pred predecessor_turns.pending) cut_turns.pending;
+            [%test_eq: int64]
+              (Int64.succ predecessor_turns.interrupted)
+              cut_turns.interrupted;
+            assert (
+              List.count (terminal_operations child) ~f:(fun operation ->
+                P.Id.Operation.equal predecessor.id operation.id
+                &&
+                match operation.state with
+                | Interrupted _ -> true
+                | Starting | Running | Cancelling | Completed | Failed _ | Cancelled ->
+                  false)
+              = 1);
+            (* A managed child Turn holds inherited dispatch authority. The
+               parent's completed tool borrow grants no child transcript access. *)
+            let invocation =
+              List.find_exn retained.invocations ~f:(fun invocation ->
+                String.equal invocation.P.Invocation.context.tool_name remaining)
+            in
+            (match invocation.status with
+             | Published (Fail { code = "permission_denied"; _ }) -> ()
+             | status -> raise_s [%sexp (status : P.Invocation.status)]);
             let current =
               A.Recovery_window_ledger.active (Option.value_exn retained.recovery_windows)
               |> A.Recovery_window_ledger.Window.scope

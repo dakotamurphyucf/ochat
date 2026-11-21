@@ -1645,9 +1645,9 @@ let implementation_sources =
   ; ( "lib/agent_session/canonical_usage_update.ml"
     , "599bf11fce6d08aa522ce49c1df4ade47c640045591442fd67dcb47ec6084ea2" )
   ; ( "lib/agent_session/session_delta.ml"
-    , "c33d141c5d0282b259981ba78b64799f5d043a9b4cffcd984ce664bc8dda59cf" )
+    , "60eacad487575b995144744e58325f396bc4eead7480875f2643ae8c0e385b5c" )
   ; ( "lib/agent_session/session_document_transition.ml"
-    , "498fe764d5bee77b39ad15e47a38ae7851e86f161ddd974af4fbfc9007207c87" )
+    , "03ebb1d5ea7e0b6cfffe918ef1844a95beb2874b8369e4c25e12eeb27b1b0272" )
   ; ( "lib/agent_session/host_turn_tracking.ml"
     , "e9f94b5e59d6097c288c2b49c613e2749da1245afcef4716dac3caa6fc91e9e0" )
   ; ( "lib/agent_session/session_state_presence.ml"

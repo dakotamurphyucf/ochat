@@ -606,6 +606,15 @@ through the existing descendant lifecycle. An authorized controller can use
 Recovery never reconstructs a retired process credential. An archive-only
 cut waits for current authority.
 
+An inherited managed Turn can dispatch under its confirmed parent Goal
+without carrying the parent's interactive actor authority into the child.
+Context tools that require a current transcript principal still deny access
+in that Turn. An independently authorized operator can request a forced cut,
+which commits after the tool result settles. The rollover transaction retires the
+predecessor Turn and advances the child's delegated accounting at the same
+canonical revision. The archive keeps its pre-cut accounting and retirement
+does not allocate a Turn or charge another attempt.
+
 An ordinary or successor managed foreground attempt can reevaluate once when
 the same ancestor's State changes during pre-writer admission. The child seals
 the exact unstarted candidate and waits for its root reservations to close

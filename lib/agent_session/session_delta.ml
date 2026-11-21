@@ -819,6 +819,17 @@ let apply_rollover (state : Session_state.t) (change : Recovery_rollover.Commit.
            P.Error.invalid_request
              "rollover could not finish its retained predecessor Turn"))
   in
+  let%bind delegated_usage =
+    if phys_equal inference_ledger state.inference_ledger
+    then Ok state.delegated_usage
+    else
+      Option.value_map state.delegated_usage ~default:(Ok None) ~f:(fun usage ->
+        Delegated_usage.reconcile
+          usage
+          ~before:state.inference_ledger
+          ~after:inference_ledger
+        |> Result.map ~f:Option.some)
+  in
   let%map next = with_canonical_history state retained ~recovery_windows:(Some windows) in
   attach_archive
     { next with
@@ -826,6 +837,7 @@ let apply_rollover (state : Session_state.t) (change : Recovery_rollover.Commit.
     ; recovery_rollover = Some recovery_rollover
     ; recovery_effective
     ; inference_ledger
+    ; delegated_usage
     ; active_operation =
         (match R.Commit.predecessor change with
          | None -> next.active_operation
