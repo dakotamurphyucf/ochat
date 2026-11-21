@@ -509,6 +509,7 @@ let rollover_retained_history
 ;;
 
 let successor_retained_history
+      ?(retain_accepted_wakes = false)
       (state : Session_state.t)
       (operation : Agent_protocol.Operation.t)
   =
@@ -543,6 +544,9 @@ let successor_retained_history
   List.iter state.deliveries ~f:(fun delivery ->
     match delivery.status, delivery.wake_disposition with
     | Committed { history_id; _ }, Some Pending_wake -> Hash_set.add wakes history_id
+    | Committed { history_id; _ }, Some (Accepted_wake id)
+      when retain_accepted_wakes && P.Id.Operation.equal id operation.id ->
+      Hash_set.add wakes history_id
     | _ -> ());
   let entries =
     List.filter rest ~f:(fun entry ->
@@ -718,9 +722,11 @@ let apply_rollover (state : Session_state.t) (change : Recovery_rollover.Commit.
   let predecessor = W.Window.scope (W.active windows) in
   let history = state.conversation.canonical_history in
   let%bind checkpoint_history =
-    match change.batch with
-    | None -> Result.map (require_quiescent_rollover_cut state) ~f:(fun () -> None)
-    | Some batch ->
+    match change.batch, change.capacity with
+    | None, None -> Result.map (require_quiescent_rollover_cut state) ~f:(fun () -> None)
+    | _, Some cut ->
+      Result.map (Recovery_rollover_capacity_cut.validate state cut) ~f:(fun () -> None)
+    | Some batch, None ->
       let%bind intent =
         R.pending receipts
         |> Result.of_option
@@ -763,16 +769,21 @@ let apply_rollover (state : Session_state.t) (change : Recovery_rollover.Commit.
   in
   let%bind recovery_effective = Recovery_effective_capture.relocate state ~archive in
   let%bind state =
-    match change.batch with
+    match R.Commit.predecessor change with
     | None -> Ok state
     | Some _ when not change.schedule_foreground -> Ok state
-    | Some batch ->
+    | Some predecessor ->
       let%bind operation =
         Result.of_option
           state.active_operation
           ~error:(P.Error.invalid_request "rollover operation unavailable")
       in
-      let%bind expected_retained = successor_retained_history state operation in
+      let%bind expected_retained =
+        successor_retained_history
+          ~retain_accepted_wakes:(Option.is_some change.capacity)
+          state
+          operation
+      in
       let%bind () =
         if List.equal P.History.Id.equal expected_retained change.retain
         then Ok ()
@@ -781,7 +792,7 @@ let apply_rollover (state : Session_state.t) (change : Recovery_rollover.Commit.
       let%bind managed_submissions =
         suspend_managed_rollover
           state.managed_submissions
-          ~predecessor:batch.operation
+          ~predecessor
           ~continuation:change.id
       in
       let%map state = release_rollover_inputs state operation ~limits in
@@ -794,11 +805,11 @@ let apply_rollover (state : Session_state.t) (change : Recovery_rollover.Commit.
     ; recovery_rollover = Some recovery_rollover
     ; recovery_effective
     ; active_operation =
-        (match change.batch with
+        (match R.Commit.predecessor change with
          | None -> next.active_operation
          | Some _ -> None)
     ; lifecycle =
-        (match change.batch with
+        (match R.Commit.predecessor change with
          | None -> next.lifecycle
          | Some _ -> { next.lifecycle with observed = Idle })
     }
@@ -1367,7 +1378,15 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
           Automatic_turn_budget.note_operation budget operation)
       | None, _ -> state.automatic_turn_budget
     in
-    Ok { state with active_operation; automatic_turn_budget }
+    let%map.Result recovery_rollover =
+      match state.active_operation, active_operation with
+      | Some predecessor, None ->
+        Recovery_rollover.abandon_automatic
+          state.recovery_rollover
+          ~operation:predecessor.id
+      | _ -> Ok state.recovery_rollover
+    in
+    { state with active_operation; automatic_turn_budget; recovery_rollover }
   | Automatic_turn_budget_enabled policy ->
     (match state.automatic_turn_budget with
      | Some budget when Chat_response.Runtime_semantics.equal_policy budget.policy policy
@@ -2283,6 +2302,13 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
          | Authored _ ->
            Recovery_checkpoint_cut.check_checkpoint_registration state checkpoint)
       | Schedule { change; _ } -> check_continuation_change state change
+      | Admit { requester = Automatic { cut; _ }; _ } ->
+        if awaiting_settled_foreground state
+        then
+          Error
+            (Agent_protocol.Error.invalid_request
+               "capacity rollover has a pending successor")
+        else Recovery_rollover_capacity_cut.validate state cut
       | Admit _ | Settle _ | Hook _ -> Ok ()
     in
     let%bind windows =
@@ -2671,7 +2697,7 @@ let validate_goal_descendants
     | Active_operation_changed operation ->
       let%map cursor = O.advance cursor (Active_operation operation) in
       accounts, cursor
-    | Recovery_rollover_committed { batch = Some _; _ } ->
+    | Recovery_rollover_committed ({ batch = Some _; _ } | { capacity = Some _; _ }) ->
       let%map cursor = O.advance cursor (Active_operation None) in
       accounts, cursor
     | Invocation_changed invocation | Invocation_reconciled invocation ->

@@ -256,6 +256,8 @@
   recovery_successor_guidance
   recovery_rollover_batch
   recovery_rollover_batch_cut
+  recovery_rollover_capacity
+  recovery_rollover_capacity_cut
   recovery_rollover_evidence
   recovery_checkpoint_cut
   recovery_rollover

@@ -1585,3 +1585,81 @@ let check_delta document =
     ~name:rollover_hooks_name
     ~required:(delta_has_rollover_hooks (D.Document.payload document))
 ;;
+
+let recovery_capacity_rollover_name =
+  Agent_protocol.Session_storage_semantics.recovery_capacity_rollover
+;;
+
+let automatic_requester json fields =
+  match field_path json (fields @ [ "requester"; "kind" ]) with
+  | Some (`String "automatic") -> true
+  | _ -> false
+;;
+
+let state_has_capacity_rollover payload =
+  match field_path payload [ "recovery_rollover"; "receipts" ] with
+  | Some (`Array receipts) ->
+    List.exists receipts ~f:(fun receipt -> automatic_requester receipt [ "intent" ])
+  | _ -> false
+;;
+
+let delta_has_capacity_rollover payload =
+  match field_path payload [ "changes" ] with
+  | Some (`Array changes) ->
+    List.exists changes ~f:(fun change ->
+      match field_path change [ "kind" ] with
+      | Some (`String "recovery_rollover_changed") ->
+        automatic_requester change [ "value"; "intent" ]
+      | Some (`String "recovery_rollover_committed") ->
+        (match field_path change [ "value" ] with
+         | Some change ->
+           (match D.Json.field change ~name:"capacity" with
+            | Absent -> false
+            | _ -> true)
+         | None -> false)
+      | Some (`String "created") ->
+        Option.exists
+          (field_path change [ "state"; "payload" ])
+          ~f:state_has_capacity_rollover
+      | _ -> false)
+  | _ -> false
+;;
+
+let require_state_without_capacity_rollover = require_state
+let check_state_without_capacity_rollover = check_state
+let require_delta_without_capacity_rollover = require_delta
+let check_delta_without_capacity_rollover = check_delta
+
+let require_state document ~limits =
+  let%bind.Result document = require_state_without_capacity_rollover document ~limits in
+  require
+    document
+    ~name:recovery_capacity_rollover_name
+    ~required:(state_has_capacity_rollover (D.Document.payload document))
+    ~limits
+;;
+
+let check_state document =
+  let%bind.Result () = check_state_without_capacity_rollover document in
+  check
+    document
+    ~name:recovery_capacity_rollover_name
+    ~required:(state_has_capacity_rollover (D.Document.payload document))
+;;
+
+let require_delta document ~limits =
+  let%bind.Result document = require_delta_without_capacity_rollover document ~limits in
+  require
+    document
+    ~name:recovery_capacity_rollover_name
+    ~required:(delta_has_capacity_rollover (D.Document.payload document))
+    ~limits
+;;
+
+let check_delta document =
+  let%bind.Result () = check_delta_without_capacity_rollover document in
+  check
+    document
+    ~name:recovery_capacity_rollover_name
+    ~required:(delta_has_capacity_rollover (D.Document.payload document))
+;;

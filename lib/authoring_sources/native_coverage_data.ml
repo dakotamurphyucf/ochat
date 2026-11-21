@@ -578,7 +578,7 @@ let implementation_sources =
   ; ( "lib/agent_session/recovery_checkpoint_cut.ml"
     , "6f4cef6f87a0be3cabd81859cc209b44b6fdf36bc191ea6c1387ecd71c247c5a" )
   ; ( "lib/agent_session/recovery_rollover_batch_cut.ml"
-    , "732c6e62a7ece0f4b7cf36bd54e27d90ac16b6e4bbb1bc13ac3e50fc9cf04456" )
+    , "1480c60c9b1ee9653f686cd084699f4c6c40e727d2b804343b2c1cf1d9140571" )
   ; ( "lib/agent_session/recovery_rollover_evidence.ml"
     , "0a367a7b377f30130ade6664a6391273aab671380dc081d757af3b4d2d705b9a" )
   ; ( "lib/agent_session/recovery_ordinary_selection.ml"

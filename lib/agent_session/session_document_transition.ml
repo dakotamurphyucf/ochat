@@ -204,7 +204,7 @@ let prepare previous ~delta ~limits =
         let%bind candidate =
           Transaction.continue_after_history carrier ~admitted ~next:state ~limits
         in
-        (match change.batch with
+        (match Recovery_rollover.Commit.predecessor change with
          | None -> Ok candidate
          | Some _ -> Transaction.observe_descendants candidate (Active_operation None))
       | (History_deleted _ | History_edited _) as delta ->

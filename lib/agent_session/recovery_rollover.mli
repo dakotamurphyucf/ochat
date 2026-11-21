@@ -25,6 +25,10 @@ module Requester : sig
         ; operation : P.Id.Operation.t
         ; invocation : P.Id.Invocation.t
         }
+    | Automatic of
+        { principal : P.Id.Principal.t
+        ; cut : Recovery_rollover_capacity.t
+        }
   [@@deriving equal, sexp_of]
 end
 
@@ -144,11 +148,15 @@ module Commit : sig
     ; checkpoint : Receipt.checkpoint_quality
     ; retain : P.History.Id.t list
     ; batch : Recovery_rollover_batch.t option
+    ; capacity : Recovery_rollover_capacity.t option
     ; schedule_foreground : bool
     }
 
+  val predecessor : t -> P.Id.Operation.t option
+
   val create
     :  ?batch:Recovery_rollover_batch.t
+    -> ?capacity:Recovery_rollover_capacity.t
     -> ?schedule_foreground:bool
     -> Intent.t
     -> expected:Expected.t
@@ -175,6 +183,13 @@ type t
 
 val find : t -> id:P.Id.Operation.t -> Receipt.t option
 val pending : t -> Intent.t option
+val automatic_for_operation : t option -> operation:P.Id.Operation.t -> Receipt.t option
+
+val abandon_automatic
+  :  t option
+  -> operation:P.Id.Operation.t
+  -> (t option, P.Error.t) result
+
 val checkpoint : t -> Checkpoint.t option
 
 val foreground

@@ -431,7 +431,7 @@ let%expect_test "selected foreground tools use the real preparation and original
                  | _ -> None)
              in
              let capacity = field (completed remaining) "capacity" in
-             assert_json (`String "automatic") (field capacity "effective_mode");
+             assert_json (`String "manual") (field capacity "effective_mode");
              assert_json (`String "measured") (field capacity "evidence");
              assert_json (`Number "330") (field capacity "remaining");
              assert (List.exists (outcomes state new_window) ~f:(expect_failure Conflict));
@@ -443,7 +443,7 @@ let%expect_test "selected foreground tools use the real preparation and original
              assert (Scope.equal intent.expected.scope scope);
              (match intent.requester with
               | Native _ -> ()
-              | Operator _ -> failwith "wrong requester");
+              | Operator _ | Automatic _ -> failwith "wrong requester");
              let windows = Option.value_exn state.recovery_windows in
              assert (
                Scope.equal

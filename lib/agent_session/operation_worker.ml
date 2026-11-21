@@ -119,6 +119,7 @@ module Capabilities = struct
     ; admit_moderator_turn : unit -> (unit, Agent_protocol.Error.t) result
     ; admit_notification_turn : unit -> (unit, Agent_protocol.Error.t) result
     ; root_context : Chat_response.Root_context.t option
+    ; capacity_rollover : Chat_response.Capacity_rollover.t option
     ; select_rollover_followup :
         (Recovery_rollover_continuation.Hook.view
          -> Recovery_rollover_continuation.Hook.decision)
@@ -169,7 +170,12 @@ type outcome =
   | Cancelled of cancellation
   | Failed of Agent_protocol.Error.t
 
-type t = { run : sw:Eio.Switch.t -> input:Input.t -> Capabilities.t -> outcome }
+type t =
+  { run : sw:Eio.Switch.t -> input:Input.t -> Capabilities.t -> outcome
+  ; capacity_aware : bool
+  }
 
-let create ~run = { run }
+let create ~run = { run; capacity_aware = false }
+let create_capacity_aware ~run = { run; capacity_aware = true }
+let supports_capacity_rollover t = t.capacity_aware
 let run t ~sw ~input capabilities = t.run ~sw ~input capabilities

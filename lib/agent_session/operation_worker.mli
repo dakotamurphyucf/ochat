@@ -226,6 +226,7 @@ module Capabilities : sig
           accepts its consumed notification wakes, including without a moderator.
           A failed save prevents provider dispatch. *)
     ; root_context : Chat_response.Root_context.t option
+    ; capacity_rollover : Chat_response.Capacity_rollover.t option
     ; select_rollover_followup :
         (Recovery_rollover_continuation.Hook.view
          -> Recovery_rollover_continuation.Hook.decision)
@@ -288,4 +289,12 @@ type outcome =
 type t
 
 val create : run:(sw:Eio.Switch.t -> input:Input.t -> Capabilities.t -> outcome) -> t
+
+(** Trusted stock workers which apply the supplied capacity port before any
+    root allocation, including withholding an oversize wire on stale/veto. *)
+val create_capacity_aware
+  :  run:(sw:Eio.Switch.t -> input:Input.t -> Capabilities.t -> outcome)
+  -> t
+
+val supports_capacity_rollover : t -> bool
 val run : t -> sw:Eio.Switch.t -> input:Input.t -> Capabilities.t -> outcome

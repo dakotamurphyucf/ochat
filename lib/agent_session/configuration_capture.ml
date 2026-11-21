@@ -29,6 +29,10 @@ module Capacity_basis = struct
     }
   ;;
 
+  let automatic t =
+    Capacity.Mode.equal (Capacity.availability t.selection).effective Automatic
+  ;;
+
   let equal a b =
     Int.equal a.generation b.generation
     && Session_state.Spec.Resource_identity.equal a.spec b.spec
@@ -51,6 +55,19 @@ module Capacity_observation = struct
     }
 end
 
+module Cut_basis = struct
+  type t =
+    { history : Agent_protocol.History.entry list
+    ; attempt_high_water : int64
+    }
+
+  let capture (state : Session_state.t) =
+    { history = state.conversation.canonical_history
+    ; attempt_high_water = Inference_ledger.last_attempt_ordinal state.inference_ledger
+    }
+  ;;
+end
+
 module Token = struct
   type recovery_binding =
     { configuration : Inference.Observation.Configuration.t
@@ -65,11 +82,13 @@ module Token = struct
     ; target : Inference.Request.Target.t
     ; policy : Configuration_policy.t
     ; capacity : Capacity_basis.t option
+    ; cut : Cut_basis.t option
     ; recovery_scope : Agent_protocol.Recovery_window.Scope.t option
     ; reminder : Reminder.t option
     ; recovery_binding : recovery_binding option
     ; capture_recovery : bool
     ; assessment : Capacity_observation.t option
+    ; blocked_configuration : Inference.Observation.Configuration.t option
     ; configuration : Inference.Observation.Configuration.t option
     }
 
@@ -82,6 +101,7 @@ let create () = { current = None }
 
 let begin_capture
       ?capacity
+      ?cut
       ?recovery_scope
       ~capture_recovery
       ~can_remind
@@ -107,11 +127,13 @@ let begin_capture
     ; target
     ; policy
     ; capacity
+    ; cut
     ; recovery_scope
     ; reminder
     ; recovery_binding = None
     ; capture_recovery
     ; assessment = None
+    ; blocked_configuration = None
     ; configuration = None
     }
   in
@@ -223,6 +245,15 @@ let mark t token configuration =
          ())
 ;;
 
+let hard_limit () =
+  Error
+    (Agent_protocol.Error.create
+       Resource_limit
+       ~message:"prepared request exceeds the current context input limit"
+       ~retryable:false
+       ())
+;;
+
 let mark_capacity t token ~current observation =
   match t.current, current, token.Token.capacity with
   | Some (captured, Preparing), Some current, Some selected
@@ -230,16 +261,18 @@ let mark_capacity t token ~current observation =
          && Option.is_none captured.assessment
          && Capacity_basis.equal current selected
          && observation.Capacity_observation.binding_is_current () ->
-    t.current <- Some ({ captured with assessment = Some observation }, Preparing);
-    (match Capacity.Capacity.Assessment.view observation.assessment with
-     | Assessed { pressure = Hard_limit_exceeded; _ } ->
-       Error
-         (Agent_protocol.Error.create
-            Resource_limit
-            ~message:"prepared request exceeds the current context input limit"
-            ~retryable:false
-            ())
-     | Unavailable _ | Assessed _ -> Ok ())
+    let blocked_configuration =
+      match Capacity.Capacity.Assessment.view observation.assessment with
+      | Assessed { pressure = Hard_limit_exceeded; _ } -> Some observation.configuration
+      | Unavailable _ | Assessed _ -> None
+    in
+    t.current
+    <- Some
+         ( { captured with assessment = Some observation; blocked_configuration }
+         , Preparing );
+    if Option.is_some blocked_configuration && Option.is_none captured.cut
+    then hard_limit ()
+    else Ok ()
   | _ ->
     Error
       (Agent_protocol.Error.create
@@ -247,6 +280,15 @@ let mark_capacity t token ~current observation =
          ~message:"context capacity basis changed during request preparation"
          ~retryable:false
          ())
+;;
+
+let check_allocation t ~operation_id configuration =
+  match t.current with
+  | Some (token, _)
+    when Agent_protocol.Id.Operation.equal token.operation_id operation_id
+         && Option.exists token.blocked_configuration ~f:(phys_equal configuration) ->
+    hard_limit ()
+  | _ -> Ok ()
 ;;
 
 let capacity_status t ~operation_id ~current =
@@ -272,6 +314,66 @@ let capacity_status t ~operation_id ~current =
           t.current <- Some ({ token with capacity = None; assessment = None }, phase);
           Capacity.Stale_preparation availability)
      | _ -> Capacity.Awaiting_preparation availability)
+;;
+
+let capacity_rollover t ~operation_id ~current ~(state : Session_state.t) stage =
+  let module R = Chat_response.Capacity_rollover in
+  let module Prepared = Inference_runtime.Prepared in
+  let module Attempt = Inference_runtime.Attempt in
+  let module Assessment = Capacity.Capacity.Assessment in
+  let conflict () =
+    Error
+      (Agent_protocol.Error.create
+         Conflict
+         ~message:"automatic rollover preparation is no longer current"
+         ~retryable:true
+         ())
+  in
+  let matching token selection =
+    match token.Token.cut, token.capacity, token.assessment with
+    | Some cut, Some captured, Some assessment
+      when Agent_protocol.Id.Operation.equal token.operation_id operation_id
+           && Capacity_basis.equal captured selection
+           && assessment.binding_is_current ()
+           && phys_equal cut.history state.conversation.canonical_history ->
+      Some (cut, assessment)
+    | _ -> None
+  in
+  let last_ordinal = Inference_ledger.last_attempt_ordinal state.inference_ledger in
+  match t.current, current with
+  | Some (token, _), (None | Some _)
+    when Agent_protocol.Id.Operation.equal token.operation_id operation_id
+         && Option.is_some token.cut
+         && not (Option.exists current ~f:Capacity_basis.automatic) -> conflict ()
+  | _, None -> Ok R.No_transition
+  | _, Some basis when not (Capacity_basis.automatic basis) -> Ok R.No_transition
+  | Some (token, phase), Some basis ->
+    (match matching token basis with
+     | None -> conflict ()
+     | Some (cut, observation) ->
+       (match stage, phase with
+        | R.Unsent prepared, Preparing
+          when Int64.equal cut.attempt_high_water last_ordinal
+               && phys_equal observation.configuration (Prepared.configuration prepared)
+               && Inference.Request.Target.equal token.target (Prepared.target prepared)
+               && Prepared.capacity_assessment_is_current
+                    ?policy:(Capacity.Selection.policy basis.selection)
+                    prepared
+                    observation.assessment ->
+          (match Assessment.view observation.assessment with
+           | Assessed { pressure = Hard_limit_exceeded; _ } -> Ok R.Hard_limit
+           | Assessed { pressure = Checkpoint_due; _ } -> Ok R.Checkpoint_opportunity
+           | Assessed _ | Unavailable _ -> Ok R.No_transition)
+        | R.Rejected rejected, Effective
+          when Int64.(cut.attempt_high_water < last_ordinal)
+               && phys_equal
+                    observation.configuration
+                    (Attempt.configuration (R.attempt rejected))
+               && Option.exists
+                    token.configuration
+                    ~f:(phys_equal observation.configuration) -> Ok R.Qualified_rejection
+        | _ -> conflict ()))
+  | _ -> conflict ()
 ;;
 
 module Native_window = struct

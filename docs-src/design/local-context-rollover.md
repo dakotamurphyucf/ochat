@@ -305,6 +305,19 @@ moderator borrow or background state-writing lease must join or release its
 ownership before the claim advances. Storage/lease conflicts expose pending
 or typed rejection via existing error paths.
 
+The automatic foreground path has its own journal cut. It binds the original
+operation and principal, exact selected configuration, canonical occurrence
+revisions and inference high-water mark. An oversized preparation can reach
+this cut before any attempt allocation. Once assessed as oversized, that exact
+preparation is also blocked at allocation. A provider rejection must match the
+original acknowledged terminal accounting row and attest an empty safe
+response. Both boundaries require current worker ownership, no live inference
+or invocation, and the original execution custody at the archive and journal
+checks. A generic worker reports Manual availability and uses the ordinary
+hard limit. A committed retry returns the same disposition only for the same
+physical worker and cut. Replay checks the durable record and does not resume
+an abandoned worker's prepared request.
+
 The worker's existing safe-point queue remains the authority for pending
 inputs and notifications. At rollover, the actor makes the cut before the
 next deferred adoption. Already adopted entries remain exact old-window
@@ -531,7 +544,10 @@ submission.
 The standard turn worker exposes a body-free post-commit selection to the
 authored lifecycle integration. Its `Continue`, `Wait` and `Finish` outcomes
 apply only to the exact retired foreground owner and committed successor.
-A current inherited Goal root requires a fresh inherited admission before
+Without an authored decision, an automatic archive-only transition can prepare
+a fresh successor from the retained required input. A forced operator
+archive-only transition defaults to waiting. A current inherited Goal root
+requires a fresh inherited admission before
 any successor dispatch. An authorized parent can repeat its native managed
 send with the original key and input. The child selects the retained user
 occurrence and stages the new Turn through the existing parent reservation,

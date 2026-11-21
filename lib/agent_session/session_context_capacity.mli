@@ -48,6 +48,7 @@ module Selection : sig
     -> opted_in:(unit -> bool)
     -> t option
 
+  val require_worker : t -> automatic:bool -> t
   val policy : t -> Capacity.Policy.t option
   val equal : t -> t -> bool
 end

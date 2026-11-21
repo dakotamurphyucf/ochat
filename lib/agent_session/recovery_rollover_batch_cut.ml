@@ -150,6 +150,7 @@ let validate (state : Session_state.t) ~scope ~requester (batch : B.t) =
   let%map () =
     match requester with
     | Recovery_rollover.Requester.Operator _ -> Ok ()
+    | Automatic _ -> conflict "automatic rollover cannot use a tool batch"
     | Native { operation; invocation; _ } ->
       if
         P.Id.Operation.equal operation batch.operation

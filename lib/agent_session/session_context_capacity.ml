@@ -85,6 +85,12 @@ module Selection = struct
       })
   ;;
 
+  let require_worker t ~automatic =
+    if automatic
+    then t
+    else { t with availability = { t.availability with effective = Manual } }
+  ;;
+
   let policy t = t.policy
 
   let equal a b =

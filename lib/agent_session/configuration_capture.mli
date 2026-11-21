@@ -9,10 +9,17 @@ module Capacity_basis : sig
 
   val capture : Session_state.t -> selection:Session_context_capacity.Selection.t -> t
   val equal : t -> t -> bool
+  val automatic : t -> bool
 end
 
 module Capacity_observation : sig
   type t
+end
+
+module Cut_basis : sig
+  type t
+
+  val capture : Session_state.t -> t
 end
 
 module Token : sig
@@ -25,6 +32,7 @@ val create : unit -> t
 
 val begin_capture
   :  ?capacity:Capacity_basis.t
+  -> ?cut:Cut_basis.t
   -> ?recovery_scope:Agent_protocol.Recovery_window.Scope.t
   -> capture_recovery:bool
   -> can_remind:
@@ -91,11 +99,28 @@ val mark_capacity
   -> Capacity_observation.t
   -> (unit, Agent_protocol.Error.t) Result.t
 
+(** An oversized preparation cannot allocate, even if its worker omits the
+    automatic transition callback. Only the exact root object is blocked. *)
+val check_allocation
+  :  t
+  -> operation_id:Agent_protocol.Id.Operation.t
+  -> Inference.Observation.Configuration.t
+  -> (unit, Agent_protocol.Error.t) result
+
 val capacity_status
   :  t
   -> operation_id:Agent_protocol.Id.Operation.t
   -> current:Capacity_basis.t option
   -> Session_context_capacity.status
+
+(** Exact automatic worker observation, while the same root bracket is active. *)
+val capacity_rollover
+  :  t
+  -> operation_id:Agent_protocol.Id.Operation.t
+  -> current:Capacity_basis.t option
+  -> state:Session_state.t
+  -> Chat_response.Capacity_rollover.stage
+  -> (Chat_response.Capacity_rollover.pressure, Agent_protocol.Error.t) result
 
 (** Window of the actual finalized root preparation for this operation. A
     retained same-operation observation still requires live Actor checks. *)

@@ -24,6 +24,10 @@ module Requester = struct
         ; operation : P.Id.Operation.t
         ; invocation : P.Id.Invocation.t
         }
+    | Automatic of
+        { principal : P.Id.Principal.t
+        ; cut : Recovery_rollover_capacity.t
+        }
   [@@deriving equal, sexp_of]
 
   module Key = struct
@@ -31,6 +35,7 @@ module Requester = struct
       type t =
         | Operator of P.Id.Principal.t * P.Idempotency_key.t
         | Native of P.Id.Principal.t * P.Id.Operation.t * P.Id.Invocation.t
+        | Automatic of P.Id.Operation.t
       [@@deriving compare, sexp_of]
     end
 
@@ -42,6 +47,7 @@ module Requester = struct
     | Operator { principal; key; _ } -> Key.Operator (principal, key)
     | Native { principal; operation; invocation } ->
       Key.Native (principal, operation, invocation)
+    | Automatic { cut; _ } -> Key.Automatic cut.operation
   ;;
 
   let same_key a b = Int.equal (Key.compare (key a) (key b)) 0
@@ -61,6 +67,11 @@ module Requester = struct
          ; principal id
          ; "operation", P.Id.Operation.to_json operation
          ; "invocation", P.Id.Invocation.to_json invocation
+         ]
+       | Automatic { principal = id; cut } ->
+         [ "kind", `String "automatic"
+         ; principal id
+         ; "cut", Recovery_rollover_capacity.to_json cut
          ])
   ;;
 
@@ -78,6 +89,9 @@ module Requester = struct
       let%bind operation = J.required_as fields "operation" P.Id.Operation.of_json in
       let%map invocation = J.required_as fields "invocation" P.Id.Invocation.of_json in
       Native { principal; operation; invocation }
+    | "automatic" ->
+      let%map cut = J.required_as fields "cut" Recovery_rollover_capacity.of_json in
+      Automatic { principal; cut }
     | _ -> invalid "unknown recovery rollover requester"
   ;;
 end
@@ -304,6 +318,7 @@ module Receipt = struct
       &&
       match t.intent.requester with
       | Native { operation; _ } -> P.Id.Operation.equal operation claim.predecessor
+      | Automatic { cut; _ } -> P.Id.Operation.equal cut.operation claim.predecessor
       | Operator _ -> not (P.Id.Operation.equal t.intent.id claim.predecessor)
     in
     let after_binds_commit (claim : H.Claim.t) (committed : committed) =
@@ -363,10 +378,14 @@ module Receipt = struct
         | Scheduled_foreground schedule -> Some schedule.predecessor
       in
       let continuation_binds_requester =
-        Option.for_all predecessor ~f:(fun predecessor ->
-          match t.intent.requester with
-          | Native { operation; _ } -> P.Id.Operation.equal predecessor operation
-          | Operator _ -> not (P.Id.Operation.equal predecessor t.intent.id))
+        match t.intent.requester with
+        | Automatic { cut; _ } ->
+          Option.exists predecessor ~f:(P.Id.Operation.equal cut.operation)
+        | Native { operation; _ } ->
+          Option.for_all predecessor ~f:(P.Id.Operation.equal operation)
+        | Operator _ ->
+          Option.for_all predecessor ~f:(fun id ->
+            not (P.Id.Operation.equal id t.intent.id))
       in
       let checkpoint_binds_cut =
         match checkpoint with
@@ -376,6 +395,7 @@ module Receipt = struct
         | Archive_only _ ->
           (match t.intent.requester with
            | Operator { force; _ } -> force
+           | Automatic _ -> true
            | Native _ -> false)
       in
       if
@@ -407,9 +427,17 @@ module Receipt = struct
            , `Object [ "before", phase (H.before hooks); "after", phase (H.after hooks) ]
            )))
     in
+    let trigger =
+      match t.intent.requester with
+      | Automatic { cut; _ } ->
+        [ ( "capacity_trigger"
+          , `String (Recovery_rollover_capacity.trigger_name cut.trigger) )
+        ]
+      | Operator _ | Native _ -> []
+    in
     `Object
       (("status", status_to_json ~public:true t.status)
-       :: (hooks @ Intent.public_fields t.intent))
+       :: (hooks @ trigger @ Intent.public_fields t.intent))
   ;;
 
   let to_json t =
@@ -441,19 +469,30 @@ module Commit = struct
     ; checkpoint : Receipt.checkpoint_quality
     ; retain : P.History.Id.t list
     ; batch : Recovery_rollover_batch.t option
+    ; capacity : Recovery_rollover_capacity.t option
     ; schedule_foreground : bool
     }
+
+  let predecessor t =
+    match t.batch, t.capacity with
+    | Some batch, _ -> Some batch.operation
+    | None, Some capacity -> Some capacity.operation
+    | None, None -> None
+  ;;
 
   let validate_selection t =
     if
       Stdlib.List.compare_length_with t.retain Recovery_window_record.max_members > 0
       || List.contains_dup t.retain ~compare:P.History.Id.compare
     then invalid "invalid rollover carry selection"
+    else if
+      Option.is_some t.capacity && (Option.is_some t.batch || not t.schedule_foreground)
+    then invalid "automatic rollover requires only its verified capacity cut"
     else if t.schedule_foreground
     then (
-      match t.batch with
-      | Some batch when not (P.Id.Operation.equal t.id batch.operation) -> Ok t
-      | _ -> invalid "scheduled rollover requires an independent settled foreground")
+      match predecessor t with
+      | Some operation when not (P.Id.Operation.equal t.id operation) -> Ok t
+      | _ -> invalid "scheduled rollover requires an independent foreground")
     else Ok t
   ;;
 
@@ -464,25 +503,30 @@ module Commit = struct
       ; archive = t.archive
       ; checkpoint = t.checkpoint
       ; continuation =
-          (match t.batch with
+          (match predecessor t with
            | None -> Awaiting_after_commit t.id
-           | Some batch when t.schedule_foreground ->
+           | Some predecessor when t.schedule_foreground ->
              let schedule =
-               Recovery_rollover_continuation.create
-                 ~owner:t.id
-                 ~predecessor:batch.operation
+               Recovery_rollover_continuation.create ~owner:t.id ~predecessor
                |> Result.map_error ~f:(fun (failure : P.Error.t) -> failure.message)
                |> Result.ok_or_failwith
              in
              Scheduled_foreground schedule
-           | Some batch ->
-             Awaiting_settled_foreground { owner = t.id; predecessor = batch.operation })
+           | Some predecessor -> Awaiting_settled_foreground { owner = t.id; predecessor })
       }
   ;;
 
   let check_intent t (intent : Intent.t) =
+    let capacity_matches_requester =
+      match intent.requester, t.capacity with
+      | Automatic { cut; _ }, Some verified ->
+        Recovery_rollover_capacity.equal cut verified
+      | (Operator _ | Native _), None -> true
+      | _ -> false
+    in
     if
-      P.Id.Operation.equal t.id intent.id
+      capacity_matches_requester
+      && P.Id.Operation.equal t.id intent.id
       && Scope.equal t.expected.scope intent.expected.scope
       && Int64.(t.expected.revision > intent.expected.revision)
     then Receipt.validate { intent; status = Terminal (terminal t); hooks = None }
@@ -491,6 +535,7 @@ module Commit = struct
 
   let create
         ?batch
+        ?capacity
         ?(schedule_foreground = false)
         (intent : Intent.t)
         ~expected
@@ -509,6 +554,7 @@ module Commit = struct
         ; checkpoint
         ; retain
         ; batch
+        ; capacity
         ; schedule_foreground
         }
     in
@@ -528,7 +574,10 @@ module Commit = struct
        @ (if t.schedule_foreground then [ "schedule_foreground", `True ] else [])
        @ Option.to_list
            (Option.map t.batch ~f:(fun batch ->
-              "batch", Recovery_rollover_batch.to_json batch)))
+              "batch", Recovery_rollover_batch.to_json batch))
+       @ Option.to_list
+           (Option.map t.capacity ~f:(fun cut ->
+              "capacity", Recovery_rollover_capacity.to_json cut)))
   ;;
 
   let of_json json =
@@ -546,10 +595,22 @@ module Commit = struct
     let%bind checkpoint = J.required_as fields "checkpoint" Receipt.checkpoint_of_json in
     let%bind retain = J.required_as fields "retain" (J.list P.History.Id.of_json) in
     let%bind batch = J.optional_as fields "batch" Recovery_rollover_batch.of_json in
+    let%bind capacity =
+      J.optional_as fields "capacity" Recovery_rollover_capacity.of_json
+    in
     let%bind schedule_foreground = J.optional_as fields "schedule_foreground" J.bool in
     let schedule_foreground = Option.value schedule_foreground ~default:false in
     validate_selection
-      { id; expected; successor; archive; checkpoint; retain; batch; schedule_foreground }
+      { id
+      ; expected
+      ; successor
+      ; archive
+      ; checkpoint
+      ; retain
+      ; batch
+      ; capacity
+      ; schedule_foreground
+      }
   ;;
 end
 
@@ -608,6 +669,14 @@ let foreground t ~scope =
 
 let awaiting_foreground t ~scope =
   Option.exists (foreground t ~scope) ~f:Recovery_rollover_continuation.is_pending
+;;
+
+let automatic_for_operation t ~operation =
+  Option.bind t ~f:(fun ledger ->
+    List.find ledger.receipts ~f:(fun receipt ->
+      match receipt.Receipt.intent.requester with
+      | Automatic { cut; _ } -> P.Id.Operation.equal cut.operation operation
+      | Native _ | Operator _ -> false))
 ;;
 
 let previous t ~requester ~expected =
@@ -749,6 +818,17 @@ let settle t ~id ~terminal =
   | Some { status = Terminal current; _ } when Receipt.equal_terminal current terminal ->
     Ok t
   | Some _ | None -> conflict "rollover settlement has no matching pending intent"
+;;
+
+let abandon_automatic t ~operation =
+  match t with
+  | Some ledger ->
+    (match pending ledger with
+     | Some { id; requester = Automatic { cut; _ }; _ }
+       when P.Id.Operation.equal cut.operation operation ->
+       Result.map (settle ledger ~id ~terminal:(Superseded Cancelled)) ~f:Option.some
+     | Some _ | None -> Ok t)
+  | None -> Ok None
 ;;
 
 let replace_receipt t (updated : Receipt.t) =

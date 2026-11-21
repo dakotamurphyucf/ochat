@@ -994,7 +994,8 @@ let%test_unit
       let first =
         match status () with
         | Current { availability; phase = Effective; configuration; assessment } ->
-          assert (Capacity.Mode.equal availability.effective Automatic);
+          assert (Capacity.Mode.equal availability.requested Automatic);
+          assert (Capacity.Mode.equal availability.effective Manual);
           check_attempt configuration assessment "A";
           (match Counter.Assessment.view assessment with
            | Assessed { evidence = Measured actual; remaining = Available left; _ } ->

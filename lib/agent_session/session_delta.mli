@@ -144,7 +144,8 @@ val validate_successor_dispatch
   -> (unit, Agent_protocol.Error.t) result
 
 val successor_retained_history
-  :  Session_state.t
+  :  ?retain_accepted_wakes:bool
+  -> Session_state.t
   -> Agent_protocol.Operation.t
   -> (Agent_protocol.History.Id.t list, Agent_protocol.Error.t) result
 
