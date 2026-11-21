@@ -9,7 +9,7 @@ module Recovery_input = Recovery_input
 
 module Submission_guard = struct
   type t =
-    { checks : Protected_delivery.Materialized.submission list
+    { checks : Protected_delivery.Materialized.scoped_submission list
     ; admission : (unit -> unit -> unit) list
     }
 
@@ -33,7 +33,7 @@ module Submission_guard = struct
 
   let check_all t source_checks =
     let final_checks =
-      List.map t.checks ~f:(fun (guard : Protected_delivery.Materialized.submission) ->
+      List.map t.checks ~f:(fun (guard : Protected_delivery.Materialized.scoped_submission) ->
         guard.refresh ())
     in
     let check_current () =
@@ -673,7 +673,7 @@ module Prepared = struct
       | None -> Ok t.plan
       | Some materialized ->
         let%map protected_guard =
-          Protected_delivery.Materialized.bind materialized ~scope
+          Protected_delivery.Materialized.bind_scoped materialized ~scope
           |> Result.map_error ~f:(fun error -> Preparation_error.Protected_delivery error)
         in
         let run

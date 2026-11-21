@@ -291,13 +291,13 @@ module Materialized = struct
 
   let release_contents t = t.contents <- Map.empty (module Id)
 
-  type submission =
+  type scoped_submission =
     { refresh : unit -> unit -> unit
     ; claim : unit -> unit
     ; leases : Lease.t list
     }
 
-  let bind t ~scope =
+  let bind_scoped t ~scope =
     let open Result.Let_syntax in
     if
       (not (List.for_all t.sources ~f:preparing))
@@ -331,5 +331,26 @@ module Materialized = struct
           then raise (Rejected Expired)
         in
         { refresh; claim; leases })
+  ;;
+
+  type submission =
+    { refresh : unit -> unit -> unit
+    ; custody : Lease.scope option
+    }
+
+  let bind t ~scope =
+    let%map.Result scoped = bind_scoped t ~scope in
+    let custody =
+      match scoped.leases with
+      | [] -> None
+      | leases -> Some { Lease.run = (fun f -> Lease.with_submission leases ~f) }
+    in
+    let refresh () =
+      let check = scoped.refresh () in
+      fun () ->
+        check ();
+        scoped.claim ()
+    in
+    { refresh; custody }
   ;;
 end

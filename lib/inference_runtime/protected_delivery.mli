@@ -98,7 +98,7 @@ module Materialized : sig
       submitted wire preparation and authority checks retain their own state. *)
   val release_contents : t -> unit
 
-  type submission =
+  type scoped_submission =
     { refresh : unit -> unit -> unit
     ; claim : unit -> unit
     ; leases : Lease.t list
@@ -108,5 +108,15 @@ module Materialized : sig
       Argument isolation with no live results can bind to a nested attempt.
       Refresh may yield. Final checks are reusable within one physical admission.
       Claim once immediately before the first application write. *)
+  val bind_scoped : t -> scope:Transcript.Scope.t -> (scoped_submission, error) result
+
+  type submission =
+    { refresh : unit -> unit -> unit
+    ; custody : Lease.scope option
+    }
+
+  (** Bind once to the actual attempt. Live results require a root attempt.
+      Argument isolation with no live results can bind to a nested attempt.
+      Refresh may yield. The final check admits at most one application submission. *)
   val bind : t -> scope:Transcript.Scope.t -> (submission, error) result
 end
