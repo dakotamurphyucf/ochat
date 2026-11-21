@@ -50,98 +50,119 @@ let exercise env temporary ~cancel =
         ~lose_followup_reply:drop
         f
     in
-    Stock.with_stock env fixture ~port ~config_path (fun _ _ _ ->
-      let session, run_id, waiting =
-        connect ~drop:cancel (fun http connection initialized ->
-          let session, writer =
-            Support.Data_integrity_http.create ~mode:Owner_read_write http "waiting"
-          in
-          let reference =
-            P.Session_ref.create ~server_id:initialized.server_id ~session_id:session.id
-          in
-          let follow selection =
-            Client.followup connection { attachment_id = writer.id; selection }
-          in
-          let initial =
-            Stock.enable connection ~server_id:initialized.server_id session writer.id
-          in
-          Stock.start http session writer.id "start";
-          Recovery_checkpoint_scenario.await_idle env http session;
-          let before = follow (Inspect reference) |> ok in
-          require
-            (F.Reply.equal_phase before.phase Idle
-             && P.Recovery_window.Scope.equal before.basis.scope initial)
-            "new session already had a follow-up";
-          Recovery_checkpoint_scenario.send
-            http
-            session
-            writer.id
-            ~key:"seed"
-            "Record the sample.";
-          let archive =
-            List.init 1050 ~f:(fun i -> Md5.digest_string (Int.to_string i) |> Md5.to_hex)
-            |> String.concat
-          in
-          Provider.reply_summary (Provider.await_request provider env 0) archive;
-          Recovery_checkpoint_scenario.await_idle env http session;
-          let snapshot = Fixture.get http session.id in
-          let request =
-            P.Run_start.create
-              ~session_id:session.id
-              ~attachment_id:writer.id
-              ~generation:session.generation
-              ~expected_revision:snapshot.revision
-              ~mode:Single_turn
-              ~input:
-                (User_submission
-                   { kind = Plain_text; text = "Continue the sample."; attachments = [] })
-              ~key:(Fixture.key "managed-cut")
-            |> ok
-          in
-          let admitted =
-            match Fixture.request http (Session_run_start request) with
-            | Session_run_start receipt -> receipt
-            | _ -> failwith "managed submission was not admitted"
-          in
-          let waiting =
-            Support.Background_fixture.await
-              env
-              "authored Wait after physical cut"
-              (fun () ->
-                 match follow (Inspect reference) with
-                 | Error { code = Conflict; _ } -> None
-                 | result ->
-                   let status = ok result in
-                   Option.some_if (F.Reply.equal_phase status.phase Waiting) status)
-          in
-          require
-            (not (P.Recovery_window.Scope.equal initial waiting.basis.scope))
-            "Wait did not belong to the successor";
-          connect (fun _ foreign _ ->
-            Operator.expect_error
-              (Client.followup
-                 foreign
-                 { attachment_id = writer.id; selection = Inspect reference })
-              Permission_denied);
-          Operator.expect_error (follow (Apply (before.basis, Continue))) Conflict;
-          if cancel
-          then Operator.expect_error (follow (Apply (waiting.basis, Cancel))) Interrupted
-          else (
-            (match follow (Apply (waiting.basis, Continue)) with
-             | Ok _ | Error { code = Interrupted; _ } -> ()
-             | Error failure ->
-               raise_s [%sexp "follow-up was rejected", (failure : P.Error.t)]);
-            let request = Provider.await_request provider env 1 in
+    let submit () =
+      connect ~drop:cancel (fun http connection initialized ->
+        let session, writer =
+          Support.Data_integrity_http.create ~mode:Owner_read_write http "waiting"
+        in
+        let reference =
+          P.Session_ref.create ~server_id:initialized.server_id ~session_id:session.id
+        in
+        let follow selection =
+          Client.followup connection { attachment_id = writer.id; selection }
+        in
+        let initial =
+          Stock.enable connection ~server_id:initialized.server_id session writer.id
+        in
+        Stock.start http session writer.id "start";
+        Recovery_checkpoint_scenario.await_idle env http session;
+        let before = follow (Inspect reference) |> ok in
+        require
+          (F.Reply.equal_phase before.phase Idle
+           && P.Recovery_window.Scope.equal before.basis.scope initial)
+          "new session already had a follow-up";
+        let seed_text = "Record the sample." in
+        (* An idle startup moderator can defer the seed, then adopt it. Use the
+           provider request as the cutpoint for its actual delivery. *)
+        ignore
+          (Recovery_checkpoint_scenario.submit
+             http
+             session
+             writer.id
+             ~timing:Safe_boundary
+             ~key:"seed"
+             seed_text
+           : P.Method_result.Send_message.t);
+        let seed = Provider.await_request provider env 0 in
+        require
+          (Recovery_reminder_scenario.has_entry seed ~role:"user" ~substring:seed_text)
+          "the seed input did not reach the provider";
+        let archive =
+          List.init 1050 ~f:(fun i -> Md5.digest_string (Int.to_string i) |> Md5.to_hex)
+          |> String.concat
+        in
+        Provider.reply_summary seed archive;
+        Recovery_checkpoint_scenario.await_idle env http session;
+        let snapshot = Fixture.get http session.id in
+        let request =
+          P.Run_start.create
+            ~session_id:session.id
+            ~attachment_id:writer.id
+            ~generation:session.generation
+            ~expected_revision:snapshot.revision
+            ~mode:Single_turn
+            ~input:
+              (User_submission
+                 { kind = Plain_text; text = "Continue the sample."; attachments = [] })
+            ~key:(Fixture.key "managed-cut")
+          |> ok
+        in
+        let admitted =
+          match Fixture.request http (Session_run_start request) with
+          | Session_run_start receipt -> receipt
+          | _ -> failwith "managed submission was not admitted"
+        in
+        let waiting =
+          Support.Background_fixture.await
+            env
+            "authored Wait after physical cut"
+            (fun () ->
+               match follow (Inspect reference) with
+               | Error { code = Conflict; _ } -> None
+               | result ->
+                 let status = ok result in
+                 Option.some_if (F.Reply.equal_phase status.phase Waiting) status)
+        in
+        require
+          (not (P.Recovery_window.Scope.equal initial waiting.basis.scope))
+          "Wait did not belong to the successor";
+        connect (fun _ foreign _ ->
+          Operator.expect_error
+            (Client.followup
+               foreign
+               { attachment_id = writer.id; selection = Inspect reference })
+            Permission_denied);
+        Operator.expect_error (follow (Apply (before.basis, Continue))) Conflict;
+        if cancel
+        then (
+          match follow (Apply (waiting.basis, Cancel)) with
+          | Error { code = Interrupted; message; _ } ->
+            (* The fixture produces this error only after a successful HTTP reply. *)
             require
-              (Recovery_reminder_scenario.has_entry
-                 request
-                 ~role:"user"
-                 ~substring:"Continue the sample.")
-              "continued Run lost its original input";
-            Provider.reply_summary request "Continued on operator approval.";
-            Recovery_checkpoint_scenario.await_idle env http session);
-          session, admitted.run_id, waiting)
-      in
+              (String.equal message "fixture lost the follow-up reply")
+              "the Cancel reply did not reach the test transport"
+          | outcome ->
+            raise_s
+              [%sexp
+                "the Cancel reply was not dropped"
+              , (outcome : (F.Reply.t, P.Error.t) Result.t)])
+        else (
+          (match follow (Apply (waiting.basis, Continue)) with
+           | Ok _ | Error { code = Interrupted; _ } -> ()
+           | Error failure ->
+             raise_s [%sexp "follow-up was rejected", (failure : P.Error.t)]);
+          let request = Provider.await_request provider env 1 in
+          require
+            (Recovery_reminder_scenario.has_entry
+               request
+               ~role:"user"
+               ~substring:"Continue the sample.")
+            "continued Run lost its original input";
+          Provider.reply_summary request "Continued on operator approval.";
+          Recovery_checkpoint_scenario.await_idle env http session);
+        session, admitted.run_id, waiting)
+    in
+    let reconcile (session, run_id, (waiting : F.Reply.t)) =
       connect (fun http connection initialized ->
         let writer = Stock.reattach http session "reconnected" in
         let reference =
@@ -155,7 +176,7 @@ let exercise env temporary ~cancel =
         require
           (F.Reply.equal_phase current.phase expected_phase
            && P.Recovery_window.Scope.equal waiting.basis.scope current.basis.scope)
-          "the selected follow-up outcome did not survive reconnect";
+          "the selected follow-up outcome did not survive reattachment";
         Operator.expect_error (follow (Apply (waiting.basis, Continue))) Conflict;
         let state =
           Recovery_managed_rollover_scenario.durable_state env fixture session.id
@@ -170,7 +191,27 @@ let exercise env temporary ~cancel =
           "original managed Run did not reach the selected outcome";
         require
           (Int.equal (Provider.request_count provider) (if cancel then 1 else 2))
-          "reconnecting repeated model admission")))
+          "reattaching repeated model admission")
+    in
+    if cancel
+    then (
+      let submitted =
+        Stock.with_stock_daemon env fixture ~port ~config_path (fun daemon _ _ _ ->
+          let submitted = submit () in
+          let module Daemon = Support.Daemon_process in
+          Daemon.signal daemon Stdlib.Sys.sigkill;
+          let result =
+            Support.Background_fixture.await env "cancelled daemon reaped" (fun () ->
+              Daemon.result daemon)
+          in
+          require
+            (Support.Process_manager.equal_exit result.exit (Signaled Stdlib.Sys.sigkill))
+            "daemon did not crash after the lost Cancel reply";
+          submitted)
+      in
+      Stock.with_stock env fixture ~port ~config_path (fun _ _ _ -> reconcile submitted))
+    else
+      Stock.with_stock env fixture ~port ~config_path (fun _ _ _ -> reconcile (submit ())))
 ;;
 
 let run env temporary =
