@@ -59,12 +59,13 @@ call immediately. The provider receives a tool error and can continue the turn.
 
 For an unattended note-reading workflow, open a durable local session in a
 [client that can answer tool approvals](../agent-server/tutorials/local-tui.md).
-When the model requests `recovery_note_read`, select **approve prefix** if
-you intend to permit that named tool for any arguments in this session. Stop the
-session and close the interactive host. Continue the retained versioned
-conversation with the same private storage root and session ID. The grant
-applies only to that tool in the retained session. Other tools still follow
-their own policy, and shared notes still require explicit source authorization.
+When the model requests `recovery_note_read`, select **durable exact** to approve
+the same arguments and installed tool resources for this session generation.
+Select **approve prefix** to permit that named tool for any valid arguments in
+the session. Stop the session and close the interactive host, then continue the
+retained versioned conversation with the same private storage root and session
+ID. Old exact approvals issued before protected request binding require a fresh
+approval. Shared notes still require explicit source authorization.
 Selecting a tool in ChatMD makes it available to the model. Permission to
 execute it is a separate host decision.
 

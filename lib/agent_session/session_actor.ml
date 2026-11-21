@@ -6453,7 +6453,7 @@ type _ request =
       Foreground_publication.t * Notification_delivery.idle
       -> Chat_response.In_memory_stream.Safe_point_input.batch request
   | Has_interactive_permission_responder : bool request
-  | Invocation_granted : string * string -> bool request
+  | Invocation_granted : string * string option -> bool request
   | Worker_ready : Worker_readiness.t * (unit -> unit) -> unit request
   | Worker_terminal :
       Foreground_publication.t * Operation_worker.outcome * agent_custody option
@@ -17788,7 +17788,8 @@ let grant_is_unexpired t grant =
 
 let grant_identity_matches grant ~tool_name ~identity_digest =
   match grant.Agent_protocol.Grant.scope with
-  | Exact_session | Durable_exact -> String.equal grant.identity_digest identity_digest
+  | Exact_session | Durable_exact ->
+    Option.exists identity_digest ~f:(String.equal grant.identity_digest)
   | Prefix_session ->
     String.equal
       grant.identity_digest
@@ -30301,7 +30302,7 @@ let worker_capabilities t worker (publication : Foreground_publication.t) id_sou
           |> Option.value ~default:false)
     ; invocation_granted =
         (fun ~tool_name ~identity_digest ->
-          call t (Invocation_granted (tool_name, identity_digest))
+          call t (Invocation_granted (tool_name, Some identity_digest))
           |> Result.ok
           |> Option.value ~default:false)
     ; publish_live =
@@ -66364,8 +66365,10 @@ let apply_observation_follow_up t =
 let apply_moderator_follow_up = apply_observation_follow_up
 
 let invocation_granted t ~tool_name ~identity_digest =
-  call t (Invocation_granted (tool_name, identity_digest))
+  call t (Invocation_granted (tool_name, Some identity_digest))
 ;;
+
+let invocation_named_granted t ~tool_name = call t (Invocation_granted (tool_name, None))
 
 let complete_idle_moderator t drain =
   call t ~priority:Priority (Idle_completion (Complete drain))

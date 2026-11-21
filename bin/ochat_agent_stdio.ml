@@ -5,13 +5,7 @@ let absolute cwd path =
 ;;
 
 let working_directory env =
-  let native = Eio.Path.native_exn (Eio.Stdenv.cwd env) in
-  if Filename.is_absolute native
-  then native
-  else
-    Sys.getenv "PWD"
-    |> Option.filter ~f:Filename.is_absolute
-    |> Option.value_map ~default:native ~f:(fun pwd -> Filename.concat pwd native)
+  Eio_posix.Low_level.realpath (Eio.Path.native_exn (Eio.Stdenv.cwd env))
 ;;
 
 let home () = Sys.getenv "HOME"

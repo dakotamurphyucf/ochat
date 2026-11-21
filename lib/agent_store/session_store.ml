@@ -322,6 +322,8 @@ type t =
   ; organizations : Organization_store.t
   ; projection_updates : Session_projection_update.t
   ; developer_root_state : Developer_root_state.t
+  ; protected_approval_gate : Eio.Mutex.t
+  ; mutable protected_approval_key : Protected_approval_key.t option
   ; mutable index_was_rebuilt : bool
   ; mutable authoring_upload_child : Authoring_upload_store.t option
   ; mutable closed : bool
@@ -448,6 +450,42 @@ let current_schema_version = 2
 let current_metadata_schema_version = 1
 let data_root t = t.root
 let server_id t = t.server_id
+
+let protected_approval_identity
+      t
+      ~session_id
+      ~generation
+      ~profile_revision
+      ~tool_name
+      ~tool_revision
+      ~resource_fingerprint
+      ~input
+  =
+  Eio.Mutex.use_rw ~protect:true t.protected_approval_gate (fun () ->
+    let open Result.Let_syntax in
+    if t.closed || not (Lock.is_live t.daemon_lock)
+    then Error (Store_error.Corrupt "protected approval requires current Store ownership")
+    else (
+      let%map key =
+        match t.protected_approval_key with
+        | Some key -> Ok key
+        | None ->
+          let%map key = Protected_approval_key.load_or_create ~env:t.env ~root:t.root in
+          t.protected_approval_key <- Some key;
+          key
+      in
+      let owner = Agent_protocol.Session_ref.create ~server_id:t.server_id ~session_id in
+      Protected_approval_key.commit
+        key
+        ~owner
+        ~generation
+        ~profile_revision
+        ~tool_name
+        ~tool_revision
+        ~resource_fingerprint
+        ~input))
+;;
+
 let session_index t = t.index
 let delegations t = t.delegations
 let organizations t = t.organizations
@@ -940,6 +978,8 @@ let make ~env ~root ~server_id ~daemon_lock ~organizations (index, index_was_reb
   ; projection_updates =
       Session_projection_update.create ~env ~marker_path:(recovery_marker_path root) ()
   ; developer_root_state = Developer_root_state.create ()
+  ; protected_approval_gate = Eio.Mutex.create ()
+  ; protected_approval_key = None
   ; index_was_rebuilt
   ; authoring_upload_child = None
   ; closed = false
@@ -1031,15 +1071,18 @@ let open_existing ~env ~sw ~root ~process_start_identity ~lock_nonce =
 
 let close t =
   with_developer_root_gate t ~protect:true (fun () ->
-    if t.closed
-    then Ok ()
-    else if
-      Option.exists t.authoring_upload_child ~f:(fun child ->
-        not (Authoring_upload_store.fully_closed child))
-    then Error (Store_error.Locked (Some "authoring upload child remains open"))
-    else (
-      Organization_store.close t.organizations;
-      Result.map (Lock.release ~env:t.env t.daemon_lock) ~f:(fun () -> t.closed <- true)))
+    Eio.Mutex.use_rw ~protect:true t.protected_approval_gate (fun () ->
+      if t.closed
+      then Ok ()
+      else if
+        Option.exists t.authoring_upload_child ~f:(fun child ->
+          not (Authoring_upload_store.fully_closed child))
+      then Error (Store_error.Locked (Some "authoring upload child remains open"))
+      else (
+        Organization_store.close t.organizations;
+        Result.map (Lock.release ~env:t.env t.daemon_lock) ~f:(fun () ->
+          t.protected_approval_key <- None;
+          t.closed <- true))))
   |> Result.bind ~f:Fn.id
 ;;
 

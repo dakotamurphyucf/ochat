@@ -738,6 +738,14 @@ scope. A second result selection, an expired invocation, or a request with
 an unprojected canonical call fails. A host-side redirect cannot transfer a
 protected call's arguments to an ordinary tool.
 
+Exact approvals commit to the live verified arguments, current session
+generation, and selected tool resource and permission profile. A purpose-specific
+key under the original Store lock keeps the commitment opaque in retained
+permission and grant records. The key survives an ordinary reopen. Older
+placeholder-based exact approvals cannot match, while an explicit named-tool
+approval continues to use the named scope. Source authority is checked for
+every authorized effect and again at release.
+
 After the actor acknowledges the exact canonical output, the dispatcher can
 hand the next preparation a process-local plan bound to that output. The
 plan supplies its result in the original tool-output role and preserves the

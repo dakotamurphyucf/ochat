@@ -1919,28 +1919,86 @@ let check_extension_native actor_ref profile invocation =
   actor, state
 ;;
 
+type extension_native_approval_input =
+  | Ordinary of Jsonaf.t
+  | Protected of Jsonaf.t
+
+let extension_native_approval_input (invocation : Agent_protocol.Invocation.t) binding =
+  let module C = Chat_response.Tool_capability in
+  let module H = Agent_protocol.Host_invocation in
+  match C.result_contract binding with
+  | Native_output | Invocation_v1 -> Ok (Ordinary invocation.context.input)
+  | Protected_recovery_v1 ->
+    let open Result.Let_syntax in
+    let%bind call = H.of_conversation invocation in
+    let%map input =
+      Agent_session.Protected_native_call.input (H.context call) ~binding
+      |> Result.of_option
+           ~error:
+             (unavailable Permission_denied "protected approval input is unavailable")
+    in
+    Protected input
+;;
+
+let extension_native_permission_identity
+      t
+      (profile : Agent_session.Permission_policy.t)
+      (invocation : Agent_protocol.Invocation.t)
+      binding
+      input
+  =
+  let context = invocation.context in
+  let resource_fingerprint =
+    Chat_response.Tool_capability.permission_fingerprint binding
+  in
+  match input with
+  | Ordinary input ->
+    String.concat
+      ~sep:"\000"
+      [ "ochat.native-permission.v2"
+      ; profile.revision_digest
+      ; context.tool_name
+      ; context.implementation_revision
+      ; resource_fingerprint
+      ; Jsonaf.to_string input
+      ]
+    |> Chatmd_shell_spec.Source_ref.digest
+    |> Result.return
+  | Protected input ->
+    Agent_store.Session_store.protected_approval_identity
+      t.store
+      ~session_id:context.session_id
+      ~generation:context.generation
+      ~profile_revision:profile.revision_digest
+      ~tool_name:context.tool_name
+      ~tool_revision:context.implementation_revision
+      ~resource_fingerprint
+      ~input
+    |> Result.map_error ~f:(fun _ ->
+      unavailable Permission_denied "protected approval identity is unavailable")
+;;
+
 let authorize_extension_native t actor_ref profile native invocation binding =
   let module A = Agent_session.Session_actor in
   let module Policy = Agent_session.Permission_policy in
   let open Result.Let_syntax in
   let%bind actor, state = check_extension_native actor_ref profile invocation in
-  if
-    Set.mem
-      native.Chat_response.Agent_runtime.shell_tool_names
-      invocation.context.tool_name
-  then Ok ()
-  else (
-    let identity_digest =
-      String.concat
-        ~sep:"\000"
-        [ "ochat.native-permission.v2"
-        ; profile.Policy.revision_digest
-        ; invocation.context.tool_name
-        ; invocation.context.implementation_revision
-        ; Chat_response.Tool_capability.permission_fingerprint binding
-        ; Jsonaf.to_string invocation.context.input
-        ]
-      |> Chatmd_shell_spec.Source_ref.digest
+  let%bind approval_input =
+    let%bind input = extension_native_approval_input invocation binding in
+    let tool_name = invocation.context.tool_name in
+    let%map already_authorized =
+      match input with
+      | Protected _ -> A.invocation_named_granted actor ~tool_name
+      | Ordinary _ ->
+        Ok (Set.mem native.Chat_response.Agent_runtime.shell_tool_names tool_name)
+    in
+    Option.some_if (not already_authorized) input
+  in
+  match approval_input with
+  | None -> Ok ()
+  | Some input ->
+    let%bind identity_digest =
+      extension_native_permission_identity t profile invocation binding input
     in
     let request : Policy.invocation =
       { tool_name = invocation.context.tool_name
@@ -1952,86 +2010,86 @@ let authorize_extension_native t actor_ref profile native invocation binding =
     let%bind granted =
       A.invocation_granted actor ~tool_name:request.tool_name ~identity_digest
     in
-    match granted with
-    | true -> Ok ()
-    | false ->
-      let decision =
-        Policy.decide
-          profile
-          ~responder_available:(interactive_responder_available t state)
-          request
-      in
-      let permission choices =
-        Agent_protocol.Permission.
-          { id = Agent_protocol.Id.Permission.create ()
-          ; session_id = state.identity.session_id
-          ; generation = state.identity.generation
-          ; owner = Invocation invocation.context.id
-          ; call_id =
-              Option.value
-                invocation.context.provider_call_id
-                ~default:(Agent_protocol.Id.Invocation.to_string invocation.context.id)
-          ; tool_name = request.tool_name
-          ; runtime_identity = Some identity_digest
-          ; invocation_display = request.invocation_display
-          ; rationale = None
-          ; effects = request.effects
-          ; choices
-          ; created_at = now t
-          ; expires_at = shell_permission_expiry t profile
-          ; state = Pending
-          ; resolution = None
-          }
-      in
-      let accept (resolution : Agent_protocol.Permission.resolution) =
-        match resolution.choice with
-        | Deny ->
-          Error (unavailable Permission_denied "native tool invocation was denied")
-        | Approve_once | Approve_session | Approve_prefix | Durable_exact -> Ok ()
-      in
-      (match decision with
-       | Allow_now -> Ok ()
-       | Deny_now reason -> Error (unavailable Permission_denied reason)
-       | Request_permission ->
-         let permission =
-           permission
-             [ Approve_once; Approve_session; Approve_prefix; Durable_exact; Deny ]
-         in
-         let fallback =
-           match profile.fallback with
-           | Fallback_allow -> Agent_protocol.Permission.Approve_once
-           | Fallback_deny | Fallback_allow_if_policy | Fallback_reviewer _ -> Deny
-         in
-         let%bind resolution =
-           match profile.fallback with
-           | Fallback_reviewer _ ->
-             A.request_permission_with_review_fallback
-               actor
-               ~permission
-               ~timeout_seconds:(shell_permission_timeout profile)
-               ~fallback
-               ~review_on_timeout:(fun () ->
-                 review_permission t actor_ref profile request)
-           | Fallback_allow | Fallback_deny | Fallback_allow_if_policy ->
-             A.request_permission
-               actor
-               ~permission
-               ~timeout_seconds:(shell_permission_timeout profile)
-               ~fallback
-         in
-         accept resolution
-       | Request_review ->
-         let%bind resolution =
-           A.request_review
-             actor
-             ~permission:(permission [ Approve_once; Deny ])
-             ~review:(fun () -> review_permission t actor_ref profile request)
-         in
-         (match resolution.choice with
-          | Approve_once | Deny -> accept resolution
-          | Approve_session | Approve_prefix | Durable_exact ->
-            Error
-              (unavailable Permission_denied "reviewer returned an invalid grant scope"))))
+    (match granted with
+     | true -> Ok ()
+     | false ->
+       let decision =
+         Policy.decide
+           profile
+           ~responder_available:(interactive_responder_available t state)
+           request
+       in
+       let permission choices =
+         Agent_protocol.Permission.
+           { id = Agent_protocol.Id.Permission.create ()
+           ; session_id = state.identity.session_id
+           ; generation = state.identity.generation
+           ; owner = Invocation invocation.context.id
+           ; call_id =
+               Option.value
+                 invocation.context.provider_call_id
+                 ~default:(Agent_protocol.Id.Invocation.to_string invocation.context.id)
+           ; tool_name = request.tool_name
+           ; runtime_identity = Some identity_digest
+           ; invocation_display = request.invocation_display
+           ; rationale = None
+           ; effects = request.effects
+           ; choices
+           ; created_at = now t
+           ; expires_at = shell_permission_expiry t profile
+           ; state = Pending
+           ; resolution = None
+           }
+       in
+       let accept (resolution : Agent_protocol.Permission.resolution) =
+         match resolution.choice with
+         | Deny ->
+           Error (unavailable Permission_denied "native tool invocation was denied")
+         | Approve_once | Approve_session | Approve_prefix | Durable_exact -> Ok ()
+       in
+       (match decision with
+        | Allow_now -> Ok ()
+        | Deny_now reason -> Error (unavailable Permission_denied reason)
+        | Request_permission ->
+          let permission =
+            permission
+              [ Approve_once; Approve_session; Approve_prefix; Durable_exact; Deny ]
+          in
+          let fallback =
+            match profile.fallback with
+            | Fallback_allow -> Agent_protocol.Permission.Approve_once
+            | Fallback_deny | Fallback_allow_if_policy | Fallback_reviewer _ -> Deny
+          in
+          let%bind resolution =
+            match profile.fallback with
+            | Fallback_reviewer _ ->
+              A.request_permission_with_review_fallback
+                actor
+                ~permission
+                ~timeout_seconds:(shell_permission_timeout profile)
+                ~fallback
+                ~review_on_timeout:(fun () ->
+                  review_permission t actor_ref profile request)
+            | Fallback_allow | Fallback_deny | Fallback_allow_if_policy ->
+              A.request_permission
+                actor
+                ~permission
+                ~timeout_seconds:(shell_permission_timeout profile)
+                ~fallback
+          in
+          accept resolution
+        | Request_review ->
+          let%bind resolution =
+            A.request_review
+              actor
+              ~permission:(permission [ Approve_once; Deny ])
+              ~review:(fun () -> review_permission t actor_ref profile request)
+          in
+          (match resolution.choice with
+           | Approve_once | Deny -> accept resolution
+           | Approve_session | Approve_prefix | Durable_exact ->
+             Error
+               (unavailable Permission_denied "reviewer returned an invalid grant scope"))))
 ;;
 
 let extension_jobs t actor_ref registry native =

@@ -295,6 +295,7 @@
   eio
   eio_main
   eio.unix
+  eio_posix
   ochat.agent_protocol
   ochat.agent_server
   ochat.agent_transport_client

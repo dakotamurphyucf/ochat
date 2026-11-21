@@ -672,6 +672,59 @@ let crash_recovery_create ~sw env root =
   |> store_ok
 ;;
 
+let%expect_test "protected approval identity uses a private stable Store key" =
+  with_temp_directory "ochat-protected-approval" (fun env root ->
+    Eio.Switch.run (fun sw ->
+      let module Store = Agent_store.Session_store in
+      let file = Filename.concat root "indexes/protected-approval-key.v1" in
+      let path = crash_recovery_path env file in
+      let commit ?(generation = 0) ?(resource_fingerprint = "fixture") store input =
+        Store.protected_approval_identity
+          store
+          ~session_id
+          ~generation
+          ~profile_revision:"profile"
+          ~tool_name:"recovery_note_read"
+          ~tool_revision:"revision"
+          ~resource_fingerprint
+          ~input:(`String input)
+      in
+      let store = crash_recovery_create ~sw env root in
+      assert (not (path_exists env file));
+      let first = commit store "one" |> store_ok in
+      assert (not (String.equal first (commit store "two" |> store_ok)));
+      assert (not (String.equal first (commit ~generation:1 store "one" |> store_ok)));
+      assert (
+        not
+          (String.equal
+             first
+             (commit ~resource_fingerprint:"other" store "one" |> store_ok)));
+      Store.close store |> store_ok;
+      assert (Result.is_error (commit store "one"));
+      let store = crash_recovery_open ~sw env root |> store_ok in
+      assert (String.equal first (commit store "one" |> store_ok));
+      Store.close store |> store_ok;
+      let original = crash_recovery_path env (file ^ ".original") in
+      Eio.Path.rename path original;
+      Eio.Path.symlink ~link_to:"protected-approval-key.v1.original" path;
+      let store = crash_recovery_open ~sw env root |> store_ok in
+      assert (Result.is_error (commit store "one"));
+      assert (String.equal (Eio.Path.read_link path) "protected-approval-key.v1.original");
+      Store.close store |> store_ok;
+      Eio.Path.unlink path;
+      Eio.Path.rename original path;
+      Core_unix.chmod file ~perm:0o644;
+      let store = crash_recovery_open ~sw env root |> store_ok in
+      assert (Result.is_error (commit store "one"));
+      Store.close store |> store_ok;
+      Core_unix.chmod file ~perm:0o600;
+      let store = crash_recovery_open ~sw env root |> store_ok in
+      assert (String.equal first (commit store "one" |> store_ok));
+      Store.close store |> store_ok;
+      print_endline "private key survives reopen and rejects linked or unprotected files"));
+  [%expect {| private key survives reopen and rejects linked or unprotected files |}]
+;;
+
 let crash_recovery_add store ~sw id revision =
   let metadata = metadata revision in
   let metadata =

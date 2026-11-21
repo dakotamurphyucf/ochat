@@ -2650,6 +2650,13 @@ val invocation_granted
   -> identity_digest:string
   -> (bool, Agent_protocol.Error.t) result
 
+(** Only an explicit named-tool grant can match this query. The caller remains
+    responsible for its admitted tool/resource and argument checks. *)
+val invocation_named_granted
+  :  t
+  -> tool_name:string
+  -> (bool, Agent_protocol.Error.t) result
+
 (** Resolves an existing pending permission without a client attachment.
     Daemon-owned timeout/reviewer services use this compare-and-set path. *)
 val resolve_permission_as_system

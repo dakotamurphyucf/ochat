@@ -53,6 +53,7 @@
   organization_document
   organization_store
   organization_root
+  protected_approval_key
   session_store
   local_operator
   blob_metadata
@@ -84,6 +85,7 @@
   transaction
   commit_writer
   recovery_restoration_cache
+  protected_approval_key
   recovery
   history_revision_conversion
   idempotency_capacity
@@ -137,6 +139,8 @@
   cstruct
   bin_prot
   digestif
+  mirage-crypto-rng
+  ochat.private_storage
   base64
   ochat.document_schema
   ochat.chatml_source

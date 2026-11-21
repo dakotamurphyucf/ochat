@@ -16,6 +16,10 @@ let key name = P.Idempotency_key.of_string name |> ok
 let page = P.Page.Request.create ~limit:10 () |> ok
 let note = "exact retained headless note β"
 
+type approval =
+  | Named
+  | Exact
+
 let prompt =
   {|
 <config model="gpt-4.1"/>
@@ -95,7 +99,8 @@ let respond_to env client ~session_id ~attachment_id ~tool_name ~choice =
   | Permission_respond { permission; _ } ->
     require
       (P.Permission.equal_state permission.state Approved)
-      "approval was not committed"
+      "approval was not committed";
+    permission
   | _ -> failwith "permission.respond returned the wrong result"
 ;;
 
@@ -122,7 +127,7 @@ let only_session client =
   | _ -> failwith "stock local stdio did not create exactly one session"
 ;;
 
-let interactive env provider ~sw ~environment ~cwd ~prompt_file ~store =
+let interactive env provider ~sw ~environment ~cwd ~prompt_file ~store approval =
   let clock = Eio.Stdenv.clock env in
   let child =
     Stdio.spawn
@@ -177,13 +182,15 @@ let interactive env provider ~sw ~environment ~cwd ~prompt_file ~store =
      : P.Method_result.t);
   let provider_request = Provider.await_request provider env in
   Notes.function_call (provider_request 0) ~id:"write" ~name:"recovery_note_write" write;
-  respond_to
-    env
-    client
-    ~session_id
-    ~attachment_id
-    ~tool_name:"recovery_note_write"
-    ~choice:Approve_once;
+  ignore
+    (respond_to
+       env
+       client
+       ~session_id
+       ~attachment_id
+       ~tool_name:"recovery_note_write"
+       ~choice:Approve_once
+     : P.Permission.t);
   let response = provider_request 1 in
   (match Notes.output response ~id:"write" with
    | Complete `Null -> ()
@@ -195,16 +202,23 @@ let interactive env provider ~sw ~environment ~cwd ~prompt_file ~store =
     ~id:"initial-read"
     ~name:"recovery_note_read"
     (read ~stop:(String.length note));
-  respond_to
-    env
-    client
-    ~session_id
-    ~attachment_id
-    ~tool_name:"recovery_note_read"
-    ~choice:Approve_prefix;
+  let (choice, scope) : P.Permission.choice * P.Grant.scope =
+    match approval with
+    | Named -> Approve_prefix, Prefix_session
+    | Exact -> Durable_exact, Durable_exact
+  in
+  let permission =
+    respond_to
+      env
+      client
+      ~session_id
+      ~attachment_id
+      ~tool_name:"recovery_note_read"
+      ~choice
+  in
   let response = provider_request 2 in
   check_read response ~id:"initial-read";
-  Provider.reply_summary response "The interactive host approved the named read tool.";
+  Provider.reply_summary response "The interactive host approved the read tool.";
   (match
      internal
        client
@@ -214,9 +228,20 @@ let interactive env provider ~sw ~environment ~cwd ~prompt_file ~store =
    | Grant_list { items = [ grant ]; _ } ->
      require
        (String.equal grant.tool_name "recovery_note_read"
-        && P.Grant.equal_scope grant.scope Prefix_session)
-       "the store retained an unexpected native tool grant"
-   | _ -> failwith "interactive execution did not issue exactly one named-tool grant");
+        && P.Grant.equal_scope grant.scope scope)
+       "the store retained an unexpected native tool grant";
+     (match approval with
+      | Named -> ()
+      | Exact ->
+        require
+          (Option.equal
+             String.equal
+             permission.runtime_identity
+             (Some grant.identity_digest)
+           && String.is_prefix grant.identity_digest ~prefix:"protected-v1:"
+           && Int.equal (String.length grant.identity_digest) 77)
+          "the exact grant does not bind the original protected decision")
+   | _ -> failwith "interactive execution did not issue exactly one grant");
   observe_state env client session_id ~f:(function
     | Idle -> true
     | _ -> false);
@@ -241,7 +266,7 @@ let interactive env provider ~sw ~environment ~cwd ~prompt_file ~store =
   session_id
 ;;
 
-let managed env provider ~sw ~environment ~cwd ~prompt_file ~store ~session_id =
+let managed env provider ~sw ~environment ~cwd ~prompt_file ~store ~session_id ~respond =
   let main = executable env ~variable:"OCHAT_E2E_MAIN_EXE" ~name:"main" in
   let output_path = Eio.Path.(cwd / "exact-headless-output.chatmd") in
   let child =
@@ -265,27 +290,19 @@ let managed env provider ~sw ~environment ~cwd ~prompt_file ~store ~session_id =
       ; "Read the exact retained note."
       ]
   in
-  let provider_request = Provider.await_request provider env in
-  Notes.function_call
-    (provider_request 3)
-    ~id:"ungranted-write"
-    ~name:"recovery_note_write"
-    write;
-  let denied = provider_request 4 in
-  (match Notes.output denied ~id:"ungranted-write" with
-   | Fail { code = "invocation.permission_denied"; _ } -> ()
-   | outcome ->
-     raise_s
-       [%sexp
-         "ungranted write did not use deny fallback", (outcome : P.Invocation.outcome)]);
-  Notes.function_call
-    denied
-    ~id:"same-range"
-    ~name:"recovery_note_read"
-    (read ~stop:(String.length note));
-  let accepted = provider_request 5 in
-  check_read accepted ~id:"same-range";
-  Provider.reply_summary accepted "The headless run used the named read grant.";
+  let at index =
+    Eio.Fiber.first
+      (fun () -> Provider.await_request provider env index)
+      (fun () ->
+         let result = Process.await child in
+         failwith
+           (sprintf
+              "managed completion exited before provider request %d: %s"
+              index
+              result.stderr.contents))
+  in
+  let terminal, summary = respond at in
+  Provider.reply_summary terminal summary;
   let result =
     Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () -> Process.await child)
   in
@@ -293,17 +310,60 @@ let managed env provider ~sw ~environment ~cwd ~prompt_file ~store ~session_id =
     (Process.equal_exit result.exit (Exited 0))
     ("managed completion did not finish: " ^ result.stderr.contents);
   require
-    (String.is_substring
-       (Eio.Path.load output_path)
-       ~substring:"The headless run used the named read grant.")
+    (String.is_substring (Eio.Path.load output_path) ~substring:summary)
     "managed completion did not export the provider's final response";
   require
     (not (String.is_substring (Eio.Path.load output_path) ~substring:note))
     "private original was persisted in the exported history"
 ;;
 
-let run env temporary =
-  let fixture = Fixture.create env temporary "headless-recovery-permission" in
+let denied request id =
+  match Notes.output request ~id with
+  | Fail { code = "invocation.permission_denied"; _ } -> ()
+  | _ -> failwith ("protected invocation did not use deny fallback: " ^ id)
+;;
+
+let recovered_read approval request =
+  Notes.function_call (request 3) ~id:"ungranted-write" ~name:"recovery_note_write" write;
+  let response = request 4 in
+  denied response "ungranted-write";
+  let response, summary =
+    match approval with
+    | Named -> response, "The headless run used the named read grant."
+    | Exact ->
+      Notes.function_call
+        response
+        ~id:"other-range"
+        ~name:"recovery_note_read"
+        (read ~stop:5);
+      let response = request 5 in
+      denied response "other-range";
+      response, "The headless run used the exact read grant."
+  in
+  Notes.function_call
+    response
+    ~id:"same-range"
+    ~name:"recovery_note_read"
+    (read ~stop:(String.length note));
+  let accepted =
+    request
+      (match approval with
+       | Named -> 5
+       | Exact -> 6)
+  in
+  check_read accepted ~id:"same-range";
+  accepted, summary
+;;
+
+let run_with approval env temporary =
+  let variant =
+    match approval with
+    | Named -> "named"
+    | Exact -> "exact"
+  in
+  let fixture =
+    Fixture.create env temporary ("headless-recovery-permission-" ^ variant)
+  in
   let port = Config.http_port fixture in
   let endpoint = sprintf "http://127.0.0.1:%d" port in
   let secret = "headless-private-synthetic-key" in
@@ -323,6 +383,34 @@ let run env temporary =
   Eio.Switch.run (fun sw ->
     let provider = Provider.start ~sw ~env ~port in
     let store = Config.data_dir fixture in
-    let session_id = interactive ~sw env provider ~environment ~cwd ~prompt_file ~store in
-    managed ~sw env provider ~environment ~cwd ~prompt_file ~store ~session_id)
+    let session_id =
+      interactive ~sw env provider ~environment ~cwd ~prompt_file ~store approval
+    in
+    (match approval with
+     | Named -> ()
+     | Exact ->
+       let key =
+         Temp.path temporary (Filename.concat store "indexes/protected-approval-key.v1")
+       in
+       let stat = Eio.Path.stat ~follow:false key in
+       require
+         ((match stat.kind with
+           | `Regular_file -> true
+           | _ -> false)
+          && Int.equal (stat.perm land 0o777) 0o600
+          && Int64.equal (Optint.Int63.to_int64 stat.size) 32L)
+         "the stored approval key does not have its fixed private file shape");
+    managed
+      ~sw
+      env
+      provider
+      ~cwd
+      ~environment
+      ~prompt_file
+      ~store
+      ~session_id
+      ~respond:(recovered_read approval))
 ;;
+
+let run = run_with Named
+let run_exact = run_with Exact

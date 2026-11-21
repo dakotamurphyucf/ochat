@@ -87,6 +87,21 @@ val data_root : t -> Data_root.t
 val server_id : t -> Agent_protocol.Id.Server.t
 val session_index : t -> Session_index.t
 
+(** A purpose-specific commitment for an authenticated session's actual
+    schema-checked protected native input and selected resource. The Store
+    supplies its own server identity and owns the private key under its
+    live exclusive lock. Only the commitment may leave this boundary. *)
+val protected_approval_identity
+  :  t
+  -> session_id:Agent_protocol.Id.Session.t
+  -> generation:int
+  -> profile_revision:string
+  -> tool_name:string
+  -> tool_revision:string
+  -> resource_fingerprint:string
+  -> input:Jsonaf.t
+  -> (string, Store_error.t) result
+
 module Command_receipts : sig
   type store = t
 
