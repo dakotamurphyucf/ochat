@@ -47,18 +47,6 @@ let with_sources f =
 
 let phase_timeout = 20.
 
-let with_progress_watchdog env ~last_progress f =
-  let clock = Eio.Stdenv.mono_clock env in
-  let limit = Mtime.Span.of_uint64_ns (Int64.of_float (phase_timeout *. 1e9)) in
-  let rec watch () =
-    let progress = last_progress () in
-    let deadline = Mtime.add_span progress limit |> Option.value_exn in
-    Eio.Time.Mono.sleep_until clock deadline;
-    if Mtime.equal progress (last_progress ()) then raise Eio.Time.Timeout else watch ()
-  in
-  Eio.Fiber.first f watch
-;;
-
 let with_daemon
       ?(on_timeout = fun () -> ())
       ?with_deadline
@@ -237,7 +225,11 @@ let qualify_authored_shell ~snapshot_replacement =
               , (!requests : int)])
         ~with_deadline:(fun run ->
           mark "connect HTTP client";
-          with_progress_watchdog env ~last_progress:(fun () -> !last_progress) run)
+          with_progress_watchdog
+            ~clock
+            ~seconds:phase_timeout
+            ~last_progress:(fun () -> !last_progress)
+            run)
     in
     with_daemon env root configuration principal provider (fun sw daemon client ->
       Failure_diagnostic.reset diagnostic;

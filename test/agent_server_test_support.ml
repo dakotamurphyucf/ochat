@@ -1,5 +1,16 @@
 open! Core
 
+let with_progress_watchdog ~clock ~seconds ~last_progress f =
+  let limit = Mtime.Span.of_uint64_ns (Int64.of_float (seconds *. 1e9)) in
+  let rec watch () =
+    let progress = last_progress () in
+    let deadline = Mtime.add_span progress limit |> Option.value_exn in
+    Eio.Time.Mono.sleep_until clock deadline;
+    if Mtime.equal progress (last_progress ()) then raise Eio.Time.Timeout else watch ()
+  in
+  Eio.Fiber.first f watch
+;;
+
 (** Bounded failure-only fixture progress. Observations retain compact metadata,
     never State/history/ledger/payloads. Reporting performs no actor or transport call. *)
 module Failure_diagnostic : sig

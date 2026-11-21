@@ -713,6 +713,11 @@ let%expect_test "independent ancestry retains temporary roots across stop and re
             if phys_equal actor entry.Registry.actor then Some count else None)
           |> Option.value ~default:0
         in
+        let clock = Eio.Stdenv.mono_clock env in
+        let progress = ref (Eio.Time.Mono.now clock, "") in
+        (* Record completed setup and assertion boundaries. A command, poll or
+           retry inside a phase cannot renew the body's progress deadline. *)
+        let mark phase = progress := Eio.Time.Mono.now clock, phase in
         let with_daemon policy f =
           Eio.Switch.run (fun sw ->
             let inference_policy =
@@ -758,13 +763,31 @@ let%expect_test "independent ancestry retains temporary roots across stop and re
             Exn.protect
               ~finally:(fun () -> Daemon.shutdown daemon |> protocol_ok)
               ~f:(fun () ->
-                Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 30. (fun () ->
+                let run () =
                   let client = connection daemon (principal ()) in
                   Exn.protect
                     ~finally:(fun () -> Agent_client.Connection.close client)
                     ~f:(fun () ->
                       initialize client;
-                      f sw daemon client))))
+                      f sw daemon client)
+                in
+                mark "connect and initialize the daemon client";
+                match
+                  with_progress_watchdog
+                    ~clock
+                    ~seconds:30.
+                    ~last_progress:(fun () -> fst !progress)
+                    run
+                with
+                | result -> result
+                | exception Eio.Time.Timeout ->
+                  let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+                  Eio.traceln
+                    "independent ancestry timed out while attempting to %s (%d provider \
+                     requests)"
+                    (snd !progress)
+                    !requests;
+                  Stdlib.Printexc.raise_with_backtrace Eio.Time.Timeout backtrace))
         in
         let attach sw client entry =
           H.attach
@@ -821,6 +844,7 @@ let%expect_test "independent ancestry retains temporary roots across stop and re
           assert (P.Session.equal_desired_state (state entry).lifecycle.desired Stopped)
         in
         with_daemon None (fun sw daemon client ->
+          mark "deny an ungranted Independent lifetime";
           let parent, _ =
             create_session ~key:"default-denial" ~start_immediately:true client
           in
@@ -837,6 +861,7 @@ let%expect_test "independent ancestry retains temporary roots across stop and re
           H.close handle);
         let parent_id, middle_id, child_id, leaf_id, workspace =
           with_daemon (Some "fixture-v1") (fun sw daemon client ->
+            mark "create the ancestry and native probe";
             let parent, _ =
               create_session ~key:"independent-root" ~start_immediately:true client
             in
@@ -890,6 +915,7 @@ let%expect_test "independent ancestry retains temporary roots across stop and re
             independent_source := Some source_failure;
             let requests_before = !requests in
             let recording = Stdlib.Printexc.backtrace_status () in
+            mark "observe the installed native probe's source failure";
             Stdlib.Printexc.record_backtrace true;
             Exn.protect
               ~finally:(fun () -> Stdlib.Printexc.record_backtrace recording)
@@ -956,6 +982,7 @@ let%expect_test "independent ancestry retains temporary roots across stop and re
                           "648 failed resource graph cleanup settled the retained row"
                     in
                     assert_same_running ();
+                    mark "close the retained native graph and reconcile its original row";
                     (* This is now the canonical shared R graph. Drop the
                        ordinary M/R Product baselines without Stop/epoch changes;
                        the actual Independent probe loan keeps both native units
@@ -1073,6 +1100,7 @@ let%expect_test "independent ancestry retains temporary roots across stop and re
             (* Restore ordinary construction sources after the exact shared
                graph was repaired. Main C/D reuse starts with fresh baselines;
                no logical Stop or Owned parent epoch changed in the fault probe. *)
+            mark "create the deferred Independent consumer, child and Owned leaf";
             Owner.ensure_loaded parent.runtime |> protocol_ok;
             Owner.ensure_loaded middle.runtime |> protocol_ok;
             assert (Owner.is_loaded parent.runtime);
@@ -1118,6 +1146,7 @@ let%expect_test "independent ancestry retains temporary roots across stop and re
             in
             let child_handle = attach sw client child in
             let leaf_handle = attach sw client leaf in
+            mark "stop the ancestors and read their retained roots";
             H.stop parent_handle ~mode:Cancel |> protocol_ok |> ignore;
             stopped parent;
             stopped middle;
@@ -1168,6 +1197,7 @@ let%expect_test "independent ancestry retains temporary roots across stop and re
             (* D must enter only after C closes, while a genuine other holder
                keeps the canonical unit alive. Reuse the already stopped
                Independent probe; its new admission has its own actual path. *)
+            mark "reuse the native unit across a deferred Independent consumer";
             let holder_handle = attach sw client probe in
             Exn.protect
               ~finally:(fun () ->
@@ -1239,12 +1269,14 @@ let%expect_test "independent ancestry retains temporary roots across stop and re
                     assert (not (Owner.is_loaded middle.runtime))));
             (* Restore the original child/leaf trajectory before its existing
                restart, grant, eviction and workspace assertions. *)
+            mark "restore the original consumers and verify retained roots";
             H.start child_handle ~queue_if_limited:false |> protocol_ok |> ignore;
             H.start leaf_handle ~queue_if_limited:false |> protocol_ok |> ignore;
             running child;
             running leaf;
             read child_handle child "before-restart";
             read leaf_handle leaf "before-restart";
+            mark "deny parent reset and preserve retained ancestors during eviction";
             let before = state parent in
             let reset =
               Agent_client.Connection.request
@@ -1285,6 +1317,7 @@ let%expect_test "independent ancestry retains temporary roots across stop and re
           Eio.Path.(Eio.Stdenv.fs env / workspace / "value.txt")
           "after-restart";
         with_daemon (Some "fixture-v1") (fun sw daemon client ->
+          mark "read retained roots after restart";
           let parent = find daemon parent_id
           and middle = find daemon middle_id in
           let child = find daemon child_id
@@ -1301,6 +1334,7 @@ let%expect_test "independent ancestry retains temporary roots across stop and re
           read leaf_handle leaf "after-restart";
           assert (List.is_empty (state parent).invocations);
           assert (List.is_empty (state middle).invocations);
+          mark "stop the consumers and evict the idle ancestors";
           H.stop child_handle ~mode:Cancel |> protocol_ok |> ignore;
           stopped child;
           stopped leaf;
@@ -1329,6 +1363,7 @@ let%expect_test "independent ancestry retains temporary roots across stop and re
              another fresh-index pass; the loaded-entry count bounds all passes. *)
           evict_stopped_ancestors (List.length (Registry.entries registry));
           assert (Option.is_none (Registry.find (Daemon.registry daemon) parent_id));
+          mark "reload the child lazily and read its retained root";
           let client = connection daemon (principal ()) in
           Exn.protect
             ~finally:(fun () -> Agent_client.Connection.close client)
@@ -1345,6 +1380,7 @@ let%expect_test "independent ancestry retains temporary roots across stop and re
               H.stop child_handle ~mode:Cancel |> protocol_ok |> ignore;
               H.close child_handle));
         with_daemon (Some "fixture-v2") (fun sw daemon client ->
+          mark "deny restart under the changed grant";
           let child = Registry.load (Daemon.registry daemon) child_id |> protocol_ok in
           let handle = attach sw client child in
           let before = !requests in
@@ -1356,6 +1392,7 @@ let%expect_test "independent ancestry retains temporary roots across stop and re
           assert (not (Owner.is_loaded child.runtime));
           H.close handle);
         with_daemon (Some "fixture-v1") (fun sw daemon client ->
+          mark "restore the grant and deny removal of a retained root";
           let child = Registry.load (Daemon.registry daemon) child_id |> protocol_ok in
           let child_handle = attach sw client child in
           H.start child_handle ~queue_if_limited:false |> protocol_ok |> ignore;
