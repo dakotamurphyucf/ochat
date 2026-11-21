@@ -36,7 +36,10 @@ val create
   -> (t, P.Error.t) Result.t
 
 (** Shares the validated request parameters without bringing a cursor into the query digest. *)
-val of_request : P.Recovery_history_request.t -> (t, P.Error.t) Result.t
+val of_request
+  :  ?include_image_parts:bool
+  -> P.Recovery_history_request.t
+  -> (t, P.Error.t) Result.t
 
 val source : t -> P.Session_ref.t
 val family : t -> family

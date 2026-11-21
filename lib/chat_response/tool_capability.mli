@@ -95,6 +95,24 @@ val require_plain_invocation : binding -> (unit, error) result
     Managed implementations also require checking their captured dependencies. *)
 val check_delegation : binding -> (unit, error) result
 
+module Local_history_tool : sig
+  type t =
+    | List_windows
+    | List_items
+    | Search
+    | Read_text
+    | Read_media
+  [@@deriving enumerate, equal]
+
+  val name : t -> string
+  val implementation_revision : t -> string
+end
+
+(** Admit exact stock history registrations as direct generated selections for
+    the new child's owned foreground dispatcher. This is not invocation authority.
+    Transitive dependencies and unowned paths must use [check_delegation]. *)
+val check_generated_foreground : binding -> (unit, error) result
+
 (** Trusted admission of captured managed definitions alongside existing native
     bindings. The host must validate sources/schemas/dependencies first, bind
     revision/resource digests to that full authority, then install the matching

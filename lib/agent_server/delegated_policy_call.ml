@@ -13,6 +13,13 @@ end
 let unavailable code message = P.Error.create code ~message ~retryable:false ()
 let reject message = Error (unavailable Permission_denied message)
 
+let protected_model_request (request : Agent_session.Script_tool_calls.preparation) =
+  match request.owner, C.find request.selected ~name:request.call.name with
+  | Model_call _, Ok binding ->
+    C.equal_result_contract (C.result_contract binding) Protected_recovery_v1
+  | _ -> false
+;;
+
 let rewrite
       (call : t)
       ~(request : Agent_session.Script_tool_calls.preparation)
@@ -53,7 +60,16 @@ let rewrite
   Ok { call with name; args; kind; payload_text }
 ;;
 
-let validate t ~request = rewrite t ~request ~name:t.name ~args:t.args
+let validate (t : t) ~(request : Agent_session.Script_tool_calls.preparation) =
+  if protected_model_request request
+  then (
+    match t.kind, t.args with
+    | Function, `Object []
+      when String.equal t.name request.call.name && String.equal t.payload_text "{}" ->
+      Ok t
+    | _ -> reject "invalid delegated protected input projection")
+  else rewrite t ~request ~name:t.name ~args:t.args
+;;
 
 let apply t ~request ~(decision : P.Moderator_execution.Decision.t) =
   let continue ~name ~args =
@@ -62,6 +78,7 @@ let apply t ~request ~(decision : P.Moderator_execution.Decision.t) =
   match decision with
   | Reject _ -> Ok Step.Rejected
   | Approve -> validate t ~request |> Result.map ~f:(fun call -> Step.Continue call)
+  | (Rewrite_args _ | Redirect _) when protected_model_request request -> Ok Step.Rejected
   | Rewrite_args args -> continue ~name:t.name ~args
   | Redirect (name, args) -> continue ~name ~args
 ;;

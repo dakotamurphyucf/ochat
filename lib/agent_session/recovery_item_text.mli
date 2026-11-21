@@ -34,6 +34,10 @@ val role : t -> role
     metadata, invocation arguments and private result fields are never exposed. *)
 val parts : t -> P.History_text.t list
 
+(** Original neutral image slots; presence is no claim that the host retained
+    an uploaded original or that the active model can accept it. *)
+val image_parts : t -> int list
+
 (** Bounds apply before decoding the neutral payload. [current] is called
     before source I/O and after projection. [max_text_bytes] lowers the 1 MiB
     aggregate across all text parts of the item. A host passes its one
@@ -65,3 +69,12 @@ val resolve_selected
   -> selection
   -> view:view
   -> (t option, Recovery_source_reader.error) result
+
+(** Capture the exact visibility/source proof for an already verified ordinary
+    part. The caller must still hold physical source custody and check the
+    original recipient at the actual disclosure boundary. *)
+val check_ordinary_release
+  :  Session_state.t
+  -> selection
+  -> checkpoint:(unit -> unit)
+  -> (Session_state.t -> bool, Recovery_source_reader.error) result

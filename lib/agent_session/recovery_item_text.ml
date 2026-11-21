@@ -28,10 +28,12 @@ type role = P.Recovery_history_request.role =
 type t =
   { role : role
   ; parts : P.History_text.t list
+  ; image_parts : int list
   }
 
 let role t = t.role
 let parts t = t.parts
+let image_parts t = t.image_parts
 let max_item_text_bytes = 1_048_576
 
 let admit_part work ~index ~remaining text =
@@ -44,9 +46,9 @@ let admit_part work ~index ~remaining text =
 ;;
 
 let text_parts work parts ~max_text_bytes =
-  let rec loop parts ~index ~remaining ~reversed =
+  let rec loop parts ~index ~remaining ~texts ~images =
     match parts with
-    | [] -> Ok (List.rev reversed)
+    | [] -> Ok (List.rev texts, List.rev images)
     | _ :: _ when index >= 4096 -> Error Source.Limit
     | part :: rest ->
       Work.charge_source work 1;
@@ -59,10 +61,13 @@ let text_parts work parts ~max_text_bytes =
               rest
               ~index:(index + 1)
               ~remaining:(remaining - String.length text)
-              ~reversed:(selected :: reversed))
-       | Image _ | Unknown _ -> loop rest ~index:(index + 1) ~remaining ~reversed)
+              ~texts:(selected :: texts)
+              ~images)
+       | Image _ ->
+         loop rest ~index:(index + 1) ~remaining ~texts ~images:(index :: images)
+       | Unknown _ -> loop rest ~index:(index + 1) ~remaining ~texts ~images)
   in
-  loop parts ~index:0 ~remaining:max_text_bytes ~reversed:[]
+  loop parts ~index:0 ~remaining:max_text_bytes ~texts:[] ~images:[]
 ;;
 
 let classify work ~limits ~view (row : P.History.entry) =
@@ -101,13 +106,19 @@ let classify work ~limits ~view (row : P.History.entry) =
 let project work ~limits ~view ~max_text_bytes row =
   let open Result.Let_syntax in
   let%bind role, output = classify work ~limits ~view row in
-  let%map parts =
+  let%map parts, image_parts =
     match output with
     | Payload.Output.Content values -> text_parts work values ~max_text_bytes
     | Text value ->
-      Result.map (admit_part work ~index:0 ~remaining:max_text_bytes value) ~f:List.return
+      Result.map
+        (admit_part work ~index:0 ~remaining:max_text_bytes value)
+        ~f:(fun part -> [ part ], [])
   in
-  { role; parts }
+  { role; parts; image_parts }
+;;
+
+let citation = function
+  | Canonical citation | Prepared { citation; _ } -> citation
 ;;
 
 let resolve_selected
@@ -133,16 +144,8 @@ let resolve_selected
         ~max_depth:64
       |> Result.map_error ~f:(fun _ -> Source.Limit)
     in
-    let citation =
-      match selection with
-      | Canonical c | Prepared { citation = c; _ } -> c
-    in
+    let visible = Recovery_ordinary_selection.visible (citation selection) in
     let current () = current selection view in
-    let visible (state : Session_state.t) =
-      not
-        (Option.exists state.recovery_windows ~f:(fun ledger ->
-           Recovery_window_ledger.is_derived_summary ledger citation))
-    in
     let resolve allowance =
       let project =
         project
@@ -216,4 +219,17 @@ let resolve
       ~view
   in
   Result.of_option selected ~error:Source.Unavailable
+;;
+
+let check_ordinary_release accepted selection ~checkpoint =
+  let visible = Recovery_ordinary_selection.visible (citation selection) in
+  match selection with
+  | Canonical citation -> Recovery_ordinary_selection.check accepted citation
+  | Prepared { citation; source_revision } ->
+    Recovery_effective_release.check
+      ~visible
+      ~checkpoint
+      accepted
+      ~source_revision
+      citation
 ;;

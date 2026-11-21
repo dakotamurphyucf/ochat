@@ -440,16 +440,16 @@ let delegation_registry delegation = delegation.registry
 let delegation_selection delegation = delegation.selected
 let delegation_definition delegation = delegation.exposed_definition
 
-let delegate_standalone t ~selected =
+let delegate t ~selected ~check_selected =
   let open Result.Let_syntax in
   let rec closure pending visited managed_names =
     match pending with
     | [] -> Ok (visited, managed_names)
-    | reference :: pending ->
+    | (reference, check) :: pending ->
       let%bind binding =
         C.resolve t.capabilities ~id:reference.C.id ~fingerprint:reference.fingerprint
       in
-      let%bind () = C.check_delegation binding in
+      let%bind () = check binding in
       (match Set.mem visited reference.name with
        | true -> closure pending visited managed_names
        | false ->
@@ -467,14 +467,17 @@ let delegate_standalone t ~selected =
                        "delegated dependency requires its original moderator owner"
                    }
              | Standalone _ ->
+               let dependencies =
+                 C.references (EC.capabilities prepared)
+                 |> List.map ~f:(fun reference -> reference, C.check_delegation)
+               in
                closure
-                 (List.rev_append (C.references (EC.capabilities prepared)) pending)
+                 (List.rev_append dependencies pending)
                  visited
                  (Set.add managed_names reference.name))))
   in
-  let%bind names, managed_names =
-    closure (C.references selected) String.Set.empty String.Set.empty
-  in
+  let roots = C.references selected |> List.map ~f:(fun root -> root, check_selected) in
+  let%bind names, managed_names = closure roots String.Set.empty String.Set.empty in
   let%bind capabilities = C.select t.capabilities ~names:(Set.to_list names) in
   let%bind definition =
     EC.select_standalone_tools
@@ -497,6 +500,14 @@ let delegate_standalone t ~selected =
       Set.mem managed_names (EC.declaration prepared).name)
   in
   { registry = { t with capabilities; definition; tools }; selected; exposed_definition }
+;;
+
+let delegate_standalone t ~selected =
+  delegate t ~selected ~check_selected:C.check_delegation
+;;
+
+let delegate_generated_foreground t ~selected =
+  delegate t ~selected ~check_selected:C.check_generated_foreground
 ;;
 
 let delegated_dependencies

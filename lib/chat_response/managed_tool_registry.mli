@@ -96,6 +96,14 @@ val delegate_standalone
   -> selected:Tool_capability.t
   -> (delegation, Tool_capability.error) result
 
+(** For the generated child's owned foreground runtime. Only its explicitly
+    selected stock history roots may use protected dispatch. Dependencies of
+    standalone handlers remain subject to plain execution admission. *)
+val delegate_generated_foreground
+  :  t
+  -> selected:Tool_capability.t
+  -> (delegation, Tool_capability.error) result
+
 val delegation_selection : delegation -> Tool_capability.t
 
 (** Execution registry contains only the selected bindings and their captured

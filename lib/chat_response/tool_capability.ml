@@ -70,6 +70,41 @@ let check_delegation binding =
   | Some message -> error "delegation.native_context_unavailable" message
 ;;
 
+module Local_history_tool = struct
+  type t =
+    | List_windows
+    | List_items
+    | Search
+    | Read_text
+    | Read_media
+  [@@deriving enumerate, equal]
+
+  let name = function
+    | List_windows -> "context_list_windows"
+    | List_items -> "context_list_items"
+    | Search -> "context_search"
+    | Read_text -> "context_read_text"
+    | Read_media -> "context_read_media"
+  ;;
+
+  let implementation_revision tool =
+    Chatmd_shell_spec.Source_ref.digest ("ochat.recovery.history.native.v1:" ^ name tool)
+  ;;
+end
+
+let check_generated_foreground binding =
+  match
+    binding.delegation_restriction, binding.implementation, binding.result_contract
+  with
+  | None, Native _, Protected_recovery_v1
+    when List.exists Local_history_tool.all ~f:(fun tool ->
+           String.equal binding.reference.name (Local_history_tool.name tool)
+           && String.equal
+                binding.reference.implementation_revision
+                (Local_history_tool.implementation_revision tool)) -> Ok ()
+  | _ -> check_delegation binding
+;;
+
 let native_implementation binding =
   match binding.implementation with
   | Native implementation -> Some implementation

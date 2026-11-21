@@ -41,20 +41,23 @@ let page_position signer ~basis ~length = function
     Result.of_option valid ~error:(expired ())
 ;;
 
-let list signer (source : Session_state.t) ~actor ~generation ~state page =
+let list_for_origin
+      signer
+      (source : Session_state.t)
+      ~origin
+      ~operation
+      ~generation
+      ~state
+      page
+  =
   let open Result.Let_syntax in
   let current = source.identity.generation in
   let selected = Option.value generation ~default:current in
-  if page.P.Page.Request.limit <= 0 || page.limit > P.Recovery_query.max_page_size || selected < 0
+  if
+    page.P.Page.Request.limit <= 0
+    || page.limit > P.Recovery_query.max_page_size
+    || selected < 0
   then Error (P.Error.invalid_request "invalid recovery window generation or page size")
-  else if not (Operator_authorization.is_current actor)
-  then
-    Error
-      (P.Error.create
-         Permission_denied
-         ~message:"recovery authority expired"
-         ~retryable:false
-         ())
   else (
     let%bind ledger =
       Result.of_option
@@ -77,8 +80,9 @@ let list signer (source : Session_state.t) ~actor ~generation ~state page =
     in
     let basis =
       [%sexp
-        ("ochat.window-list.v1" : string)
-      , (Operator_authorization.origin actor : int)
+        ("ochat.window-list.v2" : string)
+      , (origin : int)
+      , (operation : P.Id.Operation.t option)
       , (source.identity.session_id : P.Id.Session.t)
       , (current : int)
       , (source.spec.prompt_revision_id : P.Id.Prompt_revision.t)
@@ -109,4 +113,24 @@ let list signer (source : Session_state.t) ~actor ~generation ~state page =
         P.Page.Cursor.of_string (position ^ "." ^ signature) |> Result.map ~f:Option.some)
     in
     { P.Page.items; next_cursor })
+;;
+
+let list signer source ~actor ~generation ~state page =
+  if Operator_authorization.is_current actor
+  then
+    list_for_origin
+      signer
+      source
+      ~origin:(Operator_authorization.origin actor)
+      ~operation:None
+      ~generation
+      ~state
+      page
+  else
+    Error
+      (P.Error.create
+         Permission_denied
+         ~message:"recovery authority expired"
+         ~retryable:false
+         ())
 ;;

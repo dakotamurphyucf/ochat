@@ -301,6 +301,9 @@ type t =
       -> Agent_session.Goal_native_metadata_service.t
   ; successor_guidance :
       Agent_session.Session_actor.t option ref -> Agent_session.Script_tool_calls.successor_guidance
+  ; recovery_history_service :
+      Agent_session.Session_actor.t option ref
+      -> Agent_session.Recovery_history_native_service.t
   ; protected_source_authority : Inference_runtime.Protected_delivery.Lease.Authority.t
   ; recovery_asset_submissions : Recovery_asset_submission.t
   ; generated_creation_mutex : Eio.Mutex.t
@@ -2632,6 +2635,10 @@ let native_script_tools
   Agent_session.Script_tool_calls.with_instruction_service
     tools
     (instruction_service t actor_ref)
+  |> fun tools ->
+  Agent_session.Script_tool_calls.with_recovery_history_service
+    tools
+    (t.recovery_history_service actor_ref)
   |> fun tools ->
   Agent_session.Script_tool_calls.with_recovery_note_service
     tools
@@ -8136,7 +8143,9 @@ let prepare_native_family
          match parent.resources.managed with
          | None -> Ok None
          | Some managed ->
-           Chat_response.Managed_tool_registry.delegate_standalone managed ~selected
+           Chat_response.Managed_tool_registry.delegate_generated_foreground
+             managed
+             ~selected
            |> Result.map_error ~f:(fun error ->
              unavailable Permission_denied error.Chat_response.Tool_capability.message)
            |> Result.map ~f:(fun delegation ->
@@ -9630,7 +9639,9 @@ let prepare_runtime_at_paths
               match source, managed with
               | (`Authored _ | `Artifact _), _ | `Generated _, None -> Ok None
               | `Generated _, Some managed ->
-                Chat_response.Managed_tool_registry.delegate_standalone managed ~selected
+                Chat_response.Managed_tool_registry.delegate_generated_foreground
+                  managed
+                  ~selected
                 |> Result.map ~f:(fun delegation ->
                   Some
                     Agent_session.Runtime_builder.
@@ -14567,6 +14578,40 @@ module Recovery_source_host = struct
       ~f:(fun handle ~observation ~current ~check_owner:_ -> f handle ~observation ~current)
   ;;
 end
+
+let recovery_history_native_service t actor_ref ~tool admission ~binding json =
+  let module A = Agent_session.Session_actor in
+  let module P = Agent_protocol in
+  let open Result.Let_syntax in
+  let%bind actor = extension_actor actor_ref in
+  let%bind observation = A.observe_resource_state actor in
+  let state = A.Resource_observation.state observation in
+  let owner =
+    P.Session_ref.create
+      ~server_id:(Agent_store.Session_store.server_id t.store)
+      ~session_id:state.identity.session_id
+  in
+  let source =
+    Recovery_history_native_host.
+      { with_source =
+          (fun owner ~authorize ~f ->
+            Recovery_source_host.with_observed_source t owner ~authorize ~f)
+      ; custody = recovery_note_source_custody t
+      }
+  in
+  Recovery_history_native_host.prepare
+    t.store
+    ~blobs:t.blob_store
+    ~max_payload_bytes:t.limits.max_journal_payload
+    ~now:(fun () -> Eio.Time.Mono.now (Eio.Stdenv.mono_clock t.env))
+    source
+    ~actor
+    ~owner
+    ~tool
+    admission
+    ~binding
+    json
+;;
 
 module Recovery_history = struct
   module P = Agent_protocol
@@ -20180,6 +20225,8 @@ let create
     ; goal_metadata_service =
         (fun profile actor_ref -> goal_metadata_service t profile actor_ref)
     ; successor_guidance = (fun actor_ref -> Successor_guidance.create t actor_ref)
+    ; recovery_history_service =
+        (fun actor_ref -> recovery_history_native_service t actor_ref)
     ; protected_source_authority = Inference_runtime.Protected_delivery.Lease.Authority.create ()
     ; recovery_asset_submissions = Recovery_asset_submission.create ()
     ; generated_creation_mutex = Eio.Mutex.create ()

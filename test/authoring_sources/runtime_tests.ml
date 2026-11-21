@@ -71,11 +71,11 @@ let%expect_test "runtime coverage follows the selected surface and detects stale
     {|
     (one_off_v1 28)
     (tool_v1 28)
-    (moderator_v1 37)
-    (delegated_moderator_v1 37)
+    (moderator_v1 38)
+    (delegated_moderator_v1 38)
     (delegated_moderator_v1/runtime/timers.lifecycle)
     delegated_moderator_v1/runtime/timers.lifecycle: compiler contract changed; review documentation coverage
     delegated_moderator_v1/runtime/timers.lifecycle: topic changed; review documentation coverage
-    (37 130 371)
+    (38 132 377)
     |}]
 ;;

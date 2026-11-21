@@ -68,6 +68,8 @@ let with_fixture
       ?(prompt_xml = default_prompt)
       ?on_preparation
       ?recovery_capacity
+      ?(extra_features = [])
+      ?(restrict = Fn.id)
       env
       environment
       ~auth
@@ -111,12 +113,17 @@ let with_fixture
         ~options:
           { D.default_options with
             inference_policy =
-              Generated_provider_scenario.inference_policy ?on_preparation env ~endpoint ~auth
+              Generated_provider_scenario.inference_policy
+                ?on_preparation
+                ~extra_features
+                env
+                ~endpoint
+                ~auth
           }
         ()
       |> protocol_ok
     in
-    let proof = Operator_authorization.trusted_local (principal ()) in
+    let proof = restrict (Operator_authorization.trusted_local (principal ())) in
     let notifications = Eio.Stream.create 256 in
     let context =
       Agent_server.Connection_context.create_authenticated

@@ -25,6 +25,9 @@ val with_instruction_service : t -> Instruction_service.t -> t
 
 val instruction_service : t -> Instruction_service.t option
 
+val with_recovery_history_service : t -> Recovery_history_native_service.t -> t
+val recovery_history_service : t -> Recovery_history_native_service.t option
+
 val with_recovery_note_service : t -> Recovery_note_native_service.t -> t
 val recovery_note_service : t -> Recovery_note_native_service.t option
 

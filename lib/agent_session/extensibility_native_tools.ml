@@ -37,6 +37,7 @@ type t =
   | Recurrence_cancel
   | Recurrence_status
   | Recurrence_history
+  | Recovery_history of Recovery_history_native_request.Tool.t
   | Recovery_note of Recovery_note_access.Effect.t
 [@@deriving enumerate]
 
@@ -75,6 +76,7 @@ let name = function
   | Recurrence_cancel -> Recurrence_native_admission.Effect.name Cancel
   | Recurrence_status -> Recurrence_native_admission.Effect.name Status
   | Recurrence_history -> Recurrence_native_admission.Effect.name History
+  | Recovery_history tool -> Recovery_history_native_request.Tool.name tool
   | Recovery_note effect_kind -> Recovery_note_access.Effect.name effect_kind
 ;;
 
@@ -109,6 +111,7 @@ let registration ~env ~one_off_policy ~authoring_validation_host kind =
   let present value = Ok (Some value) in
   let unavailable message = P.Error.create Invalid_state ~message ~retryable:false () in
   match kind, one_off_policy with
+  | Recovery_history tool, _ -> Recovery_history_native_tool.registration tool |> present
   | Recovery_note effect_kind, _ -> Recovery_note_native_tool.registration effect_kind |> present
   | Goal_get, _ -> Goal_native_metadata_tool.get |> present
   | Goal_create, _ -> Goal_native_metadata_tool.create |> present

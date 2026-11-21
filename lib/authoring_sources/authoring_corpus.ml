@@ -3808,6 +3808,28 @@ let runtime_foundation ~sources =
                }
          }
        ]
+     @ [ { id = "runtime.recovery_history"
+         ; title =
+             "Recover an exact ordinary history selection in a foreground model operation"
+         ; prerequisites = []
+         ; surfaces = shared
+         ; excerpts =
+             [ { path = "development/recovery-history-tools.md"
+               ; heading = "# Selected recovery history tools"
+               ; include_children = true
+               }
+             ]
+         ; review =
+             Audited
+               { excerpt_sha256 =
+                   [ "f46807b5400fecc820092d0a20d06b9e25193330fd54f28d56b1abbf6abff095" ]
+               ; evidence =
+                   [ "test/agent_session/recovery_history_access_tests.ml"
+                   ; "test/agent_server_e2e/scenarios/recovery_history_provider_scenario.ml"
+                   ]
+               }
+         }
+       ]
      @ [ { id = "runtime.recovery_notes"
          ; title = "Read, share and update selected recovery notes"
          ; prerequisites = []

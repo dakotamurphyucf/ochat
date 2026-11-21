@@ -60,7 +60,8 @@ let create_child env root daemon parent ~model ~reasoning ~tokens ~marker =
   |> protocol_ok
 ;;
 
-let inference_policy ?(on_preparation = ignore) env ~endpoint ~auth =
+let inference_policy ?(on_preparation = ignore) ?(extra_features = []) env ~endpoint ~auth
+  =
   let module D = Openai.Responses_driver in
   (* This case exercises the actual adapter over the isolated HTTP/SSE server.
      Capture the selected endpoint and credential explicitly at the fixture
@@ -69,12 +70,13 @@ let inference_policy ?(on_preparation = ignore) env ~endpoint ~auth =
     D.Capability.create
       ~baseline:
         (List.map
-           [ D.Capability.Text_input
-           ; Function_tools
-           ; Opaque_replay
-           ; Setting "max_output_tokens"
-           ; Setting "reasoning"
-           ]
+           ([ D.Capability.Text_input
+            ; Function_tools
+            ; Opaque_replay
+            ; Setting "max_output_tokens"
+            ; Setting "reasoning"
+            ]
+            @ extra_features)
            ~f:(fun feature -> feature, D.Capability.Supported))
       ~models:[]
     |> Or_error.ok_exn

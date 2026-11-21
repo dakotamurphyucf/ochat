@@ -277,6 +277,24 @@ let features =
       ; "test/factory_catalog_publication/goal_native_resume_tests.ml"
       ; "test/goal_domain/goal_resume_request_tests.ml"
       ] )
+  ; ( "recovery.history_tools"
+    , "Selected local ordinary history, exact part recovery and foreground protected \
+       delivery"
+    , [ "lib/agent_session/recovery_history_native_request.ml"
+      ; "lib/agent_session/recovery_history_native_tool.ml"
+      ; "lib/agent_session/recovery_history_native_service.ml"
+      ; "lib/agent_server/recovery_history_native_host.ml"
+      ; "lib/agent_server/delegated_policy_call.ml"
+      ; "lib/agent_session/recovery_effective_release.ml"
+      ; "lib/chat_response/generated_admission.ml"
+      ; "lib/chat_response/managed_tool_registry.ml"
+      ; "lib/chat_response/tool_capability.ml"
+      ]
+    , "runtime.recovery_history"
+    , [ "test/agent_session/recovery_history_access_tests.ml"
+      ; "test/tool_capability_test.ml"
+      ; "test/agent_server_e2e/scenarios/recovery_history_provider_scenario.ml"
+      ] )
   ; ( "recovery.note_tools"
     , "Operation-owned note reads, selected revisions, guarded delivery and durable \
        mutations"
@@ -446,13 +464,13 @@ let implementation_sources =
   ; ( "lib/agent_server/native_resource_authority.ml"
     , "6c1d600bb41fa15279a82bc66b479c850778eda7ba40dac7911a4819df9b991b" )
   ; ( "lib/agent_server/delegated_policy_call.ml"
-    , "80c6efb3ab1a69b525b001a3df8e59ef043d0bf39a9dc2e22d0d8d41b9c8c98e" )
+    , "1527c1a798b49bb509cea4ab3eba4c1dbcbec82396d72f094f430b0d53c19fc0" )
   ; ( "lib/agent_server/delegated_policy_vector.ml"
     , "6004f0ff15cf25b2282aa7b510eced951f4ecdabf223285799d6f7956263500b" )
   ; ( "lib/agent_server/descendant_accounting_host.ml"
     , "3baff14cf9c606e899c08f95805cc3ca9f070827b46ec531e1c230314820b0fd" )
   ; ( "lib/agent_server/session_factory.ml"
-    , "6c88776373a1ec610fde1c687dc1dcabe165b572437ec236ea7dfae1fad17dac" )
+    , "78f61a8bb786bd959f0fd1b16619c2d70bd20dce47b22cbcf572a0a770fd5472" )
   ; ( "lib/agent_session/authoring_context_tool.ml"
     , "6e318b45f799b485f802dc6d5e4d8bc031721e379cc8800f6ed484d59694840d" )
   ; ( "lib/agent_session/authoring_reference_scope.ml"
@@ -496,7 +514,7 @@ let implementation_sources =
   ; ( "lib/agent_session/run_chatml_tool.ml"
     , "eadb7cf2ac6622e977db08798fbfce7661062c47883cdf4f28700f1c85249b75" )
   ; ( "lib/agent_session/script_tool_calls.ml"
-    , "5b2dc3e8c29feaf961d719e81ff6964874d17b34e1e675c5cc26da4bf2d47900" )
+    , "a242925f1b617445e36748161773678f0e0adad74268cbc006988a116c0d92e4" )
   ; ( "lib/agent_session/session_management.ml"
     , "18431c4fd97a2d24a72b927fe8f0d20b8aea561f1f119d8f122d943f2a137f86" )
   ; ( "lib/agent_session/session_management_native.ml"
@@ -508,7 +526,11 @@ let implementation_sources =
   ; ( "lib/chat_response/authoring_validation.ml"
     , "71b6c71022bde3b92bfd1954904fc516994532e938b74ebe0fb3b2f6ca948694" )
   ; ( "lib/chat_response/generated_admission.ml"
-    , "781909db7e778943cbca05cf969eb93a4bff646bd6711f8dcda4d0e272062651" )
+    , "137adaa4beca5c2d5f0d6f36c5c18e25ffe3370b5086376720b0df1a3cb9bc17" )
+  ; ( "lib/chat_response/managed_tool_registry.ml"
+    , "e53613a0ee0695e433ac88bae5576dacd76960f8542d2c5d6689b4b15ecffa43" )
+  ; ( "lib/chat_response/tool_capability.ml"
+    , "babf318ca64c34e0c1e4b14d498a796cff36b2ac521808d2dc814cb32e087c9f" )
   ; ( "lib/chat_response/one_off_request.ml"
     , "7427759464798805cd25c014bf8e1bd903066fea5c3678d806e3c64ec3ee14a3" )
   ; ( "lib/chat_response/one_off_script.ml"
@@ -520,11 +542,21 @@ let implementation_sources =
   ; ( "lib/agent_session/prompt_catalog.ml"
     , "68c382d61c3afed36e41f56ddfb1700ffa85bc96e9310b18f210104aab158173" )
   ; ( "lib/agent_session/runtime_builder.ml"
-    , "f3224e1868dd42ca22860a422f73b0f83cae773ee06e86dacf00a48c282296e3" )
+    , "6eb216aede723c89d1285ac551ff33a0ef1837f97f321102d924199c6fbc4ce1" )
   ; ( "lib/agent_session/authored_source_preparation.ml"
     , "d8eea801d69ffa262cfc1d0a9bee45123ce8d4b08f74c25c67df450cd247600c" )
   ; ( "lib/agent_store/prompt_source_receipt.ml"
     , "d1089027dc9f0e69fb6db67815b2de78086d88a29334ac7c12ec6aa9f9b8258e" )
+  ; ( "lib/agent_session/recovery_history_native_request.ml"
+    , "9a590ba486c2dac0c9e6ed626a8212c5d3873faf9f41b09589b2273456ac934c" )
+  ; ( "lib/agent_session/recovery_history_native_tool.ml"
+    , "f718fdba8b290d35a75b4a795ae3e0b0d24ff9597c0653bd7387b162ff59d688" )
+  ; ( "lib/agent_session/recovery_history_native_service.ml"
+    , "a62ebb0bd41532a68115dc543da957c2122595746792c91724a6a82d59fdb860" )
+  ; ( "lib/agent_server/recovery_history_native_host.ml"
+    , "f8bb0805d894ec104d0ee3e74d1fbd55c59be2c5cd5b2299b228703ed616cab0" )
+  ; ( "lib/agent_session/recovery_effective_release.ml"
+    , "3d599d9e734011aabf69c966d74adda9481a3be3f69b8cd25c98574373b1d401" )
   ; ( "lib/agent_session/recovery_note_access.ml"
     , "526b0eff312e38a1b8d22c923ff0a6fd4a9927c553dbf1472d2bfbe75df062e8" )
   ; ( "lib/agent_session/recovery_note_native_request.ml"
@@ -590,6 +622,18 @@ let implementation_sources =
 
 let topic_contracts =
   [ ( "one_off_v1"
+    , "runtime.recovery_history"
+    , "38a2319a85a53c95913e14ab7a2d16d698a26649d6e7b5ad8dd8fa2ef3b40d44" )
+  ; ( "tool_v1"
+    , "runtime.recovery_history"
+    , "e59bf374b02e919455ee7cab02cd3830ec3d172eb48450ba665d69687d0b17de" )
+  ; ( "moderator_v1"
+    , "runtime.recovery_history"
+    , "e4d25379c584d34581cbce8bea7f402525c0073ed2504ad8834e134b45f5a1b2" )
+  ; ( "delegated_moderator_v1"
+    , "runtime.recovery_history"
+    , "450fbde15e490ae9b67b80085c4ed7a16bb4c4bcde631a03d55f94af82848311" )
+  ; ( "one_off_v1"
     , "instructions.sources"
     , "4cbb224a500d3e811fe54e5cacfd8c8f91612e6fa2236c79f42f4b0c7655b2e3" )
   ; ( "tool_v1"

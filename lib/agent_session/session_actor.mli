@@ -844,6 +844,26 @@ module Recovery_history_access : sig
     :  proof
     -> Recovery_history_query.Continuation.t
     -> (string, Agent_protocol.Error.t) result
+
+  (** Capture the exact still-running, local foreground operation. The proof
+      checks current transcript authority after the native admission exits. *)
+  type native_read
+
+  val capture_native
+    :  Resource_observation.t
+    -> Native_tool_invocation.Admission.t
+    -> binding:Chat_response.Tool_capability.binding
+    -> source:Agent_protocol.Session_ref.t
+    -> tool:Recovery_history_native_request.Tool.t
+    -> (native_read, Agent_protocol.Error.t) result
+
+  val native_current : native_read -> (Session_state.t, Agent_protocol.Error.t) result
+  val native_principal : native_read -> Agent_protocol.Principal.t
+
+  val list_native_windows
+    :  native_read
+    -> Agent_protocol.Page.Request.t
+    -> (Agent_protocol.Recovery_query.Summary.t Agent_protocol.Page.t, Agent_protocol.Error.t) result
 end
 
 (** Observes accepted State through this Actor's mailbox. May yield. The host

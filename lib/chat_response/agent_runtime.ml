@@ -1202,7 +1202,7 @@ let inherit_native ?managed ~(parent : t) ~capabilities () =
           ~fingerprint:reference.fingerprint
         |> binding_result
       in
-      let%bind () = C.check_delegation binding |> binding_result in
+      let%bind () = C.check_generated_foreground binding |> binding_result in
       match C.implementation binding with
       | Native fn -> Ok (fn :: functions)
       | Managed _ when Option.is_some managed ->

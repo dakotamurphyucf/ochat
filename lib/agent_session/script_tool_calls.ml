@@ -86,6 +86,7 @@ type t =
   ; generated_creation_service : Generated_session_request.service option
   ; managed_session_service : Managed_session_service.t option
   ; instruction_service : Instruction_service.t option
+  ; recovery_history_service : Recovery_history_native_service.t option
   ; recovery_note_service : Recovery_note_native_service.t option
   ; successor_guidance : successor_guidance option
   ; recovery_context_service : Recovery_context_service.t option
@@ -515,6 +516,7 @@ let create
   ; generated_creation_service = None
   ; managed_session_service = None
   ; instruction_service = None
+  ; recovery_history_service = None
   ; recovery_note_service = None
   ; successor_guidance = None
   ; recovery_context_service = None
@@ -530,6 +532,11 @@ let create
 let with_shell_context t services = { t with shell_context = Some services }
 let with_instruction_service t service = { t with instruction_service = Some service }
 let instruction_service t = t.instruction_service
+let with_recovery_history_service t service =
+  { t with recovery_history_service = Some service }
+;;
+
+let recovery_history_service t = t.recovery_history_service
 let with_recovery_note_service t service = { t with recovery_note_service = Some service }
 let recovery_note_service t = t.recovery_note_service
 
@@ -821,6 +828,7 @@ let call_payload kind input =
 let prepare_host_call
       ?(native_origin = "script")
       ?caller
+      ?(projected_model_input = false)
       t
       ~selected
       ~session_id
@@ -869,16 +877,26 @@ let prepare_host_call
       Ok (route original prepared.input preparation (Some (fail code message)))
     in
     let validate reference input =
-      let%bind _ =
+      let%bind binding =
         C.resolve selected ~id:reference.C.id ~fingerprint:reference.fingerprint
         |> Result.map_error ~f:(fun e -> e.C.message)
       in
-      let%bind schema =
-        Chatmd_shell_spec.Tool_schema.compile reference.input_schema
-        |> Result.map_error ~f:(fun _ -> "invalid tool input schema")
-      in
-      Chatmd_shell_spec.Tool_schema.validate schema input
-      |> Result.map_error ~f:(fun _ -> "invalid tool input")
+      if projected_model_input
+      then (
+        match owner, input with
+        | Model_call _, `Object []
+          when String.equal reference.name original.name
+               && C.equal_result_contract
+                    (C.result_contract binding)
+                    Protected_recovery_v1 -> Ok ()
+        | _ -> Error "invalid protected model input projection")
+      else (
+        let%bind schema =
+          Chatmd_shell_spec.Tool_schema.compile reference.input_schema
+          |> Result.map_error ~f:(fun _ -> "invalid tool input schema")
+        in
+        Chatmd_shell_spec.Tool_schema.validate schema input
+        |> Result.map_error ~f:(fun _ -> "invalid tool input"))
     in
     (match validate original prepared.input with
      | Error _ ->
@@ -1039,6 +1057,17 @@ let with_model_preparation
           |> Result.map ~f:C.reference
           |> Result.map_error ~f:(fun error -> error.C.message)
         in
+        (* The streaming dispatcher validates original arguments before host
+           policy sees the empty projection. Native dispatch validates the
+           real arguments again in its isolated input scope. *)
+        let projected_model_input =
+          Option.is_some (protected_binding selected reference)
+        in
+        let%bind () =
+          if projected_model_input && not (String.equal request.name request.original_name)
+          then Error "a protected model call cannot transfer its selection"
+          else Ok ()
+        in
         let%bind value =
           Stream_invocation.parse_input ~kind:request.kind ~payload:request.payload
         in
@@ -1047,6 +1076,7 @@ let with_model_preparation
           with_preparation_caller t (Execution capture_caller) (fun caller ->
             prepare_host_call
               ?caller
+              ~projected_model_input
               t
               ~selected
               ~session_id:input.session_id

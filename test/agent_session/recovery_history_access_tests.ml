@@ -85,10 +85,12 @@ let%expect_test
                 Access.read_cursor proof (Option.value_exn !cursor)
                 |> Identity.expect_error Cursor_expired
               | _ -> failwith "unexpected history tool invocation");
-             Openai.Responses.Tool_output.Output.Text "ack")
+             A.Recovery_native_result.acknowledge admission ~binding |> protocol_ok;
+             Openai.Responses.Tool_output.Output.Text "")
       in
       let declared =
         Capability.create
+          ~result_contracts:[ Definition.name, Protected_recovery_v1 ]
           ~owner:"context-history-access-fixture"
           ~resource_fingerprint:(Chatmd_shell_spec.Source_ref.digest "history-access")
           [ Chatmd_shell_spec.Source_ref.digest "implementation", implementation ]
@@ -98,7 +100,8 @@ let%expect_test
       let tools, tool_tbl = Ochat_function.functions [ implementation ] in
       let attempts = ref 0 in
       let inference =
-        Inference_fixture.create
+        Inference_fixture.create_with_request_guidance
+          ~on_prepare:ignore
           ~namespace:"history-access-fixture"
           ~default_model:"history-access-fixture"
           ~post_stream:(fun ~sw:_ ~inputs:_ ->

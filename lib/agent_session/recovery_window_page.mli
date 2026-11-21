@@ -28,3 +28,15 @@ val list
   -> state:Window.state option
   -> P.Page.Request.t
   -> (summary P.Page.t, P.Error.t) result
+
+(** The actor has already checked the actual foreground operation and its
+    transcript authority. Its operation identity confines cursor replay. *)
+val list_for_origin
+  :  signer
+  -> Session_state.t
+  -> origin:int
+  -> operation:P.Id.Operation.t option
+  -> generation:int option
+  -> state:Window.state option
+  -> P.Page.Request.t
+  -> (summary P.Page.t, P.Error.t) result

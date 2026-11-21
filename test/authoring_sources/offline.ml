@@ -17,6 +17,7 @@ let () =
     ; "agent-server/recurring-automation.md"
     ; "design/composable-agent-instructions-and-packages.md"
     ; "development/context-window-tools.md"
+    ; "development/recovery-history-tools.md"
     ; "development/recovery-note-tools.md"
     ; "guide/admitted-instructions.md"
     ; "guide/authoring-context-tool.md"

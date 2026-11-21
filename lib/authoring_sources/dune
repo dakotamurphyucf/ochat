@@ -41,6 +41,13 @@
     lib/agent_session/goal_native_metadata_service.ml %{dep:../agent_session/goal_native_metadata_service.ml}
     lib/agent_session/goal_native_metadata_view.ml %{dep:../agent_session/goal_native_metadata_view.ml}
     lib/agent_session/goal_run_evidence.ml %{dep:../agent_session/goal_run_evidence.ml}
+    lib/agent_session/recovery_history_native_request.ml %{dep:../agent_session/recovery_history_native_request.ml}
+    lib/agent_session/recovery_history_native_tool.ml %{dep:../agent_session/recovery_history_native_tool.ml}
+    lib/agent_session/recovery_history_native_service.ml %{dep:../agent_session/recovery_history_native_service.ml}
+    lib/agent_server/recovery_history_native_host.ml %{dep:../agent_server/recovery_history_native_host.ml}
+    lib/agent_session/recovery_effective_release.ml %{dep:../agent_session/recovery_effective_release.ml}
+    lib/chat_response/tool_capability.ml %{dep:../chat_response/tool_capability.ml}
+    lib/chat_response/managed_tool_registry.ml %{dep:../chat_response/managed_tool_registry.ml}
     lib/agent_session/recovery_note_access.ml %{dep:../agent_session/recovery_note_access.ml}
     lib/agent_session/recovery_note_native_request.ml %{dep:../agent_session/recovery_note_native_request.ml}
     lib/agent_session/recovery_note_native_tool.ml %{dep:../agent_session/recovery_note_native_tool.ml}
@@ -634,6 +641,7 @@
     guide/native-goal-metadata.md %{dep:../../docs-src/guide/native-goal-metadata.md}
     guide/chatml-authoring-runs.md %{dep:../../docs-src/guide/chatml-authoring-runs.md}
     development/context-window-tools.md %{dep:../../docs-src/development/context-window-tools.md}
+    development/recovery-history-tools.md %{dep:../../docs-src/development/recovery-history-tools.md}
     development/recovery-note-tools.md %{dep:../../docs-src/development/recovery-note-tools.md}
     guide/admitted-instructions.md %{dep:../../docs-src/guide/admitted-instructions.md}
     guide/builtin-instructions.md %{dep:../../docs-src/guide/builtin-instructions.md}

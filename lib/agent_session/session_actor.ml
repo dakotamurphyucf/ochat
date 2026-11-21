@@ -61953,6 +61953,8 @@ let observe_resource_state t = call t Observe_resource_state
 module Recovery_history_access = struct
   module P = Agent_protocol
   module Query = Recovery_history_query
+  module Tool = Recovery_history_native_request.Tool
+  module Capability = Chat_response.Tool_capability
   module Admission = Native_tool_invocation.Admission
 
   type request =
@@ -61972,11 +61974,12 @@ module Recovery_history_access = struct
     | Model _ -> true
     | Operator _ -> false
   ;;
+
   let denied () = error Permission_denied "recovery history authority is unavailable"
 
-  let tool_name = function
-    | Query.List_items -> "context_list_items"
-    | Search _ -> "context_search"
+  let query_tool = function
+    | Query.List_items -> Tool.List_items
+    | Search _ -> Tool.Search
   ;;
 
   let check_credential actor =
@@ -61988,17 +61991,20 @@ module Recovery_history_access = struct
     else Error (denied ())
   ;;
 
-  let credential request ~query =
+  let credential request ~tool =
     let open Result.Let_syntax in
     match request with
     | Operator actor -> check_credential actor
     | Model (admission, binding) ->
       let%bind () = Admission.check_now admission ~binding in
-      let expected = tool_name (Query.action query) in
+      let expected = Tool.name tool in
       let invocation = Admission.invocation admission in
       if
         (not
-           (String.equal expected (Chat_response.Tool_capability.reference binding).name))
+           (Capability.equal_result_contract
+              (Capability.result_contract binding)
+              Protected_recovery_v1))
+        || (not (String.equal expected (Capability.reference binding).name))
         || not (String.equal expected invocation.context.tool_name)
       then Error (denied ())
       else (
@@ -62012,7 +62018,8 @@ module Recovery_history_access = struct
   ;;
 
   let principal request ~query =
-    credential request ~query |> Result.map ~f:Operator_authorization.principal
+    credential request ~tool:(query_tool (Query.action query))
+    |> Result.map ~f:Operator_authorization.principal
   ;;
 
   let model_owner (observation : Resource_observation.t) ~invocation ~origin =
@@ -62056,11 +62063,10 @@ module Recovery_history_access = struct
     Ok (Some id, check)
   ;;
 
-  let capture (observation : Resource_observation.t) request ~query =
+  let capture_audience (observation : Resource_observation.t) request ~source ~tool =
     let open Result.Let_syntax in
-    let%bind credential = credential request ~query in
+    let%bind credential = credential request ~tool in
     let%bind state = Resource_observation.check_current observation in
-    let source = Query.source query in
     let session = state.identity.session_id in
     let generation = state.identity.generation in
     let origin = Operator_authorization.origin credential in
@@ -62074,11 +62080,33 @@ module Recovery_history_access = struct
       | Operator actor -> Ok (None, fun _ -> Result.map (check_credential actor) ~f:ignore)
       | Model (admission, _) ->
         let invocation = Admission.invocation admission in
+        let owner =
+          Option.bind
+            observation.actor.canonical_persistence
+            ~f:Canonical_backend_binding_data.session_owner
+        in
         if
           P.Id.Session.equal invocation.context.session_id session
           && Int.equal invocation.context.generation generation
+          && Option.exists owner ~f:(P.Session_ref.equal source)
         then model_owner observation ~invocation ~origin
         else Error (denied ())
+    in
+    let check_current () =
+      let%bind current = Resource_observation.check_current observation in
+      let%map () = check_audience current in
+      current
+    in
+    let%map _ = check_current () in
+    state, credential, origin, operation, check_current
+  ;;
+
+  let capture (observation : Resource_observation.t) request ~query =
+    let open Result.Let_syntax in
+    let source = Query.source query in
+    let tool = query_tool (Query.action query) in
+    let%map state, _, origin, operation, check_current =
+      capture_audience observation request ~source ~tool
     in
     let audience =
       [%sexp
@@ -62086,7 +62114,7 @@ module Recovery_history_access = struct
       , (Chatml_source.Digest.to_hex (Query.digest query) : string)
       , (origin : int)
       , (operation : P.Id.Operation.t option)
-      , (generation : int)
+      , (state.identity.generation : int)
       , (state.spec.prompt_revision_id : P.Id.Prompt_revision.t)
       , (state.spec.configuration_revision : int64)
       , (state.counters.owner_lease_generation : int64)
@@ -62094,17 +62122,11 @@ module Recovery_history_access = struct
       , (state.parent_stop_epoch : int64 option)]
       |> Sexp.to_string_mach
     in
-    let check_current () =
-      let%bind current = Resource_observation.check_current observation in
-      let%map () = check_audience current in
-      current
-    in
     let t = observation.actor in
     let with_cursor f =
       let%bind _ = check_current () in
       f (Lazy.force t.recovery_query_cursor) ~now:(t.services.monotonic_now ()) ~audience
     in
-    let%map _ = check_current () in
     { check_current
     ; read_cursor =
         (fun cursor ->
@@ -62115,6 +62137,43 @@ module Recovery_history_access = struct
           with_cursor (fun t ~now ~audience ->
             Recovery_query_cursor.seal t ~now ~audience cursor))
     }
+  ;;
+
+  type native_read =
+    { native_current : unit -> (Session_state.t, P.Error.t) result
+    ; native_principal : P.Principal.t
+    ; native_origin : int
+    ; native_operation : P.Id.Operation.t
+    ; native_signer : Recovery_window_page.signer Lazy.t
+    }
+
+  let capture_native observation admission ~binding ~source ~tool =
+    let open Result.Let_syntax in
+    let%bind _, credential, native_origin, operation, native_current =
+      capture_audience observation (Model (admission, binding)) ~source ~tool
+    in
+    let%map native_operation = Result.of_option operation ~error:(denied ()) in
+    { native_current
+    ; native_principal = Operator_authorization.principal credential
+    ; native_origin
+    ; native_operation
+    ; native_signer = observation.actor.recovery_window_cursor
+    }
+  ;;
+
+  let native_current t = t.native_current ()
+  let native_principal t = t.native_principal
+
+  let list_native_windows t page =
+    let%bind.Result state = native_current t in
+    Recovery_window_page.list_for_origin
+      (Lazy.force t.native_signer)
+      state
+      ~origin:t.native_origin
+      ~operation:(Some t.native_operation)
+      ~generation:None
+      ~state:None
+      page
   ;;
 
   let check_current t = t.check_current ()

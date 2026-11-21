@@ -40,6 +40,7 @@ type t =
   ; limit : int
   ; max_reply_bytes : int
   ; action : action
+  ; include_image_parts : bool
   ; digest : Digest.t
   }
 
@@ -54,7 +55,7 @@ let wire_limits max_bytes =
   P.Recovery_wire.limits ~max_bytes ~max_fields:2048 ~max_nodes:65_536
 ;;
 
-let of_request (request : P.Recovery_history_request.t) =
+let of_request ?(include_image_parts = false) (request : P.Recovery_history_request.t) =
   let { P.Recovery_history_request.session = source
       ; window
       ; family
@@ -90,6 +91,7 @@ let of_request (request : P.Recovery_history_request.t) =
           ordinals
       ; X.integer_json limit
       ; X.integer_json max_reply_bytes
+      ; (if include_image_parts then `True else `False)
       ; (match action with
          | List_items -> `Null
          | Search term -> P.Search_term.to_json term)
@@ -99,7 +101,18 @@ let of_request (request : P.Recovery_history_request.t) =
     P.Recovery_wire.measure ~limits:(wire_limits max_encoded_bytes) query
   in
   let digest = Digest.of_contents (Jsonaf.to_string query) ~checkpoint:(fun () -> ()) in
-  { source; scope; family; view; role; ordinals; limit; max_reply_bytes; action; digest }
+  { source
+  ; scope
+  ; family
+  ; view
+  ; role
+  ; ordinals
+  ; limit
+  ; max_reply_bytes
+  ; action
+  ; include_image_parts
+  ; digest
+  }
 ;;
 
 let create
@@ -240,19 +253,24 @@ let item_fields (candidate : Basis.candidate) item =
 ;;
 
 type projection =
-  | List_parts
+  | List_parts of { include_image_parts : bool }
   | Match of P.History_text.Literal.t
 
 let project ~checkpoint projection candidate item =
   let fields extra = Some (`Object (item_fields candidate item @ extra)) in
   let parts = Text.parts item in
   match projection with
-  | List_parts ->
+  | List_parts { include_image_parts } ->
+    let images =
+      if include_image_parts
+      then [ "image_parts", `Array (List.map (Text.image_parts item) ~f:X.integer_json) ]
+      else []
+    in
     Ok
       (fields
-         [ ( "text_parts"
-           , `Array (List.map parts ~f:(fun part -> X.integer_json part.index)) )
-         ])
+         (( "text_parts"
+          , `Array (List.map parts ~f:(fun part -> X.integer_json part.index)) )
+          :: images))
   | Match term ->
     let rec find = function
       | [] -> Ok None
@@ -356,7 +374,7 @@ let rec render_fitting t basis page ~start ~sign =
 let visit t basis ~start ~checkpoint ~read =
   let projection =
     match t.action with
-    | List_items -> List_parts
+    | List_items -> List_parts { include_image_parts = t.include_image_parts }
     | Search term -> Match (P.History_text.Literal.create term)
   in
   let length = Basis.length basis in
@@ -377,7 +395,7 @@ let visit t basis ~start ~checkpoint ~read =
         candidate.is_selected
         &&
         match projection with
-        | List_parts -> true
+        | List_parts _ -> true
         | Match _ -> Basis.is_earliest basis candidate ~position
       in
       if not selected

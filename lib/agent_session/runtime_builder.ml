@@ -1017,7 +1017,7 @@ let inherit_resources ~(parent : resources) ~definition =
     match parent.managed with
     | None -> Ok None
     | Some managed ->
-      Chat_response.Managed_tool_registry.delegate_standalone
+      Chat_response.Managed_tool_registry.delegate_generated_foreground
         managed
         ~selected:
           (Chat_response.Generated_admission.capabilities

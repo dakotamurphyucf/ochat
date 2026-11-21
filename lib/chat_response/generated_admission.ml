@@ -172,7 +172,7 @@ let prepare
     List.fold_result (C.references capabilities) ~init:() ~f:(fun () reference ->
       Result.bind
         (C.resolve capabilities ~id:reference.id ~fingerprint:reference.fingerprint)
-        ~f:C.check_delegation)
+        ~f:C.check_generated_foreground)
     |> Result.map_error ~f:(fun e -> [ D.error ~code:e.code e.message ])
   in
   let%bind definition =
