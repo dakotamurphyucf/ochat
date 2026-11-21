@@ -1681,6 +1681,14 @@ let persist_prepared
     acknowledge_ingress ()
 ;;
 
+type transactional_event =
+  | Ordinary of Moderation.Event.t
+  | Rollover of Context_rollover_hook.t * (Context_rollover_hook.Decision.t -> unit)
+
+let has_context_rollover t =
+  Option.is_some t.artifact.extension && Runtime.has_context_rollover t.runtime
+;;
+
 let handle_event_entries_transactional_unlocked
       ?run_actions
       ?jobs
@@ -1715,46 +1723,46 @@ let handle_event_entries_transactional_unlocked
     in
     let%bind background_result =
       match event with
-      | Moderation.Event.Internal_event value ->
+      | Ordinary (Moderation.Event.Internal_event value) ->
         Background_delivery.decode value |> Result.map ~f:Option.is_some
-      | _ -> Ok false
+      | Ordinary _ | Rollover _ -> Ok false
     in
-    let%bind () =
-      match background_result with
-      | true -> authorize ()
-      | false -> Ok ()
-    in
-    let phase = Moderation.Event.phase event in
-    let%bind event =
-      match event with
-      | Moderation.Event.Internal_event value ->
-        Result.bind (Schedule_delivery.script_event value) ~f:(fun value ->
-          Result.bind
-            (Ingress_delivery.script_event value)
-            ~f:Background_delivery.script_event)
-        |> Result.map ~f:(fun value -> Moderation.Event.Internal_event value)
-      | _ -> Ok event
-    in
+    let%bind () = if background_result then authorize () else Ok () in
     let checked = Moderator_invocation.snapshot_state ?control ~limits:script.limits in
-    let%bind event =
+    let%bind phase, value =
       match event with
-      | Moderation.Event.Internal_event
-          (Chatml.Chatml_lang.VVariant ("Internal_event", [ payload ])) ->
-        let%bind event = Moderator_invocation.internal_event ?control payload in
-        let%map _ = checked event in
-        event
-      | Internal_event _ ->
-        Error "event.invalid_internal_event: requires a v1 Internal_event envelope"
-      | Session_start
-      | Session_resume
-      | Turn_start
-      | Item_appended _
-      | Pre_tool_call _
-      | Post_tool_response _
-      | Turn_end ->
-        (* Host observations use the live observer budget. The declaration's
-           snapshot limits still bound retained state and internal events. *)
-        Ok (Moderation.Event.to_value_with_control ~control event)
+      | Rollover ((Before _ as offer), _) ->
+        Ok
+          ( Moderation.Phase.Before_context_rollover
+          , Context_rollover_hook.to_value ?control offer )
+      | Rollover ((After _ as offer), _) ->
+        Ok
+          ( Moderation.Phase.After_context_rollover
+          , Context_rollover_hook.to_value ?control offer )
+      | Ordinary observed ->
+        let phase = Moderation.Event.phase observed in
+        let%map value =
+          match observed with
+          | Internal_event raw ->
+            let%bind value = Schedule_delivery.script_event raw in
+            let%bind value = Ingress_delivery.script_event value in
+            let%bind value = Background_delivery.script_event value in
+            (match value with
+             | Chatml.Chatml_lang.VVariant ("Internal_event", [ payload ]) ->
+               let%bind value = Moderator_invocation.internal_event ?control payload in
+               let%map _ = checked value in
+               value
+             | _ ->
+               Error "event.invalid_internal_event: requires a v1 Internal_event envelope")
+          | Session_start
+          | Session_resume
+          | Turn_start
+          | Item_appended _
+          | Pre_tool_call _
+          | Post_tool_response _
+          | Turn_end -> Ok (Moderation.Event.to_value_with_control ~control observed)
+        in
+        phase, value
     in
     let context =
       Moderation.Entry_projection.project_context_with_control
@@ -1832,7 +1840,9 @@ let handle_event_entries_transactional_unlocked
         <- t.processed_effect_count + List.length transaction.local_effects;
         outcome := prepared
     in
-    t.last_history <- history;
+    (match event with
+     | Ordinary _ -> t.last_history <- history
+     | Rollover _ -> ());
     let previous = !(t.invocation_tool_call) in
     t.invocation_tool_call := Some on_tool_call;
     let%map () =
@@ -1853,18 +1863,31 @@ let handle_event_entries_transactional_unlocked
                  Result.bind (checked value) ~f:Value_codec.Snapshot.to_value
                in
                let validate_state value = Result.map (checked value) ~f:(fun _ -> ()) in
-               match consume_queued with
-               | false ->
+               match event, consume_queued with
+               | Rollover (event, select), false ->
+                 Runtime.handle_context_rollover
+                   t.runtime
+                   ~context
+                   ~event:value
+                   ~copy_state:copy
+                   ~validate_state
+                   ~prepare_transaction:prepare
+                   ~decide:(fun value ->
+                     Result.map
+                       (Context_rollover_hook.Decision.of_value ?control ~event value)
+                       ~f:select)
+               | Rollover _, true -> Error "rollover hook is not a queued event"
+               | Ordinary _, false ->
                  Runtime.handle_event
                    t.runtime
                    ~context
-                   ~event
+                   ~event:value
                    ~copy_state:copy
                    ~validate_state
                    ~prepare_transaction:prepare
                    ~validate_suspension:(fun () ->
                      Error "event.suspended: cannot retain a UI continuation")
-               | true ->
+               | Ordinary _, true ->
                  let%bind consumed =
                    Runtime.handle_next_queued_event
                      t.runtime
@@ -1924,11 +1947,35 @@ let handle_event_entries_transactional
       ~history
       ~available_tools
       ~session_meta
-      ~event
+      ~event:(Ordinary event)
       ~consume_queued:false
       ~authorize
       ~on_tool_call
       ~prepare_event)
+;;
+
+let handle_context_rollover t ~session_id ~now_ms ~event ~authorize ~on_tool_call ~prepare
+  =
+  with_execution_model_recipes t (fun () ->
+    let selected = ref None in
+    if not (has_context_rollover t)
+    then Error "the installed moderator has no rollover hook"
+    else
+      handle_event_entries_transactional_unlocked
+        t
+        ~session_id
+        ~now_ms
+        ~history:[]
+        ~available_tools:[]
+        ~session_meta:`Null
+        ~event:(Rollover (event, fun decision -> selected := Some decision))
+        ~consume_queued:false
+        ~authorize
+        ~on_tool_call
+        ~prepare_event:(fun ~outcome ~snapshot ->
+          match !selected with
+          | None -> Error "rollover hook completed without a decision"
+          | Some decision -> prepare ~decision ~outcome ~snapshot))
 ;;
 
 let handle_next_event_entries_transactional
@@ -1968,7 +2015,7 @@ let handle_next_event_entries_transactional
           ~history
           ~available_tools
           ~session_meta
-          ~event:(Internal_event event)
+          ~event:(Ordinary (Moderation.Event.Internal_event event))
           ~consume_queued:true
           ~authorize:(fun () ->
             let%bind selected = Value_codec.Snapshot.of_value event in

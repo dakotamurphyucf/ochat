@@ -173,7 +173,75 @@ let queue_wake actor ~source ~snapshot =
   registry
 ;;
 
-let run ?(resume = false) ?(finish = false) ?(cancel = false) scenario =
+let check_authored_wait (receipt : R.Receipt.t) =
+  let module H = A.Recovery_rollover_hooks in
+  let hooks = Option.value_exn receipt.hooks in
+  match H.before hooks, H.after hooks with
+  | Completed (before, Proceed _), Completed (after, Wait) ->
+    assert (P.Id.Operation.equal before.predecessor after.predecessor);
+    assert (not (Scope.equal before.window after.window))
+  | _ -> failwith "the installed moderator did not author both operator dispositions"
+;;
+
+let check_authored_claim_prefixes ~initial ~transactions ~id =
+  let module H = A.Recovery_rollover_hooks in
+  let module Restored = A.Session_persistence.Restored in
+  let before, after, _ =
+    List.fold
+      transactions
+      ~init:(false, false, initial)
+      ~f:(fun (before, after, previous) transaction ->
+        let restored =
+          A.Session_persistence.apply_transaction
+            ~limits:document_limits
+            previous
+            transaction
+          |> store_ok
+        in
+        let state = Restored.state restored in
+        let receipt = Option.bind state.recovery_rollover ~f:(R.find ~id) in
+        match receipt with
+        | Some { status = Pending; hooks = Some hooks; _ } ->
+          (match H.before hooks with
+           | Claimed _ ->
+             assert (List.is_empty state.conversation.compaction_archives);
+             true, after, restored
+           | _ -> before, after, restored)
+        | Some { status = Terminal (Committed committed); hooks = Some hooks; _ } ->
+          (match H.after hooks with
+           | Claimed claim ->
+             assert (Scope.equal claim.window committed.successor);
+             let schedule =
+               Option.bind state.recovery_rollover ~f:(R.foreground ~scope:claim.window)
+               |> Option.value_exn
+             in
+             assert (A.Recovery_rollover_continuation.equal_phase schedule.phase Awaiting);
+             let expected =
+               R.Expected.create claim.window ~revision:state.counters.revision
+               |> protocol_ok
+             in
+             let change =
+               A.Session_delta.Recovery_rollover_changed
+                 (Hook
+                    { id; expected; change = Stop (After, claim.execution, Interrupted) })
+             in
+             let interrupted = A.Session_delta.apply state change |> protocol_ok in
+             let receipt = Disk.lookup interrupted ~id in
+             let hooks = Option.value_exn receipt.hooks in
+             (match H.after hooks with
+              | Stopped (_, Interrupted) -> ()
+              | _ -> failwith "an actual orphan claim did not resolve as interrupted");
+             assert (List.length interrupted.conversation.compaction_archives = 1);
+             assert (Option.is_none interrupted.active_operation);
+             before, true, restored
+           | _ -> before, after, restored)
+        | _ -> before, after, restored)
+  in
+  assert (before && after)
+;;
+
+let run ?(resume = false) ?(finish = false) ?(cancel = false) ?(authored = false) scenario
+  =
   with_actor_workspace (fun env workspace_instance ->
     Eio.Switch.run (fun storage_scope ->
       Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 20. (fun () ->
@@ -404,9 +472,27 @@ let run ?(resume = false) ?(finish = false) ?(cancel = false) scenario =
                in
                let wake_registry = ref None in
                let moderator =
-                 Option.some_if resume ()
+                 Option.some_if (resume || authored) ()
                  |> Option.map ~f:(fun () ->
-                   let manager, _ = handoff_manager env in
+                   let manager =
+                     if authored
+                     then (
+                       let manager, _, _ =
+                         handoff_definition
+                           ~events:
+                             {|
+    | _ -> Task.pure(state)
+    let on_context_rollover ctx state event =
+      match event with
+      | `Before_context_rollover(_) ->
+        Task.pure((|state, `Before(`Proceed({hints = `Some([]); continuation = `None}))|))
+      | `After_context_rollover(_) -> Task.pure((|state, `After(`Wait)|))
+|}
+                           env
+                       in
+                       manager)
+                     else fst (handoff_manager env)
+                   in
                    let snapshot =
                      Chat_response.Moderator_manager.identity_snapshot manager
                      |> Result.ok_or_failwith
@@ -576,7 +662,25 @@ let run ?(resume = false) ?(finish = false) ?(cancel = false) scenario =
                         | _ -> ());
                        outcome))
                in
-               Actor.set_operation_worker actor (Some worker) |> protocol_ok;
+               if authored
+               then (
+                 let selected, _ = Option.value_exn moderator in
+                 Actor.set_runtime_worker
+                   actor
+                   ~moderator_manager:selected.manager
+                   ~worker:(Some worker)
+                   ~inference:
+                     (Some
+                        (Inference_client.Execution.create
+                           ~context
+                           ~identity:(Inference_fixture.identity runtime)
+                           ~relation:Root
+                           ~before_dispatch:ignore
+                           ~on_attempt:ignore
+                           ~on_completion:ignore
+                           ~on_observation:ignore))
+                 |> protocol_ok)
+               else Actor.set_operation_worker actor (Some worker) |> protocol_ok;
                (* A client can replay an older completed request while a different
                   operator intent owns a live foreground cut. *)
                let prior_cancel =
@@ -714,6 +818,7 @@ let run ?(resume = false) ?(finish = false) ?(cancel = false) scenario =
                   assert (List.length after.conversation.canonical_history = 1);
                   assert (List.length after.conversation.deferred_user_entries = 1);
                   assert (Int.equal !dispatches 1));
+               if authored then check_authored_wait (Disk.lookup after ~id:admitted.id);
                if equal_scenario scenario Force
                then (
                  let sequence = after.counters.transaction_sequence in
@@ -726,7 +831,7 @@ let run ?(resume = false) ?(finish = false) ?(cancel = false) scenario =
                    Int64.equal sequence (W.state actor).counters.transaction_sequence));
                assert (Int.equal !hook_calls (if finish then 1 else 0));
                Option.iter
-                 moderator
+                 (Option.filter moderator ~f:(fun _ -> resume))
                  ~f:(fun ((worker : Chat_response.In_memory_stream.moderator), source) ->
                    let snapshot =
                      Chat_response.Moderator_manager.identity_snapshot worker.manager
@@ -835,6 +940,10 @@ let run ?(resume = false) ?(finish = false) ?(cancel = false) scenario =
         let reopened = W.journal disk Agent_store.Journal.open_existing in
         let recovered = Disk.recovery disk ~journal:reopened ~initial in
         let state = A.Session_persistence.Restored.state recovered.state in
+        if authored
+        then (
+          check_authored_wait (Disk.lookup state ~id);
+          check_authored_claim_prefixes ~initial ~transactions:recovered.transactions ~id);
         match scenario with
         | Native ->
           assert (
@@ -931,4 +1040,10 @@ let%expect_test "fresh successor admission holds capacity without consuming stag
      paths kept custody";
   [%expect
     {| fresh successor accepted queued input and wake once; held, finished and cancelled paths kept custody |}]
+;;
+
+let%expect_test "installed moderator authorizes and holds a real operator rollover" =
+  run ~authored:true Force;
+  print_endline "both durable authored phases survived operator replay";
+  [%expect {| both durable authored phases survived operator replay |}]
 ;;

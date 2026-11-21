@@ -33,6 +33,7 @@
   chatml_moderator
   chatml_moderation
   moderation
+  context_rollover_hook
   run_operations
   moderator_manager
   goal_native_scope

@@ -21,6 +21,7 @@ type t =
   { kind : Kind.t
   ; surface : Static.t
   ; required_bindings : (string * Chatml_builtin_spec.ty) list
+  ; optional_bindings : (string * Chatml_builtin_spec.ty) list
   }
 
 let for_target target ~checkpoint =
@@ -33,9 +34,16 @@ let for_target target ~checkpoint =
     | Moderator_v1 -> X.moderator_v1, X.moderator_entrypoints
     | Delegated_moderator_v1 -> X.delegated_moderator_v1, X.moderator_entrypoints
   in
+  let optional_bindings =
+    match target with
+    | Moderator_v1 | Delegated_moderator_v1 ->
+      [ Chatml_context_rollover.entrypoint, Chatml_context_rollover.scheme ]
+    | One_off_v1 | Tool_v1 | Developer_tool_v1 -> []
+  in
   { kind = Kind.Standard target
   ; surface = Static.of_runtime_surface surface ~checkpoint
   ; required_bindings
+  ; optional_bindings
   }
 ;;
 
@@ -59,9 +67,10 @@ let target_name t =
 
 let static_surface t = t.surface
 let required_bindings t = t.required_bindings
+let optional_bindings t = t.optional_bindings
 
 let for_static_surface surface ~required_bindings =
-  { kind = Kind.Native; surface; required_bindings }
+  { kind = Kind.Native; surface; required_bindings; optional_bindings = [] }
 ;;
 
 (* Conversion and emission poll their actual work. Standard identity preserves
@@ -98,8 +107,18 @@ let identity t ~checkpoint =
     | Native -> Sexp.Atom "Native"
   in
   checkpoint ();
+  let optional =
+    match t.optional_bindings with
+    | [] -> []
+    | entries ->
+      [ Sexp.List
+          (Sexp.Atom "Optional_bindings"
+           :: List.map entries ~f:(fun (name, scheme) -> binding name scheme))
+      ]
+  in
   Sexp.List
-    [ Sexp.Atom (compiler_family t); target; globals; modules; aliases; requirements ]
+    ([ Sexp.Atom (compiler_family t); target; globals; modules; aliases; requirements ]
+     @ optional)
 ;;
 
 module Identity_summary = struct

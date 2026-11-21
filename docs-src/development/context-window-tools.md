@@ -78,3 +78,36 @@ instructions as data. The rollover receipt stores the selection coordinates.
 OChat reads the content locally and rechecks access before sending it.
 A changed or unavailable revision can be omitted, and the session can
 continue without the hint when it exceeds the available input budget.
+
+## Authored rollover hooks
+
+An installed extensibility-v1 moderator can add the optional
+`on_context_rollover` binding alongside its ordinary `on_event` handler.
+Use a separate typed match for the two rollover phases.
+
+```chatml
+let on_context_rollover :
+  context -> state -> context_rollover_event -> (state * context_rollover_decision) task =
+  fun ctx state event -> match event with
+  | `Before_context_rollover(offer) ->
+    (match offer.checkpoint with
+     | `Checkpointed(notes) ->
+       Task.pure((|state, `Before(`Proceed({hints = `Some(notes); continuation = `None}))|))
+     | _ -> Task.pure((|state, `Before(`Veto)|)))
+  | `After_context_rollover(committed) ->
+    Task.pure((|state, `After(Context_rollover.compose([`Continue, `Wait]))|))
+```
+
+The pre-cut event shows the exact window, state revision, classified pressure
+and checkpoint status. The qualified note coordinates are body-free. Use
+``hints = `None`` for the normal checkpoint selection and
+``hints = `Some([])`` for an explicit empty selection. A veto leaves the
+predecessor active. `Context_rollover.compose` prefers `Finish` over `Wait`
+and `Wait` over `Continue`.
+
+The after-hook sees the committed cut. It can update its own transactional
+moderator state and hold, finish or continue the eligible follow-up. Tool,
+model, overlay and scheduled-work effects use their own ordinary admission
+boundaries. The actor records both phases durably. A failed or interrupted
+after-hook leaves the successor in place and holds the follow-up. Reopening
+the session reads the saved disposition and does not run the hook again.

@@ -247,6 +247,9 @@
   recovery_rollover_continuation
   recovery_rollover_input
   recovery_rollover_hint_ref
+  recovery_rollover_hooks
+  recovery_rollover_hook_policy
+  recovery_rollover_hook_snapshot
   recovery_successor_guidance
   recovery_rollover_batch
   recovery_rollover_batch_cut

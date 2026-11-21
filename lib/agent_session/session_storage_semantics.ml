@@ -1512,3 +1512,75 @@ let check_delta document =
     ~name:recovery_authored_checkpoint_name
     ~required:(delta_has_authored_checkpoint (D.Document.payload document))
 ;;
+
+let rollover_hooks_name = Agent_protocol.Session_storage_semantics.recovery_rollover_hooks
+
+let state_has_rollover_hooks payload =
+  match field_path payload [ "recovery_rollover"; "receipts" ] with
+  | Some (`Array receipts) ->
+    List.exists receipts ~f:(fun receipt ->
+      match D.Json.field receipt ~name:"hooks" with
+      | Value _ | Null -> true
+      | Absent -> false)
+  | _ -> false
+;;
+
+let delta_has_rollover_hooks payload =
+  match field_path payload [ "changes" ] with
+  | Some (`Array changes) ->
+    List.exists changes ~f:(fun change ->
+      match field_path change [ "kind" ] with
+      | Some (`String "recovery_rollover_changed") ->
+        (match field_path change [ "value"; "kind" ] with
+         | Some (`String "hook") -> true
+         | Some (`String "settle") ->
+           (match field_path change [ "value"; "status"; "reason" ] with
+            | Some (`String ("hook_vetoed" | "hook_failed")) -> true
+            | _ -> false)
+         | _ -> false)
+      | Some (`String "created") ->
+        Option.exists
+          (field_path change [ "state"; "payload" ])
+          ~f:state_has_rollover_hooks
+      | _ -> false)
+  | _ -> false
+;;
+
+let require_state_without_rollover_hooks = require_state
+let check_state_without_rollover_hooks = check_state
+let require_delta_without_rollover_hooks = require_delta
+let check_delta_without_rollover_hooks = check_delta
+
+let require_state document ~limits =
+  let%bind.Result document = require_state_without_rollover_hooks document ~limits in
+  require
+    document
+    ~name:rollover_hooks_name
+    ~required:(state_has_rollover_hooks (D.Document.payload document))
+    ~limits
+;;
+
+let check_state document =
+  let%bind.Result () = check_state_without_rollover_hooks document in
+  check
+    document
+    ~name:rollover_hooks_name
+    ~required:(state_has_rollover_hooks (D.Document.payload document))
+;;
+
+let require_delta document ~limits =
+  let%bind.Result document = require_delta_without_rollover_hooks document ~limits in
+  require
+    document
+    ~name:rollover_hooks_name
+    ~required:(delta_has_rollover_hooks (D.Document.payload document))
+    ~limits
+;;
+
+let check_delta document =
+  let%bind.Result () = check_delta_without_rollover_hooks document in
+  check
+    document
+    ~name:rollover_hooks_name
+    ~required:(delta_has_rollover_hooks (D.Document.payload document))
+;;

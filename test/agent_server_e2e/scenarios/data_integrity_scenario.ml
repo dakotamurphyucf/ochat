@@ -9,6 +9,7 @@ let cases =
   ; "daemon-recovery.configured-capacity", Recovery_capacity_scenario.run
   ; "daemon-recovery.successor-hint-guards", Recovery_successor_guard_scenario.run
   ; "daemon-recovery.authored-checkpoint", Recovery_checkpoint_scenario.run
+  ; "daemon-recovery.authored-rollover-hooks", Recovery_rollover_hooks_scenario.run
   ; "daemon-recovery.installed-originals", Support.Installed_originals.run
   ; "daemon-recovery.installed-handoff", Support.Installed_originals.run_handoff
   ; "http.export-atomic-success", Support.Data_integrity_http.test_export

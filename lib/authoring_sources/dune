@@ -51,6 +51,12 @@
     lib/agent_session/recovery_context_service.ml %{dep:../agent_session/recovery_context_service.ml}
     lib/agent_session/recovery_authored_checkpoint.ml %{dep:../agent_session/recovery_authored_checkpoint.ml}
     lib/agent_session/recovery_checkpoint_cut.ml %{dep:../agent_session/recovery_checkpoint_cut.ml}
+    lib/chatml/chatml_context_rollover.ml %{dep:../chatml/chatml_context_rollover.ml}
+    lib/chat_response/context_rollover_hook.ml %{dep:../chat_response/context_rollover_hook.ml}
+    lib/agent_session/recovery_rollover.ml %{dep:../agent_session/recovery_rollover.ml}
+    lib/agent_session/recovery_rollover_hooks.ml %{dep:../agent_session/recovery_rollover_hooks.ml}
+    lib/agent_session/recovery_rollover_hook_policy.ml %{dep:../agent_session/recovery_rollover_hook_policy.ml}
+    lib/agent_session/recovery_rollover_hook_snapshot.ml %{dep:../agent_session/recovery_rollover_hook_snapshot.ml}
     lib/agent_session/recovery_rollover_batch_cut.ml %{dep:../agent_session/recovery_rollover_batch_cut.ml}
     lib/agent_session/recovery_rollover_evidence.ml %{dep:../agent_session/recovery_rollover_evidence.ml}
     lib/agent_session/recovery_ordinary_selection.ml %{dep:../agent_session/recovery_ordinary_selection.ml}

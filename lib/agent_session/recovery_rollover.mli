@@ -79,6 +79,8 @@ module Receipt : sig
     | Basis_changed
     | Cancelled
     | Checkpoint_required
+    | Hook_vetoed
+    | Hook_failed
   [@@deriving equal, sexp_of]
 
   type archive_only_reason =
@@ -122,6 +124,7 @@ module Receipt : sig
   type t = private
     { intent : Intent.t
     ; status : status
+    ; hooks : Recovery_rollover_hooks.t option
     }
   [@@deriving equal, sexp_of]
 
@@ -208,6 +211,11 @@ module Change : sig
         { id : P.Id.Operation.t
         ; expected : Expected.t
         ; change : Recovery_rollover_continuation.change
+        }
+    | Hook of
+        { id : P.Id.Operation.t
+        ; expected : Expected.t
+        ; change : Recovery_rollover_hooks.change
         }
 
   val to_json : t -> Jsonaf.t

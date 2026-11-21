@@ -543,6 +543,22 @@ val handle_event_detailed
   -> event:value
   -> (unit, Chatml_diagnostic.t) result
 
+(** Selection comes from the installed compiled moderator, with its separate
+    optional entrypoint and ordinary state type. The decision is validated before
+    the usual transactional state/effect commit. *)
+val has_context_rollover : session -> bool
+
+val handle_context_rollover
+  :  ?prepare_transaction:prepare_transaction
+  -> ?validate_state:(value -> (unit, string) result)
+  -> ?copy_state:(value -> (value, string) result)
+  -> ?limits:execution_limits
+  -> session
+  -> context:value
+  -> event:value
+  -> decide:(value -> (unit, string) result)
+  -> (unit, string) result
+
 (** Handle the oldest queued event, removing it only in the successful state/
     effects commit. Returns [Ok None] for an empty queue. The prospective
     transaction excludes that head and retains the tail followed by new emits.

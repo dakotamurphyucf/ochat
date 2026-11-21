@@ -391,7 +391,14 @@ let same_context a b =
   && paired a (Lookup.source b) (Lookup.phase b)
 ;;
 
-let check_entrypoints t (checked : Checked_unit.t) ~source ~require ~required_bindings =
+let check_entrypoints
+      ?(optional_bindings = [])
+      t
+      (checked : Checked_unit.t)
+      ~source
+      ~require
+      ~required_bindings
+  =
   if
     not
       (phys_equal t.invocation checked.invocation
@@ -449,12 +456,17 @@ let check_entrypoints t (checked : Checked_unit.t) ~source ~require ~required_bi
         then Checker.instantiate state scheme
         else scheme
       in
+      let optional_bindings =
+        List.filter optional_bindings ~f:(fun (name, _) ->
+          Option.exists (Scope.find checked.scope ~name) ~f:(fun binding ->
+            Option.is_none (Scope.Binding.origin binding)))
+      in
       Checker.check_required_bindings
         ~semantic_scope:checked.scope
         ~binding_span:(fun name ->
           Option.bind (Scope.find checked.scope ~name) ~f:Scope.Binding.span)
         state
-        required_bindings
+        (required_bindings @ optional_bindings)
         ~lookup_binding;
       state.checkpoint ();
       Ok (List.rev !targets))

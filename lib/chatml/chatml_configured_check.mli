@@ -173,7 +173,8 @@ end
     before borrowing its raw cells). Returned targets retain no callbacks/types.
     Failure discards the invocation. *)
 val check_entrypoints
-  :  t
+  :  ?optional_bindings:(string * Chatml.Chatml_builtin_spec.ty) list
+  -> t
   -> Checked_unit.t
   -> source:Lookup.t
   -> require:

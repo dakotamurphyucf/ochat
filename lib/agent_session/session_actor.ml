@@ -1738,6 +1738,7 @@ module Foreground_successor = struct
       ; predecessor : Foreground_publication.t
       ; view : Recovery_rollover_continuation.Hook.view
       ; check : unit -> (unit, P.Error.t) result
+      ; hook_authority : unit -> (unit, P.Error.t) result
       ; custody : Execution_custody.t option
       }
   end
@@ -1754,6 +1755,21 @@ module Foreground_successor = struct
     ; mutable prepared : Inference_runtime.Prepared.t option
     ; mutable admitted : (Inference_runtime.Attempt.t * int64) option
     ; mutable hold : Recovery_rollover_continuation.hold
+    }
+end
+
+module Authored_rollover_hook = struct
+  module P = Agent_protocol
+
+  type t =
+    { owner : P.Id.Operation.t
+    ; phase : Recovery_rollover_hooks.phase
+    ; claim : Recovery_rollover_hooks.Claim.t
+    ; manager : Chat_response.Moderator_manager.t
+    ; event : Chat_response.Context_rollover_hook.t
+    ; view_transcript : bool
+    ; admitted : Session_state.t
+    ; check_authority : unit -> (unit, P.Error.t) result
     }
 end
 
@@ -5562,7 +5578,15 @@ module Recovery_rollover_request = struct
         -> Recovery_authored_checkpoint.Receipt.t t
     | Worker_settled :
         Foreground_publication.t * Chat_response.Settled_tool_batch.t
-        -> Chat_response.Settled_tool_batch.decision t
+        -> (Chat_response.Settled_tool_batch.decision * Authored_rollover_hook.t option) t
+    | Hook_complete :
+        Authored_rollover_hook.t
+        * Chat_response.Context_rollover_hook.Decision.t
+        * Chat_response.Moderation.Outcome.t
+        * Session.Moderator_state.Identity_snapshot.t
+        -> unit t
+    | Hook_release : Authored_rollover_hook.t * Recovery_rollover_hooks.failure -> unit t
+    | Successor_hook : Foreground_successor.Handoff.t -> Authored_rollover_hook.t option t
     | Successor_handoff :
         Foreground_publication.t
         -> Foreground_successor.Handoff.t option t
@@ -6710,6 +6734,7 @@ and t =
   ; mutable live_operator_rollover : Foreground_rollover.t option
   ; mutable foreground_successor : Foreground_successor.t option
   ; mutable foreground_successor_handoff : Foreground_successor.Handoff.t option
+  ; mutable authored_rollover_hook : Authored_rollover_hook.t option
   ; mutable recurrence_controller : Recurrence_controller.t option
   ; recurrence_runtime : Recurrence_runtime.t
   ; recurrence_creation_owner : unit ref
@@ -9726,10 +9751,14 @@ let cancel_job_scopes t jobs =
     | false -> ())
 ;;
 
-let moderator_is_borrowed t =
+let ordinary_moderator_is_borrowed t =
   Option.is_some t.moderator_borrow
   || Option.is_some t.queued_event_borrow
   || Delegated_policy_custody.pending t
+;;
+
+let moderator_is_borrowed t =
+  ordinary_moderator_is_borrowed t || Option.is_some t.authored_rollover_hook
 ;;
 
 let call t ?(priority = Mailbox.Normal) ?command_audit request =
@@ -19806,24 +19835,35 @@ let successor_hint_witness t publication (selected : Foreground_successor.t) =
   let module R = Recovery_rollover in
   let module H = Recovery_rollover_hint_ref in
   let open Option.Let_syntax in
-  let%bind admission = Result.ok (operation_agent_admission t selected.operation) |> Option.join in
+  let%bind admission =
+    Result.ok (operation_agent_admission t selected.operation) |> Option.join
+  in
   let%bind ledger = t.state.recovery_rollover in
   let%bind receipt = R.find ledger ~id:selected.owner in
   let%bind reference_selection =
-    match receipt.status with
-    | Terminal (Committed { checkpoint = Checkpointed checkpoint; successor; _ })
+    let explicit =
+      Option.bind receipt.hooks ~f:(fun hooks ->
+        match Recovery_rollover_hooks.before hooks with
+        | Completed (_, Proceed { hints; _ }) -> hints
+        | _ -> None)
+    in
+    match receipt.status, explicit with
+    | Terminal (Committed { successor; _ }), Some explicit
+      when P.Recovery_window.Scope.equal successor selected.scope -> Some explicit
+    | Terminal (Committed { checkpoint = Checkpointed checkpoint; successor; _ }), None
       when P.Recovery_window.Scope.equal successor selected.scope ->
       List.take (R.Checkpoint.notes checkpoint) H.Selection.max_references
       |> List.map ~f:H.local_note
       |> H.Selection.create
       |> Result.ok
-    | Terminal (Committed { checkpoint = Archive_only _; successor; _ })
-      when P.Recovery_window.Scope.equal successor selected.scope -> Some H.Selection.empty
-    | Pending | Terminal _ -> None
+    | Terminal (Committed { checkpoint = Archive_only _; successor; _ }), None
+      when P.Recovery_window.Scope.equal successor selected.scope ->
+      Some H.Selection.empty
+    | (Pending | Terminal _), _ -> None
   in
   let check_current () =
     Int.equal t.runtime_source_domain (Stdlib.Domain.self () :> int)
-    && not t.stopped
+    && (not t.stopped)
     && Option.exists t.foreground_successor ~f:(phys_equal selected)
     && Option.exists t.state.recovery_windows ~f:(fun windows ->
       P.Recovery_window.Scope.equal
@@ -19833,18 +19873,19 @@ let successor_hint_witness t publication (selected : Foreground_successor.t) =
     && (match operation_agent_admission t selected.operation with
         | Ok (Some actual) -> phys_equal admission actual
         | Ok None | Error _ -> false)
-    && Execution_custody.Admission.Status.(match Execution_custody.Admission.status admission with
-        | Current -> true
-        | Closed | Authority_expired -> false)
+    && Execution_custody.Admission.Status.(
+         match Execution_custody.Admission.status admission with
+         | Current -> true
+         | Closed | Authority_expired -> false)
     && Option.exists (Session_delta.foreground_continuation t.state) ~f:(fun current ->
       P.Id.Operation.equal current.owner selected.owner
-      && match current.phase, selected.admitted with
-         | Preparing operation, None ->
-           P.Id.Operation.equal operation selected.operation
-         | Admitted { operation; ordinal }, Some (_, selected_ordinal) ->
-           P.Id.Operation.equal operation selected.operation
-           && Int64.equal ordinal selected_ordinal
-         | _ -> false)
+      &&
+      match current.phase, selected.admitted with
+      | Preparing operation, None -> P.Id.Operation.equal operation selected.operation
+      | Admitted { operation; ordinal }, Some (_, selected_ordinal) ->
+        P.Id.Operation.equal operation selected.operation
+        && Int64.equal ordinal selected_ordinal
+      | _ -> false)
   in
   if check_current ()
   then Some (H.Witness.create ~references:reference_selection ~check_current)
@@ -29437,6 +29478,75 @@ let with_idle_moderator_observation_tools t ~observer f =
       true)
 ;;
 
+let run_authored_rollover_hook t (lease : Authored_rollover_hook.t) =
+  let module Manager = Chat_response.Moderator_manager in
+  let module H = Recovery_rollover_hooks in
+  let current () =
+    if t.stopped || not (Option.exists t.authored_rollover_hook ~f:(phys_equal lease))
+    then Error "rollover hook lease ended"
+    else if not (phys_equal t.state lease.admitted)
+    then Error "rollover hook source cut changed"
+    else
+      let open Result.Let_syntax in
+      let%bind () =
+        Result.map_error (require_runtime_admission t) ~f:(fun failure ->
+          failure.Agent_protocol.Error.message)
+      in
+      Result.map_error (lease.check_authority ()) ~f:(fun failure ->
+        failure.Agent_protocol.Error.message)
+  in
+  let failure = ref H.Interrupted in
+  let result =
+    Exn.protect
+      ~finally:(fun () ->
+        Eio.Cancel.protect (fun () ->
+          ignore
+            (call t (Context_request (Rollover (Hook_release (lease, !failure))))
+             : (unit, Agent_protocol.Error.t) result)))
+      ~f:(fun () ->
+        let receipt decision outcome snapshot =
+          let%bind.Result () = current () in
+          Ok
+            { Manager.persist =
+                (fun () ->
+                  Eio.Cancel.protect (fun () ->
+                    call
+                      t
+                      (Context_request
+                         (Rollover (Hook_complete (lease, decision, outcome, snapshot))))
+                    |> Result.map_error ~f:(fun error ->
+                      error.Agent_protocol.Error.message)))
+            ; install = ignore
+            }
+        in
+        with_moderator_gate t (fun () ->
+          let result =
+            Manager.handle_context_rollover
+              lease.manager
+              ~session_id:
+                (Agent_protocol.Id.Session.to_string t.state.identity.session_id)
+              ~now_ms:
+                (Time_ns.diff
+                   (Agent_protocol.Timestamp.to_time_ns (t.services.now ()))
+                   Time_ns.epoch
+                 |> Time_ns.Span.to_ms
+                 |> Float.to_int)
+              ~event:lease.event
+              ~authorize:current
+              ~on_tool_call:(fun ~name:_ ~args:_ ->
+                Error "tool effects are unavailable during context rollover")
+              ~prepare:(fun ~decision ~outcome ~snapshot ->
+                receipt decision outcome snapshot)
+          in
+          match result with
+          | Ok _ -> Ok ()
+          | Error _ ->
+            failure := if Result.is_ok (current ()) then Failed else Authority_lost;
+            Ok ()))
+  in
+  result
+;;
+
 let worker_capabilities t (publication : Foreground_publication.t) id_source buffer =
   let { Foreground_publication.operation; live; completion; _ } = publication in
   let operation_id = operation.Agent_protocol.Operation.id in
@@ -29521,7 +29631,17 @@ let worker_capabilities t (publication : Foreground_publication.t) id_source buf
           root_configuration_context t operation_id)
     ; settle_tool_batch =
         Option.map (current_context_capacity_basis t) ~f:(fun _ batch ->
-          call t (Context_request (Rollover (Worker_settled (publication, batch)))))
+          let open Result.Let_syntax in
+          let settle () =
+            Eio.Cancel.protect (fun () ->
+              call t (Context_request (Rollover (Worker_settled (publication, batch)))))
+          in
+          match%bind settle () with
+          | decision, None -> Ok decision
+          | _, Some lease ->
+            let%bind () = run_authored_rollover_hook t lease in
+            let%map decision, _ = settle () in
+            decision)
     ; select_rollover_followup =
         (fun select ->
           let open Result.Let_syntax in
@@ -29531,6 +29651,13 @@ let worker_capabilities t (publication : Foreground_publication.t) id_source buf
           match handoff with
           | None -> Ok ()
           | Some handoff ->
+            let%bind hook =
+              Eio.Cancel.protect (fun () ->
+                call t (Context_request (Rollover (Successor_hook handoff))))
+            in
+            let%bind () =
+              Option.value_map hook ~default:(Ok ()) ~f:(run_authored_rollover_hook t)
+            in
             let decision : Recovery_rollover_continuation.Hook.decision =
               match select with
               | None ->
@@ -49629,6 +49756,9 @@ let lifecycle_request_allowed : type a. a request -> bool = function
          ( Native_new_window _
          | Native_checkpoint _
          | Worker_settled _
+         | Hook_complete _
+         | Hook_release _
+         | Successor_hook _
          | Successor_selection _
          | Successor_prepared _
          | Successor_dispatch _
@@ -58201,6 +58331,239 @@ let successor_expected t scope =
   Recovery_rollover.Expected.create scope ~revision:t.state.counters.revision
 ;;
 
+let retained_rollover_receipt t id =
+  Option.bind t.state.recovery_rollover ~f:(fun ledger ->
+    Recovery_rollover.find ledger ~id)
+;;
+
+let qualified_rollover_hook t =
+  Option.filter
+    t.moderator_manager
+    ~f:Chat_response.Moderator_manager.has_context_rollover
+;;
+
+let persist_rollover_hook t ~id ~scope ~change ?moderator ~check () =
+  let open Result.Let_syntax in
+  let%bind expected = successor_expected t scope in
+  let hook = Session_delta.Recovery_rollover_changed (Hook { id; expected; change }) in
+  let delta =
+    match moderator with
+    | None -> hook
+    | Some raw -> Session_delta.Batch [ hook; Moderator_changed (Some raw) ]
+  in
+  persist_recovery_delta t ~rollover:true ~delta ~check_before_commit:check
+;;
+
+let claim_rollover_hook
+      t
+      ~owner
+      ~predecessor
+      ~scope
+      ~phase
+      ~manager
+      ~make_event
+      ~view_transcript
+      ~check_authority
+  =
+  let module H = Recovery_rollover_hooks in
+  let open Result.Let_syntax in
+  let previous = t.state in
+  let check () =
+    let%bind () = require_rollover_recovered t in
+    if
+      phys_equal previous t.state
+      && (not (moderator_is_borrowed t || t.idle_moderator_borrowed))
+      && Option.exists (qualified_rollover_hook t) ~f:(phys_equal manager)
+      && Option.exists
+           (active_rollover_window t)
+           ~f:(Agent_protocol.Recovery_window.Scope.equal scope)
+    then check_authority ()
+    else Error (error Conflict "authored rollover source is no longer available")
+  in
+  let%bind () = check () in
+  let%bind observer = Moderator_checkpoint.observer previous.moderator in
+  let%bind observer =
+    Result.of_option
+      observer
+      ~error:(error Conflict "authored rollover has no installed source")
+  in
+  let%bind claim =
+    H.Claim.create
+      ~execution:(Agent_protocol.Id.Moderator_execution.create ())
+      ~predecessor
+      ~window:scope
+      ~revision:previous.counters.revision
+      ~observer
+  in
+  let%map () =
+    persist_rollover_hook t ~id:owner ~scope ~change:(Claim (phase, claim)) ~check ()
+  in
+  let lease : Authored_rollover_hook.t =
+    { owner
+    ; phase
+    ; claim
+    ; manager
+    ; event = make_event claim.revision
+    ; view_transcript
+    ; admitted = t.state
+    ; check_authority
+    }
+  in
+  t.authored_rollover_hook <- Some lease;
+  Some lease
+;;
+
+let hook_pressure t operation =
+  let module H = Chat_response.Context_rollover_hook in
+  let module A = Inference_runtime.Context_capacity.Assessment in
+  match read_context_capacity t operation with
+  | Ok (Current { assessment; _ }) ->
+    (match A.view assessment with
+     | Unavailable _ -> H.Unknown
+     | Assessed { pressure = Below_warning; _ } -> Within_budget
+     | Assessed { pressure = Near_limit | Checkpoint_due; _ } -> Near_limit
+     | Assessed { pressure = Hard_limit_exceeded; _ } -> Over_limit)
+  | _ -> H.Unknown
+;;
+
+let check_authored_rollover_hook t (lease : Authored_rollover_hook.t) =
+  let open Result.Let_syntax in
+  let%bind () = require_runtime_admission t in
+  if
+    not t.stopped
+    && Option.exists t.authored_rollover_hook ~f:(phys_equal lease)
+    && phys_equal t.state lease.admitted
+    && Option.exists t.moderator_manager ~f:(phys_equal lease.manager)
+  then lease.check_authority ()
+  else Error (error Conflict "authored rollover source or custody changed")
+;;
+
+let complete_rollover_hook t (lease : Authored_rollover_hook.t) decision outcome snapshot =
+  let open Result.Let_syntax in
+  let check () = check_authored_rollover_hook t lease in
+  let%bind () = check () in
+  let%bind change =
+    Recovery_rollover_hook_policy.resolve
+      t.state
+      ~event:lease.event
+      ~execution:lease.claim.execution
+      ~view_transcript:lease.view_transcript
+      decision
+  in
+  let%bind moderator =
+    Recovery_rollover_hook_snapshot.prepare t.state.moderator ~outcome ~snapshot
+  in
+  persist_rollover_hook
+    t
+    ~id:lease.owner
+    ~scope:lease.claim.window
+    ~change
+    ?moderator
+    ~check
+    ()
+;;
+
+let release_rollover_hook t (lease : Authored_rollover_hook.t) failure =
+  if not (Option.exists t.authored_rollover_hook ~f:(phys_equal lease))
+  then Ok ()
+  else
+    Exn.protect
+      ~finally:(fun () -> t.authored_rollover_hook <- None)
+      ~f:(fun () ->
+        let module H = Recovery_rollover_hooks in
+        match
+          Option.bind (retained_rollover_receipt t lease.owner) ~f:(fun receipt ->
+            receipt.hooks)
+        with
+        | None -> Ok ()
+        | Some hooks ->
+          let running =
+            match lease.phase with
+            | Before ->
+              (match H.before hooks with
+               | Claimed _ -> true
+               | _ -> false)
+            | After ->
+              (match H.after hooks with
+               | Claimed _ -> true
+               | _ -> false)
+          in
+          if not running
+          then Ok ()
+          else
+            persist_rollover_hook
+              t
+              ~id:lease.owner
+              ~scope:lease.claim.window
+              ~change:(Stop (lease.phase, lease.claim.execution, failure))
+              ~check:(fun () -> require_rollover_recovered t)
+              ())
+;;
+
+let claim_successor_hook t (handoff : Foreground_successor.Handoff.t) =
+  let module H = Recovery_rollover_hooks in
+  let module Hook = Chat_response.Context_rollover_hook in
+  let open Result.Let_syntax in
+  match retained_rollover_receipt t handoff.owner with
+  | Some { status = Terminal (Committed committed); hooks = Some hooks; intent }
+    when match H.after hooks with
+         | Pending -> true
+         | _ -> false ->
+    let check_authority () =
+      if Option.exists t.foreground_successor_handoff ~f:(phys_equal handoff)
+      then handoff.hook_authority ()
+      else Error (error Conflict "successor handoff changed")
+    in
+    let view_transcript =
+      Option.exists handoff.custody ~f:(fun custody ->
+        match Execution_custody.actor custody with
+        | Ok actor ->
+          Agent_protocol.Principal.has_scope
+            (Operator_authorization.principal actor)
+            View_session_transcript
+        | Error _ -> false)
+    in
+    let checkpoint () =
+      match committed.checkpoint with
+      | Archive_only _ -> Hook.Archive_only
+      | Checkpointed selection when view_transcript -> Recovery_rollover_hook_policy.checkpoint_offer (Some selection)
+      | Checkpointed _ -> Hook.Checkpointed []
+    in
+    (match qualified_rollover_hook t, check_authority () with
+     | Some manager, Ok () ->
+       let%bind observer = Moderator_checkpoint.observer t.state.moderator in
+       let correct_source =
+         Option.exists
+           (H.claim (H.before hooks))
+           ~f:(fun prior ->
+             Option.exists
+               observer
+               ~f:(Agent_protocol.Invocation.equal_observer prior.observer))
+       in
+       if not correct_source
+       then Ok None
+       else
+         claim_rollover_hook
+           t
+           ~owner:handoff.owner
+           ~predecessor:handoff.predecessor.operation.id
+           ~scope:committed.successor
+           ~phase:After
+           ~manager
+           ~view_transcript
+           ~check_authority
+           ~make_event:(fun _ ->
+             Hook.After
+               { intent = handoff.owner
+               ; previous = intent.expected.scope
+               ; window = committed.successor
+               ; cut_revision = committed.cut_revision
+               ; checkpoint = checkpoint ()
+               })
+     | _ -> Ok None)
+  | _ -> Ok None
+;;
+
 let save_successor_phase t ~id ~expected ~change ~check =
   transition
     t
@@ -58427,6 +58790,129 @@ let admit_successor_dispatch t (selected : Foreground_successor.t) attempt =
     final_check
 ;;
 
+let qualify_before_rollover_hook
+      t
+      ~publication
+      ~intent
+      ?checkpoint_history
+      ~check_authority
+      ~check_cut
+      ()
+  =
+  let module H = Recovery_rollover_hooks in
+  let module Hook = Chat_response.Context_rollover_hook in
+  let module R = Recovery_rollover in
+  let module P = Agent_protocol in
+  let open Result.Let_syntax in
+  let id = intent.R.Intent.id in
+  let scope = intent.expected.scope in
+  let predecessor = publication.Foreground_publication.operation.id in
+  let check () =
+    let%bind () = check_cut () in
+    let%map _ = check_authority () in
+    ()
+  in
+  let stop reason =
+    let%map () =
+      persist_recovery_delta
+        t
+        ~rollover:true
+        ~delta:(Recovery_rollover_changed (Settle { id; terminal = Superseded reason }))
+        ~check_before_commit:(fun () ->
+          let%bind () = require_rollover_recovered t in
+          check_live_foreground_publication t publication)
+    in
+    if
+      Option.exists t.live_operator_rollover ~f:(fun selected ->
+        P.Id.Operation.equal id selected.id)
+    then t.live_operator_rollover <- None;
+    `Held
+  in
+  match
+    Option.bind (retained_rollover_receipt t id) ~f:(fun receipt -> receipt.hooks)
+  with
+  | Some hooks ->
+    (match H.before hooks with
+     | Completed (_, Proceed _) ->
+       let%map () = check () in
+       `Ready
+     | Completed (_, Veto) -> stop Hook_vetoed
+     | Stopped _ -> stop Hook_failed
+     | Claimed _ | Pending -> Ok `Held)
+  | None ->
+    (match qualified_rollover_hook t with
+     | None -> Ok `Ready
+     | Some manager ->
+       let%bind principal = check_authority () in
+       let view_transcript = P.Principal.has_scope principal View_session_transcript in
+       let checkpoint =
+         let open Option.Let_syntax in
+         let%bind ledger =
+           Option.filter t.state.recovery_rollover ~f:(fun _ -> view_transcript)
+         in
+         let%bind selection = R.checkpoint ledger in
+         let expected =
+           R.Expected.create scope ~revision:t.state.counters.revision |> Result.ok
+         in
+         let%bind expected = expected in
+         Result.map
+           (R.check_checkpoint
+              ?checkpoint_history
+              ~validate_authored:
+                (Recovery_checkpoint_cut.check_checkpoint ?checkpoint_history t.state)
+              ledger
+              selection
+              ~expected
+              ~history:t.state.conversation.canonical_history
+              ~catalog:t.state.recovery_notes)
+           ~f:(fun () -> selection)
+         |> Result.ok
+       in
+       let pressure = hook_pressure t predecessor in
+       let%map lease =
+         claim_rollover_hook
+           t
+           ~owner:id
+           ~predecessor
+           ~scope
+           ~phase:Before
+           ~manager
+           ~view_transcript
+           ~check_authority:check
+           ~make_event:(fun revision ->
+             Hook.Before
+               { intent = id
+               ; window = scope
+               ; expected_revision = revision
+               ; pressure
+               ; checkpoint = Recovery_rollover_hook_policy.checkpoint_offer checkpoint
+               })
+       in
+       `Hook lease)
+;;
+
+let close_orphaned_after_hook t ~id ~scope ~check =
+  let module H = Recovery_rollover_hooks in
+  match
+    Option.bind (retained_rollover_receipt t id) ~f:(fun receipt -> receipt.hooks)
+  with
+  | Some hooks ->
+    (match H.after hooks with
+     | Claimed claim ->
+       if Option.is_some t.authored_rollover_hook
+       then Error (error Conflict "the authored after-hook is still running")
+       else
+         persist_rollover_hook
+           t
+           ~id
+           ~scope
+           ~change:(Stop (After, claim.execution, Interrupted))
+           ~check
+           ()
+     | _ -> Ok ())
+  | None -> Ok ()
+;;
+
 let successor_control t actor attachment_id authorize id expected action =
   let module P = Agent_protocol in
   let module C = Recovery_rollover_continuation in
@@ -58451,6 +58937,12 @@ let successor_control t actor attachment_id authorize id expected action =
     then Ok ()
     else Error (error Conflict "successor continuation cut changed")
   in
+  let%bind () =
+    if Option.is_some t.foreground_successor_handoff
+    then Error (error Conflict "successor follow-up still has a live owner")
+    else close_orphaned_after_hook t ~id ~scope:expected.scope ~check
+  in
+  let%bind expected = successor_expected t expected.scope in
   let%bind current, expected =
     match current.phase, t.state.active_operation with
     | C.Preparing operation, None ->
@@ -58587,6 +59079,7 @@ let settle_foreground_tool_batch t (publication : Foreground_publication.t) live
   let module S = Chat_response.Settled_tool_batch in
   let open Result.Let_syntax in
   let operation = publication.operation.id in
+  let returned decision = Ok (decision, None) in
   let admission =
     let open Option.Let_syntax in
     let%bind intent = Option.bind t.state.recovery_rollover ~f:R.pending in
@@ -58594,9 +59087,10 @@ let settle_foreground_tool_batch t (publication : Foreground_publication.t) live
     intent, check, force
   in
   match admission with
-  | _ when not (foreground_publication_matches t publication) -> Ok S.Retire
-  | None -> Ok S.Continue
+  | _ when not (foreground_publication_matches t publication) -> returned S.Retire
+  | None -> returned S.Continue
   | Some (intent, check, authorize_force) ->
+    let%bind () = require_rollover_recovered t in
     let%bind () = check_live_foreground_publication t publication in
     let%bind scope =
       Result.of_option
@@ -58619,7 +59113,7 @@ let settle_foreground_tool_batch t (publication : Foreground_publication.t) live
       | None -> Ok ()
     in
     (match B.capture t.state ~scope ~operation live with
-     | Error _ -> Ok S.Continue
+     | Error _ -> returned S.Continue
      | Ok batch ->
        let%bind () = exact_attempt () in
        let%bind checkpoint_history =
@@ -58632,95 +59126,125 @@ let settle_foreground_tool_batch t (publication : Foreground_publication.t) live
          match status with
          | Current _ when not (List.is_empty t.invocation_executions) ->
            Error (error Conflict "settled batch still has an active invocation")
-         | Current _ when moderator_is_borrowed t || t.idle_moderator_borrowed ->
+         | Current _ when ordinary_moderator_is_borrowed t || t.idle_moderator_borrowed ->
            Error (error Conflict "settled batch still has an active moderator")
          | Current _ when t.state.halted ->
            Error (error Conflict "settled batch belongs to a halted session")
          | Current _ -> Ok ()
          | Disabled | Stale_preparation _ | Awaiting_preparation _ ->
-           Error (error Conflict "settled batch selected preparation is no longer current")
+           Error
+             (error Conflict "settled batch selected preparation is no longer current")
        in
-       let%bind expected = R.Expected.create scope ~revision:t.state.counters.revision in
-       let checkpoint = Option.bind t.state.recovery_rollover ~f:R.checkpoint in
-       let%bind retain =
-         Session_delta.successor_retained_history t.state publication.operation
-       in
-       let transferred =
-         let%bind owner = operation_agent_admission t operation in
-         let%bind owner =
-           Result.of_option
-             owner
-             ~error:(error Permission_denied "settled owner is unavailable")
-         in
-         Execution_custody.Admission.transfer owner
-         |> Result.map ~f:Execution_custody.Admission.custody
-       in
-       let after_commit_install () =
-         if Option.exists t.foreground_publication ~f:(phys_equal publication)
-         then (
-           t.live_operator_rollover <- None;
-           t.foreground_publication <- None;
-           t.foreground_moderator <- None;
-           t.notification_inputs <- None;
-           t.active_cancel <- None)
-       in
-       let receipt =
-         settle_context_rollover_internal
-           ~batch
-           ~after_commit_install
-           ?checkpoint_history
-           ~check_live_cut
+       let%bind qualification =
+         qualify_before_rollover_hook
            t
-           ~check
-           ~authorize_force
-           ~id:intent.id
-           expected
-           (Publish { checkpoint; retain })
+           ~publication
+           ~intent
+           ?checkpoint_history
+           ~check_authority:check
+           ~check_cut:check_live_cut
+           ()
        in
-       (match receipt with
-        | Error failure ->
-          Result.iter transferred ~f:(Option.iter ~f:retire_agent_custody);
-          Error failure
-        | Ok { status = Terminal (Committed committed); _ } ->
-          Option.iter t.foreground_successor_handoff ~f:(fun other ->
-            Option.iter other.custody ~f:retire_agent_custody);
-          let custody = Result.ok transferred |> Option.join in
-          let check () =
-            let%bind custody =
+       (match qualification with
+        | `Held -> returned S.Continue
+        | `Hook lease -> Ok (S.Continue, lease)
+        | `Ready ->
+          let%bind expected =
+            R.Expected.create scope ~revision:t.state.counters.revision
+          in
+          let checkpoint = Option.bind t.state.recovery_rollover ~f:R.checkpoint in
+          let%bind retain =
+            Session_delta.successor_retained_history t.state publication.operation
+          in
+          let transferred =
+            let%bind owner = operation_agent_admission t operation in
+            let%bind owner =
               Result.of_option
-                custody
-                ~error:(error Permission_denied "successor authority unavailable")
+                owner
+                ~error:(error Permission_denied "settled owner is unavailable")
             in
-            let%bind actor = Execution_custody.actor custody in
-            let principal = Operator_authorization.principal actor in
-            if P.Principal.has_scope principal Send_messages
-            then Ok ()
-            else Error (error Permission_denied "successor authority expired")
+            Execution_custody.Admission.transfer owner
+            |> Result.map ~f:Execution_custody.Admission.custody
           in
-          let checkpoint =
-            match committed.checkpoint with
-            | Checkpointed _ -> `Checkpointed
-            | Archive_only _ -> `Archive_only
+          let after_commit_install () =
+            if Option.exists t.foreground_publication ~f:(phys_equal publication)
+            then (
+              t.live_operator_rollover <- None;
+              t.foreground_publication <- None;
+              t.foreground_moderator <- None;
+              t.notification_inputs <- None;
+              t.active_cancel <- None)
           in
-          t.foreground_successor_handoff
-          <- Some
-               { owner = intent.id
-               ; predecessor = publication
-               ; view = { window = committed.successor; checkpoint }
-               ; check
-               ; custody
-               };
-          Ok S.Retire
-        | Ok { status = Terminal (Superseded _); _ } ->
-          Result.iter transferred ~f:(Option.iter ~f:retire_agent_custody);
-          if
-            Option.exists t.live_operator_rollover ~f:(fun selected ->
-              P.Id.Operation.equal intent.id selected.id)
-          then t.live_operator_rollover <- None;
-          Ok S.Continue
-        | Ok { status = Pending; _ } ->
-          Result.iter transferred ~f:(Option.iter ~f:retire_agent_custody);
-          Ok S.Continue))
+          let requester_check = check in
+          let receipt =
+            settle_context_rollover_internal
+              ~batch
+              ~after_commit_install
+              ?checkpoint_history
+              ~check_live_cut
+              t
+              ~check
+              ~authorize_force
+              ~id:intent.id
+              expected
+              (Publish { checkpoint; retain })
+          in
+          (match receipt with
+           | Error failure ->
+             Result.iter transferred ~f:(Option.iter ~f:retire_agent_custody);
+             Error failure
+           | Ok { status = Terminal (Committed committed); _ } ->
+             Option.iter t.foreground_successor_handoff ~f:(fun other ->
+               Option.iter other.custody ~f:retire_agent_custody);
+             let custody = Result.ok transferred |> Option.join in
+             let check () =
+               let%bind custody =
+                 Result.of_option
+                   custody
+                   ~error:(error Permission_denied "successor authority unavailable")
+               in
+               let%bind actor = Execution_custody.actor custody in
+               let principal = Operator_authorization.principal actor in
+               if P.Principal.has_scope principal Send_messages
+               then Ok ()
+               else Error (error Permission_denied "successor authority expired")
+             in
+             let hook_authority () =
+               let%bind () = check () in
+               match intent.requester with
+               | Native _ -> Ok ()
+               | Operator _ ->
+                 let%bind _ = requester_check () in
+                 Option.value_map
+                   authorize_force
+                   ~default:(Ok ())
+                   ~f:(fun check -> check t.state)
+             in
+             let checkpoint =
+               match committed.checkpoint with
+               | Checkpointed _ -> `Checkpointed
+               | Archive_only _ -> `Archive_only
+             in
+             t.foreground_successor_handoff
+             <- Some
+                  { owner = intent.id
+                  ; predecessor = publication
+                  ; view = { window = committed.successor; checkpoint }
+                  ; check
+                  ; hook_authority
+                  ; custody
+                  };
+             returned S.Retire
+           | Ok { status = Terminal (Superseded _); _ } ->
+             Result.iter transferred ~f:(Option.iter ~f:retire_agent_custody);
+             if
+               Option.exists t.live_operator_rollover ~f:(fun selected ->
+                 P.Id.Operation.equal intent.id selected.id)
+             then t.live_operator_rollover <- None;
+             returned S.Continue
+           | Ok { status = Pending; _ } ->
+             Result.iter transferred ~f:(Option.iter ~f:retire_agent_custody);
+             returned S.Continue)))
 ;;
 
 let handle_recovery_rollover
@@ -58788,11 +59312,22 @@ let handle_recovery_rollover
     admit_recovery_rollover t ~check ~check_basis ~expected
   | Native_checkpoint (access, request) -> record_authored_checkpoint t ~access request
   | Worker_settled (publication, live) -> settle_foreground_tool_batch t publication live
+  | Hook_complete (lease, decision, outcome, snapshot) ->
+    complete_rollover_hook t lease decision outcome snapshot
+  | Hook_release (lease, failure) -> release_rollover_hook t lease failure
+  | Successor_hook handoff -> claim_successor_hook t handoff
   | Successor_handoff publication ->
     Ok
       (Option.filter t.foreground_successor_handoff ~f:(fun handoff ->
          phys_equal handoff.predecessor publication))
-  | Successor_selection (handoff, decision) -> select_successor_handoff t handoff decision
+  | Successor_selection (handoff, decision) ->
+    let hooks =
+      Option.bind (retained_rollover_receipt t handoff.owner) ~f:(fun receipt -> receipt.hooks)
+    in
+    select_successor_handoff
+      t
+      handoff
+      (Recovery_rollover_hook_policy.choose_followup hooks ~default:decision)
   | Successor_prepared (selected, optional_hint, prepared) ->
     check_successor_prepared t selected ~optional_hint prepared
   | Successor_dispatch (selected, attempt) -> admit_successor_dispatch t selected attempt
@@ -60777,6 +61312,13 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
       let%bind () =
         match t.foreground_successor_handoff with
         | Some handoff when phys_equal handoff.predecessor publication ->
+          let%bind () =
+            close_orphaned_after_hook
+              t
+              ~id:handoff.owner
+              ~scope:handoff.view.window
+              ~check:(fun () -> require_rollover_recovered t)
+          in
           select_successor_handoff t handoff Wait
         | _ -> Ok ()
       in
@@ -61149,6 +61691,7 @@ let create_internal
     ; live_operator_rollover = None
     ; foreground_successor = None
     ; foreground_successor_handoff = None
+    ; authored_rollover_hook = None
     ; recurrence_controller = None
     ; recurrence_runtime = Recurrence_runtime.create ~origin:(services.monotonic_now ())
     ; recurrence_creation_owner = ref ()

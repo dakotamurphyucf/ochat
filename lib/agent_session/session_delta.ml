@@ -2255,7 +2255,7 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
          | Authored _ ->
            Recovery_checkpoint_cut.check_checkpoint_registration state checkpoint)
       | Schedule { change; _ } -> check_continuation_change state change
-      | Admit _ | Settle _ -> Ok ()
+      | Admit _ | Settle _ | Hook _ -> Ok ()
     in
     let%bind windows =
       Result.of_option
@@ -2277,7 +2277,7 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
       match change with
       | Schedule { id; change; _ } ->
         settle_managed_continuation state.managed_submissions ~owner:id change
-      | Admit _ | Record_checkpoint _ | Settle _ -> Ok state.managed_submissions
+      | Admit _ | Record_checkpoint _ | Settle _ | Hook _ -> Ok state.managed_submissions
     in
     { state with recovery_rollover = Some ledger; managed_submissions }
   | Recovery_rollover_committed change -> apply_rollover state change ~limits

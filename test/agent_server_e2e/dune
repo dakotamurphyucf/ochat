@@ -102,6 +102,12 @@
       data-integrity
       --case
       daemon-recovery.authored-checkpoint)
+     (run
+      %{exe:agent_server_e2e.exe}
+      --scenario
+      data-integrity
+      --case
+      daemon-recovery.authored-rollover-hooks)
      (run %{exe:agent_server_e2e.exe} --scenario fork-children))))))
 
 (alias

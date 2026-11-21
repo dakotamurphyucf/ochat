@@ -40,6 +40,10 @@ val target_name : t -> string
 val static_surface : t -> Static.t
 val required_bindings : t -> (string * Chatml_builtin_spec.ty) list
 
+(** Optional local entrypoints share the grouped state contract when present.
+    Imported members cannot select an optional host callback. *)
+val optional_bindings : t -> (string * Chatml_builtin_spec.ty) list
+
 (** Pure native metadata context for compile-only/custom graph consumers.
     Compute identity from this supplied static surface AND exact selected
     required bindings, under a distinct native compiler identity. No supplied

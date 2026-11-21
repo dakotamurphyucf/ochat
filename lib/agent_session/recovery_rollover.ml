@@ -120,6 +120,8 @@ module Receipt = struct
     | Basis_changed
     | Cancelled
     | Checkpoint_required
+    | Hook_vetoed
+    | Hook_failed
   [@@deriving equal, sexp_of]
 
   type archive_only_reason =
@@ -163,6 +165,7 @@ module Receipt = struct
   type t =
     { intent : Intent.t
     ; status : status
+    ; hooks : Recovery_rollover_hooks.t option
     }
   [@@deriving equal, sexp_of]
 
@@ -170,6 +173,8 @@ module Receipt = struct
     | Basis_changed -> "basis_changed"
     | Cancelled -> "cancelled"
     | Checkpoint_required -> "checkpoint_required"
+    | Hook_vetoed -> "hook_vetoed"
+    | Hook_failed -> "hook_failed"
   ;;
 
   let checkpoint_to_json ~public = function
@@ -270,6 +275,8 @@ module Receipt = struct
         | "basis_changed" -> Ok Basis_changed
         | "cancelled" -> Ok Cancelled
         | "checkpoint_required" -> Ok Checkpoint_required
+        | "hook_vetoed" -> Ok Hook_vetoed
+        | "hook_failed" -> Ok Hook_failed
         | _ -> invalid "unknown recovery rollover supersession"
       in
       Terminal (Superseded reason)
@@ -288,7 +295,57 @@ module Receipt = struct
     | _ -> invalid "unknown recovery rollover status"
   ;;
 
+  let validate_hooks t =
+    let module H = Recovery_rollover_hooks in
+    let within_initial_scope (claim : H.Claim.t) =
+      let scope = t.intent.expected.scope in
+      Scope.equal scope claim.window
+      && Int64.(claim.revision >= t.intent.expected.revision)
+      &&
+      match t.intent.requester with
+      | Native { operation; _ } -> P.Id.Operation.equal operation claim.predecessor
+      | Operator _ -> not (P.Id.Operation.equal t.intent.id claim.predecessor)
+    in
+    let after_binds_commit (claim : H.Claim.t) (committed : committed) =
+      Scope.equal claim.window committed.successor
+      && Int64.(claim.revision > committed.cut_revision)
+      &&
+      match committed.continuation with
+      | Awaiting_settled_foreground { predecessor; _ }
+      | Scheduled_foreground { predecessor; _ } ->
+        P.Id.Operation.equal predecessor claim.predecessor
+      | Awaiting_after_commit _ -> false
+    in
+    let invalid_hooks () = invalid "rollover hook receipt differs from its owning cut" in
+    match t.hooks, t.status with
+    | ( None
+      , ( Pending
+        | Terminal
+            (Committed _ | Superseded (Basis_changed | Cancelled | Checkpoint_required))
+          ) ) -> Ok ()
+    | None, Terminal (Superseded (Hook_vetoed | Hook_failed)) -> invalid_hooks ()
+    | Some hooks, status ->
+      let before = H.before hooks in
+      let before_claim = H.claim before in
+      let after_claim = H.claim (H.after hooks) in
+      if not (Option.exists before_claim ~f:within_initial_scope)
+      then invalid_hooks ()
+      else (
+        match status, before, after_claim with
+        | Pending, _, None
+        | Terminal (Superseded (Basis_changed | Cancelled | Checkpoint_required)), _, None
+        | Terminal (Superseded Hook_vetoed), Completed (_, Veto), None
+        | Terminal (Superseded Hook_failed), Stopped _, None -> Ok ()
+        | Terminal (Committed committed), Completed (claim, Proceed _), after
+          when Int64.(claim.revision < committed.cut_revision)
+               && Option.for_all after ~f:(fun claim ->
+                 after_binds_commit claim committed) -> Ok ()
+        | _ -> invalid_hooks ())
+  ;;
+
   let validate t =
+    let open Result.Let_syntax in
+    let%bind () = validate_hooks t in
     let expected = t.intent.expected in
     match t.status with
     | Pending | Terminal (Superseded _) -> Ok ()
@@ -334,12 +391,33 @@ module Receipt = struct
   ;;
 
   let to_public_json t =
+    let module H = Recovery_rollover_hooks in
+    let phase = function
+      | H.Pending -> `String "pending"
+      | Claimed _ -> `String "claimed"
+      | Completed _ -> `String "completed"
+      | Stopped (_, Failed) -> `String "failed"
+      | Stopped (_, Authority_lost) -> `String "authority_lost"
+      | Stopped (_, Interrupted) -> `String "interrupted"
+    in
+    let hooks =
+      Option.to_list
+        (Option.map t.hooks ~f:(fun hooks ->
+           ( "hooks"
+           , `Object [ "before", phase (H.before hooks); "after", phase (H.after hooks) ]
+           )))
+    in
     `Object
-      (("status", status_to_json ~public:true t.status) :: Intent.public_fields t.intent)
+      (("status", status_to_json ~public:true t.status)
+       :: (hooks @ Intent.public_fields t.intent))
   ;;
 
   let to_json t =
-    `Object [ "intent", Intent.to_json t.intent; "status", status_to_json t.status ]
+    `Object
+      ([ "intent", Intent.to_json t.intent; "status", status_to_json t.status ]
+       @ Option.to_list
+           (Option.map t.hooks ~f:(fun hooks ->
+              "hooks", Recovery_rollover_hooks.to_json hooks)))
   ;;
 
   let of_json json =
@@ -347,7 +425,8 @@ module Receipt = struct
     let%bind fields = J.fields json in
     let%bind intent = J.required_as fields "intent" Intent.of_json in
     let%bind status = J.required_as fields "status" status_of_json in
-    let receipt = { intent; status } in
+    let%bind hooks = J.optional_as fields "hooks" Recovery_rollover_hooks.of_json in
+    let receipt = { intent; status; hooks } in
     let%map () = validate receipt in
     receipt
   ;;
@@ -406,7 +485,7 @@ module Commit = struct
       P.Id.Operation.equal t.id intent.id
       && Scope.equal t.expected.scope intent.expected.scope
       && Int64.(t.expected.revision > intent.expected.revision)
-    then Receipt.validate { intent; status = Terminal (terminal t) }
+    then Receipt.validate { intent; status = Terminal (terminal t); hooks = None }
     else conflict "rollover publication does not match the admitted intent"
   ;;
 
@@ -563,6 +642,11 @@ module Change = struct
         ; expected : Expected.t
         ; change : Recovery_rollover_continuation.change
         }
+    | Hook of
+        { id : P.Id.Operation.t
+        ; expected : Expected.t
+        ; change : Recovery_rollover_hooks.change
+        }
 
   let to_json = function
     | Admit intent -> `Object [ "kind", `String "admit"; "intent", Intent.to_json intent ]
@@ -583,6 +667,13 @@ module Change = struct
         ; "id", P.Id.Operation.to_json id
         ; "expected", Expected.to_json expected
         ; "change", Recovery_rollover_continuation.change_to_json change
+        ]
+    | Hook { id; expected; change } ->
+      `Object
+        [ "kind", `String "hook"
+        ; "id", P.Id.Operation.to_json id
+        ; "expected", Expected.to_json expected
+        ; "change", Recovery_rollover_hooks.change_to_json change
         ]
   ;;
 
@@ -610,6 +701,13 @@ module Change = struct
         J.required_as fields "change" Recovery_rollover_continuation.change_of_json
       in
       Schedule { id; expected; change }
+    | "hook" ->
+      let%bind id = J.required_as fields "id" P.Id.Operation.of_json in
+      let%bind expected = J.required_as fields "expected" Expected.of_json in
+      let%map change =
+        J.required_as fields "change" Recovery_rollover_hooks.change_of_json
+      in
+      Hook { id; expected; change }
     | _ -> invalid "unknown recovery rollover change"
   ;;
 end
@@ -653,6 +751,51 @@ let settle t ~id ~terminal =
   | Some _ | None -> conflict "rollover settlement has no matching pending intent"
 ;;
 
+let replace_receipt t (updated : Receipt.t) =
+  { t with
+    receipts =
+      List.map t.receipts ~f:(fun retained ->
+        if P.Id.Operation.equal retained.intent.id updated.intent.id
+        then updated
+        else retained)
+  }
+;;
+
+let apply_hook t ~active ~revision ~id ~(expected : Expected.t) change =
+  let module H = Recovery_rollover_hooks in
+  let open Result.Let_syntax in
+  let phase = H.phase change in
+  let stale () = conflict "rollover hook cut or phase changed" in
+  let%bind receipt =
+    match find t ~id with
+    | Some ({ status = Pending; _ } as receipt)
+      when H.equal_phase phase Before && Scope.equal receipt.intent.expected.scope active
+      -> Ok receipt
+    | Some ({ status = Terminal (Committed committed); _ } as receipt)
+      when H.equal_phase phase After
+           && Scope.equal committed.successor active
+           &&
+           match committed.continuation with
+           | Scheduled_foreground { phase = Awaiting; _ } -> true
+           | _ -> false -> Ok receipt
+    | None | Some _ -> stale ()
+  in
+  let%bind () =
+    if Scope.equal active expected.scope && Int64.equal revision expected.revision
+    then (
+      match change with
+      | H.Claim (_, claim)
+        when not (Scope.equal claim.window active && Int64.equal claim.revision revision)
+        -> stale ()
+      | _ -> Ok ())
+    else stale ()
+  in
+  let%bind hooks = H.apply (Option.value receipt.hooks ~default:H.empty) change in
+  let updated = { receipt with hooks = Some hooks } in
+  let%map () = Receipt.validate updated in
+  replace_receipt t updated
+;;
+
 let apply previous_ledger ~active ~revision ~history ~catalog change =
   let open Result.Let_syntax in
   let t =
@@ -675,7 +818,11 @@ let apply previous_ledger ~active ~revision ~history ~catalog change =
       then conflict "expected recovery window or revision changed"
       else if Option.is_some (pending t)
       then conflict "another rollover intent is pending"
-      else Ok { t with receipts = Receipt.{ intent; status = Pending } :: t.receipts }
+      else
+        Ok
+          { t with
+            receipts = Receipt.{ intent; status = Pending; hooks = None } :: t.receipts
+          }
     | Record_checkpoint checkpoint ->
       if
         Scope.equal active (Checkpoint.expected checkpoint).scope
@@ -711,6 +858,7 @@ let apply previous_ledger ~active ~revision ~history ~catalog change =
     | Settle { terminal = Committed _; _ } ->
       invalid "committed rollover requires its atomic archive and successor delta"
     | Settle { id; terminal = Superseded _ as terminal } -> settle t ~id ~terminal
+    | Hook { id; expected; change } -> apply_hook t ~active ~revision ~id ~expected change
     | Schedule { id; expected; change } ->
       let%bind receipt, committed, schedule =
         match find t ~id, foreground t ~scope:active with
@@ -730,6 +878,15 @@ let apply previous_ledger ~active ~revision ~history ~catalog change =
         | Scheduled_foreground _, _ -> Ok ()
         | Awaiting_after_commit _, _ -> invalid "rollover has no settled foreground work"
       in
+      let%bind () =
+        match receipt.hooks with
+        | None -> Ok ()
+        | Some hooks ->
+          (match Recovery_rollover_hooks.after hooks with
+           | Pending | Completed _ | Stopped _ -> Ok ()
+           | Claimed _ ->
+             conflict "rollover continuation awaits its authored after-hook disposition")
+      in
       let%bind schedule = Recovery_rollover_continuation.apply schedule change in
       let updated =
         { receipt with
@@ -739,11 +896,7 @@ let apply previous_ledger ~active ~revision ~history ~catalog change =
         }
       in
       let%map () = Receipt.validate updated in
-      { t with
-        receipts =
-          List.map t.receipts ~f:(fun retained ->
-            if P.Id.Operation.equal retained.intent.id id then updated else retained)
-      }
+      replace_receipt t updated
   in
   let%map () = bounded next in
   next
@@ -921,7 +1074,14 @@ let validate_state t ~windows ~revision ~has_archive =
   in
   List.fold_result t.receipts ~init:() ~f:(fun () (receipt : Receipt.t) ->
     let expected = receipt.intent.expected in
-    if not (covers_existing_window expected)
+    let hook_revisions_are_committed =
+      Option.for_all receipt.hooks ~f:(fun hooks ->
+        let module H = Recovery_rollover_hooks in
+        let committed (claim : H.Claim.t) = Int64.(claim.revision < revision) in
+        Option.for_all (H.claim (H.before hooks)) ~f:committed
+        && Option.for_all (H.claim (H.after hooks)) ~f:committed)
+    in
+    if not (covers_existing_window expected && hook_revisions_are_committed)
     then invalid "rollover receipt has no owning recovery window"
     else (
       match receipt.status with

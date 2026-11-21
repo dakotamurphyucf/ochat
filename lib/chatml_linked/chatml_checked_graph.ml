@@ -254,6 +254,7 @@ let check_invocation ?recorder mode prepared ~contract ~max_dependency_depth ~ch
               ~source
               ~require
               ~required_bindings:(Contract.required_bindings contract)
+              ~optional_bindings:(Contract.optional_bindings contract)
             |> stage_result Host_requirements Typecheck
           else Ok []
         in

@@ -33,6 +33,8 @@ module Phase = struct
     | Internal_event
     | Tool_invoked
     | Tool_observed
+    | Before_context_rollover
+    | After_context_rollover
   [@@deriving sexp, compare]
 
   let to_string (t : t) : string =
@@ -47,6 +49,8 @@ module Phase = struct
     | Internal_event -> "internal_event"
     | Tool_invoked -> "tool_invoked"
     | Tool_observed -> "tool_observed"
+    | Before_context_rollover -> "before_context_rollover"
+    | After_context_rollover -> "after_context_rollover"
   ;;
 
   let of_string (value : string) : (t, string) result =
@@ -61,6 +65,8 @@ module Phase = struct
     | "internal_event" -> Ok Internal_event
     | "tool_invoked" -> Ok Tool_invoked
     | "tool_observed" -> Ok Tool_observed
+    | "before_context_rollover" -> Ok Before_context_rollover
+    | "after_context_rollover" -> Ok After_context_rollover
     | _ -> Error (Printf.sprintf "Unknown moderation phase %S" value)
   ;;
 end

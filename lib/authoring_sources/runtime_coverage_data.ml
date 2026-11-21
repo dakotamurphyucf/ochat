@@ -570,7 +570,23 @@ let shared_features =
 ;;
 
 let moderator_features =
-  [ ( "moderator.state_limits"
+  [ ( "context.authored_rollover_hooks"
+    , "Optional installed moderator rollover hook, exact claims and durable follow-up \
+       disposition"
+    , [ "lib/chatml/chatml_context_rollover.ml"
+      ; "lib/chat_response/context_rollover_hook.ml"
+      ; "lib/agent_session/recovery_rollover.ml"
+      ; "lib/agent_session/recovery_rollover_hooks.ml"
+      ; "lib/agent_session/recovery_rollover_hook_policy.ml"
+      ; "lib/agent_session/recovery_rollover_hook_snapshot.ml"
+      ; "lib/chat_response/moderator_manager.ml"
+      ; "lib/agent_session/session_actor.ml"
+      ]
+    , "runtime.context_windows"
+    , [ "test/agent_server_e2e/scenarios/recovery_rollover_hooks_scenario.ml"
+      ; "test/agent_session/recovery_rollover_hooks_tests.ml"
+      ] )
+  ; ( "moderator.state_limits"
     , "Fresh event scopes, bounded data snapshots and validation before commit"
     , [ "lib/chatml/chatml_value_codec.ml"
       ; "lib/chat_response/moderator_invocation.ml"
@@ -894,7 +910,19 @@ let moderator_features =
 ;;
 
 let implementation_sources =
-  [ ( "lib/agent_session/writer_attachment.ml"
+  [ ( "lib/chatml/chatml_context_rollover.ml"
+    , "5b882911f6969cbd7f20cc905e81b543c2b73bcba1a9275f96a3a48066fe8d97" )
+  ; ( "lib/chat_response/context_rollover_hook.ml"
+    , "cf083e4d6400e36ec5997397f183305fe9bbe84687a6996528518bbb15ba5c8f" )
+  ; ( "lib/agent_session/recovery_rollover.ml"
+    , "2c3e259139ab1a5de0b8b96d3d64a7cd1869b6030cbd55b234777cb69b24859f" )
+  ; ( "lib/agent_session/recovery_rollover_hooks.ml"
+    , "80588d7f09e6569d58ede58aab4b145971a813de7d31ce1c938ebf1a385e8125" )
+  ; ( "lib/agent_session/recovery_rollover_hook_policy.ml"
+    , "339753605344ac58e0a5d7f522b715b930bb9b11111015a9ed6f1403b44cacc5" )
+  ; ( "lib/agent_session/recovery_rollover_hook_snapshot.ml"
+    , "f788d06316f5e0d2512fffaf2bad5aa4d919d3e679cdb738f5eb6acb51b4b20f" )
+  ; ( "lib/agent_session/writer_attachment.ml"
     , "290d2de6ab34333ac91f4635138cc59ed0ae3640921b1bf38860dabd95126745" )
   ; ( "lib/agent_server/runtime_resource_testing.ml"
     , "36017898365372e19e30bd2ef1abece86fe252679fdccc0d690f2c079c8ccf78" )
@@ -1067,7 +1095,7 @@ let implementation_sources =
   ; ( "lib/agent_session/staged_ingress.ml"
     , "27e596e1b90c67bbf7aa24ae7b0c916ceccdda0bb00c7580f19e6c09cb12f8da" )
   ; ( "lib/agent_session/session_storage_semantics.ml"
-    , "8b398086d5b58683dac6b70f31a88f26cdc2040caef2588e7cda87cf98e4187f" )
+    , "0ea3c149c56b9b9056c3fb8071d464703b22f9ed043304eae0f4115332dc8ac5" )
   ; ( "lib/agent_session/session_state_document.mli"
     , "450131747211ca900ea4f26787f72881f39f78b3f69cfea6feb68d7dee59e152" )
   ; ( "lib/agent_session/session_state_decode_evidence.ml"
@@ -1079,7 +1107,7 @@ let implementation_sources =
   ; ( "lib/agent_session/session_delta_document.ml"
     , "8305be8b091e2db61912dbbc2ce3f09edba1033e540f5d88957b6cd6200be1ae" )
   ; ( "lib/agent_protocol/session_storage_semantics.ml"
-    , "e10fbe17ff42135a9e4d923c3e189e22fa9e21451df768d3b3de6e4f6cc593af" )
+    , "239b4ae7eebbfb0d150c043765a3850e7d72534a83aa9e7600a25b64420bb004" )
   ; ( "lib/agent_session/pending_turn.ml"
     , "0cacc56da4b2a17f822d25dd25501096b2ac7184888f9ef3b09093023192c178" )
   ; ( "lib/agent_session/run_input_handoff.ml"
@@ -1301,7 +1329,7 @@ let implementation_sources =
   ; ( "lib/chatml/chatml_builtin_modules.ml"
     , "4d005f60b55cee3263e7925bae6d1c81129ca383cf6218b3cc2dc86270def236" )
   ; ( "lib/chatml/chatml_compiler_contract.ml"
-    , "85a8d9efb0d8eee24819512c0fc4afaa62c49456d3e0d19e112f78852dcb86a6" )
+    , "7e67f112f6484dea487bba037bb04e114655ed1d030a2ce56672ef068f02def0" )
   ; ( "lib/chatml/chatml_contract_encoding.ml"
     , "7f8c6c1a49818abaf5ecbfe7cc1df2f4511930939cc1c573e3d422c94548c138" )
   ; ( "lib/chatml/chatml_eval.ml"
@@ -1509,7 +1537,7 @@ let implementation_sources =
   ; ( "lib/agent_session/goal_continuation_phase.ml"
     , "e24a210492bfcc9e94c7bf472603531eb053eb7654de7c6100083464da9b1b51" )
   ; ( "lib/agent_session/session_actor.ml"
-    , "5029ece3767e71ce15da70cfe00a99782de2e0aab5b7ee0f15273f1e6906e392" )
+    , "b8c26635e38025cdcbb41053b1a9d9b02ac6eb7a8809e2fba0b018f02c648e3d" )
   ; ( "lib/agent_session/idle_completion_write.ml"
     , "d427fa80c4346b64f3f9bf4d5025ad2218403278816ade76ff17ba1adaa426d9" )
   ; ( "lib/agent_session/goal_descendant_admission_custody.ml"
@@ -1547,7 +1575,7 @@ let implementation_sources =
   ; ( "lib/chat_response/moderator_invocation.ml"
     , "445f7e4a6597b27d3af34905fee56441bcf82285fd52eb8d9f0c400379b28deb" )
   ; ( "lib/chat_response/moderator_manager.ml"
-    , "adad2665abe5dbcd5b829ef14e6933a193f079db2f81e5661074dc60a5bdf77a" )
+    , "3ba1323d09cafa21feb684edfaab8b0ad7286b676c1e14ad13a951a5f36a01a3" )
   ; ( "lib/chat_response/notification_operations.ml"
     , "1e67db1e69921f11f0c28798e340e7e23dc5436eb492bb79a12a0125b0f69e29" )
   ; ( "lib/chat_response/runtime_semantics.ml"
@@ -1557,7 +1585,7 @@ let implementation_sources =
   ; ( "lib/chat_response/subscription_operations.ml"
     , "88aa4ac9bd7c2100a9614f8b30639c6fd30e7ae0c11e86e423a57badd69c0603" )
   ; ( "lib/chatml/chatml_host_runtime.ml"
-    , "ed072efe4420b0301cb7e3e9c42230f67bfa09ab42e9e067fa26d1320fec901b" )
+    , "b36da091bfad8de042dbb28c7d1cb9e4f5c2d60c220d2a554dc46b246832bee1" )
   ; ( "lib/chatml/chatml_lang.ml"
     , "f8d63210438cadd286834a77bb62eaa371cc4f94aea08751aa84a87bc49333f0" )
   ; ( "lib/chatml_sources/chatml_diagnostic.ml"
@@ -1617,7 +1645,7 @@ let implementation_sources =
   ; ( "lib/agent_session/canonical_usage_update.ml"
     , "599bf11fce6d08aa522ce49c1df4ade47c640045591442fd67dcb47ec6084ea2" )
   ; ( "lib/agent_session/session_delta.ml"
-    , "7a813416d4537d381db929c41cffe44f5975ae9c49db66f729e49cfbd1e7c472" )
+    , "734728aa4579c63d542d590e6d503bf1bef1e478e265925ad44468774d432a9e" )
   ; ( "lib/agent_session/session_document_transition.ml"
     , "8de131ffa87140254185b26ef87bf3ddad4eb3aeeb4f11e1ea93d0d6d963abdc" )
   ; ( "lib/agent_session/host_turn_tracking.ml"
@@ -1640,7 +1668,13 @@ let implementation_sources =
 ;;
 
 let topic_contracts =
-  [ ( "one_off_v1"
+  [ ( "moderator_v1"
+    , "runtime.context_windows"
+    , "d589067ba0bbf0f7df8c8a127c20c7d804b1a41d8b38b61b5c1d8e22ae802e02" )
+  ; ( "delegated_moderator_v1"
+    , "runtime.context_windows"
+    , "f74af2196108e77a66966388055b864d376020b9617d5af6ac31153a78f7af89" )
+  ; ( "one_off_v1"
     , "instructions.sources"
     , "4cbb224a500d3e811fe54e5cacfd8c8f91612e6fa2236c79f42f4b0c7655b2e3" )
   ; ( "tool_v1"

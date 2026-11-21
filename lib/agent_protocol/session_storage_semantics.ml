@@ -20,6 +20,7 @@ let recovery_rollover_commit = "session.recovery-rollover-commit.v1"
 let recovery_authored_checkpoint = "session.recovery-authored-checkpoint.v1"
 let recovery_rollover_batch = "session.recovery-rollover-batch.v1"
 let recovery_rollover_continuation = "session.recovery-rollover-continuation.v1"
+let recovery_rollover_hooks = "session.recovery-rollover-hooks.v1"
 
 let supported_children =
   [ Schedule_provenance.persistence_semantics
@@ -46,6 +47,7 @@ let supported_children =
   ; recovery_rollover_commit
   ; recovery_rollover_batch
   ; recovery_rollover_continuation
+  ; recovery_rollover_hooks
   ; recovery_authored_checkpoint
   ]
 ;;

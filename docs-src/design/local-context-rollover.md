@@ -397,32 +397,44 @@ and recovery records remain readable under current authority.
 
 ## ChatML hooks and continuation
 
-Add proposed `Before_context_rollover` and `After_context_rollover` events
-to the real installed moderator only. They follow the current runtime's
-bounded execution, typed source provenance and lifecycle borrow rules. The
-pre-commit hook sees the proposed expected basis, classified pressure and
-checkpoint capabilities. It can select an admitted checkpoint reference,
-offer bounded hint references, select a continuation or veto. It cannot
-assert a note write that did not commit, change the target, broaden
-authority, alter the queued cut or publish a window. An explicit veto,
-authority failure or loss of source currentness stops every trigger,
-including force. A fault exposes pre-commit failure, and may use archive-only
-force only when no mandatory hook guard failed. A forced transition can
-proceed without an optional checkpoint helper.
+The installed extensibility-v1 moderator can define the optional
+`on_context_rollover` binding. It is a separate typed entry point, so an
+exhaustive `on_event` handler keeps its existing event type. The actor invokes
+the hook for both native and operator proposals which reach an exact settled
+foreground batch under current authority. A moderator without the binding
+uses the ordinary rollover behavior.
 
-The post-commit hook sees the committed receipt and can refine the
-continuation using the same bounded, current borrow. For each phase the
-actor durably claims hook execution and commits typed results through the
-existing effect discipline or records failure/interruption. An interruption after
-a claim does not automatically run arbitrary effects again. Post-commit
-failure keeps the new window and holds follow-up pending explicit recovery
-or the configured wait policy. Rebuild and reconnect can read that
-disposition without manufacturing another lifecycle event. Hook callbacks
-receive no additional model, tool or filesystem authority. Staged effects
-are verified against their real originating borrow before commit.
-[Current event phases](../../lib/chat_response/moderation.mli#L131-L145),
-[runtime requests](../../lib/chat_response/moderation.mli#L343-L359),
-[existing Continue/Wait/Finish composition](../../lib/agent_session/run_action_service.mli#L24-L33).
+`Before_context_rollover` carries the expected session, generation, window,
+state revision, classified pressure and available checkpoint status. A qualified
+checkpoint includes an ordered list of bounded, body-free note references.
+The moderator can veto, proceed with that default selection, supply an explicit
+hint selection or express a preference for follow-up. An explicit empty
+selection suppresses default hints. Local note selections must match the
+qualified checkpoint. Canonical ranges are checked against current visibility.
+A shared-note reference routes to the source-owned grant and gains its meaning
+only when that reader verifies the actual source and successor. A veto,
+pre-commit hook failure or loss of authority prevents publication, including
+for a force request.
+
+`After_context_rollover` sees the committed predecessor and successor scopes,
+the cut revision and checkpoint status. The moderator selects `Continue`,
+`Wait` or `Finish`. `Context_rollover.compose` combines preferences using
+`Finish`, then `Wait`, then `Continue`. Each claimed phase can write its
+transactional moderator state and typed disposition. Other effects such as
+tool calls, model work, overlay edits, emitted events or scheduled work must
+use their ordinary admitted lifecycle. Subsequent foreground work has its
+own authority and attempt.
+
+The same session writer records a claim before evaluating either handler.
+Completion is accepted only for the exact claim and live source lease.
+An unclaimed phase remains pending. A persisted claim without a live lease
+can be resolved as interrupted through the existing operator continuation
+control. Reopen does not run either handler or introduce a new effect.
+A failed or interrupted after-hook leaves the published successor in place
+and holds its follow-up for deliberate recovery. An authorized rollover
+receipt exposes phase statuses while keeping the script identity and
+selected reference coordinates private. [Typed hook boundary](../../lib/chat_response/context_rollover_hook.mli),
+[durable dispositions](../../lib/agent_session/recovery_rollover_hooks.mli).
 
 | Script outcome | Actor effect |
 | --- | --- |

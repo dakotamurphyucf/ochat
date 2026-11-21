@@ -60,6 +60,7 @@ end
 let host_result result = Result.map_error result ~f:Failure.plain
 
 module Value_codec = Chatml.Chatml_value_codec
+module Context_rollover = Chatml.Chatml_context_rollover
 
 type event_arguments =
   | Context_state_event
@@ -70,6 +71,7 @@ type compiled_script =
   ; resolved : Lang.resolved_program
   ; source_text : string
   ; source : Captured.t option
+  ; context_rollover : bool
   }
 
 type log_level =
@@ -203,6 +205,7 @@ and session =
   { env : Lang.env
   ; mutable state : Lang.value
   ; on_event : Lang.value option
+  ; on_context_rollover : Lang.value option
   ; event_arguments : event_arguments
   ; queue : Lang.value Queue.t
   ; operations : op_def String.Map.t
@@ -859,6 +862,22 @@ let compilation_diagnostic diagnostic ~stage ~source_text ~checkpoint =
   }
 ;;
 
+let declares_context_rollover surface (program : Lang.program) ~checkpoint =
+  List.exists surface.Builtin_surface.modules ~f:(fun entry ->
+    String.equal entry.name Context_rollover.builtin.name)
+  && List.exists program.stmts ~f:(fun statement ->
+    checkpoint ();
+    match statement.value with
+    | SLet (binder, _) ->
+      List.exists
+        (Chatml.Chatml_binding_pattern.binders ~checkpoint binder)
+        ~f:(fun (name, _) -> String.equal name Context_rollover.entrypoint)
+    | SLetRec bindings ->
+      List.exists bindings ~f:(fun (name, _) ->
+        String.equal (Chatml.Chatml_syntax_name.name name) Context_rollover.entrypoint)
+    | SType _ | SModule _ | SOpen _ | SExpr _ -> false)
+;;
+
 let compile_source
       ?(checkpoint = fun () -> ())
       ?(surface = Builtin_surface.moderator_surface)
@@ -886,6 +905,12 @@ let compile_source
     match parsed with
     | Error diagnostic -> compilation_error Parse diagnostic
     | Ok program ->
+      let context_rollover = declares_context_rollover surface program ~checkpoint in
+      let required_bindings =
+        if context_rollover
+        then required_bindings @ [ Context_rollover.entrypoint, Context_rollover.scheme ]
+        else required_bindings
+      in
       let checked =
         Typechecker.check_program_with_surface
           ~checkpoint
@@ -899,7 +924,7 @@ let compile_source
        | Error diagnostic -> compilation_error Typecheck diagnostic
        | Ok checked ->
          let resolved = Resolver.resolve_checked_program checked program in
-         Ok { surface; resolved; source_text; source })
+         Ok { surface; resolved; source_text; source; context_rollover })
   in
   checkpoint ();
   result
@@ -930,6 +955,7 @@ let compiled_surface (compiled : compiled_script) : Builtin_surface.surface =
 let create_session
       ?(event_arguments = Context_state_event)
       ?on_event
+      ?on_context_rollover
       env
       ~state
       ~operations
@@ -939,6 +965,7 @@ let create_session
   { env
   ; state
   ; on_event
+  ; on_context_rollover
   ; event_arguments
   ; queue = Queue.create ()
   ; operations
@@ -990,6 +1017,18 @@ let instantiate_session_internal
                (match expect_callable entrypoints.on_event_name on_event with
                 | Error msg -> failure msg
                 | Ok on_event ->
+                  let open Result.Let_syntax in
+                  let%map on_context_rollover =
+                    if compiled.context_rollover
+                    then (
+                      match Lang.find_var env Context_rollover.entrypoint with
+                      | Some selected ->
+                        expect_callable Context_rollover.entrypoint selected
+                        |> host_result
+                        |> Result.map ~f:Option.some
+                      | None -> failure "Compiled rollover handler is unavailable")
+                    else Ok None
+                  in
                   Option.iter control ~f:(fun control ->
                     control.check_value initial_state);
                   Debug_log.emit (fun () ->
@@ -999,14 +1038,14 @@ let instantiate_session_internal
                       (value_to_string initial_state)
                       entrypoints.initial_state_name
                       entrypoints.on_event_name);
-                  Ok
-                    (create_session
-                       env
-                       ~state:initial_state
-                       ~on_event
-                       ~operations
-                       ~source_text:compiled.source_text
-                       ~current_exec:None)))
+                  create_session
+                    env
+                    ~state:initial_state
+                    ~on_event
+                    ?on_context_rollover
+                    ~operations
+                    ~source_text:compiled.source_text
+                    ~current_exec:None))
         with
         | Lang.Runtime_error err -> Error (Failure.runtime err)))
 ;;
@@ -1824,6 +1863,7 @@ let handle_event_impl_detailed
       ?(validate_suspension = fun () -> Ok ())
       ?(copy_state = fun state -> Ok state)
       ?limits
+      ?rollover_decision
       ~consume_queued
       (session : session)
       ~(context : Lang.value)
@@ -1877,10 +1917,15 @@ let handle_event_impl_detailed
                   | Context_state_event -> [ context; execution_state; event ]
                   | Event_state -> [ event; execution_state ]
                 in
-                match session.on_event with
-                | None -> Error (Failure.plain "Session has no event handler")
-                | Some on_event ->
-                  (match Eval.apply_value_result on_event arguments with
+                let selected =
+                  match rollover_decision with
+                  | None -> session.on_event
+                  | Some _ -> session.on_context_rollover
+                in
+                match selected with
+                | None -> Error (Failure.plain "Session has no selected event handler")
+                | Some handler ->
+                  (match Eval.apply_value_result handler arguments with
                    | Error err -> Error (Failure.runtime err)
                    | Ok value ->
                      (match expect_task_value value with
@@ -1906,8 +1951,16 @@ let handle_event_impl_detailed
                 (value_to_string event)
                 (String.prefix msg.Failure.diagnostic.message 4096));
             Error msg
-          | Ok (Task_value new_state) ->
+          | Ok (Task_value value) ->
             let open Result.Let_syntax in
+            let%bind new_state =
+              match rollover_decision, value with
+              | None, value -> Ok value
+              | Some decide, Lang.VTuple { first; second; rest = [] } ->
+                let%map () = decide second |> host_result in
+                first
+              | Some _, _ -> Error (Failure.plain "Invalid rollover handler result")
+            in
             Option.iter session.env.control ~f:(fun control ->
               control.check_value new_state);
             let%bind () = validate_state new_state |> host_result in
@@ -1962,6 +2015,32 @@ let handle_event_detailed
     ~context
     ~event
   |> Result.map_error ~f:Failure.diagnostic
+;;
+
+let has_context_rollover session = Option.is_some session.on_context_rollover
+
+let handle_context_rollover
+      ?prepare_transaction
+      ?validate_state
+      ?copy_state
+      ?limits
+      session
+      ~context
+      ~event
+      ~decide
+  =
+  handle_event_internal
+    ?prepare_transaction
+    ?validate_state
+    ?copy_state
+    ?limits
+    ~rollover_decision:decide
+    ~validate_suspension:(fun () -> Error "Rollover hook cannot retain a UI continuation")
+    session
+    ~context
+    ~event
+  |> Result.map_error ~f:(fun failure ->
+    Failure.render failure ~source_text:session.source_text)
 ;;
 
 let handle_event
@@ -2212,11 +2291,21 @@ let instantiate_prepared_session_internal
   in
   let plain message = Diagnostic.create message in
   let%bind operations = operations_map config.operations |> Result.map_error ~f:plain in
+  let context_rollover =
+    List.exists (Chatml_linked_program.entrypoints program) ~f:(fun entry ->
+      String.equal
+        (Chatml_linked_program.Entrypoint.name entry)
+        Context_rollover.entrypoint)
+  in
+  let entrypoint_names =
+    Chatml.Chatml_compiler_contract.Invocation.entrypoints invocation
+    @ if context_rollover then [ Context_rollover.entrypoint ] else []
+  in
   let%bind instance =
     Chatml_linked_runtime.instantiate
       program
       ~surface:config.surface
-      ~entrypoints:(Chatml.Chatml_compiler_contract.Invocation.entrypoints invocation)
+      ~entrypoints:entrypoint_names
       ?control
       ()
     |> Result.map_error ~f:Chatml_linked_runtime.Error.diagnostic
@@ -2231,6 +2320,15 @@ let instantiate_prepared_session_internal
   let%bind on_event =
     expect_callable entrypoints.on_event_name on_event |> Result.map_error ~f:plain
   in
+  let%bind on_context_rollover =
+    if context_rollover
+    then (
+      let%bind selected = binding Context_rollover.entrypoint in
+      expect_callable Context_rollover.entrypoint selected
+      |> Result.map ~f:Option.some
+      |> Result.map_error ~f:plain)
+    else Ok None
+  in
   Option.iter control ~f:(fun control -> control.check_value initial_state);
   Ok
     (create_session
@@ -2238,6 +2336,7 @@ let instantiate_prepared_session_internal
        (Chatml_linked_runtime.entry_env instance)
        ~state:initial_state
        ~on_event
+       ?on_context_rollover
        ~operations
        ~source_text:(Captured.contents (Chatml_linked_runtime.entry_source instance))
        ~current_exec:None)
