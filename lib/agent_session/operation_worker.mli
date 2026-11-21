@@ -286,15 +286,17 @@ type outcome =
   | Cancelled of cancellation
   | Failed of Agent_protocol.Error.t
 
+type run = sw:Eio.Switch.t -> input:Input.t -> Capabilities.t -> outcome
 type t
 
-val create : run:(sw:Eio.Switch.t -> input:Input.t -> Capabilities.t -> outcome) -> t
+val create : run:run -> t
 
 (** Trusted stock workers which apply the supplied capacity port before any
     root allocation, including withholding an oversize wire on stale/veto. *)
-val create_capacity_aware
-  :  run:(sw:Eio.Switch.t -> input:Input.t -> Capabilities.t -> outcome)
-  -> t
+val create_capacity_aware : run:run -> t
+
+(** Wrap the installed runner while preserving its admission capabilities. *)
+val map_run : t -> f:(run -> run) -> t
 
 val supports_capacity_rollover : t -> bool
 val run : t -> sw:Eio.Switch.t -> input:Input.t -> Capabilities.t -> outcome

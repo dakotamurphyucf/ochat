@@ -4129,8 +4129,7 @@ module Product = struct
     let%bind () = check_snapshot t ~moderator_checkpoint in
     let%bind () = check_open t in
     let worker =
-      Operation_worker.create ~run:(fun ~sw ~input capabilities ->
-        Operation_worker.run t.worker ~sw ~input capabilities)
+      Operation_worker.map_run t.worker ~f:Fn.id
     in
     let runtime =
       t.make_binding
@@ -4904,10 +4903,10 @@ let build_product_attachment
     match check_execution with
     | None -> worker
     | Some check ->
-      Operation_worker.create ~run:(fun ~sw ~input capabilities ->
+      Operation_worker.map_run worker ~f:(fun run ~sw ~input capabilities ->
         match check () with
         | Error error -> Operation_worker.Failed error
-        | Ok () -> Operation_worker.run worker ~sw ~input capabilities)
+        | Ok () -> run ~sw ~input capabilities)
   in
   let activity =
     Option.map (source_authority source) ~f:(fun _ -> Runtime_activity.create ~sw)
@@ -4921,12 +4920,12 @@ let build_product_attachment
     match activity with
     | None -> worker
     | Some activity ->
-      Operation_worker.create ~run:(fun ~sw:_ ~input capabilities ->
+      Operation_worker.map_run worker ~f:(fun run ~sw:_ ~input capabilities ->
         Runtime_activity.with_switch activity (fun ~sw ->
-          Operation_worker.run worker ~sw ~input capabilities))
+          run ~sw ~input capabilities))
   in
   let worker =
-    Operation_worker.create ~run:(fun ~sw ~input capabilities ->
+    Operation_worker.map_run worker ~f:(fun run ~sw ~input capabilities ->
       let enrolled =
         let open Result.Let_syntax in
         let%bind receipt =
@@ -4939,7 +4938,7 @@ let build_product_attachment
       in
       match enrolled with
       | Error failure -> Operation_worker.Failed failure
-      | Ok () -> Operation_worker.run worker ~sw ~input capabilities)
+      | Ok () -> run ~sw ~input capabilities)
   in
   let runtime_lifecycle_kind =
     match moderator, lifecycle, extension_services with

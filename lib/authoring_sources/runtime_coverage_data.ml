@@ -1155,7 +1155,7 @@ let implementation_sources =
   ; ( "lib/agent_session/instruction_guidance_text.ml"
     , "f479e72bd27d60883647524052eb04770198f07603b2d738633130ece31c4861" )
   ; ( "lib/chat_response/in_memory_stream.ml"
-    , "ca8569f8437721a1bd4adcc2040bc84bc67aeac6a118a2d787f9e36d30e60d7c" )
+    , "855da8e847a4656311841efc7d8d85a61cdb158349b5281575c6092458a9b2ea" )
   ; ( "lib/agent_session/run_job_completion.ml"
     , "f8d8d2b2523ba7de9df158362e4cf25a67f9334c58b293462451a53d208a788e" )
   ; ( "lib/agent_session/run_transition.ml"
@@ -1175,7 +1175,7 @@ let implementation_sources =
   ; ( "lib/agent_session/runtime_unmoderated_source.ml"
     , "18779ed765c2ecf7ac429a1376f8e2708a9b419f779350652342f3362513a6b6" )
   ; ( "lib/agent_session/runtime_builder.ml"
-    , "6eb216aede723c89d1285ac551ff33a0ef1837f97f321102d924199c6fbc4ce1" )
+    , "69e3d11162f6c0217b6b12b4654b2b4af0c730fd56532a9e8a20575b5b1d49cc" )
   ; ( "lib/context_compaction/compactor.ml"
     , "7b11eae5ce4d929bf1ab4702111d03f70fe97cfe8543135c73782c2b92391ff0" )
   ; ( "lib/agent_session/session_transition.ml"
@@ -1505,7 +1505,7 @@ let implementation_sources =
   ; ( "lib/agent_session/product_callback_data.mli"
     , "b981c51b31151bcfe467e03d818142c75ca4d3cf2a1ed5e5536eaf3dbcce3b76" )
   ; ( "lib/agent_session/operation_worker.ml"
-    , "b1116aee053b5b69e00bce6aeb85ec558e9795fc3e8f72374b436831250a0dfe" )
+    , "1d98782d1df8d8623f34b93e1eebcfccfb541a4e1bf51378e12ee23b27bc4ef8" )
   ; ( "lib/agent_session/notification_delivery.ml"
     , "9f18c6eb7561b0afda29cd706214ddf2a376c54b9f28980ce536079ae5b7b45e" )
   ; ( "lib/agent_session/notification_history.ml"

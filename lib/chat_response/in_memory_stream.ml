@@ -241,6 +241,7 @@ type 'a prepared_turn =
 type ctx =
   { env : Eio_unix.Stdenv.base
   ; root_context : Root_context.t option
+  ; foreground_capacity : Foreground_capacity.t option
   ; on_settled_batch : (Settled_tool_batch.t -> Settled_tool_batch.decision) option
   ; successor : Root_context.Successor.t option
   ; inference_context : Inference_runtime.Context.t
@@ -315,6 +316,7 @@ type ctx =
 type args =
   { env : Eio_unix.Stdenv.base
   ; root_context : Root_context.t option
+  ; foreground_capacity : Foreground_capacity.t option
   ; on_settled_batch : (Settled_tool_batch.t -> Settled_tool_batch.decision) option
   ; successor : Root_context.Successor.t option
   ; inference_context : Inference_runtime.Context.t
@@ -1469,6 +1471,7 @@ let make_run_fork_admitted
     { ctx with
       allocator = child_allocator
     ; root_context = None
+    ; foreground_capacity = None
     ; on_settled_batch = None
     ; successor = None
     ; take_protected_delivery = None
@@ -2267,6 +2270,7 @@ let log_request (c : ctx) ~(inputs : Openai.Responses.Item.t list) =
 ;;
 
 let run_turn (root_ctx : ctx) ~sw ~(history : History_entry.t list) =
+  let exception Retired_foreground of History_entry.t list in
   let sem = lazy (Eio.Semaphore.make 8) in
   let rec turn_with_budget
             (c : ctx)
@@ -2381,6 +2385,18 @@ let run_turn (root_ctx : ctx) ~sw ~(history : History_entry.t list) =
         let protected_delivery =
           Option.value_map c.take_protected_delivery ~default:[] ~f:(fun take -> take ())
         in
+        let capacity =
+          Option.map c.foreground_capacity ~f:(fun control ->
+            let can_roll_over =
+              match c.transcript_relation with
+              | Nested _ -> false
+              | Root ->
+                Option.is_some c.root_context
+                && Option.is_none c.successor
+                && List.is_empty protected_delivery
+            in
+            Foreground_capacity.Request.create control ~can_roll_over)
+        in
         let run ~with_optional_hint =
           Agent_guidance.with_request
             c.agent_guidance
@@ -2417,6 +2433,8 @@ let run_turn (root_ctx : ctx) ~sw ~(history : History_entry.t list) =
                         Option.iter c.successor ~f:(fun successor ->
                           successor.check_prepared ~optional_hint prepared);
                         on_prepared prepared;
+                        Option.iter capacity ~f:(fun cut ->
+                          Foreground_capacity.Request.before_dispatch cut prepared);
                         c.before_inference_dispatch prepared)
                       ~on_attempt:(fun attempt ->
                         on_dispatch (Inference_runtime.Attempt.configuration attempt);
@@ -2425,6 +2443,8 @@ let run_turn (root_ctx : ctx) ~sw ~(history : History_entry.t list) =
                         <- Some (Inference_runtime.Attempt.scope attempt);
                         admitted_attempt := Some attempt)
                       ~on_event:(fun event ->
+                        Option.iter capacity ~f:(fun cut ->
+                          Foreground_capacity.Request.observe cut event);
                         match Inference.Event.view event with
                         | Live event -> publish_inference_live c ~st:!st event
                         | Candidate_ready { item; payload; local_execution } ->
@@ -2455,16 +2475,33 @@ let run_turn (root_ctx : ctx) ~sw ~(history : History_entry.t list) =
           try run ~with_optional_hint:true with
           | Root_context.Successor.Omit_optional_hint -> run ~with_optional_hint:false
         in
-        let receipt =
+        let run_and_release () =
           if List.is_empty protected_delivery
           then run ()
           else
             Exn.protect ~f:run ~finally:(fun () ->
               List.iter protected_delivery ~f:Inference_runtime.Protected_delivery.retire)
         in
-        { c with successor = None }, !admitted_attempt, receipt
+        match
+          let receipt = run_and_release () in
+          Option.iter capacity ~f:(fun cut ->
+            Option.iter !admitted_attempt ~f:(fun attempt ->
+              Foreground_capacity.Request.after_receipt
+                cut
+                ~attempt
+                ~receipt
+                ~finish_source:(fun () ->
+                  Option.iter c.transcript_scope ~f:(fun scope ->
+                    publish_neutral_view
+                      c
+                      (Source_finished { scope; completion = Failed }));
+                  c.transcript_scope <- None)));
+          `Returned ({ c with successor = None }, !admitted_attempt, receipt)
+        with
+        | result -> result
+        | exception Foreground_capacity.Request.Retired -> `Retired
       in
-      let c, attempt, receipt =
+      let outcome =
         match c.root_context with
         | None ->
           run_request
@@ -2474,6 +2511,11 @@ let run_turn (root_ctx : ctx) ~sw ~(history : History_entry.t list) =
             ~on_dispatch:ignore
         | Some source ->
           source.with_context ~previous:c.inference_context ~history:inputs run_request
+      in
+      let c, attempt, receipt =
+        match outcome with
+        | `Retired -> raise (Retired_foreground hist)
+        | `Returned result -> result
       in
       let st = !st in
       let new_entries_rev, tool_requests, committed = await_calls c ~hist st in
@@ -2568,7 +2610,11 @@ let run_turn (root_ctx : ctx) ~sw ~(history : History_entry.t list) =
                 in
                 turn_with_budget c hist ~request_turn_budget:next_budget))))
   in
-  turn_with_budget root_ctx history ~request_turn_budget:0
+  match turn_with_budget root_ctx history ~request_turn_budget:0 with
+  | result -> result
+  | exception Retired_foreground history ->
+    Option.iter root_ctx.foreground_capacity ~f:Foreground_capacity.on_retired;
+    history
 ;;
 
 let setup_ctx ~(sw : Eio.Switch.t) (a : args) =
@@ -2579,6 +2625,7 @@ let setup_ctx ~(sw : Eio.Switch.t) (a : args) =
   let c =
     { env = a.env
     ; root_context = a.root_context
+    ; foreground_capacity = a.foreground_capacity
     ; on_settled_batch = a.on_settled_batch
     ; successor = a.successor
     ; inference_context = a.inference_context
@@ -2658,6 +2705,7 @@ let run_completion_stream_in_memory_entries
       ~env
       ~inference_context
       ?root_context
+      ?foreground_capacity
       ?on_settled_batch
       ?successor
       ~inference_identity
@@ -2791,6 +2839,7 @@ let run_completion_stream_in_memory_entries
   let args =
     { env
     ; root_context
+    ; foreground_capacity
     ; on_settled_batch
     ; successor
     ; inference_context

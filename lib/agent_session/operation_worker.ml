@@ -170,12 +170,15 @@ type outcome =
   | Cancelled of cancellation
   | Failed of Agent_protocol.Error.t
 
+type run = sw:Eio.Switch.t -> input:Input.t -> Capabilities.t -> outcome
+
 type t =
-  { run : sw:Eio.Switch.t -> input:Input.t -> Capabilities.t -> outcome
+  { run : run
   ; capacity_aware : bool
   }
 
 let create ~run = { run; capacity_aware = false }
 let create_capacity_aware ~run = { run; capacity_aware = true }
+let map_run t ~f = { t with run = f t.run }
 let supports_capacity_rollover t = t.capacity_aware
 let run t ~sw ~input capabilities = t.run ~sw ~input capabilities

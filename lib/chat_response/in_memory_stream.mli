@@ -401,6 +401,7 @@ val run_completion_stream_in_memory_entries
   :  env:Eio_unix.Stdenv.base
   -> inference_context:Inference_runtime.Context.t
   -> ?root_context:Root_context.t
+  -> ?foreground_capacity:Foreground_capacity.t
   -> ?on_settled_batch:(Settled_tool_batch.t -> Settled_tool_batch.decision)
   -> ?successor:Root_context.Successor.t
   -> inference_identity:Neutral_turn.Identity.t
