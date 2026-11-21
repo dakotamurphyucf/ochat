@@ -9,8 +9,15 @@ type t
 val all_scopes : Agent_protocol.Scope.Set.t
 
 (** [create environment ~name ~http_port] creates one isolated configuration
-    fixture with physical and temporary workspaces and two bearer credentials. *)
-val create : Temporary_environment.t -> name:string -> http_port:int -> t
+    fixture with physical and temporary workspaces and two bearer credentials.
+    The snapshot intervals default to ten events and 1,000 milliseconds. *)
+val create
+  :  ?snapshot_every_events:int
+  -> ?snapshot_every_ms:int
+  -> Temporary_environment.t
+  -> name:string
+  -> http_port:int
+  -> t
 
 (** [configuration t ?data_dir ?unix_socket ?http_port ()] renders normalized
     version 1 source using the supplied server-path overrides. *)

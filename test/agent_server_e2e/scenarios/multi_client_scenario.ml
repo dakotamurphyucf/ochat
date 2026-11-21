@@ -59,7 +59,16 @@ let reserve_port env =
 ;;
 
 let fixture env environment name =
-  let fixture = Config_fixture.create environment ~name ~http_port:(reserve_port env) in
+  (* These scenarios use synced journals, including across daemon restart.
+     Keep snapshot retention from reserving a session between client requests. *)
+  let fixture =
+    Config_fixture.create
+      ~snapshot_every_events:Int.max_value
+      ~snapshot_every_ms:Int.max_value
+      environment
+      ~name
+      ~http_port:(reserve_port env)
+  in
   Config_fixture.grant_public_all_scopes fixture;
   fixture
 ;;

@@ -12,6 +12,8 @@ type t =
   ; token_path : string
   ; prompt_path : string
   ; physical_workspace : string
+  ; snapshot_every_events : int
+  ; snapshot_every_ms : int
   ; mutable public_principal : Agent_protocol.Id.Principal.t option
   }
 
@@ -110,8 +112,8 @@ let configuration t ?data_dir ?unix_socket ?http_port () =
   (durability
    ((journal_flush each)
     (journal_flush_ms 10)
-    (snapshot_every_events 10)
-    (snapshot_every_ms 1000)))
+    (snapshot_every_events %d)
+    (snapshot_every_ms %d)))
   (unsafe_allow_unauthenticated_remote_http false)))
 (workspaces
  (((id physical)
@@ -141,6 +143,8 @@ let configuration t ?data_dir ?unix_socket ?http_port () =
     unix_socket
     http_port
     (atom t.token_path)
+    t.snapshot_every_events
+    t.snapshot_every_ms
     (atom t.physical_workspace)
     (atom t.prompt_path)
 ;;
@@ -151,7 +155,13 @@ let write_configuration t ~name contents =
   config_path
 ;;
 
-let create environment ~name ~http_port =
+let create
+      ?(snapshot_every_events = 10)
+      ?(snapshot_every_ms = 1_000)
+      environment
+      ~name
+      ~http_port
+  =
   let roots : Temporary_environment.roots = Temporary_environment.roots environment in
   let directory = Filename.concat roots.config name in
   let make value = Filename.concat directory value in
@@ -170,6 +180,8 @@ let create environment ~name ~http_port =
     ; token_path = make "tokens.sexp"
     ; prompt_path = make "smoke.chatmd"
     ; physical_workspace
+    ; snapshot_every_events
+    ; snapshot_every_ms
     ; public_principal = None
     }
   in
