@@ -10,32 +10,7 @@ let error message =
 
 let document_error value = error (Sexp.to_string_hum (D.Error.sexp_of_t value))
 let store_error value = error (Sexp.to_string_hum (Store.Store_error.sexp_of_t value))
-
-let archive_document state ~limits =
-  let open Result.Let_syntax in
-  (* History capture excludes private recovery grants, notes and intent keys. *)
-  let value = Session_state_document.value state in
-  let state =
-    match value.recovery_notes, value.recovery_note_shares, value.recovery_rollover with
-    | None, None, None -> state
-    | _ ->
-      Session_state_document.with_value
-        state
-        { value with
-          recovery_notes = None
-        ; recovery_note_shares = None
-        ; recovery_rollover = None
-        }
-  in
-  let%bind state = Session_state_document.encode state ~limits in
-  (* Admit the encoded child without replacing its captured JSON representation. *)
-  let%bind _ = Session_state_document.decode ~limits state in
-  D.Document.create
-    ~limits
-    ~kind:"session.compaction_archive"
-    ~version:1
-    ~payload:(`Object [ "state", D.Document.json state ])
-;;
+let archive_document = Session_state_document.archive_document
 
 let reference_for state ~limits ~kind operation_id =
   let open Result.Let_syntax in

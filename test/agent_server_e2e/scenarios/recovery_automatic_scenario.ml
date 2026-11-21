@@ -191,5 +191,32 @@ let run_soft env environment =
       Checkpoint.await_idle env client session;
       Fixture.require
         (Int.equal (Provider.request_count provider) 2)
-        "stock soft checkpoint or successor was submitted twice"))
+        "stock soft checkpoint or successor was submitted twice";
+      let command request =
+        Support.Http_driver.request client request |> Fixture.protocol_ok |> ignore
+      in
+      command (Session_stop
+        { session_id = session.id; attachment_id; mode = Graceful
+        ; idempotency_key = Fixture.key "soft-checkpoint-stop" });
+      let stopped = Support.Background_fixture.await env "stopped checkpointed session"
+        (fun () ->
+           let latest = Fixture.get client session.id in
+           match latest.session.observed_state with
+           | Stopped -> Some latest
+           | _ -> None) in
+      command (Session_reset
+        { session_id = session.id; attachment_id; expected_revision = stopped.revision
+        ; keep_history = false; keep_tasks = true; keep_cache = true
+        ; keep_workspace = true; keep_grants = true; keep_labels = true
+        ; idempotency_key = Fixture.key "soft-checkpoint-reset" });
+      let summary = (Fixture.get client session.id).session in
+      let reset = Support.Background_fixture.checkpoint env fixture { summary; attachment_id }
+        |> Option.value_exn in
+      Fixture.require
+        (Int.equal reset.identity.generation (state.identity.generation + 1)
+         && Option.is_none reset.recovery_rollover
+         && not (Scope.equal (Soft.active_scope reset) next)
+         && List.length (Soft.safe_catalog reset) = 1
+         && Int.equal (Provider.request_count provider) 2)
+        "reset lost its checkpoint note, carried retired rights, or issued inference"))
 ;;

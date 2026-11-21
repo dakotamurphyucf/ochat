@@ -56,6 +56,7 @@ let reset_state (state : Session_state.t) options =
   ; lifecycle = { desired = Stopped; observed = Stopped }
   ; pending_initial_start = false
   ; recovery_installed_originals = None
+  ; recovery_rollover = None
   ; conversation = conversation state options
   ; active_operation = None
   ; permissions = []

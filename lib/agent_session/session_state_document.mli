@@ -38,6 +38,13 @@ val value : t -> Session_state.t
 val with_value : t -> Session_state.t -> t
 val shape : Document_schema.Shape.t
 
+(** Exact retained universal archive carrier, with private recovery notes, sharing
+    grants and rollover control omitted. Compatible unknown fields retain custody. *)
+val archive_document
+  :  t
+  -> limits:Document_schema.Limits.t
+  -> (Document_schema.Document.t, Document_schema.Error.t) result
+
 (** Capacity-only future shape witnesses for this exact already encoded native
     state. The persistence owner supplies its admitted [document]. Witness JSON
     is never decoded as state/evidence or installed; it owns no execution right. *)
@@ -394,6 +401,17 @@ module Transaction : sig
     :  t
     -> limits:Document_schema.Limits.t
     -> (document, Document_schema.Error.t) result
+
+  (** Stage canonical row retirement under the exact archived physical state at
+      the entrance to this transaction. Ordinary and same-generation Created
+      keep their existing raw preservation rules. Call before updating accounting
+      and install the actual [next] before encoding. *)
+  val retire_administrative_history
+    :  t
+    -> original:document
+    -> next:Session_state.t
+    -> limits:Document_schema.Limits.t
+    -> (t, Document_schema.Error.t) result
 
   val transfer_pending
     :  t

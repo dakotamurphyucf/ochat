@@ -51,3 +51,14 @@ val check_replacement_archive
   :  Session_state.t
   -> incoming:Session_state.t
   -> (unit, P.Error.t) result
+
+(** A replacement may retire a rollover ledger only with a fresh administrative
+    archive at the exact prior revision. The ordered document replay checks
+    the complete transaction prestate and persists the archive before the
+    journal. The pure reducer may see the same reference already staged by
+    the transaction's pending-input retirement. *)
+val rollover_replacement_archive
+  :  ?pending_archive_staged:bool
+  -> Session_state.t
+  -> incoming:Session_state.t
+  -> (Session_state.Compaction_archive.t option, P.Error.t) result

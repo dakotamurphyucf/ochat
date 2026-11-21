@@ -2775,6 +2775,32 @@ let encode t ~limits =
   document
 ;;
 
+let archive_document state ~limits =
+  let open Result.Let_syntax in
+  (* History capture excludes private recovery grants, notes and intent keys. *)
+  let value = value state in
+  let state =
+    match value.recovery_notes, value.recovery_note_shares, value.recovery_rollover with
+    | None, None, None -> state
+    | _ ->
+      with_value
+        state
+        { value with
+          recovery_notes = None
+        ; recovery_note_shares = None
+        ; recovery_rollover = None
+        }
+  in
+  let%bind state = encode state ~limits in
+  (* Admit the encoded child without replacing its captured JSON representation. *)
+  let%bind _ = decode ~limits state in
+  D.Document.create
+    ~limits
+    ~kind:"session.compaction_archive"
+    ~version:1
+    ~payload:(`Object [ "state", D.Document.json state ])
+;;
+
 let adopt previous ~limits incoming =
   let open Result.Let_syntax in
   let%bind () = validate_run_carrier previous in
@@ -3069,11 +3095,15 @@ let transfer_pending_internal
     | false, None -> Ok ()
     | (true | false), Some reference ->
       let%bind captured =
-        D.Document.create
-          ~limits
-          ~kind:"session.compaction_archive"
-          ~version:1
-          ~payload:(`Object [ "state", D.Document.json previous_document ])
+        match reference.Session_state.Compaction_archive.kind with
+        | (Reset | Rebuild) when Option.is_some previous.recovery_rollover ->
+          archive_document t ~limits
+        | _ ->
+          D.Document.create
+            ~limits
+            ~kind:"session.compaction_archive"
+            ~version:1
+            ~payload:(`Object [ "state", D.Document.json previous_document ])
       in
       let kind_allowed =
         match reference.Session_state.Compaction_archive.kind with
@@ -3936,6 +3966,39 @@ module Transaction = struct
   let checkpoint t ~limits =
     let%map.Result _ = encode t.staged ~limits in
     t.staged
+  ;;
+
+  let retire_administrative_history t ~original ~(next : S.t) ~limits =
+    let open Result.Let_syntax in
+    let%bind archive =
+      Recovery_window_capture.rollover_replacement_archive (value { staged = original })
+        ~incoming:next
+      |> X.document_result
+    in
+    match archive with
+    | None -> Ok t
+    | Some archive ->
+      let%bind document = archive_document original ~limits in
+      if
+        not
+          (String.equal
+             archive.sha256
+             (Agent_store.Document_record.digest (D.Document.to_string document)))
+      then
+        Error
+          (D.Error.Invalid_field
+             { path = [ "conversation"; "compaction_archives" ]
+             ; reason =
+                 "administrative archive does not bind the exact previous admitted document"
+             })
+      else
+        let%map staged =
+          retire_canonical_compaction
+            t.staged
+            ~history:next.conversation.canonical_history
+            ~limits
+        in
+        { staged }
   ;;
 
   let transfer_pending t ~plan ~archive ~expiry_archive ~limits =

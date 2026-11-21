@@ -917,10 +917,11 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
         state.recovery_reminders
         ~incoming:created.recovery_reminders
     in
-    let%bind () =
-      Recovery_rollover.check_unchanged
-        state.recovery_rollover
-        ~incoming:created.recovery_rollover
+    let%bind _ =
+      Recovery_window_capture.rollover_replacement_archive
+        ~pending_archive_staged:true
+        state
+        ~incoming:created
     in
     let%bind () =
       Session_state.Compaction_archive.check_rollover_unchanged

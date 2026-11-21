@@ -8,18 +8,50 @@ module Policy_path = struct
     | Absent_only
 end
 
-let prepare previous ~delta ~limits =
+let check_administration_order
+      (original : Session_state.t)
+      (current : Session_state.t)
+      delta
+  =
+  let before = original.recovery_rollover in
+  let staged = current.recovery_rollover in
+  if Option.is_none before && Option.is_none staged
+  then Ok ()
+  else
+    let open Result.Let_syntax in
+    let%bind () =
+      Recovery_rollover.check_unchanged before ~incoming:staged |> X.document_result
+    in
+    let exact_order =
+      match delta with
+      | Session_delta.Created _ | Batch [ Created _ ] -> true
+      | Batch [ Pending_inputs_changed (mutation, Some archive, _); Created _ ] ->
+        Pending_mutation.retires_for_administration mutation ~kind:archive.kind
+      | _ -> false
+    in
+    if exact_order
+    then Ok ()
+    else
+      Error
+        (Document_schema.Error.Invalid_field
+           { path = [ "recovery_rollover" ]
+           ; reason = "rollover retirement requires the exact administrative transaction"
+           })
+;;
+
+let prepare previous_document ~delta:transaction ~limits =
   let%bind.Result () =
-    Session_delta.validate_rollover_transaction delta |> X.document_result
+    Session_delta.validate_rollover_transaction transaction |> X.document_result
   in
-  let previous_value = Session_state_document.value previous in
+  let previous_value = Session_state_document.value previous_document in
   let%bind.Result () =
-    Session_delta.validate_successor_dispatch previous_value delta |> X.document_result
+    Session_delta.validate_successor_dispatch previous_value transaction
+    |> X.document_result
   in
   let policy_path =
     if
       Session_delta.requires_policy_tracking
-        delta
+        transaction
         ~previous:previous_value.policy_canonical_usage
     then Policy_path.Capturing
     else Absent_only
@@ -27,7 +59,7 @@ let prepare previous ~delta ~limits =
   let goal_policy_path =
     if
       Session_delta.requires_goal_policy_tracking
-        delta
+        transaction
         ~previous:previous_value.goal_policy_contributions
         ~canonical:previous_value.policy_canonical_usage
     then Policy_path.Capturing
@@ -91,11 +123,24 @@ let prepare previous ~delta ~limits =
         apply_context carrier delta (Moderator_execution execution)
       | (Moderator_execution_changed execution | Moderator_execution_reconciled execution)
         as delta -> apply_context carrier delta (Moderator_execution execution)
-      | Created _ as delta ->
+      | Created _ as replacement ->
         let open Result.Let_syntax in
         let%bind state =
-          Session_delta.apply ~limits (Transaction.value carrier) delta
+          Session_delta.apply ~limits (Transaction.value carrier) replacement
           |> X.document_result
+        in
+        let%bind carrier =
+          if Int.equal previous.identity.generation state.identity.generation
+          then Ok carrier
+          else (
+            let%bind () =
+              check_administration_order previous_value previous transaction
+            in
+            Transaction.retire_administrative_history
+              carrier
+              ~original:previous_document
+              ~next:state
+              ~limits)
         in
         let%bind carrier = Transaction.replace_goal_accounting carrier state in
         let%map carrier =
@@ -367,11 +412,12 @@ let prepare previous ~delta ~limits =
   let open Result.Let_syntax in
   let%bind previous =
     match policy_path, goal_policy_path with
-    | Capturing, (Capturing | Absent_only) -> Transaction.begin_ previous ~limits
-    | Absent_only, Capturing -> Transaction.begin_absent_policy previous ~limits
-    | Absent_only, Absent_only -> Transaction.begin_absent_accounting previous ~limits
+    | Capturing, (Capturing | Absent_only) -> Transaction.begin_ previous_document ~limits
+    | Absent_only, Capturing -> Transaction.begin_absent_policy previous_document ~limits
+    | Absent_only, Absent_only ->
+      Transaction.begin_absent_accounting previous_document ~limits
   in
-  let%bind candidate = apply previous delta in
+  let%bind candidate = apply previous transaction in
   let current = Transaction.value candidate in
   let%bind () =
     Queue_provenance_validation.validate_transition

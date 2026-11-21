@@ -26,6 +26,13 @@ let successor_operation t =
   | _ -> None
 ;;
 
+let retires_for_administration t ~kind =
+  match t.change, kind with
+  | Retire Source_reset, Session_state.Compaction_archive.Reset
+  | Retire Source_replaced, Rebuild -> true
+  | _ -> false
+;;
+
 let prepare t state ~limits =
   let open Result.Let_syntax in
   let%bind retention = Pending_disposition.Retention.create ~max_records:t.max_records in

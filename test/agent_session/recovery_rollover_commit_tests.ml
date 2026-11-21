@@ -195,6 +195,15 @@ let record_checkpoint actor writer (receipt : Catalog.Receipt.t) =
   |> protocol_ok
 ;;
 
+let reset_options : A.Administration.reset_options =
+  { keep_history = false
+  ; keep_tasks = false
+  ; keep_grants = false
+  ; keep_labels = true
+  ; workspace_instance = None
+  }
+;;
+
 let publish ?checkpoint retain = R.Settlement.Publish { checkpoint; retain }
 
 let check_unmodified (before : A.Session_state.t) (after : A.Session_state.t) =
@@ -612,10 +621,397 @@ let%expect_test "archive sync and journal acknowledgement have distinct replay e
              let after = W.state actor in
              check_unmodified before after;
              assert (List.is_empty after.conversation.canonical_history);
-             assert (List.length after.conversation.compaction_archives = 2)))));
+             assert (List.length after.conversation.compaction_archives = 2);
+             Actor.reset
+               actor
+               ~attachment_id:writer
+               ~expected_revision:after.counters.revision
+               reset_options
+             |> protocol_ok
+             |> ignore;
+             let reset = W.state actor in
+             [%test_eq: int] 1 (Scope.generation (W.scope reset));
+             assert (Option.is_none reset.recovery_rollover);
+             let references = reset.conversation.compaction_archives in
+             let admin = List.hd_exn references in
+             assert (A.Session_state.Compaction_archive.equal_kind admin.kind Reset);
+             [%test_eq: int64] after.counters.revision admin.revision;
+             [%test_eq: int] 3 (List.length references);
+             let admin_state = W.read_archive fixture admin |> protocol_ok in
+             assert (Scope.equal (W.scope after) (W.scope admin_state));
+             assert (Option.is_none admin_state.recovery_rollover);
+             assert (Option.is_none admin_state.recovery_notes);
+             ignore (W.read_archive fixture reference |> protocol_ok : A.Session_state.t);
+             Identity.expect_error Conflict (settle actor writer ~id cut Cancel);
+             let reset =
+               (recovery fixture ~journal ~initial).state |> Persistence.Restored.state
+             in
+             assert (Option.is_none reset.recovery_rollover);
+             assert (Scope.equal (W.scope reset) (W.scope (W.state actor)))))));
   print_endline
     "orphan kept the old head, writer failure required reopen, lost reply replayed one \
      successor, force recorded archive-only";
   [%expect
     {| orphan kept the old head, writer failure required reopen, lost reply replayed one successor, force recorded archive-only |}]
+;;
+
+let update_field json name ~f = Identity.set json name (f (Identity.get json name))
+
+let raw_future_initial state =
+  let open A.Session_state_document in
+  let json =
+    authored state |> encode ~limits:document_limits |> document_ok |> D.Document.json
+  in
+  let json =
+    update_field json "payload" ~f:(fun payload ->
+      update_field payload "conversation" ~f:(fun conversation ->
+        update_field conversation "canonical_history" ~f:(function
+          | `Array [ row ] -> `Array [ Identity.set row "future_row" (`Number "1.00") ]
+          | _ -> failwith "expected one original row"))
+      |> fun payload ->
+      update_field payload "identity" ~f:(fun identity ->
+        Identity.set identity "future_identity" `True))
+  in
+  D.Document.inspect ~limits:document_limits json
+  |> document_ok
+  |> decode ~limits:document_limits
+  |> document_ok
+  |> Persistence.Restored.of_state_document
+;;
+
+let assert_private_note (state : A.Session_state.t) (receipt : Catalog.Receipt.t) =
+  let catalog = Option.value_exn state.recovery_notes in
+  let body = Catalog.read catalog receipt.selection |> Result.ok |> Option.value_exn in
+  [%test_eq: string] "private reset note" (Catalog.Content.to_string body)
+;;
+
+let assert_physical_archive (fixture : W.fixture) reference =
+  let location =
+    Filename.concat
+      (S.Session_store.Handle.archive_directory fixture.handle)
+      (W.Archive.filename reference)
+  in
+  let frame =
+    S.Durable_file.load_bounded ~env:fixture.env ~path:location ~max_bytes:W.payload_limit
+    |> store_ok
+  in
+  let _, captured =
+    W.Archive.decode_record
+      ~max_payload_length:W.payload_limit
+      ~expected_digest:(Some reference.A.Session_state.Compaction_archive.sha256)
+      frame
+    |> protocol_ok
+  in
+  let payload =
+    A.Session_state_document.encode captured ~limits:document_limits
+    |> document_ok
+    |> D.Document.payload
+  in
+  let rows = Identity.get (Identity.get payload "conversation") "canonical_history" in
+  (match rows with
+   | `Array [ row ] ->
+     assert (D.Json.equal (Identity.get row "future_row") (`Number "1.00"))
+   | _ -> failwith "administrative archive lost the retired physical row");
+  assert (
+    D.Json.equal (Identity.get (Identity.get payload "identity") "future_identity") `True)
+;;
+
+let%expect_test
+    "reset and rebuild retire checkpoint and pending intent at the archive boundary"
+  =
+  List.iter [ `Checkpoint; `Pending ] ~f:(fun mode ->
+    with_actor_workspace (fun env workspace_instance ->
+      Eio.Switch.run (fun sw ->
+        let seed =
+          actor_state ~workspace_instance ~liveness:Detached ~start_immediately:false
+        in
+        let original = W.history 0 "retired administrative history" in
+        let seed =
+          A.Session_state.create
+            ~identity:seed.identity
+            ~spec:seed.spec
+            ~initial_history:[ original ]
+        in
+        let seed =
+          { seed with
+            conversation = { seed.conversation with initial_prompt_entry_count = 0 }
+          }
+        in
+        let seed =
+          match mode with
+          | `Checkpoint -> seed
+          | `Pending ->
+            let queued =
+              W.history 1 "undelivered user input" |> pending_document ~generation:0
+            in
+            { seed with
+              conversation =
+                { seed.conversation with
+                  deferred_user_entries = [ queued ]
+                ; next_history_sequence = 2L
+                ; reserved_history_through = 2L
+                }
+            }
+        in
+        let storage = Job_artifact_fixtures.create env sw seed in
+        let owner =
+          P.Session_ref.create
+            ~server_id:(S.Session_store.server_id storage.sessions)
+            ~session_id
+        in
+        let fixture : W.fixture =
+          { env; sessions = storage.sessions; handle = storage.session; owner }
+        in
+        let initial = raw_future_initial seed in
+        let journal = W.journal fixture S.Journal.create in
+        let can_write = ref false in
+        let archive reference document =
+          if !can_write
+          then
+            W.Archive.write_document
+              ~env
+              ~handle:fixture.handle
+              ~max_payload_length:W.payload_limit
+              reference
+              document
+          else
+            Error
+              (P.Error.create
+                 Persistence_error
+                 ~retryable:false
+                 ~message:"archive sync denied by fixture"
+                 ())
+        in
+        let after, note, fresh_intent =
+          W.with_actor
+            fixture
+            sw
+            journal
+            ~restored:initial
+            ~previous_transaction_hash:None
+            ~archive
+            (fun actor persistence ->
+               let writer = W.attach actor in
+               set_manual actor fixture;
+               ignore
+                 (Actor.enable_recovery_windows
+                    actor
+                    ~actor:(W.actor_proof ())
+                    ~attachment_id:writer
+                    ~authorize:Identity.allow
+                  |> protocol_ok
+                  : Scope.t);
+               let access =
+                 A.Recovery_note_access.operator
+                   (W.actor_proof ())
+                   ~owner
+                   ~generation:0
+                   ~attachment_id:(Some writer)
+                   ~authorize:Identity.allow
+               in
+               let note =
+                 Actor.mutate_recovery_note_operator
+                   actor
+                   ~access
+                   ~key:(Identity.key "private-reset-note")
+                   (Identity.create "private reset note")
+                 |> protocol_ok
+               in
+               ignore (record_checkpoint actor writer note : R.Checkpoint.t);
+               let old_basis = expected actor in
+               let old_intent =
+                 match mode with
+                 | `Checkpoint -> None
+                 | `Pending ->
+                   Some (request actor writer ~name:"reset-key" old_basis |> protocol_ok)
+               in
+               let before = W.state actor in
+               let citation =
+                 W.membership before |> List.hd_exn |> W.Ledger.Member.citation
+               in
+               let unchanged = Identity.count journal in
+               let forged = { before with recovery_rollover = None } in
+               Identity.expect_error
+                 Invalid_request
+                 (A.Session_delta.apply before (Created forged));
+               let physical_prior =
+                 Persistence.restored persistence |> Persistence.Restored.state_document
+               in
+               let candidate =
+                 A.Administration.reset before reset_options |> protocol_ok
+               in
+               let forged_no_archive = A.Session_delta.apply before (Created candidate) in
+               Identity.expect_error Invalid_request forged_no_archive;
+               let forged_archive =
+                 A.Session_state.Compaction_archive.
+                   { operation_id = P.Id.Operation.create ()
+                   ; revision = before.counters.revision
+                   ; sha256 = String.make 64 '0'
+                   ; kind = Reset
+                   ; invocation_dispositions = []
+                   }
+               in
+               let forged =
+                 { candidate with
+                   conversation =
+                     { candidate.conversation with
+                       compaction_archives =
+                         forged_archive :: before.conversation.compaction_archives
+                     }
+                 }
+               in
+               assert (
+                 Result.is_error
+                   (A.Session_document_transition.admit
+                      physical_prior
+                      ~delta:(Created forged)
+                      ~next:forged
+                      ~limits:document_limits));
+               if
+                 P.Id.Context_window.equal
+                   (Scope.window (W.scope before))
+                   (Scope.window (W.scope candidate))
+               then failwith "planned administration reuses a retired window";
+               (match mode with
+                | `Pending -> ()
+                | `Checkpoint ->
+                  let archive =
+                    W.Archive.reference_for
+                      physical_prior
+                      ~limits:document_limits
+                      ~kind:Reset
+                      (P.Id.Operation.create ())
+                    |> protocol_ok
+                  in
+                  let exact =
+                    { candidate with
+                      conversation =
+                        { candidate.conversation with
+                          compaction_archives =
+                            archive :: before.conversation.compaction_archives
+                        }
+                    }
+                  in
+                  assert (
+                    Result.is_error
+                      (A.Session_document_transition.admit
+                         physical_prior
+                         ~delta:(Batch [ Failure_changed None; Created exact ])
+                         ~next:exact
+                         ~limits:document_limits)));
+               let replace () =
+                 match mode with
+                 | `Checkpoint ->
+                   Actor.reset
+                     actor
+                     ~attachment_id:writer
+                     ~expected_revision:before.counters.revision
+                     reset_options
+                 | `Pending ->
+                   let prepared =
+                     A.Administration.plan_rebuild before before.spec.prompt_revision_id
+                     |> protocol_ok
+                   in
+                   Actor.commit_reconciled_administration
+                     actor
+                     ~command_audit:None
+                     ~attachment_id:writer
+                     ~expected:before
+                     ~kind:Rebuild
+                     prepared
+               in
+               Identity.expect_error Persistence_error (replace ());
+               [%test_eq: int] unchanged (Identity.count journal);
+               assert (
+                 phys_equal before.recovery_rollover (W.state actor).recovery_rollover);
+               assert (Scope.equal (W.scope before) (W.scope (W.state actor)));
+               can_write := true;
+               ignore (replace () |> protocol_ok : P.Session.t);
+               let after = W.state actor in
+               assert (Option.is_none after.recovery_rollover);
+               assert (not (Scope.equal (W.scope before) (W.scope after)));
+               [%test_eq: int] 1 after.identity.generation;
+               assert (List.is_empty after.conversation.canonical_history);
+               assert_private_note after note;
+               let administrative = List.hd_exn after.conversation.compaction_archives in
+               assert (
+                 A.Session_state.Compaction_archive.equal_kind
+                   administrative.kind
+                   (match mode with
+                    | `Checkpoint -> Reset
+                    | `Pending -> Rebuild));
+               let archive = W.read_archive fixture administrative |> protocol_ok in
+               assert (W.same_ledger before archive);
+               assert (Option.is_none archive.recovery_rollover);
+               assert (Option.is_none archive.recovery_notes);
+               (match mode with
+                | `Checkpoint -> ()
+                | `Pending ->
+                  [%test_eq: int]
+                    1
+                    (List.length archive.conversation.deferred_user_entries);
+                  assert (List.is_empty after.conversation.deferred_user_entries));
+               assert_physical_archive fixture administrative;
+               let source current ~project =
+                 A.Recovery_source_reader.read
+                   fixture.sessions
+                   ~handle:fixture.handle
+                   ~current
+                   ~max_frame_bytes:W.payload_limit
+                   citation
+                   ~project
+               in
+               assert (
+                 Result.is_ok
+                   (source
+                      (fun () -> Ok before)
+                      ~project:(fun row -> Ok (P.History.equal_entry row original))));
+               assert (
+                 Result.is_error
+                   (source
+                      (fun () -> Ok after)
+                      ~project:(fun _ -> failwith "old recovery row disclosed")));
+               Option.iter old_intent ~f:(fun receipt ->
+                 Identity.expect_error
+                   Conflict
+                   (settle actor writer ~id:receipt.intent.id old_basis Cancel));
+               Identity.expect_error
+                 Conflict
+                 (request actor writer ~name:"reset-key" old_basis);
+               let new_intent =
+                 request actor writer ~name:"reset-key" (expected actor) |> protocol_ok
+               in
+               Option.iter old_intent ~f:(fun receipt ->
+                 assert (not (P.Id.Operation.equal receipt.intent.id new_intent.intent.id)));
+               after, note, new_intent)
+        in
+        let reloaded =
+          recovery fixture ~journal:(W.journal fixture S.Journal.open_existing) ~initial
+        in
+        let state = Persistence.Restored.state reloaded.state in
+        assert (Scope.equal (W.scope after) (W.scope state));
+        assert_private_note state note;
+        assert (R.Receipt.equal fresh_intent (lookup state ~id:fresh_intent.intent.id));
+        let payload =
+          Persistence.Restored.state_document reloaded.state
+          |> A.Session_state_document.encode ~limits:document_limits
+          |> document_ok
+          |> D.Document.payload
+        in
+        assert (
+          D.Json.equal
+            (Identity.get (Identity.get payload "identity") "future_identity")
+            `True);
+        let archive = List.hd_exn state.conversation.compaction_archives in
+        assert_physical_archive fixture archive;
+        printf
+          "%s archived before retirement and reopened with new authority\n"
+          (match mode with
+           | `Checkpoint -> "checkpoint-only reset"
+           | `Pending -> "pending-intent rebuild"))));
+  [%expect
+    {|
+    checkpoint-only reset archived before retirement and reopened with new authority
+    pending-intent rebuild archived before retirement and reopened with new authority
+    |}]
 ;;

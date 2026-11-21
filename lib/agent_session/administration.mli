@@ -14,7 +14,9 @@ type reset_options =
 
 (** Returns a validated replacement with its retained inference ledger advanced
     to the new generation. Active inference attempts or turns reject the reset;
-    no retained evidence is cleared or fabricated. *)
+    retained inference evidence stays intact. Pending rollover intent, checkpoint
+    and live receipts close with their generation. The committed replacement
+    requires the independently retained previous-generation history archive. *)
 val reset
   :  Session_state.t
   -> reset_options

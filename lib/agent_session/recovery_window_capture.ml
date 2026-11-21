@@ -371,3 +371,49 @@ let check_replacement_archive (state : S.t) ~(incoming : S.t) =
   then Ok ()
   else invalid "recovery generation replacement requires an exact administrative archive"
 ;;
+
+let rollover_replacement_archive
+      ?(pending_archive_staged = false)
+      (state : S.t)
+      ~(incoming : S.t)
+  =
+  let before = state.identity.generation in
+  let after = incoming.identity.generation in
+  match state.recovery_rollover, incoming.recovery_rollover with
+  | Some _, None when not (Int.equal before after) ->
+    let module Archive = S.Compaction_archive in
+    let prior = state.conversation.compaction_archives in
+    let same_reference a b =
+      [%equal: Sexp.t] (Archive.sexp_of_t a) (Archive.sexp_of_t b)
+    in
+    let administrative (archive : Archive.t) =
+      match archive.kind with
+      | Reset | Rebuild -> true
+      | Compaction | Upgrade | Edit | Delete | Pending_input | Rollover -> false
+    in
+    (match incoming.conversation.compaction_archives with
+     | archive :: retained
+       when before < Int.max_value
+            && Int.equal after (before + 1)
+            && P.Id.Session.equal state.identity.session_id incoming.identity.session_id
+            && Int64.equal archive.revision state.counters.revision
+            && administrative archive
+            && (not
+                  (List.exists retained ~f:(fun previous ->
+                     P.Id.Operation.equal previous.operation_id archive.operation_id
+                     || Int64.equal previous.revision archive.revision)))
+            && (List.equal same_reference prior retained
+                || (pending_archive_staged
+                    && List.equal same_reference prior (archive :: retained))) ->
+       Ok (Some archive)
+     | _ -> invalid "rollover retirement requires a fresh exact administrative archive")
+  | _, Some _ when not (Int.equal before after) ->
+    invalid "generation replacement retained an old rollover ledger"
+  | _ ->
+    let%map.Result () =
+      Recovery_rollover.check_unchanged
+        state.recovery_rollover
+        ~incoming:incoming.recovery_rollover
+    in
+    None
+;;
