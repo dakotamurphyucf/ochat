@@ -229,6 +229,7 @@ let exact_target_policy target =
 ;;
 
 let%expect_test "selected foreground tools use the real preparation and original actor" =
+  let module Graph = Agent_server.Graph_tracking in
   with_actor_workspace (fun env workspace ->
     Eio.Switch.run (fun sw ->
       let remaining = "context_remaining" in
@@ -305,14 +306,30 @@ let%expect_test "selected foreground tools use the real preparation and original
           env
           (Filename.concat workspace.canonical_root.native_path "rollover-selected")
       in
-      Storage.with_writer
+      let terminal = ref None in
+      let state_committed _ events =
+        List.iter events ~f:(fun (event : P.Event.Durable.t) ->
+          match
+            P.Event.Durable.Payload.of_json ~kind:event.kind event.payload |> protocol_ok
+          with
+          | Operation_completed operation
+          | Operation_failed operation
+          | Operation_cancelled operation
+          | Operation_interrupted operation -> terminal := Some operation
+          | _ -> ())
+      in
+      Identity.with_actor
         env
         sw
         journal
         (A.Session_persistence.Restored.authored initial)
         ~owner:Identity.owner
+        ~latest_sequence:0L
+        ~previous_transaction_hash:None
+        ~snapshot_payload_limit:1048576
         ~before_commit:None
         ~now:P.Timestamp.now
+        ~state_committed
         (fun actor _ ->
            let attachment_id = Identity.attach actor Owner_read_write in
            let scope = enable actor ~attachment_id in
@@ -360,6 +377,20 @@ let%expect_test "selected foreground tools use the real preparation and original
            let config =
              Authoring_input_tests.worker_config env (fun ~sw:_ ~inputs:_ -> Seq.empty)
            in
+           let fixture_identity = Inference_fixture.identity fixture in
+           let graph =
+             let upstream =
+               Inference_tracking_tests.upstream (fun ~scope:_ ~accounting_id:_ -> ())
+             in
+             Graph.create
+               actor
+               ~source:(Inference_tracking_tests.source "selected-context-fixture")
+               ~upstream:
+                 { upstream with
+                   new_preparation_id = fixture_identity.new_preparation_id
+                 }
+             |> protocol_ok
+           in
            let worker =
              A.Turn_worker.create
                ~root_binding:
@@ -374,7 +405,11 @@ let%expect_test "selected foreground tools use the real preparation and original
                { config with
                  inference_context =
                    Inference_fixture.resolve fixture target |> C.runtime_ok
-               ; inference_identity = (fun _ -> Inference_fixture.identity fixture)
+               ; inference_identity =
+                   (fun allocate -> Graph.bind_identity graph ~allocate)
+               ; on_inference_attempt = Graph.on_attempt graph
+               ; on_inference_observation = Graph.on_observation graph
+               ; on_inference_completion = Graph.on_completion graph
                ; tools = Chat_response.Tool.convert_tools tools
                ; tool_tbl
                ; permission_profile =
@@ -388,20 +423,35 @@ let%expect_test "selected foreground tools use the real preparation and original
            Actor.set_operation_worker actor (Some worker) |> protocol_ok;
            Actor.start actor ~attachment_id |> protocol_ok |> ignore;
            let submit scopes =
+             terminal := None;
              let reserved = Actor.reserve_history_block actor ~count:1 |> protocol_ok in
              let input =
                Pending_input_tests.occurrence
                  (Int64.to_int_exn reserved.first_sequence)
                  "inspect context"
              in
-             Actor.submit_message_authenticated
-               actor
-               ~actor:(Identity.proof scopes)
-               ~attachment_id
-               input
-             |> protocol_ok
-             |> ignore;
-             Authoring_input_tests.finished actor
+             let admitted =
+               Actor.submit_message_authenticated
+                 actor
+                 ~actor:(Identity.proof scopes)
+                 ~attachment_id
+                 input
+               |> protocol_ok
+             in
+             let operation_id = Option.value_exn admitted.operation_id in
+             let state = Authoring_input_tests.finished actor in
+             (match !terminal with
+              | Some { id; state = Completed; _ }
+                when P.Id.Operation.equal id operation_id -> ()
+              | terminal ->
+                raise_s
+                  [%sexp
+                    "selected foreground did not complete"
+                  , { operation_id : P.Id.Operation.t
+                    ; terminal : P.Operation.t option
+                    ; provider_calls = (!attempt : int)
+                    }]);
+             state
            in
            let outcomes state tool =
              List.filter_map state.A.Session_state.invocations ~f:(fun invocation ->
@@ -431,17 +481,24 @@ let%expect_test "selected foreground tools use the real preparation and original
                  | _ -> None)
              in
              let capacity = field (completed remaining) "capacity" in
-             assert_json (`String "manual") (field capacity "effective_mode");
+             assert_json (`String "automatic") (field capacity "requested_mode");
+             assert_json (`String "automatic") (field capacity "effective_mode");
              assert_json (`String "measured") (field capacity "evidence");
              assert_json (`Number "330") (field capacity "remaining");
              assert (List.exists (outcomes state new_window) ~f:(expect_failure Conflict));
-             assert_json
-               (`String "pending")
-               (field (field (completed new_window) "status") "kind");
+             let admitted = completed new_window in
+             assert_json (`String "pending") (field (field admitted "status") "kind");
              let ledger = Option.value_exn state.recovery_rollover in
-             let intent = R.pending ledger |> Option.value_exn in
-             assert (Scope.equal intent.expected.scope scope);
-             (match intent.requester with
+             let id = P.Id.Operation.of_json (field admitted "id") |> protocol_ok in
+             let receipt = R.find ledger ~id |> Option.value_exn in
+             (match receipt.status with
+              | Terminal (Superseded Checkpoint_required) -> ()
+              | status ->
+                raise_s
+                  [%sexp
+                    "native rollover without a checkpoint", (status : R.Receipt.status)]);
+             assert (Scope.equal receipt.intent.expected.scope scope);
+             (match receipt.intent.requester with
               | Native _ -> ()
               | Operator _ | Automatic _ -> failwith "wrong requester");
              let windows = Option.value_exn state.recovery_windows in
@@ -450,12 +507,14 @@ let%expect_test "selected foreground tools use the real preparation and original
                  scope
                  (A.Recovery_window_ledger.active windows
                   |> A.Recovery_window_record.scope));
-             [%test_eq: int] !attempt 6))));
+             [%test_eq: int] !attempt 6);
+           Graph.seal graph |> protocol_ok;
+           Graph.finish graph |> protocol_ok)));
   print_endline
-    "Selected tools enforced original scope, measured the actual preparation and \
-     admitted a pending intent";
+    "Selected tools enforced original scope, measured the actual preparation and settled \
+     the native intent without a checkpoint";
   [%expect
-    {| Selected tools enforced original scope, measured the actual preparation and admitted a pending intent |}]
+    {| Selected tools enforced original scope, measured the actual preparation and settled the native intent without a checkpoint |}]
 ;;
 
 let%expect_test "shared operator receipts preserve a pending cut across canonical replay" =
