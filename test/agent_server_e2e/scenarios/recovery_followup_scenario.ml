@@ -118,12 +118,11 @@ let exercise env temporary ~cancel =
             (not (P.Recovery_window.Scope.equal initial waiting.basis.scope))
             "Wait did not belong to the successor";
           connect (fun _ foreign _ ->
-            require
-              (Result.is_error
-                 (Client.followup
-                    foreign
-                    { attachment_id = writer.id; selection = Inspect reference }))
-              "foreign client used the original writer");
+            Operator.expect_error
+              (Client.followup
+                 foreign
+                 { attachment_id = writer.id; selection = Inspect reference })
+              Permission_denied);
           Operator.expect_error (follow (Apply (before.basis, Continue))) Conflict;
           if cancel
           then Operator.expect_error (follow (Apply (waiting.basis, Cancel))) Interrupted
