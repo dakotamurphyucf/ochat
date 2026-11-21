@@ -135,6 +135,7 @@ let with_actor
       let actor =
         Actor.create_with_bound_runtime_source_owner
           ~canonical_persistence
+          ~interactive_permission_responder:Use_writable_attachment
           ~runtime_source_owner:
             (A.Runtime_source_owner.create () |> A.Runtime_source_owner.identity)
           ~ordinary_execution_admission:(fun () -> Ok ())

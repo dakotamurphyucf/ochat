@@ -735,9 +735,12 @@ val create_with_runtime_source_owner
 (** First-party canonical counterpart. Validates SAME physical commit closure,
     writer session and creating domain before Actor startup. Old constructors
     remain unsupported for failed-startup disposal; no generic availability
-    callback or alternative persistence adapter is admitted by this binding. *)
+    callback or alternative persistence adapter is admitted by this binding.
+    [interactive_permission_responder] is selected by the actual process owner
+    even when the Actor loads a session originally created by another frontend. *)
 val create_with_bound_runtime_source_owner
   :  canonical_persistence:Canonical_persistence.t
+  -> interactive_permission_responder:Permission_policy.interactive_responder
   -> runtime_source_owner:Runtime_source_owner.Identity.t
   -> ordinary_execution_admission:(unit -> (unit, Agent_protocol.Error.t) result)
   -> schedule_permission_timeouts:bool

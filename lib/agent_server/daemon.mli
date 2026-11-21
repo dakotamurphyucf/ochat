@@ -292,6 +292,11 @@ type options =
   ; quota_limits : Agent_session.Quota_manager.limits
   ; reviewer_resolver : Catalog_builder.reviewer_resolver option
   ; policy_evaluator_resolver : Catalog_builder.policy_evaluator_resolver option
+  ; interactive_permission_responder :
+      Agent_session.Permission_policy.interactive_responder
+    (** Trusted process-local frontend behavior. Defaults to using current
+        writable attachments as responders. A frontend that cannot answer
+        approval prompts disables them even when it writes the conversation. *)
   ; inference_policy : Session_factory.inference_policy
   ; context_capacity_host : Agent_session.Session_context_capacity.Host.t
     (** Explicit durable-session and exact-target qualification. Disabled by

@@ -351,6 +351,8 @@ val create
   -> tool_dir:string
   -> home:string option
   -> inference_policy:inference_policy
+  -> interactive_permission_responder:
+       Agent_session.Permission_policy.interactive_responder
   -> context_capacity_host:Agent_session.Session_context_capacity.Host.t
   -> local_recovery_host:Operator_authorization.Local_recovery_host.t option
   -> qualify_chatml_extensions:bool

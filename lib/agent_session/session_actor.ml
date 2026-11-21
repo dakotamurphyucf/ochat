@@ -6452,7 +6452,7 @@ type _ request =
   | Consume_initial_notifications :
       Foreground_publication.t * Notification_delivery.idle
       -> Chat_response.In_memory_stream.Safe_point_input.batch request
-  | Has_writer_attachment : bool request
+  | Has_interactive_permission_responder : bool request
   | Invocation_granted : string * string -> bool request
   | Worker_ready : Worker_readiness.t * (unit -> unit) -> unit request
   | Worker_terminal :
@@ -6835,6 +6835,7 @@ and t =
   ; max_attachments : int
   ; subscriber_capacity : int
   ; schedule_permission_timeouts : bool
+  ; interactive_permission_responder : Permission_policy.interactive_responder
   ; mutable owner_timer_cancel : unit Eio.Promise.u option
   ; mutable foreground_publication : Foreground_publication.t option
   ; mutable active_cancel : (unit -> unit) option
@@ -17773,7 +17774,11 @@ let write_attachment t attachment_id =
   Writer_attachment.require t.state ~attachment_id ~now:t.services.now
 ;;
 
-let has_writer_attachment t = Writer_attachment.any t.state ~now:t.services.now
+let has_interactive_permission_responder t =
+  Permission_policy.has_interactive_responder
+    t.interactive_permission_responder
+    ~has_writable_attachment:(fun () -> Writer_attachment.any t.state ~now:t.services.now)
+;;
 
 let grant_is_unexpired t grant =
   match grant.Agent_protocol.Grant.expires_at with
@@ -30291,7 +30296,9 @@ let worker_capabilities t worker (publication : Foreground_publication.t) id_sou
         (fun ~permission ~review -> request_review_internal t ~permission ~review)
     ; responder_available =
         (fun () ->
-          call t Has_writer_attachment |> Result.ok |> Option.value ~default:false)
+          call t Has_interactive_permission_responder
+          |> Result.ok
+          |> Option.value ~default:false)
     ; invocation_granted =
         (fun ~tool_name ~identity_digest ->
           call t (Invocation_granted (tool_name, identity_digest))
@@ -50155,7 +50162,7 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Commit_worker_entry _
   | Publish_invocation_output _
   | Commit_worker_moderator _
-  | Has_writer_attachment
+  | Has_interactive_permission_responder
   | Invocation_granted _
   | Worker_ready _
   | Worker_terminal _
@@ -62737,7 +62744,7 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
     | Commit_worker_moderator (publication, snapshot) ->
       with_foreground_publication t publication (fun operation_id ~check ->
         commit_worker_moderator t operation_id ~check snapshot)
-    | Has_writer_attachment -> Ok (has_writer_attachment t)
+    | Has_interactive_permission_responder -> Ok (has_interactive_permission_responder t)
     | Authorize_writer attachment_id -> with_writer t attachment_id (fun () -> Ok ())
     | Invocation_granted (tool_name, identity_digest) ->
       Ok (invocation_granted t ~tool_name ~identity_digest)
@@ -63086,6 +63093,7 @@ let rec run t =
 ;;
 
 let create_internal
+      ~interactive_permission_responder
       ~canonical_persistence
       ~runtime_source_owner
       ~ordinary_execution_admission
@@ -63163,6 +63171,7 @@ let create_internal
     ; max_attachments
     ; subscriber_capacity
     ; schedule_permission_timeouts
+    ; interactive_permission_responder
     ; owner_timer_cancel = None
     ; foreground_publication = None
     ; active_cancel = None
@@ -63273,6 +63282,7 @@ let create_with_owner_lease_duration
       ~services
   =
   create_internal
+    ~interactive_permission_responder:Use_writable_attachment
     ~canonical_persistence:None
     ~runtime_source_owner:None
     ~ordinary_execution_admission:(fun () -> Ok ())
@@ -63307,6 +63317,7 @@ let create_with_runtime_source_owner
       ~services
   =
   create_internal
+    ~interactive_permission_responder:Use_writable_attachment
     ~canonical_persistence:None
     ~runtime_source_owner:(Some runtime_source_owner)
     ~ordinary_execution_admission
@@ -63326,6 +63337,7 @@ let create_with_runtime_source_owner
 
 let create_with_bound_runtime_source_owner
       ~canonical_persistence
+      ~interactive_permission_responder
       ~runtime_source_owner
       ~ordinary_execution_admission
       ~schedule_permission_timeouts
@@ -63342,6 +63354,7 @@ let create_with_bound_runtime_source_owner
       ~services
   =
   create_internal
+    ~interactive_permission_responder
     ~canonical_persistence:(Some canonical_persistence)
     ~runtime_source_owner:(Some runtime_source_owner)
     ~ordinary_execution_admission

@@ -316,6 +316,8 @@ type t =
   ; tool_dir : string
   ; home : string option
   ; inference_policy : inference_policy
+  ; interactive_permission_responder :
+      Agent_session.Permission_policy.interactive_responder
   ; context_capacity_host : Agent_session.Session_context_capacity.Host.t
   ; local_recovery_host : Operator_authorization.Local_recovery_host.t option
   ; qualify_chatml_extensions : bool
@@ -1326,15 +1328,11 @@ let shell_permission_timeout profile =
     Float.of_int value /. 1_000.)
 ;;
 
-let shell_responder_available t state =
-  List.exists state.Agent_session.Session_state.attachments ~f:(fun attachment ->
-    match attachment.Agent_protocol.Session.Attachment.mode with
-    | Read_write -> true
-    | Owner_read_write ->
-      Option.value_map attachment.owner_lease ~default:true ~f:(fun lease ->
-        Option.is_none lease.disconnect_grace_until
-        && Agent_protocol.Timestamp.compare lease.expires_at (now t) > 0)
-    | Read_only -> false)
+let interactive_responder_available t state =
+  Agent_session.Permission_policy.has_interactive_responder
+    t.interactive_permission_responder
+    ~has_writable_attachment:(fun () ->
+      Agent_session.Writer_attachment.any state ~now:(fun () -> now t))
 ;;
 
 let shell_broker_response (request : Shell_runtime.Approval_broker.ui_request) resolution =
@@ -1369,7 +1367,7 @@ let resolve_shell_permission t profile actor request ~review_on_timeout =
   let%bind state = Agent_session.Session_actor.state actor in
   let choices = shell_permission_choices request.Shell_runtime.Approval_broker.scopes in
   let fallback = permission_fallback profile choices in
-  if not (shell_responder_available t state)
+  if not (interactive_responder_available t state)
   then
     Ok
       (match fallback with
@@ -1960,7 +1958,7 @@ let authorize_extension_native t actor_ref profile native invocation binding =
       let decision =
         Policy.decide
           profile
-          ~responder_available:(shell_responder_available t state)
+          ~responder_available:(interactive_responder_available t state)
           request
       in
       let permission choices =
@@ -12861,6 +12859,7 @@ let create_unloaded_entry
         ~runtime_source_owner:
           (Agent_session.Runtime_source_owner.identity t.runtime_source_owner)
         ~ordinary_execution_admission
+        ~interactive_permission_responder:t.interactive_permission_responder
         ~schedule_permission_timeouts:false
         ~sw:t.sw
         ~clock:(Eio.Stdenv.clock t.env)
@@ -20218,6 +20217,7 @@ let create
       ~tool_dir
       ~home
       ~inference_policy
+      ~interactive_permission_responder
       ~context_capacity_host
       ~local_recovery_host
       ~qualify_chatml_extensions
@@ -20291,6 +20291,7 @@ let create
     ; tool_dir
     ; home
     ; inference_policy
+    ; interactive_permission_responder
     ; context_capacity_host
     ; local_recovery_host
     ; qualify_chatml_extensions

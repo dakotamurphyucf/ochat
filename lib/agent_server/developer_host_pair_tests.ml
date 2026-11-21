@@ -817,6 +817,7 @@ let%test_module "retained Developer Host policy" =
           ~tool_dir:root
           ~home:(Some root)
           ~inference_policy:options.inference_policy
+          ~interactive_permission_responder:options.interactive_permission_responder
           ~local_recovery_host:None
           ~context_capacity_host:options.context_capacity_host
           ~qualify_chatml_extensions:options.qualify_chatml_extensions

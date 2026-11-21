@@ -1,5 +1,9 @@
 open! Core
 
+type interactive_responder =
+  | Use_writable_attachment
+  | No_interactive_responder
+
 type tool_default =
   | Ask
   | Policy
@@ -164,6 +168,12 @@ let fallback t invocation reason =
   | Fallback_allow_if_policy ->
     if policy_allows t invocation then Allow_now else Deny_now reason
   | Fallback_reviewer _ -> Request_review
+;;
+
+let has_interactive_responder t ~has_writable_attachment =
+  match t with
+  | Use_writable_attachment -> has_writable_attachment ()
+  | No_interactive_responder -> false
 ;;
 
 let decide t ~responder_available invocation =

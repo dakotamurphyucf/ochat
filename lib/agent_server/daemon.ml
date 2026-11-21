@@ -34,6 +34,8 @@ type options =
   ; quota_limits : Agent_session.Quota_manager.limits
   ; reviewer_resolver : Catalog_builder.reviewer_resolver option
   ; policy_evaluator_resolver : Catalog_builder.policy_evaluator_resolver option
+  ; interactive_permission_responder :
+      Agent_session.Permission_policy.interactive_responder
   ; inference_policy : Session_factory.inference_policy
   ; context_capacity_host : Agent_session.Session_context_capacity.Host.t
   ; qualify_chatml_extensions : bool
@@ -159,6 +161,7 @@ let default_protocol_limits : Agent_protocol.Initialize.Limits.t =
 let default_options =
   { startup_mode = Execute
   ; root_invocation = Ui
+  ; interactive_permission_responder = Use_writable_attachment
   ; implementation_name = "ochat-agent-server"
   ; implementation_version = "dev"
   ; extension_host = Daemon
@@ -1373,6 +1376,7 @@ let compose
       ~tool_dir
       ~home
       ~inference_policy:options.inference_policy
+      ~interactive_permission_responder:options.interactive_permission_responder
       ~context_capacity_host
       ~local_recovery_host
       ~qualify_chatml_extensions:options.qualify_chatml_extensions

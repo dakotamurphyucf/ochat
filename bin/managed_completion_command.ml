@@ -582,7 +582,10 @@ let run
       E.with_local_host
         ~sw
         ~env
-        ~daemon_options
+        ~daemon_options:
+          { daemon_options with
+            interactive_permission_responder = No_interactive_responder
+          }
         ?recovery_capacity
         ~root_invocation:Headless
         ?project_sources
