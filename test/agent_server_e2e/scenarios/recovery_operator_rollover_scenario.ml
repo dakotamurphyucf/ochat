@@ -19,7 +19,8 @@ let key = Fixture.key
 let body = "The actual transcript contains a private rollover fixture."
 let response = "The provider's response must stay outside status."
 let workspace_file = "rollover-workspace-proof.txt"
-let workspace_text = "Rollover workspace proof β\nsecond line"
+let workspace_marker = "Rollover workspace proof"
+let workspace_text = workspace_marker ^ " β\nsecond line"
 
 let selected_workspace_file env fixture session attachment_id =
   let state : Agent_session.Session_state.t =
@@ -561,20 +562,15 @@ let run env environment =
           "Check ordinary context.";
         let request = Provider.await_request provider env 2 in
         let prepared = Provider.body request in
-        let selected = Checkpoint.tools request in
+        Stock.require_prepared_request
+          prepared
+          ~output:120
+          ~expected_tools:[ Stock.tool_name; "read_file" ];
         let serialized = Jsonaf.to_string prepared in
         require
-          (String.Set.equal selected (String.Set.of_list [ Stock.tool_name; "read_file" ])
-           && String.equal (Stock.string prepared "model") Stock.provider_model
-           && Document_schema.Json.equal
-                (Stock.member prepared "max_output_tokens")
-                (`Number "120")
-           && (not (String.is_substring serialized ~substring:body))
-           && not
-                (String.is_substring
-                   serialized
-                   ~substring:"This request is nearing its configured context limit."))
-          "cold successor incorrectly prepared the upgraded prompt";
+          ((not (String.is_substring serialized ~substring:body))
+           && not (String.is_substring serialized ~substring:workspace_marker))
+          "the cold successor received retired user text or the file before reading it";
         Stock.emit_remaining request "cold-capacity";
         let followup = Provider.await_request provider env 3 in
         let observed = Stock.result followup ~call_id:"cold-capacity" in

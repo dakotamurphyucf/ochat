@@ -178,6 +178,30 @@ let result request ~call_id =
     raise_s [%sexp "context_remaining failed", (outcome : P.Invocation.outcome)]
 ;;
 
+let require_prepared_request body ~output ~expected_tools =
+  require
+    (not
+       (String.is_substring
+          (Jsonaf.to_string body)
+          ~substring:"This request is nearing its configured context limit."))
+    "off, unknown or below-warning capacity produced an advisory";
+  require (String.equal (string body "model") provider_model) "wrong actual request model";
+  require
+    (Document_schema.Json.equal
+       (member body "max_output_tokens")
+       (`Number (Int.to_string output)))
+    "wrong actual output reserve";
+  let names =
+    member body "tools" |> Jsonaf.list_exn |> List.map ~f:(fun tool -> string tool "name")
+  in
+  require
+    (List.equal
+       String.equal
+       (List.sort names ~compare:String.compare)
+       (List.sort expected_tools ~compare:String.compare))
+    "the authored prompt did not select the expected tools"
+;;
+
 let observe
       ?(output = 100)
       env
@@ -203,25 +227,7 @@ let observe
    | Session_send_message receipt when Option.is_some receipt.operation_id -> ()
    | _ -> failwith "capacity fixture did not admit a foreground operation");
   let request = Provider.await_request provider env index in
-  let body = Provider.body request in
-  require
-    (not
-       (String.is_substring
-          (Jsonaf.to_string body)
-          ~substring:"This request is nearing its configured context limit."))
-    "off, unknown or below-warning capacity produced an advisory";
-  require (String.equal (string body "model") provider_model) "wrong actual request model";
-  require
-    (Document_schema.Json.equal
-       (member body "max_output_tokens")
-       (`Number (Int.to_string output)))
-    "wrong actual output reserve";
-  let names =
-    member body "tools" |> Jsonaf.list_exn |> List.map ~f:(fun tool -> string tool "name")
-  in
-  require
-    (List.equal String.equal names [ tool_name ])
-    "the authored prompt did not select exactly one capacity tool";
+  require_prepared_request (Provider.body request) ~output ~expected_tools:[ tool_name ];
   emit_remaining request call_id;
   let followup = Provider.await_request provider env (index + 1) in
   let result = result followup ~call_id in
