@@ -60,12 +60,17 @@ let create_child env root daemon parent ~model ~reasoning ~tokens ~marker =
   |> protocol_ok
 ;;
 
-let inference_policy ?(on_preparation = ignore) ?(extra_features = []) env ~endpoint ~auth
+let inference_policy
+      ?(on_preparation = ignore)
+      ?(extra_features = [])
+      ?transport_policy
+      env
+      ~endpoint
+      ~auth
   =
   let module D = Openai.Responses_driver in
-  (* This case exercises the actual adapter over the isolated HTTP/SSE server.
-     Capture the selected endpoint and credential explicitly at the fixture
-     boundary; never replace the provider request assertions with a mock stream. *)
+  (* Capture the explicit loopback endpoint, transport and credential at the
+     host boundary. Requests still use the actual production adapter. *)
   let capabilities =
     D.Capability.create
       ~baseline:
@@ -95,6 +100,7 @@ let inference_policy ?(on_preparation = ignore) ?(extra_features = []) env ~endp
   in
   let host =
     Inference_host.create
+      ?transport_policy
       driver
       ~profile
       ~profile_revision:None

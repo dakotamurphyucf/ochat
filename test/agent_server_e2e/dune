@@ -162,6 +162,7 @@
  (libraries ochat.operator_authorization
   ochat.provider_runtime
   agent_server_test_support
+  provider_websocket_fixture
   inference_composition
   base64
   core
@@ -548,6 +549,7 @@
       daemon-recovery.note-share-operator)
      (run %{exe:agent_server_e2e.exe} --scenario data-integrity --case daemon-recovery.ordinary-hard-limit)
      (run %{exe:agent_server_e2e.exe} --scenario data-integrity --case daemon-recovery.operator-rollover)
+     (run %{exe:agent_server_e2e.exe} --scenario data-integrity --case daemon-recovery.websocket-rollover)
      (run %{exe:agent_server_e2e.exe} --scenario data-integrity --case daemon-recovery.checkpoint-wake)
      (run %{exe:agent_server_e2e.exe} --scenario data-integrity --case daemon-recovery.automatic-capacity)
      (run %{exe:agent_server_e2e.exe} --scenario data-integrity --case daemon-recovery.automatic-soft-checkpoint)
