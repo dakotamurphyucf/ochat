@@ -57,7 +57,7 @@ let outputs entries =
 ;;
 
 let run env environment boundary =
-  let fixture = F.fixture env environment boundary in
+  let fixture = F.fixture ~snapshot_policy:Journal_replay env environment boundary in
   let marker = Filename.concat (C.physical_workspace fixture) "invocation.effect" in
   F.write
     env
@@ -186,7 +186,7 @@ let run env environment boundary =
            (P.Permission.equal_state cancelled.state Cancelled)
            "restart retained a live approval continuation";
          let attached, _ =
-           B.attach client session.summary (sprintf "late-approval:%d" reopen)
+           B.attach client session.summary (sprintf "late-approval-attach:%d" reopen)
          in
          (match
             Support.Http_driver.request
@@ -201,7 +201,12 @@ let run env environment boundary =
                  ; idempotency_key = F.key (sprintf "late-approval:%d" reopen)
                  })
           with
-          | Error _ -> ()
+          | Error error ->
+            F.require_equal
+              "late approval rejection"
+              [%sexp_of: P.Error.code * bool]
+              (Already_resolved, false)
+              (error.code, error.retryable)
           | Ok _ -> F.fail "late approval revived an interrupted native call")
        | _ -> ());
       for _ = 1 to 10 do

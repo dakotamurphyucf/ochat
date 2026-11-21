@@ -11,8 +11,16 @@ val path : Eio_unix.Stdenv.base -> string -> Eio.Fs.dir_ty Eio.Path.t
 val read : Eio_unix.Stdenv.base -> string -> string
 val write : Eio_unix.Stdenv.base -> string -> string -> unit
 
+type snapshot_policy =
+  | Periodic
+  | Journal_replay
+
+(** [Journal_replay] keeps the initial snapshot and per-command journal sync.
+    Use it for precise journal crash boundaries that have no periodic retention
+    assertion. [Periodic] keeps the ordinary E2E snapshot cadence. *)
 val fixture
-  :  Eio_unix.Stdenv.base
+  :  ?snapshot_policy:snapshot_policy
+  -> Eio_unix.Stdenv.base
   -> Support.Temporary_environment.t
   -> string
   -> Support.Config_fixture.t

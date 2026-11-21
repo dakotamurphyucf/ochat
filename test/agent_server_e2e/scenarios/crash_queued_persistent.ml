@@ -294,7 +294,9 @@ let require_child_history entries =
 ;;
 
 let test env environment =
-  let fixture = F.fixture env environment "queued-persistent-source" in
+  let fixture =
+    F.fixture ~snapshot_policy:Journal_replay env environment "queued-persistent-source"
+  in
   let directory = Filename.dirname (C.prompt_path fixture) in
   let child_path = Filename.concat directory "child.chatmd" in
   let nested_path = Filename.concat directory "nested.chatmd" in
