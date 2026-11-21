@@ -5307,6 +5307,15 @@ module Descendant_root_request = struct
     | Bind _ | Begin _ | Commit _ | Refresh_reserved _ | Refresh_admitted _ -> false
   ;;
 
+  let prewriter_preparation : type outcome. outcome operation -> R.Preparation.t option =
+    function
+    | Bind (_, _, preparation) -> Some preparation
+    | Begin (_, reservations) -> Some (R.Reservation_set.preparation reservations)
+    | Commit attempt -> Some attempt.preparation
+    | Refresh_reserved reservation -> Some reservation.preparation
+    | Reconcile _ | Close _ | Import _ | Refresh_admitted _ -> None
+  ;;
+
   type 'result capture =
     { basis : Child_accounting_basis.t
     ; records : Agent_store.Delegation_store.record list
@@ -8263,16 +8272,21 @@ let check_child_accounting_identity t (basis : Child_accounting_basis.t) =
     Error (error Conflict "child accounting Actor/controller/State observation changed")
 ;;
 
-let check_child_accounting_capture t (basis : Child_accounting_basis.t) =
+let check_child_accounting_capture
+      ?(on_state_change = ignore)
+      t
+      (basis : Child_accounting_basis.t)
+  =
   let%bind.Result () = check_child_accounting_identity t basis in
   if phys_equal basis.state t.state
   then Ok ()
-  else
-    Error (error Conflict "child accounting Actor/controller/State observation changed")
+  else (
+    on_state_change ();
+    Error (error Conflict "child accounting Actor/controller/State observation changed"))
 ;;
 
-let check_child_accounting_basis t basis ~current =
-  let%bind.Result () = check_child_accounting_capture t basis in
+let check_child_accounting_basis ?on_state_change t basis ~current =
+  let%bind.Result () = check_child_accounting_capture ?on_state_change t basis in
   if Recurrence_controller.is_current current
   then Ok ()
   else Error (error Conflict "child accounting Store observation changed")
@@ -8613,6 +8627,7 @@ let capture_descendant_preparation t ~occurrence ~writer_attempted =
     ; writer_attempted
     ; phase = ref Descendant_preparation.Phase.Open
     ; reservation_set_claim = None
+    ; parent_observation = Current
     ; check_owner
     ; check_before
     }
@@ -18152,13 +18167,17 @@ let correct_governed_attempt (ack : Inherited_attempt.Acknowledgement.t) =
     Error (error Conflict "governed inference initial confirmation remains pending")
 ;;
 
-let close_unattempted_inherited_attempt t (plan : Inherited_attempt.Plan.t) =
+let close_unattempted_inherited_attempt
+      ?(wait_for_release = false)
+      t
+      (plan : Inherited_attempt.Plan.t)
+  =
   let open Result.Let_syntax in
   let%bind closed = call t ~priority:Priority (Inherited_inference (Seal plan)) in
   match plan.arms, closed with
   | Descendant_attempt slot, Descendant_closed closed ->
-    let%map _ = schedule_descendant_admission_cleanup t slot ~closed in
-    ()
+    let%bind promise = schedule_descendant_admission_cleanup t slot ~closed in
+    if wait_for_release then Eio.Promise.await promise else Ok ()
   | Policy_causal_attempt _, Causal_closed _ | Combined_attempt _, Combined_closed _ ->
     let%bind promise = schedule_governed_plan_cleanup t plan in
     Actor_reply.await promise
@@ -18167,7 +18186,7 @@ let close_unattempted_inherited_attempt t (plan : Inherited_attempt.Plan.t) =
     Error (error Conflict "governed cleanup changed its closed arms")
 ;;
 
-let drive_inherited_attempt t (plan : Inherited_attempt.Plan.t) =
+let drive_inherited_attempt ?retry_parent_progress t (plan : Inherited_attempt.Plan.t) =
   let open Result.Let_syntax in
   let refresh_original () =
     match plan.original with
@@ -18190,144 +18209,153 @@ let drive_inherited_attempt t (plan : Inherited_attempt.Plan.t) =
               call t ~priority:Priority (Inherited_inference (Release acknowledgement)))
            : (unit, Agent_protocol.Error.t) result))
   in
-  Exn.protect
-    ~finally:(fun () ->
-      try cleanup () with
-      | exn ->
-        (try Eio.traceln "governed Attempt cleanup failed: %s" (Exn.to_string exn) with
-         | _ -> ()))
-    ~f:(fun () ->
-      let%bind physical =
-        match inherited_attempt_physical plan with
-        | None -> Ok None
-        | Some slot ->
-          let%bind views =
-            (Descendant_admission_slot.host slot).prepare
-              slot.preparation
-              slot.reservations
+  let with_admission ~f =
+    Exn.protect
+      ~finally:(fun () ->
+        try cleanup () with
+        | exn ->
+          (try Eio.traceln "governed Attempt cleanup failed: %s" (Exn.to_string exn) with
+           | _ -> ()))
+      ~f:(fun () ->
+        let result = f () in
+        match result, retry_parent_progress, plan.arms with
+        | Error _, Some retry, Descendant_attempt slot
+          when Descendant_preparation.parent_observation_superseded slot.preparation ->
+          let%bind () =
+            close_unattempted_inherited_attempt ~wait_for_release:true t plan
           in
-          (* A physical root can also own this held occurrence. Its reservation
-             advances the Store observation that the original runtime checks. *)
-          let%map () = refresh_original () in
-          Some views
-      in
-      let%bind () = call t (Inherited_inference (Preview (plan, physical))) in
-      let%bind policy =
-        match inherited_attempt_causal plan with
-        | None -> Ok None
-        | Some causal ->
-          (causal_plan_driver causal).prepare causal.slot.preparation causal.reservations
-          |> Result.map ~f:Option.some
-      in
-      let%bind before_writer =
-        match physical, policy with
-        | Some physical, None -> Ok (Descendant_before physical)
-        | None, Some policy -> Ok (Causal_before policy)
-        | Some physical, Some policy -> Ok (Combined_before (physical, policy))
-        | None, None ->
-          Error (error Invalid_state "governed inference has no prewriter arm")
-      in
-      (* A causal reservation can advance the same owner again. Reacquire the
+          transferred := true;
+          Eio.Fiber.yield ();
+          retry ()
+        | _ -> result)
+  in
+  with_admission ~f:(fun () ->
+    let%bind physical =
+      match inherited_attempt_physical plan with
+      | None -> Ok None
+      | Some slot ->
+        let%bind views =
+          (Descendant_admission_slot.host slot).prepare slot.preparation slot.reservations
+        in
+        (* A physical root can also own this held occurrence. Its reservation
+           advances the Store observation that the original runtime checks. *)
+        let%map () = refresh_original () in
+        Some views
+    in
+    let%bind () = call t (Inherited_inference (Preview (plan, physical))) in
+    let%bind policy =
+      match inherited_attempt_causal plan with
+      | None -> Ok None
+      | Some causal ->
+        (causal_plan_driver causal).prepare causal.slot.preparation causal.reservations
+        |> Result.map ~f:Option.some
+    in
+    let%bind before_writer =
+      match physical, policy with
+      | Some physical, None -> Ok (Descendant_before physical)
+      | None, Some policy -> Ok (Causal_before policy)
+      | Some physical, Some policy -> Ok (Combined_before (physical, policy))
+      | None, None ->
+        Error (error Invalid_state "governed inference has no prewriter arm")
+    in
+    (* A causal reservation can advance the same owner again. Reacquire the
          original runtime's observation outside the target mailbox. *)
+    let%bind () =
+      match policy, plan.original with
+      | Some _, _ -> refresh_original ()
+      | None, Legacy _ -> Ok ()
+      | None, Runtime { execution; _ } -> refresh_execution_descendant t execution
+    in
+    let%bind committed =
+      Eio.Cancel.protect (fun () ->
+        call t (Inherited_inference (Commit (plan, before_writer))))
+    in
+    match committed with
+    | Attempt_unconfirmed _ ->
+      Error (error Conflict "governed inference canonical writer remains unconfirmed")
+    | Acknowledged acknowledgement ->
+      let%bind registration =
+        match acknowledgement.original with
+        | Legacy { registration; _ } -> !registration
+        | Runtime { selected; _ } ->
+          Result.map !selected ~f:(fun selected ->
+            selected.Admitted_inference.registration)
+      in
       let%bind () =
-        match policy, plan.original with
-        | Some _, _ -> refresh_original ()
-        | None, Legacy _ -> Ok ()
-        | None, Runtime { execution; _ } -> refresh_execution_descendant t execution
+        match Inference_owner.Registration.factual_usage registration with
+        | None -> confirm_governed_attempt t acknowledgement |> Result.map ~f:ignore
+        | Some facts -> Inference_owner.Factual_usage.confirm_initial facts
       in
-      let%bind committed =
-        Eio.Cancel.protect (fun () ->
-          call t (Inherited_inference (Commit (plan, before_writer))))
+      let%bind confirmation =
+        Result.of_option
+          acknowledgement.confirmation
+          ~error:(error Conflict "governed initial duty has no exact confirmation vector")
       in
-      match committed with
-      | Attempt_unconfirmed _ ->
-        Error (error Conflict "governed inference canonical writer remains unconfirmed")
-      | Acknowledged acknowledgement ->
-        let%bind registration =
-          match acknowledgement.original with
-          | Legacy { registration; _ } -> !registration
-          | Runtime { selected; _ } ->
-            Result.map !selected ~f:(fun selected ->
-              selected.Admitted_inference.registration)
-        in
-        let%bind () =
-          match Inference_owner.Registration.factual_usage registration with
-          | None -> confirm_governed_attempt t acknowledgement |> Result.map ~f:ignore
-          | Some facts -> Inference_owner.Factual_usage.confirm_initial facts
-        in
-        let%bind confirmation =
-          Result.of_option
-            acknowledgement.confirmation
-            ~error:
-              (error Conflict "governed initial duty has no exact confirmation vector")
-        in
-        let submission_guard =
-          Inference_runtime.Submission_guard.create ~refresh:(fun () ->
-            let refreshed =
-              let%bind () =
-                match acknowledgement.original with
-                | Legacy _ -> Ok ()
-                | Runtime { selected; execution; _ } ->
-                  let%bind selected = !selected in
-                  let%bind () = refresh_admitted_inference t selected in
-                  refresh_execution_descendant t execution
-              in
-              let%bind views =
-                match acknowledgement.arms, acknowledgement.governed, confirmation with
-                | ( Descendant_attempt slot
-                  , Descendant_ack descendant
-                  , Descendant_confirmation confirmed ) ->
-                  let%map views =
-                    (Descendant_admission_slot.host slot).refresh_admitted
-                      descendant
-                      confirmed
-                  in
-                  Descendant_views views
-                | ( Policy_causal_attempt causal
-                  , Causal_ack canonical
-                  , Causal_confirmation confirmed ) ->
-                  let%map views =
-                    (causal_plan_driver causal).refresh_admitted canonical confirmed
-                  in
-                  Causal_views views
-                | ( Combined_attempt { descendant = slot; causal }
-                  , Combined_ack (descendant, canonical)
-                  , Combined_confirmation (physical, policy) ) ->
-                  let%bind physical =
-                    (Descendant_admission_slot.host slot).refresh_admitted
-                      descendant
-                      physical
-                  in
-                  let%map policy =
-                    (causal_plan_driver causal).refresh_admitted canonical policy
-                  in
-                  Combined_views (physical, policy)
-                | ( (Descendant_attempt _ | Policy_causal_attempt _ | Combined_attempt _)
-                  , (Descendant_ack _ | Causal_ack _ | Combined_ack _)
-                  , ( Descendant_confirmation _
-                    | Causal_confirmation _
-                    | Combined_confirmation _ ) ) ->
-                  Error
-                    (error Conflict "governed inference refresh changed its closed arms")
-              in
-              call
-                t
-                (Inherited_inference (Refresh (acknowledgement, confirmation, views)))
+      let submission_guard =
+        Inference_runtime.Submission_guard.create ~refresh:(fun () ->
+          let refreshed =
+            let%bind () =
+              match acknowledgement.original with
+              | Legacy _ -> Ok ()
+              | Runtime { selected; execution; _ } ->
+                let%bind selected = !selected in
+                let%bind () = refresh_admitted_inference t selected in
+                refresh_execution_descendant t execution
             in
-            match refreshed with
-            | Ok check -> check
-            | Error error -> raise (Inference_allocation.Rejected error))
-        in
-        let allocation =
-          Inference_allocation.Host.create ~handle:plan.handle ~submission_guard
-        in
-        transferred := true;
-        Ok allocation)
+            let%bind views =
+              match acknowledgement.arms, acknowledgement.governed, confirmation with
+              | ( Descendant_attempt slot
+                , Descendant_ack descendant
+                , Descendant_confirmation confirmed ) ->
+                let%map views =
+                  (Descendant_admission_slot.host slot).refresh_admitted
+                    descendant
+                    confirmed
+                in
+                Descendant_views views
+              | ( Policy_causal_attempt causal
+                , Causal_ack canonical
+                , Causal_confirmation confirmed ) ->
+                let%map views =
+                  (causal_plan_driver causal).refresh_admitted canonical confirmed
+                in
+                Causal_views views
+              | ( Combined_attempt { descendant = slot; causal }
+                , Combined_ack (descendant, canonical)
+                , Combined_confirmation (physical, policy) ) ->
+                let%bind physical =
+                  (Descendant_admission_slot.host slot).refresh_admitted
+                    descendant
+                    physical
+                in
+                let%map policy =
+                  (causal_plan_driver causal).refresh_admitted canonical policy
+                in
+                Combined_views (physical, policy)
+              | ( (Descendant_attempt _ | Policy_causal_attempt _ | Combined_attempt _)
+                , (Descendant_ack _ | Causal_ack _ | Combined_ack _)
+                , ( Descendant_confirmation _
+                  | Causal_confirmation _
+                  | Combined_confirmation _ ) ) ->
+                Error
+                  (error Conflict "governed inference refresh changed its closed arms")
+            in
+            call t (Inherited_inference (Refresh (acknowledgement, confirmation, views)))
+          in
+          match refreshed with
+          | Ok check -> check
+          | Error error -> raise (Inference_allocation.Rejected error))
+      in
+      let allocation =
+        Inference_allocation.Host.create ~handle:plan.handle ~submission_guard
+      in
+      transferred := true;
+      Ok allocation)
 ;;
 
-let finish_prepared_inference t = function
+let finish_prepared_inference ?retry_parent_progress t = function
   | Inherited_attempt.Prepared.Ordinary allocation -> Ok allocation
-  | Inherited plan -> drive_inherited_attempt t plan
+  | Inherited plan -> drive_inherited_attempt ?retry_parent_progress t plan
 ;;
 
 let settle_inference_usage t selected =
@@ -18423,19 +18451,25 @@ let drain_inference_usage t =
 
 let inference_port t execution ~graph ~relation ~configuration =
   let open Result.Let_syntax in
-  let%bind () = drain_inference_usage t in
-  let%bind () = retry_descendant_admission_cleanup t in
-  let%bind () = refresh_held_execution t execution in
-  let%bind origin_observation = observe_inference_origin t in
-  let%bind prepared =
-    Eio.Cancel.protect (fun () ->
-      call
-        t
-        (Inherited_inference
-           (Allocate_runtime
-              (origin_observation, execution, graph, relation, configuration))))
+  let allocate ?retry_parent_progress () =
+    let%bind () = drain_inference_usage t in
+    let%bind () = retry_descendant_admission_cleanup t in
+    let%bind () = refresh_held_execution t execution in
+    let%bind origin_observation = observe_inference_origin t in
+    let%bind prepared =
+      Eio.Cancel.protect (fun () ->
+        call
+          t
+          (Inherited_inference
+             (Allocate_runtime
+                (origin_observation, execution, graph, relation, configuration))))
+    in
+    finish_prepared_inference ?retry_parent_progress t prepared
   in
-  finish_prepared_inference t prepared
+  match execution, relation with
+  | Inference_operation _, Root ->
+    allocate ~retry_parent_progress:(fun () -> allocate ()) ()
+  | _ -> allocate ()
 ;;
 
 let validate_initialization_scope_current t scope =
@@ -41885,9 +41919,14 @@ let capture_descendant_root
     | Commit attempt ->
       let%bind () = descendant_route_actor t ~factual:false attempt.route in
       let%bind () = Descendant_preparation.check_basis attempt.preparation in
-      if phys_equal attempt.basis.state t.state
-      then Ok (attempt.route.source_owner, attempt.route.records)
-      else Error (error Conflict "root reserve original basis changed")
+      let%map () =
+        check_child_accounting_capture
+          ~on_state_change:(fun () ->
+            Descendant_preparation.observe_parent_state_change attempt.preparation)
+          t
+          attempt.basis
+      in
+      attempt.route.source_owner, attempt.route.records
     | Reconcile attempt ->
       let%map () = descendant_route_actor t ~factual:true attempt.route in
       attempt.route.source_owner, attempt.route.records
@@ -41925,6 +41964,12 @@ let capture_descendant_root
   Q.{ basis; records; operation }
 ;;
 
+let note_descendant_root_state_change (captured : _ Descendant_root_request.capture) () =
+  Option.iter
+    (Descendant_root_request.prewriter_preparation captured.operation)
+    ~f:Descendant_preparation.observe_parent_state_change
+;;
+
 (* Outer phase only, after capture reply. No Actor/Owner/Registry lock held. *)
 let observe_descendant_root
   : type outcome.
@@ -41935,7 +41980,11 @@ let observe_descendant_root
   fun t captured ->
   let module D = Agent_store.Delegation_store in
   let open Result.Let_syntax in
-  let%bind () = check_child_accounting_capture t captured.basis in
+  let on_state_change = note_descendant_root_state_change captured in
+  let check_capture () =
+    check_child_accounting_capture ~on_state_change t captured.basis
+  in
+  let%bind () = check_capture () in
   let factual = Descendant_root_request.factual captured.operation in
   let%bind () =
     List.fold_result captured.records ~init:() ~f:(fun () expected ->
@@ -41944,7 +41993,7 @@ let observe_descendant_root
           captured.basis.controller
           (D.reference expected)
       in
-      let%bind () = check_child_accounting_capture t captured.basis in
+      let%bind () = check_capture () in
       let%bind actual = result in
       if
         if factual
@@ -41960,14 +42009,14 @@ let observe_descendant_root
     match captured.operation with
     | Import (_, observation) ->
       let result = observation.Child_usage_observation.refresh_read () in
-      let%bind () = check_child_accounting_capture t captured.basis in
+      let%bind () = check_capture () in
       let%bind current = result in
       let result =
         Recurrence_controller.resolve_delegation
           captured.basis.controller
           observation.reference
       in
-      let%bind () = check_child_accounting_capture t captured.basis in
+      let%bind () = check_capture () in
       let%bind record = result in
       let%bind children =
         Result.of_option
@@ -41996,14 +42045,18 @@ let observe_descendant_root
   let result =
     Recurrence_controller.observe captured.basis.controller captured.basis.state
   in
-  let%bind () = check_child_accounting_capture t captured.basis in
+  let%bind () = check_capture () in
   let%bind current = result in
-  let%map () = check_child_accounting_basis t captured.basis ~current in
+  let%map () = check_child_accounting_basis ~on_state_change t captured.basis ~current in
   Descendant_root_request.{ captured; current; child_current }
 ;;
 
 let descendant_observed_check t (observed : _ Descendant_root_request.observed) =
-  check_child_accounting_basis t observed.captured.basis ~current:observed.current
+  check_child_accounting_basis
+    ~on_state_change:(note_descendant_root_state_change observed.captured)
+    t
+    observed.captured.basis
+    ~current:observed.current
 ;;
 
 let descendant_pending state (route : Descendant_admission_data.Root_route.t) =

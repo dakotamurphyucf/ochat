@@ -545,6 +545,13 @@ through the existing descendant lifecycle. An authorized controller can use
 Recovery never reconstructs a retired process credential. An archive-only
 cut waits for current authority.
 
+An ordinary or successor managed foreground attempt can reevaluate once when
+the same ancestor's State changes during pre-writer admission. The child seals
+the exact unstarted candidate and waits for its root reservations to close
+before recapturing current ancestry, authority, and budgets. A possible
+canonical write enters factual reconciliation under the original attempt
+identity.
+
 The optional successor hint port borrows its authorized source during
 preparation and request execution. The hint is request-only User guidance,
 composed with installed guidance and source checks. Submission with a hint

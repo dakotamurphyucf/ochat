@@ -1537,11 +1537,11 @@ let implementation_sources =
   ; ( "lib/agent_session/goal_continuation_phase.ml"
     , "e24a210492bfcc9e94c7bf472603531eb053eb7654de7c6100083464da9b1b51" )
   ; ( "lib/agent_session/session_actor.ml"
-    , "3e2fb617faae44f0fd0d3fe10f518c3e501388e0e9a2bd73447e64b065aee83d" )
+    , "a57656019d4e0e9f530a0b989d638aff945cb5d136a377686d11df770360315d" )
   ; ( "lib/agent_session/idle_completion_write.ml"
     , "d427fa80c4346b64f3f9bf4d5025ad2218403278816ade76ff17ba1adaa426d9" )
   ; ( "lib/agent_session/goal_descendant_admission_custody.ml"
-    , "8e0d959f077c296dd2b3651f1e945ec0be38ad35724ea81b43c59bd98d357751" )
+    , "4ce662b70134370984bb202f0f50bf8df65576eff655eaf57902edf7c50d6dc7" )
   ; ( "lib/agent_session/job_custody.ml"
     , "927e0267c6bd7b1f95fd5cad662959583347a7db8cbbc9fe211276ee513a9291" )
   ; ( "lib/agent_session/extension_invariants.ml"

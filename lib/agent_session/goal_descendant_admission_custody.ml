@@ -38,6 +38,12 @@ module Descendant_preparation = struct
       | Sealed_before_writer
   end
 
+  module Parent_observation = struct
+    type t =
+      | Current
+      | Superseded
+  end
+
   type t =
     { issuing_actor : unit ref
     ; domain : int
@@ -50,6 +56,7 @@ module Descendant_preparation = struct
     ; writer_attempted : bool ref
     ; phase : Phase.t ref
     ; mutable reservation_set_claim : unit ref option
+    ; mutable parent_observation : Parent_observation.t
     ; check_owner : unit -> (unit, P.Error.t) result
     ; check_before : unit -> (unit, P.Error.t) result
     }
@@ -57,6 +64,24 @@ module Descendant_preparation = struct
   let conflict message = Error (P.Error.create Conflict ~message ~retryable:false ())
   let on_domain t = Int.equal t.domain (Stdlib.Domain.self () :> int)
   let occurrence t = t.occurrence
+
+  let parent_observation_superseded t =
+    on_domain t
+    && (not !(t.writer_attempted))
+    &&
+    match !(t.phase), t.parent_observation with
+    | Open, Superseded -> true
+    | (Open | Acknowledged _ | Sealed_before_writer), _ -> false
+  ;;
+
+  let observe_parent_state_change t =
+    if on_domain t && not !(t.writer_attempted)
+    then (
+      match !(t.phase) with
+      | Open -> t.parent_observation <- Superseded
+      | Acknowledged _ | Sealed_before_writer -> ())
+  ;;
+
   let scopes t = O.scopes t.origin
   let delegation t = t.before.spec.delegation
 
