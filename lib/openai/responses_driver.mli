@@ -243,6 +243,7 @@ module Terminal : sig
     | Session_closed
     | Session_busy
     | Http_status of int
+    | Http_context_limit
     | Invalid_http
     | Invalid_content_type
     | Body_limit

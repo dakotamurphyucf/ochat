@@ -359,11 +359,13 @@ module Failure = struct
     | Unsupported_transport -> "unsupported_transport"
     | Session_closed -> "session_closed"
     | Session_busy -> "session_busy"
+    | Http_context_limit -> "http_context_limit"
     | Http_status _ -> "http_status"
   ;;
 
   let provider_code = function
     | T.Provider_failure.Invalid_request -> "invalid_request"
+    | Context_window_exceeded -> "context_window_exceeded"
     | Denied -> "denied"
     | Rate_limited -> "rate_limited"
     | Unavailable -> "unavailable"
@@ -392,6 +394,7 @@ module Failure = struct
           ( "transport"
           , transport_code why
           , (match why with
+             | Http_context_limit -> Some 400
              | Http_status status -> Some status
              | Connection
              | Timeout

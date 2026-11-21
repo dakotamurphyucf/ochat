@@ -136,6 +136,13 @@ preflight is unknown and there is no already-pending capacity block.
 An exact, qualified context-limit rejection may trigger the bounded recovery
 path at a safe boundary.
 
+The OpenAI adapter recognizes the structured `context_length_exceeded` error
+code on a failed Responses stream or in the bounded JSON error body of an
+HTTP 400 response. Its terminal receipt preserves how far the request got.
+A bare HTTP status, message text, rate limit or maximum output token stop
+provides insufficient evidence to trigger this recovery path. The actor still
+checks the original attempt, selected target and safe boundary before acting.
+
 | Trigger | Policy |
 | --- | --- |
 | Near limit | One durable reminder disposition per window and policy revision, with separate stages for claimed and accepted by the next actual attempt. An interrupted claim is reconciled by the actor. The reminder is advisory and low authority. Prepare again with it included and withhold it if it cannot fit. |

@@ -605,6 +605,7 @@ module Terminal = struct
     | Session_closed
     | Session_busy
     | Http_status of int
+    | Http_context_limit
     | Invalid_http
     | Invalid_content_type
     | Body_limit
@@ -1121,6 +1122,8 @@ module Http_rejection = struct
                  | Some (`String "missing_required_parameter") ->
                    H.Missing_required_parameter
                  | Some (`String "unsupported_parameter") -> Unsupported_parameter
+                 | Some (`String "context_length_exceeded") when status = 400 ->
+                   Context_window_exceeded
                  | Some (`String "invalid_parameter") -> Invalid_parameter
                  | _ -> Unclassified
                in
@@ -1249,7 +1252,10 @@ let dispatch
     let rejection = Http_rejection.read t reader headers status in
     rejection_emitted := true;
     on_event (Event.Http_rejection { rejection; delivery = Possibly_submitted });
-    transport_failure (Http_status status));
+    let module H = Inference.Observation.Diagnostic.Http_rejection in
+    if H.equal_reason (H.reason rejection) Context_window_exceeded
+    then transport_failure Http_context_limit
+    else transport_failure (Http_status status));
   if
     List.exists headers ~f:(fun (key, value) ->
       String.equal key "content-encoding" && not (String.Caseless.equal value "identity"))
@@ -2025,7 +2031,7 @@ let run_with_transport
           sse
             (Some
                (match reason with
-                | Invalid_http | Http_status _ -> Transport_selection.Upgrade
+                | Invalid_http | Http_status _ | Http_context_limit -> Transport_selection.Upgrade
                 | _ -> Connection))
         | `Failure reason ->
           let terminal = failed reason in

@@ -1266,6 +1266,7 @@ module Diagnostic = struct
       | Missing_required_parameter
       | Unsupported_parameter
       | Invalid_parameter
+      | Context_window_exceeded
       | Unclassified
     [@@deriving equal, sexp_of]
 
@@ -1292,6 +1293,8 @@ module Diagnostic = struct
     let create ~status ~reason ~parameter =
       if status < 100 || status > 599 || status = 200
       then invalid "http_status" "not rejection status"
+      else if equal_reason reason Context_window_exceeded && status <> 400
+      then invalid "http_status" "context-limit rejection requires HTTP 400"
       else Ok { status; reason; parameter }
     ;;
 
@@ -1302,6 +1305,7 @@ module Diagnostic = struct
     let reasons =
       [ "missing_required_parameter", Missing_required_parameter
       ; "unsupported_parameter", Unsupported_parameter
+      ; "context_window_exceeded", Context_window_exceeded
       ; "invalid_parameter", Invalid_parameter
       ; "unclassified", Unclassified
       ]

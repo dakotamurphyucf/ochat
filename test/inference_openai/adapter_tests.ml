@@ -996,6 +996,35 @@ let%expect_test
     {| exact item.done candidate and canonical bytes restored; next actual request replays primary ciphertext |}]
 ;;
 
+let%test_unit "only exact structured context rejections qualify across HTTP and streams" =
+  let error code =
+    `Object [ "code", `String code; "message", `String "context_length_exceeded" ]
+  in
+  let http code = Jsonaf.to_string (`Object [ "error", error code ]) in
+  let stream code = terminal ~status:"failed" ~usage:[ "error", error code ] [] in
+  Eio_main.run (fun env ->
+    List.iter
+      [ 400, http "context_length_exceeded", true
+      ; 400, http "invalid_request_error", false
+      ; 429, http "context_length_exceeded", false
+      ; 400, {|{"error":{"code":"other","code":"context_length_exceeded"}}|}, false
+      ; 200, stream "context_length_exceeded", true
+      ; 200, stream "invalid_request_error", false
+      ]
+      ~f:(fun (status, body, qualified) ->
+        with_server ~status env (fun _ -> body) (fun sw endpoint ->
+          let profile = profile endpoint in
+          let target = target profile in
+          let result =
+            prepare (context env profile ~target ~auth) (request target)
+            |> run ~sw
+            |> Runtime.Receipt.terminal
+          in
+          [%test_eq: bool] qualified (E.Terminal.is_context_window_rejection result);
+          let delivery = if status = 200 then E.Terminal.Response_started else Possibly_submitted in
+          assert (E.Terminal.equal_delivery delivery (E.Terminal.delivery result)))))
+;;
+
 let%test_unit "actual HTTP rejection diagnostic survives ledger roundtrip without body" =
   Eio_main.run (fun env ->
     List.iter [ false; true ] ~f:(fun content_type_failure ->

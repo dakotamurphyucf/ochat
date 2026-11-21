@@ -314,6 +314,7 @@ module Diagnostic : sig
       | Missing_required_parameter
       | Unsupported_parameter
       | Invalid_parameter
+      | Context_window_exceeded
       | Unclassified
     [@@deriving equal, sexp_of]
 
