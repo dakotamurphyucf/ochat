@@ -36946,7 +36946,7 @@ let execution_basis ?admitted t (origins : execution_origin_lookup) execution =
            && P.Id.Operation.equal owner selected.owner ->
       (* Preparation and the physical write have one Run origin. Its work
          ownership moves only when this exact successor is admitted. *)
-      Run_transition.rollover_work_owner t.state ~predecessor
+      Run_rollover_work.dispatch_owner t.state ~predecessor
     | _ -> Ok owner
   in
   let basis ?operation_id ?invocation_id ?preparation run =
@@ -59684,17 +59684,14 @@ let save_successor_phase t ~id ~expected ~change ~check =
         | Script_finished -> Interrupted
         | Cancelled -> Cancelled
       in
-      let%map deltas =
-        Run_transition.settle_operation
-          t.state
-          ~operation_id:current.predecessor
-          ~outcome
-          ~now:(t.services.now ())
-      in
-      (match t.state.run_state, deltas with
-       | Some before, [ Session_delta.Run_state_changed after ]
-         when phys_equal before after -> []
-       | _ -> deltas)
+      (match%bind Run_rollover_work.owner t.state ~predecessor:current.predecessor with
+       | Unowned | Retired -> Ok []
+       | Unresolved _ ->
+         Run_transition.settle_operation
+           t.state
+           ~operation_id:current.predecessor
+           ~outcome
+           ~now:(t.services.now ()))
     | _ -> Ok []
   in
   let schedule =
@@ -59914,8 +59911,8 @@ let admit_successor_dispatch t (selected : Foreground_successor.t) attempt =
       Result.of_option (Session_delta.foreground_continuation t.state)
         ~error:(error Conflict "foreground rollover continuation is absent")
     in
-    let%bind owner_run, work =
-      Run_transition.transfer_rollover_work
+    let%bind transfer =
+      Run_rollover_work.prepare
         t.state
         ~predecessor:continuation.predecessor
         ~successor:selected.operation
@@ -59923,9 +59920,15 @@ let admit_successor_dispatch t (selected : Foreground_successor.t) attempt =
     in
     let check () =
       let%bind () = check () in
-      Option.value_map owner_run ~default:(Ok ()) ~f:(check_run_binding t)
+      Option.value_map transfer ~default:(Ok ()) ~f:(fun (run, _) ->
+        check_run_binding t run)
     in
-    let delta = Session_delta.Batch (pending_deltas @ wakes @ (schedule :: work)) in
+    let admission =
+      match transfer with
+      | None -> [ schedule ]
+      | Some (_, index) -> [ schedule; Session_delta.Run_state_changed index ]
+    in
+    let delta = Session_delta.Batch (pending_deltas @ wakes @ admission) in
     let completion_sample = producer_completion_sample t ~delta in
     let%bind candidate = prepare_transition ?completion_sample t ~delta ~payloads in
     let%map () =

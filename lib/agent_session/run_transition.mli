@@ -63,26 +63,6 @@ val run : t -> Agent_protocol.Run.t
 val delta : t -> Session_delta.t
 val payloads : t -> Agent_protocol.Event.Durable.Payload.t list
 
-(** Exact unresolved predecessor ownership. Use only after checking the actual
-    foreground continuation. The returned Run conveys no execution authority. *)
-val rollover_work_owner
-  :  Session_state.t
-  -> predecessor:Agent_protocol.Id.Operation.t
-  -> (Agent_protocol.Run.t option, Agent_protocol.Error.t) result
-
-(** Transfer the single live Run's unresolved foreground obligation at actual
-    successor dispatch. Preserve its receipt, existing outcomes and relinquished
-    predecessor. The caller checks live Run authority and publishes atomically
-    with successor admission. Ordinary operations have no owning Run. *)
-val transfer_rollover_work
-  :  Session_state.t
-  -> predecessor:Agent_protocol.Id.Operation.t
-  -> successor:Agent_protocol.Id.Operation.t
-  -> now:Agent_protocol.Timestamp.t
-  -> ( Agent_protocol.Id.Run.t option * Session_delta.t list
-       , Agent_protocol.Error.t )
-       result
-
 (** Join the actual root terminal transaction. Captures immutable owner evidence
     and resolves a pending Finish only after all retained owned work has settled.
     The same aggregate law is used when an actual Job is the final owned work,
