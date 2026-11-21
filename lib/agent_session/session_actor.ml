@@ -27984,7 +27984,7 @@ let worker_publication_terminal
     | Some _ | None -> Ok ())
 ;;
 
-let cancel_operation_internal t attachment_id operation_id =
+let cancel_operation_internal ?check_at_writer t attachment_id operation_id =
   let open Result.Let_syntax in
   let%bind _ = write_attachment t attachment_id in
   let%bind operation = current_operation t operation_id in
@@ -27997,6 +27997,8 @@ let cancel_operation_internal t attachment_id operation_id =
     let%bind session =
       transition
         t
+        ?check_before_commit:check_at_writer
+        ?check_model_turn_at_writer:check_at_writer
         ~delta:(Session_delta.Active_operation_changed (Some operation))
         ~payloads:
           [ Agent_protocol.Event.Durable.Payload.Session_updated
@@ -37365,21 +37367,23 @@ let authorize_inference_basis t ~read_current =
            (Goal_work_attribution.episode left)
            (Goal_work_attribution.episode right)
     in
-    if
-      Option.equal same_run basis.run current.run
-      && Option.equal same_attribution basis.attribution current.attribution
-      &&
-      match basis.run, binding with
-      | None, None -> true
-      | Some run, Some binding ->
-        Run_authorities.is_current t.run_authorities binding ~run_id:run.id
-      | None, Some _ | Some _, None -> false
-    then Ok ()
-    else
+    let changed () =
       Error
         (error
            Permission_denied
            "inference physical owner or immutable origin changed after refresh")
+    in
+    if
+      Option.equal same_run basis.run current.run
+      && Option.equal same_attribution basis.attribution current.attribution
+    then (
+      match current.run, binding with
+      | None, None -> Ok ()
+      | Some run, Some expected ->
+        let%bind actual = inference_run_binding_current t run in
+        if phys_equal actual expected then Ok () else changed ()
+      | None, Some _ | Some _, None -> changed ())
+    else changed ()
   in
   let%map () = check_current () in
   { basis; check_current }
@@ -59672,7 +59676,7 @@ let claim_successor_hook t (handoff : Foreground_successor.Handoff.t) =
   | _ -> Ok None
 ;;
 
-let save_successor_phase t ~id ~expected ~change ~check =
+let save_successor_phase ?check_at_writer t ~id ~expected ~change ~check =
   let module C = Recovery_rollover_continuation in
   let open Result.Let_syntax in
   let%bind work =
@@ -59702,7 +59706,13 @@ let save_successor_phase t ~id ~expected ~change ~check =
     | [] -> schedule
     | _ -> Session_delta.Batch (schedule :: work)
   in
-  transition t ~check_before_commit:check ~delta ~payloads:[] |> Result.map ~f:ignore
+  transition
+    t
+    ~check_before_commit:check
+    ?check_model_turn_at_writer:check_at_writer
+    ~delta
+    ~payloads:[]
+  |> Result.map ~f:ignore
 ;;
 
 let check_successor_selected t (selected : Foreground_successor.t) =
@@ -59726,7 +59736,7 @@ let check_successor_selected t (selected : Foreground_successor.t) =
   selected.check ()
 ;;
 
-let begin_successor t ~id ~expected ~check custody =
+let begin_successor ?check_at_writer t ~id ~expected ~check custody =
   let open Result.Let_syntax in
   let%bind () = check () in
   let%bind () =
@@ -59741,12 +59751,16 @@ let begin_successor t ~id ~expected ~check custody =
   let%bind selected, operation, admission =
     prepare_foreground_successor t ~id ~expected ~check
   in
+  let check_admission authority () =
+    let%bind () = authority () in
+    check_turn_custody t custody
+  in
+  let check_at_writer = Option.map check_at_writer ~f:check_admission in
   let%map _ =
     transition
       t
-      ~check_before_commit:(fun () ->
-        let%bind () = check () in
-        check_turn_custody t custody)
+      ~check_before_commit:(check_admission check)
+      ?check_model_turn_at_writer:check_at_writer
       ~delta:
         (Batch
            (Recovery_rollover_changed
@@ -59908,7 +59922,8 @@ let admit_successor_dispatch t (selected : Foreground_successor.t) attempt =
         , [ P.Event.Durable.Payload.History_appended entries ] )
     in
     let%bind continuation =
-      Result.of_option (Session_delta.foreground_continuation t.state)
+      Result.of_option
+        (Session_delta.foreground_continuation t.state)
         ~error:(error Conflict "foreground rollover continuation is absent")
     in
     let%bind transfer =
@@ -59918,10 +59933,21 @@ let admit_successor_dispatch t (selected : Foreground_successor.t) attempt =
         ~successor:selected.operation
         ~now:(t.services.now ())
     in
+    let%bind run_authority =
+      match transfer with
+      | None -> Ok None
+      | Some (run, _) ->
+        let%map binding =
+          Run_authorities.find t.run_authorities run
+          |> Result.of_option
+               ~error:(error Permission_denied "run no longer has live host authority")
+        in
+        Some (run, binding)
+    in
     let check () =
       let%bind () = check () in
-      Option.value_map transfer ~default:(Ok ()) ~f:(fun (run, _) ->
-        check_run_binding t run)
+      Option.value_map run_authority ~default:(Ok ()) ~f:(fun (_, binding) ->
+        Run_admission.Scope.authorize (Run_authorities.scope binding) t.state)
     in
     let admission =
       match transfer with
@@ -59931,8 +59957,22 @@ let admit_successor_dispatch t (selected : Foreground_successor.t) attempt =
     let delta = Session_delta.Batch (pending_deltas @ wakes @ admission) in
     let completion_sample = producer_completion_sample t ~delta in
     let%bind candidate = prepare_transition ?completion_sample t ~delta ~payloads in
+    let model_turn_writer =
+      Option.map run_authority ~f:(fun (run, binding) ->
+        let check_at_writer () =
+          let%bind () = current () in
+          if Run_authorities.is_current t.run_authorities binding ~run_id:run
+          then Run_admission.Scope.check_current (Run_authorities.scope binding)
+          else Error (error Permission_denied "successor Run authority changed")
+        in
+        Session_commit_observation.Owner.create_guarded
+          ~previous:t.state
+          ~candidate
+          ~check_at_writer)
+    in
     let%map () =
       install
+        ?model_turn_writer
         ~protected_successor_append:(selected, attempt)
         ?completion_sample
         ~check_before_commit:check
@@ -60111,6 +60151,7 @@ let successor_control t actor attachment_id authorize id expected action =
           ~expected
           ~change:(Hold { operation; reason = Preparation_interrupted })
           ~check
+          ~check_at_writer:check
       in
       let%bind current = find () in
       let%map expected = successor_expected t expected.scope in
@@ -60125,18 +60166,34 @@ let successor_control t actor attachment_id authorize id expected action =
     | Cancel_followup, Finished Cancelled -> Ok ()
     | C.Continue, _ ->
       let custody = create_agent_custody actor in
-      (match begin_successor t ~id ~expected ~check (Some custody) with
+      (match
+         begin_successor t ~id ~expected ~check ~check_at_writer:check (Some custody)
+       with
        | Ok () -> Ok ()
        | Error failure ->
          retire_agent_custody custody;
          Error failure)
-    | Wait_for_wake, _ -> save_successor_phase t ~id ~expected ~change:Wait ~check
+    | Wait_for_wake, _ ->
+      save_successor_phase t ~id ~expected ~change:Wait ~check ~check_at_writer:check
     | Finish_followup, _ ->
-      save_successor_phase t ~id ~expected ~change:(Finish Script_finished) ~check
+      save_successor_phase
+        t
+        ~id
+        ~expected
+        ~change:(Finish Script_finished)
+        ~check
+        ~check_at_writer:check
     | Cancel_followup, Preparing operation ->
-      cancel_operation_internal t attachment_id operation |> Result.map ~f:ignore
+      cancel_operation_internal t attachment_id operation ~check_at_writer:check
+      |> Result.map ~f:ignore
     | Cancel_followup, _ ->
-      save_successor_phase t ~id ~expected ~change:(Finish Cancelled) ~check
+      save_successor_phase
+        t
+        ~id
+        ~expected
+        ~change:(Finish Cancelled)
+        ~check
+        ~check_at_writer:check
   in
   find ()
 ;;

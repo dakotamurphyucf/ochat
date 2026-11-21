@@ -420,7 +420,9 @@ let run ?(resume = false) ?(finish = false) ?(cancel = false) ?(authored = false
                  ())
           else Ok ()
         in
+        let followup_write = ref ignore in
         let before_commit prepublish =
+          !followup_write prepublish;
           if
             List.length (ordinal_outputs prepublish) = 1
             && not (Eio.Promise.is_resolved output_ack_blocked)
@@ -878,21 +880,51 @@ let run ?(resume = false) ?(finish = false) ?(cancel = false) ?(authored = false
                    wake_registry := Some (queue_wake actor ~source ~snapshot));
                if resume || cancel
                then (
-                 let control action =
+                 let request actor_proof action =
                    Actor.control_context_rollover
                      actor
-                     ~actor:operator
+                     ~actor:actor_proof
                      ~attachment_id:writer
                      ~authorize:permission
                      ~id:admitted.id
                      (Disk.expected actor)
                      action
-                   |> protocol_ok
+                 in
+                 let control action = request operator action |> protocol_ok in
+                 let check_expired_at_writer action reached =
+                   let before = W.state actor in
+                   let current = ref true in
+                   let expiring =
+                     Operator_authorization.guarded
+                       ~principal:(Operator_authorization.principal operator)
+                       ~is_current:(fun () -> !current)
+                   in
+                   (followup_write
+                    := fun candidate -> if reached candidate then current := false);
+                   let rejected = request expiring action in
+                   followup_write := ignore;
+                   if !current then failwith "fixture did not reach canonical preparation";
+                   (match rejected with
+                    | Error { code = Permission_denied; _ } -> ()
+                    | _ -> failwith "expired follow-up authority reached the writer");
+                   let after = W.state actor in
+                   if
+                     not
+                       (Int64.equal
+                          before.counters.transaction_sequence
+                          after.counters.transaction_sequence)
+                   then
+                     failwith
+                       "expired follow-up changed the canonical transaction sequence"
                  in
                  if cancel
                  then (
                    ignore (control Continue : A.Recovery_rollover_continuation.t);
                    Eio.Promise.await successor_preparing;
+                   check_expired_at_writer Cancel_followup (fun state ->
+                     match state.active_operation with
+                     | Some { state = Cancelling; _ } -> true
+                     | _ -> false);
                    ignore (control Cancel_followup : A.Recovery_rollover_continuation.t);
                    let stopped = await_idle actor in
                    let phase =
@@ -906,9 +938,19 @@ let run ?(resume = false) ?(finish = false) ?(cancel = false) ?(authored = false
                    assert (List.length stopped.conversation.deferred_user_entries = 1);
                    assert (Int.equal !dispatches 1))
                  else (
-                   let before = control Wait_for_wake in
-                   assert (
-                     A.Recovery_rollover_continuation.equal_phase before.phase Waiting);
+                   let has_phase state phase =
+                     Option.exists
+                       (A.Session_delta.foreground_continuation state)
+                       ~f:(fun current ->
+                         A.Recovery_rollover_continuation.equal_phase current.phase phase)
+                   in
+                   check_expired_at_writer Finish_followup (fun state ->
+                     has_phase state (Finished Script_finished));
+                   check_expired_at_writer Continue (fun state ->
+                     match A.Session_delta.foreground_continuation state with
+                     | Some { phase = Preparing _; _ } -> true
+                     | _ -> false);
+                   assert (Int.equal !dispatches 1);
                    let select model =
                      let before = Actor.configuration actor |> protocol_ok in
                      Actor.update_configuration
@@ -941,6 +983,11 @@ let run ?(resume = false) ?(finish = false) ?(cancel = false) ?(authored = false
                      match (List.hd_exn held.deliveries).wake_disposition with
                      | Some Pending_wake -> true
                      | _ -> false);
+                   check_expired_at_writer Wait_for_wake (fun state ->
+                     has_phase state Waiting);
+                   let before = control Wait_for_wake in
+                   assert (
+                     A.Recovery_rollover_continuation.equal_phase before.phase Waiting);
                    select (Inference.Request.Target.model target);
                    ignore (control Continue : A.Recovery_rollover_continuation.t);
                    let admitted_state = await_idle actor in
