@@ -11,7 +11,6 @@ module Scope = P.Recovery_window.Scope
 
 type policy =
   | Veto
-  | Continue
   | Fail_after
 
 let on_event =
@@ -36,19 +35,12 @@ let on_event : context -> int -> moderator_event -> int task =
 
 let before = function
   | Veto -> "Task.pure((|state, `Before(`Veto)|))"
-  | Continue ->
-    {|(match offer.checkpoint with
-      | `Checkpointed(notes) ->
-        Task.pure((|state, `Before(`Proceed({hints = `Some(notes); continuation = `None}))|))
-      | _ -> Task.fail("qualified note references are missing"))|}
   | Fail_after ->
     {|Task.pure((|state, `Before(`Proceed({hints = `Some([]); continuation = `None}))|))|}
 ;;
 
 let after = function
   | Veto -> "Task.fail(\"veto must not enter after\")"
-  | Continue ->
-    {|Task.pure((|state + 1, `After(Context_rollover.compose([`Continue, `Continue]))|))|}
   | Fail_after ->
     {|let* ignored = Tool.call("recovery_note_write", `Object([])) in
       Task.fail("post-cut effects are unavailable")|}
@@ -113,21 +105,21 @@ let successor env fixture summary attachment previous =
   |> Option.filter ~f:(fun active -> not (Scope.equal active previous))
 ;;
 
-let assert_committed ?(waiting = false) env fixture session attachment scope =
+let assert_waiting env fixture session attachment scope =
   wait_for env (fun () ->
     let open Option.Let_syntax in
     let%bind ledger = E.retained_rollover env fixture session attachment in
     let%bind schedule = R.foreground ledger ~scope in
-    let selected =
-      match schedule.phase, waiting with
-      | Waiting, true | Admitted _, false -> true
-      | _ -> false
+    let%bind () =
+      match schedule.phase with
+      | Waiting -> Some ()
+      | _ -> None
     in
-    let%bind receipt =
-      Option.filter (R.find ledger ~id:schedule.owner) ~f:(fun _ -> selected)
-    in
-    let%map hooks = receipt.hooks in
-    receipt, hooks)
+    let%bind receipt = R.find ledger ~id:schedule.owner in
+    match receipt.status, receipt.hooks with
+    | Terminal (Committed { successor; _ }), Some hooks when Scope.equal successor scope
+      -> Some (receipt, hooks)
+    | _ -> None)
 ;;
 
 let assert_failed hooks =
@@ -205,59 +197,32 @@ let run env environment =
          | Completed (_, Veto), Pending -> ()
          | _ -> Fixture.fail "veto entered an after-hook")
       | _ -> Fixture.fail "veto disposition did not survive the journal");
-    foreground
-      Continue
-      4
-      "continued"
-      (fun fixture _config_path session attachment previous ->
-         let next = request 7 in
-         let scope =
-           Option.value_exn (successor env fixture session attachment previous)
-         in
-         let _, hooks = assert_committed env fixture session attachment scope in
-         (match H.before hooks, H.after hooks with
-          | ( Completed (before, Proceed { hints = Some selection; _ })
-            , Completed (after, Continue) )
-            when Scope.equal before.window previous
-                 && Scope.equal after.window scope
-                 && List.length
-                      (A.Recovery_rollover_hint_ref.Selection.references selection)
-                    = 1 -> ()
-          | _ -> Fixture.fail "the actual successor lacked the ordered authored decisions");
-         let input = Jsonaf.member_exn "input" (Provider.body next) |> Jsonaf.list_exn in
-         E.require_local_hint input;
-         Provider.reply_summary next "The new window is active.";
-         ignore (wait_until_idle env fixture session attachment : A.Session_state.t));
     let fixture, config_path, session, scope, receipt =
       foreground
         Fail_after
-        8
+        4
         "failed-after"
         (fun fixture config_path session attachment previous ->
            let scope =
              wait_for env (fun () -> successor env fixture session attachment previous)
            in
-           let receipt, hooks =
-             assert_committed ~waiting:true env fixture session attachment scope
-           in
+           let receipt, hooks = assert_waiting env fixture session attachment scope in
            assert_failed hooks;
            ignore (wait_until_idle env fixture session attachment : A.Session_state.t);
            Fixture.require
-             (Provider.request_count provider = 11)
+             (Provider.request_count provider = 7)
              "failed after-hook dispatched a follow-up";
            fixture, config_path, session, scope, receipt)
     in
     Stock.with_stock env fixture ~port ~config_path (fun client _ _ ->
       let attachment = Stock.reattach client session "reopen-hook-disposition" in
       Stock.start client session attachment "reopen-hook-start";
-      let observed, hooks =
-        assert_committed ~waiting:true env fixture session attachment scope
-      in
+      let observed, hooks = assert_waiting env fixture session attachment scope in
       assert_failed hooks;
       Fixture.require
         (R.Receipt.equal observed receipt)
         "reopen replaced an authored phase disposition";
       Fixture.require
-        (Provider.request_count provider = 11)
+        (Provider.request_count provider = 7)
         "reopen repeated the authored follow-up"))
 ;;

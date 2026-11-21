@@ -93,14 +93,17 @@ dune build @agent-e2e-pr
 Normal `runtest` does not require the opt-in E2E runner, live provider, manual TUI,
 load, or soak scenarios. `@agent-docs-check` validates the documentation/examples
 separately. `@agent-e2e-pr` selects smoke, transports, workspaces, multi-client
-checks, `@agent-e2e-extensibility-pr` and the bounded
-`@agent-e2e-artifact-redaction` regression. The focused extensibility subset checks
-retained child provider settings across restart, invocation admission/publication
-without replaying an external effect, and recovery of a committed native child
-creation outcome. It also checks that native tool-start and nested trace events
+checks, `@agent-e2e-extensibility-pr`, the checked-in authored recovery example
+and the bounded `@agent-e2e-artifact-redaction` regression. The focused extensibility
+subset checks retained child provider settings across restart, invocation
+admission/publication without replaying an external effect, and recovery of a
+committed native child creation outcome. It also checks that native tool-start and nested trace events
 reach clients with secret arguments redacted. Recursive fork coverage exercises
 native, standalone ChatML and moderator-handled child tools, parent rejection
 before execution, and separation of child history from the root conversation.
+The checked-in context recovery example exercises successful authored rollover
+hooks and exact note delivery on the first successor request. Separate hook
+trials cover veto and an after-hook failure that stays held after a cold reopen.
 These use offline providers, production hosts and retained E2E artifacts. The
 required framework CI runs this alias in its E2E tier alongside the separate
 forced normal-test tier.
@@ -146,6 +149,20 @@ The subset does not replace full runtime, permission, security, persistence and
 crash qualification. Use the affected aliases or `@agent-e2e-safe` for that wider
 matrix. Read [the alias definitions](../../test/agent_server_e2e/dune) before
 selecting a larger tier.
+
+For local or release qualification of recovery delivery and assets, run
+
+```sh
+dune build --force -j 2 @agent-e2e-recovery-qualification
+```
+
+This runs ten offline cases with retained fixture reports. It covers asset
+publication and converter adoption, original bytes and installed handoff,
+reminders and their provider-write and required-input boundaries, authored
+history and local and shared note delivery. The broader `@agent-e2e-safe` alias
+includes this qualification. The PR and recovery aliases share the same
+checked-in authored example action, so one safe build runs the example once.
+Each case remains selectable with the runner's `--scenario` and `--case` flags.
 
 ### Complete offline workflow qualification
 
@@ -212,6 +229,7 @@ These run under `@agent-docs-check`, without provider requests.
 | `@agent-e2e-developer-trace-client` | Authenticated two-root Developer trace pages over embedded, HTTP, Unix and first-party stdio; exact revocation and reconnect. Included in transports. |
 | `@agent-e2e-permissions`, `@agent-e2e-security` | Approval, authorization, projection and boundary cases. |
 | `@agent-e2e-persistence`, `@agent-e2e-crash`, `@agent-e2e-recovery` | Store and interruption/recovery behavior. |
+| `@agent-e2e-recovery-qualification` | Offline recovery delivery, asset custody and near-limit behavior for local and release checks. Included in safe. |
 | `@agent-e2e-tui-auto` | Deterministic automated TUI traces. |
 | `@agent-e2e-pty-headless` | Headless PTY capability and terminal lifecycle checks. |
 | `@agent-e2e-load` | Bounded session/command, SSE/backpressure, reconnect, actor-unload and capacity loads. |

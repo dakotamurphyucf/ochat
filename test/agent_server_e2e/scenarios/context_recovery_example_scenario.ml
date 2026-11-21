@@ -10,6 +10,7 @@ module Scope = P.Recovery_window.Scope
 module Citation = P.Recovery_window.Citation
 module Stock = Recovery_capacity_scenario
 module Rollover = A.Recovery_rollover
+module Hint = A.Recovery_rollover_hint_ref
 
 let require = F.require
 let field = Jsonaf.member_exn
@@ -199,13 +200,24 @@ let component_state (state : A.Session_state.t) ~scope ~finished =
   [%test_eq: Session.Snapshot.t] (get actual "review_finished") (Bool finished)
 ;;
 
-let verify_rollover (state : A.Session_state.t) ~previous ~next =
+let verify_rollover (state : A.Session_state.t) ~previous ~next ~selection =
+  let hint =
+    Hint.of_json (`Object [ "kind", string "local_note"; "reference", selection ])
+    |> F.protocol_ok
+  in
   let ledger = Option.value_exn state.recovery_rollover in
   let scheduled = Rollover.foreground ledger ~scope:next |> Option.value_exn in
+  (match scheduled.phase with
+   | Admitted _ -> ()
+   | _ -> F.fail "the actual successor request has no admitted foreground");
   let receipt = Rollover.find ledger ~id:scheduled.owner |> Option.value_exn in
   (match receipt.status with
-   | Terminal (Committed { successor; checkpoint = Checkpointed _; _ })
-     when Scope.equal successor next -> ()
+   | Terminal (Committed { successor; checkpoint = Checkpointed proof; _ })
+     when Scope.equal successor next
+          && List.equal
+               Hint.equal
+               (List.map (Rollover.Checkpoint.notes proof) ~f:Hint.local_note)
+               [ hint ] -> ()
    | _ -> F.fail "example did not commit its checkpointed successor");
   let hooks = Option.value_exn receipt.hooks in
   match A.Recovery_rollover_hooks.before hooks, A.Recovery_rollover_hooks.after hooks with
@@ -214,7 +226,7 @@ let verify_rollover (state : A.Session_state.t) ~previous ~next =
     require
       (Scope.equal before.window previous
        && Scope.equal after.window next
-       && List.length (A.Recovery_rollover_hint_ref.Selection.references hints) = 1)
+       && List.equal Hint.equal (Hint.Selection.references hints) [ hint ])
       "example hooks did not select the exact checkpoint and successor"
   | _ -> F.fail "example did not record ordered before and after hook decisions"
 ;;
@@ -315,7 +327,7 @@ let run env environment =
         |> fun (row : P.Recovery_query.Summary.t) -> row.scope
       in
       let state = durable () in
-      verify_rollover state ~previous ~next;
+      verify_rollover state ~previous ~next ~selection;
       component_state state ~scope:next ~finished:false;
       let windows =
         call
@@ -407,5 +419,8 @@ let run env environment =
         (await ())
         "The preceding window contains the exact decision marker α-lantern.";
       E.await_idle env client session;
+      require
+        (Provider.request_count provider = !index + 1)
+        "settled successor unexpectedly dispatched another provider request";
       component_state (durable ()) ~scope:next ~finished:true))
 ;;

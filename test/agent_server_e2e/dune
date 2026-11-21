@@ -18,6 +18,7 @@
   (alias agent-e2e-workspaces)
   (alias agent-e2e-multiclient)
   (alias agent-e2e-extensibility-pr)
+  (alias agent-e2e-recovery-authored-example)
   (alias agent-e2e-artifact-redaction)))
 
 ;; Bound secret-registration growth and preserve its exact redaction contract in
@@ -127,6 +128,7 @@
   (alias agent-e2e-security)
   (alias agent-e2e-crash)
   (alias agent-e2e-recovery)
+  (alias agent-e2e-recovery-qualification)
   (alias agent-e2e-tui-auto)
   (alias agent-e2e-pty-headless)
   (alias agent-e2e-load)))
@@ -484,8 +486,18 @@
     %{exe:../../bin/ochat_agent_server.exe}
     (run %{exe:agent_server_e2e.exe} --scenario crash-matrix)))))
 
+;; Run the checked-in positive hook example once when PR and recovery are
+;; combined by the safe aggregate.
+(rule
+ (alias agent-e2e-recovery-authored-example)
+ (action
+  (setenv OCHAT_E2E_ARTIFACT_ROOT %{workspace_root}/_build/agent-e2e-artifacts
+   (setenv OCHAT_E2E_SERVER_EXE %{exe:../../bin/ochat_agent_server.exe}
+    (run %{exe:agent_server_e2e.exe} --scenario data-integrity --case daemon-recovery.authored-example)))))
+
 (rule
  (alias agent-e2e-recovery)
+ (deps (alias agent-e2e-recovery-authored-example))
  (action
   (setenv
    OCHAT_E2E_ARTIFACT_ROOT
@@ -501,12 +513,6 @@
       data-integrity
       --case
       daemon-recovery.successor-hint-guards)
-     (run
-      %{exe:agent_server_e2e.exe}
-      --scenario
-      data-integrity
-      --case
-      daemon-recovery.authored-example)
      (run
       %{exe:agent_server_e2e.exe}
       --scenario
@@ -538,6 +544,30 @@
       data-integrity
       --case
       daemon-recovery.ordinary-wake-at-write))))))
+
+;; Full recovery delivery and asset qualification uses the offline provider.
+;; The converter runs the stdio server in-process. The stock reminder and
+;; installed-original cases spawn the daemon executable.
+(rule
+ (alias agent-e2e-recovery-qualification)
+ (action
+  (setenv
+   OCHAT_E2E_ARTIFACT_ROOT
+   %{workspace_root}/_build/agent-e2e-artifacts
+   (setenv
+    OCHAT_E2E_SERVER_EXE
+    %{exe:../../bin/ochat_agent_server.exe}
+    (progn
+     (run %{exe:agent_server_e2e.exe} --scenario data-integrity --case daemon-recovery.asset-publication)
+     (run %{exe:agent_server_e2e.exe} --scenario data-integrity --case daemon-recovery.converter-adoption)
+     (run %{exe:agent_server_e2e.exe} --scenario data-integrity --case daemon-recovery.near-limit-reminder)
+     (run %{exe:agent_server_e2e.exe} --scenario data-integrity --case daemon-recovery.near-limit-before-write)
+     (run %{exe:agent_server_e2e.exe} --scenario data-integrity --case daemon-recovery.near-limit-required-input)
+     (run %{exe:agent_server_e2e.exe} --scenario data-integrity --case daemon-recovery.installed-originals)
+     (run %{exe:agent_server_e2e.exe} --scenario data-integrity --case daemon-recovery.installed-handoff)
+     (run %{exe:agent_server_e2e.exe} --scenario runtime-integrity --case recovery.authored-history)
+     (run %{exe:agent_server_e2e.exe} --scenario runtime-integrity --case recovery.notes-provider-write)
+     (run %{exe:agent_server_e2e.exe} --scenario runtime-integrity --case recovery.notes-shared-provider-write))))))
 
 (rule
  (alias agent-e2e-pending)
