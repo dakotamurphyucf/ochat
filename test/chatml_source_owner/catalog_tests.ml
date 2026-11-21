@@ -362,19 +362,32 @@ let%test_unit
     "interrupted preparation closes every candidate before returning and keeps catalog \
      reusable"
   =
-  with_workspace (fun env parent root ->
-    save root "root.chatmd" "<user>checkpoint</user>";
-    let definition = definition root in
-    let catalog = catalog env parent in
-    Eio.Switch.run (fun sw ->
-      let polls = ref 0 in
-      let candidate =
-        prepare catalog sw [ definition ] ~checkpoint:(fun () -> incr polls) |> ok
-      in
-      Catalog.discard_prepared candidate;
-      assert (!polls > 0);
+  let with_catalog ~retained f =
+    with_workspace (fun env parent root ->
+      save root "root.chatmd" "<user>checkpoint</user>";
+      let definition = definition root in
+      let catalog = catalog env parent in
+      Eio.Switch.run (fun sw ->
+        if retained then Catalog.discard_prepared (prepare catalog sw [ definition ] |> ok);
+        f env catalog sw definition))
+  in
+  List.iter [ false; true ] ~f:(fun retained ->
+    let polls = ref 0 in
+    with_catalog ~retained (fun env catalog sw definition ->
       let before = descriptors env in
-      for stop = 1 to !polls do
+      let acquired = ref false in
+      let checkpoint () =
+        incr polls;
+        if not !acquired then acquired := descriptors env > before
+      in
+      prepare catalog sw [ definition ] ~checkpoint |> ok |> Catalog.discard_prepared;
+      assert !acquired;
+      [%test_eq: int] (descriptors env) before);
+    (* A cold preparation can publish a revision before interruption. Start each
+       injection from the same physical revision state as its control run. *)
+    for stop = 1 to !polls do
+      with_catalog ~retained (fun env catalog sw definition ->
+        let before = descriptors env in
         let token = Failure "prepare checkpoint" in
         let visited = ref 0 in
         (match
@@ -382,24 +395,39 @@ let%test_unit
              incr visited;
              if !visited = stop then raise token)
          with
-         | exception exn -> assert (phys_equal exn token)
-         | Ok _ | Error _ -> assert false);
-        assert (descriptors env = before)
-      done;
-      assert (
-        Result.is_error
-          (Catalog.prepare_owned
-             catalog
-             ~sw
-             ~source_limits:(limits ())
-             ~max_roots:0
-             ~checkpoint:ignore
-             ~transaction_id:(fun _ -> assert false)
-             ~created_at:(Agent_protocol.Timestamp.of_string "2026-10-11T12:00:00Z" |> ok)
-             [ definition ]));
-      assert (descriptors env = before);
-      let fresh = prepare catalog sw [ definition ] |> ok in
-      Catalog.install_owned catalog fresh |> ok))
+         | exception exn when phys_equal exn token -> ()
+         | exception exn -> raise exn
+         | Ok _ ->
+           raise_s
+             [%sexp
+               "preparation completed before injection"
+             , { retained : bool; stop : int; visited = (!visited : int) }]
+         | Error error ->
+           raise_s
+             [%sexp
+               "preparation rejected before injection"
+             , { retained : bool
+               ; stop : int
+               ; visited = (!visited : int)
+               ; error : Error.t
+               }]);
+        [%test_eq: int] (descriptors env) before;
+        assert (
+          Result.is_error
+            (Catalog.prepare_owned
+               catalog
+               ~sw
+               ~source_limits:(limits ())
+               ~max_roots:0
+               ~checkpoint:ignore
+               ~transaction_id:(fun _ -> assert false)
+               ~created_at:
+                 (Agent_protocol.Timestamp.of_string "2026-10-11T12:00:00Z" |> ok)
+               [ definition ]));
+        [%test_eq: int] (descriptors env) before;
+        Catalog.install_owned catalog (prepare catalog sw [ definition ] |> ok) |> ok;
+        ignore (revision catalog definition : Agent_session.Prompt_revision.t))
+    done)
 ;;
 
 let%test_unit
