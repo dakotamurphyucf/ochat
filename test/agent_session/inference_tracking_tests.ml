@@ -108,6 +108,16 @@ let upstream on_admitted =
     }
 ;;
 
+let create_fixture_graph actor ~source_name fixture =
+  let identity = Inference_fixture.identity fixture in
+  let upstream = upstream (fun ~scope:_ ~accounting_id:_ -> ()) in
+  G.create
+    actor
+    ~source:(source source_name)
+    ~upstream:{ upstream with new_preparation_id = identity.new_preparation_id }
+  |> protocol_ok
+;;
+
 let rows actor = (A.state actor |> protocol_ok).inference_ledger |> L.rows
 let only_handle actor = List.hd_exn (rows actor) |> L.Row.handle
 

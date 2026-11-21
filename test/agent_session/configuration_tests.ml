@@ -1236,19 +1236,11 @@ let%test_unit
                let attachment_id = Recovery_note_actor_tests.attach actor Read_write in
                (* The durable foreground must qualify the actual root attempt
                   at the ordinary provider write, as in the installed host. *)
-               let identity = Inference_fixture.identity fixture in
                let graph =
-                 Graph.create
+                 Inference_tracking_tests.create_fixture_graph
                    actor
-                   ~source:(Inference_tracking_tests.source "capacity-fixture")
-                   ~upstream:
-                     { new_preparation_id = identity.new_preparation_id
-                     ; on_admitted = (fun ~scope:_ ~accounting_id:_ -> ())
-                     ; on_attempt = ignore
-                     ; on_observation = ignore
-                     ; on_completion = ignore
-                     }
-                 |> protocol_ok
+                   ~source_name:"capacity-fixture"
+                   fixture
                in
                run env sw actor attachment_id ~graph:(Some graph);
                Graph.seal graph |> protocol_ok;

@@ -377,19 +377,11 @@ let%expect_test "selected foreground tools use the real preparation and original
            let config =
              Authoring_input_tests.worker_config env (fun ~sw:_ ~inputs:_ -> Seq.empty)
            in
-           let fixture_identity = Inference_fixture.identity fixture in
            let graph =
-             let upstream =
-               Inference_tracking_tests.upstream (fun ~scope:_ ~accounting_id:_ -> ())
-             in
-             Graph.create
+             Inference_tracking_tests.create_fixture_graph
                actor
-               ~source:(Inference_tracking_tests.source "selected-context-fixture")
-               ~upstream:
-                 { upstream with
-                   new_preparation_id = fixture_identity.new_preparation_id
-                 }
-             |> protocol_ok
+               ~source_name:"selected-context-fixture"
+               fixture
            in
            let worker =
              A.Turn_worker.create
