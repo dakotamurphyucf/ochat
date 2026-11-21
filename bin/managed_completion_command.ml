@@ -465,13 +465,18 @@ let with_pending_diagnostics connection ~env ~session_id ~storage f =
   | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
 ;;
 
-let select_for_execution connection ~env ~enable_recovery session_id =
+let select_for_execution host connection ~env ~enable_recovery ~retained_input session_id =
   let open Result.Let_syntax in
-  if not enable_recovery
-  then snapshot connection session_id
+  let%bind initial = snapshot connection session_id in
+  let join_resume =
+    retained_input && P.Session.equal_desired_state initial.session.desired_state Running
+  in
+  if not (enable_recovery || join_resume)
+  then Ok initial
   else (
-    (* This enrollment precedes selection of the execution anchor. Its private
-       writes need not produce subscribed projection events. *)
+    (* Selecting this running local runtime schedules its captured resume callback.
+       Join that same activation before fixing the subscribed command's revision.
+       Enrollment can also commit multiple private revisions. *)
     let%bind selected =
       Eio.Switch.run (fun admin_sw ->
         let%bind owner =
@@ -480,7 +485,7 @@ let select_for_execution connection ~env ~enable_recovery session_id =
             ~clock:(Eio.Stdenv.clock env)
             ~connection
             ~session_id
-            ~mode:Owner_read_write
+            ~mode:(if enable_recovery then Owner_read_write else Read_write)
             ~subscribe:false
             ()
         in
@@ -493,11 +498,21 @@ let select_for_execution connection ~env ~enable_recovery session_id =
            |> P.Public.Snapshot.fields)
             .session
         in
+        let attachment = C.Session_handle.attachment owner in
         let%bind () =
-          Local_recovery_cli.enroll
-            connection
-            selected
-            ~attachment:(C.Session_handle.attachment owner)
+          if enable_recovery
+          then Local_recovery_cli.enroll connection selected ~attachment
+          else Ok ()
+        in
+        let%bind selected =
+          if join_resume
+          then
+            E.complete_script_activation
+              host
+              ~started:selected
+              ~attachment_id:attachment.id
+              ~checkpoint:Eio.Fiber.check
+          else Ok selected
         in
         detach_requested := true;
         let%map () = C.Session_handle.detach owner in
@@ -515,7 +530,7 @@ let select_for_execution connection ~env ~enable_recovery session_id =
       Error
         (failure
            Conflict
-           "selected source changed during local recovery enrollment"))
+           "selected source changed during local session preparation"))
 ;;
 
 let run
@@ -608,7 +623,15 @@ let run
           Eio.Flow.copy_string
             (sprintf "[managed conversation %s]\n" (P.Id.Session.to_string session_id))
             (Eio.Stdenv.stderr env);
-          let%bind fields = select_for_execution connection ~env ~enable_recovery session_id in
+          let%bind fields =
+            select_for_execution
+              host
+              connection
+              ~env
+              ~enable_recovery
+              ~retained_input:(Option.is_some options.submission)
+              session_id
+          in
           let%bind completed =
             with_pending_diagnostics
               connection
