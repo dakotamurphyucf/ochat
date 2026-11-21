@@ -118,6 +118,8 @@ let has_command_receipt = function
   | Recovery_history _
   | Recovery_range _
   | Recovery_asset_read _
+  | Recovery_status _
+  | Recovery_rollover _
   | Goal_query _
   | Recovery_enable _
   | Goal_control _
@@ -1041,6 +1043,8 @@ type recovery_command =
   | Query_history of P.Recovery_history_request.t
   | Read_text of P.Recovery_text_range.t
   | Read_asset of P.Recovery_asset_read.t
+  | Inspect_rollover of P.Recovery_rollover_control.Inspect.t
+  | Request_rollover of P.Recovery_rollover_control.Request.t
 
 let request_recovery t ~initialized_as command =
   let command =
@@ -1050,6 +1054,8 @@ let request_recovery t ~initialized_as command =
     | Query_history request -> P.Command.Recovery_history request
     | Read_text request -> P.Command.Recovery_range request
     | Read_asset request -> P.Command.Recovery_asset_read request
+    | Inspect_rollover request -> P.Command.Recovery_status request
+    | Request_rollover request -> P.Command.Recovery_rollover request
   in
   let check () =
     if Option.exists (initialization t) ~f:(phys_equal initialized_as)

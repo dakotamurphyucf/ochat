@@ -750,6 +750,18 @@ module Recovery_history : sig
     | Range of Agent_protocol.Error.t
   [@@deriving sexp_of]
 
+  (** Read bounded status from the exact retained owner and supply its
+      nonyielding disclosure check for the eventual transport write. *)
+  val inspect_rollover
+    :  t
+    -> on_release:((unit -> (unit, Agent_protocol.Error.t) result) -> unit)
+    -> actor:Operator_authorization.t
+    -> authorize:(Agent_session.Session_state.t -> (unit, Agent_protocol.Error.t) result)
+    -> authorize_writer:(Agent_session.Session_state.t -> (unit, Agent_protocol.Error.t) result)
+    -> authorize_force:(Agent_session.Session_state.t -> (unit, Agent_protocol.Error.t) result)
+    -> Agent_protocol.Recovery_rollover_control.Inspect.t
+    -> (Agent_protocol.Recovery_rollover_control.Status.t, Agent_protocol.Error.t) result
+
   (** Check the current authenticated principal and session visibility, then
       list window identities and status under the retained actor. Each page
       requires a fresh current proof. *)

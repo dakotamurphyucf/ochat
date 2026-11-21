@@ -200,3 +200,101 @@ let read_asset t ~on_release request =
       error Invalid_request "this part has no supported local original"
     | Source Corrupt -> error Interrupted "recovery asset could not be verified")
 ;;
+
+module Control = P.Recovery_rollover_control
+
+let authorize_control t session (state : A.Session_state.t) =
+  let open Result.Let_syntax in
+  let%bind () = require_feature t Control.feature in
+  let principal = Operator_authorization.principal t.actor in
+  if
+    P.Id.Session.equal state.identity.session_id (P.Session_ref.session_id session)
+    && P.Principal.has_scope principal View_session_transcript
+    && Authorization.session_creator_visible_to
+         principal
+         ~creator:state.identity.creating_principal
+  then Ok ()
+  else Error (error Permission_denied "recovery status is unavailable")
+;;
+
+let authorize_control_writer t session attachment state =
+  let open Result.Let_syntax in
+  let%bind () = authorize_control t session state in
+  let session_id = P.Session_ref.session_id session in
+  if
+    Option.exists attachment ~f:(fun attachment_id ->
+      Connection_context.owns_attachment t.context ~session_id ~attachment_id)
+  then Ok ()
+  else Error (error Permission_denied "rollover requires the current connection writer")
+;;
+
+let authorize_control_force t _state =
+  let principal = Operator_authorization.principal t.actor in
+  if
+    Operator_authorization.is_current t.actor
+    && P.Principal.has_scope principal Administer_configuration
+    && P.Principal.has_scope principal Send_messages
+  then Ok ()
+  else
+    Error
+      (error Permission_denied "rollover force requires current configuration authority")
+;;
+
+let inspect_rollover t ~on_release (request : Control.Inspect.t) =
+  let open Result.Let_syntax in
+  let%bind () = require_feature t Control.feature in
+  let%bind () =
+    if P.Id.Server.equal t.server_id (P.Session_ref.server_id request.session)
+    then Ok ()
+    else Error (error Invalid_request "recovery status belongs to another host")
+  in
+  Session_factory.Recovery_history.inspect_rollover
+    t.factory
+    ~on_release
+    ~actor:t.actor
+    ~authorize:(authorize_control t request.session)
+    ~authorize_writer:(authorize_control_writer t request.session request.attachment_id)
+    ~authorize_force:(authorize_control_force t)
+    request
+;;
+
+let rollover t (entry : Session_registry.entry) ~on_release (request : Control.Request.t) =
+  let open Result.Let_syntax in
+  let%bind () = require_feature t Control.feature in
+  let session = Control.Request.session request in
+  let%bind () =
+    if P.Id.Server.equal t.server_id (P.Session_ref.server_id session)
+    then Ok ()
+    else Error (error Invalid_request "rollover belongs to another host")
+  in
+  let principal = Operator_authorization.principal t.actor in
+  let authorize state =
+    let%bind () = Session_registry.check_native_metadata_publication t.registry entry in
+    authorize_control_writer t session (Some request.attachment_id) state
+  in
+  let authorize_force = authorize_control_force t in
+  let%bind receipt =
+    Actor.publish_context_rollover
+      entry.actor
+      ~actor:t.actor
+      ~authorize
+      ~authorize_force
+      request
+  in
+  let%bind observation = Actor.observe_resource_state entry.actor in
+  let check () =
+    let%bind state = Actor.Resource_observation.check_current observation in
+    let%bind () = authorize state in
+    let%bind () =
+      A.Writer_attachment.require_recovery_owner
+        state
+        ~principal:principal.id
+        ~attachment_id:request.attachment_id
+        ~now:t.now
+    in
+    if request.force then authorize_force state else Ok ()
+  in
+  let%map () = check () in
+  on_release check;
+  receipt
+;;

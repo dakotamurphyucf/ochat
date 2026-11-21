@@ -291,14 +291,13 @@ let check_allocation t ~operation_id configuration =
   | _ -> Ok ()
 ;;
 
-let capacity_status t ~operation_id ~current =
+let observed_capacity t ~accept ~current =
   match current with
   | None -> Capacity.Disabled
   | Some current ->
     let availability = Capacity.availability current.Capacity_basis.selection in
     (match t.current with
-     | Some (token, phase)
-       when Agent_protocol.Id.Operation.equal token.operation_id operation_id ->
+     | Some (token, phase) when accept token ->
        (match token.capacity, token.assessment with
         | Some basis, Some observation
           when Capacity_basis.equal basis current && observation.binding_is_current () ->
@@ -310,9 +309,7 @@ let capacity_status t ~operation_id ~current =
             }
         | Some basis, None when Capacity_basis.equal basis current ->
           Capacity.Awaiting_preparation availability
-        | _ ->
-          t.current <- Some ({ token with capacity = None; assessment = None }, phase);
-          Capacity.Stale_preparation availability)
+        | _ -> Capacity.Stale_preparation availability)
      | _ -> Capacity.Awaiting_preparation availability)
 ;;
 
@@ -375,6 +372,25 @@ let capacity_rollover t ~operation_id ~current ~(state : Session_state.t) stage 
         | _ -> conflict ()))
   | _ -> conflict ()
 ;;
+
+let capacity_status t ~operation_id ~current =
+  let status =
+    observed_capacity
+      t
+      ~accept:(fun token ->
+        Agent_protocol.Id.Operation.equal token.operation_id operation_id)
+      ~current
+  in
+  (match status with
+   | Capacity.Stale_preparation _ ->
+     t.current
+     <- Option.map t.current ~f:(fun (token, phase) ->
+          { token with capacity = None; assessment = None }, phase)
+   | _ -> ());
+  status
+;;
+
+let inspect_capacity t ~current = observed_capacity t ~accept:(fun _ -> true) ~current
 
 module Native_window = struct
   type t =

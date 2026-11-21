@@ -163,6 +163,8 @@ type t =
   | Recovery_history of (Recovery_history_page.t[@sexp.opaque])
   | Recovery_range of (Recovery_text_range.Reply.t[@sexp.opaque])
   | Recovery_asset_read of (Recovery_asset_read.Reply.t[@sexp.opaque])
+  | Recovery_status of (Recovery_rollover_control.Status.t[@sexp.opaque])
+  | Recovery_rollover of (Recovery_rollover_control.Receipt.t[@sexp.opaque])
   | Goal_query of (Goal_query.Result.t[@sexp.opaque])
   | Goal_control of (Goal_control.Result.t[@sexp.opaque])
   | Recurrence_query of (Recurrence_query.Result.t[@sexp.opaque])

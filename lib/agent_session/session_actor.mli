@@ -3915,6 +3915,29 @@ val context_checkpoint_native
   -> Recovery_context_service.Checkpoint.Request.t
   -> (Recovery_context_service.Checkpoint.Receipt.t, Agent_protocol.Error.t) result
 
+(** Inspect the bounded rollover projection from a current observed actor.
+    The host binds transcript visibility and optional attachment to the original
+    connection. This does not yield and can be repeated at transport release. *)
+val inspect_context_rollover
+  :  Resource_observation.t
+  -> actor:Operator_authorization.t
+  -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> authorize_writer:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> authorize_force:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> Agent_protocol.Recovery_rollover_control.Inspect.t
+  -> (Agent_protocol.Recovery_rollover_control.Status.t, Agent_protocol.Error.t) result
+
+(** Submit a new quiescent cut or reconcile the exact principal-owned intent.
+    Checks run again at publication. An exact terminal receipt precedes comparison
+    of today's cut, without recreating force or attachment authority. *)
+val publish_context_rollover
+  :  t
+  -> actor:Operator_authorization.t
+  -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> authorize_force:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> Agent_protocol.Recovery_rollover_control.Request.t
+  -> (Agent_protocol.Recovery_rollover_control.Receipt.t, Agent_protocol.Error.t) result
+
 (** Request under the current writer attachment. Force requires a separate
     trusted authorization check and still binds the exact expected revision. *)
 val request_context_rollover

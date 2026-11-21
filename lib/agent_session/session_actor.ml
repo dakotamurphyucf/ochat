@@ -5636,6 +5636,12 @@ module Recovery_rollover_request = struct
         * P.Idempotency_key.t
         * R.Expected.t
         -> R.Receipt.t t
+    | Operator_publish :
+        Operator_authorization.t
+        * authorize
+        * authorize
+        * P.Recovery_rollover_control.Request.t
+        -> P.Recovery_rollover_control.Receipt.t t
     | Operator_settle :
         Operator_authorization.t
         * P.Id.Attachment.t
@@ -50048,6 +50054,7 @@ let lifecycle_request_allowed : type a. a request -> bool = function
          | Successor_dispatch _
          | Successor_control _
          | Operator_request _
+         | Operator_publish _
          | Operator_settle _
          | Operator_checkpoint _
          | Capacity_request _ ))
@@ -58408,6 +58415,7 @@ let record_authored_checkpoint t ~access (request : Recovery_authored_checkpoint
 ;;
 
 let settle_context_rollover_internal
+      ?(cancel_reason = Recovery_rollover.Receipt.Cancelled)
       ?batch
       ?capacity
       ?checkpoint_history
@@ -58474,7 +58482,7 @@ let settle_context_rollover_internal
     then supersede Basis_changed
     else (
       match settlement with
-      | Cancel -> supersede Cancelled
+      | Cancel -> supersede cancel_reason
       | Publish { checkpoint; retain } ->
         let%bind basis =
           Result.of_option
@@ -58583,6 +58591,92 @@ let settle_context_rollover_internal
          | Error reason, (Operator { force = true; _ } | Automatic _) ->
            commit (Archive_only reason)
          | Error _, (Operator _ | Native _) -> supersede Checkpoint_required))
+;;
+
+let publish_operator_rollover
+      t
+      actor
+      ~authorize
+      ~authorize_force
+      (request : Agent_protocol.Recovery_rollover_control.Request.t)
+  =
+  let module R = Recovery_rollover in
+  let open Result.Let_syntax in
+  let attachment_id = request.attachment_id in
+  let check () =
+    let%bind principal = rollover_operator t actor ~attachment_id ~authorize in
+    let%map () = if request.force then authorize_force t.state else Ok () in
+    principal
+  in
+  let module Key = Agent_protocol.Idempotency_key in
+  let%bind key = Key.of_string (Key.to_string request.key) in
+  let%bind expected =
+    R.Expected.create request.expected.scope ~revision:request.expected.revision
+  in
+  let%bind principal = check () in
+  let%bind () = require_rollover_recovered t in
+  let requester =
+    R.Requester.Operator { principal = principal.id; key; force = request.force }
+  in
+  let%bind retained = R.previous t.state.recovery_rollover ~requester ~expected in
+  let settle (receipt : R.Receipt.t) =
+    match receipt.status with
+    | Terminal _ -> Ok receipt
+    | Pending ->
+      let current =
+        active_rollover_window t
+        |> Option.bind ~f:(fun scope ->
+          R.Expected.create scope ~revision:t.state.counters.revision |> Result.ok)
+      in
+      (* Admission consumes precisely one session revision. A later quiescent
+         cut can settle this intent as superseded but cannot publish its archive. *)
+      let admitted_revision = Int64.succ expected.revision in
+      (match current with
+       | Some cut
+         when R.Expected.equal cut expected
+              || Result.is_error
+                   (check_rollover_cut t ~previous:t.state ~expected:cut ~check) ->
+         Ok receipt
+       | None -> Ok receipt
+       | Some cut ->
+         let exact =
+           Agent_protocol.Recovery_window.Scope.equal cut.scope expected.scope
+           && Int64.equal cut.revision admitted_revision
+         in
+         let settlement =
+           if exact
+           then
+             R.Settlement.Publish
+               { checkpoint = Option.bind t.state.recovery_rollover ~f:R.checkpoint
+               ; retain = []
+               }
+           else Cancel
+         in
+         settle_context_rollover_internal
+           ~cancel_reason:Basis_changed
+           t
+           ~check
+           ~authorize_force:(Option.some_if request.force authorize_force)
+           ~id:receipt.intent.id
+           cut
+           settlement)
+  in
+  let%bind receipt =
+    match retained with
+    | Some receipt -> settle receipt
+    | None ->
+      let previous = t.state in
+      let check_basis () = check_rollover_cut t ~previous ~expected ~check in
+      let check_requester () =
+        let%map _ = check () in
+        requester
+      in
+      let%bind receipt =
+        admit_recovery_rollover t ~check:check_requester ~check_basis ~expected
+      in
+      settle receipt
+  in
+  Recovery_rollover_projection.receipt receipt
 ;;
 
 let settled_rollover_authority t publication (intent : Recovery_rollover.Intent.t) =
@@ -59875,6 +59969,8 @@ let handle_recovery_rollover
           <- Some { id = intent.id; publication; check = operator; authorize_force })
     in
     admit_recovery_rollover ~after_admit t ~check ~expected
+  | Operator_publish (actor, authorize, authorize_force, request) ->
+    publish_operator_rollover t actor ~authorize ~authorize_force request
   | Operator_settle (actor, attachment_id, authorize, authorize_force, id, expected, settlement) ->
     let check () = rollover_operator t actor ~attachment_id ~authorize in
     let%map receipt =
@@ -65603,6 +65699,91 @@ let context_new_window_native t ~access ~window =
 
 let context_checkpoint_native t ~access request =
   call t (Context_request (Rollover (Native_checkpoint (access, request))))
+;;
+
+let inspect_context_rollover
+      (observation : Resource_observation.t)
+      ~actor
+      ~authorize
+      ~authorize_writer
+      ~authorize_force
+      (request : Agent_protocol.Recovery_rollover_control.Inspect.t)
+  =
+  let module P = Agent_protocol in
+  let module Wire = P.Recovery_rollover_control in
+  let module R = Recovery_rollover in
+  let module L = Recovery_window_ledger in
+  let module Scope = P.Recovery_window.Scope in
+  let open Result.Let_syntax in
+  let%bind state = Resource_observation.check_current observation in
+  let principal = Operator_authorization.principal actor in
+  let%bind () =
+    if
+      Operator_authorization.is_current actor
+      && P.Principal.has_scope principal View_session_transcript
+    then authorize state
+    else Error (error Permission_denied "rollover inspection authority expired")
+  in
+  let t = observation.actor in
+  match active_rollover_window t, state.recovery_windows with
+  | Some scope, Some windows ->
+    let revision = state.counters.revision in
+    let%bind current = Wire.Basis.create scope ~revision in
+    let%bind expected = R.Expected.create scope ~revision in
+    let active = L.active windows in
+    let previous =
+      match L.Window.origin active with
+      | Root -> None
+      | Successor { previous; _ } | New_generation { previous } ->
+        List.find_map (L.windows windows) ~f:(fun window ->
+          if P.Id.Context_window.equal previous (L.Window.id window)
+          then Some (L.Window.scope window)
+          else None)
+    in
+    let retained =
+      Option.bind state.recovery_rollover ~f:(fun ledger ->
+        match request.key with
+        | None -> R.latest ledger ~scope
+        | Some key -> R.find_operator ledger ~principal:principal.id ~key)
+    in
+    let%bind receipt =
+      match retained with
+      | None -> Ok None
+      | Some receipt ->
+        Result.map (Recovery_rollover_projection.receipt receipt) ~f:Option.some
+    in
+    let capacity_basis = current_context_capacity_basis t in
+    let capacity =
+      Configuration_capture.inspect_capacity
+        t.configuration_capture
+        ~current:capacity_basis
+      |> Recovery_rollover_projection.capacity state
+    in
+    let rollover =
+      Option.is_some capacity_basis
+      && Result.is_ok (require_rollover_recovered t)
+      && (not (Session_delta.awaiting_settled_foreground state))
+      && (not
+            (Option.exists state.recovery_rollover ~f:(fun ledger ->
+               Option.is_some (R.pending ledger))))
+      && Option.exists request.attachment_id ~f:(fun attachment_id ->
+        let check () =
+          rollover_operator t actor ~attachment_id ~authorize:authorize_writer
+        in
+        Result.is_ok (check_rollover_cut t ~previous:state ~expected ~check))
+    in
+    let force = rollover && Result.is_ok (authorize_force state) in
+    Wire.Status.create
+      request.session
+      (Available { current; previous; capacity; receipt; actions = { rollover; force } })
+  | _ -> Wire.Status.create request.session Unavailable
+;;
+
+let publish_context_rollover t ~actor ~authorize ~authorize_force request =
+  call
+    t
+    (Context_request
+       (Rollover (Operator_publish (actor, authorize, authorize_force, request))))
 ;;
 
 let request_context_rollover t ~actor ~attachment_id ~authorize ?authorize_force ~key expected =

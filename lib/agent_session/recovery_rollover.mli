@@ -192,6 +192,16 @@ val abandon_automatic
 
 val checkpoint : t -> Checkpoint.t option
 
+(** Latest transition originating in or creating this scope. *)
+val latest : t -> scope:P.Recovery_window.Scope.t -> Receipt.t option
+
+(** Inspect a specific caller's receipt, without granting replay or force authority. *)
+val find_operator
+  :  t
+  -> principal:P.Id.Principal.t
+  -> key:P.Idempotency_key.t
+  -> Receipt.t option
+
 val foreground
   :  t
   -> scope:P.Recovery_window.Scope.t

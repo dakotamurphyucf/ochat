@@ -23,6 +23,8 @@ type recovery_command =
   | Query_history of Agent_protocol.Recovery_history_request.t
   | Read_text of Agent_protocol.Recovery_text_range.t
   | Read_asset of Agent_protocol.Recovery_asset_read.t
+  | Inspect_rollover of Agent_protocol.Recovery_rollover_control.Inspect.t
+  | Request_rollover of Agent_protocol.Recovery_rollover_control.Request.t
 
 (** Process a recovery command on the ordinary request lane under the same
     successful physical Initialize, including after a suspended reply. *)

@@ -457,3 +457,181 @@ let%expect_test "selected foreground tools use the real preparation and original
   [%expect
     {| Selected tools enforced original scope, measured the actual preparation and admitted a pending intent |}]
 ;;
+
+let%expect_test "shared operator receipts preserve a pending cut across canonical replay" =
+  let module Wire = P.Recovery_rollover_control in
+  let actor_proof () =
+    Identity.proof [ View_session_transcript; Send_messages; Administer_configuration ]
+  in
+  let inspect actor key =
+    let observation = Actor.observe_resource_state actor |> protocol_ok in
+    let status =
+      Actor.inspect_context_rollover
+        observation
+        ~actor:(actor_proof ())
+        ~authorize:allow
+        ~authorize_writer:allow
+        ~authorize_force:allow
+        { session = Identity.owner; attachment_id = None; key = Some key }
+      |> protocol_ok
+    in
+    match status.view with
+    | Available { current; previous = None; receipt = Some receipt; actions; _ }
+      when not (actions.rollover || actions.force) -> current, receipt
+    | _ -> failwith "expected one redacted receipt under transcript authority"
+  in
+  let retry actor request =
+    Actor.publish_context_rollover
+      actor
+      ~actor:(actor_proof ())
+      ~authorize:allow
+      ~authorize_force:allow
+      request
+    |> protocol_ok
+  in
+  with_actor_workspace (fun env workspace ->
+    Eio.Switch.run (fun sw ->
+      let key = Identity.key "pending-operator-control" in
+      let seed actor attachment_id =
+        let scope = enable actor ~attachment_id in
+        set_manual actor;
+        let state = Actor.state actor |> protocol_ok in
+        let revision = state.counters.revision in
+        let expected = Wire.Basis.create scope ~revision |> protocol_ok in
+        let admitted = R.Expected.create scope ~revision |> protocol_ok in
+        Actor.request_context_rollover
+          actor
+          ~actor:(actor_proof ())
+          ~attachment_id
+          ~authorize:allow
+          ~key
+          admitted
+        |> protocol_ok
+        |> require_pending;
+        let current, receipt = inspect actor key in
+        assert (Wire.Basis.equal receipt.expected expected);
+        assert (Wire.Receipt.equal_outcome receipt.outcome Pending);
+        [%test_eq: int64] current.revision (Int64.succ expected.revision);
+        Wire.Request.{ expected; attachment_id; key; force = false }
+      in
+      Storage.new_session
+        env
+        sw
+        workspace
+        Identity.owner
+        ~name:"control-exact-admitted"
+        (fun actor _ _ ->
+           let attachment_id = Identity.attach actor Owner_read_write in
+           let request = seed actor attachment_id in
+           let result = retry actor request in
+           assert (Wire.Receipt.equal_outcome result.outcome (Failed Checkpoint_required));
+           let current, _ = inspect actor key in
+           [%test_eq: int64] current.revision Int64.(request.expected.revision + 2L);
+           assert (Wire.Receipt.equal result (retry actor request)));
+      let abandoned =
+        Storage.new_session
+          env
+          sw
+          workspace
+          Identity.owner
+          ~name:"control-reopened-pending"
+          (fun actor _ _ -> seed actor (Identity.attach actor Owner_read_write))
+      in
+      Storage.reopen_session
+        env
+        sw
+        workspace
+        Identity.owner
+        ~name:"control-reopened-pending"
+        (fun actor _ ->
+           let _, receipt = inspect actor key in
+           assert (Wire.Basis.equal receipt.expected abandoned.expected);
+           assert (Wire.Receipt.equal_outcome receipt.outcome Pending);
+           let attachment_id = Identity.attach actor Owner_read_write in
+           let request = { abandoned with attachment_id } in
+           let resolved = retry actor request in
+           assert (Wire.Receipt.equal_outcome resolved.outcome (Failed Basis_changed));
+           assert (Wire.Receipt.equal resolved (retry actor request));
+           let current, reported = inspect actor key in
+           assert (Scope.equal current.scope abandoned.expected.scope);
+           assert (Wire.Receipt.equal resolved reported))));
+  print_endline
+    "Exact pending cut settled once; reopened changed cut failed without replacing \
+     history";
+  [%expect
+    {| Exact pending cut settled once; reopened changed cut failed without replacing history |}]
+;;
+
+let%expect_test "shared rollover wire rejects unbound receipts and open extension fields" =
+  let module W = P.Recovery_rollover_control in
+  let scope session =
+    Scope.create ~session ~generation:4 ~window:(P.Id.Context_window.create ())
+    |> protocol_ok
+  in
+  let current = W.Basis.create (scope Identity.owner) ~revision:6L |> protocol_ok in
+  let request =
+    W.Request.
+      { expected = current
+      ; key = Identity.key "wire-receipt"
+      ; attachment_id = P.Id.Attachment.create ()
+      ; force = false
+      }
+  in
+  assert (
+    W.Basis.equal
+      current
+      (W.Request.of_json (W.Request.to_json request) |> protocol_ok).expected);
+  let foreign =
+    P.Session_ref.create
+      ~server_id:(P.Session_ref.server_id Identity.owner)
+      ~session_id:(P.Id.Session.create ())
+  in
+  let committed successor =
+    W.Receipt.Committed
+      { successor; cut_revision = 7L; quality = Archive_only_missing_checkpoint }
+  in
+  Identity.expect_error
+    Invalid_request
+    (W.Receipt.create current (committed (scope foreign)));
+  let forced =
+    W.Receipt.create current (committed (scope Identity.owner)) |> protocol_ok
+  in
+  Identity.expect_error Invalid_request (W.Receipt.validate forced ~request);
+  let pending = W.Receipt.create current Pending |> protocol_ok in
+  let fields json = P.Json_codec.fields json |> protocol_ok |> P.Json_codec.to_alist in
+  let underlying = W.Receipt.to_json pending |> fields in
+  Identity.expect_error
+    Invalid_request
+    (W.Receipt.of_json (`Object (("principal", `String "opaque") :: underlying)));
+  let status =
+    W.Status.create
+      Identity.owner
+      (Available
+         { current
+         ; previous = None
+         ; capacity = Unknown { reason = Disabled; target = None }
+         ; receipt = Some pending
+         ; actions = { rollover = true; force = true }
+         })
+    |> protocol_ok
+  in
+  assert (W.Status.equal status (W.Status.of_json (W.Status.to_json status) |> protocol_ok));
+  Identity.expect_error
+    Invalid_request
+    (W.Status.validate
+       status
+       ~request:{ session = Identity.owner; attachment_id = None; key = None });
+  Identity.expect_error
+    Invalid_request
+    (W.Inspect.of_json
+       (`Object
+           [ ( "session"
+             , `Object
+                 (("credentials", `String "hidden")
+                  :: (P.Session_ref.to_json Identity.owner |> fields)) )
+           ]));
+  print_endline
+    "Typed wire closed private fields, foreign scope, force mismatch and observer actions";
+  [%expect
+    {| Typed wire closed private fields, foreign scope, force mismatch and observer actions |}]
+;;

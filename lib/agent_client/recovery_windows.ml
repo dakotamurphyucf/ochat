@@ -100,3 +100,35 @@ let read_asset connection request =
     chunk
   | _ -> Error (P.Error.invalid_request "unexpected recovery asset result")
 ;;
+
+module Control = P.Recovery_rollover_control
+
+let inspect_rollover connection (request : Control.Inspect.t) =
+  let open Result.Let_syntax in
+  let%bind initialized_as =
+    check_host connection ~feature:Control.feature request.session
+  in
+  let%bind result =
+    Connection.request_recovery connection ~initialized_as (Inspect_rollover request)
+  in
+  match result with
+  | Recovery_status status ->
+    let%map () = Control.Status.validate status ~request in
+    status
+  | _ -> Error (P.Error.invalid_request "unexpected recovery status result")
+;;
+
+let request_rollover connection request =
+  let open Result.Let_syntax in
+  let%bind initialized_as =
+    check_host connection ~feature:Control.feature (Control.Request.session request)
+  in
+  let%bind result =
+    Connection.request_recovery connection ~initialized_as (Request_rollover request)
+  in
+  match result with
+  | Recovery_rollover receipt ->
+    let%map () = Control.Receipt.validate receipt ~request in
+    receipt
+  | _ -> Error (P.Error.invalid_request "unexpected recovery rollover result")
+;;

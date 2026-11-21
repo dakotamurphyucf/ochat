@@ -654,6 +654,24 @@ let pending t =
 
 let checkpoint t = t.checkpoint
 
+let latest t ~scope =
+  List.find t.receipts ~f:(fun receipt ->
+    Scope.equal receipt.Receipt.intent.expected.scope scope
+    ||
+    match receipt.status with
+    | Terminal (Committed { successor; _ }) -> Scope.equal successor scope
+    | Terminal (Superseded _) | Pending -> false)
+;;
+
+let find_operator t ~principal ~key =
+  List.find t.receipts ~f:(fun receipt ->
+    match receipt.Receipt.intent.requester with
+    | Operator requester ->
+      P.Id.Principal.equal requester.principal principal
+      && P.Idempotency_key.equal requester.key key
+    | Native _ | Automatic _ -> false)
+;;
+
 let foreground t ~scope =
   List.find_map t.receipts ~f:(fun receipt ->
     match receipt.status with

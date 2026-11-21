@@ -688,6 +688,8 @@ let architecture_methods =
   ; "session.recovery.query"
   ; "session.recovery.read_asset"
   ; "session.recovery.read_text"
+  ; "session.recovery.rollover"
+  ; "session.recovery.status"
   ; "session.recovery.windows"
   ; "session.goals"
   ; "session.goal"
@@ -765,7 +767,7 @@ let%expect_test "every architecture method has request and result dispatch" =
           (List.equal String.equal expected (normalize Method_result.supported_methods)
            : bool)
       }];
-  [%expect {| ((method_count 123) (requests true) (results true)) |}]
+  [%expect {| ((method_count 125) (requests true) (results true)) |}]
 ;;
 
 let%expect_test "history deletion requires stable ID, revision and idempotency" =

@@ -2089,6 +2089,7 @@ let compose
       | Session_run _
       | Recurrence_query _
       | Recovery_windows _
+      | Recovery_status _
       | Recovery_history _
       | Recovery_range _
       | Recovery_asset_read _
@@ -2125,6 +2126,7 @@ let compose
       | Session_run_start _
       | Recurrence_control _
       | Recovery_enable _
+      | Recovery_rollover _
       | Goal_control _
       | Session_send_message _
       | Session_cancel_pending_input _

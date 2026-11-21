@@ -420,6 +420,8 @@ type t =
   | Recovery_history of (Recovery_history_page.t[@sexp.opaque])
   | Recovery_range of (Recovery_text_range.Reply.t[@sexp.opaque])
   | Recovery_asset_read of (Recovery_asset_read.Reply.t[@sexp.opaque])
+  | Recovery_status of (Recovery_rollover_control.Status.t[@sexp.opaque])
+  | Recovery_rollover of (Recovery_rollover_control.Receipt.t[@sexp.opaque])
   | Goal_query of (Goal_query.Result.t[@sexp.opaque])
   | Goal_control of (Goal_control.Result.t[@sexp.opaque])
   | Recurrence_query of (Recurrence_query.Result.t[@sexp.opaque])
@@ -515,6 +517,8 @@ let method_name = function
   | Recovery_history _ -> Recovery_history_request.method_name
   | Recovery_range _ -> Recovery_text_range.method_name
   | Recovery_asset_read _ -> Recovery_asset_read.method_name
+  | Recovery_status _ -> Recovery_rollover_control.Inspect.method_name
+  | Recovery_rollover _ -> Recovery_rollover_control.Request.method_name
   | Goal_query result -> Goal_query.Result.method_name result
   | Goal_control result -> Goal_control.Result.method_name result
   | Recurrence_query result -> Recurrence_query.Result.method_name result
@@ -613,6 +617,8 @@ let to_json = function
   | Recovery_history v -> Recovery_history_page.to_json v
   | Recovery_range v -> Recovery_text_range.Reply.to_json v
   | Recovery_asset_read v -> Recovery_asset_read.Reply.to_json v
+  | Recovery_status v -> Recovery_rollover_control.Status.to_json v
+  | Recovery_rollover v -> Recovery_rollover_control.Receipt.to_json v
   | Goal_query result -> Goal_query.Result.payload result
   | Goal_control result -> Goal_control.Result.payload result
   | Recurrence_query result -> Recurrence_query.Result.payload result
@@ -791,6 +797,10 @@ let decoders =
     , map Recovery_text_range.Reply.of_json (fun x -> Recovery_range x) )
   ; ( Recovery_asset_read.method_name
     , map Recovery_asset_read.Reply.of_json (fun x -> Recovery_asset_read x) )
+  ; ( Recovery_rollover_control.Inspect.method_name
+    , map Recovery_rollover_control.Status.of_json (fun x -> Recovery_status x) )
+  ; ( Recovery_rollover_control.Request.method_name
+    , map Recovery_rollover_control.Receipt.of_json (fun x -> Recovery_rollover x) )
   ; "session.runs", map (Page.of_json Run_query.View.of_json) (fun x -> Session_runs x)
   ; "session.run", map Run_query.Outcome.of_json (fun x -> Session_run x)
   ; ( "session.pending_inputs"

@@ -36,6 +36,8 @@ type t =
   | Recovery_history of (Recovery_history_request.t[@sexp.opaque])
   | Recovery_range of (Recovery_text_range.t[@sexp.opaque])
   | Recovery_asset_read of (Recovery_asset_read.t[@sexp.opaque])
+  | Recovery_status of (Recovery_rollover_control.Inspect.t[@sexp.opaque])
+  | Recovery_rollover of (Recovery_rollover_control.Request.t[@sexp.opaque])
   | Goal_query of (Goal_query.Request.t[@sexp.opaque])
   | Goal_control of (Goal_control.Request.t[@sexp.opaque])
   | Recurrence_query of (Recurrence_query.Request.t[@sexp.opaque])
@@ -131,6 +133,8 @@ let method_name = function
   | Recovery_history _ -> Recovery_history_request.method_name
   | Recovery_range _ -> Recovery_text_range.method_name
   | Recovery_asset_read _ -> Recovery_asset_read.method_name
+  | Recovery_status _ -> Recovery_rollover_control.Inspect.method_name
+  | Recovery_rollover _ -> Recovery_rollover_control.Request.method_name
   | Goal_query request -> Goal_query.Request.method_name request
   | Goal_control request -> Goal_control.Request.method_name request
   | Recurrence_query request -> Recurrence_query.Request.method_name request
@@ -230,6 +234,8 @@ let params = function
   | Recovery_history v -> Recovery_history_request.to_json v
   | Recovery_range v -> Recovery_text_range.to_json v
   | Recovery_asset_read v -> Recovery_asset_read.to_json v
+  | Recovery_status v -> Recovery_rollover_control.Inspect.to_json v
+  | Recovery_rollover v -> Recovery_rollover_control.Request.to_json v
   | Goal_query request -> Goal_query.Request.params request
   | Goal_control request -> Goal_control.Request.params request
   | Recurrence_query request -> Recurrence_query.Request.params request
@@ -412,6 +418,10 @@ let decoders =
     , map Recovery_text_range.of_json (fun x -> Recovery_range x) )
   ; ( Recovery_asset_read.method_name
     , map Recovery_asset_read.of_json (fun x -> Recovery_asset_read x) )
+  ; ( Recovery_rollover_control.Inspect.method_name
+    , map Recovery_rollover_control.Inspect.of_json (fun x -> Recovery_status x) )
+  ; ( Recovery_rollover_control.Request.method_name
+    , map Recovery_rollover_control.Request.of_json (fun x -> Recovery_rollover x) )
   ; "session.runs", map Run_query.Request.of_json (fun x -> Session_runs x)
   ; "session.run", map Run_query.Lookup_request.of_json (fun x -> Session_run x)
   ; ( "session.pending_inputs"

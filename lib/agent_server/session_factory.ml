@@ -14623,6 +14623,39 @@ module Recovery_history = struct
     | Range of P.Error.t
   [@@deriving sexp_of]
 
+  let inspect_rollover t ~on_release ~actor ~authorize ~authorize_writer ~authorize_force
+        (request : P.Recovery_rollover_control.Inspect.t) =
+    let module A = Agent_session.Session_actor in
+    let module Status = P.Recovery_rollover_control.Status in
+    let open Result.Let_syntax in
+    let denied () = unavailable Permission_denied "recovery status is unavailable" in
+    let%bind outcome =
+      Recovery_source_host.with_observed_source
+        t
+        request.session
+        ~authorize
+        ~f:(fun _handle ~observation ~current ~check_owner ->
+          let inspect () =
+            A.inspect_context_rollover
+              observation ~actor ~authorize ~authorize_writer ~authorize_force request
+          in
+          let outcome = inspect () in
+          let%map _ = current () |> Result.map_error ~f:(fun _ -> Source.Denied) in
+          Result.map outcome ~f:(fun result ->
+            let check () =
+              let%bind () = check_owner () in
+              let%bind latest = inspect () in
+              if Status.equal result latest
+              then Ok ()
+              else Error (unavailable Conflict "recovery status changed before release")
+            in
+            on_release check;
+            result))
+      |> Result.map_error ~f:(fun _ -> denied ())
+    in
+    outcome
+  ;;
+
   let list_windows t ?(on_release = ignore) ~actor ~session ?generation ?state page =
     let principal = Operator_authorization.principal actor in
     let denied () =

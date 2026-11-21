@@ -32,3 +32,19 @@ val read_asset
   :  Connection.t
   -> Agent_protocol.Recovery_asset_read.t
   -> (Agent_protocol.Recovery_asset_read.Reply.t, Agent_protocol.Error.t) result
+
+(** Inspect bounded window and rollover status under current transcript
+    authorization. A key selects only this principal's receipt. Supply the
+    current connection's writer attachment to request fresh-action availability. *)
+val inspect_rollover
+  :  Connection.t
+  -> Agent_protocol.Recovery_rollover_control.Inspect.t
+  -> (Agent_protocol.Recovery_rollover_control.Status.t, Agent_protocol.Error.t) result
+
+(** Start or reconcile an exact durable intent via its current writer. After
+    lost results, retain the original expected cut, key, and force value. A
+    reinitialized connection may supply a newly acquired writer attachment. *)
+val request_rollover
+  :  Connection.t
+  -> Agent_protocol.Recovery_rollover_control.Request.t
+  -> (Agent_protocol.Recovery_rollover_control.Receipt.t, Agent_protocol.Error.t) result

@@ -109,6 +109,16 @@ let recovery_method name =
   || String.equal name Agent_protocol.Recovery_asset_read.method_name
 ;;
 
+let recovery_control_method name =
+  let module R = Agent_protocol.Recovery_rollover_control in
+  String.equal name R.Inspect.method_name || String.equal name R.Request.method_name
+;;
+
+let recovery_control_limits =
+  query_envelope_limits ~max_depth:16 ~max_fields:108 ~max_nodes:220
+    Agent_protocol.Recovery_rollover_control.max_envelope_bytes
+;;
+
 let recovery_envelope_limits =
   query_envelope_limits ~max_depth:18 ~max_fields:516 ~max_nodes:1032
     (Agent_protocol.Recovery_query.max_page_bytes + 512)
@@ -141,6 +151,8 @@ let operator_query_limits method_ =
   then Some ("Recovery", text_range_limits)
   else if String.equal method_ Agent_protocol.Recovery_asset_read.method_name
   then Some ("Recovery", asset_read_limits)
+  else if recovery_control_method method_
+  then Some ("Recovery", recovery_control_limits)
   else if recovery_method method_
   then Some ("Recovery", recovery_envelope_limits)
   else if

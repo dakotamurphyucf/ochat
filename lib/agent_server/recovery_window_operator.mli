@@ -46,3 +46,16 @@ val read_asset
   -> on_release:(release -> unit)
   -> Agent_protocol.Recovery_asset_read.t
   -> (Agent_protocol.Recovery_asset_read.Reply.t, Agent_protocol.Error.t) result
+
+val inspect_rollover
+  :  t
+  -> on_release:(release -> unit)
+  -> Agent_protocol.Recovery_rollover_control.Inspect.t
+  -> (Agent_protocol.Recovery_rollover_control.Status.t, Agent_protocol.Error.t) result
+
+val rollover
+  :  t
+  -> Session_registry.entry
+  -> on_release:(release -> unit)
+  -> Agent_protocol.Recovery_rollover_control.Request.t
+  -> (Agent_protocol.Recovery_rollover_control.Receipt.t, Agent_protocol.Error.t) result

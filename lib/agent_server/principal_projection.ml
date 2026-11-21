@@ -334,13 +334,14 @@ let project_result principal = function
            ~retryable:false
            ())
   | ( Recovery_windows _
+    | Recovery_status _
     | Recovery_history _
     | Recovery_range _
     | Recovery_asset_read _
     | Goal_query _
     | Recurrence_query _ ) as value ->
     operator_result value ~has_required_scope:(has principal View_session_transcript)
-  | (Recovery_enable _ | Goal_control _ | Recurrence_control _) as value ->
+  | (Recovery_enable _ | Recovery_rollover _ | Goal_control _ | Recurrence_control _) as value ->
     operator_result
       value
       ~has_required_scope:

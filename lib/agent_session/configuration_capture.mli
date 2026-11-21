@@ -122,6 +122,13 @@ val capacity_rollover
   -> Chat_response.Capacity_rollover.stage
   -> (Chat_response.Capacity_rollover.pressure, Agent_protocol.Error.t) result
 
+(** Read the live or retained root evidence without changing the capture.
+    The caller must supply the current exact target, configuration and window basis. *)
+val inspect_capacity
+  :  t
+  -> current:Capacity_basis.t option
+  -> Session_context_capacity.status
+
 (** Window of the actual finalized root preparation for this operation. A
     retained same-operation observation still requires live Actor checks. *)
 module Native_window : sig
