@@ -137,7 +137,9 @@ let%expect_test "File cancellation before reservation preserves source and Facto
               ~tool_dir:(Eio.Path.native_exn root)
               ~home:(Some (Eio.Path.native_exn home))
               ~inference_policy:inference
+              ~interactive_permission_responder:options.interactive_permission_responder
               ~context_capacity_host:options.context_capacity_host
+              ~local_recovery_host:None
               ~qualify_chatml_extensions:true
               ~session_helpers:[]
               ~independent_lifetime_policy:None
