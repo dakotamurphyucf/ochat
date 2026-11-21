@@ -26,13 +26,17 @@ module Host : sig
     -> targets:(Capacity.Policy.t * [ `Manual | `Automatic ]) list
     -> (t, error) Result.t
 
-  (** Shipped policy. Only a session with its own durable recovery window can
-      use this policy. [mode] records the request; stock target rows qualify
-      Manual. A qualified embedded automatic recipe uses [create]. *)
+  (** Select a policy with manual capacity handling only after a session has a
+      durable recovery window. Preserve the requested mode in its status. *)
   val for_enabled_windows
     :  mode:Mode.t
     -> targets:Capacity.Policy.t list
     -> (t, error) Result.t
+
+  (** Register exact target policies with a qualified automatic checkpoint
+      and rollover implementation. Each session still needs its own durable
+      window and a foreground worker that handles capacity transitions. *)
+  val for_automatic_windows : targets:Capacity.Policy.t list -> (t, error) Result.t
 end
 
 module Selection : sig

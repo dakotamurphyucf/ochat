@@ -44,8 +44,13 @@ actions for that host.
 The stock daemon loads the optional `server.recovery_capacity` policy at
 startup and uses the session's durable recovery-window opt-in. It qualifies
 the OpenAI Responses encoder against targets captured by the ordinary prompt
-and profile resolver. A stock request for automatic handling reports manual
-because stock startup supplies no qualified checkpoint and fallback recipe.
+and profile resolver. An exact policy and a foreground worker that supports
+capacity transitions allow automatic handling. While the active window is
+still current, a hard limit can retire a prepared request before the host
+allocates an attempt. A provider-triggered transition requires a completed,
+acknowledged context-limit rejection from that root attempt and no observed
+partial output. The first request in the successor cannot trigger a second
+automatic rollover. A target change requires a fresh qualification.
 The stock policy syntax and bounds are described in the agent server
 configuration guide.
 
@@ -107,8 +112,8 @@ source, so their private content does not affect the reported estimate.
 Images, documents, opaque reasoning, unknown retained item shapes and
 requests beyond the bound return a typed unknown. A host must qualify
 the estimator and choose its safety margin for the actual target. Real
-provider input usage remains separate. No automatic pressure policy ships
-with this assessment. [Assessment contract](../../lib/inference_runtime/context_capacity.mli),
+provider input usage remains separate. The owning host selects the pressure
+policy for each qualified target. [Assessment contract](../../lib/inference_runtime/context_capacity.mli),
 [prepared API](../../lib/inference_runtime/inference_runtime.mli),
 [OpenAI implementation](../../lib/openai/inference_capacity.ml).
 

@@ -48,7 +48,9 @@ let create (configuration : Configuration.t) ~prompts ~inference =
           P.Error.invalid_request "invalid recovery capacity limits for resolved target")))
     |> Result.all
   in
-  Host.for_enabled_windows ~mode:configuration.mode ~targets:policies
+  (match configuration.mode with
+   | Manual -> Host.for_enabled_windows ~mode:Manual ~targets:policies
+   | Automatic -> Host.for_automatic_windows ~targets:policies)
   |> Result.map_error ~f:(fun Host.Duplicate_target ->
     P.Error.invalid_request
       "multiple recovery capacity entries qualify the same resolved target")
