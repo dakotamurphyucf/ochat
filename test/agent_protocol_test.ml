@@ -685,6 +685,9 @@ let architecture_methods =
   ; "session.runs"
   ; "session.run"
   ; "session.recovery.enable"
+  ; "session.recovery.notes.inspect"
+  ; "session.recovery.notes.revoke_share"
+  ; "session.recovery.notes.share"
   ; "session.recovery.query"
   ; "session.recovery.read_asset"
   ; "session.recovery.read_text"
@@ -767,7 +770,70 @@ let%expect_test "every architecture method has request and result dispatch" =
           (List.equal String.equal expected (normalize Method_result.supported_methods)
            : bool)
       }];
-  [%expect {| ((method_count 125) (requests true) (results true)) |}]
+  [%expect {| ((method_count 128) (requests true) (results true)) |}]
+;;
+
+let%expect_test "note share management binds a closed receipt to its exact request" =
+  let module W = Recovery_note_share_control in
+  let generator = deterministic_generator () in
+  let server_id = Id.Server.create_with generator in
+  let session_id = Id.Session.create_with generator in
+  let session = Session_ref.create ~server_id ~session_id in
+  let attachment_id = Id.Attachment.create_with generator in
+  let source =
+    W.Source.create session ~attachment_id ~expected_generation:0 |> ok_or_fail
+  in
+  let path = W.Path.of_string "handoff/known" |> ok_or_fail in
+  let request = W.Request.Inspect { source; path = Some path } in
+  let method_ = W.Request.method_name request in
+  let fields =
+    match W.Request.to_json request with
+    | `Object fields -> fields
+    | _ -> assert false
+  in
+  let accepts_request json =
+    W.Request.of_method_and_params ~method_ json |> Result.is_ok
+  in
+  assert (accepts_request (`Object fields));
+  assert (not (accepts_request (`Object (("content", `Null) :: fields))));
+  let nested name replacement =
+    `Object (List.Assoc.add fields name replacement ~equal:String.equal)
+  in
+  assert (not (accepts_request (nested "path" (`String "../private"))));
+  assert (
+    not
+      (accepts_request
+         (nested "source"
+            (`Object
+                [ "server_id", Id.Server.to_json server_id
+                ; "session_id", Id.Session.to_json session_id
+                ; "extra", `Null
+                ]))));
+  let nonce = Id.Session_incarnation.create_with generator in
+  let reference = W.Reference.create session ~nonce ~id:2L |> ok_or_fail in
+  let request =
+    W.Request.Revoke
+      { source
+      ; expected_share_revision = 3L
+      ; reference
+      ; key = Idempotency_key.of_string "exact-revoke" |> ok_or_fail
+      }
+  in
+  let response grant_id share_revision =
+    let reference = W.Reference.create session ~nonce ~id:grant_id |> ok_or_fail in
+    W.Response.Revoked (W.Receipt.create reference ~share_revision |> ok_or_fail)
+  in
+  let valid = response 2L 4L in
+  let decoded =
+    W.Response.of_method_and_json
+      ~method_:(W.Response.method_name valid)
+      (W.Response.to_json valid)
+    |> ok_or_fail
+  in
+  assert (Result.is_ok (W.Response.validate decoded ~request));
+  assert (Result.is_error (W.Response.validate (response 1L 4L) ~request));
+  assert (Result.is_error (W.Response.validate (response 2L 5L) ~request));
+  [%expect {| |}]
 ;;
 
 let%expect_test "history deletion requires stable ID, revision and idempotency" =
