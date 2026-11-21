@@ -286,6 +286,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_protocol/queue_producer.mli` | [contract](../../lib/agent_protocol/queue_producer.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/recovery_asset_read.mli` | [contract](../../lib/agent_protocol/recovery_asset_read.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/recovery_attempt_evidence.mli` | [contract](../../lib/agent_protocol/recovery_attempt_evidence.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
+| `lib/agent_protocol/recovery_followup.mli` | [contract](../../lib/agent_protocol/recovery_followup.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/recovery_history_page.mli` | [contract](../../lib/agent_protocol/recovery_history_page.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/recovery_history_request.mli` | [contract](../../lib/agent_protocol/recovery_history_request.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/recovery_item_version.mli` | [contract](../../lib/agent_protocol/recovery_item_version.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
@@ -534,6 +535,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_server/recovery_asset_submission.mli` | [contract](../../lib/agent_server/recovery_asset_submission.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_server/recovery_capacity_configuration.mli` | [contract](../../lib/agent_server/recovery_capacity_configuration.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_server/recovery_capacity_host.mli` | [contract](../../lib/agent_server/recovery_capacity_host.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
+| `lib/agent_server/recovery_followup_operator.mli` | [contract](../../lib/agent_server/recovery_followup_operator.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_server/recovery_history_host.mli` | [contract](../../lib/agent_server/recovery_history_host.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_server/recovery_history_native_host.mli` | [contract](../../lib/agent_server/recovery_history_native_host.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_server/recovery_note_share_operator.mli` | [contract](../../lib/agent_server/recovery_note_share_operator.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
@@ -1024,6 +1026,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_session/run_producer_settlement.mli` | [contract](../../lib/agent_session/run_producer_settlement.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/run_recurrence_origins.mli` | [contract](../../lib/agent_session/run_recurrence_origins.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/run_retirement.mli` | [contract](../../lib/agent_session/run_retirement.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
+| `lib/agent_session/run_rollover_work.mli` | [contract](../../lib/agent_session/run_rollover_work.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/run_scope.mli` | [contract](../../lib/agent_session/run_scope.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/run_source_change.mli` | [contract](../../lib/agent_session/run_source_change.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/run_source_installation.mli` | [contract](../../lib/agent_session/run_source_installation.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
@@ -1180,6 +1183,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_store/prompt_manifest_document.mli` | [contract](../../lib/agent_store/prompt_manifest_document.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/prompt_program_bundle.mli` | [contract](../../lib/agent_store/prompt_program_bundle.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/prompt_source_receipt.mli` | [contract](../../lib/agent_store/prompt_source_receipt.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
+| `lib/agent_store/protected_approval_key.mli` | [contract](../../lib/agent_store/protected_approval_key.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/recovery.mli` | [contract](../../lib/agent_store/recovery.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/recovery_asset_inventory.mli` | [contract](../../lib/agent_store/recovery_asset_inventory.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/recovery_asset_record.mli` | [contract](../../lib/agent_store/recovery_asset_record.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |

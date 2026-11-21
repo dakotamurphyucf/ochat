@@ -3440,6 +3440,7 @@ type t =
   | Recovery_asset_read of (Recovery_asset_read.t[@sexp.opaque])
   | Recovery_status of (Recovery_rollover_control.Inspect.t[@sexp.opaque])
   | Recovery_rollover of (Recovery_rollover_control.Request.t[@sexp.opaque])
+  | Recovery_followup of (Recovery_followup.t[@sexp.opaque])
   | Recovery_note_shares of (Recovery_note_share_control.Request.t[@sexp.opaque])
   | Goal_query of (Goal_query.Request.t[@sexp.opaque])
   | Goal_control of (Goal_control.Request.t[@sexp.opaque])
@@ -10469,6 +10470,7 @@ type t =
   | Recovery_asset_read of (Recovery_asset_read.Reply.t[@sexp.opaque])
   | Recovery_status of (Recovery_rollover_control.Status.t[@sexp.opaque])
   | Recovery_rollover of (Recovery_rollover_control.Receipt.t[@sexp.opaque])
+  | Recovery_followup of (Recovery_followup.Reply.t[@sexp.opaque])
   | Recovery_note_shares of (Recovery_note_share_control.Response.t[@sexp.opaque])
   | Goal_query of (Goal_query.Result.t[@sexp.opaque])
   | Goal_control of (Goal_control.Result.t[@sexp.opaque])
@@ -12613,6 +12615,68 @@ val to_json : t -> Jsonaf.t
 val of_json : Jsonaf.t -> (t, Protocol_error.t) result
 ```
 
+## recovery_followup
+
+[implementation](../../lib/agent_protocol/recovery_followup.ml) · [interface](../../lib/agent_protocol/recovery_followup.mli)
+
+```ocaml
+(** Body-free inspection and exact-revision control of the current successor.
+    Reinspect after an uncertain reply before making another decision. *)
+open! Core
+
+module Basis = Recovery_rollover_control.Basis
+
+val feature : string
+val method_name : string
+
+type action =
+  | Continue
+  | Wait
+  | Finish
+  | Cancel
+
+type selection =
+  | Inspect of Session_ref.t
+  | Apply of Basis.t * action
+
+type t =
+  { attachment_id : Id.Attachment.t
+  ; selection : selection
+  }
+
+val session : t -> Session_ref.t
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Protocol_error.t) result
+
+module Reply : sig
+  type phase =
+    | Idle
+    | Awaiting
+    | Waiting
+    | Preparing
+    | Held_capacity
+    | Held_capacity_unknown
+    | Held_authority
+    | Held_input
+    | Held_interrupted
+    | Admitted
+    | Finished
+    | Cancelled
+  [@@deriving equal, sexp_of]
+
+  type t =
+    { basis : Basis.t
+    ; phase : phase
+    }
+  [@@deriving equal, sexp_of]
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Protocol_error.t) result
+end
+
+val validate : Reply.t -> request:t -> (unit, Protocol_error.t) result
+```
+
 ## recovery_history_page
 
 [implementation](../../lib/agent_protocol/recovery_history_page.ml) · [interface](../../lib/agent_protocol/recovery_history_page.mli)
@@ -12988,6 +13052,8 @@ module Basis : sig
   [@@deriving equal, sexp_of]
 
   val create : Recovery_window.Scope.t -> revision:int64 -> (t, Protocol_error.t) result
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Protocol_error.t) result
 end
 
 module Inspect : sig

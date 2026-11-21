@@ -93,7 +93,20 @@ module Reply = struct
     | Cancelled
   [@@deriving enumerate, equal, sexp_of]
 
-  let phase_name phase = Sexp.to_string (sexp_of_phase phase) |> String.lowercase
+  let phase_name = function
+    | Idle -> "idle"
+    | Awaiting -> "awaiting"
+    | Waiting -> "waiting"
+    | Preparing -> "preparing"
+    | Held_capacity -> "held_capacity"
+    | Held_capacity_unknown -> "held_capacity_unknown"
+    | Held_authority -> "held_authority"
+    | Held_input -> "held_input"
+    | Held_interrupted -> "held_interrupted"
+    | Admitted -> "admitted"
+    | Finished -> "finished"
+    | Cancelled -> "cancelled"
+  ;;
 
   type t =
     { basis : Basis.t
