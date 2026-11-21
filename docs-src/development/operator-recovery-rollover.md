@@ -5,6 +5,11 @@ uses the same commands on HTTP and its other supported RPC transports. Keep
 `recovery.windows` selected if the client also needs to enable capture or list
 sealed windows. Rollover control does not enable recovery on a session.
 
+To try a complete authored, checkpointed cut and exact original read, use
+the [local recovery tutorial](../examples/learning/context-recovery/README.md).
+The [window and history operations](../agent-server/operations.md#local-recovery-windows)
+give the negotiated methods for enrollment, retained search and exact reads.
+
 The typed client uses `Agent_client.Recovery_windows.inspect_rollover` and
 `Agent_client.Recovery_windows.request_rollover`. Both require initialization on
 the host in the session reference.
@@ -130,3 +135,47 @@ uses ordinary operation cancellation. If a connection closes before the
 reply, reconnect, obtain a current owner attachment and inspect again. A stale
 basis returns a conflict. An `idle` phase means the current window has no
 foreground follow-up.
+
+## After an edit or configuration change
+
+- For an edited or withdrawn message, run a fresh recovery query. Read the
+  citation and part it returns if the message remains visible. Old citations,
+  cursors and effective preparations can lose their source basis. A prior
+  snippet, byte range or digest grants no continued access.
+  [History edit contract](../agent-server/protocol.md#sessions-and-messages)
+- Editing a local note advances its revision. That can invalidate checkpoint
+  selection and future reads through a share pinned to the former head.
+  Recheck the local catalog before recording a new checkpoint. The source
+  owner can explicitly grant the intended current revision again.
+  [Note revision and share controls](recovery-note-shares.md)
+- A model, profile or effective settings change may leave the target outside
+  the host's capacity qualification. Inspect fresh status after the next
+  preparation. An unmatched target has no numeric policy and cannot trigger
+  automatic rollover. The window ledger and authorized retained reads still
+  use local session state.
+  [Capacity qualification](../agent-server/configuration.md#local-context-capacity)
+
+## Host lifetime and provider transport
+
+| Host | Retained recovery |
+| --- | --- |
+| Durable detached daemon | A client can disconnect and reattach. After daemon restart, use the same store and current authority. A visible retained window can still be queried without activating a model run. |
+| Durable native `chat-tui --local` or `ochat chat-completion` | Enrollment belongs to the selected process-bound conversation. Use `-enable-recovery` on the initial enrollment, then reopen the same absolute storage root and session ID. Supply the local capacity file again for each process that needs the policy. |
+| Transient native host, legacy TUI or remote provider conversation | Use a durable native store or a qualified daemon session for local recovery. A provider conversation or response ID cannot reopen the local ledger. |
+
+See [TUI flags](../bin/chat_tui.doc.md#local-context-recovery),
+[managed headless use](../cli/chat-completion.md#capture-recoverable-context)
+and the [local capacity file](../agent-server/configuration.md#local-recovery-capacity-file).
+Provider-independent ownership refers to local windows, citations and
+receipts. Token estimates, triggers and model submission still depend on the
+qualified adapter and the resolved target. The stock numeric qualification
+described here uses OpenAI Responses.
+
+A fresh successor starts from a new local request envelope with its selected
+inputs and bounded checkpoint hints when applicable. It does not use a
+predecessor's provider continuation ID. SSE and WebSocket loopback tests
+exercise this separation. On a still-live qualified WebSocket, an idle
+archive-only cut sends a full successor-local input on the same physical
+connection. Ordinary prefix reuse can work within each window. An in-flight
+successor can own a new binding. This checks request construction and actual
+writes, while live provider behavior depends on your configured profile.

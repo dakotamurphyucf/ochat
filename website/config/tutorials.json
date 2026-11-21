@@ -814,5 +814,46 @@
         "website/scripts/publication-policy.mjs": "9b319f666e661a872c9d5a95c34424258e51920bb388c71602a07077e27d4ba3"
       }
     }
+  },
+  {
+    "id": "T20",
+    "page": "tutorials/context-recovery",
+    "host": "Private durable Unix daemon",
+    "examples": [
+      "context-recovery"
+    ],
+    "verification": {
+      "state": "offline-checked",
+      "baseRevision": "7f6c6ef9ca60160a44762d2ea2237361054e5c1b",
+      "testedAt": "2026-11-20",
+      "platform": "macOS / arm64",
+      "toolchain": "Pinned repository OCaml and Dune toolchain",
+      "liveProvider": false,
+      "commands": [
+        "dune build @test/agent_server_e2e/agent-e2e-recovery-authored-example"
+      ],
+      "observed": "The stock daemon loads the checked ChatMD and project with the installed recovery guidance. A controlled provider invokes note, checkpoint and rollover tools. The successor retrieves the original text by exact citation and the Review component advances through its durable checkpoint.",
+      "limitations": "The fixture uses a controlled provider. Model decisions, credentials and payment depend on your live provider setup.",
+      "hashes": {
+        "LICENSE.txt": "cfe7ad42b7c3ddb8772df672f1001e6457ce5dcef9eaaaa6f271779e67e8b153",
+        "docs-src/examples/learning/context-recovery/README.md": "b87887a5a838067f034c94ed378d185fc3c2e29dcdaf36360b0a305537439507",
+        "docs-src/examples/learning/context-recovery/agent.chatmd": "6e98da595e3fc8b35b996912d8adf24a22f3bb547fcfe8c778673e4341268c5e",
+        "docs-src/examples/learning/context-recovery/chatml.project.json": "58369c06637989de0c02309842ae6f6e89907679c8d69d63e6cf7de4d140434f",
+        "docs-src/examples/learning/context-recovery/moderator.chatml": "381392740f33802cb107a5381d882d229f8ba97aa77aa1dc708167fca10f126a",
+        "docs-src/examples/learning/context-recovery/server.sexp": "a413c8bd7467734c80fc4d3792a1969947126b8960b8b5d1095d7ac758ffac9e",
+        "docs-src/examples/learning/lifecycle-composition/components/review/chatml.project.json": "4e7a6315ab62456085bd09f775754e86ff67e97ef081e405bc1067ee8db63a8a",
+        "docs-src/examples/learning/lifecycle-composition/components/review/src/review.chatml": "3d8d5fe7a8d4d7069184ca3fff52d04df9e992f7f053b650e7e26f63b1f5572e",
+        "docs-src/examples/learning/lifecycle-composition/components/review/src/review.chatmli": "f4720da12455b8b1d80e8914d88387d0ae33ab3d1aefe27a9f26333dbb24689d",
+        "docs-src/examples/libraries/lifecycle/chatml.project.json": "54a26874e094aa567cc218fde6b9ab1e0008d5b72c0b9b70d01c46fa4c890e6d",
+        "docs-src/examples/libraries/lifecycle/src/lifecycle.chatml": "15f53fe13e80a4e04478102fd5618b10209e6f111fcb39ae09751b2976fdde61",
+        "docs-src/examples/libraries/lifecycle/src/lifecycle.chatmli": "b530d9e1f0f373c3911f1e69c1e3d259eaf513f8ddb3926dcf99ac9b9fa98a34",
+        "docs-src/examples/libraries/recovery-rollover/chatml.project.json": "c6e61ae557656e991cfd91fd1ea8ff509c7b643680a9dc7a5a3728a01806a645",
+        "docs-src/examples/libraries/recovery-rollover/src/recovery_rollover.chatml": "0bf6241a4d916041ddf2226d6096f3d8aa25631b5771c1380bb8cf218fd51a9e",
+        "docs-src/examples/libraries/recovery-rollover/src/recovery_rollover.chatmli": "867654e77b12732382faea9658816b102a3d9188a6144547ba4e7c2b818f435b",
+        "test/agent_server_e2e/dune": "79a63e3e384a65904c1ce82f78a1428f697241ab71434fd4601494d374051cc3",
+        "test/agent_server_e2e/scenarios/context_recovery_example_scenario.ml": "3b44bfa2f6587ec4c94b2af0e56f808557486b239d5941c9972282ca2f524ad2",
+        "test/agent_server_e2e/scenarios/data_integrity_scenario.ml": "e1602ef4de9665fdf5172aea26b4e08c3350cab156a0b4630ce528de7a37eac7"
+      }
+    }
   }
 ]

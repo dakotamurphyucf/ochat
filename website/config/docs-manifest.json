@@ -5598,5 +5598,215 @@
     "title": "Recurrence rules internals",
     "reviewNote": "Implementation reference or checked source notes; the public guides cover the supported reader workflow.",
     "provenance": "authored"
+  },
+  {
+    "id": "tutorials/context-recovery",
+    "source": "docs-src/examples/learning/context-recovery/README.md",
+    "disposition": "publish",
+    "title": "Recover an earlier decision across local windows",
+    "description": "Select ChatMD tools, save a session note, and continue a ChatML workflow after a checkpointed cut with an exact citation.",
+    "audience": [
+      "author",
+      "operator"
+    ],
+    "reviewNote": "Maintained recovery workflow or shipped interface; the tutorial records its offline scope.",
+    "provenance": "authored",
+    "route": "/docs/tutorials/context-recovery/",
+    "section": "ChatML workflows",
+    "kind": "tutorial",
+    "order": 7,
+    "related": [
+      "development/operator-recovery-rollover",
+      "development/context-window-tools"
+    ],
+    "navigation": true,
+    "search": true,
+    "sitemap": true,
+    "noindex": false,
+    "status": "current",
+    "verification": "not-checked"
+  },
+  {
+    "id": "development/operator-recovery-rollover",
+    "source": "docs-src/development/operator-recovery-rollover.md",
+    "disposition": "publish",
+    "title": "Operate local context recovery",
+    "description": "Inspect capacity and receipts, request a cut, reconcile an interrupted rollover and reconnect to a durable store.",
+    "audience": [
+      "operator",
+      "integrator"
+    ],
+    "reviewNote": "Maintained recovery workflow or shipped interface; the tutorial records its offline scope.",
+    "provenance": "authored",
+    "route": "/docs/guides/local-context-recovery/",
+    "section": "Run and operate",
+    "kind": "guide",
+    "order": 9,
+    "related": [
+      "tutorials/context-recovery",
+      "development/recovery-note-shares"
+    ],
+    "navigation": true,
+    "search": true,
+    "sitemap": true,
+    "noindex": false,
+    "status": "current",
+    "verification": "not-checked"
+  },
+  {
+    "id": "development/context-window-tools",
+    "source": "docs-src/development/context-window-tools.md",
+    "disposition": "publish",
+    "title": "Context window tools and rollover hooks",
+    "description": "Inspect capacity, record a checkpoint, request a new window and handle before and after events.",
+    "audience": [
+      "author",
+      "operator",
+      "integrator"
+    ],
+    "reviewNote": "Maintained recovery workflow or shipped interface; the tutorial records its offline scope.",
+    "provenance": "authored",
+    "route": "/docs/reference/recovery/context-window-tools/",
+    "section": "Reference",
+    "kind": "reference",
+    "order": 12,
+    "related": [
+      "tutorials/context-recovery",
+      "development/operator-recovery-rollover"
+    ],
+    "navigation": false,
+    "search": true,
+    "sitemap": true,
+    "noindex": false,
+    "status": "current",
+    "verification": "not-checked"
+  },
+  {
+    "id": "development/recovery-history-tools",
+    "source": "docs-src/development/recovery-history-tools.md",
+    "disposition": "publish",
+    "title": "Recovery history tools",
+    "description": "Select bounded window and history search, exact text ranges and original asset reads.",
+    "audience": [
+      "author",
+      "operator",
+      "integrator"
+    ],
+    "reviewNote": "Maintained recovery workflow or shipped interface; the tutorial records its offline scope.",
+    "provenance": "authored",
+    "route": "/docs/reference/recovery/recovery-history-tools/",
+    "section": "Reference",
+    "kind": "reference",
+    "order": 12,
+    "related": [
+      "tutorials/context-recovery",
+      "development/operator-recovery-rollover"
+    ],
+    "navigation": false,
+    "search": true,
+    "sitemap": true,
+    "noindex": false,
+    "status": "current",
+    "verification": "not-checked"
+  },
+  {
+    "id": "development/recovery-note-tools",
+    "source": "docs-src/development/recovery-note-tools.md",
+    "disposition": "publish",
+    "title": "Recovery note tools",
+    "description": "Create, edit, search and read an exact local note or explicitly shared revision.",
+    "audience": [
+      "author",
+      "operator",
+      "integrator"
+    ],
+    "reviewNote": "Maintained recovery workflow or shipped interface; the tutorial records its offline scope.",
+    "provenance": "authored",
+    "route": "/docs/reference/recovery/recovery-note-tools/",
+    "section": "Reference",
+    "kind": "reference",
+    "order": 12,
+    "related": [
+      "tutorials/context-recovery",
+      "development/operator-recovery-rollover"
+    ],
+    "navigation": false,
+    "search": true,
+    "sitemap": true,
+    "noindex": false,
+    "status": "current",
+    "verification": "not-checked"
+  },
+  {
+    "id": "development/recovery-note-shares",
+    "source": "docs-src/development/recovery-note-shares.md",
+    "disposition": "publish",
+    "title": "Share a specific recovery note revision",
+    "description": "Inspect an exact source path, grant one recipient temporary read access and revoke a grant.",
+    "audience": [
+      "author",
+      "operator",
+      "integrator"
+    ],
+    "reviewNote": "Maintained recovery workflow or shipped interface; the tutorial records its offline scope.",
+    "provenance": "authored",
+    "route": "/docs/reference/recovery/recovery-note-shares/",
+    "section": "Reference",
+    "kind": "reference",
+    "order": 12,
+    "related": [
+      "tutorials/context-recovery",
+      "development/operator-recovery-rollover"
+    ],
+    "navigation": false,
+    "search": true,
+    "sitemap": true,
+    "noindex": false,
+    "status": "current",
+    "verification": "not-checked"
+  },
+  {
+    "id": "development/recovery-window-membership",
+    "source": "docs-src/development/recovery-window-membership.md",
+    "disposition": "publish",
+    "title": "Recovery citations and window membership",
+    "description": "Read source identity, window membership, retention and exact text range rules.",
+    "audience": [
+      "author",
+      "operator",
+      "integrator"
+    ],
+    "reviewNote": "Maintained recovery workflow or shipped interface; the tutorial records its offline scope.",
+    "provenance": "authored",
+    "route": "/docs/reference/recovery/recovery-window-membership/",
+    "section": "Reference",
+    "kind": "reference",
+    "order": 12,
+    "related": [
+      "tutorials/context-recovery",
+      "development/operator-recovery-rollover"
+    ],
+    "navigation": false,
+    "search": true,
+    "sitemap": true,
+    "noindex": false,
+    "status": "current",
+    "verification": "not-checked"
+  },
+  {
+    "id": "design/local-context-recovery",
+    "source": "docs-src/design/local-context-recovery.md",
+    "disposition": "repository-only",
+    "title": "Local context recovery design",
+    "reviewNote": "Design rationale and historical alternatives. The published recovery tutorial and operator references cover supported behavior.",
+    "provenance": "authored"
+  },
+  {
+    "id": "design/local-context-rollover",
+    "source": "docs-src/design/local-context-rollover.md",
+    "disposition": "repository-only",
+    "title": "Local context rollover design",
+    "reviewNote": "Design rationale and historical alternatives. The published recovery tutorial and operator references cover supported behavior.",
+    "provenance": "authored"
   }
 ]

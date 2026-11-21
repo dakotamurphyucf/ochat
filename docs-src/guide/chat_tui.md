@@ -236,6 +236,9 @@ produces one final canonical output through the existing Chat transcript path.
 
 ### Search prompt mode (entered via `/` or `?` in Normal)
 
+These keys search the displayed conversation. For exact citations from
+a sealed local window, use [recovery history queries](../agent-server/operations.md#list-and-search-recovery-items).
+
 | Keys | Action |
 |---|---|
 | (type) | edit the search query |

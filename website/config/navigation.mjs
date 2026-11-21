@@ -106,6 +106,13 @@ const paths = [
     label: 'ChatML workflows',
   },
   {
+    id: 'tutorials/context-recovery',
+    title: 'Recover a decision across local windows',
+    description:
+      'Save a private note, checkpoint a review, and retrieve the exact earlier decision in the next window.',
+    label: 'ChatML workflows',
+  },
+  {
     id: 'guide/chatml-development-workflow',
     title: 'Develop ChatML interactively',
     description:

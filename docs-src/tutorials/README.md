@@ -24,7 +24,8 @@ to add; lesson numbers are stable identifiers, not a required global sequence.
   [turn the program into a reusable tool](chatml-tool.md), then learn how a
   [moderator controls a conversation](workflow.md),
   [retain a review ledger](stateful-workflow.md), and
-  [deliver real background check results](background-results.md).
+  [deliver real background check results](background-results.md),
+  and [recover a cited decision across windows](../examples/learning/context-recovery/README.md).
 - **Subagents and agent teams:** [keep a specialist conversation](persistent-specialist.md),
   then [create a reviewer for the current task](generated-specialist.md).
 - **Run and host:** [save a batch request](../cli/chat-completion.md) or

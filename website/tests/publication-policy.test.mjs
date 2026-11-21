@@ -224,6 +224,7 @@ test('required capabilities have searchable reader destinations and explicit def
       'retrieval',
       'refinement',
       'compaction',
+      'context-recovery',
       'chatml',
       'developer-workflow',
       'subagents',

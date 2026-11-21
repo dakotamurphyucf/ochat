@@ -760,6 +760,56 @@
       "source": "docs-src/examples/libraries/lifecycle-run/src/lifecycle_run.chatmli",
       "disposition": "example-download",
       "reason": "Exact recurring-review source member approved for the catalog\u2019s complete archive and source reader."
+    },
+    {
+      "source": "docs-src/examples/learning/context-recovery/agent.chatmd",
+      "disposition": "example-download",
+      "reason": "Exact source approved for the complete local recovery tutorial download."
+    },
+    {
+      "source": "docs-src/examples/learning/context-recovery/moderator.chatml",
+      "disposition": "example-download",
+      "reason": "Exact source approved for the complete local recovery tutorial download."
+    },
+    {
+      "source": "docs-src/examples/learning/context-recovery/chatml.project.json",
+      "disposition": "example-download",
+      "reason": "Exact source approved for the complete local recovery tutorial download."
+    },
+    {
+      "source": "docs-src/examples/learning/context-recovery/server.sexp",
+      "disposition": "example-download",
+      "reason": "Exact source approved for the complete local recovery tutorial download."
+    },
+    {
+      "source": "docs-src/examples/learning/lifecycle-composition/components/review/chatml.project.json",
+      "disposition": "example-download",
+      "reason": "Exact source approved for the complete local recovery tutorial download."
+    },
+    {
+      "source": "docs-src/examples/learning/lifecycle-composition/components/review/src/review.chatml",
+      "disposition": "example-download",
+      "reason": "Exact source approved for the complete local recovery tutorial download."
+    },
+    {
+      "source": "docs-src/examples/learning/lifecycle-composition/components/review/src/review.chatmli",
+      "disposition": "example-download",
+      "reason": "Exact source approved for the complete local recovery tutorial download."
+    },
+    {
+      "source": "docs-src/examples/libraries/recovery-rollover/chatml.project.json",
+      "disposition": "example-download",
+      "reason": "Exact source approved for the complete local recovery tutorial download."
+    },
+    {
+      "source": "docs-src/examples/libraries/recovery-rollover/src/recovery_rollover.chatml",
+      "disposition": "example-download",
+      "reason": "Exact source approved for the complete local recovery tutorial download."
+    },
+    {
+      "source": "docs-src/examples/libraries/recovery-rollover/src/recovery_rollover.chatmli",
+      "disposition": "example-download",
+      "reason": "Exact source approved for the complete local recovery tutorial download."
     }
   ],
   "directories": [

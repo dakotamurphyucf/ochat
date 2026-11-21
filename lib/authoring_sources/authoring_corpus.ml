@@ -3753,7 +3753,7 @@ let runtime_foundation ~sources =
          ; review =
              Audited
                { excerpt_sha256 =
-                   [ "6e6ec03ec819715129d26b68a3dcd196f358845e110aa754acd893157fac5abf" ]
+                   [ "ebbcefb5f554cd78dd58c4b0e6d7679fb783662d82226539fc080cfc83d11b49" ]
                ; evidence =
                    [ "test/builtin_instructions/builtin_instructions_tests.ml"
                    ; "test/chatmd_prompt_content/content_tests.ml"
