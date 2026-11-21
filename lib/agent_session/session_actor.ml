@@ -37367,23 +37367,21 @@ let authorize_inference_basis t ~read_current =
            (Goal_work_attribution.episode left)
            (Goal_work_attribution.episode right)
     in
-    let changed () =
+    if
+      Option.equal same_run basis.run current.run
+      && Option.equal same_attribution basis.attribution current.attribution
+      &&
+      match basis.run, binding with
+      | None, None -> true
+      | Some run, Some binding ->
+        Run_authorities.is_current t.run_authorities binding ~run_id:run.id
+      | None, Some _ | Some _, None -> false
+    then Ok ()
+    else
       Error
         (error
            Permission_denied
            "inference physical owner or immutable origin changed after refresh")
-    in
-    if
-      Option.equal same_run basis.run current.run
-      && Option.equal same_attribution basis.attribution current.attribution
-    then (
-      match current.run, binding with
-      | None, None -> Ok ()
-      | Some run, Some expected ->
-        let%bind actual = inference_run_binding_current t run in
-        if phys_equal actual expected then Ok () else changed ()
-      | None, Some _ | Some _, None -> changed ())
-    else changed ()
   in
   let%map () = check_current () in
   { basis; check_current }

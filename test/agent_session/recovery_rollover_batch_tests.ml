@@ -278,8 +278,73 @@ let check_authored_claim_prefixes ~initial ~transactions ~id =
   assert (before && after)
 ;;
 
-let run ?(resume = false) ?(finish = false) ?(cancel = false) ?(authored = false) scenario
-  =
+let check_run_transfer state (schedule : A.Recovery_rollover_continuation.t) run_id =
+  let operation =
+    match schedule.phase with
+    | Admitted { operation; _ } -> operation
+    | _ -> failwith "the successor transfer was not admitted"
+  in
+  let index = Option.value_exn state.A.Session_state.run_state in
+  let run = A.Run_state.find index run_id |> Option.value_exn in
+  let work id =
+    P.Run_work.create ~key:(Operation id) ~generation:state.identity.generation
+    |> protocol_ok
+  in
+  assert (
+    List.mem run.relinquished_work (work schedule.predecessor) ~equal:P.Run_work.equal);
+  assert (List.mem run.owned_work (work operation) ~equal:P.Run_work.equal)
+;;
+
+let admit_managed_turn actor ~owner ~writer ~original ~observer ~entry text =
+  let scope =
+    A.Run_admission.Scope.create_authenticated
+      ~actor:original
+      ~observer
+      ~startup_pending:(fun () -> false)
+      ~authorize:permission
+    |> protocol_ok
+  in
+  let current = W.state actor in
+  let request =
+    P.Run_start.create
+      ~session_id
+      ~attachment_id:writer
+      ~generation:current.identity.generation
+      ~expected_revision:current.counters.revision
+      ~mode:Single_turn
+      ~input:(User_submission { kind = Plain_text; text; attachments = [] })
+      ~key:(Recovery_note_actor_tests.key "expire-original-run")
+    |> protocol_ok
+  in
+  let request_sha256 =
+    A.Run_admission_request.of_writer request
+    |> A.Run_admission_request.request_sha256
+    |> protocol_ok
+  in
+  let receipt =
+    Actor.admit_run
+      actor
+      ~scope
+      ~request
+      ~session:owner
+      ~request_sha256
+      ~entry:(Some entry)
+    |> protocol_ok
+  in
+  receipt.run_id
+;;
+
+type authored_followup =
+  | Wait
+  | Expire_original_run
+
+let run ?(resume = false) ?(finish = false) ?(cancel = false) ?authored_followup scenario =
+  let authored = Option.is_some authored_followup in
+  let expire_original_run =
+    match authored_followup with
+    | Some Expire_original_run -> true
+    | Some Wait | None -> false
+  in
   with_actor_workspace (fun env workspace_instance ->
     Eio.Switch.run (fun storage_scope ->
       Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 20. (fun () ->
@@ -394,6 +459,18 @@ let run ?(resume = false) ?(finish = false) ?(cancel = false) ?(authored = false
         let journal = W.journal disk Agent_store.Journal.create in
         let archive_ref = ref None in
         let operator_current = ref true in
+        let original_run_current = ref true in
+        let original_run_id = ref None in
+        let state_committed state _ =
+          match !original_run_id, A.Session_delta.foreground_continuation state with
+          | Some run, Some ({ phase = Admitted _; _ } as schedule)
+            when !original_run_current ->
+            (* The journal has acknowledged the work transfer; the provider guard
+               still owns the next application write. *)
+            check_run_transfer state schedule run;
+            original_run_current := false
+          | _ -> ()
+        in
         let operator =
           Operator_authorization.guarded
             ~principal:(Operator_authorization.principal proof_for_owners)
@@ -440,6 +517,7 @@ let run ?(resume = false) ?(finish = false) ?(cancel = false) ?(authored = false
             ~previous_transaction_hash:None
             ~archive
             ~before_commit
+            ~state_committed
             (fun actor persistence ->
                let writer = W.attach actor in
                let old_scope =
@@ -756,21 +834,43 @@ let run ?(resume = false) ?(finish = false) ?(cancel = false) ?(authored = false
                  else None
                in
                Actor.start actor ~attachment_id:writer |> protocol_ok |> ignore;
-               let send ?timing text =
+               let entry text =
                  let reserved =
                    Actor.reserve_history_block actor ~count:1 |> protocol_ok
                  in
+                 Pending_input_tests.occurrence
+                   (Int64.to_int_exn reserved.first_sequence)
+                   text
+               in
+               let send ?timing text =
                  Actor.submit_message_authenticated
                    actor
                    ~actor:proof_for_owners
                    ?timing
                    ~attachment_id:writer
-                   (Pending_input_tests.occurrence
-                      (Int64.to_int_exn reserved.first_sequence)
-                      text)
+                   (entry text)
                  |> protocol_ok
                in
-               send "admit the foreground attempt" |> ignore;
+               let text = "admit the foreground attempt" in
+               if expire_original_run
+               then (
+                 let _, observer = Option.value_exn moderator in
+                 let original =
+                   Operator_authorization.guarded
+                     ~principal:(Operator_authorization.principal proof_for_owners)
+                     ~is_current:(fun () -> !original_run_current)
+                 in
+                 original_run_id
+                 := Some
+                      (admit_managed_turn
+                         actor
+                         ~owner
+                         ~writer
+                         ~original
+                         ~observer
+                         ~entry:(entry text)
+                         text))
+               else send text |> ignore;
                Eio.Promise.await first_entered;
                Eio.Promise.await second_returning;
                let get_intent () = pending (W.state actor) |> Option.value_exn in
@@ -878,7 +978,7 @@ let run ?(resume = false) ?(finish = false) ?(cancel = false) ?(authored = false
                      |> Result.ok_or_failwith
                    in
                    wake_registry := Some (queue_wake actor ~source ~snapshot));
-               if resume || cancel
+               if resume || cancel || expire_original_run
                then (
                  let request actor_proof action =
                    Actor.control_context_rollover
@@ -917,7 +1017,23 @@ let run ?(resume = false) ?(finish = false) ?(cancel = false) ?(authored = false
                      failwith
                        "expired follow-up changed the canonical transaction sequence"
                  in
-                 if cancel
+                 if expire_original_run
+                 then (
+                   ignore (control Continue : A.Recovery_rollover_continuation.t);
+                   let settled = await_idle actor in
+                   assert (not !original_run_current);
+                   assert !operator_current;
+                   [%test_eq: int] 1 !dispatches;
+                   (match !worker_failure with
+                    | Some { code = Permission_denied; message; _ } ->
+                      [%test_eq: string] "Run original authority expired" message
+                    | _ ->
+                      failwith "the provider guard did not reject original Run expiry");
+                   let schedule =
+                     Option.value_exn (A.Session_delta.foreground_continuation settled)
+                   in
+                   check_run_transfer settled schedule (Option.value_exn !original_run_id))
+                 else if cancel
                  then (
                    ignore (control Continue : A.Recovery_rollover_continuation.t);
                    Eio.Promise.await successor_preparing;
@@ -1063,10 +1179,10 @@ let run ?(resume = false) ?(finish = false) ?(cancel = false) ?(authored = false
           assert (Scope.equal old_scope (W.scope archive));
           assert (
             Bool.equal
-              (not resume)
+              (not (resume || expire_original_run))
               (List.exists state.conversation.deferred_user_entries ~f:(fun pending ->
                  P.History.Id.equal (A.Pending_input_document.entry pending).id pending_id)));
-          if resume
+          if resume || expire_original_run
           then
             assert (
               List.count state.conversation.canonical_history ~f:(fun entry ->
@@ -1089,7 +1205,11 @@ let run ?(resume = false) ?(finish = false) ?(cancel = false) ?(authored = false
                   | Some (Accepted_wake accepted) ->
                     P.Id.Operation.equal accepted operation
                   | _ -> false)
-               | Waiting when not (resume || finish || cancel) -> true
+               | Admitted _ when expire_original_run ->
+                 check_run_transfer state schedule (Option.value_exn !original_run_id);
+                 true
+               | Waiting when not (resume || finish || cancel || expire_original_run) ->
+                 true
                | Finished Script_finished when finish -> true
                | Finished Cancelled when cancel -> true
                | _ -> false);
@@ -1137,7 +1257,13 @@ let%expect_test "fresh successor admission holds capacity without consuming stag
 ;;
 
 let%expect_test "installed moderator authorizes and holds a real operator rollover" =
-  run ~authored:true Force;
+  run ~authored_followup:Wait Force;
   print_endline "both durable authored phases survived operator replay";
   [%expect {| both durable authored phases survived operator replay |}]
+;;
+
+let%expect_test "a transferred Run can expire before its successor provider submission" =
+  run ~authored_followup:Expire_original_run Force;
+  print_endline "the durable Run transfer survived without a successor provider request";
+  [%expect {| the durable Run transfer survived without a successor provider request |}]
 ;;
