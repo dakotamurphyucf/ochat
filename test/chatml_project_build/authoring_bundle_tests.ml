@@ -15,7 +15,16 @@ let wire_ok = function
 
 let adapter_ok = function
   | Ok value -> value
-  | Error _ -> failwith "valid captured project rejected"
+  | Error error ->
+    (match A.Error.problem error with
+     | Work_limit -> failwith "project bundle exhausted work"
+     | Input_limit -> failwith "project bundle exhausted input bytes"
+     | Builder error ->
+       (match B.Error.problem error with
+        | Limit_exceeded -> failwith "project build exhausted its allowance"
+        | Prepared _ -> failwith "prepared project rejected"
+        | _ -> failwith "project builder rejected")
+     | _ -> failwith "valid captured project rejected")
 ;;
 
 let metadata source =
@@ -250,6 +259,19 @@ let%test_unit "nested Project subsets share one snapshot and one aggregate allow
   in
   let first = validate attempt first_selector |> adapter_ok in
   let second = validate attempt second_selector |> adapter_ok in
+  let first_prepared = B.prepared (A.Validated.build first) in
+  Eio_main.run (fun env ->
+    match
+      Chatml_compilation.compile_prepared_with_contract_and_policy
+        first_prepared
+        ~contract
+        ~policy:(Bounded Chatml_compilation.default_limits)
+        ~max_dependency_depth:16
+        ~env
+        ()
+    with
+    | Ok _ -> ()
+    | Error error -> failwith (error.code ^ ": " ^ error.message));
   assert (
     not
       (S.Digest.equal

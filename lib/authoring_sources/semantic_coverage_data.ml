@@ -466,11 +466,11 @@ let implementation_sources =
   ; ( "lib/chatml/chatml_static_surface.ml"
     , "07c8f7a97e1e6da286ff4e103181ce4b22b12ebb6f370ac19918f171c0723111" )
   ; ( "lib/chatml/chatml_compiler_contract.ml"
-    , "7e67f112f6484dea487bba037bb04e114655ed1d030a2ce56672ef068f02def0" )
+    , "dbf88963eb09f069bb4627524586b1a0e4c1498c63c9ce983a2e2fc0cba45291" )
   ; ( "lib/chatml/chatml_module_reference.ml"
     , "f2e9c1ff541b67a243effe6b4f04b8c0f15763000f9cd42603d6a9a746d0a728" )
   ; ( "lib/chatml/chatml_contract_encoding.ml"
-    , "7f8c6c1a49818abaf5ecbfe7cc1df2f4511930939cc1c573e3d422c94548c138" )
+    , "b0576ce50db5b3eef518e4d816857f8412596cbba5fa52129bd300760b713c43" )
   ; ( "lib/chatml_linked/chatml_linked_program.ml"
     , "a1e4203a423527acfc538471ed848004f5211ae57231700d1a6760ef3204ab47" )
   ; ( "lib/chatml/chatml_binding_pattern.ml"

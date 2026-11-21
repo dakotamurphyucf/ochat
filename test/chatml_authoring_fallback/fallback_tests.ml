@@ -198,7 +198,8 @@ let%test_unit "selected contract and captured source are exact, bounded evidence
        ~checkpoint:ignore
    with
    | Error F.Error.Contract_mismatch -> ()
-   | Ok _ | Error _ -> assert false);
+   | Error error -> Error.raise_s (F.Error.sexp_of_t error)
+   | Ok _ -> failwith "different compiler contract admitted");
   let moderator_fixture = Fixtures.make ~contract:wrong_target () in
   let moderator_build = Fixtures.compose moderator_fixture |> Support.ok in
   let moderator =

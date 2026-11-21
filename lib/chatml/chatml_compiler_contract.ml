@@ -73,52 +73,54 @@ let for_static_surface surface ~required_bindings =
   { kind = Kind.Native; surface; required_bindings; optional_bindings = [] }
 ;;
 
-(* Conversion and emission poll their actual work. Standard identity preserves
-   compiler.v1 bytes; native static metadata has a distinct target/version tag. *)
-let identity t ~checkpoint =
+let emit_identity t writer =
+  let module E = Chatml_contract_encoding in
+  let atom = E.atom writer in
+  let list = E.list writer in
   let binding name scheme =
-    checkpoint ();
-    Sexp.List [ Sexp.Atom name; Chatml_contract_encoding.type_scheme scheme ~checkpoint ]
+    list (fun () ->
+      atom name;
+      E.type_scheme writer scheme)
   in
   let bindings entries =
-    Sexp.List
-      (List.map entries ~f:(fun (b : Static.Binding.t) -> binding b.name b.scheme))
+    list (fun () ->
+      List.iter entries ~f:(fun (b : Static.Binding.t) -> binding b.name b.scheme))
   in
-  let globals = bindings (Static.globals t.surface) in
-  let modules =
-    Sexp.List
-      (List.map (Static.modules t.surface) ~f:(fun (m : Static.Module.t) ->
-         checkpoint ();
-         Sexp.List [ Sexp.Atom m.name; bindings m.exports ]))
-  in
-  let aliases =
-    Sexp.List
-      (List.map
-         (Static.type_aliases t.surface)
-         ~f:(fun (a : Chatml_builtin_surface.builtin_type_alias) -> binding a.name a.body))
-  in
-  let requirements =
-    Sexp.List
-      (List.map t.required_bindings ~f:(fun (name, scheme) -> binding name scheme))
+  let entrypoints entries =
+    List.iter entries ~f:(fun (name, scheme) -> binding name scheme)
   in
   let target =
     match t.kind with
-    | Standard target -> Target.sexp_of_t target
-    | Native -> Sexp.Atom "Native"
+    | Standard target ->
+      (match Target.sexp_of_t target with
+       | Atom name -> name
+       | List _ -> assert false)
+    | Native -> "Native"
   in
-  checkpoint ();
-  let optional =
+  list (fun () ->
+    atom (compiler_family t);
+    atom target;
+    bindings (Static.globals t.surface);
+    list (fun () ->
+      List.iter (Static.modules t.surface) ~f:(fun (m : Static.Module.t) ->
+        list (fun () ->
+          atom m.name;
+          bindings m.exports)));
+    list (fun () ->
+      List.iter
+        (Static.type_aliases t.surface)
+        ~f:(fun (a : Chatml_builtin_surface.builtin_type_alias) -> binding a.name a.body));
+    list (fun () -> entrypoints t.required_bindings);
     match t.optional_bindings with
-    | [] -> []
+    | [] -> ()
     | entries ->
-      [ Sexp.List
-          (Sexp.Atom "Optional_bindings"
-           :: List.map entries ~f:(fun (name, scheme) -> binding name scheme))
-      ]
-  in
-  Sexp.List
-    ([ Sexp.Atom (compiler_family t); target; globals; modules; aliases; requirements ]
-     @ optional)
+      list (fun () ->
+        atom "Optional_bindings";
+        entrypoints entries))
+;;
+
+let identity t ~checkpoint =
+  Chatml_contract_encoding.to_sexp ~checkpoint (emit_identity t)
 ;;
 
 module Identity_summary = struct
@@ -131,13 +133,8 @@ module Identity_summary = struct
   let fingerprint t = t.fingerprint
 end
 
-let encode_identity t ~checkpoint ~allocate =
-  let converted_checkpoint () =
-    checkpoint ();
-    allocate 512
-  in
-  let identity = identity t ~checkpoint:converted_checkpoint in
-  Chatml_contract_encoding.to_string identity ~checkpoint ~allocate
+let encode_identity ?allocate t ~checkpoint =
+  Chatml_contract_encoding.to_string ?allocate ~checkpoint (emit_identity t)
 ;;
 
 let summarize_identity t ~checkpoint ~allocate =
@@ -153,7 +150,7 @@ let input_bytes t ~checkpoint ~allocate =
 ;;
 
 let fingerprint t ~checkpoint =
-  let encoded = Chatml_contract_encoding.to_string (identity t ~checkpoint) ~checkpoint in
+  let encoded = encode_identity t ~checkpoint in
   Chatml_source.Digest.of_contents encoded ~checkpoint
 ;;
 
@@ -164,9 +161,8 @@ let matches_runtime_surface t surface ~checkpoint ?(allocate = fun _ -> ()) () =
   in
   let projected = Static.of_runtime_surface surface ~checkpoint:charged_checkpoint in
   let digest contract =
-    let identity = identity contract ~checkpoint:charged_checkpoint in
-    let encoded = Chatml_contract_encoding.to_string identity ~checkpoint ~allocate in
-    Chatml_source.Digest.of_contents encoded ~checkpoint
+    let summary = summarize_identity contract ~checkpoint ~allocate in
+    Identity_summary.fingerprint summary
   in
   let expected = digest t in
   let actual = digest { t with surface = projected } in
@@ -246,13 +242,9 @@ module Invocation = struct
 
   let matching_state state input result ~checkpoint ~allocate =
     let digest scheme =
-      let checkpoint_type () =
-        checkpoint ();
-        allocate 512
-      in
       let encoded =
-        Chatml_contract_encoding.type_scheme scheme ~checkpoint:checkpoint_type
-        |> Chatml_contract_encoding.to_string ~checkpoint ~allocate
+        Chatml_contract_encoding.to_string ~checkpoint ~allocate (fun writer ->
+          Chatml_contract_encoding.type_scheme writer scheme)
       in
       Chatml_source.Digest.of_contents encoded ~checkpoint
     in

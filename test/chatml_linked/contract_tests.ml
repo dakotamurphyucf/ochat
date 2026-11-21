@@ -23,24 +23,41 @@ let legacy_identity target surface requirements =
   , (requirements : (string * B.ty) list)]
 ;;
 
-let%test_unit "standard static contracts preserve exact old compiler identities" =
+let%test_unit
+    "standard identities extend the legacy schema only on targets with the rollover hook"
+  =
   let module X = Chatml.Chatml_extension_surface in
   List.iter
     [ C.Target.One_off_v1, X.one_off_v1, X.one_off_entrypoints
     ; Tool_v1, X.tool_v1, X.tool_entrypoints
+    ; Developer_tool_v1, X.developer_tool_v1, X.tool_entrypoints
     ; Moderator_v1, X.moderator_v1, X.moderator_entrypoints
     ; Delegated_moderator_v1, X.delegated_moderator_v1, X.moderator_entrypoints
     ]
     ~f:(fun (target, surface, requirements) ->
       let actual = C.for_target target ~checkpoint in
-      let expected = legacy_identity target surface requirements in
+      let legacy = legacy_identity target surface requirements in
+      let expected =
+        match target with
+        | Moderator_v1 | Delegated_moderator_v1 ->
+          let hook = Chatml.Chatml_context_rollover.scheme in
+          let entry = [%sexp ("on_context_rollover" : string), (hook : B.ty)] in
+          (match legacy with
+           | Sexp.List fields ->
+             Sexp.List (fields @ [ Sexp.List [ Atom "Optional_bindings"; entry ] ])
+           | Atom _ -> assert false)
+        | One_off_v1 | Tool_v1 | Developer_tool_v1 -> legacy
+      in
       assert (Sexp.equal expected (C.identity actual ~checkpoint));
       let allocated = ref 0 in
       let summary =
         C.summarize_identity actual ~checkpoint ~allocate:(fun bytes ->
           allocated := !allocated + bytes)
       in
-      assert (C.Identity_summary.encoded_bytes summary > 0);
+      let expected_bytes = Sexp.to_string expected in
+      [%test_eq: int]
+        (C.Identity_summary.encoded_bytes summary)
+        (String.length expected_bytes);
       assert (!allocated >= C.Identity_summary.encoded_bytes summary);
       assert (
         Chatml_source.Digest.equal
@@ -49,7 +66,7 @@ let%test_unit "standard static contracts preserve exact old compiler identities"
       assert (
         Chatml_source.Digest.equal
           (C.fingerprint actual ~checkpoint)
-          (Chatml_source.Digest.of_contents (Sexp.to_string expected) ~checkpoint)));
+          (Chatml_source.Digest.of_contents expected_bytes ~checkpoint)));
   let contract = C.for_target Tool_v1 ~checkpoint in
   [%test_eq: string]
     (Chatml_source.Digest.to_hex (C.fingerprint contract ~checkpoint))
@@ -83,6 +100,7 @@ let%test_unit
     ; "\n\r\t\b"
     ; String.init 256 ~f:Char.of_int_exn
     ; String.make 20000 'n'
+    ; String.make 20000 '\000'
     ]
   in
   List.iter atoms ~f:(fun name ->

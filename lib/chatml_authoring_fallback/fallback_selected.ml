@@ -35,20 +35,20 @@ module Selected_contract = struct
     let poll () = Work.charge work 1 in
     try
       poll ();
-      let contract =
-        match Contract.kind selected_contract with
-        | Contract.Kind.Standard target -> Contract.for_target target ~checkpoint:poll
-        | Native -> selected_contract
-      in
       let allocated = ref 0 in
       let allocate bytes =
         if bytes < 0 || bytes > limits.max_contract_identity_bytes - !allocated
         then raise Identity_limit;
         allocated := !allocated + bytes
       in
-      let actual_bytes = Contract.input_bytes contract ~checkpoint:poll ~allocate in
-      if actual_bytes > limits.max_contract_identity_bytes then raise Identity_limit;
-      let fingerprint = Contract.fingerprint contract ~checkpoint:poll in
+      let identity =
+        Contract.summarize_identity selected_contract ~checkpoint:poll ~allocate
+      in
+      if
+        Contract.Identity_summary.encoded_bytes identity
+        > limits.max_contract_identity_bytes
+      then raise Identity_limit;
+      let fingerprint = Contract.Identity_summary.fingerprint identity in
       let prepared = Build.prepared build in
       if
         (not (Captured.Digest.equal fingerprint (Prepared.compiler_contract prepared)))
@@ -58,7 +58,7 @@ module Selected_contract = struct
                 (Prepared.Environment.required_contract (Prepared.environment prepared)))
       then Error Error.Contract_mismatch
       else (
-        let surface = Contract.static_surface contract in
+        let surface = Contract.static_surface selected_contract in
         let names_rev = ref [] in
         List.iter (Static.globals surface) ~f:(fun (binding : Static.Binding.t) ->
           Work.charge_string work binding.name;
