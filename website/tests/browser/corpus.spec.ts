@@ -51,7 +51,7 @@ test('all nine TUI bridges retain every historical heading without JavaScript', 
   }
 });
 
-test('the framework map exposes the capability catalog and reaches maintained MCP integration', async ({
+test('the framework map publishes the capability catalog and links to recovery and MCP', async ({
   browser,
 }) => {
   const context = await browser.newContext({
@@ -65,7 +65,20 @@ test('the framework map exposes the capability catalog and reaches maintained MC
     const navigation = page.getByRole('navigation', {
       name: 'Framework capabilities',
     });
-    await expect(navigation.getByRole('link')).toHaveCount(17);
+    const capabilities: { title: string; pages: { route: string }[] }[] =
+      report.capabilities;
+    const links = await navigation.getByRole('link').evaluateAll((nodes) =>
+      nodes.map((node) => ({
+        text: node.textContent?.trim(),
+        href: node.getAttribute('href'),
+      })),
+    );
+    expect(links).toEqual(
+      capabilities.map(({ title, pages }) => ({
+        text: title,
+        href: pages[0].route,
+      })),
+    );
     await expect(
       navigation.getByRole('link', {
         name: 'Captured ChatML development and REPL',
@@ -84,6 +97,20 @@ test('the framework map exposes the capability catalog and reaches maintained MC
       .getByRole('link', { name: 'Custom tools', exact: true })
       .click();
     await expect(page).toHaveURL('/docs/library/custom-tools/');
+
+    await page.goto('/docs/');
+    await page.getByText('Explore the framework', { exact: true }).click();
+    await navigation
+      .getByRole('link', { name: 'Local context recovery', exact: true })
+      .click();
+    await expect(page).toHaveURL('/docs/tutorials/context-recovery/');
+    await expect(
+      page.getByRole('heading', {
+        level: 1,
+        name: 'Recover an earlier decision across local windows',
+        exact: true,
+      }),
+    ).toBeVisible();
   } finally {
     await context.close();
   }
