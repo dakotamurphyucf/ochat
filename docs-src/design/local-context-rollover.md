@@ -615,6 +615,16 @@ through the existing descendant lifecycle. An authorized controller can use
 Recovery never reconstructs a retired process credential. An archive-only
 cut waits for current authority.
 
+An ordinary managed Run retains its admission when local context rollover
+replaces its foreground Operation. During preparation the selected successor
+uses the outstanding predecessor Run as its inference origin. At the actual
+provider admission, the transaction moves the old Operation from owned work
+to relinquished work and adds the successor. The physical predecessor remains
+interrupted in inference history. Its successor's actual terminal settles the
+Run under ordinary single-turn or workflow rules. A wait or capacity hold keeps
+the obligation pending. Cancellation before dispatch settles outstanding work
+as cancelled, and an explicit finish without a successor leaves it interrupted.
+
 An inherited managed Turn can dispatch under its confirmed parent Goal
 without carrying the parent's interactive actor authority into the child.
 Context tools that require a current transcript principal still deny access

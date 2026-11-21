@@ -36933,8 +36933,21 @@ let execution_basis ?admitted t (origins : execution_origin_lookup) execution =
     Option.value_map admission ~default:(Ok ()) ~f:check_agent_admission
   in
   let operation id generation =
-    let%bind work = Agent_protocol.Run_work.create ~key:(Operation id) ~generation in
-    Goal_work_attribution.run_of_work t.state work
+    let module P = Agent_protocol in
+    let%bind work = P.Run_work.create ~key:(Operation id) ~generation in
+    let%bind owner = Goal_work_attribution.run_of_work t.state work in
+    match
+      owner, t.foreground_successor, Session_delta.foreground_continuation t.state
+    with
+    | None, Some selected, Some { phase = Preparing operation; owner; predecessor }
+      when Int.equal generation t.state.identity.generation
+           && P.Id.Operation.equal id selected.operation
+           && P.Id.Operation.equal operation id
+           && P.Id.Operation.equal owner selected.owner ->
+      (* Preparation and the physical write have one Run origin. Its work
+         ownership moves only when this exact successor is admitted. *)
+      Run_transition.rollover_work_owner t.state ~predecessor
+    | _ -> Ok owner
   in
   let basis ?operation_id ?invocation_id ?preparation run =
     let%map attribution =
@@ -59660,12 +59673,39 @@ let claim_successor_hook t (handoff : Foreground_successor.Handoff.t) =
 ;;
 
 let save_successor_phase t ~id ~expected ~change ~check =
-  transition
-    t
-    ~check_before_commit:check
-    ~delta:(Session_delta.Recovery_rollover_changed (Schedule { id; expected; change }))
-    ~payloads:[]
-  |> Result.map ~f:ignore
+  let module C = Recovery_rollover_continuation in
+  let open Result.Let_syntax in
+  let%bind work =
+    match change, Session_delta.foreground_continuation t.state with
+    | (C.Finish reason | Stop_preparation { reason; _ }), Some current
+      when Agent_protocol.Id.Operation.equal current.owner id ->
+      let outcome : Agent_protocol.Run_work.Terminal.outcome =
+        match reason with
+        | Script_finished -> Interrupted
+        | Cancelled -> Cancelled
+      in
+      let%map deltas =
+        Run_transition.settle_operation
+          t.state
+          ~operation_id:current.predecessor
+          ~outcome
+          ~now:(t.services.now ())
+      in
+      (match t.state.run_state, deltas with
+       | Some before, [ Session_delta.Run_state_changed after ]
+         when phys_equal before after -> []
+       | _ -> deltas)
+    | _ -> Ok []
+  in
+  let schedule =
+    Session_delta.Recovery_rollover_changed (Schedule { id; expected; change })
+  in
+  let delta =
+    match work with
+    | [] -> schedule
+    | _ -> Session_delta.Batch (schedule :: work)
+  in
+  transition t ~check_before_commit:check ~delta ~payloads:[] |> Result.map ~f:ignore
 ;;
 
 let check_successor_selected t (selected : Foreground_successor.t) =
@@ -59870,7 +59910,22 @@ let admit_successor_dispatch t (selected : Foreground_successor.t) attempt =
         ( [ Pending_transition.delta pending ]
         , [ P.Event.Durable.Payload.History_appended entries ] )
     in
-    let delta = Session_delta.Batch (pending_deltas @ wakes @ [ schedule ]) in
+    let%bind continuation =
+      Result.of_option (Session_delta.foreground_continuation t.state)
+        ~error:(error Conflict "foreground rollover continuation is absent")
+    in
+    let%bind owner_run, work =
+      Run_transition.transfer_rollover_work
+        t.state
+        ~predecessor:continuation.predecessor
+        ~successor:selected.operation
+        ~now:(t.services.now ())
+    in
+    let check () =
+      let%bind () = check () in
+      Option.value_map owner_run ~default:(Ok ()) ~f:(check_run_binding t)
+    in
+    let delta = Session_delta.Batch (pending_deltas @ wakes @ (schedule :: work)) in
     let completion_sample = producer_completion_sample t ~delta in
     let%bind candidate = prepare_transition ?completion_sample t ~delta ~payloads in
     let%map () =

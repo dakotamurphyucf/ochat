@@ -8,6 +8,7 @@ let cases =
   ; "daemon-recovery.asset-publication", Support.Data_integrity_http.test_recovery_assets
   ; "daemon-recovery.converter-adoption", Support.Recovery_asset_converter.run
   ; "embedded-recovery.owner-enrollment", Recovery_embedded_owner_scenario.run
+  ; "embedded-recovery.cold-managed-rollover", Recovery_managed_rollover_scenario.run
   ; "embedded-recovery.headless-permissions", Recovery_headless_permission_scenario.run
   ; "embedded-recovery.headless-exact-permission", Recovery_headless_permission_scenario.run_exact
   ; "daemon-recovery.configured-capacity", Recovery_capacity_scenario.run

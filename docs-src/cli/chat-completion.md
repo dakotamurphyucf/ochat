@@ -50,6 +50,17 @@ rollover, enroll the session and supply a policy that qualifies its actual
 model and profile each time you run the local host.
 [Local capacity file](../agent-server/configuration.md#local-recovery-capacity-file).
 
+When you submit new input to a retained versioned moderator, the CLI joins its
+cold resume callback before selecting the input revision. A failed callback
+reports its error before the new message is admitted.
+
+If the input crosses an automatic context boundary, the command keeps the same
+managed Run ID. Once the successor is admitted, the Run records the retired
+Operation as relinquished and follows the new Operation to its terminal result.
+Later invocations can inspect the original Run receipt or send a new message
+in the retained successor window. A suspended continuation can still require
+an operator decision before the Run finishes.
+
 ## Tool approvals in unattended runs
 
 This command can write the conversation and has no interactive approval prompt.

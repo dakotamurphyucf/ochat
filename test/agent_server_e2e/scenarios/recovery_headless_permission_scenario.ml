@@ -355,19 +355,11 @@ let recovered_read approval request =
   accepted, summary
 ;;
 
-let run_with approval env temporary =
-  let variant =
-    match approval with
-    | Named -> "named"
-    | Exact -> "exact"
-  in
-  let fixture =
-    Fixture.create env temporary ("headless-recovery-permission-" ^ variant)
-  in
+let with_local_provider env temporary ~name ~prompt f =
+  let fixture = Fixture.create env temporary name in
   let port = Config.http_port fixture in
   let endpoint = sprintf "http://127.0.0.1:%d" port in
   let secret = "headless-private-synthetic-key" in
-  Temp.register_secret temporary note;
   let cwd = Temp.path temporary (Config.physical_workspace fixture) in
   let prompt_file = Config.prompt_path fixture in
   Eio.Path.save ~create:(`Or_truncate 0o600) (Temp.path temporary prompt_file) prompt;
@@ -383,33 +375,51 @@ let run_with approval env temporary =
   Eio.Switch.run (fun sw ->
     let provider = Provider.start ~sw ~env ~port in
     let store = Config.data_dir fixture in
-    let session_id =
-      interactive ~sw env provider ~environment ~cwd ~prompt_file ~store approval
-    in
-    (match approval with
-     | Named -> ()
-     | Exact ->
-       let key =
-         Temp.path temporary (Filename.concat store "indexes/protected-approval-key.v1")
+    f ~sw ~provider ~fixture ~environment ~cwd ~prompt_file ~store)
+;;
+
+let run_with approval env temporary =
+  let variant =
+    match approval with
+    | Named -> "named"
+    | Exact -> "exact"
+  in
+  Temp.register_secret temporary note;
+  with_local_provider
+    env
+    temporary
+    ~name:("headless-recovery-permission-" ^ variant)
+    ~prompt
+    (fun ~sw ~provider ~fixture:_ ~environment ~cwd ~prompt_file ~store ->
+       let session_id =
+         interactive ~sw env provider ~environment ~cwd ~prompt_file ~store approval
        in
-       let stat = Eio.Path.stat ~follow:false key in
-       require
-         ((match stat.kind with
-           | `Regular_file -> true
-           | _ -> false)
-          && Int.equal (stat.perm land 0o777) 0o600
-          && Int64.equal (Optint.Int63.to_int64 stat.size) 32L)
-         "the stored approval key does not have its fixed private file shape");
-    managed
-      ~sw
-      env
-      provider
-      ~cwd
-      ~environment
-      ~prompt_file
-      ~store
-      ~session_id
-      ~respond:(recovered_read approval))
+       (match approval with
+        | Named -> ()
+        | Exact ->
+          let key =
+            Temp.path
+              temporary
+              (Filename.concat store "indexes/protected-approval-key.v1")
+          in
+          let stat = Eio.Path.stat ~follow:false key in
+          require
+            ((match stat.kind with
+              | `Regular_file -> true
+              | _ -> false)
+             && Int.equal (stat.perm land 0o777) 0o600
+             && Int64.equal (Optint.Int63.to_int64 stat.size) 32L)
+            "the stored approval key does not have its fixed private file shape");
+       managed
+         ~sw
+         env
+         provider
+         ~cwd
+         ~environment
+         ~prompt_file
+         ~store
+         ~session_id
+         ~respond:(recovered_read approval))
 ;;
 
 let run = run_with Named

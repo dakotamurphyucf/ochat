@@ -476,6 +476,58 @@ let add_owned_work
     ~now
 ;;
 
+let rollover_work_owner (state : Session_state.t) ~predecessor =
+  let open Result.Let_syntax in
+  let%bind work =
+    P.Run_work.create ~key:(Operation predecessor) ~generation:state.identity.generation
+  in
+  let%bind origin = Goal_work_attribution.run_of_work state work in
+  match origin with
+  | None -> Ok None
+  | Some run ->
+    let live =
+      match run.P.Run.lifecycle with
+      | Terminal _ -> false
+      | Admitted | Active | Waiting _ -> true
+    in
+    if
+      live
+      && List.mem run.owned_work work ~equal:P.Run_work.equal
+      && not
+           (List.exists run.terminal_work ~f:(fun proof ->
+              P.Run_work.equal proof.work work))
+    then Ok (Some run)
+    else Error (conflict "the predecessor Run no longer owns this foreground obligation")
+;;
+
+let transfer_rollover_work (state : Session_state.t) ~predecessor ~successor ~now =
+  let open Result.Let_syntax in
+  let generation = state.identity.generation in
+  let%bind old = P.Run_work.create ~key:(Operation predecessor) ~generation in
+  let%bind next = P.Run_work.create ~key:(Operation successor) ~generation in
+  if P.Run_work.equal old next
+  then Error (conflict "a rollover must select a fresh foreground Operation")
+  else (
+    let%bind owner = rollover_work_owner state ~predecessor in
+    match state.run_state, owner with
+    | _, None -> Ok (None, [])
+    | Some index, Some run ->
+      let%bind changed =
+        rebuild
+          run
+          ~lifecycle:run.lifecycle
+          ~owned_work:
+            (List.map run.owned_work ~f:(fun work ->
+               if P.Run_work.equal work old then next else work))
+          ~relinquished_work:(old :: run.relinquished_work)
+          ~terminal_work:run.terminal_work
+          ~now
+      in
+      let%map index = Run_state.advance index ~run:changed ~intents:[] in
+      Some run.id, [ Session_delta.Run_state_changed index ]
+    | _ -> Error (conflict "rollover foreground has ambiguous Run ownership"))
+;;
+
 let settle_operation ?startup_run (state : Session_state.t) ~operation_id ~outcome ~now =
   let open Result.Let_syntax in
   match state.run_state with
