@@ -25,7 +25,7 @@ let expect_error result code =
   | Ok _ -> failwith "rollover unexpectedly succeeded"
 ;;
 
-let with_client ~sw env fixture ~token ?(lose_rollover_reply = false) f =
+let with_client ~sw env fixture ~token ?(lose_rollover_reply = false) ?(lose_followup_reply = false) ?(extra_features = []) f =
   let client =
     Http.create ~sw ~env ~port:(Config.http_port fixture) ~token:(Some token)
     |> Result.ok_or_failwith
@@ -45,6 +45,9 @@ let with_client ~sw env fixture ~token ?(lose_rollover_reply = false) f =
                ~message:"fixture lost the reply"
                ~retryable:true
                ())
+        | Recovery_followup { selection = Apply _; _ } when lose_followup_reply && not !lost && Result.is_ok rpc.result ->
+          lost := true;
+          Error (P.Error.create Interrupted ~message:"fixture lost the follow-up reply" ~retryable:true ())
         | _ -> Ok rpc.result)
       ~next_notification:(fun () -> None)
       ~close:(fun () ->
@@ -60,7 +63,7 @@ let with_client ~sw env fixture ~token ?(lose_rollover_reply = false) f =
           connection
           ~implementation_name:"recovery-operator-rollover-e2e"
           ~implementation_version:"dev"
-          ~features:[ P.Recovery_query.Features.windows; Wire.feature ]
+          ~features:([ P.Recovery_query.Features.windows; Wire.feature ] @ extra_features)
         |> ok
       in
       require

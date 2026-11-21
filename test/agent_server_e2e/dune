@@ -550,6 +550,7 @@
      (run %{exe:agent_server_e2e.exe} --scenario data-integrity --case daemon-recovery.ordinary-hard-limit)
      (run %{exe:agent_server_e2e.exe} --scenario data-integrity --case daemon-recovery.operator-rollover)
      (run %{exe:agent_server_e2e.exe} --scenario data-integrity --case daemon-recovery.websocket-rollover)
+     (run %{exe:agent_server_e2e.exe} --scenario data-integrity --case daemon-recovery.connected-followup)
      (run %{exe:agent_server_e2e.exe} --scenario data-integrity --case daemon-recovery.checkpoint-wake)
      (run %{exe:agent_server_e2e.exe} --scenario data-integrity --case daemon-recovery.automatic-capacity)
      (run %{exe:agent_server_e2e.exe} --scenario data-integrity --case daemon-recovery.automatic-soft-checkpoint)

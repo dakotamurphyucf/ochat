@@ -13,6 +13,7 @@ let cases =
   ; "embedded-recovery.headless-exact-permission", Recovery_headless_permission_scenario.run_exact
   ; "daemon-recovery.configured-capacity", Recovery_capacity_scenario.run
   ; "daemon-recovery.operator-rollover", Recovery_operator_rollover_scenario.run
+  ; "daemon-recovery.connected-followup", Recovery_followup_scenario.run
   ; "daemon-recovery.websocket-rollover", Recovery_websocket_scenario.run
   ; "daemon-recovery.automatic-capacity", Recovery_automatic_scenario.run
   ; "daemon-recovery.automatic-soft-checkpoint", Recovery_automatic_scenario.run_soft
