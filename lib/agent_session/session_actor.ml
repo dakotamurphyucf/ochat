@@ -25738,17 +25738,21 @@ let commit_configuration_update t validated =
   configuration_view t
 ;;
 
+let context_capacity_selection t ~owner ~target =
+  Session_context_capacity.Selection.select
+    t.context_capacity_host
+    ~owner
+    ~target
+    ~opted_in:(fun () ->
+      Option.exists t.state.recovery_windows ~f:(fun ledger ->
+        Agent_protocol.Session_ref.equal owner (Recovery_window_ledger.owner ledger)))
+;;
+
 let context_capacity_basis t target =
   Option.bind
     (Option.bind t.canonical_persistence ~f:Canonical_backend_binding_data.session_owner)
     ~f:(fun owner ->
-      Session_context_capacity.Selection.select
-        t.context_capacity_host
-        ~owner
-        ~target
-        ~opted_in:(fun () ->
-          Option.exists t.state.recovery_windows ~f:(fun ledger ->
-            Agent_protocol.Session_ref.equal owner (Recovery_window_ledger.owner ledger)))
+      context_capacity_selection t ~owner ~target
       |> Option.map ~f:(fun selection ->
         Configuration_capture.Capacity_basis.capture t.state ~selection))
 ;;
@@ -57916,7 +57920,6 @@ let check_successor_selected t (selected : Foreground_successor.t) =
 
 let begin_successor t ~id ~expected ~check custody =
   let module P = Agent_protocol in
-  let module Capacity = Session_context_capacity in
   let open Result.Let_syntax in
   let%bind () = check () in
   let%bind () = require_selected_execution t in
@@ -57931,8 +57934,8 @@ let begin_successor t ~id ~expected ~check custody =
   in
   let%bind target = Configuration_transition.target t.state in
   let%bind policy =
-    Capacity.Selection.select
-      t.context_capacity_host
+    context_capacity_selection
+      t
       ~owner:(P.Recovery_window.Scope.session expected.Recovery_rollover.Expected.scope)
       ~target
     |> Result.of_option

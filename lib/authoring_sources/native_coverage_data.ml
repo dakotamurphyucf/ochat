@@ -430,7 +430,7 @@ let implementation_sources =
   ; ( "lib/agent_server/managed_output_cursor.ml"
     , "d5db2b48aa4a0c4a1b05704054ef3c41557ea31c8c4b92d8f538406185af472c" )
   ; ( "lib/agent_server/managed_output_page.ml"
-    , "a14130666a4495de0c35df1c01974922da31daed064f1f7622a9b686b9c38ba5" )
+    , "2e6f63c3c97e3a87aa6d37b2ddc94e497b0f87d962d2b4d31586672aac945d5b" )
   ; ( "lib/agent_server/recurrence_authored_source.ml"
     , "6d9ab0d58716b09e6cb709a37d6dcb3398a4c4af6bf33a45727aded557e865d2" )
   ; ( "lib/agent_server/native_resource_authority.ml"
@@ -442,7 +442,7 @@ let implementation_sources =
   ; ( "lib/agent_server/descendant_accounting_host.ml"
     , "3baff14cf9c606e899c08f95805cc3ca9f070827b46ec531e1c230314820b0fd" )
   ; ( "lib/agent_server/session_factory.ml"
-    , "966f04f6022061cd023d75a4a28839483bbfd95478e4708097357a07234b714c" )
+    , "6ac07a124aeb55925dad51717b98f04aa2a85d5ff9e5cf0f1d5294d236be2648" )
   ; ( "lib/agent_session/authoring_context_tool.ml"
     , "6e318b45f799b485f802dc6d5e4d8bc031721e379cc8800f6ed484d59694840d" )
   ; ( "lib/agent_session/authoring_reference_scope.ml"
@@ -472,7 +472,7 @@ let implementation_sources =
   ; ( "lib/agent_session/managed_stop_tool.ml"
     , "22a5489b134b536c82b797f30e03a2c4fc4aadedcdc9c4b1e3cd49a3fab5ebef" )
   ; ( "lib/agent_session/managed_submission.ml"
-    , "b7a7c8697aa0d9915c4be6ba8cd7eb65288a7508694a51ef3ea2e1acd4313cc2" )
+    , "f82d46404e5083e7e20610a1e3bef6ac8d2c2a2fc1fbd8fad4e5fa104a1c8a07" )
   ; ( "lib/agent_session/managed_submission_tracking.ml"
     , "6c8804b2d0c2033631b965769af63c5240afeb6dabff72695c818dc1a68baed8" )
   ; ( "lib/agent_session/managed_wait_tool.ml"

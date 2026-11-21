@@ -23,7 +23,7 @@ let await_bootstrap (child : Registry.entry) ~receipt_id =
     in
     match receipt.status with
     | Terminal (Some _, Completed) -> current, receipt
-    | Deferred | Ready | Assigned _ ->
+    | Deferred | Ready | Assigned _ | Suspended_rollover _ ->
       Eio.Promise.await changed;
       loop ()
     | Terminal (None, _)
