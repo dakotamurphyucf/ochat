@@ -910,12 +910,15 @@ let%test_unit
   let module Counter = Runtime.Context_capacity in
   let module O = Inference.Observation in
   let module S = Agent_session.Session_state in
+  let module Graph = Agent_server.Graph_tracking in
+  let module Worker = Agent_session.Operation_worker in
   let run
         ~durable
         env
         sw
         actor
         attachment_id
+        ~graph
         ~fixture
         ~selected
         ~count_calls
@@ -978,12 +981,18 @@ let%test_unit
     let config =
       Authoring_input_tests.worker_config env (fun ~sw:_ ~inputs:_ -> Seq.empty)
     in
+    let identity allocate =
+      match graph with
+      | Some graph -> Graph.bind_identity graph ~allocate
+      | None -> Inference_fixture.identity fixture
+    in
+    let track f value = Option.iter graph ~f:(fun graph -> f graph value) in
     let worker =
       Agent_session.Turn_worker.create
         ~root_binding:(Chat_response.Root_binding.create (Runtime.Session.create ~sw))
         { config with
           inference_context = context
-        ; inference_identity = (fun _ -> Inference_fixture.identity fixture)
+        ; inference_identity = identity
         ; tool_tbl = tools
         ; permission_profile =
             permission_policy
@@ -993,9 +1002,40 @@ let%test_unit
               ~reviewer:None
         ; on_inference_attempt =
             (fun attempt ->
+              track Graph.on_attempt attempt;
               let configuration = Runtime.Attempt.configuration attempt in
               attempt_preparation := Some (O.Configuration.preparation_id configuration))
+        ; on_inference_observation = track Graph.on_observation
+        ; on_inference_completion = track Graph.on_completion
         }
+    in
+    let finished, publish_finished = Eio.Promise.create () in
+    let worker =
+      Worker.map_run worker ~f:(fun run ~sw ~input caps ->
+        let outcome = run ~sw ~input caps in
+        Eio.Promise.resolve publish_finished outcome;
+        outcome)
+    in
+    let wait stage f =
+      Agent_server_test_support.with_stage_timeout
+        ~clock:(Eio.Stdenv.clock env)
+        ~seconds:15.
+        ~stage
+        f
+    in
+    let require_complete stage = function
+      | Worker.Completed _ -> ()
+      | Failed failure ->
+        raise_s [%sexp (stage : string), (failure : Agent_protocol.Error.t)]
+      | Cancelled { reason } -> failwithf "%s: %s" stage reason ()
+    in
+    let await_provider stage entered =
+      wait stage (fun () ->
+        Eio.Fiber.first
+          (fun () -> Eio.Promise.await entered)
+          (fun () ->
+             require_complete stage (Eio.Promise.await finished);
+             failwithf "%s: worker completed before provider entry" stage ()))
     in
     A.set_operation_worker actor (Some worker) |> protocol_ok;
     if durable then A.start actor ~attachment_id |> protocol_ok |> ignore;
@@ -1006,7 +1046,7 @@ let%test_unit
     A.submit_message ~submitting_principal:principal_id actor ~attachment_id user
     |> protocol_ok
     |> ignore;
-    Eio.Promise.await entered;
+    await_provider "capacity A provider entry" entered;
     let current = A.state actor |> protocol_ok in
     let operation = Option.value_exn current.active_operation in
     let port = A.context_capacity actor ~operation_id:operation.id in
@@ -1049,7 +1089,7 @@ let%test_unit
        | Stale_preparation { requested = Automatic; effective = Manual } -> ()
        | _ -> assert false);
       Eio.Promise.resolve release ();
-      Eio.Promise.await next_entered;
+      await_provider "capacity B provider entry" next_entered;
       (match status () with
        | Current { availability; configuration; assessment; phase = Effective } ->
          assert (Capacity.Mode.equal availability.effective Manual);
@@ -1081,7 +1121,9 @@ let%test_unit
        | _ -> assert false);
       Eio.Promise.resolve release ();
       assert (!count_calls = 0));
-    await_idle actor |> ignore;
+    wait "capacity foreground completion" (fun () ->
+      require_complete "capacity foreground completion" (Eio.Promise.await finished);
+      await_idle actor |> ignore);
     assert (Result.is_error (Capacity.Port.read port))
   in
   List.iter [ false; true ] ~f:(fun durable ->
@@ -1146,13 +1188,14 @@ let%test_unit
       in
       { state with spec = { state.spec with inference_target } }
     in
-    let run env sw actor attachment_id =
+    let run env sw actor attachment_id ~graph =
       run
         ~durable
         env
         sw
         actor
         attachment_id
+        ~graph
         ~fixture
         ~selected
         ~count_calls
@@ -1191,9 +1234,26 @@ let%test_unit
             ~state_committed:(fun _ _ -> ())
             (fun actor _ ->
                let attachment_id = Recovery_note_actor_tests.attach actor Read_write in
-               Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 15. (fun () ->
-                 run env sw actor attachment_id))))
+               (* The durable foreground must qualify the actual root attempt
+                  at the ordinary provider write, as in the installed host. *)
+               let identity = Inference_fixture.identity fixture in
+               let graph =
+                 Graph.create
+                   actor
+                   ~source:(Inference_tracking_tests.source "capacity-fixture")
+                   ~upstream:
+                     { new_preparation_id = identity.new_preparation_id
+                     ; on_admitted = (fun ~scope:_ ~accounting_id:_ -> ())
+                     ; on_attempt = ignore
+                     ; on_observation = ignore
+                     ; on_completion = ignore
+                     }
+                 |> protocol_ok
+               in
+               run env sw actor attachment_id ~graph:(Some graph);
+               Graph.seal graph |> protocol_ok;
+               Graph.finish graph |> protocol_ok)))
     else
       Job_fixtures.with_actor ~prepare_state (fun env sw actor attachment _ ->
-        run env sw actor attachment.id))
+        run env sw actor attachment.id ~graph:None))
 ;;
