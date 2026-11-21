@@ -26,20 +26,25 @@ let write_prompt env fixture ~select =
      ^ checkpoint)
 ;;
 
-let send client (session : P.Session.t) attachment_id ~key text =
+let submit client (session : P.Session.t) attachment_id ~timing ~key text =
   match
     Fixture.request
       client
       (Session_send_message
          { session_id = session.id
          ; attachment_id
-         ; timing = Safe_boundary
+         ; timing
          ; content = { kind = Plain_text; text; attachments = [] }
          ; idempotency_key = Fixture.key key
          })
   with
-  | Session_send_message receipt when Option.is_some receipt.operation_id -> ()
+  | Session_send_message receipt -> receipt
   | _ -> Fixture.fail "checkpoint fixture did not admit the foreground operation"
+;;
+
+let send client session attachment_id ~key text =
+  let receipt = submit client session attachment_id ~timing:Safe_boundary ~key text in
+  require (Option.is_some receipt.operation_id) "no foreground operation for user input"
 ;;
 
 let await_finished env client (session : P.Session.t) =
@@ -147,7 +152,7 @@ let require_previous connection scope =
   | _ -> Fixture.fail "stale checkpoint unexpectedly changed the active window"
 ;;
 
-let write_and_register request ~start scope ~id =
+let write_and_register ?(before_checkpoint = ignore) request ~start scope ~id =
   let first = request start in
   require (Set.mem (tools first) checkpoint_name) "authored checkpoint is unselected";
   let write_id = id ^ "-write" in
@@ -167,10 +172,33 @@ let write_and_register request ~start scope ~id =
    | Complete `Null -> ()
    | outcome ->
      raise_s [%sexp "selected note write failed", (outcome : P.Invocation.outcome)]);
+  before_checkpoint ();
   checkpoint second scope ~id ~key:id ~readback:false;
   let acknowledgment = request (start + 2) in
   assert_status acknowledgment id "accepted";
   acknowledgment
+;;
+
+let require_local_hint input =
+  let excerpts =
+    List.filter_map input ~f:(fun item ->
+      Option.bind (Jsonaf.member "content" item) ~f:(function
+        | `Array [ `Object _ as part ] ->
+          (match Jsonaf.member "text" part with
+           | Some (`String text) ->
+             Option.map
+               (String.chop_prefix text ~prefix:"Untrusted excerpts from locally retained session data:\n")
+               ~f:(fun json -> Jsonaf.member "role" item, Jsonaf.of_string json)
+           | _ -> None)
+        | _ -> None))
+  in
+  match excerpts with
+  | [ Some (`String "user"), `Array [ excerpt ] ] ->
+    require
+      (Document_schema.Json.equal excerpt
+         (`Object [ "source", string "local_note"; "text", string note_body; "more", `False ]))
+      "successor did not receive its exact selected note"
+  | _ -> Fixture.fail "expected one untrusted user-priority recovery hint"
 ;;
 
 let run env environment =
@@ -201,8 +229,18 @@ let run env environment =
           attachment
           ~key:"start-checkpoint"
           "record and start a new local context";
+        let queued_message = "Also inspect the failing parser assertion." in
+        let before_checkpoint () =
+          let receipt =
+            submit client session attachment ~timing:After_current_operation
+              ~key:"successor-queued-user" queued_message
+          in
+          require
+            (P.Method_result.Send_message.equal_disposition receipt.disposition Deferred)
+            "the user message did not enter the predecessor FIFO"
+        in
         let acknowledged =
-          write_and_register request ~start:0 scope ~id:"success-proof"
+          write_and_register ~before_checkpoint request ~start:0 scope ~id:"success-proof"
         in
         request_transition acknowledged scope ~id:"successful-transition";
         let successor = request 3 in
@@ -216,6 +254,18 @@ let run env environment =
                   (Jsonaf.member "call_id" item)
                   (Some (string "successful-transition")))))
           "the successor replayed the old rollover call";
+        require_local_hint input;
+        require
+          (Int.equal 1
+             (List.count input ~f:(fun item ->
+                Option.equal Document_schema.Json.equal (Jsonaf.member "role" item)
+                  (Some (string "user"))
+                && String.is_substring (Jsonaf.to_string item) ~substring:queued_message)))
+          "the queued user message and note did not arrive together exactly once";
+        let rollover = retained_rollover env fixture session attachment |> Option.value_exn in
+        require
+          (not (String.is_substring (Rollover.to_json rollover |> Jsonaf.to_string) ~substring:note_body))
+          "request-only hint plaintext entered persisted rollover data";
         let open_window =
           list_windows connection scope
           |> List.find_exn ~f:(fun row -> Q.State.equal row.state Open)

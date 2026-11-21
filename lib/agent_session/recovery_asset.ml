@@ -4,7 +4,6 @@ module Source = Recovery_source_reader
 module Ref = Agent_store.Recovery_asset_reference
 module Store = Agent_store.Recovery_asset_store
 module Payload = History_entry.Payload
-module Ledger = Recovery_window_ledger
 module Citation = P.Recovery_window.Citation
 
 type t =
@@ -97,14 +96,8 @@ let selected ?(ordinary = false) row ~part =
         Error Source.Unsupported))
 ;;
 
-let ordinary_visible citation (state : Session_state.t) =
-  not
-    (Option.exists state.recovery_windows ~f:(fun ledger ->
-       Ledger.is_derived_summary ledger citation))
-;;
-
 let with_part ?(ordinary = false) t ~current citation ~part ~f =
-  let visible = if ordinary then Some (ordinary_visible citation) else None in
+  let visible = if ordinary then Some (Recovery_ordinary_selection.visible citation) else None in
   Source.with_entry
     ?visible
     t.sessions
@@ -260,49 +253,12 @@ let read t ~sw ~current citation ~part ~max_bytes =
   read_with_view t ~ordinary:false ~sw ~current citation ~part ~max_bytes
 ;;
 
-let release_selection accepted citation =
-  let owner = P.Recovery_window.Scope.session (Citation.scope citation) in
-  let current_member (state : Session_state.t) =
-    let open Result.Let_syntax in
-    if not (ordinary_visible citation state)
-    then Error Source.Unavailable
-    else (
-      let%bind visible =
-        Recovery_visibility.create state ~owner
-        |> Result.map_error ~f:(fun _ -> Source.Corrupt)
-      in
-      match Recovery_visibility.select visible citation with
-      | Eligible member -> Ok member
-      | Unavailable -> Error Source.Unavailable
-      | Withdrawn -> Error Source.Withdrawn
-      | Expired -> Error Source.Expired)
-  in
-  let%map.Result selected = current_member accepted in
-  let windows = accepted.Session_state.recovery_windows in
-  let moderator = accepted.moderator in
-  let generation = accepted.identity.generation in
-  fun (latest : Session_state.t) ->
-    Int.equal generation latest.identity.generation
-    &&
-    if
-      Option.equal phys_equal latest.recovery_windows windows
-      && Option.equal phys_equal latest.moderator moderator
-    then true
-    else
-      Result.ok (current_member latest)
-      |> Option.exists ~f:(fun member ->
-        Ledger.Source.equal (Ledger.Member.source selected) (Ledger.Member.source member)
-        && Int.equal
-             (Ledger.Member.source_ordinal selected)
-             (Ledger.Member.source_ordinal member))
-;;
-
 let read_ordinary t ~sw ~current citation ~part ~max_bytes =
   let open Result.Let_syntax in
   let%bind body =
     read_with_view t ~ordinary:true ~sw ~current citation ~part ~max_bytes
   in
   let%bind accepted = current () |> Result.map_error ~f:(fun _ -> Source.Denied) in
-  let%map check = release_selection accepted citation in
+  let%map check = Recovery_ordinary_selection.check accepted citation in
   body, check
 ;;

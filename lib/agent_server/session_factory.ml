@@ -299,6 +299,8 @@ type t =
       Agent_session.Permission_policy.t
       -> Agent_session.Session_actor.t option ref
       -> Agent_session.Goal_native_metadata_service.t
+  ; successor_guidance :
+      Agent_session.Session_actor.t option ref -> Agent_session.Script_tool_calls.successor_guidance
   ; protected_source_authority : Inference_runtime.Protected_delivery.Lease.Authority.t
   ; recovery_asset_submissions : Recovery_asset_submission.t
   ; generated_creation_mutex : Eio.Mutex.t
@@ -2325,7 +2327,7 @@ let check_recovery_source_owner t entry ~session () =
   Session_registry.check_native_metadata_publication t.registry entry
 ;;
 
-let recovery_note_source_custody t source =
+let recovery_source_lease t source =
   let module P = Agent_protocol in
   let module Delivery = Inference_runtime.Protected_delivery in
   let module Lease = Delivery.Lease in
@@ -2360,7 +2362,11 @@ let recovery_note_source_custody t source =
       ~host:(P.Session_ref.server_id source |> P.Id.Server.to_string)
       ~session:(P.Session_ref.session_id source |> P.Id.Session.to_string)
   in
-  Delivery.Source (Lease.create t.protected_source_authority ~source ~scope:{ run })
+  Lease.create t.protected_source_authority ~source ~scope:{ run }
+;;
+
+let recovery_note_source_custody t source =
+  Inference_runtime.Protected_delivery.Source (recovery_source_lease t source)
 ;;
 
 let recovery_share_session t (entry : Session_registry.entry) =
@@ -2397,19 +2403,17 @@ let with_recovery_note_source t ~source ~reader reference ~f =
            f disclosure))
 ;;
 
-let prepare_recovery_note_operation_delivery
+let with_recovery_note_operation_selection
       t
       ~recipient
       ~operation_id
       reference
-      ~admit
-      ~render
+      ~prepare
   =
   let module P = Agent_protocol in
   let module A = Agent_session in
   let module Actor = A.Session_actor.Recovery_note_shares in
   let module Share = A.Recovery_note_share in
-  let module Delivery = Inference_runtime.Protected_delivery in
   let open Result.Let_syntax in
   let unavailable () = Error (Share.unavailable ()) in
   let hide_denial result = Result.map_error result ~f:(fun _ -> Share.unavailable ()) in
@@ -2441,11 +2445,7 @@ let prepare_recovery_note_operation_delivery
       with
       | Eio.Time.Timeout -> unavailable ()
     in
-    let%map () = select ~f:admit in
-    let materialize () =
-      select ~f:render |> Result.map_error ~f:(fun _ -> Delivery.Unavailable)
-    in
-    let refresh ~scope:_ =
+    let recheck () =
       let selected =
         let%bind entry =
           Session_registry.find t.registry (P.Session_ref.session_id source)
@@ -2459,8 +2459,23 @@ let prepare_recovery_note_operation_delivery
       in
       fun () -> Result.bind selected ~f:Actor.materialize |> Result.is_ok
     in
-    A.Recovery_note_native_service.
-      { custody = recovery_note_source_custody t source; materialize; refresh })
+    prepare ~get:(fun () -> select ~f:Result.return) ~recheck)
+;;
+
+let prepare_recovery_note_operation_delivery t ~recipient ~operation_id reference ~admit ~render =
+  let module Delivery = Inference_runtime.Protected_delivery in
+  with_recovery_note_operation_selection t ~recipient ~operation_id reference
+    ~prepare:(fun ~get ~recheck ->
+      let open Result.Let_syntax in
+      let%map () = Result.bind (get ()) ~f:admit in
+      let materialize () =
+        Result.bind (get ()) ~f:render |> Result.map_error ~f:(fun _ -> Delivery.Unavailable)
+      in
+      Agent_session.Recovery_note_native_service.
+        { custody = recovery_note_source_custody t (Agent_session.Recovery_note_share.Reference.source reference)
+        ; materialize
+        ; refresh = (fun ~scope:_ -> recheck ())
+        })
 ;;
 
 let recovery_note_native_service t actor_ref =
@@ -2621,6 +2636,8 @@ let native_script_tools
   Agent_session.Script_tool_calls.with_recovery_note_service
     tools
     (recovery_note_native_service t actor_ref)
+  |> fun tools ->
+  Agent_session.Script_tool_calls.with_successor_guidance tools (t.successor_guidance actor_ref)
   |> fun tools ->
   Agent_session.Script_tool_calls.with_recovery_context_service
     tools
@@ -14632,7 +14649,7 @@ module Recovery_history = struct
       query
   ;;
 
-  let read_text t ?on_release ~authorize selection ~view ~part ~start ~stop ?max_bytes () =
+  let read_selected_text t ?on_release ~allow_canonical_append ~authorize selection ~view ~part ~start ~stop ?max_bytes () =
     let citation =
       match selection with
       | Text.Canonical citation | Prepared { citation; _ } -> citation
@@ -14678,6 +14695,13 @@ module Recovery_history = struct
             let range = P.History_text.read ?max_bytes selected ~start ~stop in
             checkpoint ();
             let%map accepted = current () |> Result.map_error ~f:(fun _ -> Source.Denied) in
+            let still_selected =
+              match allow_canonical_append, selection, view with
+              | true, Text.Canonical citation, Text.Ordinary ->
+                Agent_session.Recovery_ordinary_selection.check accepted citation
+                |> Result.ok |> Option.value ~default:(fun _ -> false)
+              | _ -> phys_equal accepted
+            in
             Result.map range ~f:(fun slice ->
               Option.iter on_release ~f:(fun register ->
                 register (fun () ->
@@ -14692,7 +14716,7 @@ module Recovery_history = struct
                   in
                   (* The slice was read under this immutable source snapshot. A change
                      between preparation and delivery requires a fresh bounded read. *)
-                  if phys_equal latest accepted
+                  if still_selected latest
                      && Agent_store.Session_store.retained_lifecycle_available t.store handle
                   then authorize latest
                   else Error (denied ())));
@@ -14700,6 +14724,126 @@ module Recovery_history = struct
       |> Result.map_error ~f:(fun e -> Source e)
     in
     Result.map_error range ~f:(fun e -> Range e)
+  ;;
+
+  let read_text t ?on_release ~authorize selection ~view ~part ~start ~stop ?max_bytes () =
+    read_selected_text t ?on_release ~allow_canonical_append:false ~authorize selection
+      ~view ~part ~start ~stop ?max_bytes ()
+  ;;
+end
+
+module Successor_guidance = struct
+  module A = Agent_session
+  module P = Agent_protocol
+  module Ref = A.Recovery_rollover_hint_ref
+  module Guidance = A.Recovery_successor_guidance
+  module Observation = A.Session_actor.Resource_observation
+  module Catalog = Recovery_notes.Catalog
+  module Delivery = Inference_runtime.Protected_delivery
+
+  let denied () = A.Recovery_note_share.unavailable ()
+  let require ok = if ok then Ok () else Error (denied ())
+
+  let guard t source ~refresh =
+    Inference_runtime.Submission_guard.create_scoped
+      ~leases:[ recovery_source_lease t source ]
+      ~refresh:(fun () ->
+        let check = refresh () in
+        fun () -> if not (check ()) then raise (Delivery.Rejected Unavailable))
+  ;;
+
+  let note reference content guard =
+    let open Result.Let_syntax in
+    let text = Catalog.Content.to_string content in
+    let%bind part = P.History_text.create ~index:0 ~text in
+    let%bind slice = P.History_text.read part ~start:0 ~stop:(String.length text) ~max_bytes:4096 in
+    Guidance.fragment ~reference ~text:slice.text ~more:(Option.is_some slice.next_offset) ~guard
+  ;;
+
+  let local t owner ~authorize reference selection =
+    let open Result.Let_syntax in
+    let read (state : A.Session_state.t) =
+      let%bind catalog = Result.of_option state.recovery_notes ~error:(denied ()) in
+      let%bind () = require (P.Session_ref.equal owner (Catalog.owner catalog)) in
+      Catalog.read catalog selection |> Result.map_error ~f:(fun _ -> denied ())
+    in
+    Recovery_source_host.with_observed_source t owner ~authorize
+      ~f:(fun _handle ~observation ~current ~check_owner ->
+        let body =
+          let%bind state = current () in
+          let%bind content = read state in
+          let refresh () () =
+            Result.is_ok
+              (let%bind () = check_owner () in
+               let%bind latest = Observation.check_current observation in
+               let%bind () = authorize latest in
+               Result.map (read latest) ~f:ignore)
+          in
+          note reference content (guard t owner ~refresh)
+        in
+        Result.map_error body ~f:(fun _ -> A.Recovery_source_reader.Denied))
+    |> Result.map_error ~f:(fun _ -> denied ())
+  ;;
+
+  let shared t recipient ~operation_id reference share =
+    let source = A.Recovery_note_share.Reference.source share in
+    with_recovery_note_operation_selection t ~recipient ~operation_id share
+      ~prepare:(fun ~get ~recheck ->
+        let%bind.Result content = get () in
+        note reference content (guard t source ~refresh:recheck))
+  ;;
+
+  let canonical t owner ~authorize reference (range : P.Recovery_text_range.t) =
+    let open Result.Let_syntax in
+    let%bind () = require (P.Session_ref.equal owner (P.Recovery_text_range.session range)) in
+    let check = ref None in
+    let%bind slice =
+      Recovery_history.read_selected_text t
+        ~on_release:(fun release -> check := Some release)
+        ~allow_canonical_append:true ~authorize:(fun _ _ -> authorize)
+        (Canonical range.citation) ~view:Ordinary ~part:range.part ~start:range.start
+        ~stop:range.stop ~max_bytes:range.max_bytes ()
+      |> Result.map_error ~f:(fun _ -> denied ())
+    in
+    let%bind release = Result.of_option !check ~error:(denied ()) in
+    Guidance.fragment ~reference ~text:slice.text ~more:(Option.is_some slice.next_offset)
+      ~guard:(guard t owner ~refresh:(fun () () -> Result.is_ok (release ())))
+  ;;
+
+  let create t actor_ref ~(input : A.Operation_worker.Input.t)
+        ~(capabilities : A.Operation_worker.Capabilities.t) =
+    Guidance.create ~select:(fun () ->
+      let open Result.Let_syntax in
+      let%bind witness = Result.of_option capabilities.successor_hint_references ~error:(denied ()) in
+      let%bind () = require (Ref.Witness.check_current witness) in
+      let%bind original = capabilities.original_agent_actor () in
+      let%bind original = Result.of_option original ~error:(denied ()) in
+      let%bind actor = extension_actor actor_ref in
+      let%bind entry = Session_registry.find t.registry input.session_id |> Result.of_option ~error:(denied ()) in
+      let%bind () = require (phys_equal actor entry.actor) in
+      let%bind owner = recovery_share_session t entry in
+      let principal = Operator_authorization.principal original in
+      let authorize (state : A.Session_state.t) =
+        let%bind () = check_recovery_source_owner t entry ~session:owner () in
+        require
+          (Ref.Witness.check_current witness
+           && Operator_authorization.is_current original
+           && P.Principal.has_scope principal View_session_transcript
+           && P.Id.Session.equal input.session_id state.identity.session_id
+           && Int.equal input.session_generation state.identity.generation
+           && Authorization.session_creator_visible_to principal ~creator:state.identity.creating_principal)
+      in
+      let%bind observation = A.Session_actor.observe_resource_state actor in
+      let check () = Result.bind (Observation.check_current observation) ~f:authorize in
+      let%bind () = check () in
+      let resolve reference =
+        let%bind () = check () in
+        match reference with
+        | Ref.Local_note selection -> local t owner ~authorize reference selection
+        | Shared_note share -> shared t entry ~operation_id:input.operation.id reference share
+        | Canonical_text range -> canonical t owner ~authorize reference range
+      in
+      Ok (Ref.Witness.references witness, guard t owner ~refresh:(fun () () -> Result.is_ok (check ())), resolve))
   ;;
 end
 
@@ -20012,6 +20156,7 @@ let create
         (fun profile actor_ref -> recurrence_service t profile actor_ref)
     ; goal_metadata_service =
         (fun profile actor_ref -> goal_metadata_service t profile actor_ref)
+    ; successor_guidance = (fun actor_ref -> Successor_guidance.create t actor_ref)
     ; protected_source_authority = Inference_runtime.Protected_delivery.Lease.Authority.create ()
     ; recovery_asset_submissions = Recovery_asset_submission.create ()
     ; generated_creation_mutex = Eio.Mutex.create ()

@@ -53,6 +53,9 @@
     lib/agent_session/recovery_checkpoint_cut.ml %{dep:../agent_session/recovery_checkpoint_cut.ml}
     lib/agent_session/recovery_rollover_batch_cut.ml %{dep:../agent_session/recovery_rollover_batch_cut.ml}
     lib/agent_session/recovery_rollover_evidence.ml %{dep:../agent_session/recovery_rollover_evidence.ml}
+    lib/agent_session/recovery_ordinary_selection.ml %{dep:../agent_session/recovery_ordinary_selection.ml}
+    lib/agent_session/recovery_rollover_hint_ref.ml %{dep:../agent_session/recovery_rollover_hint_ref.ml}
+    lib/agent_session/recovery_successor_guidance.ml %{dep:../agent_session/recovery_successor_guidance.ml}
     lib/agent_session/recurrence_native_admission.ml %{dep:../agent_session/recurrence_native_admission.ml}
     lib/agent_session/recurrence_native_schema.ml %{dep:../agent_session/recurrence_native_schema.ml}
     lib/agent_session/recurrence_native_request.ml %{dep:../agent_session/recurrence_native_request.ml}

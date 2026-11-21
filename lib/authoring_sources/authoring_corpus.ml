@@ -3745,7 +3745,7 @@ let runtime_foundation ~sources =
          ; review =
              Audited
                { excerpt_sha256 =
-                   [ "bbeb831ef4d9aa68a80611043011a31f053eae1407872768a9b632f2c069b645" ]
+                   [ "7dfd14ef66612a6a32751c8cfbfc09fbf52de9aae06f0a3156e87856b1e895b0" ]
                ; evidence =
                    [ "test/agent_session/recovery_rollover_tests.ml"
                    ; "test/agent_server_e2e/scenarios/recovery_checkpoint_scenario.ml"

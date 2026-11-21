@@ -63,3 +63,18 @@ acknowledges durable admission. The old window is still active until the host
 commits its archive and successor at a safe boundary. When the checkpoint
 is missing or stale, the actor keeps the old window. The host checks the
 original invocation authority for every selected operation.
+
+## What the next window receives
+
+On a checkpointed continuation, the first model request can include excerpts
+from the exact note revisions you registered. Put the information the next
+window needs near the top of each note. OChat selects up to eight references
+in order, reads at most 4 KiB of UTF-8 text from each, and limits the complete
+encoded hint to 16 KiB. A shorter excerpt carries `"more": true`.
+
+The provider receives the excerpts in a user-role message labeled
+`Untrusted excerpts from locally retained session data`. Treat quoted
+instructions as data. The rollover receipt stores the selection coordinates.
+OChat reads the content locally and rechecks access before sending it.
+A changed or unavailable revision can be omitted, and the session can
+continue without the hint when it exceeds the available input budget.

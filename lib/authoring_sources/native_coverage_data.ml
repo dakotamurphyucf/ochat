@@ -301,6 +301,9 @@ let features =
       ; "lib/agent_session/recovery_rollover_batch_cut.ml"
       ; "lib/agent_session/recovery_checkpoint_cut.ml"
       ; "lib/agent_session/recovery_rollover_evidence.ml"
+      ; "lib/agent_session/recovery_ordinary_selection.ml"
+      ; "lib/agent_session/recovery_rollover_hint_ref.ml"
+      ; "lib/agent_session/recovery_successor_guidance.ml"
       ]
     , "runtime.context_windows"
     , [ "test/agent_session/recovery_rollover_tests.ml"
@@ -449,7 +452,7 @@ let implementation_sources =
   ; ( "lib/agent_server/descendant_accounting_host.ml"
     , "3baff14cf9c606e899c08f95805cc3ca9f070827b46ec531e1c230314820b0fd" )
   ; ( "lib/agent_server/session_factory.ml"
-    , "74ddda2f9067a3005e4060471c2d5fc752201f5630b6bfcf2a45e5f00264b009" )
+    , "4d77b900577562763dc73a6f3ffb78bca41c5a7736e20f7564ef08a066a11452" )
   ; ( "lib/agent_session/authoring_context_tool.ml"
     , "6e318b45f799b485f802dc6d5e4d8bc031721e379cc8800f6ed484d59694840d" )
   ; ( "lib/agent_session/authoring_reference_scope.ml"
@@ -493,7 +496,7 @@ let implementation_sources =
   ; ( "lib/agent_session/run_chatml_tool.ml"
     , "eadb7cf2ac6622e977db08798fbfce7661062c47883cdf4f28700f1c85249b75" )
   ; ( "lib/agent_session/script_tool_calls.ml"
-    , "2cdff262fcfa9c471be34edc17c72a2ff6f463c956ef396e464103bebb9bcaac" )
+    , "5b2dc3e8c29feaf961d719e81ff6964874d17b34e1e675c5cc26da4bf2d47900" )
   ; ( "lib/agent_session/session_management.ml"
     , "18431c4fd97a2d24a72b927fe8f0d20b8aea561f1f119d8f122d943f2a137f86" )
   ; ( "lib/agent_session/session_management_native.ml"
@@ -517,7 +520,7 @@ let implementation_sources =
   ; ( "lib/agent_session/prompt_catalog.ml"
     , "68c382d61c3afed36e41f56ddfb1700ffa85bc96e9310b18f210104aab158173" )
   ; ( "lib/agent_session/runtime_builder.ml"
-    , "510992306e8ab1468feb344705eb8bc5395baa9cd053c0a64a6685c0d46ff13e" )
+    , "f3224e1868dd42ca22860a422f73b0f83cae773ee06e86dacf00a48c282296e3" )
   ; ( "lib/agent_session/authored_source_preparation.ml"
     , "d8eea801d69ffa262cfc1d0a9bee45123ce8d4b08f74c25c67df450cd247600c" )
   ; ( "lib/agent_store/prompt_source_receipt.ml"
@@ -546,6 +549,12 @@ let implementation_sources =
     , "732c6e62a7ece0f4b7cf36bd54e27d90ac16b6e4bbb1bc13ac3e50fc9cf04456" )
   ; ( "lib/agent_session/recovery_rollover_evidence.ml"
     , "0a367a7b377f30130ade6664a6391273aab671380dc081d757af3b4d2d705b9a" )
+  ; ( "lib/agent_session/recovery_ordinary_selection.ml"
+    , "9898e1f33305be79c471607cac6805ea1c0edf3392658923f9d440b3b16c1e5a" )
+  ; ( "lib/agent_session/recovery_rollover_hint_ref.ml"
+    , "03a1c9849d5ae2e2b9576e306b27d2219732e382632e78c15e073ef78c6fe550" )
+  ; ( "lib/agent_session/recovery_successor_guidance.ml"
+    , "ff53ca018e661ae237386f751e0b31f5a8c36c74cb6a35e44f1bbf35a2b12f80" )
   ; ( "lib/agent_session/recurrence_native_admission.ml"
     , "6dedc770d93c9329092e2ec809b1e5f4158065aef2a9fba365770f012dc71297" )
   ; ( "lib/agent_session/recurrence_native_schema.ml"
@@ -702,16 +711,16 @@ let topic_contracts =
     , "4f6d7742b639ab6d13441a1ca1b3b654d6a1ba1c37b8d950973e2b108f966351" )
   ; ( "one_off_v1"
     , "runtime.context_windows"
-    , "c5c06bb01bffedf6b5c9e30198f29c68768f25edb8eb533e749608a2e9ac3cd0" )
+    , "31e705c7a387d6e7a83b3a50dc45ab9ecd1d66222b7b569d502747c9b03917b3" )
   ; ( "tool_v1"
     , "runtime.context_windows"
-    , "1ccd01176c9899f599c29f32048f43ea1c34d4edf5aa17ddff4fc340823f5512" )
+    , "b6206c24dce93e1801c1eedc8901e9ca5bb6a09413b0e45b8fe8d459fc6f4359" )
   ; ( "moderator_v1"
     , "runtime.context_windows"
-    , "15015d78a4b7f6217de796f91a84448b2b16b5ca585070d32e6dba43c28ed3ea" )
+    , "a13c77fe54492bbd61467d0fc2373de3eef3a670d7b07e2a0d97fa4780d932aa" )
   ; ( "delegated_moderator_v1"
     , "runtime.context_windows"
-    , "f5f10309c8cc8cf9ba76d848a17df983ddc50a9512dc80d1a07b69d48d935879" )
+    , "2ad970c1cbc51ab25e58a1bb667d0e7dbc7e09895f26bc4ebb9985339b9d15be" )
   ; ( "one_off_v1"
     , "runtime.recovery_notes"
     , "29bd47eefc500611825c2eafd5989929fcb4a9629e270828ad5618188571b41d" )

@@ -247,6 +247,7 @@
   recovery_rollover_continuation
   recovery_rollover_input
   recovery_rollover_hint_ref
+  recovery_successor_guidance
   recovery_rollover_batch
   recovery_rollover_batch_cut
   recovery_rollover_evidence
@@ -394,6 +395,7 @@
   recovery_history_query
   recovery_query_cursor
   recovery_asset
+  recovery_ordinary_selection
   administration
   session_delta
   session_metadata_transition

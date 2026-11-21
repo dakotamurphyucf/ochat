@@ -6,6 +6,11 @@ module M = Chat_response.Moderation.Capabilities
 module E = Agent_protocol.Moderator_execution
 module Managed = Chat_response.Managed_tool_registry
 
+type successor_guidance =
+  input:Operation_worker.Input.t
+  -> capabilities:Operation_worker.Capabilities.t
+  -> Chat_response.Agent_guidance.t
+
 type managed_service =
   { env : Eio_unix.Stdenv.base
   ; definition : Managed.t
@@ -82,6 +87,7 @@ type t =
   ; managed_session_service : Managed_session_service.t option
   ; instruction_service : Instruction_service.t option
   ; recovery_note_service : Recovery_note_native_service.t option
+  ; successor_guidance : successor_guidance option
   ; recovery_context_service : Recovery_context_service.t option
   ; recurrence_service : Recurrence_service.t option
   ; goal_metadata_service : Goal_native_metadata_service.t option
@@ -510,6 +516,7 @@ let create
   ; managed_session_service = None
   ; instruction_service = None
   ; recovery_note_service = None
+  ; successor_guidance = None
   ; recovery_context_service = None
   ; recurrence_service = None
   ; goal_metadata_service = None
@@ -525,6 +532,9 @@ let with_instruction_service t service = { t with instruction_service = Some ser
 let instruction_service t = t.instruction_service
 let with_recovery_note_service t service = { t with recovery_note_service = Some service }
 let recovery_note_service t = t.recovery_note_service
+
+let with_successor_guidance t service = { t with successor_guidance = Some service }
+let successor_guidance t = t.successor_guidance
 
 let with_recovery_context_service t service =
   { t with recovery_context_service = Some service }
