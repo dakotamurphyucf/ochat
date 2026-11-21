@@ -487,12 +487,20 @@ let%expect_test "archive sync and journal acknowledgement have distinct replay e
                  let writer = W.attach actor in
                  set_manual actor fixture;
                  let cut = expected actor in
+                 let module Observation = Actor.Resource_observation in
+                 let observation = Actor.observe_resource_state actor |> protocol_ok in
+                 let release () = Observation.check_recovery_current observation in
+                 ignore (release () |> protocol_ok : A.Session_state.t);
                  before_write := Some (Identity.count journal);
                  (match settle actor writer ~id cut (publish ~checkpoint [ keep.id ]) with
                   | Error { code = Persistence_error; message; _ } ->
                     assert (
                       String.is_substring message ~substring:"append journal segment")
                   | Error _ | Ok _ -> failwith "rollover did not reach the actual writer");
+                 ignore
+                   (Observation.check_current observation |> protocol_ok
+                    : A.Session_state.t);
+                 Identity.expect_error Persistence_error (release ());
                  Identity.expect_error Conflict (settle actor writer ~id cut Cancel);
                  Identity.expect_error Conflict (request actor writer ~name admission)));
         [%test_eq: int] (Option.value_exn !before_write) (Identity.count journal));
@@ -584,6 +592,12 @@ let%expect_test "archive sync and journal acknowledgement have distinct replay e
           (fun actor _ ->
              let writer = W.attach actor in
              set_manual actor fixture;
+             let observation = Actor.observe_resource_state actor |> protocol_ok in
+             let published =
+               Actor.Resource_observation.check_recovery_current observation
+               |> protocol_ok
+             in
+             assert (Scope.equal terminal.successor (W.scope published));
              let count = Identity.count journal in
              assert (
                R.Receipt.equal

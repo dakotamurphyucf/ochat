@@ -791,7 +791,23 @@ let%expect_test
           ~project:(fun row -> Ok row.id)
       in
       let store = journal fixture Store.Journal.create in
+      let writer_entered, enter_writer = Eio.Promise.create () in
+      let writer_resume, resume_writer = Eio.Promise.create () in
+      let before_commit next =
+        let expires_predecessor window =
+          Scope.equal (Ledger.Window.scope window) predecessor
+          && P.Recovery_query.State.equal (Ledger.Window.state window) Expired
+        in
+        if
+          Option.is_none (Eio.Promise.peek writer_entered)
+          && List.exists (Ledger.windows (ledger next)) ~f:expires_predecessor
+        then (
+          Eio.Promise.resolve enter_writer ();
+          Eio.Promise.await writer_resume);
+        Ok ()
+      in
       with_actor
+        ~before_commit
         fixture
         sw
         store
@@ -808,7 +824,6 @@ let%expect_test
                ~authorize:(fun _ -> Ok ())
            in
            let manager = actor_proof ~scopes:[ Send_messages; Manage_grants ] () in
-           let live () = Actor.state actor in
            let prior = state actor in
            assert (Result.is_error (expire (actor_proof ()) predecessor));
            assert (Result.is_error (expire manager successor));
@@ -921,10 +936,52 @@ let%expect_test
              |> store_ok
            in
            [%test_eq: int option] (retire prior) (Some 0);
+           let module Observation = Actor.Resource_observation in
+           let module Access = Actor.Recovery_history_access in
+           let observation = Actor.observe_resource_state actor |> protocol_ok in
+           let release () = Observation.check_recovery_current observation in
+           let query =
+             A.Recovery_history_query.create
+               ~scope:(Window predecessor)
+               ~source:fixture.owner
+               ~family:Canonical
+               ~view:Ordinary
+               List_items
+             |> protocol_ok
+           in
+           let proof =
+             Access.capture observation (Access.operator (actor_proof ())) ~query
+             |> protocol_ok
+           in
+           assert (phys_equal (Access.check_current proof |> protocol_ok) prior);
            assert (
-             P.History.Id.equal (read live old |> Result.ok |> Option.value_exn) item.id);
-           expire manager predecessor |> protocol_ok;
-           let after = state actor in
+             P.History.Id.equal
+               (read release old |> Result.ok |> Option.value_exn)
+               item.id);
+           assert (Result.is_ok (asset_reader release old));
+           let expiry =
+             Eio.Fiber.fork_promise ~sw (fun () -> expire manager predecessor)
+           in
+           Exn.protect
+             ~finally:(fun () -> Eio.Promise.resolve resume_writer ())
+             ~f:(fun () ->
+               Eio.Fiber.first
+                 (fun () -> Eio.Promise.await writer_entered)
+                 (fun () ->
+                    Eio.Promise.await_exn expiry |> protocol_ok;
+                    failwith "expiry returned before the writer gate");
+               (* The generic observation still reads the installed state while
+                  releases must wait for the actual writer decision. *)
+               assert (
+                 phys_equal (Observation.check_current observation |> protocol_ok) prior);
+               (match release (), Access.check_current proof with
+                | Error { code = Conflict; _ }, Error { code = Conflict; _ } -> ()
+                | _ -> failwith "pending expiry did not fence recovery publication");
+               match read release old, asset_reader release old with
+               | Error Denied, Error Denied -> ()
+               | _ -> failwith "pending expiry disclosed a retained original");
+           Eio.Promise.await_exn expiry |> protocol_ok;
+           let after = release () |> protocol_ok in
            let frame = data_transaction store after in
            [%test_eq: string list] (delta_kinds frame) [ "recovery_window_expired" ];
            let replayed =
@@ -942,7 +999,7 @@ let%expect_test
              Ok (if !calls = 1 then prior else replayed)
            in
            List.iter
-             [ live; while_reading; (fun () -> Ok replayed) ]
+             [ release; while_reading; (fun () -> Ok replayed) ]
              ~f:(fun current ->
                match read current old with
                | Error Expired -> ()
@@ -950,10 +1007,10 @@ let%expect_test
            assert (!calls >= 2);
            assert (
              P.History.Id.equal
-               (read live carried |> Result.ok |> Option.value_exn)
+               (read release carried |> Result.ok |> Option.value_exn)
                item.id);
-           (match asset_reader (fun () -> Ok replayed) old with
-            | Error Expired -> ()
+           (match asset_reader release old, asset_reader (fun () -> Ok replayed) old with
+            | Error Expired, Error Expired -> ()
             | _ -> failwith "expired original asset escaped");
            [%test_eq: int option] (retire replayed) (Some 1);
            [%test_eq: int option] (retire replayed) (Some 0);

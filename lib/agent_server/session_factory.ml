@@ -14560,7 +14560,7 @@ module Recovery_source_host = struct
                    if not (live ())
                    then Error (denied ())
                    else (
-                     let%bind state = Observation.check_current observation in
+                     let%bind state = Observation.check_recovery_current observation in
                      let%map () = authorize state in
                      state)
                  in
@@ -14695,7 +14695,10 @@ module Recovery_history = struct
             Result.map result ~f:(fun accepted ->
               let check () =
                 let%bind () = check_owner () |> Result.map_error ~f:(fun _ -> denied ()) in
-                let%bind latest = O.check_current observation |> Result.map_error ~f:(fun _ -> denied ()) in
+                let%bind latest =
+                  O.check_recovery_current observation
+                  |> Result.map_error ~f:(fun _ -> denied ())
+                in
                 let%bind () = authorize latest in
                 let%bind observed = list () in
                 let same_row (first : P.Recovery_query.Summary.t) (second : P.Recovery_query.Summary.t) =
@@ -14789,7 +14792,8 @@ module Recovery_history = struct
                   in
                   let%bind () = check_owner () |> Result.map_error ~f:(fun _ -> denied ()) in
                   let%bind latest =
-                    Agent_session.Session_actor.Resource_observation.check_current observation
+                    Agent_session.Session_actor.Resource_observation.check_recovery_current
+                      observation
                     |> Result.map_error ~f:(fun _ -> denied ())
                   in
                   (* The slice was read under this immutable source snapshot. A change
@@ -14853,7 +14857,7 @@ module Successor_guidance = struct
           let refresh () () =
             Result.is_ok
               (let%bind () = check_owner () in
-               let%bind latest = Observation.check_current observation in
+               let%bind latest = Observation.check_recovery_current observation in
                let%bind () = authorize latest in
                Result.map (read latest) ~f:ignore)
           in
@@ -15014,7 +15018,7 @@ module Recovery_assets = struct
             ~f:(fun chunk ->
               on_release (fun () ->
                 let%bind () = check_owner () in
-                let%bind latest = Observation.check_current observation in
+                let%bind latest = Observation.check_recovery_current observation in
                 let%bind () = authorize latest in
                 if
                   Agent_store.Session_store.retained_lifecycle_available t.store handle

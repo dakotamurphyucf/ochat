@@ -7461,6 +7461,25 @@ end
 
 let error code message = Agent_protocol.Error.create code ~message ~retryable:false ()
 
+let require_recovery_backend t =
+  let open Result.Let_syntax in
+  let unavailable () = error Persistence_error "canonical recovery writer is unavailable" in
+  let%bind backend =
+    Result.of_option t.canonical_persistence ~error:(unavailable ())
+  in
+  if Canonical_backend_binding_data.is_available backend
+  then Ok backend
+  else Error (unavailable ())
+;;
+
+let recovery_publication_backend t =
+  if t.canonical_write_in_progress
+  then Error (error Conflict "canonical writer is deciding recovery visibility")
+  else if t.rollover_requires_recovery
+  then Error (error Persistence_error "recovery publication requires journal recovery")
+  else require_recovery_backend t
+;;
+
 module Resource_observation = struct
   module Resource_identity = Session_state.Spec.Resource_identity
 
@@ -7527,9 +7546,16 @@ module Resource_observation = struct
     else Error (error Conflict "session resource observation is stale")
   ;;
 
-  let list_recovery_windows t ~actor ~generation ~state page =
+  let check_recovery_current (t : t) =
     let open Result.Let_syntax in
     let%bind current = check_current t in
+    let%map _ = recovery_publication_backend t.actor in
+    current
+  ;;
+
+  let list_recovery_windows t ~actor ~generation ~state page =
+    let open Result.Let_syntax in
+    let%bind current = check_recovery_current t in
     Recovery_window_page.list
       (Lazy.force t.actor.recovery_window_cursor) current ~actor ~generation ~state page
   ;;
@@ -60820,22 +60846,19 @@ let recovery_share_owner t ~check_owner ~publication =
   if
     (not (Int.equal t.runtime_source_domain (Stdlib.Domain.self () :> int)))
     || t.stopped
-    || (publication && t.canonical_write_in_progress)
     || Option.is_some t.lifecycle_fence
     || Failed_startup_release_data.Gate.is_closed t.startup_disposal
   then unavailable ()
   else (
     let%bind () = check_owner () in
     let%bind binding =
-      Result.of_option t.canonical_persistence ~error:(Recovery_note_share.unavailable ())
+      (if publication then recovery_publication_backend t else require_recovery_backend t)
+      |> Result.map_error ~f:(fun _ -> Recovery_note_share.unavailable ())
     in
     let%bind owner =
-      if Canonical_backend_binding_data.is_available binding
-      then
-        Result.of_option
-          (Canonical_backend_binding_data.session_owner binding)
-          ~error:(Recovery_note_share.unavailable ())
-      else unavailable ()
+      Result.of_option
+        (Canonical_backend_binding_data.session_owner binding)
+        ~error:(Recovery_note_share.unavailable ())
     in
     let%bind () = Recovery_note_session.check_owner t.state.recovery_notes ~owner in
     if
@@ -63431,7 +63454,7 @@ module Recovery_history_access = struct
   let capture_audience (observation : Resource_observation.t) request ~source ~tool =
     let open Result.Let_syntax in
     let%bind credential = credential request ~tool in
-    let%bind state = Resource_observation.check_current observation in
+    let%bind state = Resource_observation.check_recovery_current observation in
     let session = state.identity.session_id in
     let generation = state.identity.generation in
     let origin = Operator_authorization.origin credential in
@@ -63458,7 +63481,7 @@ module Recovery_history_access = struct
         else Error (denied ())
     in
     let check_current () =
-      let%bind current = Resource_observation.check_current observation in
+      let%bind current = Resource_observation.check_recovery_current observation in
       let%map () = check_audience current in
       current
     in
@@ -66464,7 +66487,7 @@ let inspect_context_rollover
   let module L = Recovery_window_ledger in
   let module Scope = P.Recovery_window.Scope in
   let open Result.Let_syntax in
-  let%bind state = Resource_observation.check_current observation in
+  let%bind state = Resource_observation.check_recovery_current observation in
   let principal = Operator_authorization.principal actor in
   let%bind () =
     if

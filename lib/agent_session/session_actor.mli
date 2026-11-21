@@ -794,6 +794,13 @@ module Resource_observation : sig
       per-effect guards. *)
   val check_current : t -> (Session_state.t, Agent_protocol.Error.t) result
 
+  (** Additionally require a determinate, available canonical writer before
+      releasing recovery data. A pending write returns [Conflict], and a
+      writer requiring recovery or unavailable returns [Persistence_error].
+      Nonyielding. Callers still check their original source, authority and item
+      visibility on the returned State before release. *)
+  val check_recovery_current : t -> (Session_state.t, Agent_protocol.Error.t) result
+
   (** List safe window summaries on this physical actor. The Factory establishes
       session visibility and retains source custody through release. *)
   val list_recovery_windows
