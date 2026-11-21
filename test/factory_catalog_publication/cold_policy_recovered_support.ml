@@ -438,8 +438,7 @@ let with_native_construction t (native : Cold.native_request) f =
     ~finally:(fun () -> Actor.end_policy_restoration t.actor ~restoration |> protocol_ok)
     (fun () ->
        let check () =
-         let open Result.Let_syntax in
-         let%bind () = native.authorize () in
+         let%bind.Result () = native.authorize () in
          Actor.Policy_restoration.check restoration
        in
        Resource.Native.with_probe
@@ -448,8 +447,20 @@ let with_native_construction t (native : Cold.native_request) f =
          ~expected
          ~host:(fun ~capture_tracking ->
            t.phase := "644 prepare actual native driver";
+           (* Match Factory native preparation at each compiler checkpoint:
+              yield, then check the exact current resource and restoration. *)
+           let authorize = native.capture_authorization () |> protocol_ok in
+           let check_preparation () =
+             let%bind.Result () = authorize () in
+             Actor.Policy_restoration.check restoration
+           in
            let _, host =
-             construction_inputs t ~restoration ~expected ~check ~capture_tracking
+             construction_inputs
+               t
+               ~restoration
+               ~expected
+               ~check:check_preparation
+               ~capture_tracking
            in
            host)
          ~input:(fun () ->

@@ -297,6 +297,7 @@ type native_request =
   ; request : A.Script_tool_calls.preparation
   ; governance : Actor.Causal_governance.t
   ; authorize : unit -> (unit, P.Error.t) result
+  ; capture_authorization : unit -> (unit -> (unit, P.Error.t) result, P.Error.t) result
   ; delegation : E.delegation
   }
 
@@ -352,21 +353,23 @@ let with_native_request ~phase env daemon ~target_actor expected ~original ~f =
                ; call
                }
              in
-             let authorize () =
+             let check_original () =
+               if Operator_authorization.is_current original
+               then Ok ()
+               else
+                 Error
+                   (P.Error.create
+                      Permission_denied
+                      ~message:"634 original revoked"
+                      ~retryable:false
+                      ())
+             in
+             let authorize ~read_target () =
                let open Result.Let_syntax in
-               let%bind () =
-                 if Operator_authorization.is_current original
-                 then Ok ()
-                 else
-                   Error
-                     (P.Error.create
-                        Permission_denied
-                        ~message:"634 original revoked"
-                        ~retryable:false
-                        ())
-               in
+               let%bind () = check_original () in
+               let%bind (current : A.Session_state.t) = read_target () in
+               let%bind () = check_original () in
                let principal = Operator_authorization.principal original in
-               let%bind current = Actor.state target_actor in
                let%bind () =
                  if
                    P.Id.Session.equal
@@ -374,9 +377,9 @@ let with_native_request ~phase env daemon ~target_actor expected ~original ~f =
                      expected.A.Session_state.identity.session_id
                    && Int.equal current.identity.generation expected.identity.generation
                    && P.Principal.has_scope principal Own_sessions
-                   && Agent_server.Authorization.session_visible_to
+                   && Agent_server.Authorization.session_creator_visible_to
                         principal
-                        (A.Session_state.summary current)
+                        ~creator:current.identity.creating_principal
                  then Ok ()
                  else
                    Error
@@ -388,6 +391,15 @@ let with_native_request ~phase env daemon ~target_actor expected ~original ~f =
                         ())
                in
                Actor.check_delegated_policy_caller caller_actor request
+             in
+             let capture_authorization () =
+               let%map.Result observation = Actor.observe_resource_state target_actor in
+               authorize ~read_target:(fun () ->
+                 Eio.Fiber.yield ();
+                 Actor.Resource_observation.check_current observation)
+             in
+             let authorize =
+               authorize ~read_target:(fun () -> Actor.state target_actor)
              in
              authorize () |> protocol_ok;
              let governance =
@@ -401,6 +413,7 @@ let with_native_request ~phase env daemon ~target_actor expected ~original ~f =
                ; request
                ; governance
                ; authorize
+               ; capture_authorization
                ; delegation =
                    { child_session_id = request.session_id
                    ; child_generation = request.generation
