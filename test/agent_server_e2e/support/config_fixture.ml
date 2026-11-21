@@ -1,5 +1,9 @@
 open Core
 
+type snapshot_policy =
+  | Periodic
+  | Journal_replay
+
 type t =
   { environment : Temporary_environment.t
   ; directory : string
@@ -12,8 +16,7 @@ type t =
   ; token_path : string
   ; prompt_path : string
   ; physical_workspace : string
-  ; snapshot_every_events : int
-  ; snapshot_every_ms : int
+  ; snapshot_policy : snapshot_policy
   ; mutable public_principal : Agent_protocol.Id.Principal.t option
   }
 
@@ -88,6 +91,11 @@ let configuration t ?data_dir ?unix_socket ?http_port () =
   let data_dir = Option.value data_dir ~default:t.data_dir |> atom in
   let unix_socket = Option.value unix_socket ~default:t.unix_socket |> atom in
   let http_port = Option.value http_port ~default:t.http_port in
+  let snapshot_every_events, snapshot_every_ms =
+    match t.snapshot_policy with
+    | Periodic -> 10, 1_000
+    | Journal_replay -> Int.max_value, Int.max_value
+  in
   sprintf
     {|
 (version 1)
@@ -143,8 +151,8 @@ let configuration t ?data_dir ?unix_socket ?http_port () =
     unix_socket
     http_port
     (atom t.token_path)
-    t.snapshot_every_events
-    t.snapshot_every_ms
+    snapshot_every_events
+    snapshot_every_ms
     (atom t.physical_workspace)
     (atom t.prompt_path)
 ;;
@@ -155,13 +163,7 @@ let write_configuration t ~name contents =
   config_path
 ;;
 
-let create
-      ?(snapshot_every_events = 10)
-      ?(snapshot_every_ms = 1_000)
-      environment
-      ~name
-      ~http_port
-  =
+let create ?(snapshot_policy = Periodic) environment ~name ~http_port =
   let roots : Temporary_environment.roots = Temporary_environment.roots environment in
   let directory = Filename.concat roots.config name in
   let make value = Filename.concat directory value in
@@ -180,8 +182,7 @@ let create
     ; token_path = make "tokens.sexp"
     ; prompt_path = make "smoke.chatmd"
     ; physical_workspace
-    ; snapshot_every_events
-    ; snapshot_every_ms
+    ; snapshot_policy
     ; public_principal = None
     }
   in

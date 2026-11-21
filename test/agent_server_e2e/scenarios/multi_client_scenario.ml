@@ -63,8 +63,7 @@ let fixture env environment name =
      Keep snapshot retention from reserving a session between client requests. *)
   let fixture =
     Config_fixture.create
-      ~snapshot_every_events:Int.max_value
-      ~snapshot_every_ms:Int.max_value
+      ~snapshot_policy:Journal_replay
       environment
       ~name
       ~http_port:(reserve_port env)

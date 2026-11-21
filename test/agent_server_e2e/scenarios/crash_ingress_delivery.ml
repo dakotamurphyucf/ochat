@@ -98,7 +98,9 @@ let frames state =
 ;;
 
 let test env environment =
-  let fixture = F.fixture env environment "ingress-lost-ack" in
+  let fixture =
+    F.fixture ~snapshot_policy:Journal_replay env environment "ingress-lost-ack"
+  in
   List.iter sources ~f:(fun (name, contents) ->
     let path =
       if String.equal name "agent.chatmd"

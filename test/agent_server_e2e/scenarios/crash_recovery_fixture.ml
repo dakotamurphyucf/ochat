@@ -28,11 +28,7 @@ let write env native contents =
   Eio.Path.save ~create:(`Or_truncate 0o600) (path env native) contents
 ;;
 
-type snapshot_policy =
-  | Periodic
-  | Journal_replay
-
-let fixture ?(snapshot_policy = Periodic) env environment name =
+let fixture ?snapshot_policy env environment name =
   let port =
     Eio.Switch.run (fun sw ->
       let reservation = Support.Port_reservation.create ~sw ~env in
@@ -40,15 +36,7 @@ let fixture ?(snapshot_policy = Periodic) env environment name =
       Support.Port_reservation.release reservation;
       port)
   in
-  match snapshot_policy with
-  | Periodic -> Config_fixture.create environment ~name ~http_port:port
-  | Journal_replay ->
-    Config_fixture.create
-      ~snapshot_every_events:Int.max_value
-      ~snapshot_every_ms:Int.max_value
-      environment
-      ~name
-      ~http_port:port
+  Config_fixture.create ?snapshot_policy environment ~name ~http_port:port
 ;;
 
 let with_client ~sw env fixture f =

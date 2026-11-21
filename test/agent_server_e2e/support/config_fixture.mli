@@ -8,12 +8,18 @@ type t
     same-user socket. This comparison set grants nothing by itself. *)
 val all_scopes : Agent_protocol.Scope.Set.t
 
+type snapshot_policy =
+  | Periodic
+  | Journal_replay
+
 (** [create environment ~name ~http_port] creates one isolated configuration
     fixture with physical and temporary workspaces and two bearer credentials.
-    The snapshot intervals default to ten events and 1,000 milliseconds. *)
+    [Periodic] is the default and requests snapshots every ten events or 1,000
+    milliseconds. [Journal_replay] keeps the initial snapshot and per-command
+    journal sync, isolating scenarios whose assertions are independent of periodic
+    snapshot retention. *)
 val create
-  :  ?snapshot_every_events:int
-  -> ?snapshot_every_ms:int
+  :  ?snapshot_policy:snapshot_policy
   -> Temporary_environment.t
   -> name:string
   -> http_port:int
