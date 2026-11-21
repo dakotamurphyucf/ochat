@@ -658,6 +658,27 @@ eligibility are outside this transition's contract.
 | Queue, tools and continuation | Parallel calls settle with results/cancellation in durable order. Queue input before/after the cut, wake acknowledgement and late/duplicate results survive restart exactly once. Test stale configuration, source edit or authority at both commit and dispatch. Exercise pre/post hook fault, loss after hook claim, each continuation outcome, no self-trigger loop, no duplicate scheduling, and an unqualified fallback path. |
 | Authored recovery workflow | Under one composed moderator, write a per-session note, commit a transition, recover exact history and selected note revisions, then demonstrate explicit sharing and revocation. Verify a smaller request after omitting hints, safe status for clients at each stage, and continuity of goals, filesystem state, provider selection and jobs. |
 
+The [composed Goal and recurrence restart test](../../test/factory_catalog_publication/goal_recurrence_window_tests.ml)
+uses the checked-in [release-note review example](../examples/learning/goal-recurrence/README.md).
+It admits a recurring worker, records Goal progress and commits a forced
+archive-only cut through the owner API. A separate daemon reopens the same
+store and compares the predecessor archive with the successor's Goal episode,
+Run accounting, admitted occurrence and captured project and skill digests.
+On a physical restart, the standard Run recovery path records an interruption
+for the original waiting Run. Resume with the retired attachment returns
+`permission_denied`. Repeated Resume requests from a current writer return a
+conflict for that terminal Run. An operator who wants another Goal
+episode explicitly requests `session.goal.start` under current authority and
+policy. During unattended activation, the example's `Session_resume`
+instruction lookup returns `permission_denied` because it requires a current
+operator. The moderator retains its previous checkpoint in that case. A current
+writer can stop and start the reopened session, inspect the selected instructions
+and submit new work. The next ordinary request uses the
+captured instructions with a fresh transcript. The test compares the original
+Goal and recurrence invocation records, charge totals and recurring worker Run
+for exact equality. The instruction lookup has the same authority requirement
+before rollover.
+
 Qualify the durable host with offline scripted adapters and isolated store fault
 tests. Use an authenticated provider profile when actual transport observations
 or provider errors need qualification. Record the host, adapter, artifact and

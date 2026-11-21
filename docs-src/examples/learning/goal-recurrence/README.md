@@ -18,6 +18,11 @@ to change what the controller receives. The moderator records the selected
 revision and counts in its own component.
 [Discover, capture and activate guidance](../../../guide/admitted-instructions.md)
 
+Unattended recovery can reach `Session_resume` without a current operator. If
+`instructions_status` returns `permission_denied`, the moderator retains its
+last recorded observation. A current writer can inspect the saved selection
+and submit new work after starting the session.
+
 The initial callback creates the review Goal and stages its start. On the first
 Goal-owned turn, the controller creates and enables a recurrence for the captured
 worker. The first due time is the host's UTC timestamp on that Goal Run's

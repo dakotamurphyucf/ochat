@@ -351,7 +351,12 @@ type review_wait =
 
 let compaction_output = "The current release-note handoff names a reviewer."
 
-let with_waiting_controller ?resume_input f =
+let with_waiting_controller
+      ?test_root
+      ?(configure = Support.configure_guidance)
+      ?resume_input
+      f
+  =
   let providers = ref 0 in
   let post_stream ~sw:_ ~inputs =
     Int.incr providers;
@@ -387,8 +392,9 @@ let with_waiting_controller ?resume_input f =
   in
   let policy = guidance_inference_policy ~default_model:"fixture-model" ~post_stream () in
   Native.with_accepted_start
+    ?test_root
     ~startup:Support.startup
-    ~configure:Support.configure_guidance
+    ~configure
     ~timeout_seconds:120.
     ~v1:true
     ~policy

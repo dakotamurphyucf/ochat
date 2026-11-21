@@ -7,6 +7,24 @@ module Manual = Goal_job_runtime_tests
 module Control = Goal_control_completion_tests
 module G = P.Goal
 
+let with_clocks (env : Eio_unix.Stdenv.base) ~clock ~mono_clock : Eio_unix.Stdenv.base =
+  object
+    method clock = clock
+    method mono_clock = mono_clock
+    method domain_mgr = env#domain_mgr
+    method stdin = env#stdin
+    method stdout = env#stdout
+    method stderr = env#stderr
+    method net = env#net
+    method process_mgr = env#process_mgr
+    method fs = env#fs
+    method cwd = env#cwd
+    method secure_random = env#secure_random
+    method debug = env#debug
+    method backend_id = env#backend_id
+  end
+;;
+
 (* The actual Execute-daemon scheduler owns claim, Factory source,
    cold Init and SAME failed completion. Pause both actual host clocks only after
    observing the scheduler's real polling wait, before admitting the Job. Advance
@@ -33,21 +51,7 @@ let with_controlled_due_clocks (env : Eio_unix.Stdenv.base) ~pause ~resume ~adva
    := fun seconds ->
         advance_wall (Eio.Time.now clock +. seconds);
         advance_mono seconds);
-  object
-    method clock = clock
-    method mono_clock = mono_clock
-    method domain_mgr = env#domain_mgr
-    method stdin = env#stdin
-    method stdout = env#stdout
-    method stderr = env#stderr
-    method net = env#net
-    method process_mgr = env#process_mgr
-    method fs = env#fs
-    method cwd = env#cwd
-    method secure_random = env#secure_random
-    method debug = env#debug
-    method backend_id = env#backend_id
-  end
+  with_clocks env ~clock ~mono_clock
 ;;
 
 let prompt =

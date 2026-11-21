@@ -63,14 +63,17 @@ let call = fun tool request ->
   | `Ok(value) -> Task.pure(value)
   | `Error(code) -> Task.fail(tool ++ ": " ++ code)
 
-let inspect_instructions = fun state ->
-  let* status = call("instructions_status", Instruction_requests.status()) in
+let observe_instructions = fun state status ->
   match (|field(status, "revision"), field(status, "project_selected"),
            field(status, "project_files"), field(status, "skills")|) with
     | (|`String(revision), `Bool(project_selected), `Number(project_files), `Number(skills)|) ->
       Task.pure({state with instructions = `Observed({revision = revision;
         project_selected = project_selected; project_files = project_files; skills = skills})})
     | _ -> Task.fail("Stored instruction summary is malformed")
+
+let inspect_instructions = fun state ->
+  let* status = call("instructions_status", Instruction_requests.status()) in
+  observe_instructions(state, status)
 
 let instruction_decision : json Lifecycle.component =
   {id = "instructions"; obligation = `Finished; action = `No_action}
@@ -297,7 +300,12 @@ let on_event = fun ctx state event ->
          | `Ok(before) -> start_goal(state, before)
          | `Error("permission_denied") -> Task.pure(state)
          | `Error(code) -> Task.fail("goal_get: " ++ code))
-    | (|_, _, `Session_resume|) -> inspect_instructions(state)
+    | (|_, _, `Session_resume|) ->
+        let* read = Tool.call("instructions_status", Instruction_requests.status()) in
+        (match read with
+         | `Ok(status) -> observe_instructions(state, status)
+         | `Error("permission_denied") -> Task.pure(state)
+         | `Error(code) -> Task.fail("instructions_status: " ++ code))
     | (|`Start_staged, `Unobserved, `Turn_end|) ->
         let* observed = inspect_instructions(state) in
         await_reviews(observed)
