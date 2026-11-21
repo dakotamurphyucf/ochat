@@ -250,27 +250,45 @@ let delegation_stage payload =
    deadline bookkeeping. Resuming excludes time spent paused; it never jumps
    past deadlines merely because fixture work was slow. *)
 let controlled_monotonic_clock real_clock =
-  let logical_now = ref (Eio.Time.Mono.now real_clock) in
-  let last_real = ref !logical_now in
-  let paused = ref false in
-  (* The fixture owns clock transitions. Sleepers borrow the current promise;
-     only pause/resume/advance rotate and complete it, waking every waiter to
-     recheck logical time. A paused clock never polls the real clock in a loop. *)
+  let module Epoch = struct
+    type t =
+      | Paused of Mtime.t
+      | Running of { logical : Mtime.t; real : Mtime.t }
+
+    let at t now =
+      match t with
+      | Paused logical -> logical
+      | Running { logical; real } ->
+        Mtime.add_span logical (Mtime.span real now) |> Option.value_exn
+    ;;
+  end
+  in
+  let initial = Eio.Time.Mono.now real_clock in
+  let epoch = Atomic.make (Epoch.Running { logical = initial; real = initial }) in
+  let owner = (Stdlib.Domain.self () :> int) in
+  let require_owner () =
+    if not (Int.equal owner (Stdlib.Domain.self () :> int))
+    then invalid_arg "controlled clock transitions and sleeps require the creating domain"
+  in
   let changed = ref (Eio.Promise.create ()) in
-  let notify_change () =
+  let transition f =
+    require_owner ();
+    let old = Atomic.get epoch in
+    let real = Eio.Time.Mono.now real_clock in
+    Atomic.set epoch (f old ~logical:(Epoch.at old real) ~real);
     let _, resolver = !changed in
     changed := Eio.Promise.create ();
     Eio.Promise.resolve resolver ()
   in
-  let now () =
-    let actual = Eio.Time.Mono.now real_clock in
-    (match !paused with
-     | true -> ()
-     | false ->
-       logical_now
-       := Mtime.add_span !logical_now (Mtime.span !last_real actual) |> Option.value_exn);
-    last_real := actual;
-    !logical_now
+  (* Compiler domains can read time concurrently. A read crossing a transition
+     retries, so it cannot extrapolate a running epoch past a pause. *)
+  let rec now () =
+    let current = Atomic.get epoch in
+    match current with
+    | Paused logical -> logical
+    | Running _ ->
+      let instant = Epoch.at current (Eio.Time.Mono.now real_clock) in
+      if phys_equal current (Atomic.get epoch) then instant else now ()
   in
   let module Clock = struct
     type t = unit
@@ -279,6 +297,7 @@ let controlled_monotonic_clock real_clock =
     let now = now
 
     let rec sleep_until () deadline =
+      require_owner ();
       let current = now () in
       match Mtime.compare deadline current <= 0 with
       | true -> Eio.Fiber.yield ()
@@ -287,9 +306,9 @@ let controlled_monotonic_clock real_clock =
            lost between observing the state and registering the wait. Real timer
            completion alone never proves a controlled deadline has elapsed. *)
         let change, _ = !changed in
-        (match !paused with
-         | true -> Eio.Promise.await change
-         | false ->
+        (match Atomic.get epoch with
+         | Paused _ -> Eio.Promise.await change
+         | Running _ ->
            Eio.Fiber.first
              (fun () -> Eio.Time.Mono.sleep_span real_clock (Mtime.span current deadline))
              (fun () -> Eio.Promise.await change));
@@ -297,20 +316,15 @@ let controlled_monotonic_clock real_clock =
     ;;
   end
   in
-  let pause () =
-    ignore (now ());
-    paused := true;
-    notify_change ()
-  in
-  let resume () =
-    ignore (now ());
-    paused := false;
-    notify_change ()
-  in
+  let pause () = transition (fun _ ~logical ~real:_ -> Paused logical) in
+  let resume () = transition (fun _ ~logical ~real -> Running { logical; real }) in
   let advance seconds =
-    let span = Mtime.Span.of_float_ns (seconds *. 1_000_000_000.) |> Option.value_exn in
-    logical_now := Mtime.add_span (now ()) span |> Option.value_exn;
-    notify_change ()
+    let span = Mtime.Span.of_float_ns (seconds *. 1e9) |> Option.value_exn in
+    transition (fun old ~logical ~real ->
+      let logical = Mtime.add_span logical span |> Option.value_exn in
+      match old with
+      | Paused _ -> Paused logical
+      | Running _ -> Running { logical; real })
   in
   Eio.Resource.T ((), Eio.Time.Pi.clock (module Clock)), pause, resume, advance
 ;;
