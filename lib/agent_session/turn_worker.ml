@@ -409,6 +409,14 @@ let run
                      f context ~select_prepared ~on_prepared ~on_dispatch))
           })
   in
+  let select_successor () =
+    capabilities.select_rollover_followup after_rollover |> require_ok;
+    runtime_requests := []
+  in
+  let foreground_capacity =
+    Option.map capabilities.capacity_rollover ~f:(fun port ->
+      Chat_response.Foreground_capacity.create port ~on_retired:select_successor)
+  in
   let final_history =
     let prepare_model_input =
       Option.map authoring_context ~f:(fun make ->
@@ -430,12 +438,12 @@ let run
         ~inference_context:initial_context
         ?root_context
         ?successor
+        ?foreground_capacity
         ?on_settled_batch:
           (Option.map capabilities.settle_tool_batch ~f:(fun settle batch ->
              match settle batch |> require_ok with
              | Chat_response.Settled_tool_batch.Retire ->
-               capabilities.select_rollover_followup after_rollover |> require_ok;
-               runtime_requests := [];
+               select_successor ();
                Chat_response.Settled_tool_batch.Retire
              | Continue -> Chat_response.Settled_tool_batch.Continue))
         ~inference_identity:(config.inference_identity capabilities.allocate_inference)
@@ -499,7 +507,7 @@ let create
       ?initial_notification_input
       config
   =
-  Operation_worker.create ~run:(fun ~sw ~input capabilities ->
+  Operation_worker.create_capacity_aware ~run:(fun ~sw ~input capabilities ->
     match
       run
         ?root_binding
