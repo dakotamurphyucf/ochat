@@ -1,9 +1,42 @@
 import fs from 'node:fs/promises';
+import { ident, parse as parseCss, walk as walkCss } from 'css-tree';
 import { parse } from 'parse5';
 
 const codeStylesheet = /^\/_astro\/ec\.[^/.]+\.css$/;
+const resourceFunctions = new Set([
+  'url',
+  'src',
+  'image',
+  'image-set',
+  '-webkit-image-set',
+]);
 
-function placeStylesheet(html, route) {
+async function loadInlineCss(dir, href) {
+  const css = await fs.readFile(new URL(`.${href}`, dir), 'utf8');
+  const reject = () => {
+    throw new Error(`${href}: expected self-contained generated CSS`);
+  };
+  if (/<\/style/i.test(css)) reject();
+  walkCss(
+    parseCss(css, { parseCustomProperty: true, onParseError: reject }),
+    (node) => {
+      if (node.type === 'Raw') reject();
+      if (node.type === 'Url' && !/^data:/i.test(node.value)) reject();
+      if (
+        node.type === 'Atrule' &&
+        ident.decode(node.name).toLowerCase() === 'import'
+      )
+        reject();
+      if (node.type === 'Function') {
+        const name = ident.decode(node.name).toLowerCase();
+        if (resourceFunctions.has(name)) reject();
+      }
+    },
+  );
+  return css;
+}
+
+async function placeStylesheet(html, dir, route) {
   const document = parse(html, { sourceCodeLocationInfo: true });
   const root = document.childNodes.find((node) => node.tagName === 'html');
   const head = root?.childNodes.find((node) => node.tagName === 'head');
@@ -14,29 +47,26 @@ function placeStylesheet(html, route) {
       const { rel, href } = Object.fromEntries(
         node.attrs.map(({ name, value }) => [name, value]),
       );
-      if (rel === 'stylesheet' && codeStylesheet.test(href)) links.push(node);
+      if (rel === 'stylesheet' && codeStylesheet.test(href))
+        links.push({ href, location: node.sourceCodeLocation });
     }
     for (const child of node.childNodes || []) collect(child);
   }
   collect(document);
 
   const [link] = links;
-  const location = link?.sourceCodeLocation;
   const headEnd = head?.sourceCodeLocation?.endTag?.startOffset;
-  if (links.length !== 1 || !location || headEnd === undefined)
+  if (links.length !== 1 || !link?.location || headEnd === undefined)
     throw new Error(
       `${route}: expected one generated code stylesheet and head`,
     );
-  if (link.parentNode === head) return html;
-
-  const { startOffset: start, endOffset: end } = location;
-  if (start < headEnd)
-    throw new Error(
-      `${route}: generated code stylesheet has no expected location`,
-    );
+  const { startOffset: start, endOffset: end } = link.location;
+  const css = await loadInlineCss(dir, link.href);
+  const style = `<style data-ochat-protocol-code>${css}</style>`;
+  if (end <= headEnd) return html.slice(0, start) + style + html.slice(end);
   return (
     html.slice(0, headEnd) +
-    html.slice(start, end) +
+    style +
     html.slice(headEnd, start) +
     html.slice(end)
   );
@@ -44,7 +74,8 @@ function placeStylesheet(html, route) {
 
 // Expressive Code first links its stylesheet in the article body. On this
 // dense page, a late stylesheet can move a native fragment out of view as
-// thousands of source lines change height. Fetch it with the head styles.
+// thousands of source lines change height. Put the self-contained rules in
+// the head so the first layout does not depend on a separate request.
 export default function protocolStylesheet(route) {
   return {
     name: 'ochat-protocol-stylesheet',
@@ -52,8 +83,7 @@ export default function protocolStylesheet(route) {
       'astro:build:generated': async ({ dir }) => {
         const file = new URL(`.${route}index.html`, dir);
         const html = await fs.readFile(file, 'utf8');
-        const updated = placeStylesheet(html, route);
-        if (updated !== html) await fs.writeFile(file, updated);
+        await fs.writeFile(file, await placeStylesheet(html, dir, route));
       },
     },
   };

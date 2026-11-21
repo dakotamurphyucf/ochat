@@ -57,7 +57,7 @@ test('protocol anchors and source excerpts remain usable without JavaScript', as
     const page = await context.newPage();
     await page.goto('/docs/reference/agent-server/protocol-types/#session');
     await expect(
-      page.locator('head > link[rel="stylesheet"][href^="/_astro/ec."]'),
+      page.locator('head > style[data-ochat-protocol-code]'),
     ).toHaveCount(1);
     const section = page.locator('#session:target');
     await expect(section).toHaveText('session');
