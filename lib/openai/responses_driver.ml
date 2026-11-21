@@ -1023,8 +1023,13 @@ let io f =
 
 exception Auth_invalidated of Auth.error
 
-let with_application_write submission_guard ~submitted ~f =
-  try Inference_runtime.Submission_guard.with_submission submission_guard ~f with
+let with_application_write submission_guard ~submitted ~check_transport ~f =
+  try
+    Inference_runtime.Submission_guard.with_submission
+      submission_guard
+      ~check_transport
+      ~f
+  with
   | Inference_runtime.Protected_delivery.Lease_timeout ->
     if !submitted
     then transport_failure Timeout
@@ -1229,10 +1234,13 @@ let dispatch
       additional_headers
       (String.length body)
   in
-  with_application_write submission_guard ~submitted ~f:(fun () ->
-    (match lease.Auth.check_current () with
-     | Ok () -> ()
-     | Error error -> raise (Auth_invalidated error));
+  let check_transport () =
+    match lease.Auth.check_current () with
+    | Ok () -> ()
+    | Error error -> raise (Auth_invalidated error)
+  in
+  with_application_write submission_guard ~submitted ~check_transport ~f:(fun () ->
+    check_transport ();
     submitted := true;
     io (fun () ->
       Eio.Flow.copy_string header flow;
@@ -1790,8 +1798,9 @@ let websocket_dispatch
   if String.length body > t.max_request_bytes then transport_failure Body_limit;
   check_auth lease;
   on_selected Inference.Observation.Transport_selection.Websocket None;
-  with_application_write submission_guard ~submitted ~f:(fun () ->
-    check_auth lease;
+  let check_transport () = check_auth lease in
+  with_application_write submission_guard ~submitted ~check_transport ~f:(fun () ->
+    check_transport ();
     (* From this point cancellation or partial write is uncertain; no resend. *)
     Responses_websocket.begin_response channel.websocket;
     submitted := true;

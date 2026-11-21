@@ -15,6 +15,7 @@ let recovery_withdrawals = "session.recovery-withdrawals.v1"
 let recurrence_controller_goal = "recurrence.controller-goal.v1"
 let recovery_notes = "session.recovery-notes.v1"
 let recovery_note_shares = "session.recovery-note-shares.v1"
+let recovery_reminders = "session.recovery-reminders.v1"
 let recovery_rollover = "session.recovery-rollover.v1"
 let recovery_rollover_commit = "session.recovery-rollover-commit.v1"
 let recovery_authored_checkpoint = "session.recovery-authored-checkpoint.v1"
@@ -44,6 +45,7 @@ let supported_children =
   ; recovery_notes
   ; recovery_note_shares
   ; recovery_rollover
+  ; recovery_reminders
   ; recovery_rollover_commit
   ; recovery_rollover_batch
   ; recovery_rollover_continuation

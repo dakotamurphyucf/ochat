@@ -4,5 +4,6 @@ include
   with module Error = Inference_client.Error
    and module Completion = Inference_client.Completion
    and module Identity = Inference_client.Identity
+   and module Prepared_selection = Inference_client.Prepared_selection
    and module Text = Inference_client.Text
    and module Execution = Inference_client.Execution

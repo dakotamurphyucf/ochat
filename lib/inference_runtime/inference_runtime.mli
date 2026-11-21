@@ -62,9 +62,15 @@ module Submission_guard : sig
       A writer must be idempotent for the same physical attempt. *)
   val create_admission : refresh:(unit -> unit -> unit) -> t
 
+  (** Application-only admission after all ordinary admissions and their
+      rechecks. The adapter performs its last transport authorization before
+      this writer is called and again before application bytes. [check] rejects
+      this guard because an inspection is not a write boundary. *)
+  val create_write_admission : refresh:(unit -> unit -> unit) -> t
+
   val compose : t -> t -> t
   val check : t -> unit
-  val with_submission : t -> f:(unit -> 'a) -> 'a
+  val with_submission : ?check_transport:(unit -> unit) -> t -> f:(unit -> 'a) -> 'a
 end
 
 (** Effectful inference boundary. A prepared value owns its actual adapter and

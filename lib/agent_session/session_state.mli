@@ -185,6 +185,7 @@ type 'spec fields =
   ; recovery_windows : (Recovery_window_ledger.t option[@sexp.opaque])
   ; recovery_installed_originals : (Recovery_installed_originals.t option[@sexp.opaque])
   ; recovery_effective : (Recovery_effective_ledger.t option[@sexp.opaque])
+  ; recovery_reminders : (Recovery_reminder.t option[@sexp.opaque])
     (** The absent field disables local window accounting. Canonical history
         and physical archive custody continue to use their existing owners. *)
   ; permissions : Agent_protocol.Permission.t list

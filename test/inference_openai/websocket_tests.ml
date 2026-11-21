@@ -175,8 +175,9 @@ exception Submission_revoked of unit ref
 let%test_unit "HTTP and WebSocket recheck the owner after transport selection waits" =
   run_env (fun env ->
     List.iter [ O.Transport_policy.Http_sse; Require_websocket ] ~f:(fun policy ->
-      List.iter [ false; true ] ~f:(fun revoke ->
+      List.iter [ `None; `Owner; `Credential ] ~f:(fun withdrawal ->
         let submitted = ref 0 in
+        let accepted = ref false in
         let server_done, resolve_server_done = Eio.Promise.create () in
         with_server
           env
@@ -190,11 +191,13 @@ let%test_unit "HTTP and WebSocket recheck the owner after transport selection wa
                    let _, fields = headers reader in
                    upgrade flow fields;
                    let first_byte = Eio.Buf_read.take 1 reader in
+                   assert !accepted;
                    incr submitted;
                    ignore (client_message ~first_byte reader : Jsonaf.t);
                    Eio.Flow.copy_string (server_frame completed) flow)
                  else (
                    let first_byte = Eio.Buf_read.take 1 reader in
+                   assert !accepted;
                    incr submitted;
                    let _, fields = headers ~first_byte reader in
                    let length =
@@ -218,7 +221,19 @@ let%test_unit "HTTP and WebSocket recheck the owner after transport selection wa
              let selected, resolve_selected = Eio.Promise.create () in
              let resume, resolve_resume = Eio.Promise.create () in
              let current = ref true in
+             let credential_current = ref true in
              let refreshes = ref 0 in
+             let auth =
+               let check_current () =
+                 if !credential_current then Ok () else Error D.Auth.Denied
+               in
+               D.Auth.with_identity
+                 (D.Auth.bearer "fixture-token" |> ok)
+                 ~owner:"transport-cut"
+                 ~generation:1L
+                 ~check_current
+               |> ok
+             in
              let marker = ref () in
              let original_backtrace = Stdlib.Printexc.get_callstack 16 in
              let guard =
@@ -231,24 +246,34 @@ let%test_unit "HTTP and WebSocket recheck the owner after transport selection wa
                        (Submission_revoked marker)
                        original_backtrace)
              in
-             let rejected = ref false in
+             let write =
+               Inference_runtime.Submission_guard.create_write_admission
+                 ~refresh:(fun () ->
+                   assert (not !accepted);
+                   accepted := true;
+                   fun () -> assert !accepted)
+             in
+             let guard = Inference_runtime.Submission_guard.compose guard write in
+             let reported = ref `Returned in
              Eio.Fiber.both
                (fun () ->
                   try
-                    ignore
-                      (D.run_with_transport
-                         ~submission_guard:guard
-                         (driver env)
-                         ~session:(Some session)
-                         ~policy
-                         ~auth:(fun ~sw:_ _ -> Ok (lease ()))
-                         ~prepared:(prepared (profile endpoint) [ input "guarded" ])
-                         ~on_selected:(fun _ _ ->
-                           Eio.Promise.resolve resolve_selected ();
-                           Eio.Promise.await resume)
-                         ~on_event:ignore
-                       |> ok
-                       : D.Terminal.t)
+                    match
+                      D.run_with_transport
+                        ~submission_guard:guard
+                        (driver env)
+                        ~session:(Some session)
+                        ~policy
+                        ~auth:(fun ~sw:_ _ -> Ok auth)
+                        ~prepared:(prepared (profile endpoint) [ input "guarded" ])
+                        ~on_selected:(fun _ _ ->
+                          Eio.Promise.resolve resolve_selected ();
+                          Eio.Promise.await resume)
+                        ~on_event:ignore
+                    with
+                    | Ok _ -> ()
+                    | Error D.Auth.Denied -> reported := `Credential
+                    | Error _ -> assert false
                   with
                   | Submission_revoked observed ->
                     assert (phys_equal observed marker);
@@ -264,16 +289,25 @@ let%test_unit "HTTP and WebSocket recheck the owner after transport selection wa
                       String.equal
                         (String.split_lines caught |> List.hd_exn)
                         (String.split_lines original |> List.hd_exn));
-                    rejected := true)
+                    reported := `Owner)
                (fun () ->
                   Eio.Promise.await selected;
-                  if revoke then current := false;
+                  (match withdrawal with
+                   | `None -> ()
+                   | `Owner -> current := false
+                   | `Credential -> credential_current := false);
                   Eio.Promise.resolve resolve_resume ());
              D.Websocket_session.close session;
              Eio.Promise.await server_done;
-             assert (Bool.equal !rejected revoke);
+             let authorized =
+               match withdrawal, !reported with
+               | `None, `Returned -> true
+               | `Owner, `Owner | `Credential, `Credential -> false
+               | _ -> assert false
+             in
              assert (!refreshes = 1);
-             assert (!submitted = if revoke then 0 else 1)))))
+             assert (Bool.equal !accepted authorized);
+             assert (!submitted = if authorized then 1 else 0)))))
 ;;
 
 let%expect_test

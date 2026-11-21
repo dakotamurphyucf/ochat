@@ -843,6 +843,8 @@ let project_fields_with_presence
        [ "recovery_installed_originals", Recovery_installed_originals.to_jsonaf receipt ])
      @ Option.value_map t.recovery_effective ~default:[] ~f:(fun ledger ->
        [ "recovery_effective", Recovery_effective_ledger.to_jsonaf ledger ])
+     @ Option.value_map t.recovery_reminders ~default:[] ~f:(fun ledger ->
+       [ "recovery_reminders", Recovery_reminder.to_json ledger ])
      @ run_state_fields run_state_field t.run_state
      @ goal_catalog_fields
      @ goal_accounts_fields
@@ -962,6 +964,12 @@ let state_fields_of_jsonaf ?capture ~limits json =
     | Null -> Error (P.Error.invalid_request "recovery_effective must be a ledger")
     | Value ledger ->
       Recovery_effective_ledger.of_jsonaf ledger |> Result.map ~f:Option.some
+  in
+  let%bind recovery_reminders =
+    match D.Json.field json ~name:"recovery_reminders" with
+    | Absent -> Ok None
+    | Null -> Error (P.Error.invalid_request "recovery_reminders must be a ledger")
+    | Value ledger -> Recovery_reminder.of_json ledger |> Result.map ~f:Option.some
   in
   let%bind permissions = X.required fields "permissions" (X.list P.Permission.of_json) in
   let%bind grants = X.required fields "grants" (X.list P.Grant.of_json) in
@@ -1130,6 +1138,7 @@ let state_fields_of_jsonaf ?capture ~limits json =
     ; recovery_windows
     ; recovery_installed_originals
     ; recovery_effective
+    ; recovery_reminders
     ; permissions
     ; grants
     ; jobs
@@ -1190,6 +1199,7 @@ let state_shape =
     ; "recovery_windows", Recovery_window_ledger.shape
     ; "recovery_installed_originals", Recovery_installed_originals.shape
     ; "recovery_effective", Recovery_effective_ledger.shape
+    ; "recovery_reminders", Recovery_reminder.shape
     ; "permissions", X.array_shape_exn ~identity_field:"id" Shapes.permission
     ; "grants", X.array_shape_exn ~identity_field:"id" Shapes.grant
     ; "jobs", X.array_shape_exn ~identity_field:"id" Shapes.job
@@ -2837,6 +2847,12 @@ let adopt previous ~limits incoming =
     Recovery_note_share.check_unchanged
       (value previous).recovery_note_shares
       ~incoming:(value incoming).recovery_note_shares
+    |> X.document_result
+  in
+  let%bind () =
+    Recovery_reminder.check_unchanged
+      (value previous).recovery_reminders
+      ~incoming:(value incoming).recovery_reminders
     |> X.document_result
   in
   let%bind () =

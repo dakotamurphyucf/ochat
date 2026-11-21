@@ -11,9 +11,10 @@ module Submission_guard = struct
   type t =
     { checks : Protected_delivery.Materialized.scoped_submission list
     ; admission : (unit -> unit -> unit) list
+    ; write_admission : (unit -> unit -> unit) list
     }
 
-  let empty = { checks = []; admission = [] }
+  let empty = { checks = []; admission = []; write_admission = [] }
 
   let create_scoped ~leases ~refresh =
     { empty with
@@ -23,15 +24,17 @@ module Submission_guard = struct
 
   let create ~refresh = create_scoped ~leases:[] ~refresh
   let create_admission ~refresh = { empty with admission = [ refresh ] }
+  let create_write_admission ~refresh = { empty with write_admission = [ refresh ] }
   let with_protected t guard = { t with checks = t.checks @ [ guard ] }
 
   let compose parent child =
     { checks = parent.checks @ child.checks
     ; admission = parent.admission @ child.admission
+    ; write_admission = parent.write_admission @ child.write_admission
     }
   ;;
 
-  let check_all t source_checks =
+  let check_all t source_checks ~check_transport =
     let final_checks =
       List.map t.checks ~f:(fun (guard : Protected_delivery.Materialized.scoped_submission) ->
         guard.refresh ())
@@ -41,13 +44,26 @@ module Submission_guard = struct
       List.iter final_checks ~f:(fun check -> check ())
     in
     check_current ();
-    (match t.admission with
-     | [] -> ()
-     | _ ->
-       Eio.Fiber.check ();
-       let admitted = List.map t.admission ~f:(fun admit -> admit ()) in
-       check_current ();
-       List.iter admitted ~f:(fun check -> check ()));
+    let admitted =
+      List.map t.admission ~f:(fun admit ->
+        Eio.Fiber.check ();
+        admit ())
+    in
+    let check_admission () =
+      check_current ();
+      List.iter admitted ~f:(fun check -> check ())
+    in
+    if not (List.is_empty admitted) then check_admission ();
+    let write_checks =
+      List.map t.write_admission ~f:(fun admit ->
+        Eio.Fiber.check ();
+        check_transport ();
+        admit ())
+    in
+    if not (List.is_empty write_checks)
+    then (
+      check_admission ();
+      List.iter write_checks ~f:(fun check -> check ()));
     List.iter t.checks ~f:(fun guard -> guard.claim ())
   ;;
 
@@ -56,14 +72,15 @@ module Submission_guard = struct
   ;;
 
   let check t =
-    if not (List.is_empty (leases t)) then raise (Protected_delivery.Rejected Unavailable);
-    check_all t (fun () -> true)
+    if not (List.is_empty (leases t) && List.is_empty t.write_admission)
+    then raise (Protected_delivery.Rejected Unavailable);
+    check_all t (fun () -> true) ~check_transport:ignore
   ;;
 
-  let with_submission t ~f =
+  let with_submission ?(check_transport = ignore) t ~f =
     Protected_delivery.Lease.with_submission (leases t) ~f:(fun source_checks ->
       Eio.Fiber.check ();
-      check_all t source_checks;
+      check_all t source_checks ~check_transport;
       Eio.Fiber.check ();
       f ())
   ;;

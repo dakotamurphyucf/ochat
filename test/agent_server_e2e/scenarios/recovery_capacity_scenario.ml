@@ -46,7 +46,7 @@ let configuration fixture recovery =
        ~with_:(recovery ^ "\n (unix_socket")
 ;;
 
-let with_stock env fixture ~port ~config_path f =
+let with_stock ?(stop = Fixture.stop) env fixture ~port ~config_path f =
   Eio.Switch.run (fun sw ->
     let daemon =
       Daemon.start_with_environment_overrides
@@ -60,7 +60,7 @@ let with_stock env fixture ~port ~config_path f =
           ]
     in
     Exn.protect
-      ~finally:(fun () -> Fixture.stop env daemon)
+      ~finally:(fun () -> stop env daemon)
       ~f:(fun () ->
         Fixture.wait_ready env daemon;
         let client =
@@ -200,6 +200,12 @@ let observe
    | _ -> failwith "capacity fixture did not admit a foreground operation");
   let request = Provider.await_request provider env index in
   let body = Provider.body request in
+  require
+    (not
+       (String.is_substring
+          (Jsonaf.to_string body)
+          ~substring:"This request is nearing its configured context limit."))
+    "off, unknown or below-warning capacity produced an advisory";
   require (String.equal (string body "model") provider_model) "wrong actual request model";
   require
     (Document_schema.Json.equal

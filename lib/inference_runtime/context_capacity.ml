@@ -35,6 +35,7 @@ module Policy = struct
         ; input : int64 option
         ; output : int64 option
         }
+  [@@deriving sexp_of]
 
   type allowance =
     { host_total : int64 option
@@ -43,6 +44,7 @@ module Policy = struct
     ; checkpoint_reserve : int64
     ; warning_lead : int64
     }
+  [@@deriving sexp_of]
 
   type estimate =
     { estimator : Observation.Estimator.t
@@ -56,6 +58,7 @@ module Policy = struct
     ; allowance : allowance
     ; estimate : estimate option
     ; stamp : unit ref
+    ; revision : Chatml_source.Digest.t
     }
 
   type error =
@@ -63,8 +66,32 @@ module Policy = struct
     | Invalid_reservations
   [@@deriving equal, sexp_of]
 
+  let compute_revision ~target ~encoder ~model_limit ~allowance ~estimate =
+    let module S = Sexplib0.Sexp in
+    let estimate =
+      Option.map estimate ~f:(fun { estimator; margin } ->
+        [%sexp
+          { method_ =
+              (Observation.Estimator.method_ estimator : Observation.Estimator.method_)
+          ; version = (Observation.Estimator.version estimator : int)
+          ; margin : int64
+          }])
+    in
+    S.List
+      [ Atom "ochat.capacity-policy.v1"
+      ; Atom (Jsonaf.to_string (Inference.Request.Target.to_json target))
+      ; Encoder.sexp_of_t encoder
+      ; sexp_of_model_limit model_limit
+      ; sexp_of_allowance allowance
+      ; [%sexp (estimate : S.t option)]
+      ]
+    |> S.to_string_mach
+    |> Chatml_source.Digest.of_contents ~checkpoint:ignore
+  ;;
+
   let allowed_total ~total t = cap (cap total t.host_total) t.session_total
   let target t = t.target
+  let revision t = t.revision
 
   let validate ~model_limit ~allowance ~estimate =
     let { host_total
@@ -110,7 +137,10 @@ module Policy = struct
 
   let create ~target ~encoder ~model_limit ~allowance ~estimate =
     Result.map (validate ~model_limit ~allowance ~estimate) ~f:(fun () ->
-      { target; encoder; model_limit; allowance; estimate; stamp = ref () })
+      let revision =
+        compute_revision ~target ~encoder ~model_limit ~allowance ~estimate
+      in
+      { target; encoder; model_limit; allowance; estimate; stamp = ref (); revision })
   ;;
 end
 

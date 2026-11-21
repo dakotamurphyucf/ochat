@@ -30,6 +30,7 @@ val recurrence_controller_goal : string
 
 val recovery_notes : string
 val recovery_note_shares : string
+val recovery_reminders : string
 val recovery_rollover : string
 val recovery_rollover_commit : string
 val recovery_rollover_batch : string

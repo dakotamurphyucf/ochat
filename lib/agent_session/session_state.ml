@@ -179,6 +179,7 @@ type 'spec fields =
   ; recovery_windows : (Recovery_window_ledger.t option[@sexp.opaque])
   ; recovery_installed_originals : (Recovery_installed_originals.t option[@sexp.opaque])
   ; recovery_effective : (Recovery_effective_ledger.t option[@sexp.opaque])
+  ; recovery_reminders : (Recovery_reminder.t option[@sexp.opaque])
   ; permissions : Agent_protocol.Permission.t list
   ; grants : Agent_protocol.Grant.t list
   ; jobs : Agent_protocol.Job.t list
@@ -796,6 +797,7 @@ let create_fields ~(identity : Identity.t) ~spec ~desired ~initial_history =
   ; recovery_windows = None
   ; recovery_installed_originals = None
   ; recovery_effective = None
+  ; recovery_reminders = None
   ; permissions = []
   ; grants = []
   ; jobs = []
@@ -1167,6 +1169,14 @@ let validate_domain (t : t) ~recovery_revision =
             && Agent_protocol.Id.Operation.equal archive.operation_id operation
             && Int64.equal archive.revision revision
             && String.equal archive.sha256 sha256)))
+  in
+  let%bind () =
+    Option.value_map t.recovery_reminders ~default:(Ok ()) ~f:(fun ledger ->
+      Recovery_reminder.validate_state
+        ledger
+        ~session:t.identity.session_id
+        ~generation:t.identity.generation
+        ~owner:(Option.map t.recovery_windows ~f:Recovery_window_ledger.owner))
   in
   let%bind () =
     Option.value_map t.recovery_rollover ~default:(Ok ()) ~f:(fun ledger ->

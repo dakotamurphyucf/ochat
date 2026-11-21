@@ -192,6 +192,7 @@ let admit_recovery_storage
     Option.equal phys_equal previous.Session_state.recovery_notes state.recovery_notes
     && Option.equal phys_equal previous.recovery_note_shares state.recovery_note_shares
     && Option.equal phys_equal previous.recovery_rollover state.recovery_rollover
+    && Option.equal phys_equal previous.recovery_reminders state.recovery_reminders
     && Option.equal phys_equal previous.recovery_windows state.recovery_windows
     && Option.equal
          phys_equal

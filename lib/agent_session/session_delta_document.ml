@@ -156,6 +156,12 @@ let atom_to_jsonaf ~limits ~state_document delta =
           [ "kind", `String "recovery_effective_prepared"
           ; "record", Recovery_effective_record.to_jsonaf record
           ])
+  | Recovery_reminder_changed change ->
+    Ok
+      (`Object
+          [ "kind", `String "recovery_reminder_changed"
+          ; "change", Recovery_reminder.Change.to_json change
+          ])
   | Recovery_effective_attempt_changed receipt ->
     Ok
       (`Object
@@ -612,6 +618,9 @@ let atom_of_jsonaf ~limits json =
   | "recovery_effective_prepared" ->
     let%map record = X.required fields "record" Recovery_effective_record.of_jsonaf in
     Delta.Recovery_effective_prepared record
+  | "recovery_reminder_changed" ->
+    let%map change = X.required fields "change" Recovery_reminder.Change.of_json in
+    Delta.Recovery_reminder_changed change
   | "recovery_effective_attempt_changed" ->
     let%map receipt = X.required fields "receipt" Recovery_effective_receipts.of_jsonaf in
     Delta.Recovery_effective_attempt_changed receipt
@@ -974,6 +983,9 @@ let shape =
              ; ( "recovery_effective_prepared"
                , X.shape_exn
                    [ "kind", D.Shape.value; "record", Recovery_effective_record.shape ] )
+             ; ( "recovery_reminder_changed"
+               , X.shape_exn
+                   [ "kind", D.Shape.value; "change", Recovery_reminder.Change.shape ] )
              ; ( "recovery_effective_attempt_changed"
                , X.shape_exn
                    [ "kind", D.Shape.value; "receipt", Recovery_effective_receipts.shape ] )

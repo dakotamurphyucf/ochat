@@ -27,6 +27,10 @@ val begin_capture
   :  ?capacity:Capacity_basis.t
   -> ?recovery_scope:Agent_protocol.Recovery_window.Scope.t
   -> capture_recovery:bool
+  -> can_remind:
+       (scope:Agent_protocol.Recovery_window.Scope.t
+        -> policy:Chatml_source.Digest.t
+        -> bool)
   -> t
   -> operation_id:Agent_protocol.Id.Operation.t
   -> generation:int
@@ -39,6 +43,24 @@ val check_recovery
   :  t
   -> Token.t
   -> scope:Agent_protocol.Recovery_window.Scope.t
+  -> (unit, Agent_protocol.Error.t) Result.t
+
+val claim_reminder
+  :  t
+  -> Token.t
+  -> scope:Agent_protocol.Recovery_window.Scope.t
+  -> current:Capacity_basis.t option
+  -> Inference_runtime.Prepared.t
+  -> (Recovery_reminder.Claim.t option, Agent_protocol.Error.t) Result.t
+
+val check_reminder_dispatch
+  :  t
+  -> Token.t
+  -> scope:Agent_protocol.Recovery_window.Scope.t
+  -> current:Capacity_basis.t option
+  -> Recovery_reminder.Claim.t
+  -> Inference_runtime.Prepared.t
+  -> Inference_runtime.Attempt.t
   -> (unit, Agent_protocol.Error.t) Result.t
 
 (** Exact process-local identity of the immutable configuration object from
@@ -115,6 +137,16 @@ val root_port
         -> configuration:Inference.Observation.Configuration.t
         -> binding_is_current:(unit -> bool)
         -> (unit, Agent_protocol.Error.t) Result.t)
+  -> claim_reminder:
+       (Token.t
+        -> Inference_runtime.Prepared.t
+        -> (Recovery_reminder.Claim.t option, Agent_protocol.Error.t) Result.t)
+  -> accept_reminder:
+       (Token.t
+        -> Recovery_reminder.Claim.t
+        -> Inference_runtime.Prepared.t
+        -> Inference_runtime.Attempt.t
+        -> (unit -> unit, Agent_protocol.Error.t) Result.t)
   -> mark:
        (Token.t
         -> Inference.Observation.Configuration.t

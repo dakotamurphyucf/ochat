@@ -400,13 +400,13 @@ let run
                 source.with_context
                   ~previous
                   ~history
-                  (fun context ~on_prepared ~on_dispatch ->
+                  (fun context ~select_prepared ~on_prepared ~on_dispatch ->
                      let context =
                        if consume_fresh_binding ()
                        then Inference_runtime.Context.detach context
                        else context
                      in
-                     f context ~on_prepared ~on_dispatch))
+                     f context ~select_prepared ~on_prepared ~on_dispatch))
           })
   in
   let final_history =

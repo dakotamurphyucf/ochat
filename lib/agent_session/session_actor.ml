@@ -5641,6 +5641,15 @@ module Context_request = struct
       | Publish :
           Configuration_capture.Token.t * Configuration_capture.Capacity_observation.t
           -> unit t
+      | Claim_reminder :
+          Configuration_capture.Token.t * Inference_runtime.Prepared.t
+          -> Recovery_reminder.Claim.t option t
+      | Accept_reminder :
+          Configuration_capture.Token.t
+          * Recovery_reminder.Claim.t
+          * Inference_runtime.Prepared.t
+          * Inference_runtime.Attempt.t
+          -> (unit -> unit) t
   end
 
   type _ t =
@@ -12754,6 +12763,7 @@ let rec deferred_execution_delta (previous : Session_state.t) (delta : Session_d
   | Recovery_window_expired _
   | Recovery_window_enabled _
   | Recovery_effective_prepared _
+  | Recovery_reminder_changed _
   | Recovery_effective_attempt_changed _
   | Recovery_summary_compacted _
   | Authoring_references_forgotten _
@@ -25881,7 +25891,9 @@ let begin_configuration_capture t operation_id =
   Configuration_capture.begin_capture
     ?capacity:(context_capacity_basis t target)
     ?recovery_scope:(current_recovery_preparation_scope t)
-    ~capture_recovery:(Recovery_effective_ledger.has_record_capacity t.state.recovery_effective)
+    ~capture_recovery:
+      (Recovery_effective_ledger.has_record_capacity t.state.recovery_effective)
+    ~can_remind:(Recovery_reminder.can_claim t.state.recovery_reminders)
     t.configuration_capture
     ~operation_id
     ~generation:t.state.identity.generation
@@ -25976,14 +25988,122 @@ let capture_recovery_preparation t capture input ~configuration ~binding_is_curr
        Ok ())
 ;;
 
+let reminder_scope t capture =
+  let open Result.Let_syntax in
+  let operation = Configuration_capture.Token.operation_id capture in
+  let%bind _ = running_operation t operation in
+  let%bind () = require_runtime_admission t in
+  let%bind admission = operation_agent_admission t operation in
+  let%bind () = Option.value_map admission ~default:(Ok ()) ~f:check_agent_admission in
+  Result.of_option
+    (current_recovery_preparation_scope t)
+    ~error:(error Conflict "reminder recovery window is unavailable")
+;;
+
+let commit_reminder_change t change ~check =
+  let open Result.Let_syntax in
+  let run_preparation =
+    Option.map t.run_source_binding ~f:(fun binding -> binding.Source_binding.preparation)
+  in
+  let previous = t.state in
+  let%bind candidate =
+    prepare_transition
+      ?run_preparation
+      t
+      ~delta:(Recovery_reminder_changed change)
+      ~payloads:[]
+  in
+  match%bind check_recovery_admission t candidate with
+  | Capacity_exhausted -> Ok false
+  | Fits ->
+    let commit_observation =
+      Session_commit_observation.Owner.create_guarded
+        ~previous
+        ~candidate
+        ~check_at_writer:check
+    in
+    let%bind () =
+      persist_transition
+        ?run_preparation
+        t
+        candidate
+        ~check_before_commit:check
+        ~commit_observation
+    in
+    install_committed_transition ?run_preparation t candidate;
+    publish_committed_transition t candidate;
+    Ok true
+;;
+
+let claim_recovery_reminder t capture prepared =
+  let open Result.Let_syntax in
+  let check_claim () =
+    let%bind scope = reminder_scope t capture in
+    Configuration_capture.claim_reminder
+      t.configuration_capture
+      capture
+      ~scope
+      ~current:(current_context_capacity_basis t)
+      prepared
+  in
+  match%bind check_claim () with
+  | None -> Ok None
+  | Some claim ->
+    let check () =
+      match%bind check_claim () with
+      | Some current when Recovery_reminder.Claim.equal claim current -> Ok ()
+      | _ -> Error (error Conflict "reminder claim became unavailable")
+    in
+    let%map committed = commit_reminder_change t (Claim claim) ~check in
+    Option.some_if committed claim
+;;
+
+let accept_recovery_reminder t capture claim prepared attempt =
+  let open Result.Let_syntax in
+  let check () =
+    let%bind scope = reminder_scope t capture in
+    Configuration_capture.check_reminder_dispatch
+      t.configuration_capture
+      capture
+      ~scope
+      ~current:(current_context_capacity_basis t)
+      claim
+      prepared
+      attempt
+  in
+  let%bind () = check () in
+  let attempt = Inference_runtime.Attempt.accounting_id attempt in
+  let%bind accepted =
+    if Recovery_reminder.accepted_by t.state.recovery_reminders claim attempt
+    then Ok true
+    else commit_reminder_change t (Accept (claim, attempt)) ~check
+  in
+  if accepted
+  then
+    Ok
+      (fun () ->
+        match check () with
+        | Ok () -> ()
+        | Error failure -> raise (Native_tool_dispatch.Dispatch_error failure))
+  else Error (error Conflict "reminder acceptance could not be retained")
+;;
+
 let root_configuration_context t operation_id =
   Configuration_capture.root_port
     ~begin_capture:(fun () -> call t (Begin_configuration_capture operation_id))
     ~publish_capacity:(fun capture observation ->
       call t (Context_request (Capacity (Publish (capture, observation)))))
     ~publish_recovery:(fun capture input ~configuration ~binding_is_current ->
-      call t
-        (Context_request (Recovery_effective (capture, input, configuration, binding_is_current))))
+      call
+        t
+        (Context_request
+           (Recovery_effective (capture, input, configuration, binding_is_current))))
+    ~claim_reminder:(fun capture prepared ->
+      call t (Context_request (Capacity (Claim_reminder (capture, prepared)))))
+    ~accept_reminder:(fun capture claim prepared attempt ->
+      call
+        t
+        (Context_request (Capacity (Accept_reminder (capture, claim, prepared, attempt)))))
     ~mark:(fun capture configuration ->
       call t (Mark_configuration_capture (capture, configuration)))
     ~finish:(fun capture ~success ->
@@ -49669,7 +49789,7 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Commit_extensions _
   | Set_organization_admission _
   | Set_configuration_policy _
-  | Context_request (Capacity (Set_host _))
+  | Context_request (Capacity (Set_host _ | Claim_reminder _ | Accept_reminder _))
   | Context_request (Recovery_effective _)
   | Prepare_configuration_update _
   | Commit_configuration_update _
@@ -60104,6 +60224,10 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
       begin_configuration_capture t operation_id
     | Mark_configuration_capture (capture, configuration) ->
       mark_configuration_capture t capture configuration
+    | Context_request (Capacity (Claim_reminder (capture, prepared))) ->
+      claim_recovery_reminder t capture prepared
+    | Context_request (Capacity (Accept_reminder (capture, claim, prepared, attempt))) ->
+      accept_recovery_reminder t capture claim prepared attempt
     | Context_request (Capacity (Publish (capture, observation))) ->
       mark_context_capacity t capture observation
     | Context_request (Recovery_effective (capture, input, configuration, binding_is_current)) ->

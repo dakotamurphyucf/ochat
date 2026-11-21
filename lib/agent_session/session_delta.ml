@@ -16,6 +16,7 @@ type t =
   | Recovery_window_enabled of
       Agent_protocol.Session_ref.t * Agent_protocol.Id.Context_window.t
   | Recovery_effective_prepared of (Recovery_effective_record.t[@sexp.opaque])
+  | Recovery_reminder_changed of (Recovery_reminder.Change.t[@sexp.opaque])
   | Recovery_effective_attempt_changed of (Recovery_effective_receipts.t[@sexp.opaque])
   | Recovery_summary_compacted of
       Session_state.Compaction_archive.t
@@ -203,6 +204,7 @@ let rec contains_policy_usage = function
   | Recovery_window_expired _
   | Recovery_window_enabled _
   | Recovery_effective_prepared _
+  | Recovery_reminder_changed _
   | Recovery_effective_attempt_changed _
   | Recovery_summary_compacted _
   | Authoring_references_forgotten _
@@ -288,6 +290,7 @@ let rec contains_goal_policy = function
   | Recovery_window_expired _
   | Recovery_window_enabled _
   | Recovery_effective_prepared _
+  | Recovery_reminder_changed _
   | Recovery_effective_attempt_changed _
   | Recovery_summary_compacted _
   | Authoring_references_forgotten _
@@ -877,7 +880,14 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
         ~incoming:created.recovery_note_shares
     in
     let%bind () =
-      Recovery_rollover.check_unchanged state.recovery_rollover ~incoming:created.recovery_rollover
+      Recovery_reminder.check_unchanged
+        state.recovery_reminders
+        ~incoming:created.recovery_reminders
+    in
+    let%bind () =
+      Recovery_rollover.check_unchanged
+        state.recovery_rollover
+        ~incoming:created.recovery_rollover
     in
     let%bind () =
       Session_state.Compaction_archive.check_rollover_unchanged
@@ -1173,6 +1183,24 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
   | Recovery_window_enabled (owner, window) ->
     let%map.Result ledger = Recovery_window_capture.bootstrap state ~owner ~window in
     { state with recovery_windows = Some ledger }
+  | Recovery_reminder_changed change ->
+    let open Result.Let_syntax in
+    let unavailable =
+      Agent_protocol.Error.invalid_request "reminder has no active window or operation"
+    in
+    let%bind windows = Result.of_option state.recovery_windows ~error:unavailable in
+    let%bind operation = Result.of_option state.active_operation ~error:unavailable in
+    let scope =
+      Recovery_window_ledger.Window.scope (Recovery_window_ledger.active windows)
+    in
+    let%map ledger =
+      Recovery_reminder.apply
+        state.recovery_reminders
+        change
+        ~scope
+        ~operation:operation.id
+    in
+    { state with recovery_reminders = Some ledger }
   | Recovery_effective_prepared record ->
     let%map.Result ledger = Recovery_effective_capture.apply state record in
     { state with recovery_effective = Some ledger }
@@ -2506,6 +2534,7 @@ let validate_goal_accounts delta ~(previous : Session_state.t) ~(next : Session_
     | Recovery_window_expired _
     | Recovery_window_enabled _
     | Recovery_effective_prepared _
+    | Recovery_reminder_changed _
     | Recovery_effective_attempt_changed _
     | Recovery_summary_compacted _
     | Authoring_references_forgotten _
@@ -2665,6 +2694,7 @@ let validate_goal_descendants
     | Recovery_window_expired _
     | Recovery_window_enabled _
     | Recovery_effective_prepared _
+    | Recovery_reminder_changed _
     | Recovery_effective_attempt_changed _
     | Recovery_summary_compacted _
     | Authoring_references_forgotten _
@@ -2772,6 +2802,7 @@ let rec validate_descendant_publication delta ~revision =
   | Recovery_window_expired _
   | Recovery_window_enabled _
   | Recovery_effective_prepared _
+  | Recovery_reminder_changed _
   | Recovery_effective_attempt_changed _
   | Recovery_summary_compacted _
   | Authoring_references_forgotten _
@@ -2899,6 +2930,7 @@ let policy_usage_step delta ~(previous : Session_state.t) ~(next : Session_state
   | Recovery_window_expired _
   | Recovery_window_enabled _
   | Recovery_effective_prepared _
+  | Recovery_reminder_changed _
   | Recovery_effective_attempt_changed _
   | Recovery_summary_compacted _
   | Authoring_references_forgotten _
@@ -3040,6 +3072,7 @@ let goal_policy_step delta ~(previous : Session_state.t) ~(next : Session_state.
   | Recovery_window_expired _
   | Recovery_window_enabled _
   | Recovery_effective_prepared _
+  | Recovery_reminder_changed _
   | Recovery_effective_attempt_changed _
   | Recovery_summary_compacted _
   | Authoring_references_forgotten _

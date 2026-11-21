@@ -54,6 +54,32 @@ module Identity : sig
     }
 end
 
+module Prepared_selection : sig
+  type candidate
+  type t
+
+  val prepared : candidate -> Inference_runtime.Prepared.t
+
+  val choose
+    :  candidate
+    -> for_attempt:(Inference_runtime.Attempt.t -> Inference_runtime.Submission_guard.t)
+    -> t
+
+  (** Optional host selection of one alternative for a root request. The
+      one-shot isolated constructor prepares without allocating an attempt or
+      sending. Only a candidate from this invocation can replace its baseline.
+      Only the winning preparation reaches dispatch or tracking. Its guard
+      follows the caller and allocation guards. Protected-result requests
+      always keep their original preparation. *)
+  type select =
+    request:Inference.Request.t
+    -> prepare_isolated:
+         (Inference.Request.t
+          -> (candidate, Inference_runtime.Preparation_error.t) Result.t)
+    -> Inference_runtime.Prepared.t
+    -> t option
+end
+
 (** Input is the final immutable request after moderation, guidance, tool
     selection and local asset resolution. [before_dispatch] performs the existing
     host admission against THIS prepared fingerprint. Only afterward is one
@@ -80,7 +106,8 @@ end
     backend admits an application request. This guard is not an identity or
     credential lease. *)
 val run
-  :  ?submission_guard:Inference_runtime.Submission_guard.t
+  :  ?select_prepared:Prepared_selection.select
+  -> ?submission_guard:Inference_runtime.Submission_guard.t
   -> ?protected_delivery:Inference_runtime.Protected_delivery.t list
   -> ?protect_tool_arguments:bool
   -> Inference_runtime.Context.t

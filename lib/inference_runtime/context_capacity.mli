@@ -56,6 +56,10 @@ module Policy : sig
     -> (unit, error) Result.t
 
   val target : t -> Inference.Request.Target.t
+
+  (** Stable revision of the immutable declaration and exact target. Distinct
+      live policy bindings can have the same revision after a restart. *)
+  val revision : t -> Chatml_source.Digest.t
 end
 
 module Source : sig

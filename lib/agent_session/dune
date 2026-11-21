@@ -390,6 +390,8 @@
   recovery_effective_record
   recovery_effective_ledger
   recovery_effective_capture
+  recovery_reminder
+  recovery_reminder_preparation
   recovery_effective_receipts
   recovery_visibility
   recovery_window_seal

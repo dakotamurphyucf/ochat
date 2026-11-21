@@ -1,6 +1,8 @@
 open! Core
 module C = Agent_protocol.Session_configuration
 module Capacity = Session_context_capacity
+module R = Inference_runtime
+module Reminder = Recovery_reminder_preparation
 
 module Capacity_basis = struct
   type t =
@@ -64,6 +66,7 @@ module Token = struct
     ; policy : Configuration_policy.t
     ; capacity : Capacity_basis.t option
     ; recovery_scope : Agent_protocol.Recovery_window.Scope.t option
+    ; reminder : Reminder.t option
     ; recovery_binding : recovery_binding option
     ; capture_recovery : bool
     ; assessment : Capacity_observation.t option
@@ -81,6 +84,7 @@ let begin_capture
       ?capacity
       ?recovery_scope
       ~capture_recovery
+      ~can_remind
       t
       ~operation_id
       ~generation
@@ -88,6 +92,13 @@ let begin_capture
       ~target
       ~policy
   =
+  let reminder =
+    let open Option.Let_syntax in
+    let%bind scope = recovery_scope in
+    let%bind basis = capacity in
+    let%bind policy = Reminder.of_selection basis.Capacity_basis.selection in
+    Option.some_if (can_remind ~scope ~policy:(Reminder.revision policy)) policy
+  in
   let token : Token.t =
     { identity = ref ()
     ; operation_id
@@ -97,6 +108,7 @@ let begin_capture
     ; policy
     ; capacity
     ; recovery_scope
+    ; reminder
     ; recovery_binding = None
     ; capture_recovery
     ; assessment = None
@@ -121,6 +133,49 @@ let check_recovery t token ~scope =
               current.recovery_scope
               ~f:(Agent_protocol.Recovery_window.Scope.equal scope) -> Ok ()
   | _ -> Error (Agent_protocol.Error.invalid_request "root preparation custody changed")
+;;
+
+let reminder_custody t token ~scope ~current =
+  match t.current, current with
+  | Some (captured, phase), Some current
+    when owns t token
+         && Option.exists captured.capacity ~f:(Capacity_basis.equal current)
+         && Option.exists
+              captured.recovery_scope
+              ~f:(Agent_protocol.Recovery_window.Scope.equal scope) ->
+    Option.map captured.reminder ~f:(fun policy -> captured, phase, policy)
+  | _ -> None
+;;
+
+let claim_reminder t token ~scope ~current prepared =
+  match reminder_custody t token ~scope ~current with
+  | Some (_, Preparing, policy) when Reminder.fits policy prepared ->
+    Recovery_reminder.Claim.create
+      ~scope
+      ~policy:(Reminder.revision policy)
+      ~operation:token.operation_id
+      ~preparation:(R.Prepared.preparation_id prepared)
+    |> Result.map ~f:Option.some
+  | _ -> Ok None
+;;
+
+let check_reminder_dispatch t token ~scope ~current claim prepared attempt =
+  match reminder_custody t token ~scope ~current with
+  | Some (captured, Effective, _)
+    when Option.exists
+           captured.configuration
+           ~f:(phys_equal (R.Attempt.configuration attempt))
+         && String.equal
+              (Recovery_reminder.Claim.preparation claim)
+              (R.Prepared.preparation_id prepared)
+         && R.Prepared.binding_guard prepared ()
+         && R.Prepared.owns_attempt prepared attempt
+         &&
+         match (R.Attempt.scope attempt).relation with
+         | Root -> true
+         | Nested _ -> false -> Ok ()
+  | _ ->
+    Error (Agent_protocol.Error.invalid_request "reminder preparation custody changed")
 ;;
 
 let record_recovery_binding t token ~configuration ~source_revision =
@@ -302,7 +357,15 @@ let require = function
   | Error error -> raise (Native_tool_dispatch.Dispatch_error error)
 ;;
 
-let root_port ~begin_capture ~publish_capacity ~publish_recovery ~mark ~finish =
+let root_port
+      ~begin_capture
+      ~publish_capacity
+      ~publish_recovery
+      ~claim_reminder
+      ~accept_reminder
+      ~mark
+      ~finish
+  =
   Chat_response.Root_context.
     { with_context =
         (fun ~previous ~history f ->
@@ -362,7 +425,30 @@ let root_port ~begin_capture ~publish_capacity ~publish_recovery ~mark ~finish =
                       ~binding_is_current
                     |> require)
             in
-            f context ~on_prepared ~on_dispatch:(fun configuration ->
+            let select_prepared =
+              let open Option.Let_syntax in
+              let%map policy = token.reminder in
+              fun ~request ~prepare_isolated baseline ->
+                let%bind () = Option.some_if (Reminder.warns policy baseline) () in
+                let%bind request = Reminder.with_reminder request in
+                let%bind candidate = prepare_isolated request |> Result.ok in
+                let prepared = Inference_client.Prepared_selection.prepared candidate in
+                let%bind () =
+                  Option.some_if
+                    (Reminder.fits policy prepared
+                     && R.Prepared.includes_history
+                          prepared
+                          (Inference.Request.history request))
+                    ()
+                in
+                let%map claim = claim_reminder token prepared |> require in
+                let for_attempt attempt =
+                  R.Submission_guard.create_write_admission ~refresh:(fun () ->
+                    accept_reminder token claim prepared attempt |> require)
+                in
+                Inference_client.Prepared_selection.choose candidate ~for_attempt
+            in
+            f context ~select_prepared ~on_prepared ~on_dispatch:(fun configuration ->
               mark token configuration |> require)
           with
           | result ->

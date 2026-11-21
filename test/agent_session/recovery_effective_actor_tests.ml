@@ -699,7 +699,7 @@ let%test_unit "actual root preparation retains only exact neutral sources and re
                        root.with_context
                          ~previous
                          ~history
-                         (fun context ~on_prepared ~on_dispatch:_ ->
+                         (fun context ~select_prepared:_ ~on_prepared ~on_dispatch:_ ->
                             let target = Runtime.Context.target context in
                             if !cutover
                             then (

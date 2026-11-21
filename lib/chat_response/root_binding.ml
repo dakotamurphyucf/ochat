@@ -95,12 +95,15 @@ let with_context ?(fresh = false) t ~resolved ~f =
 let wrap ?(fresh = fun () -> false) t (source : Root_context.t) : Root_context.t =
   { with_context =
       (fun ~previous ~history f ->
-        source.with_context ~previous ~history (fun resolved ~on_prepared ~on_dispatch ->
-          match
-            with_context ~fresh:(fresh ()) t ~resolved ~f:(fun context ->
-              f context ~on_prepared ~on_dispatch)
-          with
-          | Ok result -> result
-          | Error error -> raise_s [%sexp (error : Runtime.Preparation_error.t)]))
+        source.with_context
+          ~previous
+          ~history
+          (fun resolved ~select_prepared ~on_prepared ~on_dispatch ->
+             match
+               with_context ~fresh:(fresh ()) t ~resolved ~f:(fun context ->
+                 f context ~select_prepared ~on_prepared ~on_dispatch)
+             with
+             | Ok result -> result
+             | Error error -> raise_s [%sexp (error : Runtime.Preparation_error.t)]))
   }
 ;;

@@ -151,6 +151,28 @@ checks the original attempt, selected target and safe boundary before acting.
 | Operator request | Require exact expected window and session revision. The ordinary request requires a valid checkpoint. A separately authorized force is allowed with an honestly classified absent checkpoint. Unknown capacity does not prohibit an authorized local force. |
 | Smaller model, target or settings change | Reacquire the new immutable target and reprepare before any further dispatch. Use ordinary same-window admission if it fits. Otherwise consider the local policy and qualify the required fresh projection with the new target. A former observation never authorizes the new request. The actor never silently selects a larger model, another account, or a different output setting. |
 
+The near-limit advisory is extra User guidance in one ordinary root provider
+request for an enabled window. The actor uses the baseline's exact qualified
+assessment, then prepares the same request with the bounded text and counts
+it again. All instructions, required successor inputs, and existing
+source guards remain in force. The optional text is omitted when the alternative
+has no complete count, exceeds the hard limit, or reaches the soft limit in
+Automatic mode. A request carrying a live protected result retains its existing
+preparation. Disabled and unknown capacity produce no advisory.
+
+The actor persists the exact preparation's claim, then accepts it for its
+physical attempt after ordinary application admissions and a fresh transport
+authorization check. HTTP and WebSocket both pass this boundary before
+application bytes. An unaccepted claim can be superseded by a later qualified
+preparation because the original attempt could not write. Acceptance is
+conservative across failure and restart. A crash after the durable acceptance
+may have interrupted the write, so the actor still treats the reminder as
+consumed. Rechecks or retries of the same in-process attempt use its existing
+receipt. The stable policy revision derives from the exact target, encoder,
+qualified bounds and estimator, and effective mode. The ledger has a fixed
+limit and retains prior acceptances across policy changes and fresh windows.
+The advisory body never enters canonical history or the durable receipt.
+
 A checkpoint is a receipt for a selected set of already committed local
 note revisions, with current authority, owning session, old window and
 qualified conversation coverage. Confirm these at commit. Its coverage

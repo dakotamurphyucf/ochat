@@ -41,7 +41,30 @@ module Identity = struct
     }
 end
 
+module Prepared_selection = struct
+  type candidate =
+    { prepared : R.Prepared.t
+    ; owner : unit ref
+    }
+
+  type t =
+    { candidate : candidate
+    ; for_attempt : R.Attempt.t -> R.Submission_guard.t
+    }
+
+  let prepared candidate = candidate.prepared
+  let choose candidate ~for_attempt = { candidate; for_attempt }
+
+  type select =
+    request:Inference.Request.t
+    -> prepare_isolated:
+         (Inference.Request.t -> (candidate, R.Preparation_error.t) Result.t)
+    -> R.Prepared.t
+    -> t option
+end
+
 let run
+      ?select_prepared
       ?(submission_guard = R.Submission_guard.empty)
       ?(protected_delivery = [])
       ?(protect_tool_arguments = false)
@@ -74,6 +97,39 @@ let run
       request
     |> Result.map_error ~f:(fun error -> Error.Preparation error)
   in
+  let%bind selected =
+    match relation, protected_delivery, select_prepared with
+    | Transcript.Scope.Root, [], Some select ->
+      let owner = ref () in
+      let available = ref true in
+      let prepare_isolated request =
+        if not !available
+        then Error R.Preparation_error.Invalid_preparation
+        else (
+          available := false;
+          R.Context.prepare
+            ~protect_tool_arguments:true
+            context
+            ~preparation_id:(identity.new_preparation_id ())
+            request
+          |> Result.map ~f:(fun alternative ->
+            { Prepared_selection.prepared = alternative; owner }))
+      in
+      let selected =
+        Exn.protect
+          ~finally:(fun () -> available := false)
+          ~f:(fun () -> select ~request ~prepare_isolated prepared)
+      in
+      (match selected with
+       | Some value when not (phys_equal value.Prepared_selection.candidate.owner owner)
+         -> Error (Error.Preparation Invalid_preparation)
+       | None | Some _ -> Ok selected)
+    | _ -> Ok None
+  in
+  let prepared =
+    Option.value_map selected ~default:prepared ~f:(fun selected ->
+      Prepared_selection.prepared selected.Prepared_selection.candidate)
+  in
   before_dispatch prepared;
   identity.with_attempt
     prepared
@@ -98,6 +154,12 @@ let run
       let%bind attempt =
         R.Prepared.start prepared ~scope ~accounting_id
         |> Result.map_error ~f:(fun error -> Error.Preparation error)
+      in
+      let submission_guard =
+        Option.value_map selected ~default:submission_guard ~f:(fun selected ->
+          R.Submission_guard.compose
+            submission_guard
+            (selected.Prepared_selection.for_attempt attempt))
       in
       let result =
         try

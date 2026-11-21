@@ -2356,7 +2356,7 @@ let run_turn (root_ctx : ctx) ~sw ~(history : History_entry.t list) =
       in
       c.neutral_items <- Map.empty (module Transcript.Item.Key);
       c.transcript_live <- None;
-      let run_request inference_context ~on_prepared ~on_dispatch =
+      let run_request inference_context ~select_prepared ~on_prepared ~on_dispatch =
         let c = { c with inference_context } in
         let admitted_attempt = ref None in
         let successor_guard =
@@ -2404,6 +2404,7 @@ let run_turn (root_ctx : ctx) ~sw ~(history : History_entry.t list) =
                  ~limits:Transcript.Admission.default
                  (fun request ~guard ~included:optional_hint ->
                     Neutral_turn.run
+                      ?select_prepared
                       ~submission_guard:guard
                       ~protected_delivery
                       ~protect_tool_arguments:(c.protect_tool_arguments || optional_hint)
@@ -2465,7 +2466,12 @@ let run_turn (root_ctx : ctx) ~sw ~(history : History_entry.t list) =
       in
       let c, attempt, receipt =
         match c.root_context with
-        | None -> run_request c.inference_context ~on_prepared:ignore ~on_dispatch:ignore
+        | None ->
+          run_request
+            c.inference_context
+            ~select_prepared:None
+            ~on_prepared:ignore
+            ~on_dispatch:ignore
         | Some source ->
           source.with_context ~previous:c.inference_context ~history:inputs run_request
       in
