@@ -467,6 +467,15 @@ let with_pending_diagnostics connection ~env ~session_id ~storage f =
 
 let select_for_execution host connection ~env ~enable_recovery ~retained_input session_id =
   let open Result.Let_syntax in
+  let same_source (left : P.Session.t) (right : P.Session.t) =
+    P.Id.Session.equal left.id right.id
+    && Int.equal left.generation right.generation
+    && Option.equal P.Id.Prompt_revision.equal left.prompt_revision right.prompt_revision
+    && Option.equal
+         P.Id.Workspace_instance.equal
+         left.workspace_instance
+         right.workspace_instance
+  in
   let%bind initial = snapshot connection session_id in
   let join_resume =
     retained_input && P.Session.equal_desired_state initial.session.desired_state Running
@@ -498,6 +507,11 @@ let select_for_execution host connection ~env ~enable_recovery ~retained_input s
            |> P.Public.Snapshot.fields)
             .session
         in
+        let%bind () =
+          if same_source initial.session selected
+          then Ok ()
+          else Error (failure Conflict "local session source changed before preparation")
+        in
         let attachment = C.Session_handle.attachment owner in
         let%bind () =
           if enable_recovery
@@ -519,18 +533,10 @@ let select_for_execution host connection ~env ~enable_recovery ~retained_input s
         selected)
     in
     let%bind fields = snapshot connection session_id in
-    if
-      Int.equal fields.session.generation selected.generation
-      && Option.equal
-           P.Id.Prompt_revision.equal
-           fields.session.prompt_revision
-           selected.prompt_revision
+    if same_source selected fields.session
     then Ok fields
     else
-      Error
-        (failure
-           Conflict
-           "selected source changed during local session preparation"))
+      Error (failure Conflict "selected source changed during local session preparation"))
 ;;
 
 let run
