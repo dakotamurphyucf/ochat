@@ -1254,9 +1254,11 @@ let%expect_test
                   ~f:(fun () ->
                     f
                       previous
+                      ~select_checkpoint:None
                       ~select_prepared:None
                       ~on_prepared:ignore
                       ~on_dispatch:ignore))
+          ; checkpoint_tools = Unselected
           }
       in
       let port =

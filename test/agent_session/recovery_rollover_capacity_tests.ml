@@ -183,7 +183,7 @@ let worker scenario ~previous ~actor ~original_operation ~on_cut ~record_failure
       root.with_context
         ~previous
         ~history:input.history
-        (fun context ~select_prepared ~on_prepared ~on_dispatch ->
+        (fun context ~select_checkpoint:_ ~select_prepared ~on_prepared ~on_dispatch ->
            let request =
              Inference.Request.create
                ~target:(Runtime.Context.target context)
