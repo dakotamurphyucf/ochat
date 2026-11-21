@@ -685,6 +685,7 @@ let architecture_methods =
   ; "session.runs"
   ; "session.run"
   ; "session.recovery.enable"
+  ; "session.recovery.followup"
   ; "session.recovery.notes.inspect"
   ; "session.recovery.notes.revoke_share"
   ; "session.recovery.notes.share"

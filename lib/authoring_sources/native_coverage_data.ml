@@ -411,7 +411,7 @@ let implementation_sources =
   ; ( "lib/agent_server/authorization.ml"
     , "9424177c0eb3b265a0ec2e3ef83d39c10ca219ac4770a3cef3bcccd042e70bc1" )
   ; ( "lib/agent_server/command_handler.ml"
-    , "4089d4bbf2e7e26da65ba0899139cafb32494cebdf1093c80e5266572100a48e" )
+    , "a1ef6fe5ff4f9504bc460d37cb8c696dd28db2c2e53cf8fd2b70617487276c69" )
   ; ( "lib/agent_server/daemon.ml"
     , "1b85fb24f833962ee6d564a7e9f3d281407adbf08b73c91fa0c34f4722974c5f" )
   ; ( "lib/agent_server/instruction_operator_service.ml"

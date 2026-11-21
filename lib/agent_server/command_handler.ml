@@ -522,6 +522,7 @@ let idempotency = function
   | Recovery_asset_read _
   | Recovery_status _
   | Recovery_rollover _
+  | Recovery_followup _
   | Recovery_note_shares _
   | Goal_query _
   | Goal_control _
@@ -3060,6 +3061,7 @@ let prepared_writer_attachment command =
   | Recovery_asset_read _
   | Recovery_status _
   | Recovery_rollover _
+  | Recovery_followup _
   | Recovery_note_shares _
   | Goal_query _
   | Goal_control _
@@ -3495,6 +3497,8 @@ let command_session_id = function
     Some (Agent_protocol.Session_ref.session_id source.session)
   | Recovery_windows request -> Some (Agent_protocol.Session_ref.session_id request.session)
   | Recovery_status request -> Some (Agent_protocol.Session_ref.session_id request.session)
+  | Recovery_followup request ->
+    Some (Agent_protocol.Session_ref.session_id (Agent_protocol.Recovery_followup.session request))
   | Recovery_rollover request ->
     Some
       (Agent_protocol.Recovery_rollover_control.Request.session request
@@ -3715,6 +3719,7 @@ let receipt_summary ~session_id result =
   | Recovery_asset_read _
   | Recovery_status _
   | Recovery_rollover _
+  | Recovery_followup _
   | Recovery_note_shares _
   | Goal_query _
   | Goal_control _
@@ -4299,6 +4304,7 @@ let handle t ?actor ?(on_release = ignore) ~context ~inference_budget command =
       | Recovery_asset_read _
       | Recovery_status _
       | Recovery_rollover _
+      | Recovery_followup _
       | Recovery_note_shares _ -> Some "context recovery"
       | Goal_query _ | Goal_control _ -> Some "Goal"
       | Recurrence_query _ | Recurrence_control _ -> Some "Recurrence"
@@ -4317,6 +4323,7 @@ let handle t ?actor ?(on_release = ignore) ~context ~inference_budget command =
            | Recovery_asset_read _
            | Recovery_status _
            | Recovery_rollover _
+           | Recovery_followup _
            | Recovery_note_shares _ )
          , _ ) ->
          let%bind check =

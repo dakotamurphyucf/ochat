@@ -4289,6 +4289,7 @@ let method_coverage =
   ; "session.recovery.read_asset", "daemon-recovery.converter-adoption"
   ; "session.recovery.read_text", "daemon-recovery.converter-adoption"
   ; "session.recovery.rollover", "daemon-recovery.operator-rollover"
+  ; "session.recovery.followup", "daemon-recovery.connected-followup"
   ; "session.recovery.status", "daemon-recovery.operator-rollover"
   ; "session.recovery.windows", "daemon-recovery.converter-adoption"
   ; "session.goals", "conformance.goal-operator"

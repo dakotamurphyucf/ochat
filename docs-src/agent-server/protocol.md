@@ -126,6 +126,7 @@ list/search, `recovery.text_range` or `recovery.asset_read` for retrieval,
 | `session.recovery.read_asset` | `Recovery_asset_read` | `session.transcript.read` and current source visibility | Read a bounded chunk of a retained original image or document. |
 | `session.recovery.status` | `Recovery_rollover_control.Inspect` | `session.transcript.read` and session visibility | Inspect the current window, capacity evidence, offered actions and transition receipt. |
 | `session.recovery.rollover` | `Recovery_rollover_control.Request` | `session.message.send`, transcript visibility and current writer | Submit or retry against an expected window and revision. Forcing a rollover also requires configuration administration. |
+| `session.recovery.followup` | `Recovery_followup` | `session.message.send`, transcript visibility and current owner writer | Inspect the successor phase or apply an action at the exact current window and revision. Negotiate `recovery.followup_control`. |
 | `session.recovery.notes.inspect` | `Recovery_note_share_control.Request` | `grant.manage` and `session.transcript.read`, source owner writer | Read revision metadata for grant management or an exact note path. |
 | `session.recovery.notes.share` | `Recovery_note_share_control.Request` | Same source owner and scopes as inspect | Grant one recipient access to a specific note revision until the supplied expiry. |
 | `session.recovery.notes.revoke_share` | `Recovery_note_share_control.Request` | Same source owner and scopes as inspect | Revoke the specified grant and return its receipt. |

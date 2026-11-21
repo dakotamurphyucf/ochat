@@ -105,3 +105,28 @@ the new attachment ID. A terminal exact retry returns the original receipt
 without admitting another successor. A pending receipt can be completed only
 while the original verified cut still applies. Choose a fresh key and current
 cut for a genuinely new request.
+
+## Resolve a suspended follow-up
+
+A moderator can return `Wait` after a window is committed. The successor then
+exists, but its next model request can remain pending. Negotiate
+`recovery.followup_control` on a connection to the owning host and attach as
+the owner writer. Use `session.recovery.followup` to inspect the current phase.
+
+```json
+{"action":"inspect","session":{"server_id":"<server>","session_id":"<session>"},"attachment_id":"<owner attachment>"}
+```
+
+The reply contains `phase` and `basis`. Copy the complete returned `basis`
+object into `expected` for an action. Supply the current attachment ID and one
+of `continue`, `wait`, `finish` or `cancel` as `action`. The OCaml client
+exposes these operations through `Agent_client.Recovery_windows.followup`.
+
+Use `continue` to request a fresh preparation when the reason for a hold has
+been addressed. The actor checks current authority, input and capacity before
+dispatch. `wait` suspends eligible follow-up. `finish` ends that follow-up,
+and `cancel` can also interrupt preparation. A model request already admitted
+uses ordinary operation cancellation. If a connection closes before the
+reply, reconnect, obtain a current owner attachment and inspect again. A stale
+basis returns a conflict. An `idle` phase means the current window has no
+foreground follow-up.
