@@ -242,6 +242,8 @@ type ctx =
   { env : Eio_unix.Stdenv.base
   ; root_context : Root_context.t option
   ; foreground_capacity : Foreground_capacity.t option
+  ; ordinary_write_admission :
+      (Inference_runtime.Prepared.t -> Inference_runtime.Attempt.t -> unit -> unit) option
   ; on_settled_batch : (Settled_tool_batch.t -> Settled_tool_batch.decision) option
   ; successor : Root_context.Successor.t option
   ; inference_context : Inference_runtime.Context.t
@@ -317,6 +319,8 @@ type args =
   { env : Eio_unix.Stdenv.base
   ; root_context : Root_context.t option
   ; foreground_capacity : Foreground_capacity.t option
+  ; ordinary_write_admission :
+      (Inference_runtime.Prepared.t -> Inference_runtime.Attempt.t -> unit -> unit) option
   ; on_settled_batch : (Settled_tool_batch.t -> Settled_tool_batch.decision) option
   ; successor : Root_context.Successor.t option
   ; inference_context : Inference_runtime.Context.t
@@ -1472,6 +1476,7 @@ let make_run_fork_admitted
       allocator = child_allocator
     ; root_context = None
     ; foreground_capacity = None
+    ; ordinary_write_admission = None
     ; on_settled_batch = None
     ; successor = None
     ; take_protected_delivery = None
@@ -2363,6 +2368,24 @@ let run_turn (root_ctx : ctx) ~sw ~(history : History_entry.t list) =
       let run_request inference_context ~select_prepared ~on_prepared ~on_dispatch =
         let c = { c with inference_context } in
         let admitted_attempt = ref None in
+        let ordinary_prepared = ref None in
+        let ordinary_guard =
+          match c.ordinary_write_admission with
+          | None -> Inference_runtime.Submission_guard.empty
+          | Some admit ->
+            let accepted = ref None in
+            Inference_runtime.Submission_guard.create_write_admission ~refresh:(fun () ->
+              match !accepted with
+              | Some recheck -> recheck
+              | None ->
+                let recheck =
+                  admit
+                    (Option.value_exn !ordinary_prepared)
+                    (Option.value_exn !admitted_attempt)
+                in
+                accepted := Some recheck;
+                recheck)
+        in
         let successor_guard =
           Option.value_map
             c.successor
@@ -2404,7 +2427,9 @@ let run_turn (root_ctx : ctx) ~sw ~(history : History_entry.t list) =
             ~submission_guard:
               (Inference_runtime.Submission_guard.compose
                  c.submission_guard
-                 successor_guard)
+                 (Inference_runtime.Submission_guard.compose
+                    successor_guard
+                    ordinary_guard))
             ~limits:Transcript.Admission.default
             (fun request ~guard ~reserved_input_tokens:_ ->
                let hint =
@@ -2435,7 +2460,8 @@ let run_turn (root_ctx : ctx) ~sw ~(history : History_entry.t list) =
                         on_prepared prepared;
                         Option.iter capacity ~f:(fun cut ->
                           Foreground_capacity.Request.before_dispatch cut prepared);
-                        c.before_inference_dispatch prepared)
+                        c.before_inference_dispatch prepared;
+                        ordinary_prepared := Some prepared)
                       ~on_attempt:(fun attempt ->
                         on_dispatch (Inference_runtime.Attempt.configuration attempt);
                         c.on_inference_attempt attempt;
@@ -2626,6 +2652,7 @@ let setup_ctx ~(sw : Eio.Switch.t) (a : args) =
     { env = a.env
     ; root_context = a.root_context
     ; foreground_capacity = a.foreground_capacity
+    ; ordinary_write_admission = a.ordinary_write_admission
     ; on_settled_batch = a.on_settled_batch
     ; successor = a.successor
     ; inference_context = a.inference_context
@@ -2706,6 +2733,7 @@ let run_completion_stream_in_memory_entries
       ~inference_context
       ?root_context
       ?foreground_capacity
+      ?ordinary_write_admission
       ?on_settled_batch
       ?successor
       ~inference_identity
@@ -2840,6 +2868,7 @@ let run_completion_stream_in_memory_entries
     { env
     ; root_context
     ; foreground_capacity
+    ; ordinary_write_admission
     ; on_settled_batch
     ; successor
     ; inference_context

@@ -5740,6 +5740,17 @@ module Recurrence_check_request = struct
         -> Recurrence_goal_run_guard.t option t
 end
 
+type _ model_turn_request =
+  | Check_model_turn : Agent_protocol.Id.Operation.t * bool -> unit model_turn_request
+  | Admit_ordinary_model_write :
+      Foreground_publication.t
+      * bool
+      * Inference_runtime.Prepared.t
+      * Inference_runtime.Attempt.t
+      -> (unit -> unit) model_turn_request
+  | Admit_moderator_turn : Agent_protocol.Id.Operation.t -> unit model_turn_request
+  | Admit_notification_turn : Agent_protocol.Id.Operation.t -> unit model_turn_request
+
 type _ request =
   | Install_descendant_host :
       Descendant_host_installation.t
@@ -5830,8 +5841,7 @@ type _ request =
   | Manage_moderator_follow_up :
       Agent_protocol.Id.Operation.t * Agent_protocol.Invocation.observer
       -> unit request
-  | Admit_moderator_turn : Agent_protocol.Id.Operation.t -> unit request
-  | Admit_notification_turn : Agent_protocol.Id.Operation.t -> unit request
+  | Model_turn : 'a model_turn_request -> 'a request
   | Claim_ordinary_event :
       Agent_protocol.Id.Moderator_execution.t
       * Agent_protocol.Id.Operation.t option
@@ -13511,6 +13521,7 @@ let prepare_completion_plan t (transition : Session_transition.t) completion_sam
 ;;
 
 let install
+      ?model_turn_writer
       ?protected_successor_append
       ?causal_root_acknowledgement
       ?unmoderated_configuration_acknowledgement
@@ -13744,14 +13755,14 @@ let install
     persist_transition
       ?protected_successor_append
       ?commit_observation:
-        (match causal_root_acknowledgement, constructor_job_control with
-         | Some write, None -> Some (Session_commit_attempt.observation write.writer)
-         | None, Some (_, plan) ->
+        (match causal_root_acknowledgement, constructor_job_control, model_turn_writer with
+         | Some write, None, None -> Some (Session_commit_attempt.observation write.writer)
+         | None, Some (_, plan), None ->
            Some
              (Session_commit_attempt.observation
                 plan.Constructor_model_data.canonical.attempt)
-         | None, None -> None
-         | Some _, Some _ ->
+         | None, None, observation -> observation
+         | _ ->
            invalid_arg
              "one canonical candidate cannot have two distinct native writer owners")
       ?idle_completion_write
@@ -14003,6 +14014,7 @@ let check_constructor_job_handoff
 ;;
 
 let transition
+      ?check_model_turn_at_writer
       ?idle_completion_step
       ?goal_runtime_scope
       ?check_before_commit
@@ -14063,8 +14075,14 @@ let transition
               in
               check_runtime_construction_effect (Existing_goal scope.continuation))
       in
+      let model_turn_writer =
+        Option.map check_model_turn_at_writer ~f:(fun check_at_writer ->
+          Session_commit_observation.Owner.create_guarded
+            ~previous:t.state ~candidate:transition ~check_at_writer)
+      in
       let%map () =
         install
+          ?model_turn_writer
           ?idle_completion_write
           ?goal_runtime_acknowledgement
           ?check_before_commit
@@ -27430,7 +27448,7 @@ let preparing_successor t operation_id =
     | Awaiting | Waiting | Held _ | Admitted _ | Finished _ -> false)
 ;;
 
-let admit_moderator_turn t operation_id =
+let check_managed_model_turn t operation_id =
   let open Result.Let_syntax in
   let%bind () = require_selected_execution t in
   let%bind operation = running_operation t operation_id in
@@ -27443,6 +27461,12 @@ let admit_moderator_turn t operation_id =
       Error (error Conflict "provider admission cannot interrupt a moderator event")
     | false, false -> Ok ()
   in
+  Ok (operation, observer)
+;;
+
+let managed_model_turn_deltas t operation_id =
+  let open Result.Let_syntax in
+  let%bind operation, observer = check_managed_model_turn t operation_id in
   let%bind plan = Observation_follow_up.admit_turn ~state:t.state ~observer in
   let%bind notifications =
     if preparing_successor t operation_id
@@ -27450,30 +27474,122 @@ let admit_moderator_turn t operation_id =
     else notification_wake_deltas t operation_id ~accept:true
   in
   let%bind run_deltas = run_turn_deltas t operation plan.events [] in
-  match follow_up_deltas t plan @ notifications @ run_deltas with
-  | [] -> Ok ()
-  | deltas ->
-    transition t ~delta:(Session_delta.Batch deltas) ~payloads:[] |> Result.map ~f:ignore
+  Ok (follow_up_deltas t plan @ notifications @ run_deltas)
 ;;
 
-let admit_notification_turn t operation_id =
+let check_notification_model_turn t operation_id =
   let open Result.Let_syntax in
   let%bind () = require_selected_execution t in
   let%bind _ = running_operation t operation_id in
-  let%bind () =
-    match t.state.lifecycle.desired, t.state.halted, moderator_is_borrowed t with
-    | Running, false, false -> Ok ()
-    | _ -> Error (error Conflict "session cannot admit a provider request")
-  in
-  let%bind deltas =
-    if preparing_successor t operation_id
-    then Ok []
-    else notification_wake_deltas t operation_id ~accept:true
-  in
+  match t.state.lifecycle.desired, t.state.halted, moderator_is_borrowed t with
+  | Running, false, false -> Ok ()
+  | _ -> Error (error Conflict "session cannot admit a provider request")
+;;
+
+let notification_model_turn_deltas t operation_id =
+  let open Result.Let_syntax in
+  let%bind () = check_notification_model_turn t operation_id in
+  if preparing_successor t operation_id
+  then Ok []
+  else notification_wake_deltas t operation_id ~accept:true
+;;
+
+let persist_model_turn ?check_at_writer t deltas =
   match deltas with
   | [] -> Ok ()
   | _ ->
-    transition t ~delta:(Session_delta.Batch deltas) ~payloads:[] |> Result.map ~f:ignore
+    transition
+      ?check_model_turn_at_writer:check_at_writer
+      ?check_before_commit:check_at_writer
+      t
+      ~delta:(Session_delta.Batch deltas)
+      ~payloads:[]
+    |> Result.map ~f:ignore
+;;
+
+let admit_moderator_turn t operation_id =
+  Result.bind (managed_model_turn_deltas t operation_id) ~f:(persist_model_turn t)
+;;
+
+let admit_notification_turn t operation_id =
+  Result.bind (notification_model_turn_deltas t operation_id) ~f:(persist_model_turn t)
+;;
+
+let check_model_turn t operation_id ~managed =
+  if managed
+  then Result.map (check_managed_model_turn t operation_id) ~f:ignore
+  else check_notification_model_turn t operation_id
+;;
+
+let ordinary_model_registration t operation_id attempt =
+  List.find_map t.inference_owners ~f:(fun custody ->
+    let owner = Inference_graph_custody.owner custody in
+    let selected = ref None in
+    Graph_owner.iter_registrations owner ~f:(fun registration ->
+      let handle = Inference_owner.Registration.handle registration in
+      if Option.exists (Inference_ledger.Handle.operation_id handle)
+           ~f:(Agent_protocol.Id.Operation.equal operation_id)
+         && Option.is_none (Inference_ledger.Handle.invocation_id handle)
+         && Option.exists (Inference_owner.Registration.attempt registration)
+              ~f:(phys_equal attempt)
+      then selected := Some (owner, registration));
+    !selected)
+;;
+
+let admit_ordinary_model_write
+      t
+      (publication : Foreground_publication.t)
+      ~managed
+      prepared
+      attempt
+  =
+  let open Result.Let_syntax in
+  let operation_id = publication.operation.id in
+  let missing () = error Conflict "ordinary model admission lost its running attempt" in
+  let%bind owner, registration =
+    Result.of_option (ordinary_model_registration t operation_id attempt) ~error:(missing ())
+  in
+  let handle = Inference_owner.Registration.handle registration in
+  let check () =
+    let%bind () = require_runtime_admission t in
+    let%bind () =
+      if Option.exists
+           (Graph_owner.registration owner ~ordinal:(Inference_ledger.Handle.ordinal handle))
+           ~f:(phys_equal registration)
+      then Ok ()
+      else Error (missing ())
+    in
+    let%bind () = check_model_turn t operation_id ~managed in
+    let%bind admission = operation_agent_admission t operation_id in
+    let%bind () = Option.value_map admission ~default:(Ok ()) ~f:check_agent_admission in
+    let%bind () =
+      if Atomic.get publication.live
+         && Foreground_publication.matches publication ~selected:t.foreground_publication ~state:t.state
+      then Ok ()
+      else Error (error Conflict "ordinary model admission lost its original foreground")
+    in
+    if
+      Configuration_capture.ordinary_attempt_is_current
+        t.configuration_capture
+        ~operation_id
+        ~current:(current_context_capacity_basis t)
+        ~prepared
+        ~attempt
+    then Ok ()
+    else Error (error Conflict "ordinary model admission lost its prepared root")
+  in
+  let%bind () = check () in
+  let%bind deltas =
+    if managed
+    then managed_model_turn_deltas t operation_id
+    else notification_model_turn_deltas t operation_id
+  in
+  let%bind () = persist_model_turn ~check_at_writer:check t deltas in
+  let%map () = check () in
+  fun () ->
+    match check () with
+    | Ok () -> ()
+    | Error failure -> raise (Native_tool_dispatch.Dispatch_error failure)
 ;;
 
 let foreground_terminal_requests t operation_id outcome =
@@ -29881,9 +29997,28 @@ let worker_capabilities t worker (publication : Foreground_publication.t) id_sou
         with_current_queued_moderator_event_tools t ~operation_id:(Some operation_id)
     ; manage_moderator_follow_up =
         (fun ~observer -> call t (Manage_moderator_follow_up (operation_id, observer)))
-    ; admit_moderator_turn = (fun () -> call t (Admit_moderator_turn operation_id))
-    ; admit_notification_turn = (fun () -> call t (Admit_notification_turn operation_id))
+    ; admit_moderator_turn =
+        (fun () -> call t (Model_turn (Admit_moderator_turn operation_id)))
+    ; admit_notification_turn =
+        (fun () -> call t (Model_turn (Admit_notification_turn operation_id)))
     ; with_invocation = with_invocation t operation_id
+    ; model_admission =
+        Option.bind t.configuration_policy ~f:(fun _ ->
+          current_context_capacity_basis t
+          |> Option.filter ~f:Configuration_capture.Capacity_basis.has_policy
+          |> Option.map ~f:(fun _ ->
+            Operation_worker.Model_admission.
+              { check =
+                  (fun ~managed ->
+                    call t (Model_turn (Check_model_turn (operation_id, managed))))
+              ; admit =
+                  (fun ~managed prepared attempt ->
+                    call
+                      t
+                      (Model_turn
+                         (Admit_ordinary_model_write
+                            (publication, managed, prepared, attempt))))
+              }))
     ; root_context =
         Option.map t.configuration_policy ~f:(fun _ ->
           root_configuration_context t operation_id ~automatic)
@@ -49920,8 +50055,7 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Claim_job_moderator _
   | Claim_job_event _
   | Manage_moderator_follow_up _
-  | Admit_moderator_turn _
-  | Admit_notification_turn _
+  | Model_turn _
   | Claim_ordinary_event _
   | Claim_queued_event _
   | Claim_legacy_callback _
@@ -60387,8 +60521,14 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
          Ok ())
     | Manage_moderator_follow_up (operation_id, observer) ->
       manage_moderator_follow_up t operation_id observer
-    | Admit_moderator_turn operation_id -> admit_moderator_turn t operation_id
-    | Admit_notification_turn operation_id -> admit_notification_turn t operation_id
+    | Model_turn (Check_model_turn (operation_id, managed)) ->
+      check_model_turn t operation_id ~managed
+    | Model_turn (Admit_ordinary_model_write (publication, managed, prepared, attempt))
+      -> admit_ordinary_model_write t publication ~managed prepared attempt
+    | Model_turn (Admit_moderator_turn operation_id) ->
+      admit_moderator_turn t operation_id
+    | Model_turn (Admit_notification_turn operation_id) ->
+      admit_notification_turn t operation_id
     | Claim_delegated_event (capture, request, governance, id, delegation, snapshot, event)
       -> claim_delegated_event t capture request governance id delegation snapshot event
     | Claim_job_event (scope, id, snapshot, event) ->

@@ -545,6 +545,16 @@ prepared request is checked for the exact required input and qualified
 capacity before it can allocate an attempt. A known oversize request or
 unavailable qualified capacity holds at the successor. An authorized owner
 can continue with an exact current window revision after changing the target.
+For a foreground request with a qualified numeric capacity policy, delivering a
+notification into history and accepting its wake are separate steps. The
+ordinary provider write accepts the wake after the candidate fits, the
+original operation still owns the request, and the provider has authenticated.
+The same boundary applies to a moderator follow-up fulfilled by that request.
+An idle scheduler may separately record that it accepted a request to start a
+Turn. That scheduling receipt can exist before the Turn reaches a provider.
+A hard-limit denial or checkpoint-only request cannot acknowledge an ordinary
+provider wake.
+
 The provider's final write guard records admission after validating current
 source, operation and credential checks. Once the admission is durable,
 the same obligation cannot launch again after a lost reply or uncertain

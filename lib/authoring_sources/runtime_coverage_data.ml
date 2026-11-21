@@ -1155,7 +1155,7 @@ let implementation_sources =
   ; ( "lib/agent_session/instruction_guidance_text.ml"
     , "f479e72bd27d60883647524052eb04770198f07603b2d738633130ece31c4861" )
   ; ( "lib/chat_response/in_memory_stream.ml"
-    , "855da8e847a4656311841efc7d8d85a61cdb158349b5281575c6092458a9b2ea" )
+    , "b6d407c6d7e3a144a77596ec908e1b74eac8caf83a5ee7915e53bc08549abcd0" )
   ; ( "lib/agent_session/run_job_completion.ml"
     , "f8d8d2b2523ba7de9df158362e4cf25a67f9334c58b293462451a53d208a788e" )
   ; ( "lib/agent_session/run_transition.ml"
@@ -1505,7 +1505,7 @@ let implementation_sources =
   ; ( "lib/agent_session/product_callback_data.mli"
     , "b981c51b31151bcfe467e03d818142c75ca4d3cf2a1ed5e5536eaf3dbcce3b76" )
   ; ( "lib/agent_session/operation_worker.ml"
-    , "1d98782d1df8d8623f34b93e1eebcfccfb541a4e1bf51378e12ee23b27bc4ef8" )
+    , "e38ae17c51e71f64dcada7cec2a9b9e021642d8f244fffaa850da7e5d3d017f0" )
   ; ( "lib/agent_session/notification_delivery.ml"
     , "9f18c6eb7561b0afda29cd706214ddf2a376c54b9f28980ce536079ae5b7b45e" )
   ; ( "lib/agent_session/notification_history.ml"
@@ -1537,7 +1537,7 @@ let implementation_sources =
   ; ( "lib/agent_session/goal_continuation_phase.ml"
     , "e24a210492bfcc9e94c7bf472603531eb053eb7654de7c6100083464da9b1b51" )
   ; ( "lib/agent_session/session_actor.ml"
-    , "c6c0f60dd3424f43c5f5fc86fb1ecd0c2d226ded2753dc98067cd3815a61fea3" )
+    , "08d2b1d962e499effbc7786821296ea20aabad695c32d9226194d4c28db703c0" )
   ; ( "lib/agent_session/idle_completion_write.ml"
     , "d427fa80c4346b64f3f9bf4d5025ad2218403278816ade76ff17ba1adaa426d9" )
   ; ( "lib/agent_session/goal_descendant_admission_custody.ml"

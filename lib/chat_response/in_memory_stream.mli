@@ -402,6 +402,8 @@ val run_completion_stream_in_memory_entries
   -> inference_context:Inference_runtime.Context.t
   -> ?root_context:Root_context.t
   -> ?foreground_capacity:Foreground_capacity.t
+  -> ?ordinary_write_admission:
+       (Inference_runtime.Prepared.t -> Inference_runtime.Attempt.t -> unit -> unit)
   -> ?on_settled_batch:(Settled_tool_batch.t -> Settled_tool_batch.decision)
   -> ?successor:Root_context.Successor.t
   -> inference_identity:Neutral_turn.Identity.t

@@ -504,7 +504,19 @@
       --case
       daemon-recovery.selected-successor-sources)
      (run %{exe:agent_server_e2e.exe} --scenario data-integrity --case daemon-recovery.ordinary-hard-limit)
-     (run %{exe:agent_server_e2e.exe} --scenario data-integrity --case daemon-recovery.operator-rollover))))))
+     (run %{exe:agent_server_e2e.exe} --scenario data-integrity --case daemon-recovery.operator-rollover)
+     (run
+      %{exe:agent_server_e2e.exe}
+      --scenario
+      data-integrity
+      --case
+      daemon-recovery.ordinary-wake-denied)
+     (run
+      %{exe:agent_server_e2e.exe}
+      --scenario
+      data-integrity
+      --case
+      daemon-recovery.ordinary-wake-at-write))))))
 
 (rule
  (alias agent-e2e-pending)

@@ -9,6 +9,8 @@ let cases =
   ; "daemon-recovery.configured-capacity", Recovery_capacity_scenario.run
   ; "daemon-recovery.operator-rollover", Recovery_operator_rollover_scenario.run
   ; "daemon-recovery.ordinary-hard-limit", Recovery_successor_guard_scenario.ordinary_hard_limit
+  ; "daemon-recovery.ordinary-wake-denied", Recovery_wake_admission_scenario.denied
+  ; "daemon-recovery.ordinary-wake-at-write", Recovery_wake_admission_scenario.accepted
   ; "daemon-recovery.near-limit-reminder", Recovery_reminder_scenario.run_stock
   ; "daemon-recovery.near-limit-before-write", Recovery_reminder_scenario.run_cut
   ; "daemon-recovery.near-limit-required-input", Recovery_reminder_scenario.run_tight

@@ -8,6 +8,7 @@ module Capacity_basis : sig
   type t
 
   val capture : Session_state.t -> selection:Session_context_capacity.Selection.t -> t
+  val has_policy : t -> bool
   val equal : t -> t -> bool
   val automatic : t -> bool
 end
@@ -144,6 +145,16 @@ val native_window
   -> configuration_revision:int64
   -> target:Inference.Request.Target.t
   -> Native_window.t option
+
+(** Check the live root writer's exact captured preparation before acknowledging
+    an ordinary model turn. No durable state is changed by this predicate. *)
+val ordinary_attempt_is_current
+  :  t
+  -> operation_id:Agent_protocol.Id.Operation.t
+  -> current:Capacity_basis.t option
+  -> prepared:Inference_runtime.Prepared.t
+  -> attempt:Inference_runtime.Attempt.t
+  -> bool
 
 val finish : t -> Token.t -> success:bool -> unit
 

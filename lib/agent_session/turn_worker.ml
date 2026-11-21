@@ -323,6 +323,32 @@ let run
       ~input
       capabilities
   =
+  let capabilities, ordinary_write_admission =
+    match capabilities.Operation_worker.Capabilities.model_admission with
+    | None -> capabilities, None
+    | Some port ->
+      let requested_moderator = ref false in
+      let managed = ref false in
+      let check_moderator () =
+        let open Result.Let_syntax in
+        let%map () = port.check ~managed:true in
+        requested_moderator := true
+      in
+      let check_notification () =
+        let open Result.Let_syntax in
+        let%map () = port.check ~managed:false in
+        managed := !requested_moderator;
+        requested_moderator := false
+      in
+      let admit prepared attempt =
+        port.admit ~managed:!managed prepared attempt |> require_ok
+      in
+      ( { capabilities with
+          admit_moderator_turn = check_moderator
+        ; admit_notification_turn = check_notification
+        }
+      , Some admit )
+  in
   let config =
     match config.Config.moderator, moderator_events with
     | Some moderator, Some make ->
@@ -437,6 +463,7 @@ let run
           (Option.map agent_guidance ~f:(fun make -> make ~input ~capabilities))
         ~inference_context:initial_context
         ?root_context
+        ?ordinary_write_admission
         ?successor
         ?foreground_capacity
         ?on_settled_batch:

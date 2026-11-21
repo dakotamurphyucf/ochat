@@ -13,6 +13,17 @@ module Input : sig
     }
 end
 
+module Model_admission : sig
+  type t =
+    { check : managed:bool -> (unit, Agent_protocol.Error.t) result
+    ; admit :
+        managed:bool
+        -> Inference_runtime.Prepared.t
+        -> Inference_runtime.Attempt.t
+        -> (unit -> unit, Agent_protocol.Error.t) result
+    }
+end
+
 module Capabilities : sig
   type 'plan notification_consumer =
     'plan
@@ -225,6 +236,7 @@ module Capabilities : sig
       (** Every root provider request checks the running operation and atomically
           accepts its consumed notification wakes, including without a moderator.
           A failed save prevents provider dispatch. *)
+    ; model_admission : Model_admission.t option
     ; root_context : Chat_response.Root_context.t option
     ; capacity_rollover : Chat_response.Capacity_rollover.t option
     ; select_rollover_followup :

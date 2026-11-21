@@ -33,6 +33,8 @@ module Capacity_basis = struct
     Capacity.Mode.equal (Capacity.availability t.selection).effective Automatic
   ;;
 
+  let has_policy t = Option.is_some (Capacity.Selection.policy t.selection)
+
   let equal a b =
     Int.equal a.generation b.generation
     && Session_state.Spec.Resource_identity.equal a.spec b.spec
@@ -414,6 +416,21 @@ let native_window t ~operation_id ~configuration_revision ~target =
     Option.map token.recovery_scope ~f:(fun selected_scope ->
       Native_window.{ identity = token.identity; scope = selected_scope })
   | _ -> None
+;;
+
+let ordinary_attempt_is_current t ~operation_id ~current ~prepared ~attempt =
+  match t.current, current with
+  | Some (token, Effective), Some basis ->
+    Agent_protocol.Id.Operation.equal token.operation_id operation_id
+    && Option.exists token.capacity ~f:(Capacity_basis.equal basis)
+    && Option.exists token.configuration ~f:(phys_equal (R.Attempt.configuration attempt))
+    && R.Prepared.owns_attempt prepared attempt
+    && R.Prepared.binding_guard prepared ()
+    &&
+      (match (R.Attempt.scope attempt).relation with
+      | Root -> true
+      | Nested _ -> false)
+  | _ -> false
 ;;
 
 let finish t token ~success =

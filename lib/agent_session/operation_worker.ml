@@ -9,6 +9,17 @@ module Input = struct
     }
 end
 
+module Model_admission = struct
+  type t =
+    { check : managed:bool -> (unit, Agent_protocol.Error.t) result
+    ; admit :
+        managed:bool
+        -> Inference_runtime.Prepared.t
+        -> Inference_runtime.Attempt.t
+        -> (unit -> unit, Agent_protocol.Error.t) result
+    }
+end
+
 module Capabilities = struct
   type 'plan notification_consumer =
     'plan
@@ -118,6 +129,7 @@ module Capabilities = struct
         -> (unit, Agent_protocol.Error.t) result
     ; admit_moderator_turn : unit -> (unit, Agent_protocol.Error.t) result
     ; admit_notification_turn : unit -> (unit, Agent_protocol.Error.t) result
+    ; model_admission : Model_admission.t option
     ; root_context : Chat_response.Root_context.t option
     ; capacity_rollover : Chat_response.Capacity_rollover.t option
     ; select_rollover_followup :
