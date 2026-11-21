@@ -451,6 +451,15 @@ the original semantics of edits, idle compaction, cancellation and reset.
 Disabling the feature stops new admissions while existing committed windows
 and recovery records remain readable under current authority.
 
+A stopped successor can be upgraded to a published authored prompt revision
+with the current session revision. The upgrade keeps the window and existing
+canonical rows. After an explicit start, the captured prompt configuration
+and tool selection apply to new requests in that window, including after a
+daemon restart. A rollover advances the expected revision without charging
+another automatic turn. Its successor and journal replay retain the prior
+follow-up count, rate history and pause settings. A newly admitted user turn
+resets the follow-up count under the ordinary budget rules.
+
 An authorized session reset or rebuild starts a fresh generation and window.
 The previous generation's pending intents, checkpoint proofs, rollover
 receipts and request keys close with that generation. The new generation

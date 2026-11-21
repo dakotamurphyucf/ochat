@@ -206,6 +206,62 @@ let reset_options : A.Administration.reset_options =
 
 let publish ?checkpoint retain = R.Settlement.Publish { checkpoint; retain }
 
+let with_retained_automatic_turn (state : A.Session_state.t) =
+  let operation : P.Operation.t =
+    { id = P.Id.Operation.create ()
+    ; generation = state.identity.generation
+    ; kind = Turn Idle_followup
+    ; state = Starting
+    ; started_at = timestamp
+    ; updated_at = timestamp
+    }
+  in
+  let ledger_result result =
+    Result.ok_or_failwith
+      (Result.map_error result ~f:(fun error ->
+         Sexp.to_string_hum (A.Inference_ledger.Error.sexp_of_t error)))
+  in
+  let ledger, handle, _ =
+    A.Inference_ledger.admit_turn state.inference_ledger operation |> ledger_result
+  in
+  let inference_ledger =
+    A.Inference_ledger.finish_turn ledger handle { operation with state = Completed }
+    |> ledger_result
+  in
+  let budget =
+    A.Automatic_turn_budget.create Automatic_turn_budget_tests.policy
+    |> fun budget ->
+    A.Automatic_turn_budget.note_operation budget operation
+    |> fun budget ->
+    A.Automatic_turn_budget.with_pauses
+      budget
+      [ Pause_followup_turns; Pause_internal_event_drains ]
+  in
+  [%test_eq: int] 1 budget.followup_turns;
+  [%test_eq: int] 1 (List.length budget.started_ms);
+  assert (
+    List.equal
+      Chat_response.Runtime_semantics.equal_pause_condition
+      [ Pause_followup_turns; Pause_internal_event_drains ]
+      budget.policy.budget.pause_conditions);
+  { state with inference_ledger; automatic_turn_budget = Some budget }, operation.id
+;;
+
+let check_automatic_budget (before : A.Session_state.t) (after : A.Session_state.t) =
+  if
+    not
+      (Option.equal
+         A.Automatic_turn_budget.equal
+         before.automatic_turn_budget
+         after.automatic_turn_budget)
+  then
+    raise_s
+      [%sexp
+        "rollover changed the automatic-turn budget"
+      , (before.automatic_turn_budget : A.Automatic_turn_budget.t option)
+      , (after.automatic_turn_budget : A.Automatic_turn_budget.t option)]
+;;
+
 let check_unmodified (before : A.Session_state.t) (after : A.Session_state.t) =
   assert (P.Id.Session.equal before.identity.session_id after.identity.session_id);
   [%test_eq: int] before.identity.generation after.identity.generation;
@@ -214,6 +270,7 @@ let check_unmodified (before : A.Session_state.t) (after : A.Session_state.t) =
   assert (phys_equal before.goal_catalog after.goal_catalog);
   assert (phys_equal before.jobs after.jobs);
   assert (phys_equal before.schedules after.schedules);
+  check_automatic_budget before after;
   assert (
     phys_equal
       before.conversation.deferred_user_entries
@@ -237,6 +294,7 @@ let%expect_test "archive sync and journal acknowledgement have distinct replay e
           ~spec:initial.spec
           ~initial_history:[ keep; old ]
       in
+      let initial, automatic_turn = with_retained_automatic_turn initial in
       let storage = Job_artifact_fixtures.create env storage_scope initial in
       let owner =
         P.Session_ref.create
@@ -539,6 +597,11 @@ let%expect_test "archive sync and journal acknowledgement have distinct replay e
       let journal = open_journal () in
       let second = recovery fixture ~journal ~initial in
       let after = Persistence.Restored.state second.state in
+      check_automatic_budget (Persistence.Restored.state initial) before;
+      check_automatic_budget before after;
+      (match (retained_turn after automatic_turn).state with
+       | Completed -> ()
+       | _ -> failwith "rollover rewrote a previously completed automatic turn");
       let receipt = lookup after ~id in
       let terminal =
         match receipt.status with
@@ -561,6 +624,7 @@ let%expect_test "archive sync and journal acknowledgement have distinct replay e
       assert (String.equal reference.sha256 (Chatml_source.Digest.to_hex terminal.archive));
       let archive = W.read_archive fixture reference |> protocol_ok in
       assert (Scope.equal (W.scope before) (W.scope archive));
+      check_automatic_budget before archive;
       assert (
         List.equal
           P.History.equal_entry

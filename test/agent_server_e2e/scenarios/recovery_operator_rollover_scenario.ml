@@ -205,6 +205,72 @@ let without_force ~sw env fixture =
        reference, ordinary.key)
 ;;
 
+let upgrade_successor
+      env
+      fixture
+      daemon
+      client
+      connection
+      reference
+      (session : P.Session.t)
+      writer
+  =
+  let stopped =
+    match
+      Fixture.request
+        client
+        (Session_stop
+           { session_id = session.id
+           ; attachment_id = writer
+           ; mode = Graceful
+           ; idempotency_key = key "rollover-upgrade-stop"
+           })
+    with
+    | Session_stop { session; _ } -> session
+    | _ -> failwith "could not stop the successor for prompt upgrade"
+  in
+  (match stopped.observed_state with
+   | Stopped -> ()
+   | _ -> failwith "prompt upgrade requires a stopped successor");
+  let previous = Option.value_exn stopped.prompt_revision in
+  Fixture.write
+    env
+    (Config.prompt_path fixture)
+    {|<config model="gpt-4.1" max_tokens="120"/><developer>Check the current context.</developer><tool name="context_remaining"/>|};
+  Support.Daemon_process.signal daemon Stdlib.Sys.sighup;
+  let target =
+    Support.Tui_fixture.await env (fun () ->
+      Agent_client.Catalog.prompts connection
+      |> ok
+      |> List.find_map ~f:(fun prompt ->
+        if String.equal prompt.name "smoke"
+        then
+          Option.filter prompt.current_revision ~f:(fun revision ->
+            not (P.Id.Prompt_revision.equal revision previous))
+        else None))
+  in
+  let pre_upgrade = basis connection reference writer in
+  match
+    Fixture.request
+      client
+      (Session_upgrade_prompt
+         { session_id = session.id
+         ; attachment_id = writer
+         ; expected_revision = pre_upgrade.revision
+         ; target_revision = target
+         ; allow_migration = true
+         ; idempotency_key = key "rollover-upgrade-prompt"
+         })
+  with
+  | Session_upgrade_prompt { session = upgraded; _ } ->
+    require
+      (Int.equal upgraded.generation session.generation
+       && Option.exists upgraded.prompt_revision ~f:(P.Id.Prompt_revision.equal target))
+      "prompt upgrade did not capture the requested revision in the same generation";
+    target, pre_upgrade
+  | _ -> failwith "could not upgrade the successor to the reloaded prompt"
+;;
+
 let run env environment =
   let fixture = Data.fixture env environment "recovery-operator-rollover" in
   let public_scopes =
@@ -225,8 +291,8 @@ let run env environment =
     Support.Port_reservation.release reservation;
     let provider = Provider.start ~sw ~env ~port in
     let admin = Config.admin_token fixture in
-    let session, command, committed, successor =
-      Stock.with_stock env fixture ~port ~config_path (fun _ _ _ ->
+    let session, command, committed, successor, target =
+      Stock.with_stock_daemon env fixture ~port ~config_path (fun daemon _ _ _ ->
         let limited_session, limited_key = without_force ~sw env fixture in
         let session, reference, command =
           with_client
@@ -286,6 +352,14 @@ let run env environment =
                  ~key:"rollover-transcript"
                  body;
                let inference = Provider.await_request provider env 0 in
+               let predecessor = Provider.body inference |> Jsonaf.to_string in
+               require
+                 ((not (String.is_substring predecessor ~substring:Stock.tool_name))
+                  && not
+                       (String.is_substring
+                          predecessor
+                          ~substring:"# Recovering a local session"))
+                 "the predecessor exposed unselected recovery tools or guidance";
                available
                  (inspect connection reference ~attachment_id:attachment.id ())
                  (fun _ _ _ _ actions ->
@@ -359,7 +433,31 @@ let run env environment =
             Idempotency_conflict;
           compare_durable env fixture session writer command.key committed;
           check_windows connection reference command.expected.scope successor;
-          session, command, committed, successor))
+          let target, pre_upgrade =
+            upgrade_successor
+              env
+              fixture
+              daemon
+              client
+              connection
+              reference
+              session
+              writer
+          in
+          let upgraded = basis connection reference writer in
+          require
+            (Scope.equal upgraded.scope successor
+             && Int64.(upgraded.revision > pre_upgrade.revision))
+            "prompt upgrade did not keep the successor while advancing its revision";
+          expect_error
+            (Client.request_rollover
+               connection
+               { duplicate with
+                 expected = pre_upgrade
+               ; key = key "rollover-before-upgrade"
+               })
+            Conflict;
+          session, command, committed, successor, target))
     in
     Stock.with_stock env fixture ~port ~config_path (fun _ _ _ ->
       with_client ~sw env fixture ~token:admin (fun client connection _ ->
@@ -384,5 +482,19 @@ let run env environment =
         check_windows connection reference command.expected.scope successor;
         require
           (Int.equal (Provider.request_count provider) 1)
-          "operator rollover or replay submitted an unexpected provider request")))
+          "operator rollover or replay submitted an unexpected provider request";
+        let reopened = (Fixture.get client session.id).session in
+        require
+          (Option.exists reopened.prompt_revision ~f:(P.Id.Prompt_revision.equal target))
+          "cold reopen lost the upgraded authored prompt revision";
+        Stock.start client reopened writer "rollover-upgrade-restart";
+        let observed =
+          Stock.observe ~output:120 env provider ~index:1 client reopened writer
+        in
+        ignore (Stock.assert_status ~window:successor observed "current" : Jsonaf.t);
+        let prepared = Provider.await_request provider env 1 |> Provider.body in
+        require
+          ((not (String.is_substring (Jsonaf.to_string prepared) ~substring:body))
+           && Int.equal (Provider.request_count provider) 3)
+          "cold successor replayed the retired transcript or submitted an extra request")))
 ;;

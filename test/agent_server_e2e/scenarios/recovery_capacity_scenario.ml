@@ -46,7 +46,7 @@ let configuration fixture recovery =
        ~with_:(recovery ^ "\n (unix_socket")
 ;;
 
-let with_stock ?(stop = Fixture.stop) env fixture ~port ~config_path f =
+let with_stock_daemon ?(stop = Fixture.stop) env fixture ~port ~config_path f =
   Eio.Switch.run (fun sw ->
     let daemon =
       Daemon.start_with_environment_overrides
@@ -83,7 +83,11 @@ let with_stock ?(stop = Fixture.stop) env fixture ~port ~config_path f =
                 ~features:[ P.Recovery_query.Features.windows ]
               |> protocol_ok
             in
-            f client connection initialized.P.Initialize.Response.server_id)))
+            f daemon client connection initialized.P.Initialize.Response.server_id)))
+;;
+
+let with_stock ?stop env fixture ~port ~config_path f =
+  with_stock_daemon ?stop env fixture ~port ~config_path (fun _daemon -> f)
 ;;
 
 let start client (session : P.Session.t) attachment_id name =
