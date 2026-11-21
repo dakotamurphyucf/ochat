@@ -254,7 +254,14 @@ let recover_initial_start ~moderated ~lost_stage =
         let base = config root root prompt_file in
         let config =
           { base with
-            workspaces =
+            (* Keep event-count snapshots. Timed retention can reserve the parent
+               between attaching and stopping, outside this recovery scenario. *)
+            server =
+              { base.server with
+                durability =
+                  { base.server.durability with snapshot_every_ms = Int.max_value }
+              }
+          ; workspaces =
               List.map base.workspaces ~f:(fun workspace ->
                 { workspace with
                   source =
