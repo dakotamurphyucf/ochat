@@ -1224,7 +1224,7 @@ let implementation_sources =
   ; ( "lib/agent_server/descendant_accounting_host.ml"
     , "3baff14cf9c606e899c08f95805cc3ca9f070827b46ec531e1c230314820b0fd" )
   ; ( "lib/agent_server/session_factory.ml"
-    , "db307ca70ac05055ebd63c6a8351c80ef1212bdcca484250fb5d4d4c38a2b099" )
+    , "c1863dc87419c09a09587933df09ec0d9e4fdeb4ff04e488dc2c74a26c508ac9" )
   ; ( "bin/inference_composition.ml"
     , "1f57451d5543a5fe8f2f23dc0e593374b64946d088cba164acd1c087a7cdce18" )
   ; ( "lib/agent_protocol/developer_command_id.ml"
@@ -1354,7 +1354,7 @@ let implementation_sources =
   ; ( "lib/agent_server/graph_tracking.ml"
     , "166ef8eeecb21c2e592b866532f00f1d0c3daefbf392f4a51421cb92092733fe" )
   ; ( "lib/agent_server/session_registry.ml"
-    , "f5107716d5e8f97953fa3e3a74b6c39a73f12b9c866bfe751fe93a02649d0d95" )
+    , "3e387ceae5c7f3cbe03fb0b686d842e337dd11151b83dd3cd42aab339200445a" )
   ; ( "lib/agent_server/cleanup_original_view.ml"
     , "8dd7c37b5561b6daa2ba6a033a88660cea08a738e027969240d9d03a20883896" )
   ; ( "lib/agent_server/cleanup_original_view.mli"

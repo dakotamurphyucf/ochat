@@ -122,8 +122,11 @@ end
     before those acknowledged owners. After genuine Held admission, the target's
     exact live Held/Prepared basis and registered owner remain required; a
     transient registry reservation alone does not revoke that admitted target.
-    A distinct controller still requires fresh entry validation. Retained receipt
-    reconciliation and all pre-admission checks retain fresh entry validation.
+    A distinct controller joins an exact same-owner loaded retention while
+    retaining the original live activation and rechecking both owners and
+    authorities at the existing activation steps. Other controller
+    reservations still reject. Retained receipt reconciliation and all
+    pre-admission checks retain fresh fail-fast entry validation.
     Existing-session input and both captured
     Single_turn/Workflow modes retain their existing support.
 

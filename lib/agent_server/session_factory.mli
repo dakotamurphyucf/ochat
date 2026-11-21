@@ -741,6 +741,20 @@ val check_registered_entry
   -> session:Agent_protocol.Session_ref.t
   -> (unit, Agent_protocol.Error.t) result
 
+(** Post-ACK controller check for a distinct target's live Held activation.
+    Revalidate the same Factory/Store controller entry and the caller's live
+    owner/authority check before and after waiting on exact loaded retention.
+    [check_current] is nonyielding and receives [resumed:true] after waiting.
+    Every other reservation remains a conflict.
+    This joins without taking a Registry lease. Fresh admission and retained
+    reconciliation use [check_registered_entry]. *)
+val await_held_recurrence_controller
+  :  t
+  -> Session_registry.entry
+  -> session:Agent_protocol.Session_ref.t
+  -> check_current:(resumed:bool -> (unit, Agent_protocol.Error.t) result)
+  -> (unit, Agent_protocol.Error.t) result
+
 (** Exact recovery of a bounded UTF-8 range under the current Factory's
     physical source custody. The host reauthorizes the exact selection and
     view before reading and at release. A later delivery must reauthorize

@@ -14583,6 +14583,14 @@ let check_registered_entry t entry ~session =
   else Ok ()
 ;;
 
+let await_held_recurrence_controller t entry ~session ~check_current =
+  Session_registry.await_loaded_retention t.registry entry ~check_current:(fun ~resumed ->
+    let open Result.Let_syntax in
+    let%bind () = check_registered_owner t entry ~session in
+    let%bind () = check_current ~resumed in
+    if resumed then check_registered_owner t entry ~session else Ok ())
+;;
+
 module Recovery_source_host = struct
   module P = Agent_protocol
   module Source = Agent_session.Recovery_source_reader

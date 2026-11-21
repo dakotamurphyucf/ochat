@@ -364,6 +364,27 @@ val commit_retired
     creation coordinators check this under their own creation lock before reserve. *)
 val lifecycle_reserved : t -> Agent_protocol.Id.Session.t -> bool
 
+(** Wait for each actual loaded retention reservation on the exact Actor, Owner
+    and Handle to release. [check_current] must be nonyielding and is rerun
+    after every suspension with [resumed:true]. Other reservations, owner
+    replacement, failed cleanup and shutdown reject. A retention join also
+    verifies retained storage availability.
+    This only joins existing custody, without acquiring a lease. Call from the
+    creating domain, outside Actor callbacks and without any lock needed by
+    retention. Cancellation propagates. *)
+val await_loaded_retention
+  :  t
+  -> entry
+  -> check_current:(resumed:bool -> (unit, Agent_protocol.Error.t) result)
+  -> (unit, Agent_protocol.Error.t) result
+
+module For_testing : sig
+  (** Same-domain scoped observer for the first actual wait on this exact
+      tuple. One observer per Registry. It has no authority and does not delay
+      or release the retention reservation. *)
+  val with_loaded_retention_wait_observer : t -> entry -> (unit Eio.Promise.t -> 'a) -> 'a
+end
+
 (** Negative-only observation for continuing an already owned invocation.
     Closing, failed cleanup, a missing or unavailable Handle, a changed
     Actor/Owner/Handle tuple, and exclusive lifecycle, loading or loaded
