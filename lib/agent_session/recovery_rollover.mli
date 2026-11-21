@@ -191,6 +191,7 @@ val abandon_automatic
   -> (t option, P.Error.t) result
 
 val checkpoint : t -> Checkpoint.t option
+val checkpoint_opportunity : t -> Recovery_checkpoint_opportunity.t option
 
 val foreground
   :  t
@@ -218,6 +219,10 @@ module Change : sig
   type t =
     | Admit of Intent.t
     | Record_checkpoint of Checkpoint.t
+    | Record_checkpoint_with_note of
+        { checkpoint : Checkpoint.t
+        ; note : Recovery_note_change.t
+        }
     | Settle of
         { id : P.Id.Operation.t
         ; terminal : Receipt.terminal
@@ -232,6 +237,7 @@ module Change : sig
         ; expected : Expected.t
         ; change : Recovery_rollover_hooks.change
         }
+    | Checkpoint_opportunity of Recovery_checkpoint_opportunity.change
 
   val to_json : t -> Jsonaf.t
   val of_json : Jsonaf.t -> (t, P.Error.t) result

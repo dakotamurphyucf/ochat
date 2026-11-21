@@ -393,7 +393,8 @@ let attach_archive (state : Session_state.t) archive =
 ;;
 
 let rec contains_rollover_publication = function
-  | Recovery_rollover_committed _ | Recovery_rollover_changed (Record_checkpoint _) ->
+  | Recovery_rollover_committed _
+  | Recovery_rollover_changed (Record_checkpoint _ | Record_checkpoint_with_note _) ->
     true
   | Batch deltas -> List.exists deltas ~f:contains_rollover_publication
   | _ -> false
@@ -408,7 +409,8 @@ let validate_rollover_transaction delta =
   in
   match delta with
   | Batch
-      [ (Recovery_rollover_committed _ | Recovery_rollover_changed (Record_checkpoint _))
+      [ ( Recovery_rollover_committed _
+        | Recovery_rollover_changed (Record_checkpoint _ | Record_checkpoint_with_note _) )
       ] -> Ok ()
   | Batch deltas when List.exists deltas ~f:contains_rollover_publication ->
     invalid "rollover archive or checkpoint requires a standalone delta"
@@ -2294,22 +2296,56 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
     { state with recovery_notes = Some catalog }
   | Recovery_rollover_changed change ->
     let open Result.Let_syntax in
-    let%bind () =
+    let module Checkpoint = Recovery_rollover.Checkpoint in
+    let invalid () =
+      Error
+        (Agent_protocol.Error.invalid_request
+           "checkpoint note requires its exact atomic creation")
+    in
+    let%bind state =
       match change with
       | Record_checkpoint checkpoint ->
-        (match Recovery_rollover.Checkpoint.recipe checkpoint with
-         | Owner_selection _ -> require_quiescent_rollover_cut state
+        (match Checkpoint.recipe checkpoint with
+         | Authored binding when Option.is_some binding.soft_note -> invalid ()
+         | Owner_selection _ ->
+           let%map () = require_quiescent_rollover_cut state in
+           state
          | Authored _ ->
-           Recovery_checkpoint_cut.check_checkpoint_registration state checkpoint)
-      | Schedule { change; _ } -> check_continuation_change state change
+           let%map () =
+             Recovery_checkpoint_cut.check_checkpoint_registration state checkpoint
+           in
+           state)
+      | Record_checkpoint_with_note { checkpoint; note } ->
+        (match Checkpoint.recipe checkpoint with
+         | Authored binding when Option.is_some binding.soft_note ->
+           let%bind catalog =
+             Recovery_note_change.apply
+               note
+               ~previous:state.recovery_notes
+               ~session_id:state.identity.session_id
+           in
+           let state = { state with recovery_notes = Some catalog } in
+           let%map () =
+             Recovery_checkpoint_cut.check_checkpoint_registration state checkpoint
+           in
+           state
+         | Owner_selection _ | Authored _ -> invalid ())
+      | Schedule { change; _ } ->
+        let%map () = check_continuation_change state change in
+        state
+      | Checkpoint_opportunity change ->
+        let%map () = Recovery_checkpoint_cut.check_opportunity_change state change in
+        state
       | Admit { requester = Automatic { cut; _ }; _ } ->
         if awaiting_settled_foreground state
         then
           Error
             (Agent_protocol.Error.invalid_request
                "capacity rollover has a pending successor")
-        else Recovery_rollover_capacity_cut.validate state cut
-      | Admit _ | Settle _ | Hook _ -> Ok ()
+        else
+          let%map () = Recovery_rollover_capacity_cut.validate state cut in
+          state
+      | Admit _ | Settle _ | Hook _ -> Ok state
     in
     let%bind windows =
       Result.of_option
@@ -2331,7 +2367,12 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
       match change with
       | Schedule { id; change; _ } ->
         settle_managed_continuation state.managed_submissions ~owner:id change
-      | Admit _ | Record_checkpoint _ | Settle _ | Hook _ -> Ok state.managed_submissions
+      | Admit _
+      | Record_checkpoint _
+      | Record_checkpoint_with_note _
+      | Settle _
+      | Hook _
+      | Checkpoint_opportunity _ -> Ok state.managed_submissions
     in
     { state with recovery_rollover = Some ledger; managed_submissions }
   | Recovery_rollover_committed change -> apply_rollover state change ~limits

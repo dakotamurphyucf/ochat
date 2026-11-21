@@ -309,6 +309,7 @@ let moderate_submission config input on_runtime_request =
 
 let run
       ?root_binding
+      ?(checkpoint_tools = Chat_response.Soft_checkpoint.Unselected)
       ?runtime_policy
       ?authoring_context
       ?agent_guidance
@@ -390,6 +391,7 @@ let run
   in
   let root_context =
     Option.map capabilities.root_context ~f:(fun source ->
+      let source = { source with Chat_response.Root_context.checkpoint_tools } in
       match root_binding with
       | Some binding ->
         Chat_response.Root_binding.wrap ~fresh:consume_fresh_binding binding source
@@ -400,13 +402,25 @@ let run
                 source.with_context
                   ~previous
                   ~history
-                  (fun context ~select_prepared ~on_prepared ~on_dispatch ->
+                  (fun
+                      context
+                       ~select_checkpoint
+                       ~select_prepared
+                       ~on_prepared
+                       ~on_dispatch
+                     ->
                      let context =
                        if consume_fresh_binding ()
                        then Inference_runtime.Context.detach context
                        else context
                      in
-                     f context ~select_prepared ~on_prepared ~on_dispatch))
+                     f
+                       context
+                       ~select_checkpoint
+                       ~select_prepared
+                       ~on_prepared
+                       ~on_dispatch))
+          ; checkpoint_tools
           })
   in
   let select_successor () =
@@ -496,6 +510,7 @@ let run
 
 let create
       ?root_binding
+      ?checkpoint_tools
       ?runtime_policy
       ?authoring_context
       ?agent_guidance
@@ -511,6 +526,7 @@ let create
     match
       run
         ?root_binding
+        ?checkpoint_tools
         ?runtime_policy
         ?authoring_context
         ?agent_guidance

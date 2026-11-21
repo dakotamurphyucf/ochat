@@ -118,15 +118,9 @@ let registration effect_kind =
          ignore (execute effect_kind json : (unit, P.Error.t) result);
          Openai.Responses.Tool_output.Output.Text "")
   in
-  let revision =
-    match effect_kind with
-    | A.Effect.Read -> "ochat.recovery.notes.native.v2:"
-    | List | Search | Write | Append | Delete -> "ochat.recovery.notes.native.v1:"
-  in
   Chat_response.Agent_runtime.
     { implementation
-    ; implementation_revision =
-        Chatmd_shell_spec.Source_ref.digest (revision ^ A.Effect.name effect_kind)
+    ; implementation_revision = A.Effect.implementation_revision effect_kind
     ; result_contract = Protected_recovery_v1
     ; source_requirement = Ordinary
     ; authoring_metadata = None

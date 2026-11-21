@@ -36,6 +36,11 @@ let list t =
     { selection; path; byte_length = String.length content })
 ;;
 
+let retained_receipt t identity =
+  List.find_map (D.Extension_carrier.value t).receipts ~f:(fun row ->
+    Option.some_if (Mutation_identity.equal row.identity identity) row.receipt)
+;;
+
 let to_document = Catalog_document.encode
 
 let of_document document ~owner:expected_owner =

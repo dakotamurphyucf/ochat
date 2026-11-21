@@ -7,6 +7,7 @@ type t
 module Capacity_basis : sig
   type t
 
+  val automatic_policy : t -> Inference_runtime.Context_capacity.Policy.t option
   val capture : Session_state.t -> selection:Session_context_capacity.Selection.t -> t
   val equal : t -> t -> bool
   val automatic : t -> bool
@@ -52,6 +53,14 @@ val check_recovery
   -> Token.t
   -> scope:Agent_protocol.Recovery_window.Scope.t
   -> (unit, Agent_protocol.Error.t) Result.t
+
+val checkpoint_policy
+  :  t
+  -> Token.t
+  -> scope:Agent_protocol.Recovery_window.Scope.t
+  -> current:Capacity_basis.t option
+  -> attempt:Inference_runtime.Attempt.t option
+  -> Inference_runtime.Context_capacity.Policy.t option
 
 val claim_reminder
   :  t
@@ -153,7 +162,8 @@ val view
     or cancellation clears preparing ownership under cancellation protection;
     successful completion retains a historical projection, never an active one. *)
 val root_port
-  :  begin_capture:(unit -> (Token.t, Agent_protocol.Error.t) Result.t)
+  :  select_checkpoint:(Token.t -> Chat_response.Soft_checkpoint.select option)
+  -> begin_capture:(unit -> (Token.t, Agent_protocol.Error.t) Result.t)
   -> publish_capacity:
        (Token.t -> Capacity_observation.t -> (unit, Agent_protocol.Error.t) Result.t)
   -> publish_recovery:

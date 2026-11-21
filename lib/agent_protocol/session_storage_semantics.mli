@@ -36,5 +36,6 @@ val recovery_rollover_commit : string
 val recovery_rollover_batch : string
 val recovery_rollover_continuation : string
 val recovery_rollover_hooks : string
+val recovery_checkpoint_opportunity : string
 val recovery_authored_checkpoint : string
 val recovery_capacity_rollover : string

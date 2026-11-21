@@ -376,6 +376,11 @@ module Admission = struct
     Option.map t.borrowed.goal_context ~f:Chat_response.Goal_native_scope.owner
   ;;
 
+  let selected_capabilities t =
+    let%bind.Result () = check_now t ~binding:t.binding in
+    borrowed_capabilities t.borrowed
+  ;;
+
   let invocation t = t.borrowed.invocation
   let actor t = t.actor
 end

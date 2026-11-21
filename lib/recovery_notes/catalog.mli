@@ -153,6 +153,10 @@ val read : t -> selection -> (Content.t, read_error) result
 (** Current metadata in case-sensitive lexical path order. *)
 val list : t -> metadata list
 
+(** Historical body-free receipt of this exact mutation identity. An absent
+    receipt conveys no proof. A retained receipt grants no source authority. *)
+val retained_receipt : t -> Mutation_identity.t -> Receipt.t option
+
 (** At most 128 live notes, 2 MiB of live text, and 512 receipts in one catalog.
     Check exact replay before the compare-and-set preconditions. An identity
     still in the receipt window with other arguments conflicts. After eviction,

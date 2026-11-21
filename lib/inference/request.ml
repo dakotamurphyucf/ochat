@@ -609,3 +609,16 @@ let with_guidance t ~guidance ~limits =
 ;;
 
 let guidance t = t.guidance
+
+let with_single_tool t ~tool ~guidance ~limits =
+  if not (List.mem t.tools tool ~equal:Tool_spec.equal)
+  then invalid "tools" "single tool must be present on the original request"
+  else
+    create_with_guidance
+      ~target:t.target
+      ~history:t.history
+      ~tools:[ tool ]
+      ~assets:t.assets
+      ~guidance
+      ~limits
+;;

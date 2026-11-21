@@ -10,6 +10,12 @@ let implementation_revision =
   Chatmd_shell_spec.Source_ref.digest ("ochat.recovery.context.native.v1:" ^ name)
 ;;
 
+let note_name = "recovery_note_write"
+
+let note_implementation_revision =
+  Chatmd_shell_spec.Source_ref.digest ("ochat.recovery.notes.native.v1:" ^ note_name)
+;;
+
 let invalid message = Error (P.Error.invalid_request message)
 let nonnegative = J.bounded_int64 ~min:0L ~max:Int64.max_value
 let integer value = `Number (Int64.to_string value)
@@ -131,6 +137,12 @@ module Receipt = struct
   ;;
 end
 
+type soft_note =
+  { opportunity : P.Id.Operation.t
+  ; created : Catalog.selection
+  }
+[@@deriving equal, sexp_of]
+
 type t =
   { principal : P.Id.Principal.t
   ; key : Digest.t
@@ -147,6 +159,7 @@ type t =
   ; instruction_revision : int64 option
   ; instruction_digest : Chatml_source.Digest.t option
   ; covered_rows : int
+  ; soft_note : soft_note option
   }
 [@@deriving equal, sexp_of]
 
@@ -194,14 +207,17 @@ let create
       ; instruction_revision
       ; instruction_digest
       ; covered_rows
+      ; soft_note = None
       }
 ;;
+
+let with_soft_note t soft_note = { t with soft_note = Some soft_note }
 
 let same_key t ~principal ~key =
   P.Id.Principal.equal t.principal principal && Digest.equal t.key key
 ;;
 
-let selected_invocation (invocation : P.Invocation.t) =
+let selected_route (invocation : P.Invocation.t) ~name ~implementation_revision =
   let context = invocation.context in
   P.Invocation.equal_origin context.origin Model
   && Option.is_some context.call_entry_id
@@ -215,32 +231,67 @@ let selected_invocation (invocation : P.Invocation.t) =
     && P.Invocation.equal_preparation routing.preparation Passed)
 ;;
 
+let selected_invocation invocation =
+  selected_route invocation ~name ~implementation_revision
+;;
+
+let selected_note_invocation invocation =
+  selected_route
+    invocation
+    ~name:note_name
+    ~implementation_revision:note_implementation_revision
+;;
+
 let matches_invocation t (invocation : P.Invocation.t) =
   P.Id.Invocation.equal invocation.context.id t.invocation
   && Option.equal P.History.Id.equal invocation.context.call_entry_id (Some t.call)
-  && selected_invocation invocation
+  &&
+  match t.soft_note with
+  | None -> selected_invocation invocation
+  | Some _ -> selected_note_invocation invocation
+;;
+
+let soft_note_to_json t =
+  `Object
+    [ "opportunity", P.Id.Operation.to_json t.opportunity
+    ; "id", integer (Catalog.Note_id.to_int64 t.created.id)
+    ; "revision", integer (Catalog.Note_revision.to_int64 t.created.revision)
+    ]
+;;
+
+let soft_note_of_json json =
+  let open Result.Let_syntax in
+  let%bind fields = J.fields json in
+  let%bind opportunity = J.required_as fields "opportunity" P.Id.Operation.of_json in
+  let%bind id = J.required_as fields "id" nonnegative >>= Catalog.Note_id.of_int64 in
+  let%map note_revision =
+    J.required_as fields "revision" nonnegative >>= Catalog.Note_revision.of_int64
+  in
+  { opportunity; created = Catalog.{ id; revision = note_revision } }
 ;;
 
 let to_json t =
   `Object
-    [ "principal", P.Id.Principal.to_json t.principal
-    ; "key_digest", key_json t.key
-    ; "operation", P.Id.Operation.to_json t.operation
-    ; "invocation", P.Id.Invocation.to_json t.invocation
-    ; "call", P.History.Id.to_json t.call
-    ; "attempt_ordinal", integer t.attempt_ordinal
-    ; "source_revision", integer t.source_revision
-    ; "configuration_revision", integer t.configuration_revision
-    ; "prompt_revision", P.Id.Prompt_revision.to_json t.prompt_revision
-    ; "moderator", Option.value_map t.moderator ~default:`Null ~f:key_json
-    ; "catalog_revision", integer (Catalog.Catalog_revision.to_int64 t.catalog_revision)
-    ; "pending_revision", P.Pending_input.Revision.to_json t.pending_revision
-    ; ( "instruction_revision"
-      , Option.value_map t.instruction_revision ~default:`Null ~f:integer )
-    ; ( "instruction_digest"
-      , Option.value_map t.instruction_digest ~default:`Null ~f:key_json )
-    ; "covered_rows", `Number (Int.to_string t.covered_rows)
-    ]
+    ([ "principal", P.Id.Principal.to_json t.principal
+     ; "key_digest", key_json t.key
+     ; "operation", P.Id.Operation.to_json t.operation
+     ; "invocation", P.Id.Invocation.to_json t.invocation
+     ; "call", P.History.Id.to_json t.call
+     ; "attempt_ordinal", integer t.attempt_ordinal
+     ; "source_revision", integer t.source_revision
+     ; "configuration_revision", integer t.configuration_revision
+     ; "prompt_revision", P.Id.Prompt_revision.to_json t.prompt_revision
+     ; "moderator", Option.value_map t.moderator ~default:`Null ~f:key_json
+     ; "catalog_revision", integer (Catalog.Catalog_revision.to_int64 t.catalog_revision)
+     ; "pending_revision", P.Pending_input.Revision.to_json t.pending_revision
+     ; ( "instruction_revision"
+       , Option.value_map t.instruction_revision ~default:`Null ~f:integer )
+     ; ( "instruction_digest"
+       , Option.value_map t.instruction_digest ~default:`Null ~f:key_json )
+     ; "covered_rows", `Number (Int.to_string t.covered_rows)
+     ]
+     @ Option.to_list
+         (Option.map t.soft_note ~f:(fun note -> "soft_note", soft_note_to_json note)))
 ;;
 
 let of_json json =
@@ -283,20 +334,24 @@ let of_json json =
       "covered_rows"
       (J.bounded_int ~min:1 ~max:Recovery_window_record.max_members)
   in
-  create
-    ~principal
-    ~key
-    ~operation
-    ~invocation
-    ~call
-    ~attempt_ordinal
-    ~source_revision
-    ~configuration_revision
-    ~prompt_revision
-    ~moderator
-    ~catalog_revision
-    ~pending_revision
-    ~instruction_revision
-    ~instruction_digest
-    ~covered_rows
+  let%bind soft_note = J.optional_as fields "soft_note" soft_note_of_json in
+  let%map binding =
+    create
+      ~principal
+      ~key
+      ~operation
+      ~invocation
+      ~call
+      ~attempt_ordinal
+      ~source_revision
+      ~configuration_revision
+      ~prompt_revision
+      ~moderator
+      ~catalog_revision
+      ~pending_revision
+      ~instruction_revision
+      ~instruction_digest
+      ~covered_rows
+  in
+  { binding with soft_note }
 ;;

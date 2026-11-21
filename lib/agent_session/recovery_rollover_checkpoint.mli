@@ -34,6 +34,9 @@ val expected : t -> Expected.t
 val recipe : t -> recipe
 val notes : t -> Recovery_notes.Catalog.selection list
 
+(** Bounded fingerprint of the ordered canonical source and its content revisions. *)
+val history_digest : P.History.entry list -> (Chatml_source.Digest.t, P.Error.t) result
+
 val check_contents
   :  t
   -> history:P.History.entry list

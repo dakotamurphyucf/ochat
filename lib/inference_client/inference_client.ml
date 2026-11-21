@@ -65,6 +65,7 @@ end
 
 let run
       ?select_prepared
+      ?(on_receipt = fun _ _ -> ())
       ?(submission_guard = R.Submission_guard.empty)
       ?(protected_delivery = [])
       ?(protect_tool_arguments = false)
@@ -181,6 +182,7 @@ let run
        produce a second, contradictory interruption callback. *)
         on_completion
           { Completion.attempt; outcome = Returned (R.Receipt.terminal receipt) };
+        on_receipt attempt receipt;
         Ok receipt
       | `Result (Error error) ->
         on_completion (interrupted Host_interrupted);

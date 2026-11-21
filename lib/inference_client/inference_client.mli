@@ -95,6 +95,9 @@ end
     Preparation/admission failures before an actual attempt exists create no
     fabricated completion. Durable hosts supply this independently of UI callbacks.
 
+    [on_receipt] runs inside the exact attempt after successful terminal
+    acknowledgment. Its failure propagates without reporting another terminal.
+
     Candidate events reach the caller's existing admission/commit/tool owner;
     Not_eligible is retained evidence, never a request to execute a tool. The
     receipt retains the runtime's explicit complete-response/prefix distinction.
@@ -107,6 +110,7 @@ end
     credential lease. *)
 val run
   :  ?select_prepared:Prepared_selection.select
+  -> ?on_receipt:(Inference_runtime.Attempt.t -> Inference_runtime.Receipt.t -> unit)
   -> ?submission_guard:Inference_runtime.Submission_guard.t
   -> ?protected_delivery:Inference_runtime.Protected_delivery.t list
   -> ?protect_tool_arguments:bool
