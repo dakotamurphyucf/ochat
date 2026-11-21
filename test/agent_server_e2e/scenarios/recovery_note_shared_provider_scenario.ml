@@ -6,6 +6,7 @@ module P = Agent_protocol
 module A = Agent_session.Session_actor
 module S = Agent_session.Recovery_note_share
 module D = Agent_server.Daemon
+module R = Agent_server.Session_registry
 module Shares = Agent_server.Session_factory.Recovery_note_shares
 module F = Recovery_note_provider_scenario
 module Provider = Support.Tui_stream_provider
@@ -49,10 +50,7 @@ let test env environment =
        let recipient = open_session ~mode:Read_write in
        let other = open_session ~mode:Read_write in
        let registry = D.registry daemon in
-       let entry handle =
-         Agent_server.Session_registry.find registry (H.session_id handle)
-         |> Option.value_exn
-       in
+       let entry handle = R.find registry (H.session_id handle) |> Option.value_exn in
        let reference handle =
          P.Session_ref.create
            ~server_id:(Agent_store.Session_store.server_id (D.store daemon))
@@ -119,12 +117,55 @@ let test env environment =
            let current = state (entry handle) in
            if Option.is_none current.active_operation then Some current else None)
        in
+       let send_read handle ~label ~provider_index =
+         let session_id = H.session_id handle in
+         let original = entry handle in
+         let command =
+           P.Command.Session_send_message
+             { session_id
+             ; attachment_id = (H.attachment handle).id
+             ; idempotency_key = key ("shared-provider-read-" ^ label)
+             ; timing = Safe_boundary
+             ; content = { kind = Plain_text; text = label; attachments = [] }
+             }
+         in
+         let send = Agent_client.Connection.request_without_history client in
+         let rec submit () =
+           match send command with
+           | Ok (Session_send_message submission) -> submission
+           | Error
+               { code = Conflict
+               ; message = "session lifecycle is already reserved"
+               ; retryable = true
+               ; _
+               } ->
+             (* Snapshot retention can outlive the idle Actor observation. Join the
+                actual reservation before replaying this proven unadmitted send. *)
+             let receipt =
+               P.Command.Command_receipt
+                 { method_name = P.Command.method_name command
+                 ; original_params = P.Command.params command
+                 }
+             in
+             (match send receipt |> protocol_ok with
+              | Command_receipt Missing -> ()
+              | _ -> failwith "lifecycle-conflicted read send has an admitted receipt");
+             [%test_eq: int] (count ()) provider_index;
+             R.with_loaded_read registry session_id (fun current ->
+               assert (phys_equal current original);
+               Ok ())
+             |> protocol_ok;
+             submit ()
+           | Ok _ -> failwith "expected a shared-read send receipt"
+           | Error error -> protocol_ok (Error error)
+         in
+         Eio.Time.Timeout.run_exn
+           (Eio.Time.Timeout.seconds (Eio.Stdenv.mono_clock env) 5.)
+           submit
+       in
        let start_read handle request ~label ~before_dispatch =
          let index = count () in
-         let submission =
-           H.send_message handle { kind = Plain_text; text = label; attachments = [] }
-           |> protocol_ok
-         in
+         let submission = send_read handle ~label ~provider_index:index in
          assert (Option.is_some submission.operation_id);
          let initial = await_request index in
          before_dispatch ();
