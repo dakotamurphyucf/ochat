@@ -59,45 +59,65 @@ let complete = function
 ;;
 
 let finish_call ?timeout ?on_poll env host call_id =
-  try
-    Background_shell_tests.wait ?timeout ?on_poll env (fun () ->
+  let respond (snapshot : P.Public.Snapshot.Fields.t) =
+    List.iter snapshot.permissions ~f:(fun permission ->
+      if
+        P.Permission.equal_state permission.state Pending
+        && not (String.is_prefix permission.tool_name ~prefix:"shell:")
+      then
+        Host.request
+          host
+          (Permission_respond
+             { session_id = E.session_id host
+             ; attachment_id = (E.attachment host).id
+             ; permission_id = permission.id
+             ; permission_generation = permission.generation
+             ; choice = Approve_once
+             ; reason =
+                 Some
+                   "Allow this declared workflow tool; shell decisions stay separate."
+             ; idempotency_key =
+                 P.Idempotency_key.of_string (P.Id.Permission.to_string permission.id)
+                 |> protocol_ok
+             })
+        |> ignore)
+  in
+  let has_output (snapshot : P.Public.Snapshot.Fields.t) =
+    List.exists snapshot.canonical_history.entries ~f:(fun entry ->
+      Option.exists (Host.function_output_call_id entry) ~f:(String.equal call_id))
+  in
+  let wait stage ~observe condition =
+    try
+      Background_shell_tests.wait ?timeout ?on_poll env (fun () ->
+        let snapshot = observe () in
+        respond snapshot;
+        condition snapshot)
+    with
+    | Eio.Time.Timeout ->
       let snapshot = Host.snapshot host in
-      List.iter snapshot.permissions ~f:(fun permission ->
-        if
-          P.Permission.equal_state permission.state Pending
-          && not (String.is_prefix permission.tool_name ~prefix:"shell:")
-        then
-          Host.request
-            host
-            (Permission_respond
-               { session_id = E.session_id host
-               ; attachment_id = (E.attachment host).id
-               ; permission_id = permission.id
-               ; permission_generation = permission.generation
-               ; choice = Approve_once
-               ; reason =
-                   Some
-                     "Allow this declared workflow tool; shell decisions stay separate."
-               ; idempotency_key =
-                   P.Idempotency_key.of_string (P.Id.Permission.to_string permission.id)
-                   |> protocol_ok
-               })
-          |> ignore);
-      Option.is_none snapshot.session.active_operation
-      && List.exists snapshot.canonical_history.entries ~f:(fun entry ->
-        Option.exists (Host.function_output_call_id entry) ~f:(String.equal call_id)))
-  with
-  | Eio.Time.Timeout ->
-    let snapshot = Host.snapshot host in
-    raise_s
-      [%sexp
-        "workflow call did not finish"
-      , (call_id : string)
-      , (snapshot.session.observed_state : P.Session.observed_state)
-      , (snapshot.session.active_operation : P.Operation.t option)
-      , (List.map snapshot.permissions ~f:(fun p -> p.P.Permission.tool_name, p.state)
-         : (string * P.Permission.state) list)
-      , (List.map snapshot.jobs ~f:(fun j -> j.P.Job.status) : P.Job.status list)]
+      raise_s
+        [%sexp
+          "workflow call did not finish"
+        , (call_id : string)
+        , (stage : string)
+        , (snapshot.session.observed_state : P.Session.observed_state)
+        , (snapshot.session.active_operation : P.Operation.t option)
+        , (List.map snapshot.permissions ~f:(fun p -> p.P.Permission.tool_name, p.state)
+           : (string * P.Permission.state) list)
+        , (List.map snapshot.jobs ~f:(fun j -> j.P.Job.status) : P.Job.status list)]
+  in
+  wait "tool acknowledgement" ~observe:(fun () -> Host.snapshot host) has_output;
+  (* After this exact call is acknowledged, only permissions and operation state
+     are needed while waiting for the worker to retire. *)
+  let status () =
+    let history =
+      Some P.History.Window_request.{ position = Tail 1; limit = 1; effective = false }
+    in
+    match Host.request host (Session_get { session_id = E.session_id host; history }) with
+    | Session_get snapshot -> P.Public.Snapshot.fields snapshot
+    | _ -> failwith "expected session status during turn retirement"
+  in
+  wait "turn retirement" ~observe:status (fun s -> Option.is_none s.session.active_operation)
 ;;
 
 let%expect_test
