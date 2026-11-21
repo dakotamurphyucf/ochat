@@ -11,12 +11,36 @@ module Provider = Support.Tui_stream_provider
 module Config = Support.Config_fixture
 module Http = Support.Http_driver
 module Data = Support.Data_integrity_http
+module Tools = Recovery_note_provider_scenario
 
 let ok = Fixture.protocol_ok
 let require = Fixture.require
 let key = Fixture.key
 let body = "The actual transcript contains a private rollover fixture."
 let response = "The provider's response must stay outside status."
+let workspace_file = "rollover-workspace-proof.txt"
+let workspace_text = "Rollover workspace proof β\nsecond line"
+
+let selected_workspace_file env fixture session attachment_id =
+  let state : Agent_session.Session_state.t =
+    Support.Background_fixture.checkpoint env fixture { summary = session; attachment_id }
+    |> Option.value_exn
+  in
+  let root = state.spec.workspace_instance.canonical_root.native_path in
+  require
+    (String.equal root (Eio_posix.Low_level.realpath (Config.physical_workspace fixture)))
+    "the session did not retain the selected physical workspace";
+  Filename.concat root workspace_file
+;;
+
+let expect_file_output request ~id expected =
+  match Tools.output request ~id with
+  | Complete (`String actual) ->
+    require (String.equal actual expected) "wrong file output"
+  | outcome ->
+    raise_s
+      [%sexp "workspace tool failed", (id : string), (outcome : P.Invocation.outcome)]
+;;
 
 let expect_error result code =
   match result with
@@ -254,7 +278,9 @@ let upgrade_successor
   Fixture.write
     env
     (Config.prompt_path fixture)
-    {|<config model="gpt-4.1" max_tokens="120"/><developer>Check the current context.</developer><tool name="context_remaining"/>|};
+    {|<config model="gpt-4.1" max_tokens="120"/><developer>Check the current context.</developer>
+<tool name="context_remaining"/>
+<tool name="read_file"><read id="physical" path="${workspace}"/></tool>|};
   Support.Daemon_process.signal daemon Stdlib.Sys.sighup;
   let target =
     Support.Tui_fixture.await env (fun () ->
@@ -298,7 +324,8 @@ let run env environment =
   Fixture.write
     env
     (Config.prompt_path fixture)
-    {|<config model="gpt-4.1" max_tokens="100"/><developer>Preserve private history.</developer>|};
+    {|<config model="gpt-4.1" max_tokens="100"/><developer>Preserve private history.</developer>
+<tool name="append_to_file"><write path="${workspace}"/></tool>|};
   let config_path =
     Stock.configuration fixture Stock.policy
     |> Config.write_configuration fixture ~name:"rollover-control.sexp"
@@ -384,7 +411,21 @@ let run env environment =
                     require
                       (not (actions.rollover || actions.force))
                       "active foreground was advertised as an idle cut");
-               Provider.reply_summary inference response;
+               let path = selected_workspace_file env fixture session attachment.id in
+               Tools.function_call
+                 inference
+                 ~id:"write-workspace-proof"
+                 ~name:"append_to_file"
+                 (`Object [ "path", `String path; "content", `String workspace_text ]);
+               let written = Provider.await_request provider env 1 in
+               expect_file_output
+                 written
+                 ~id:"write-workspace-proof"
+                 (sprintf "Content appended to %s successfully." path);
+               require
+                 (String.equal (Fixture.read env path) ("\n" ^ workspace_text))
+                 "the predecessor did not write the exact bytes in its selected workspace";
+               Provider.reply_summary written response;
                Checkpoint.await_idle env client session;
                available (inspect connection reference ()) (fun _ _ capacity _ _ ->
                  match capacity with
@@ -499,20 +540,62 @@ let run env environment =
           "restarted duplicate did not read the same terminal receipt";
         check_windows connection reference command.expected.scope successor;
         require
-          (Int.equal (Provider.request_count provider) 1)
+          (Int.equal (Provider.request_count provider) 2)
           "operator rollover or replay submitted an unexpected provider request";
         let reopened = (Fixture.get client session.id).session in
         require
           (Option.exists reopened.prompt_revision ~f:(P.Id.Prompt_revision.equal target))
           "cold reopen lost the upgraded authored prompt revision";
-        Stock.start client reopened writer "rollover-upgrade-restart";
-        let observed =
-          Stock.observe ~output:120 env provider ~index:1 client reopened writer
-        in
-        ignore (Stock.assert_status ~window:successor observed "current" : Jsonaf.t);
-        let prepared = Provider.await_request provider env 1 |> Provider.body in
         require
-          ((not (String.is_substring (Jsonaf.to_string prepared) ~substring:body))
-           && Int.equal (Provider.request_count provider) 3)
-          "cold successor replayed the retired transcript or submitted an extra request")))
+          (Option.equal
+             P.Id.Workspace_instance.equal
+             session.workspace_instance
+             reopened.workspace_instance)
+          "cold reopen changed the selected workspace instance";
+        Stock.start client reopened writer "rollover-upgrade-restart";
+        Checkpoint.send
+          client
+          reopened
+          writer
+          ~key:"rollover-workspace-read"
+          "Check ordinary context.";
+        let request = Provider.await_request provider env 2 in
+        let prepared = Provider.body request in
+        let selected = Checkpoint.tools request in
+        let serialized = Jsonaf.to_string prepared in
+        require
+          (String.Set.equal selected (String.Set.of_list [ Stock.tool_name; "read_file" ])
+           && String.equal (Stock.string prepared "model") Stock.provider_model
+           && Document_schema.Json.equal
+                (Stock.member prepared "max_output_tokens")
+                (`Number "120")
+           && (not (String.is_substring serialized ~substring:body))
+           && not
+                (String.is_substring
+                   serialized
+                   ~substring:"This request is nearing its configured context limit."))
+          "cold successor incorrectly prepared the upgraded prompt";
+        Stock.emit_remaining request "cold-capacity";
+        let followup = Provider.await_request provider env 3 in
+        let observed = Stock.result followup ~call_id:"cold-capacity" in
+        ignore (Stock.assert_status ~window:successor observed "current" : Jsonaf.t);
+        Tools.function_call
+          followup
+          ~id:"read-workspace-proof"
+          ~name:"read_file"
+          (`Object [ "root", `String "physical"; "file", `String workspace_file ]);
+        let read = Provider.await_request provider env 4 in
+        expect_file_output
+          read
+          ~id:"read-workspace-proof"
+          (sprintf "%s:1-3:\n[total_lines=3]\n\n%s" workspace_file workspace_text);
+        let path = selected_workspace_file env fixture reopened writer in
+        require
+          (String.equal (Fixture.read env path) ("\n" ^ workspace_text))
+          "the cold successor altered the exact bytes in its selected workspace";
+        Provider.reply_summary read "Ochat recovery capacity and workspace checked.";
+        Checkpoint.await_idle env client reopened;
+        require
+          (Int.equal (Provider.request_count provider) 5)
+          "cold successor submitted an unexpected provider request")))
 ;;
