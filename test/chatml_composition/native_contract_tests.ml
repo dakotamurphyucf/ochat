@@ -164,13 +164,13 @@ let%expect_test "runtime native catalog contracts remain paired with reviewed re
      3838b75b95419129bea126eeb2f7da07f229ccb180a83f34c68648a16f0c8fa5)
     (context_remaining runtime.context_windows
      de12f236a29ae49a158f35d12a0c7bffc90e5c79f397ea51affbdc3a95007637
-     3e5ac8ca2d043e93b008081e8417e985ffd3c44a1e5db170fa19c7228cf53511)
+     f0367aef8020eb017c9c995c60310a624fb8aec5e4388dd9246ec6c511674c53)
     (context_new_window runtime.context_windows
      fe635b6a171ed40ae0080faf8c49f442c23952b5b643741cada85ff000588c30
-     3e5ac8ca2d043e93b008081e8417e985ffd3c44a1e5db170fa19c7228cf53511)
+     f0367aef8020eb017c9c995c60310a624fb8aec5e4388dd9246ec6c511674c53)
     (context_checkpoint runtime.context_windows
      6afaa6adb1cde9ed866dfd4d49631427608f02df7a5e1d098f9d6bdba6a9e0ab
-     3e5ac8ca2d043e93b008081e8417e985ffd3c44a1e5db170fa19c7228cf53511)
+     f0367aef8020eb017c9c995c60310a624fb8aec5e4388dd9246ec6c511674c53)
     (goal_get runtime.goal_metadata
      c8c1615cb79ccbff4199c462328b97eae95a061c9741fb9c570dc3da791cd617
      b06cac08508c2f3340bb60c47164ebd97bcee15ef04e9a09832552c4e50db111)
