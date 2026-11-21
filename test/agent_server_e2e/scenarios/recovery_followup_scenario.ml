@@ -23,8 +23,13 @@ let on_context_rollover ctx state event = match event with
 </script>|}
 ;;
 
-let run env temporary =
-  let fixture = Fixture.fixture env temporary "managed-followup" in
+let exercise env temporary ~cancel =
+  let fixture =
+    Fixture.fixture
+      env
+      temporary
+      (if cancel then "managed-cancel" else "managed-continue")
+  in
   Fixture.write env (Config.prompt_path fixture) prompt;
   let config_path =
     Stock.configuration fixture Stock.policy
@@ -47,7 +52,7 @@ let run env temporary =
     in
     Stock.with_stock env fixture ~port ~config_path (fun _ _ _ ->
       let session, run_id, waiting =
-        connect ~drop:true (fun http connection initialized ->
+        connect ~drop:cancel (fun http connection initialized ->
           let session, writer =
             Support.Data_integrity_http.create ~mode:Owner_read_write http "waiting"
           in
@@ -120,7 +125,19 @@ let run env temporary =
                     { attachment_id = writer.id; selection = Inspect reference }))
               "foreign client used the original writer");
           Operator.expect_error (follow (Apply (before.basis, Continue))) Conflict;
-          Operator.expect_error (follow (Apply (waiting.basis, Cancel))) Interrupted;
+          if cancel
+          then Operator.expect_error (follow (Apply (waiting.basis, Cancel))) Interrupted
+          else (
+            ignore (follow (Apply (waiting.basis, Continue)) |> ok : F.Reply.t);
+            let request = Provider.await_request provider env 1 in
+            require
+              (Recovery_reminder_scenario.has_entry
+                 request
+                 ~role:"user"
+                 ~substring:"Continue the sample.")
+              "continued Run lost its original input";
+            Provider.reply_summary request "Continued on operator approval.";
+            Recovery_checkpoint_scenario.await_idle env http session);
           session, admitted.run_id, waiting)
       in
       connect (fun http connection initialized ->
@@ -131,11 +148,12 @@ let run env temporary =
         let follow selection =
           Client.followup connection { attachment_id = writer; selection }
         in
-        let cancelled = follow (Inspect reference) |> ok in
+        let current = follow (Inspect reference) |> ok in
+        let expected_phase = if cancel then F.Reply.Cancelled else Admitted in
         require
-          (F.Reply.equal_phase cancelled.phase Cancelled
-           && P.Recovery_window.Scope.equal waiting.basis.scope cancelled.basis.scope)
-          "lost cancellation did not survive reconnect";
+          (F.Reply.equal_phase current.phase expected_phase
+           && P.Recovery_window.Scope.equal waiting.basis.scope current.basis.scope)
+          "the selected follow-up outcome did not survive reconnect";
         Operator.expect_error (follow (Apply (waiting.basis, Continue))) Conflict;
         let state =
           Recovery_managed_rollover_scenario.durable_state env fixture session.id
@@ -143,9 +161,17 @@ let run env temporary =
         let index = Option.value_exn state.run_state in
         let run = Agent_session.Run_state.find index run_id |> Option.value_exn in
         require
-          (P.Run.Lifecycle.equal run.lifecycle (Terminal Cancelled))
-          "original Run did not settle as cancelled";
+          (match run.lifecycle with
+           | Terminal Cancelled -> cancel
+           | Terminal (Completed _) -> not cancel
+           | _ -> false)
+          "original managed Run did not reach the selected outcome";
         require
-          (Provider.request_count provider = 1)
-          "waiting or cancellation issued another model admission")))
+          (Int.equal (Provider.request_count provider) (if cancel then 1 else 2))
+          "reconnecting repeated model admission")))
+;;
+
+let run env temporary =
+  exercise env temporary ~cancel:true;
+  exercise env temporary ~cancel:false
 ;;
