@@ -59,14 +59,27 @@ let read_request =
     ]
 ;;
 
-let with_fixture env environment ~auth ~max_sessions f =
+let default_prompt =
+  {|<config model="gpt-4.1"/><developer>Recovery note fixture.</developer>
+<tool name="recovery_note_write"/><tool name="recovery_note_read"/>|}
+;;
+
+let with_fixture
+      ?(prompt_xml = default_prompt)
+      ?on_preparation
+      ?recovery_capacity
+      env
+      environment
+      ~auth
+      ~max_sessions
+      f
+  =
   let root = (Support.Temporary_environment.roots environment).temporary in
   let prompt = Filename.concat root "recovery-note.chatmd" in
   Eio.Path.save
     ~create:(`Or_truncate 0o600)
     Eio.Path.(Eio.Stdenv.fs env / prompt)
-    {|<config model="gpt-4.1"/><developer>Recovery note fixture.</developer>
-<tool name="recovery_note_write"/><tool name="recovery_note_read"/>|};
+    prompt_xml;
   Eio.Switch.run (fun sw ->
     let reservation = Support.Port_reservation.create ~sw ~env in
     let port = Support.Port_reservation.port reservation in
@@ -74,6 +87,10 @@ let with_fixture env environment ~auth ~max_sessions f =
     let provider = Provider.start ~sw ~env ~port in
     let endpoint = sprintf "http://127.0.0.1:%d/v1/responses" port in
     let config = config root root prompt in
+    let config =
+      Option.value_map recovery_capacity ~default:config ~f:(fun capacity ->
+        { config with server = { config.server with recovery_capacity = Some capacity } })
+    in
     let workspaces =
       List.map config.workspaces ~f:(fun workspace ->
         let open Agent_server.Config.Workspace in
@@ -94,7 +111,7 @@ let with_fixture env environment ~auth ~max_sessions f =
         ~options:
           { D.default_options with
             inference_policy =
-              Generated_provider_scenario.inference_policy env ~endpoint ~auth
+              Generated_provider_scenario.inference_policy ?on_preparation env ~endpoint ~auth
           }
         ()
       |> protocol_ok

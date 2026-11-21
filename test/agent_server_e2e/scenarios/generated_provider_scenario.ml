@@ -60,7 +60,7 @@ let create_child env root daemon parent ~model ~reasoning ~tokens ~marker =
   |> protocol_ok
 ;;
 
-let inference_policy env ~endpoint ~auth =
+let inference_policy ?(on_preparation = ignore) env ~endpoint ~auth =
   let module D = Openai.Responses_driver in
   (* This case exercises the actual adapter over the isolated HTTP/SSE server.
      Capture the selected endpoint and credential explicitly at the fixture
@@ -124,7 +124,10 @@ let inference_policy env ~endpoint ~auth =
     ; runtime_inference_ports =
         (fun _ ->
           Ok
-            { new_preparation_id = (Inference_host.identity host).new_preparation_id
+            { new_preparation_id =
+                (fun () ->
+                  on_preparation ();
+                  (Inference_host.identity host).new_preparation_id ())
             ; on_admitted = (fun ~scope:_ ~accounting_id:_ -> ())
             ; on_attempt = ignore
             ; on_observation = ignore

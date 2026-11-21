@@ -152,7 +152,7 @@ let require_previous connection scope =
   | _ -> Fixture.fail "stale checkpoint unexpectedly changed the active window"
 ;;
 
-let write_and_register ?(before_checkpoint = ignore) request ~start scope ~id =
+let write_and_register ?(body = note_body) ?(before_checkpoint = ignore) request ~start scope ~id =
   let first = request start in
   require (Set.mem (tools first) checkpoint_name) "authored checkpoint is unselected";
   let write_id = id ^ "-write" in
@@ -165,7 +165,7 @@ let write_and_register ?(before_checkpoint = ignore) request ~start scope ~id =
         ; "expected", `Null
         ; "path", string "handoff/context"
         ; "expected_catalog_revision", string "0"
-        ; "content", string note_body
+        ; "content", string body
         ]);
   let second = request (start + 1) in
   (match result second write_id with
