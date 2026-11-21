@@ -195,7 +195,11 @@
  (preprocessor_deps
   (glob_files_rec ../chatml_extensibility_fixtures/x08-external-completion/*)
   (glob_files_rec ../chatml_extensibility_fixtures/x06-response-watcher/*)
-  ../chatml_extensibility_fixtures/x07-helper-session/any.json)
+  ../chatml_extensibility_fixtures/x07-helper-session/any.json
+  (glob_files ../../docs-src/examples/learning/context-recovery/*)
+  (glob_files_rec ../../docs-src/examples/libraries/recovery-rollover/*)
+  (glob_files_rec ../../docs-src/examples/libraries/lifecycle/*)
+  (glob_files_rec ../../docs-src/examples/learning/lifecycle-composition/components/review/*))
  (preprocess
   (pps ppx_jane ppx_blob)))
 
@@ -497,6 +501,12 @@
       data-integrity
       --case
       daemon-recovery.successor-hint-guards)
+     (run
+      %{exe:agent_server_e2e.exe}
+      --scenario
+      data-integrity
+      --case
+      daemon-recovery.authored-example)
      (run
       %{exe:agent_server_e2e.exe}
       --scenario

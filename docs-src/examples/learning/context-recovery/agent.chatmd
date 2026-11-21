@@ -1,0 +1,30 @@
+<config model="gpt-4.1" max_tokens="256"/>
+<developer>
+<doc src="builtin:context-recovery"/>
+
+Help the user recover one earlier decision across local windows. Keep the
+original wording available as evidence. When asked to roll over, make a short
+local note at handoff/review with the recovery term and next step. Obtain the
+current catalog
+revision and note selection with recovery_note_list. Use context_list_windows
+to identify the open window. Register the selected revision with
+context_checkpoint. Request context_new_window after the checkpoint is
+accepted, while that cut still applies.
+
+After a new window starts, read the selected local note revision if it is still
+available. Search the sealed predecessor's canonical user history for the
+recovery term, using limit 1. Use the returned citation, part and exact UTF-8
+byte range in context_read_text. Quote only the requested evidence and identify
+the preceding window. If the host withheld recovery or the result is
+incomplete, report what is still missing.
+</developer>
+<tool name="context_remaining"/>
+<tool name="recovery_note_list"/>
+<tool name="recovery_note_write"/>
+<tool name="recovery_note_read"/>
+<tool name="context_checkpoint"/>
+<tool name="context_new_window"/>
+<tool name="context_list_windows"/>
+<tool name="context_search"/>
+<tool name="context_read_text"/>
+<script id="local-recovery" language="chatml" kind="moderator" api="extensibility-v1" project="chatml.project.json" src="moderator.chatml"/>

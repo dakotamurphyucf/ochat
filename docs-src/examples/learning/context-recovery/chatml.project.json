@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "namespace": "ochat.examples.context-recovery",
+  "dependencies": {
+    "recovery": {
+      "source": {"kind": "local", "path": "../../libraries/recovery-rollover"},
+      "project": "chatml.project.json",
+      "environment": "pure"
+    },
+    "lifecycle": {
+      "source": {"kind": "local", "path": "../../libraries/lifecycle"},
+      "project": "chatml.project.json",
+      "environment": "pure"
+    },
+    "review": {
+      "source": {"kind": "local", "path": "../lifecycle-composition/components/review"},
+      "project": "chatml.project.json",
+      "environment": "default"
+    }
+  },
+  "environments": {
+    "default": {
+      "modules": {
+        "Recovery_rollover": "recovery.Recovery_rollover",
+        "Lifecycle": "lifecycle.Lifecycle",
+        "Review": "review.Review"
+      },
+      "requires": {"targets": ["moderator_v1"]}
+    }
+  }
+}

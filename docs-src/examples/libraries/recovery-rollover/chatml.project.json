@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "namespace": "ochat.capabilities.recovery-rollover",
+  "modules": {
+    "Recovery_rollover": {
+      "implementation": "src/recovery_rollover.chatml",
+      "interface": "src/recovery_rollover.chatmli"
+    }
+  },
+  "environments": {
+    "pure": {"modules": {"Recovery_rollover": "self.Recovery_rollover"}}
+  },
+  "default_environment": "pure"
+}

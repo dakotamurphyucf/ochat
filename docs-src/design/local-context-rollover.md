@@ -453,6 +453,10 @@ and recovery records remain readable under current authority.
 
 ## ChatML hooks and continuation
 
+The [authored recovery example](../examples/learning/context-recovery/README.md)
+combines a checkpoint policy with the existing Review component and recovers
+one original user decision through the selected native tools.
+
 The installed extensibility-v1 moderator can define the optional
 `on_context_rollover` binding. It is a separate typed entry point, so an
 exhaustive `on_event` handler keeps its existing event type. The actor invokes

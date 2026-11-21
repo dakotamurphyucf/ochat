@@ -24,6 +24,7 @@ let cases =
   ; "daemon-recovery.soft-checkpoint-lost-accept",
     Recovery_soft_checkpoint_scenario.run_lost_accept
   ; "daemon-recovery.authored-rollover-hooks", Recovery_rollover_hooks_scenario.run
+  ; "daemon-recovery.authored-example", Context_recovery_example_scenario.run
   ; "daemon-recovery.installed-originals", Support.Installed_originals.run
   ; "daemon-recovery.installed-handoff", Support.Installed_originals.run_handoff
   ; "http.export-atomic-success", Support.Data_integrity_http.test_export
