@@ -783,6 +783,38 @@ let test_recovery_assets env environment =
     let inventory_reader () =
       S.retained_reader sessions ~handle ~max_entries:100 ~max_bytes:32768 |> store_ok
     in
+    let collect () =
+      Agent_store.Recovery_asset_store.collect
+        collector
+        ~reader:(inventory_reader ())
+        ~retired:(fun _ -> false)
+      |> store_ok
+    in
+    (* The factory checks authority before, during and after the physical read.
+       Exercise the real collector at those boundaries without assuming a poll count. *)
+    let collection_before = ref false in
+    let collection_blocked = ref false in
+    let collection_after = ref false in
+    let authorize_read state =
+      let open Result.Let_syntax in
+      let%map () = authorize state in
+      match collect () with
+      | None ->
+        require !collection_before "collector was busy before the protected read";
+        collection_blocked := true
+      | Some _ when !collection_blocked -> collection_after := true
+      | Some _ -> collection_before := true
+    in
+    let read_reference, read_bytes =
+      Factory.read factory ~sw ~authorize:authorize_read old ~part:0 ~max_bytes
+      |> asset_ok
+    in
+    require
+      (!collection_blocked && !collection_after)
+      "collector exclusion was not held and released during a protected asset read";
+    require
+      (Reference.equal read_reference committed && String.equal read_bytes original)
+      "a collector probe changed the exact protected read";
     let reached_cut = ref false in
     let after_cut state =
       let open Result.Let_syntax in
@@ -794,14 +826,9 @@ let test_recovery_assets env environment =
         if not !reached_cut
         then (
           reached_cut := true;
-          let result =
-            Agent_store.Recovery_asset_store.collect
-              collector
-              ~reader:(inventory_reader ())
-              ~retired:(fun _ -> false)
-            |> store_ok
-          in
-          require (Option.is_none result) "collection entered an in-flight publication");
+          require
+            (Option.is_none (collect ()))
+            "collection entered an in-flight publication");
         Error (P.Error.invalid_request "fixture withdraws authority after real adoption"))
     in
     expect_error
