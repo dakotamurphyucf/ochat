@@ -568,6 +568,7 @@
     lib/agent_session/legacy_callback_runtime.ml %{dep:../agent_session/legacy_callback_runtime.ml}
     lib/agent_session/run_job_completion.ml %{dep:../agent_session/run_job_completion.ml}
     lib/agent_session/run_transition.ml %{dep:../agent_session/run_transition.ml}
+    lib/agent_session/run_rollover_work.ml %{dep:../agent_session/run_rollover_work.ml}
     lib/agent_session/run_work_settlement.ml %{dep:../agent_session/run_work_settlement.ml}
     lib/agent_session/run_producer_settlement.ml %{dep:../agent_session/run_producer_settlement.ml}
     lib/agent_session/run_subscription_evidence.ml %{dep:../agent_session/run_subscription_evidence.ml}
