@@ -193,16 +193,27 @@ let prepare previous ~delta ~limits =
         in
         Transaction.continue_after_history carrier ~admitted ~next:state ~limits
       | Recovery_rollover_committed change as delta ->
-        let%bind previous = Transaction.checkpoint carrier ~limits in
+        let%bind basis = Transaction.checkpoint carrier ~limits in
         let%bind state =
-          Session_delta.apply ~limits (Transaction.value carrier) delta
-          |> X.document_result
+          Session_delta.apply ~limits previous delta |> X.document_result
         in
+        (* The archive and history carrier remain pre-cut with respect to the Turn.
+           Advance canonical accounting only after admitting that exact transfer. *)
+        let next = { state with inference_ledger = previous.inference_ledger } in
         let%bind admitted =
-          History_retirement.admit_rollover previous change ~next:state ~limits
+          History_retirement.admit_rollover basis change ~next ~limits
         in
         let%bind candidate =
-          Transaction.continue_after_history carrier ~admitted ~next:state ~limits
+          Transaction.continue_after_history carrier ~admitted ~next ~limits
+        in
+        let%bind candidate =
+          if phys_equal state.inference_ledger previous.inference_ledger
+          then Ok candidate
+          else
+            Transaction.update_canonical_usage
+              candidate
+              ~ledger:state.inference_ledger
+              ~delegated_usage:state.delegated_usage
         in
         (match Recovery_rollover.Commit.predecessor change with
          | None -> Ok candidate
@@ -278,7 +289,8 @@ let prepare previous ~delta ~limits =
            candidate
            ~before:previous.inference_ledger
            ~policy:(Some update)
-       | Inference_ledger_changed _ | Delegated_inference_ledger_changed _ ->
+       | Inference_ledger_changed _ | Delegated_inference_ledger_changed _
+       | Recovery_rollover_committed { retired_at = Some _; _ } ->
          Transaction.observe_goal_policy_canonical
            candidate
            ~before:previous.inference_ledger

@@ -436,10 +436,8 @@ let exercise scenario =
                scope, final))
       in
       let journal = W.journal disk Agent_store.Journal.open_existing in
-      let replay =
-        (Disk.recovery disk ~journal ~initial).state
-        |> A.Session_persistence.Restored.state
-      in
+      let recovered = Disk.recovery disk ~journal ~initial in
+      let replay = A.Session_persistence.Restored.state recovered.state in
       match scenario with
       | Manual ->
         assert (List.is_empty !writes);
@@ -464,6 +462,21 @@ let exercise scenario =
             archive
           |> protocol_ok
         in
+        let active = Option.value_exn saved.active_operation in
+        assert (P.Id.Operation.equal active.id original_operation);
+        assert (
+          match active.state with
+          | Running -> true
+          | _ -> false);
+        Disk.check_turn_starting saved original_operation;
+        List.iter [ after_cut; final; replay ] ~f:(fun state ->
+          Disk.check_turn_retired state original_operation);
+        Disk.check_attempts_preserved saved after_cut;
+        Disk.check_attempts_preserved final replay;
+        [%test_eq: int64]
+          (A.Inference_ledger.last_attempt_ordinal saved.inference_ledger)
+          (if equal_scenario scenario Hard then 0L else 1L);
+        Disk.check_rollover_retirement recovered.transactions replay original_operation;
         assert (
           List.exists saved.conversation.canonical_history ~f:(fun entry ->
             P.History.Id.equal old.id entry.id));

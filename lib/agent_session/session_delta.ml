@@ -798,12 +798,32 @@ let apply_rollover (state : Session_state.t) (change : Recovery_rollover.Commit.
       let%map state = release_rollover_inputs state operation ~limits in
       { state with managed_submissions }
   in
+  let%bind retirement = R.Commit.retirement change ~active:state.active_operation in
+  let%bind inference_ledger =
+    let ledger = state.inference_ledger in
+    match retirement with
+    | None -> Ok ledger
+    | Some operation ->
+      (match
+         Inference_ledger.find_turn_handle
+           ledger
+           ~operation_id:operation.id
+           ~generation:operation.generation
+       with
+       | None -> Ok ledger
+       | Some handle ->
+         Inference_ledger.finish_turn ledger handle operation
+         |> Result.map_error ~f:(fun _ ->
+           P.Error.invalid_request
+             "rollover could not finish its retained predecessor Turn"))
+  in
   let%map next = with_canonical_history state retained ~recovery_windows:(Some windows) in
   attach_archive
     { next with
       conversation = { next.conversation with initial_prompt_entry_count }
     ; recovery_rollover = Some recovery_rollover
     ; recovery_effective
+    ; inference_ledger
     ; active_operation =
         (match R.Commit.predecessor change with
          | None -> next.active_operation
@@ -2698,6 +2718,13 @@ let validate_goal_descendants
       let%map cursor = O.advance cursor (Active_operation operation) in
       accounts, cursor
     | Recovery_rollover_committed ({ batch = Some _; _ } | { capacity = Some _; _ }) ->
+      (* Publication is standalone. Its only canonical ledger change can be the
+         deterministic terminal edge for the exact retired Turn. *)
+      let%bind cursor =
+        if phys_equal previous.inference_ledger next.inference_ledger
+        then Ok cursor
+        else O.advance cursor (Canonical next.inference_ledger)
+      in
       let%map cursor = O.advance cursor (Active_operation None) in
       accounts, cursor
     | Invocation_changed invocation | Invocation_reconciled invocation ->
@@ -2913,7 +2940,8 @@ let policy_usage_step delta ~(previous : Session_state.t) ~(next : Session_state
       (Some
          (O.Canonical
             { before = previous.inference_ledger; after = next.inference_ledger; update }))
-  | Inference_ledger_changed _ | Delegated_inference_ledger_changed _ ->
+  | Inference_ledger_changed _ | Delegated_inference_ledger_changed _
+  | Recovery_rollover_committed { retired_at = Some _; _ } ->
     Ok
       (Some
          (O.Ordinary_canonical
@@ -3078,7 +3106,8 @@ let goal_policy_step delta ~(previous : Session_state.t) ~(next : Session_state.
             ; after = next.inference_ledger
             ; policy = Some update
             }))
-  | Inference_ledger_changed _ | Delegated_inference_ledger_changed _ ->
+  | Inference_ledger_changed _ | Delegated_inference_ledger_changed _
+  | Recovery_rollover_committed { retired_at = Some _; _ } ->
     Ok
       (Some
          (O.Canonical

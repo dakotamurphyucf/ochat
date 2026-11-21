@@ -392,6 +392,15 @@ wake dispositions keep their original identities. The successor scheduler
 claims that continuation under current authority before starting a new
 foreground operation.
 
+When a live settled batch or an automatic capacity cut retires a foreground,
+the same journal transaction interrupts the exact predecessor operation and
+finishes its retained Turn, when tracked. An unsent preparation creates no
+Attempt. Submitted Attempts retain their actual provider outcomes and usage.
+The archive still captures the complete pre-cut state, including the running
+operation and its Turn as they stood before retirement. Replay reproduces
+the encoded retirement, and an older rollover frame retains its original
+accounting semantics.
+
 The authored `context_checkpoint` registration shares the durable checkpoint
 ledger with the owner-writer path. It records the exact foreground model
 invocation and submitted root attempt, note-catalog revision, immutable

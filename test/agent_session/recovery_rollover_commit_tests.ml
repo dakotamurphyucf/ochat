@@ -84,6 +84,106 @@ let recovery (fixture : W.fixture) ~journal ~initial =
   |> store_ok
 ;;
 
+let retained_turn (state : A.Session_state.t) id =
+  let payload =
+    A.Inference_ledger.to_document state.inference_ledger
+    |> Result.map_error ~f:(fun _ -> "invalid inference ledger")
+    |> Result.ok_or_failwith
+    |> D.Document.payload
+  in
+  match Identity.get payload "turns" with
+  | `Array turns ->
+    List.find_map_exn turns ~f:(fun turn ->
+      let operation =
+        P.Operation.of_json (Identity.get turn "operation") |> protocol_ok
+      in
+      Option.some_if (P.Id.Operation.equal operation.id id) operation)
+  | _ -> failwith "turns must be an array"
+;;
+
+let check_turn_starting state id =
+  let turn = retained_turn state id in
+  assert (
+    match turn.state with
+    | Starting -> true
+    | _ -> false)
+;;
+
+let check_turn_retired state id =
+  let turn = retained_turn state id in
+  assert (
+    match turn.state with
+    | Interrupted { reason; retryable = false } ->
+      String.equal reason "context window retired"
+    | _ -> false)
+;;
+
+let check_attempts_preserved (before : A.Session_state.t) (after : A.Session_state.t) =
+  let records ledger =
+    A.Inference_ledger.rows ledger
+    |> List.map ~f:(fun row ->
+      A.Inference_ledger.Row.record row |> Inference.Observation.Attempt_record.to_json)
+  in
+  assert (
+    Int64.equal
+      (A.Inference_ledger.last_attempt_ordinal before.inference_ledger)
+      (A.Inference_ledger.last_attempt_ordinal after.inference_ledger));
+  assert (
+    List.equal
+      D.Json.equal
+      (records before.inference_ledger)
+      (records after.inference_ledger))
+;;
+
+let check_rollover_retirement transactions (state : A.Session_state.t) id =
+  let transaction =
+    List.find_exn transactions ~f:(fun transaction ->
+      List.mem
+        (W.delta_kinds transaction)
+        "recovery_rollover_committed"
+        ~equal:String.equal)
+  in
+  assert (
+    List.mem
+      (D.Document.required_semantics transaction.delta)
+      P.Session_storage_semantics.recovery_rollover_turn_retirement
+      ~equal:String.equal);
+  let marker = P.Session_storage_semantics.recovery_rollover_turn_retirement in
+  let without_marker =
+    D.Document.required_semantics transaction.delta
+    |> List.filter_map ~f:(fun name ->
+      if String.equal name marker then None else Some (`String name))
+    |> fun names ->
+    Identity.set (D.Document.json transaction.delta) "required_semantics" (`Array names)
+    |> D.Document.inspect ~limits:document_limits
+    |> document_ok
+  in
+  (match A.Session_delta_document.decode ~limits:document_limits without_marker with
+   | Error (D.Error.Required_semantics_unknown name) ->
+     assert (String.equal name ("missing " ^ marker))
+   | Error _ | Ok _ -> failwith "expected missing retirement semantics");
+  let terminals =
+    List.concat_map transactions ~f:(fun transaction ->
+      A.Session_persistence.durable_events ~limits:document_limits transaction |> store_ok)
+    |> List.filter_map ~f:(fun (event : P.Event.Durable.t) ->
+      let payload =
+        P.Event.Durable.Payload.of_json ~kind:event.kind event.payload |> protocol_ok
+      in
+      match payload with
+      | Operation_interrupted operation
+      | Operation_cancelled operation
+      | Operation_completed operation
+      | Operation_failed operation
+        when P.Id.Operation.equal operation.id id ->
+        Some (P.Event.Durable.Payload.kind payload, P.Operation.to_json operation)
+      | _ -> None)
+  in
+  match terminals with
+  | [ (Operation_interrupted, operation) ] ->
+    assert (D.Json.equal operation (P.Operation.to_json (retained_turn state id)))
+  | _ -> failwith "expected one durable predecessor interruption"
+;;
+
 let record_checkpoint actor writer (receipt : Catalog.Receipt.t) =
   Actor.record_context_checkpoint
     actor

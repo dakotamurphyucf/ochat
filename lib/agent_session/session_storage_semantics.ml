@@ -1663,3 +1663,42 @@ let check_delta document =
     ~name:recovery_capacity_rollover_name
     ~required:(delta_has_capacity_rollover (D.Document.payload document))
 ;;
+
+let rollover_turn_retirement_name =
+  Agent_protocol.Session_storage_semantics.recovery_rollover_turn_retirement
+;;
+
+let delta_has_rollover_turn_retirement payload =
+  match field_path payload [ "changes" ] with
+  | Some (`Array changes) ->
+    List.exists changes ~f:(fun change ->
+      match field_path change [ "kind" ], field_path change [ "value" ] with
+      | Some (`String "recovery_rollover_committed"), Some value ->
+        (match D.Json.field value ~name:"retired_at" with
+         | Absent -> false
+         | _ -> true)
+      | _ -> false)
+  | _ -> false
+;;
+
+let require_delta_without_rollover_turn_retirement = require_delta
+let check_delta_without_rollover_turn_retirement = check_delta
+
+let require_delta document ~limits =
+  let%bind.Result document =
+    require_delta_without_rollover_turn_retirement document ~limits
+  in
+  require
+    document
+    ~name:rollover_turn_retirement_name
+    ~required:(delta_has_rollover_turn_retirement (D.Document.payload document))
+    ~limits
+;;
+
+let check_delta document =
+  let%bind.Result () = check_delta_without_rollover_turn_retirement document in
+  check
+    document
+    ~name:rollover_turn_retirement_name
+    ~required:(delta_has_rollover_turn_retirement (D.Document.payload document))
+;;

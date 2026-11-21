@@ -58558,11 +58558,25 @@ let settle_context_rollover_internal
               ~generation:(Scope.generation expected.scope)
               ~window:(P.Id.Context_window.create ())
           in
+          let schedule_foreground = Option.is_some batch || Option.is_some capacity in
+          let%bind retired_at =
+            match schedule_foreground, previous.active_operation with
+            | false, _ -> Ok None
+            | true, Some operation ->
+              let now = t.services.now () in
+              Ok
+                (Some
+                   (if P.Timestamp.compare now operation.updated_at < 0
+                    then operation.updated_at
+                    else now))
+            | true, None -> Error (error Conflict "rollover predecessor is absent")
+          in
           let%bind change =
             R.Commit.create
               ?batch
               ?capacity
-              ~schedule_foreground:(Option.is_some batch || Option.is_some capacity)
+              ?retired_at
+              ~schedule_foreground
               receipt.intent
               ~expected
               ~successor
@@ -58571,10 +58585,16 @@ let settle_context_rollover_internal
               ~retain
           in
           let%bind retained = Session_delta.rollover_retained_history previous change in
+          let%bind retirement =
+            R.Commit.retirement change ~active:previous.active_operation
+          in
           let payloads =
             [ P.Event.Durable.Payload.History_replaced
                 (Session_state.history_window retained)
             ]
+            @ Option.to_list
+                (Option.map retirement ~f:(fun operation ->
+                   P.Event.Durable.Payload.Operation_interrupted operation))
             @ Option.to_list
                 (Option.map (R.Commit.predecessor change) ~f:(fun _ ->
                    P.Event.Durable.Payload.Session_state_changed

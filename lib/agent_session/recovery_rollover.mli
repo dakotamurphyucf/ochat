@@ -149,14 +149,23 @@ module Commit : sig
     ; retain : P.History.Id.t list
     ; batch : Recovery_rollover_batch.t option
     ; capacity : Recovery_rollover_capacity.t option
+    ; retired_at : P.Timestamp.t option
     ; schedule_foreground : bool
     }
 
   val predecessor : t -> P.Id.Operation.t option
 
+  (** Derive the exact terminal foreground from the admitted pre-cut operation.
+      Older frames omit retirement and preserve their original reducer semantics. *)
+  val retirement
+    :  t
+    -> active:P.Operation.t option
+    -> (P.Operation.t option, P.Error.t) result
+
   val create
     :  ?batch:Recovery_rollover_batch.t
     -> ?capacity:Recovery_rollover_capacity.t
+    -> ?retired_at:P.Timestamp.t
     -> ?schedule_foreground:bool
     -> Intent.t
     -> expected:Expected.t

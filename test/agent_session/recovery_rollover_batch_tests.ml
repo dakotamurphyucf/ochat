@@ -76,7 +76,7 @@ let install_tools env ~remaining ~new_window =
   Chat_response.Tool.convert_tools tools, tool_tbl, dispatch_tool
 ;;
 
-let reject_reordered_replay ~initial transactions (receipt : R.Receipt.t) =
+let check_rollover_replay ~initial transactions (receipt : R.Receipt.t) =
   let is_rollover transaction =
     List.mem (W.delta_kinds transaction) "recovery_rollover_committed" ~equal:String.equal
   in
@@ -106,6 +106,48 @@ let reject_reordered_replay ~initial transactions (receipt : R.Receipt.t) =
     | Batch [ Recovery_rollover_committed change ] -> change
     | _ -> failwith "rollover must use one dedicated journal leaf"
   in
+  let active = Option.value_exn old_state.active_operation in
+  let predecessor = Option.value_exn (R.Commit.predecessor change) in
+  assert (P.Id.Operation.equal active.id predecessor);
+  Disk.check_turn_starting old_state predecessor;
+  let applied =
+    A.Session_delta.apply old_state (Recovery_rollover_committed change) |> protocol_ok
+  in
+  Disk.check_turn_retired applied predecessor;
+  Disk.check_attempts_preserved old_state applied;
+  let fields =
+    match R.Commit.to_json change with
+    | `Object fields -> List.Assoc.remove fields "retired_at" ~equal:String.equal
+    | _ -> failwith "expected a commit object"
+  in
+  let historical = R.Commit.of_json (`Object fields) |> protocol_ok in
+  assert (Option.is_none historical.retired_at);
+  let historically_applied =
+    A.Session_delta.apply old_state (Recovery_rollover_committed historical)
+    |> protocol_ok
+  in
+  assert (Scope.equal (W.scope applied) (W.scope historically_applied));
+  Disk.check_turn_starting historically_applied predecessor;
+  let stale =
+    let retired_at = P.Timestamp.of_string "1970-01-01T00:00:00Z" |> protocol_ok in
+    assert (P.Timestamp.compare retired_at active.updated_at < 0);
+    R.Commit.of_json (`Object (("retired_at", P.Timestamp.to_json retired_at) :: fields))
+    |> protocol_ok
+  in
+  let expect_conflict (type value) ~message (result : (value, P.Error.t) Result.t) =
+    match result with
+    | Error error when P.Error.equal_code error.code Conflict -> ()
+    | Error error -> raise_s [%sexp (message : string), (error : P.Error.t)]
+    | Ok _ -> failwith message
+  in
+  expect_conflict
+    ~message:"replay accepted retirement before the predecessor update"
+    (A.Session_delta.apply old_state (Recovery_rollover_committed stale));
+  expect_conflict
+    ~message:"retirement accepted another generation"
+    (R.Commit.retirement
+       change
+       ~active:(Some { active with generation = active.generation + 1 }));
   let batch = Option.value_exn change.batch in
   let batch =
     A.Recovery_rollover_batch.create
@@ -118,6 +160,7 @@ let reject_reordered_replay ~initial transactions (receipt : R.Receipt.t) =
   let reordered =
     R.Commit.create
       ~batch
+      ?retired_at:change.retired_at
       ~schedule_foreground:change.schedule_foreground
       receipt.intent
       ~expected:change.expected
@@ -127,14 +170,9 @@ let reject_reordered_replay ~initial transactions (receipt : R.Receipt.t) =
       ~retain:change.retain
     |> protocol_ok
   in
-  ignore
-    (A.Session_delta.apply old_state (Recovery_rollover_committed change) |> protocol_ok
-     : A.Session_state.t);
-  match A.Session_delta.apply old_state (Recovery_rollover_committed reordered) with
-  | Error actual when P.Error.equal_code actual.code Conflict -> ()
-  | Error actual ->
-    raise_s [%sexp "unexpected replay validation failure", (actual : P.Error.t)]
-  | Ok _ -> failwith "replay accepted reordered output acknowledgements"
+  expect_conflict
+    ~message:"replay accepted reordered output acknowledgements"
+    (A.Session_delta.apply old_state (Recovery_rollover_committed reordered))
 ;;
 
 let queue_wake actor ~source ~snapshot =
@@ -1010,10 +1048,19 @@ let run ?(resume = false) ?(finish = false) ?(cancel = false) ?(authored = false
                | _ -> false);
              assert (List.length state.conversation.compaction_archives = 1);
              assert (Option.is_none state.active_operation);
-             reject_reordered_replay
-               ~initial
+             let active = Option.value_exn archive.active_operation in
+             assert (P.Id.Operation.equal active.id schedule.predecessor);
+             assert (
+               match active.state with
+               | Running -> true
+               | _ -> false);
+             Disk.check_turn_starting archive schedule.predecessor;
+             Disk.check_turn_retired state schedule.predecessor;
+             Disk.check_rollover_retirement
                recovered.transactions
-               (Disk.lookup state ~id)
+               state
+               schedule.predecessor;
+             check_rollover_replay ~initial recovered.transactions (Disk.lookup state ~id)
            | (Interrupted | Revoked), Pending ->
              assert (Scope.equal old_scope (W.scope state));
              assert (List.is_empty state.conversation.compaction_archives)

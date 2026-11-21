@@ -22,6 +22,7 @@ let recovery_authored_checkpoint = "session.recovery-authored-checkpoint.v1"
 let recovery_rollover_batch = "session.recovery-rollover-batch.v1"
 let recovery_rollover_continuation = "session.recovery-rollover-continuation.v1"
 let recovery_capacity_rollover = "session.recovery-capacity-rollover.v1"
+let recovery_rollover_turn_retirement = "session.recovery-rollover-turn-retirement.v1"
 let recovery_rollover_hooks = "session.recovery-rollover-hooks.v1"
 
 let supported_children =
@@ -52,6 +53,7 @@ let supported_children =
   ; recovery_rollover_continuation
   ; recovery_rollover_hooks
   ; recovery_capacity_rollover
+  ; recovery_rollover_turn_retirement
   ; recovery_authored_checkpoint
   ]
 ;;

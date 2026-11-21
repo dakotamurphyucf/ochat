@@ -470,6 +470,7 @@ module Commit = struct
     ; retain : P.History.Id.t list
     ; batch : Recovery_rollover_batch.t option
     ; capacity : Recovery_rollover_capacity.t option
+    ; retired_at : P.Timestamp.t option
     ; schedule_foreground : bool
     }
 
@@ -480,11 +481,31 @@ module Commit = struct
     | None, None -> None
   ;;
 
+  let retirement t ~(active : P.Operation.t option) =
+    match t.retired_at, predecessor t, active with
+    | None, _, _ -> Ok None
+    | ( Some updated_at
+      , Some expected
+      , Some ({ kind = Turn _; state = Running; _ } as operation) )
+      when P.Id.Operation.equal expected operation.id
+           && Int.equal operation.generation (Scope.generation t.expected.scope)
+           && P.Timestamp.compare updated_at operation.updated_at >= 0 ->
+      Ok
+        (Some
+           { operation with
+             state = Interrupted { reason = "context window retired"; retryable = false }
+           ; updated_at
+           })
+    | Some _, _, _ -> conflict "rollover retirement differs from its exact foreground"
+  ;;
+
   let validate_selection t =
     if
       Stdlib.List.compare_length_with t.retain Recovery_window_record.max_members > 0
       || List.contains_dup t.retain ~compare:P.History.Id.compare
     then invalid "invalid rollover carry selection"
+    else if Option.is_some t.retired_at && Option.is_none (predecessor t)
+    then invalid "rollover retirement requires a foreground cut"
     else if
       Option.is_some t.capacity && (Option.is_some t.batch || not t.schedule_foreground)
     then invalid "automatic rollover requires only its verified capacity cut"
@@ -536,6 +557,7 @@ module Commit = struct
   let create
         ?batch
         ?capacity
+        ?retired_at
         ?(schedule_foreground = false)
         (intent : Intent.t)
         ~expected
@@ -555,6 +577,7 @@ module Commit = struct
         ; retain
         ; batch
         ; capacity
+        ; retired_at
         ; schedule_foreground
         }
     in
@@ -577,7 +600,9 @@ module Commit = struct
               "batch", Recovery_rollover_batch.to_json batch))
        @ Option.to_list
            (Option.map t.capacity ~f:(fun cut ->
-              "capacity", Recovery_rollover_capacity.to_json cut)))
+              "capacity", Recovery_rollover_capacity.to_json cut))
+       @ Option.to_list
+           (Option.map t.retired_at ~f:(fun at -> "retired_at", P.Timestamp.to_json at)))
   ;;
 
   let of_json json =
@@ -598,6 +623,7 @@ module Commit = struct
     let%bind capacity =
       J.optional_as fields "capacity" Recovery_rollover_capacity.of_json
     in
+    let%bind retired_at = J.optional_as fields "retired_at" P.Timestamp.of_json in
     let%bind schedule_foreground = J.optional_as fields "schedule_foreground" J.bool in
     let schedule_foreground = Option.value schedule_foreground ~default:false in
     validate_selection
@@ -609,6 +635,7 @@ module Commit = struct
       ; retain
       ; batch
       ; capacity
+      ; retired_at
       ; schedule_foreground
       }
   ;;
