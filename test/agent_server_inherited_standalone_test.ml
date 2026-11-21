@@ -285,12 +285,13 @@ let on_event ctx state event = match event with
                       (Sexp.to_string flags));
                   Exn.raise_with_original_backtrace exn backtrace))
         in
-        let call
+        let with_call
               ?(before_permission = fun (_ : P.Permission.t) -> ())
               sw
               client
               entry
               name
+              f
           =
           await_ready entry;
           requested_tool := name;
@@ -307,13 +308,19 @@ let on_event ctx state event = match event with
                 ()
               |> protocol_ok)
           in
-          await "inherited tool submission" (fun () ->
-            H.send_message
-              handle
-              { kind = Plain_text; text = "Read the report"; attachments = [] }
-            |> protocol_ok
-            |> ignore);
-          let rec idle () =
+          let operation_id =
+            let receipt =
+              await "inherited tool submission" (fun () ->
+                H.send_message
+                  handle
+                  { kind = Plain_text; text = "Read the report"; attachments = [] }
+                |> protocol_ok)
+            in
+            match receipt.disposition, receipt.operation_id with
+            | Started, Some operation_id -> operation_id
+            | _ -> failwith "inherited tool submission did not start a foreground turn"
+          in
+          let poll () =
             let current = state entry in
             List.iter current.permissions ~f:(fun permission ->
               match P.Permission.equal_state permission.state Pending with
@@ -330,21 +337,34 @@ let on_event ctx state event = match event with
                   ~reason:None
                 |> protocol_ok
                 |> ignore);
-            let running_jobs =
-              List.exists current.jobs ~f:(fun job ->
-                match job.status with
-                | Queued | Running | Waiting_permission _ | Waiting_completion _ -> true
-                | _ -> false)
-            in
-            match current.active_operation, running_jobs with
-            | None, false -> current
-            | _ ->
-              Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
-              idle ()
+            current
           in
-          let current = await ("inherited tool settlement for " ^ name) idle in
+          let rec settled () =
+            let current = poll () in
+            match current.active_operation with
+            | None -> current
+            | Some operation ->
+              assert (P.Id.Operation.equal operation.id operation_id);
+              Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
+              settled ()
+          in
+          let current = await ("inherited foreground settlement for " ^ name) settled in
+          (* A Pending result can leave a Job that needs the same writable
+             attachment for its own permission requests. *)
+          let result = f ~poll current in
           H.detach handle |> protocol_ok;
-          current
+          result
+        in
+        let call ?before_permission sw client entry name =
+          with_call ?before_permission sw client entry name (fun ~poll:_ current ->
+            assert (
+              not
+                (List.exists current.jobs ~f:(fun job ->
+                   match job.status with
+                   | Queued | Running | Waiting_permission _ | Waiting_completion _ ->
+                     true
+                   | _ -> false)));
+            current)
         in
         let check_public entry =
           await "inherited public capability catalog" (fun () ->
@@ -478,37 +498,38 @@ let on_event ctx state event = match event with
           check_public grandchild;
           call sw client grandchild "read_report" |> check_success;
           check_parent parent 6;
-          let started = call sw client grandchild "start_report" in
-          let invocation =
-            List.find_exn started.invocations ~f:(fun invocation ->
-              String.equal invocation.context.tool_name "start_report")
+          let job =
+            with_call sw client grandchild "start_report" (fun ~poll started ->
+              let invocation =
+                List.find_exn started.invocations ~f:(fun invocation ->
+                  String.equal invocation.context.tool_name "start_report")
+              in
+              let id =
+                match invocation.status with
+                | Published (Pending (Job id, `String "accepted")) -> id
+                | status ->
+                  raise_s
+                    [%sexp
+                      "inherited background launch failed", (status : P.Invocation.status)]
+              in
+              let rec completed () =
+                let job =
+                  List.find_exn (poll ()).jobs ~f:(fun job -> P.Id.Job.equal job.id id)
+                in
+                match job.status with
+                | Queued | Running | Waiting_permission _ | Waiting_completion _ ->
+                  Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
+                  completed ()
+                | Succeeded -> job
+                | status ->
+                  raise_s
+                    [%sexp
+                      "inherited background job failed"
+                    , (status : P.Job.status)
+                    , (job.result : Jsonaf.t option)]
+              in
+              await "inherited background completion" completed)
           in
-          let id =
-            match invocation.status with
-            | Published (Pending (Job id, `String "accepted")) -> id
-            | status ->
-              raise_s
-                [%sexp
-                  "inherited background launch failed", (status : P.Invocation.status)]
-          in
-          let rec completed () =
-            let job =
-              List.find_exn (state grandchild).jobs ~f:(fun job ->
-                P.Id.Job.equal job.id id)
-            in
-            match job.status with
-            | Queued | Running | Waiting_permission _ | Waiting_completion _ ->
-              Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
-              completed ()
-            | Succeeded -> job
-            | status ->
-              raise_s
-                [%sexp
-                  "inherited background job failed"
-                , (status : P.Job.status)
-                , (job.result : Jsonaf.t option)]
-          in
-          let job = await "inherited background completion" completed in
           assert (P.Id.Session.equal job.session_id grandchild_id);
           (match P.Job.terminal_completion job |> protocol_ok with
            | Some (Succeeded (`String text)) ->
