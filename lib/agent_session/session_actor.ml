@@ -25905,7 +25905,7 @@ let finish_configuration_capture t capture success =
 let mark_context_capacity t capture observation =
   let open Result.Let_syntax in
   let%bind _ = running_operation t (Configuration_capture.Token.operation_id capture) in
-  let%map () = require_runtime_admission t in
+  let%bind () = require_runtime_admission t in
   Configuration_capture.mark_capacity
     t.configuration_capture
     capture

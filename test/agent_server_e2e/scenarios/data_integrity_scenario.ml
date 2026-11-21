@@ -7,6 +7,7 @@ let cases =
   ; "daemon-recovery.asset-publication", Support.Data_integrity_http.test_recovery_assets
   ; "daemon-recovery.converter-adoption", Support.Recovery_asset_converter.run
   ; "daemon-recovery.configured-capacity", Recovery_capacity_scenario.run
+  ; "daemon-recovery.ordinary-hard-limit", Recovery_successor_guard_scenario.ordinary_hard_limit
   ; "daemon-recovery.successor-hint-guards", Recovery_successor_guard_scenario.run
   ; "daemon-recovery.selected-successor-sources", Recovery_successor_selection_scenario.run
   ; "daemon-recovery.authored-checkpoint", Recovery_checkpoint_scenario.run

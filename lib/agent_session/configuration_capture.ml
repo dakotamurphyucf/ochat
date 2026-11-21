@@ -169,18 +169,29 @@ let mark t token configuration =
 ;;
 
 let mark_capacity t token ~current observation =
-  match t.current with
-  | Some (captured, Preparing) when owns t token && Option.is_none captured.assessment ->
-    let captured =
-      match current, captured.capacity with
-      | Some current, Some selected
-        when Capacity_basis.equal current selected
-             && observation.Capacity_observation.binding_is_current () ->
-        { captured with assessment = Some observation }
-      | _ -> { captured with capacity = None }
-    in
-    t.current <- Some (captured, Preparing)
-  | _ -> ()
+  match t.current, current, token.Token.capacity with
+  | Some (captured, Preparing), Some current, Some selected
+    when owns t token
+         && Option.is_none captured.assessment
+         && Capacity_basis.equal current selected
+         && observation.Capacity_observation.binding_is_current () ->
+    t.current <- Some ({ captured with assessment = Some observation }, Preparing);
+    (match Capacity.Capacity.Assessment.view observation.assessment with
+     | Assessed { pressure = Hard_limit_exceeded; _ } ->
+       Error
+         (Agent_protocol.Error.create
+            Resource_limit
+            ~message:"prepared request exceeds the current context input limit"
+            ~retryable:false
+            ())
+     | Unavailable _ | Assessed _ -> Ok ())
+  | _ ->
+    Error
+      (Agent_protocol.Error.create
+         Conflict
+         ~message:"context capacity basis changed during request preparation"
+         ~retryable:false
+         ())
 ;;
 
 let capacity_status t ~operation_id ~current =
@@ -308,31 +319,25 @@ let root_port ~begin_capture ~publish_capacity ~publish_recovery ~mark ~finish =
                 "captured target cannot retain current history")
             |> require;
             let on_prepared prepared =
-              (if token.capture_recovery && Option.is_some token.recovery_scope
-               then
-                 let module Prepared = Inference_runtime.Prepared in
-                 let binding_is_current = Prepared.binding_guard prepared in
-                 if
-                   Inference.Request.Target.equal token.target (Prepared.target prepared)
-                   && binding_is_current ()
-                 then
-                   Option.iter (Prepared.recovery_input prepared) ~f:(fun input ->
-                     publish_recovery
-                       token
-                       input
-                       ~configuration:(Prepared.configuration prepared)
-                       ~binding_is_current
-                     |> require));
               Option.iter token.capacity ~f:(fun capacity ->
                 let module Prepared = Inference_runtime.Prepared in
                 let policy = Capacity.Selection.policy capacity.selection in
                 let assessment = Prepared.assess_capacity ?policy prepared in
                 if
-                  Prepared.capacity_assessment_is_current ?policy prepared assessment
-                  && Inference.Request.Target.equal
-                       token.target
-                       (Prepared.target prepared)
+                  not
+                    (Prepared.capacity_assessment_is_current ?policy prepared assessment
+                     && Inference.Request.Target.equal
+                          token.target
+                          (Prepared.target prepared))
                 then
+                  Error
+                    (Agent_protocol.Error.create
+                       Conflict
+                       ~message:"capacity assessment does not match the prepared target"
+                       ~retryable:false
+                       ())
+                  |> require
+                else
                   publish_capacity
                     token
                     Capacity_observation.
@@ -340,7 +345,22 @@ let root_port ~begin_capture ~publish_capacity ~publish_recovery ~mark ~finish =
                       ; assessment
                       ; binding_is_current = Prepared.binding_guard prepared
                       }
-                  |> require)
+                  |> require);
+              if token.capture_recovery && Option.is_some token.recovery_scope
+              then
+                let module Prepared = Inference_runtime.Prepared in
+                let binding_is_current = Prepared.binding_guard prepared in
+                if
+                  Inference.Request.Target.equal token.target (Prepared.target prepared)
+                  && binding_is_current ()
+                then
+                  Option.iter (Prepared.recovery_input prepared) ~f:(fun input ->
+                    publish_recovery
+                      token
+                      input
+                      ~configuration:(Prepared.configuration prepared)
+                      ~binding_is_current
+                    |> require)
             in
             f context ~on_prepared ~on_dispatch:(fun configuration ->
               mark token configuration |> require)

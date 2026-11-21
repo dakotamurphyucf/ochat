@@ -67,7 +67,7 @@ val mark_capacity
   -> Token.t
   -> current:Capacity_basis.t option
   -> Capacity_observation.t
-  -> unit
+  -> (unit, Agent_protocol.Error.t) Result.t
 
 val capacity_status
   :  t

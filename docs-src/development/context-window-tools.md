@@ -16,6 +16,13 @@ it describes. When it includes a numeric count, check whether the evidence is
 estimated or measured. A disabled, awaiting, stale or unknown assessment gives
 you no numeric basis for deciding to start another window.
 
+With local capacity enabled, the host measures the finalized root request
+before allocating an inference attempt. In manual mode an input known to
+exceed the hard limit fails locally with `resource_limit`, before provider
+authentication or transmission. A session with capacity disabled keeps its
+ordinary dispatch behavior. Missing capacity evidence cannot supply a numeric
+limit.
+
 To record a checkpoint, first commit the local notes through an authorized
 workflow. Select the exact current note IDs and revisions using the local
 note tools. Then call `context_checkpoint` from the foreground model before

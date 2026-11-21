@@ -502,7 +502,8 @@
       --scenario
       data-integrity
       --case
-      daemon-recovery.selected-successor-sources))))))
+      daemon-recovery.selected-successor-sources)
+     (run %{exe:agent_server_e2e.exe} --scenario data-integrity --case daemon-recovery.ordinary-hard-limit))))))
 
 (rule
  (alias agent-e2e-pending)
