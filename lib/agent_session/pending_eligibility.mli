@@ -2,6 +2,7 @@
 module Boundary : sig
   type t =
     | Worker of Agent_protocol.Id.Operation.t
+    | Successor of Agent_protocol.Id.Operation.t
     | Idle_start
   [@@deriving equal, sexp]
 end

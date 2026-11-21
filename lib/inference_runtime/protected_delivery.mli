@@ -38,6 +38,10 @@ module Lease : sig
   type t
 
   val create : Authority.t -> source:Source.t -> scope:scope -> t
+
+  (** Group all leases around the same physical submission and recheck each
+      source. Reject distinct authority identities for the same source key. *)
+  val with_submission : t list -> f:((unit -> bool) -> 'a) -> 'a
 end
 
 type custody =
@@ -96,11 +100,13 @@ module Materialized : sig
 
   type submission =
     { refresh : unit -> unit -> unit
-    ; custody : Lease.scope option
+    ; claim : unit -> unit
+    ; leases : Lease.t list
     }
 
   (** Bind once to the actual attempt. Live results require a root attempt.
       Argument isolation with no live results can bind to a nested attempt.
-      Refresh may yield. The final check admits at most one application submission. *)
+      Refresh may yield. Final checks are reusable within one physical admission.
+      Claim once immediately before the first application write. *)
   val bind : t -> scope:Transcript.Scope.t -> (submission, error) result
 end

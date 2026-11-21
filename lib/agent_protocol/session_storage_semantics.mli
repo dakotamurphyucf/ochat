@@ -33,3 +33,4 @@ val recovery_note_shares : string
 val recovery_rollover : string
 val recovery_rollover_commit : string
 val recovery_rollover_batch : string
+val recovery_rollover_continuation : string

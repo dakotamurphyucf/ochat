@@ -449,6 +449,48 @@ pre-commit failure keeps the old window. A post-commit dispatch block keeps
 the new window, its old-window archive and any unadmitted input. Both are
 bounded and recoverable through an authorized input or target change.
 
+### Settled foreground successor
+
+The successor retains the original admitted user occurrence, local initial
+prompt and any already committed notification input with an unresolved wake.
+A managed submission keeps its original receipt and input in a suspended
+assignment. The first successor operation stages eligible FIFO input and
+wakes without adopting or acknowledging them. The selected worker can
+materialize late deliveries through the normal authorized initial notification
+consumer. Withheld preparation leaves the resulting wake pending. An exact
+dispatch transaction
+adopts them and attaches the managed receipt to the same new operation using
+its acknowledged root attempt. Replay checks the exact eligible queue and
+wake selection. A historical committed batch keeps its original carry
+semantics and may be explicitly finished.
+
+The session selects a fresh root binding at the first preparation of the new
+window, even when the selected target is unchanged. The actual finalized
+prepared request is checked for the exact required input and qualified
+capacity before it can allocate an attempt. A known oversize request or
+unavailable qualified capacity holds at the successor. An authorized owner
+can continue with an exact current window revision after changing the target.
+The provider's final write guard records admission after validating current
+source, operation and credential checks. Once the admission is durable,
+the same obligation cannot launch again after a lost reply or uncertain
+submission.
+
+The standard turn worker exposes a body-free post-commit selection to the
+authored lifecycle integration. Its `Continue`, `Wait` and `Finish` outcomes
+apply only to the exact retired foreground owner and committed successor.
+A current inherited Goal root requires a fresh inherited admission before
+any successor dispatch. A missing live proof or archive-only cut waits for
+current authority. Recovery never reconstructs a retired process credential.
+
+The optional successor hint port borrows its authorized source during
+preparation and request execution. The hint is request-only User guidance,
+composed with installed guidance and source checks. Submission with a hint
+uses isolated provider transport. The host holds grouped source custody across
+admission and the first write. A same-session source allows only the exact
+pending history suffix and its derived locator extension while all existing
+source coordinates remain unchanged. A capacity rejection before attempt
+allocation permits one preparation with the optional hint omitted.
+
 ## Codex comparison
 
 The September 8 investigation pinned Codex

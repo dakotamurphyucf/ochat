@@ -8,6 +8,8 @@ val create
   -> retention:Pending_disposition.Retention.t
   -> t
 
+val successor_operation : t -> Agent_protocol.Id.Operation.t option
+
 val prepare
   :  t
   -> Session_state.t

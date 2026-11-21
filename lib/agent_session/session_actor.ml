@@ -1729,6 +1729,34 @@ module Foreground_rollover = struct
     }
 end
 
+module Foreground_successor = struct
+  module P = Agent_protocol
+
+  module Handoff = struct
+    type t =
+      { owner : P.Id.Operation.t
+      ; predecessor : Foreground_publication.t
+      ; view : Recovery_rollover_continuation.Hook.view
+      ; check : unit -> (unit, P.Error.t) result
+      ; custody : Execution_custody.t option
+      }
+  end
+
+  type t =
+    { owner : P.Id.Operation.t
+    ; scope : P.Recovery_window.Scope.t
+    ; operation : P.Id.Operation.t
+    ; mutable input : Recovery_rollover_input.t
+    ; pending : History_entry.t list
+    ; mutable capacity_basis : Configuration_capture.Capacity_basis.t
+    ; policy : Session_context_capacity.Selection.t
+    ; check : unit -> (unit, P.Error.t) result
+    ; mutable prepared : Inference_runtime.Prepared.t option
+    ; mutable admitted : (Inference_runtime.Attempt.t * int64) option
+    ; mutable hold : Recovery_rollover_continuation.hold
+    }
+end
+
 module Worker_readiness = struct
   type t =
     | Foreground of Foreground_publication.t
@@ -5532,6 +5560,26 @@ module Recovery_rollover_request = struct
     | Worker_settled :
         Foreground_publication.t * Chat_response.Settled_tool_batch.t
         -> Chat_response.Settled_tool_batch.decision t
+    | Successor_handoff :
+        Foreground_publication.t
+        -> Foreground_successor.Handoff.t option t
+    | Successor_selection :
+        Foreground_successor.Handoff.t * Recovery_rollover_continuation.Hook.decision
+        -> unit t
+    | Successor_prepared :
+        Foreground_successor.t * bool * Inference_runtime.Prepared.t
+        -> bool t
+    | Successor_dispatch :
+        Foreground_successor.t * Inference_runtime.Attempt.t
+        -> (unit -> unit) t
+    | Successor_control :
+        Operator_authorization.t
+        * P.Id.Attachment.t
+        * authorize
+        * P.Id.Operation.t
+        * R.Expected.t
+        * Recovery_rollover_continuation.action
+        -> Recovery_rollover_continuation.t t
     | Operator_request :
         Operator_authorization.t
         * P.Id.Attachment.t
@@ -6657,6 +6705,8 @@ and t =
   ; mutable context_capacity_host : Session_context_capacity.Host.t
   ; mutable rollover_requires_recovery : bool
   ; mutable live_operator_rollover : Foreground_rollover.t option
+  ; mutable foreground_successor : Foreground_successor.t option
+  ; mutable foreground_successor_handoff : Foreground_successor.Handoff.t option
   ; mutable recurrence_controller : Recurrence_controller.t option
   ; recurrence_runtime : Recurrence_runtime.t
   ; recurrence_creation_owner : unit ref
@@ -13051,7 +13101,44 @@ module Startup_write = struct
   ;;
 end
 
-let check_protected_source_write t ~(requested : Session_transition.t) =
+(* A live source lease still owns every existing coordinate. The physical
+   first submission may append only the selected pending suffix and its exact
+   derived locator extension. It cannot move or reinterpret an existing row. *)
+let is_protected_successor_append
+      t
+      ~(requested : Session_transition.t)
+      (selected, attempt)
+  =
+  let module P = Agent_protocol in
+  let selected : Foreground_successor.t = selected in
+  let owns_phase state ~admitted =
+    Option.exists (Session_delta.foreground_continuation state) ~f:(fun continuation ->
+      P.Id.Operation.equal selected.owner continuation.owner
+      &&
+      match admitted, continuation.phase with
+      | false, Preparing operation | true, Admitted { operation; _ } ->
+        P.Id.Operation.equal selected.operation operation
+      | _ -> false)
+  in
+  let previous = t.state.conversation.canonical_history in
+  let same_prefix, added =
+    List.split_n requested.state.conversation.canonical_history (List.length previous)
+  in
+  Option.exists t.foreground_successor ~f:(phys_equal selected)
+  && Option.is_none selected.admitted
+  && Option.exists selected.prepared ~f:(fun prepared ->
+       Inference_runtime.Prepared.owns_attempt prepared attempt)
+  && owns_phase t.state ~admitted:false
+  && owns_phase requested.state ~admitted:true
+  && List.equal P.History.equal_entry previous same_prefix
+  && List.equal P.History.equal_entry added (Recovery_rollover_input.entries selected.input)
+  && (match Recovery_window_capture.append t.state added with
+      | Ok expected ->
+        Option.equal Recovery_window_ledger.equal expected requested.state.recovery_windows
+      | Error _ -> false)
+;;
+
+let check_protected_source_write t ~(requested : Session_transition.t) ~successor_append =
   let previous = t.state in
   let next = requested.state in
   if
@@ -13059,12 +13146,16 @@ let check_protected_source_write t ~(requested : Session_transition.t) =
     && ((not (Int.equal previous.identity.generation next.identity.generation))
         || (not (phys_equal previous.recovery_notes next.recovery_notes))
         || (not (phys_equal previous.recovery_note_shares next.recovery_note_shares))
-        || (not (phys_equal previous.recovery_windows next.recovery_windows))
         || (not (phys_equal previous.moderator next.moderator))
-        || (not
-              (phys_equal
-                 previous.conversation.canonical_history
-                 next.conversation.canonical_history))
+        || (((not (phys_equal previous.recovery_windows next.recovery_windows))
+             || not
+                  (phys_equal
+                     previous.conversation.canonical_history
+                     next.conversation.canonical_history))
+            && not
+                 (Option.exists
+                    successor_append
+                    ~f:(is_protected_successor_append t ~requested)))
         || not
              (phys_equal
                 previous.conversation.compaction_archives
@@ -13086,6 +13177,7 @@ let require_rollover_recovered t =
 ;;
 
 let persist_transition
+      ?protected_successor_append
       ?(causal_canonical_fence = Causal_canonical_custody.Fence.Unrestricted)
       ?commit_observation
       ?startup_write
@@ -13102,7 +13194,12 @@ let persist_transition
   =
   let open Result.Let_syntax in
   let%bind () = require_rollover_recovered t in
-  let%bind () = check_protected_source_write t ~requested:candidate in
+  let%bind () =
+    check_protected_source_write
+      t
+      ~requested:candidate
+      ~successor_append:protected_successor_append
+  in
   let%bind () =
     Causal_canonical_custody.check_fence t ~requested:candidate causal_canonical_fence
   in
@@ -13339,6 +13436,7 @@ let prepare_completion_plan t (transition : Session_transition.t) completion_sam
 ;;
 
 let install
+      ?protected_successor_append
       ?causal_root_acknowledgement
       ?unmoderated_configuration_acknowledgement
       ?constructor_job_control
@@ -13569,6 +13667,7 @@ let install
   in
   let%bind () =
     persist_transition
+      ?protected_successor_append
       ?commit_observation:
         (match causal_root_acknowledgement, constructor_job_control with
          | Some write, None -> Some (Session_commit_attempt.observation write.writer)
@@ -26051,6 +26150,7 @@ let notification_payloads = function
 
 let consume_notifications_internal
       ~check
+      ?(track_wakes = true)
       ?(wakes = [])
       ?(discarded_wakes = [])
       t
@@ -26116,7 +26216,7 @@ let consume_notifications_internal
       let ids =
         List.map selected_wakes ~f:(fun value -> value.Agent_protocol.Delivery.context.id)
       in
-      t.notification_inputs <- Some (operation_id, ids @ existing);
+      if track_wakes then t.notification_inputs <- Some (operation_id, ids @ existing);
       let wake =
         List.exists selected_wakes ~f:(fun value ->
           Agent_protocol.Completion.equal_wake value.context.wake Request_turn)
@@ -27010,6 +27110,13 @@ let manage_moderator_follow_up t operation_id observer =
   | _ -> Error (error Conflict "foreground routing requires the installed moderator")
 ;;
 
+let preparing_successor t operation_id =
+  Option.exists (Session_delta.foreground_continuation t.state) ~f:(fun continuation ->
+    match continuation.phase with
+    | Preparing operation -> Agent_protocol.Id.Operation.equal operation operation_id
+    | Awaiting | Waiting | Held _ | Admitted _ | Finished _ -> false)
+;;
+
 let admit_moderator_turn t operation_id =
   let open Result.Let_syntax in
   let%bind () = require_selected_execution t in
@@ -27024,7 +27131,11 @@ let admit_moderator_turn t operation_id =
     | false, false -> Ok ()
   in
   let%bind plan = Observation_follow_up.admit_turn ~state:t.state ~observer in
-  let%bind notifications = notification_wake_deltas t operation_id ~accept:true in
+  let%bind notifications =
+    if preparing_successor t operation_id
+    then Ok []
+    else notification_wake_deltas t operation_id ~accept:true
+  in
   let%bind run_deltas = run_turn_deltas t operation plan.events [] in
   match follow_up_deltas t plan @ notifications @ run_deltas with
   | [] -> Ok ()
@@ -27041,7 +27152,11 @@ let admit_notification_turn t operation_id =
     | Running, false, false -> Ok ()
     | _ -> Error (error Conflict "session cannot admit a provider request")
   in
-  let%bind deltas = notification_wake_deltas t operation_id ~accept:true in
+  let%bind deltas =
+    if preparing_successor t operation_id
+    then Ok []
+    else notification_wake_deltas t operation_id ~accept:true
+  in
   match deltas with
   | [] -> Ok ()
   | _ ->
@@ -29358,6 +29473,57 @@ let worker_capabilities t (publication : Foreground_publication.t) id_source buf
     ; settle_tool_batch =
         Option.map (current_context_capacity_basis t) ~f:(fun _ batch ->
           call t (Context_request (Rollover (Worker_settled (publication, batch)))))
+    ; select_rollover_followup =
+        (fun select ->
+          let open Result.Let_syntax in
+          let%bind handoff =
+            call t (Context_request (Rollover (Successor_handoff publication)))
+          in
+          match handoff with
+          | None -> Ok ()
+          | Some handoff ->
+            let decision : Recovery_rollover_continuation.Hook.decision =
+              match select with
+              | None ->
+                (match handoff.view.checkpoint with
+                 | `Checkpointed -> Continue
+                 | `Archive_only -> Wait)
+              | Some select ->
+                (try select handoff.view with
+                 | Eio.Cancel.Cancelled _ as cancel -> raise cancel
+                 | _ -> Wait)
+            in
+            call t (Context_request (Rollover (Successor_selection (handoff, decision)))))
+    ; successor_inference =
+        Option.bind t.foreground_successor ~f:(fun selected ->
+          Option.some_if
+            (Agent_protocol.Id.Operation.equal operation_id selected.operation)
+            Chat_response.Root_context.Successor.
+              { pending = selected.pending
+              ; optional_hint = None
+              ; check_prepared =
+                  (fun ~optional_hint prepared ->
+                    let keep =
+                      call
+                        t
+                        (Context_request
+                           (Rollover
+                              (Successor_prepared (selected, optional_hint, prepared))))
+                      |> Result.map_error ~f:(fun (failure : Agent_protocol.Error.t) ->
+                        failure.message)
+                      |> Result.ok_or_failwith
+                    in
+                    if not keep
+                    then raise Chat_response.Root_context.Successor.Omit_optional_hint)
+              ; guard =
+                  (fun attempt ->
+                    call
+                      t
+                      (Context_request (Rollover (Successor_dispatch (selected, attempt))))
+                    |> Result.map_error ~f:(fun (failure : Agent_protocol.Error.t) ->
+                      failure.message)
+                    |> Result.ok_or_failwith)
+              })
     ; consume_deferred = (fun () -> call t (Consume_deferred publication))
     ; consume_notifications =
         (fun plan ->
@@ -49012,7 +49178,7 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Set_idle_moderator_cancel _
   | Configuration
   | Context_request (Capacity (Read _ | Publish _))
-  | Context_request (Rollover (Native_remaining _))
+  | Context_request (Rollover (Native_remaining _ | Successor_handoff _))
   | Finish_configuration_capture _
   | Lifecycle_state _
   | Retire_lifecycle _
@@ -49232,6 +49398,10 @@ let lifecycle_request_allowed : type a. a request -> bool = function
       (Rollover
          ( Native_new_window _
          | Worker_settled _
+         | Successor_selection _
+         | Successor_prepared _
+         | Successor_dispatch _
+         | Successor_control _
          | Operator_request _
          | Operator_settle _
          | Operator_checkpoint _ ))
@@ -57641,6 +57811,7 @@ let settle_context_rollover_internal
           let%bind change =
             R.Commit.create
               ?batch
+              ~schedule_foreground:(Option.is_some batch)
               receipt.intent
               ~expected
               ~successor
@@ -57709,6 +57880,427 @@ let settled_rollover_authority t publication (intent : Recovery_rollover.Intent.
   | Native _ -> None
 ;;
 
+let successor_expected t scope =
+  Recovery_rollover.Expected.create scope ~revision:t.state.counters.revision
+;;
+
+let save_successor_phase t ~id ~expected ~change ~check =
+  transition
+    t
+    ~check_before_commit:check
+    ~delta:(Session_delta.Recovery_rollover_changed (Schedule { id; expected; change }))
+    ~payloads:[]
+  |> Result.map ~f:ignore
+;;
+
+let check_successor_selected t (selected : Foreground_successor.t) =
+  let open Result.Let_syntax in
+  let module P = Agent_protocol in
+  let%bind _ = running_operation t selected.operation in
+  let%bind () =
+    if
+      Option.exists t.foreground_successor ~f:(phys_equal selected)
+      && Option.exists
+           (active_rollover_window t)
+           ~f:(P.Recovery_window.Scope.equal selected.scope)
+      && Option.exists
+           (current_context_capacity_basis t)
+           ~f:(Configuration_capture.Capacity_basis.equal selected.capacity_basis)
+    then Ok ()
+    else Error (error Conflict "successor operation, window or model selection changed")
+  in
+  let%bind () = require_selected_execution t in
+  let%bind () = check_operation_descendant t selected.operation in
+  selected.check ()
+;;
+
+let begin_successor t ~id ~expected ~check custody =
+  let module P = Agent_protocol in
+  let module Capacity = Session_context_capacity in
+  let open Result.Let_syntax in
+  let%bind () = check () in
+  let%bind () = require_selected_execution t in
+  let%bind () =
+    match inherited_turn_required t.state with
+    | Ordinary | Need_private_origin -> Ok ()
+    | Scoped ->
+      Error
+        (error
+           Permission_denied
+           "governed successor requires a fresh inherited admission")
+  in
+  let%bind target = Configuration_transition.target t.state in
+  let%bind policy =
+    Capacity.Selection.select
+      t.context_capacity_host
+      ~owner:(P.Recovery_window.Scope.session expected.Recovery_rollover.Expected.scope)
+      ~target
+    |> Result.of_option
+         ~error:(error Invalid_state "successor has no selected context policy")
+  in
+  let capacity_basis =
+    Configuration_capture.Capacity_basis.capture t.state ~selection:policy
+  in
+  let%bind input =
+    Recovery_rollover_input.capture
+      t.state
+      ~runtime_admission_open:(runtime_admission_open t)
+  in
+  let%bind pending =
+    History_codec.all_of_protocol (Recovery_rollover_input.entries input)
+  in
+  let operation = create_turn_operation t Recovery_retry in
+  let%bind admission =
+    Turn_admission.create t.state ~operation ~notification_wakes:[] ~adopt_deferred:false
+  in
+  let selected : Foreground_successor.t =
+    { owner = id
+    ; scope = expected.scope
+    ; operation = operation.id
+    ; input
+    ; pending
+    ; capacity_basis
+    ; policy
+    ; check
+    ; prepared = None
+    ; admitted = None
+    ; hold = Preparation_interrupted
+    }
+  in
+  let%map _ =
+    transition
+      t
+      ~check_before_commit:(fun () ->
+        let%bind () = check () in
+        check_turn_custody t custody)
+      ~delta:
+        (Batch
+           (Recovery_rollover_changed
+              (Schedule { id; expected; change = Begin operation.id })
+            :: Turn_admission.deltas admission))
+      ~payloads:(Turn_admission.payloads admission)
+  in
+  t.foreground_successor <- Some selected;
+  install_operation_agent_custody t operation custody;
+  launch_worker t operation
+;;
+
+let check_successor_input t (selected : Foreground_successor.t) =
+  Recovery_rollover_input.check
+    selected.input
+    t.state
+    ~operation:selected.operation
+    ~runtime_admission_open:(runtime_admission_open t)
+;;
+
+let check_successor_prepared t (selected : Foreground_successor.t) ~optional_hint prepared
+  =
+  let module R = Inference_runtime in
+  let module Capacity = R.Context_capacity.Assessment in
+  let open Result.Let_syntax in
+  let hold reason message =
+    selected.hold <- reason;
+    Error (error Conflict message)
+  in
+  let%bind () =
+    Result.map_error (check_successor_selected t selected) ~f:(fun failure ->
+      selected.hold <- Authority_unavailable;
+      failure)
+  in
+  let%bind () =
+    Result.map_error (check_successor_input t selected) ~f:(fun failure ->
+      selected.hold <- Required_input_unavailable;
+      failure)
+  in
+  let%bind () =
+    if Recovery_rollover_input.wakes_authorized selected.input
+    then Ok ()
+    else hold Authority_unavailable "successor wake publisher is unavailable"
+  in
+  let%bind () =
+    match selected.prepared with
+    | None
+      when R.Prepared.binding_guard prepared ()
+           && R.Prepared.includes_history
+                prepared
+                (Recovery_rollover_input.required selected.input) -> Ok ()
+    | _ ->
+      hold
+        Preparation_interrupted
+        "successor preparation is not the selected first request"
+  in
+  let policy = Session_context_capacity.Selection.policy selected.policy in
+  let assessment = R.Prepared.assess_capacity ?policy prepared in
+  match Capacity.view assessment with
+  | Assessed { pressure = Hard_limit_exceeded; _ } when optional_hint -> Ok false
+  | Assessed { pressure = Hard_limit_exceeded; _ } ->
+    hold Capacity "successor required input exceeds the selected limit"
+  | Unavailable _ when optional_hint -> Ok false
+  | Unavailable _ ->
+    hold Capacity_unknown "successor required input has no qualified capacity"
+  | Assessed _ ->
+    selected.prepared <- Some prepared;
+    Ok true
+;;
+
+let successor_attempt_ordinal t (selected : Foreground_successor.t) attempt =
+  let module R = Inference_runtime in
+  let module H = Inference_ledger.Handle in
+  let module P = Agent_protocol in
+  List.find_map (Inference_ledger.rows t.state.inference_ledger) ~f:(fun row ->
+    let handle = Inference_ledger.Row.handle row in
+    Option.some_if
+      (Option.equal P.Id.Operation.equal (H.operation_id handle) (Some selected.operation)
+       && Option.is_none (H.invocation_id handle)
+       && Transcript.Scope.equal (H.scope handle) (R.Attempt.scope attempt)
+       && Inference.Observation.Observation_id.equal
+            (H.accounting_id handle)
+            (R.Attempt.accounting_id attempt))
+      (H.ordinal handle))
+  |> Result.of_option
+       ~error:(error Conflict "successor attempt has no exact durable admission")
+;;
+
+let admit_successor_dispatch t (selected : Foreground_successor.t) attempt =
+  let module P = Agent_protocol in
+  let module R = Inference_runtime in
+  let open Result.Let_syntax in
+  let current () = check_successor_selected t selected in
+  let%bind () = current () in
+  let%bind prepared =
+    selected.prepared
+    |> Result.of_option ~error:(error Conflict "successor has no selected preparation")
+  in
+  let%bind () =
+    if R.Prepared.owns_attempt prepared attempt && R.Prepared.binding_guard prepared ()
+    then Ok ()
+    else Error (error Conflict "dispatch does not own the successor preparation")
+  in
+  let final_check () =
+    (match current () with
+     | Ok () -> ()
+     | Error failure -> failwith failure.message);
+    if not (R.Prepared.binding_guard prepared ())
+    then failwith "successor model preparation changed before submission"
+  in
+  match selected.admitted with
+  | Some (previous, _) when phys_equal previous attempt -> Ok final_check
+  | Some _ -> Error (error Conflict "successor is already admitted")
+  | None ->
+    let%bind ordinal = successor_attempt_ordinal t selected attempt in
+    let check () =
+      let%bind () = current () in
+      check_successor_input t selected
+    in
+    let%bind () = check () in
+    let%bind expected = successor_expected t selected.scope in
+    let%bind pending =
+      prepare_pending
+        t
+        (Adopt
+           { boundary = Successor selected.operation
+           ; runtime_admission_open = runtime_admission_open t
+           })
+    in
+    let entries = Pending_plan.adopted_entries (Pending_transition.plan pending) in
+    let%bind () =
+      if
+        List.equal
+          P.History.equal_entry
+          entries
+          (Recovery_rollover_input.entries selected.input)
+      then Ok ()
+      else Error (error Conflict "successor FIFO selection changed")
+    in
+    let%bind wakes =
+      List.map (Recovery_rollover_input.wakes selected.input) ~f:(fun value ->
+        let%map wake = P.Delivery.accept_wake value ~operation_id:selected.operation in
+        Session_delta.Delivery_wake_changed wake)
+      |> Result.all
+    in
+    let schedule =
+      Session_delta.Recovery_rollover_changed
+        (Schedule
+           { id = selected.owner
+           ; expected
+           ; change = Admit { operation = selected.operation; ordinal }
+           })
+    in
+    let pending_deltas, payloads =
+      match entries with
+      | [] -> [], []
+      | _ ->
+        ( [ Pending_transition.delta pending ]
+        , [ P.Event.Durable.Payload.History_appended entries ] )
+    in
+    let delta = Session_delta.Batch (pending_deltas @ wakes @ [ schedule ]) in
+    let completion_sample = producer_completion_sample t ~delta in
+    let%bind candidate = prepare_transition ?completion_sample t ~delta ~payloads in
+    let%map () =
+      install
+        ~protected_successor_append:(selected, attempt)
+        ?completion_sample
+        ~check_before_commit:check
+        t
+        candidate
+    in
+    selected.admitted <- Some (attempt, ordinal);
+    final_check
+;;
+
+let successor_control t actor attachment_id authorize id expected action =
+  let module P = Agent_protocol in
+  let module C = Recovery_rollover_continuation in
+  let open Result.Let_syntax in
+  let check () =
+    rollover_operator t actor ~attachment_id ~authorize |> Result.map ~f:ignore
+  in
+  let find () =
+    let%bind () = check () in
+    match Session_delta.foreground_continuation t.state with
+    | Some current when P.Id.Operation.equal current.owner id -> Ok current
+    | _ -> Error (error Invalid_state "successor continuation is unavailable")
+  in
+  let%bind current = find () in
+  let%bind () =
+    let%bind actual = successor_expected t expected.Recovery_rollover.Expected.scope in
+    if
+      Recovery_rollover.Expected.equal actual expected
+      && Option.exists
+           (active_rollover_window t)
+           ~f:(P.Recovery_window.Scope.equal expected.scope)
+    then Ok ()
+    else Error (error Conflict "successor continuation cut changed")
+  in
+  let%bind current, expected =
+    match current.phase, t.state.active_operation with
+    | C.Preparing operation, None ->
+      let%bind () =
+        save_successor_phase
+          t
+          ~id
+          ~expected
+          ~change:(Hold { operation; reason = Preparation_interrupted })
+          ~check
+      in
+      let%bind current = find () in
+      let%map expected = successor_expected t expected.scope in
+      current, expected
+    | _ -> Ok (current, expected)
+  in
+  let%bind () =
+    match action, current.phase with
+    | C.Continue, (Admitted _ | Finished _)
+    | Wait_for_wake, Waiting
+    | Finish_followup, Finished Script_finished
+    | Cancel_followup, Finished Cancelled -> Ok ()
+    | C.Continue, _ ->
+      let custody = create_agent_custody actor in
+      (match begin_successor t ~id ~expected ~check (Some custody) with
+       | Ok () -> Ok ()
+       | Error failure ->
+         retire_agent_custody custody;
+         Error failure)
+    | Wait_for_wake, _ -> save_successor_phase t ~id ~expected ~change:Wait ~check
+    | Finish_followup, _ ->
+      save_successor_phase t ~id ~expected ~change:(Finish Script_finished) ~check
+    | Cancel_followup, Preparing operation ->
+      cancel_operation_internal t attachment_id operation |> Result.map ~f:ignore
+    | Cancel_followup, _ ->
+      save_successor_phase t ~id ~expected ~change:(Finish Cancelled) ~check
+  in
+  find ()
+;;
+
+let finish_successor_worker t publication outcome =
+  let open Result.Let_syntax in
+  match t.foreground_successor with
+  | Some selected
+    when Agent_protocol.Id.Operation.equal
+           selected.operation
+           publication.Foreground_publication.operation.id
+         && foreground_publication_matches t publication ->
+    let%map () =
+      if preparing_successor t selected.operation
+      then (
+        let%bind expected = successor_expected t selected.scope in
+        let change =
+          match outcome, t.state.active_operation with
+          | Operation_worker.Cancelled _, _ | _, Some { state = Cancelling; _ } ->
+            Recovery_rollover_continuation.Stop_preparation
+              { operation = selected.operation; reason = Cancelled }
+          | _ -> Hold { operation = selected.operation; reason = selected.hold }
+        in
+        save_successor_phase t ~id:selected.owner ~expected ~change ~check:(fun () ->
+          check_foreground_publication t publication))
+      else Ok ()
+    in
+    t.foreground_successor <- None;
+    outcome
+  | _ -> Ok outcome
+;;
+
+let select_successor_handoff t (handoff : Foreground_successor.Handoff.t) decision =
+  let module P = Agent_protocol in
+  let open Result.Let_syntax in
+  let scope = handoff.view.window in
+  let current () =
+    let%map () = require_runtime_admission t in
+    Option.exists t.foreground_successor_handoff ~f:(phys_equal handoff)
+    && Option.exists (active_rollover_window t) ~f:(P.Recovery_window.Scope.equal scope)
+    && Option.exists (Session_delta.foreground_continuation t.state) ~f:(fun current ->
+      P.Id.Operation.equal current.owner handoff.owner
+      && Recovery_rollover_continuation.equal_phase current.phase Awaiting)
+  in
+  let%bind live = current () in
+  if not live
+  then (
+    if Option.exists t.foreground_successor_handoff ~f:(phys_equal handoff)
+    then (
+      t.foreground_successor_handoff <- None;
+      Option.iter handoff.custody ~f:retire_agent_custody);
+    Ok ())
+  else (
+    let retained = ref false in
+    Exn.protect
+      ~finally:(fun () ->
+        if Option.exists t.foreground_successor_handoff ~f:(phys_equal handoff)
+        then t.foreground_successor_handoff <- None;
+        if not !retained then Option.iter handoff.custody ~f:retire_agent_custody)
+      ~f:(fun () ->
+        let%bind expected = successor_expected t scope in
+        let check_current () =
+          let%bind live = current () in
+          if live
+          then Ok ()
+          else Error (error Conflict "successor selection was superseded")
+        in
+        let select change =
+          save_successor_phase t ~id:handoff.owner ~expected ~change ~check:check_current
+        in
+        match decision, handoff.view.checkpoint, handoff.custody with
+        | Recovery_rollover_continuation.Hook.Finish, _, _ ->
+          (match handoff.check () with
+           | Ok () -> select (Finish Script_finished)
+           | Error _ -> select Wait)
+        | Wait, _, _ | Continue, `Archive_only, _ | Continue, _, None -> select Wait
+        | Continue, `Checkpointed, Some custody ->
+          (match
+             begin_successor
+               t
+               ~id:handoff.owner
+               ~expected
+               ~check:handoff.check
+               (Some custody)
+           with
+           | Ok () ->
+             retained := true;
+             Ok ()
+           | Error _ ->
+             let%bind () = require_runtime_admission t in
+             select Wait)))
+;;
+
 let settle_foreground_tool_batch t (publication : Foreground_publication.t) live =
   let module P = Agent_protocol in
   let module R = Recovery_rollover in
@@ -57759,24 +58351,30 @@ let settle_foreground_tool_batch t (publication : Foreground_publication.t) live
          let%bind () = exact_attempt () in
          let%bind status = read_context_capacity t operation in
          match status with
-         | Current _
-           when List.is_empty t.invocation_executions
-                && (not (moderator_is_borrowed t))
-                && (not t.idle_moderator_borrowed)
-                && not t.state.halted -> Ok ()
-         | Current _ | Disabled | Stale_preparation _ | Awaiting_preparation _ ->
-           Error
-             (error
-                Conflict
-                "settled batch has active ownership or its selected policy changed")
+         | Current _ when not (List.is_empty t.invocation_executions) ->
+           Error (error Conflict "settled batch still has an active invocation")
+         | Current _ when moderator_is_borrowed t || t.idle_moderator_borrowed ->
+           Error (error Conflict "settled batch still has an active moderator")
+         | Current _ when t.state.halted ->
+           Error (error Conflict "settled batch belongs to a halted session")
+         | Current _ -> Ok ()
+         | Disabled | Stale_preparation _ | Awaiting_preparation _ ->
+           Error (error Conflict "settled batch selected preparation is no longer current")
        in
        let%bind expected = R.Expected.create scope ~revision:t.state.counters.revision in
        let checkpoint = Option.bind t.state.recovery_rollover ~f:R.checkpoint in
-       let retain =
-         List.take
-           t.state.conversation.canonical_history
-           t.state.conversation.initial_prompt_entry_count
-         |> List.map ~f:(fun entry -> entry.P.History.id)
+       let%bind retain =
+         Session_delta.successor_retained_history t.state publication.operation
+       in
+       let transferred =
+         let%bind owner = operation_agent_admission t operation in
+         let%bind owner =
+           Result.of_option
+             owner
+             ~error:(error Permission_denied "settled owner is unavailable")
+         in
+         Execution_custody.Admission.transfer owner
+         |> Result.map ~f:Execution_custody.Admission.custody
        in
        let after_commit_install () =
          if Option.exists t.foreground_publication ~f:(phys_equal publication)
@@ -57787,7 +58385,7 @@ let settle_foreground_tool_batch t (publication : Foreground_publication.t) live
            t.notification_inputs <- None;
            t.active_cancel <- None)
        in
-       let%map receipt =
+       let receipt =
          settle_context_rollover_internal
            ~batch
            ~after_commit_install
@@ -57800,12 +58398,50 @@ let settle_foreground_tool_batch t (publication : Foreground_publication.t) live
            expected
            (Publish { checkpoint; retain })
        in
-       (match receipt.status with
-        | Terminal (Committed _) -> S.Retire
-        | Terminal (Superseded _) ->
-          t.live_operator_rollover <- None;
-          S.Continue
-        | Pending -> S.Continue))
+       (match receipt with
+        | Error failure ->
+          Result.iter transferred ~f:(Option.iter ~f:retire_agent_custody);
+          Error failure
+        | Ok { status = Terminal (Committed committed); _ } ->
+          Option.iter t.foreground_successor_handoff ~f:(fun other ->
+            Option.iter other.custody ~f:retire_agent_custody);
+          let custody = Result.ok transferred |> Option.join in
+          let check () =
+            let%bind custody =
+              Result.of_option
+                custody
+                ~error:(error Permission_denied "successor authority unavailable")
+            in
+            let%bind actor = Execution_custody.actor custody in
+            let principal = Operator_authorization.principal actor in
+            if P.Principal.has_scope principal Send_messages
+            then Ok ()
+            else Error (error Permission_denied "successor authority expired")
+          in
+          let checkpoint =
+            match committed.checkpoint with
+            | Checkpointed _ -> `Checkpointed
+            | Archive_only _ -> `Archive_only
+          in
+          t.foreground_successor_handoff
+          <- Some
+               { owner = intent.id
+               ; predecessor = publication
+               ; view = { window = committed.successor; checkpoint }
+               ; check
+               ; custody
+               };
+          Ok S.Retire
+        | Ok { status = Terminal (Superseded _); _ } ->
+          Result.iter transferred ~f:(Option.iter ~f:retire_agent_custody);
+          if
+            Option.exists t.live_operator_rollover ~f:(fun selected ->
+              P.Id.Operation.equal intent.id selected.id)
+          then t.live_operator_rollover <- None;
+          Ok S.Continue
+        | Ok { status = Pending; _ } ->
+          Result.iter transferred ~f:(Option.iter ~f:retire_agent_custody);
+          Ok S.Continue))
 ;;
 
 let handle_recovery_rollover
@@ -57866,6 +58502,16 @@ let handle_recovery_rollover
     in
     admit_recovery_rollover t ~check ~check_basis ~expected
   | Worker_settled (publication, live) -> settle_foreground_tool_batch t publication live
+  | Successor_handoff publication ->
+    Ok
+      (Option.filter t.foreground_successor_handoff ~f:(fun handoff ->
+         phys_equal handoff.predecessor publication))
+  | Successor_selection (handoff, decision) -> select_successor_handoff t handoff decision
+  | Successor_prepared (selected, optional_hint, prepared) ->
+    check_successor_prepared t selected ~optional_hint prepared
+  | Successor_dispatch (selected, attempt) -> admit_successor_dispatch t selected attempt
+  | Successor_control (actor, attachment_id, authorize, id, expected, action) ->
+    successor_control t actor attachment_id authorize id expected action
   | Operator_request (actor, attachment_id, authorize, force, key, expected) ->
     let operator () = rollover_operator t actor ~attachment_id ~authorize in
     let authorize_force =
@@ -59760,15 +60406,35 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
         commit_worker_entry t operation_id ~check entry)
     | Prepare_authoring_input (publication, materialization, history, effective) ->
       with_foreground_publication t publication (fun operation_id ~check ->
-        prepare_authoring_input t operation_id ~check materialization history effective)
+        let open Result.Let_syntax in
+        let%bind entries =
+          prepare_authoring_input t operation_id ~check materialization history effective
+        in
+        match t.foreground_successor, entries with
+        | Some selected, _ :: _ when preparing_successor t operation_id ->
+          let%map input =
+            Recovery_rollover_input.record_authoring selected.input t.state entries
+          in
+          selected.input <- input;
+          selected.capacity_basis
+          <- Configuration_capture.Capacity_basis.capture
+               t.state
+               ~selection:selected.policy;
+          entries
+        | _ -> Ok entries)
     | Publish_invocation_output (publication, invocation_id, entry) ->
       with_foreground_publication t publication (fun operation_id ~check ->
         publish_invocation_output t operation_id ~check invocation_id entry)
     | Consume_deferred publication ->
-      with_foreground_publication t publication (consume_deferred t)
+      with_foreground_publication t publication (fun operation_id ~check ->
+        if preparing_successor t operation_id
+        then Ok []
+        else consume_deferred t operation_id ~check)
     | Consume_notifications (publication, plan) ->
       with_foreground_publication t publication (fun operation_id ~check ->
-        consume_notifications_internal ~check t operation_id plan)
+        if preparing_successor t operation_id
+        then Ok Chat_response.In_memory_stream.Safe_point_input.empty
+        else consume_notifications_internal ~check t operation_id plan)
     | Admit_standalone_delivery plan -> admit_standalone_delivery_internal t plan
     | Retire_obsolete_moderator_delivery (revision, job) ->
       retire_obsolete_moderator_delivery_internal t revision job
@@ -59776,13 +60442,31 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
       deliver_standalone_completion_internal t revision job capabilities policy
     | Consume_initial_notifications (publication, proposal) ->
       with_foreground_publication t publication (fun operation_id ~check ->
-        consume_notifications_internal
-          ~check
-          ~wakes:proposal.wakes
-          ~discarded_wakes:proposal.discarded_wakes
-          t
-          operation_id
-          proposal.pending)
+        let open Result.Let_syntax in
+        let consume ~track_wakes =
+          consume_notifications_internal
+            ~check
+            ~track_wakes
+            ~wakes:proposal.wakes
+            ~discarded_wakes:proposal.discarded_wakes
+            t
+            operation_id
+            proposal.pending
+        in
+        match t.foreground_successor with
+        | Some selected when preparing_successor t operation_id ->
+          let%bind () = check_successor_input t selected in
+          let%bind batch = consume ~track_wakes:false in
+          let%map input =
+            Recovery_rollover_input.record_notifications
+              selected.input
+              t.state
+              batch.entries
+              ~proposal
+          in
+          selected.input <- input;
+          batch
+        | _ -> consume ~track_wakes:true)
     | Commit_worker_moderator (publication, snapshot) ->
       with_foreground_publication t publication (fun operation_id ~check ->
         commit_worker_moderator t operation_id ~check snapshot)
@@ -59803,6 +60487,14 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
         cancel ();
         Ok ())
     | Worker_terminal (publication, outcome, compaction_custody) ->
+      let open Result.Let_syntax in
+      let%bind () =
+        match t.foreground_successor_handoff with
+        | Some handoff when phys_equal handoff.predecessor publication ->
+          select_successor_handoff t handoff Wait
+        | _ -> Ok ()
+      in
+      let%bind outcome = finish_successor_worker t publication outcome in
       worker_publication_terminal t publication outcome compaction_custody
     | Compaction_terminal (operation_id, outcome) ->
       with_runtime_terminal t operation_id (fun () ->
@@ -60169,6 +60861,8 @@ let create_internal
     ; context_capacity_host = Session_context_capacity.Host.off
     ; rollover_requires_recovery = false
     ; live_operator_rollover = None
+    ; foreground_successor = None
+    ; foreground_successor_handoff = None
     ; recurrence_controller = None
     ; recurrence_runtime = Recurrence_runtime.create ~origin:(services.monotonic_now ())
     ; recurrence_creation_owner = ref ()
@@ -63513,6 +64207,14 @@ let settle_context_rollover
        (Rollover
           (Operator_settle
              (actor, attachment_id, authorize, authorize_force, id, expected, settlement))))
+;;
+
+let control_context_rollover t ~actor ~attachment_id ~authorize ~id expected action =
+  call
+    t
+    (Context_request
+       (Rollover
+          (Successor_control (actor, attachment_id, authorize, id, expected, action))))
 ;;
 
 let record_context_checkpoint t ~actor ~attachment_id ~authorize expected ~notes =

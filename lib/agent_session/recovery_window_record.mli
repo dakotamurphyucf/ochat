@@ -30,6 +30,7 @@ val create
   -> Member.t list
   -> (t, P.Error.t) result
 
+val equal : t -> t -> bool
 val manifest : t -> P.Recovery_window.t
 val origin : t -> origin
 val state : t -> state

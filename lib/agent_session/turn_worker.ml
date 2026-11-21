@@ -312,6 +312,8 @@ let run
       ?runtime_policy
       ?authoring_context
       ?agent_guidance
+      ?successor_guidance
+      ?after_rollover
       ?dispatch_tool
       ?moderator_events
       ?notification_input
@@ -368,6 +370,45 @@ let run
   (match initial_entries with
    | [] -> ()
    | _ -> checkpoint_moderator ());
+  let successor =
+    Option.map capabilities.successor_inference ~f:(fun successor ->
+      let optional_hint =
+        Option.map successor_guidance ~f:(fun make -> make ~input ~capabilities)
+      in
+      { successor with optional_hint })
+  in
+  let fresh_binding = ref (Option.is_some capabilities.successor_inference) in
+  let consume_fresh_binding () =
+    let fresh = !fresh_binding in
+    fresh_binding := false;
+    fresh
+  in
+  let initial_context =
+    match successor, root_binding with
+    | Some _, None -> Inference_runtime.Context.detach config.inference_context
+    | _ -> config.inference_context
+  in
+  let root_context =
+    Option.map capabilities.root_context ~f:(fun source ->
+      match root_binding with
+      | Some binding ->
+        Chat_response.Root_binding.wrap ~fresh:consume_fresh_binding binding source
+      | None ->
+        Chat_response.Root_context.
+          { with_context =
+              (fun ~previous ~history f ->
+                source.with_context
+                  ~previous
+                  ~history
+                  (fun context ~on_prepared ~on_dispatch ->
+                     let context =
+                       if consume_fresh_binding ()
+                       then Inference_runtime.Context.detach context
+                       else context
+                     in
+                     f context ~on_prepared ~on_dispatch))
+          })
+  in
   let final_history =
     let prepare_model_input =
       Option.map authoring_context ~f:(fun make ->
@@ -386,15 +427,14 @@ let run
         ~env:config.Config.env
         ?agent_guidance:
           (Option.map agent_guidance ~f:(fun make -> make ~input ~capabilities))
-        ~inference_context:config.inference_context
-        ?root_context:
-          (Option.map capabilities.root_context ~f:(fun source ->
-             Option.value_map root_binding ~default:source ~f:(fun binding ->
-               Chat_response.Root_binding.wrap binding source)))
+        ~inference_context:initial_context
+        ?root_context
+        ?successor
         ?on_settled_batch:
           (Option.map capabilities.settle_tool_batch ~f:(fun settle batch ->
              match settle batch |> require_ok with
              | Chat_response.Settled_tool_batch.Retire ->
+               capabilities.select_rollover_followup after_rollover |> require_ok;
                runtime_requests := [];
                Chat_response.Settled_tool_batch.Retire
              | Continue -> Chat_response.Settled_tool_batch.Continue))
@@ -451,6 +491,8 @@ let create
       ?runtime_policy
       ?authoring_context
       ?agent_guidance
+      ?successor_guidance
+      ?after_rollover
       ?dispatch_tool
       ?moderator_events
       ?notification_input
@@ -464,6 +506,8 @@ let create
         ?runtime_policy
         ?authoring_context
         ?agent_guidance
+        ?successor_guidance
+        ?after_rollover
         ?dispatch_tool
         ?moderator_events
         ?notification_input

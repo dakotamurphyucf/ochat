@@ -47,6 +47,21 @@ module Submission_guard : sig
 
   val empty : t
   val create : refresh:(unit -> unit -> unit) -> t
+
+  (** Hold grouped host source custody across refresh, any actual application
+      admission, and the first write. A valid refresh returns a nonyielding
+      check that can be performed both sides of that admission. *)
+  val create_scoped
+    :  leases:Protected_delivery.Lease.t list
+    -> refresh:(unit -> unit -> unit)
+    -> t
+
+  (** Run a host writer only after the selected credential, operation and
+      source guards pass. The returned check and ordinary final checks run
+      synchronously again immediately before the actual application write.
+      A writer must be idempotent for the same physical attempt. *)
+  val create_admission : refresh:(unit -> unit -> unit) -> t
+
   val compose : t -> t -> t
   val check : t -> unit
   val with_submission : t -> f:(unit -> 'a) -> 'a
@@ -315,6 +330,13 @@ module Prepared : sig
   val preparation_id : t -> string
   val configuration : t -> Inference.Observation.Configuration.t
   val fingerprint : t -> string
+
+  (** Physical association created by [start], including protected plans. *)
+  val owns_attempt : t -> Attempt.t -> bool
+
+  (** Check ordered, exact admitted history occurrences without returning any
+      request data. Fails when a selected occurrence has a different payload. *)
+  val includes_history : t -> History_entry.t list -> bool
 
   (** Inspect final positions in the admitted neutral request, excluding both
       ends of protected tool delivery before computing evidence. No request

@@ -138,6 +138,7 @@ module Receipt = struct
         { owner : P.Id.Operation.t
         ; predecessor : P.Id.Operation.t
         }
+    | Scheduled_foreground of Recovery_rollover_continuation.t
   [@@deriving equal, sexp_of]
 
   type committed =
@@ -211,6 +212,12 @@ module Receipt = struct
         ; "id", P.Id.Operation.to_json owner
         ; "predecessor", P.Id.Operation.to_json predecessor
         ]
+    | Scheduled_foreground continuation ->
+      `Object
+        [ "kind", `String "scheduled_foreground"
+        ; "id", P.Id.Operation.to_json continuation.owner
+        ; "schedule", Recovery_rollover_continuation.to_json continuation
+        ]
   ;;
 
   let continuation_of_json json =
@@ -223,6 +230,13 @@ module Receipt = struct
     | "awaiting_settled_foreground" ->
       let%map predecessor = J.required_as fields "predecessor" P.Id.Operation.of_json in
       Awaiting_settled_foreground { owner; predecessor }
+    | "scheduled_foreground" ->
+      let%bind schedule =
+        J.required_as fields "schedule" Recovery_rollover_continuation.of_json
+      in
+      if P.Id.Operation.equal owner schedule.owner
+      then Ok (Scheduled_foreground schedule)
+      else invalid "rollover schedule owner changed"
     | _ -> invalid "unknown rollover continuation obligation"
   ;;
 
@@ -283,14 +297,19 @@ module Receipt = struct
       let owner =
         match continuation with
         | Awaiting_after_commit owner | Awaiting_settled_foreground { owner; _ } -> owner
+        | Scheduled_foreground schedule -> schedule.owner
+      in
+      let predecessor =
+        match continuation with
+        | Awaiting_after_commit _ -> None
+        | Awaiting_settled_foreground { predecessor; _ } -> Some predecessor
+        | Scheduled_foreground schedule -> Some schedule.predecessor
       in
       let continuation_binds_requester =
-        match continuation, t.intent.requester with
-        | Awaiting_after_commit _, _ -> true
-        | Awaiting_settled_foreground { predecessor; _ }, Native { operation; _ } ->
-          P.Id.Operation.equal predecessor operation
-        | Awaiting_settled_foreground { predecessor; _ }, Operator _ ->
-          not (P.Id.Operation.equal predecessor t.intent.id)
+        Option.for_all predecessor ~f:(fun predecessor ->
+          match t.intent.requester with
+          | Native { operation; _ } -> P.Id.Operation.equal predecessor operation
+          | Operator _ -> not (P.Id.Operation.equal predecessor t.intent.id))
       in
       let checkpoint_binds_cut =
         match checkpoint with
@@ -343,6 +362,7 @@ module Commit = struct
     ; checkpoint : Receipt.checkpoint_quality
     ; retain : P.History.Id.t list
     ; batch : Recovery_rollover_batch.t option
+    ; schedule_foreground : bool
     }
 
   let validate_selection t =
@@ -350,6 +370,11 @@ module Commit = struct
       Stdlib.List.compare_length_with t.retain Recovery_window_record.max_members > 0
       || List.contains_dup t.retain ~compare:P.History.Id.compare
     then invalid "invalid rollover carry selection"
+    else if t.schedule_foreground
+    then (
+      match t.batch with
+      | Some batch when not (P.Id.Operation.equal t.id batch.operation) -> Ok t
+      | _ -> invalid "scheduled rollover requires an independent settled foreground")
     else Ok t
   ;;
 
@@ -362,6 +387,15 @@ module Commit = struct
       ; continuation =
           (match t.batch with
            | None -> Awaiting_after_commit t.id
+           | Some batch when t.schedule_foreground ->
+             let schedule =
+               Recovery_rollover_continuation.create
+                 ~owner:t.id
+                 ~predecessor:batch.operation
+               |> Result.map_error ~f:(fun (failure : P.Error.t) -> failure.message)
+               |> Result.ok_or_failwith
+             in
+             Scheduled_foreground schedule
            | Some batch ->
              Awaiting_settled_foreground { owner = t.id; predecessor = batch.operation })
       }
@@ -376,11 +410,28 @@ module Commit = struct
     else conflict "rollover publication does not match the admitted intent"
   ;;
 
-  let create ?batch (intent : Intent.t) ~expected ~successor ~archive ~checkpoint ~retain =
+  let create
+        ?batch
+        ?(schedule_foreground = false)
+        (intent : Intent.t)
+        ~expected
+        ~successor
+        ~archive
+        ~checkpoint
+        ~retain
+    =
     let open Result.Let_syntax in
     let%bind t =
       validate_selection
-        { id = intent.id; expected; successor; archive; checkpoint; retain; batch }
+        { id = intent.id
+        ; expected
+        ; successor
+        ; archive
+        ; checkpoint
+        ; retain
+        ; batch
+        ; schedule_foreground
+        }
     in
     let%map () = check_intent t intent in
     t
@@ -395,6 +446,7 @@ module Commit = struct
        ; "checkpoint", Receipt.checkpoint_to_json ~public:false t.checkpoint
        ; "retain", `Array (List.map t.retain ~f:P.History.Id.to_json)
        ]
+       @ (if t.schedule_foreground then [ "schedule_foreground", `True ] else [])
        @ Option.to_list
            (Option.map t.batch ~f:(fun batch ->
               "batch", Recovery_rollover_batch.to_json batch)))
@@ -415,7 +467,10 @@ module Commit = struct
     let%bind checkpoint = J.required_as fields "checkpoint" Receipt.checkpoint_of_json in
     let%bind retain = J.required_as fields "retain" (J.list P.History.Id.of_json) in
     let%bind batch = J.optional_as fields "batch" Recovery_rollover_batch.of_json in
-    validate_selection { id; expected; successor; archive; checkpoint; retain; batch }
+    let%bind schedule_foreground = J.optional_as fields "schedule_foreground" J.bool in
+    let schedule_foreground = Option.value schedule_foreground ~default:false in
+    validate_selection
+      { id; expected; successor; archive; checkpoint; retain; batch; schedule_foreground }
   ;;
 end
 
@@ -447,12 +502,21 @@ let pending t =
 
 let checkpoint t = t.checkpoint
 
-let awaiting_foreground t ~scope =
-  List.exists t.receipts ~f:(fun receipt ->
+let foreground t ~scope =
+  List.find_map t.receipts ~f:(fun receipt ->
     match receipt.status with
-    | Terminal (Committed { successor; continuation = Awaiting_settled_foreground _; _ })
-      -> Scope.equal successor scope
-    | Pending | Terminal _ -> false)
+    | Terminal (Committed { successor; continuation; _ }) when Scope.equal successor scope
+      ->
+      (match continuation with
+       | Awaiting_after_commit _ -> None
+       | Scheduled_foreground schedule -> Some schedule
+       | Awaiting_settled_foreground { owner; predecessor } ->
+         Recovery_rollover_continuation.create ~owner ~predecessor |> Result.ok)
+    | Pending | Terminal _ -> None)
+;;
+
+let awaiting_foreground t ~scope =
+  Option.exists (foreground t ~scope) ~f:Recovery_rollover_continuation.is_pending
 ;;
 
 let previous t ~requester ~expected =
@@ -482,6 +546,11 @@ module Change = struct
         { id : P.Id.Operation.t
         ; terminal : Receipt.terminal
         }
+    | Schedule of
+        { id : P.Id.Operation.t
+        ; expected : Expected.t
+        ; change : Recovery_rollover_continuation.change
+        }
 
   let to_json = function
     | Admit intent -> `Object [ "kind", `String "admit"; "intent", Intent.to_json intent ]
@@ -495,6 +564,13 @@ module Change = struct
         [ "kind", `String "settle"
         ; "id", P.Id.Operation.to_json id
         ; "status", Receipt.status_to_json (Terminal terminal)
+        ]
+    | Schedule { id; expected; change } ->
+      `Object
+        [ "kind", `String "schedule"
+        ; "id", P.Id.Operation.to_json id
+        ; "expected", Expected.to_json expected
+        ; "change", Recovery_rollover_continuation.change_to_json change
         ]
   ;;
 
@@ -515,6 +591,13 @@ module Change = struct
       (match status with
        | Pending -> invalid "settlement requires a terminal disposition"
        | Terminal terminal -> Ok (Settle { id; terminal }))
+    | "schedule" ->
+      let%bind id = J.required_as fields "id" P.Id.Operation.of_json in
+      let%bind expected = J.required_as fields "expected" Expected.of_json in
+      let%map change =
+        J.required_as fields "change" Recovery_rollover_continuation.change_of_json
+      in
+      Schedule { id; expected; change }
     | _ -> invalid "unknown recovery rollover change"
   ;;
 end
@@ -585,6 +668,39 @@ let apply previous_ledger ~active ~revision ~history ~catalog change =
     | Settle { terminal = Committed _; _ } ->
       invalid "committed rollover requires its atomic archive and successor delta"
     | Settle { id; terminal = Superseded _ as terminal } -> settle t ~id ~terminal
+    | Schedule { id; expected; change } ->
+      let%bind receipt, committed, schedule =
+        match find t ~id, foreground t ~scope:active with
+        | Some ({ status = Terminal (Committed committed); _ } as receipt), Some schedule
+          when P.Id.Operation.equal schedule.owner id
+               && Scope.equal committed.successor active
+               && Scope.equal expected.scope active
+               && Int64.equal expected.revision revision ->
+          Ok (receipt, committed, schedule)
+        | _ -> conflict "rollover continuation window or revision changed"
+      in
+      let%bind () =
+        match committed.continuation, change with
+        | Awaiting_settled_foreground _, Recovery_rollover_continuation.Finish _ -> Ok ()
+        | Awaiting_settled_foreground _, _ ->
+          conflict "historical rollover has no retained successor input witness"
+        | Scheduled_foreground _, _ -> Ok ()
+        | Awaiting_after_commit _, _ -> invalid "rollover has no settled foreground work"
+      in
+      let%bind schedule = Recovery_rollover_continuation.apply schedule change in
+      let updated =
+        { receipt with
+          status =
+            Terminal
+              (Committed { committed with continuation = Scheduled_foreground schedule })
+        }
+      in
+      let%map () = Receipt.validate updated in
+      { t with
+        receipts =
+          List.map t.receipts ~f:(fun retained ->
+            if P.Id.Operation.equal retained.intent.id id then updated else retained)
+      }
   in
   let%map () = bounded next in
   next

@@ -55,6 +55,8 @@ module Member : sig
 
   type t
 
+  val equal : t -> t -> bool
+
   val create
     :  P.Recovery_window.Citation.t
     -> source:Source.t

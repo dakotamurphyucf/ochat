@@ -9,8 +9,13 @@ module Policy_path = struct
 end
 
 let prepare previous ~delta ~limits =
-  let%bind.Result () = Session_delta.validate_rollover_transaction delta |> X.document_result in
+  let%bind.Result () =
+    Session_delta.validate_rollover_transaction delta |> X.document_result
+  in
   let previous_value = Session_state_document.value previous in
+  let%bind.Result () =
+    Session_delta.validate_successor_dispatch previous_value delta |> X.document_result
+  in
   let policy_path =
     if
       Session_delta.requires_policy_tracking

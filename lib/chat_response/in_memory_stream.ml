@@ -242,6 +242,7 @@ type ctx =
   { env : Eio_unix.Stdenv.base
   ; root_context : Root_context.t option
   ; on_settled_batch : (Settled_tool_batch.t -> Settled_tool_batch.decision) option
+  ; successor : Root_context.Successor.t option
   ; inference_context : Inference_runtime.Context.t
   ; fork_depth : int option
   ; inference_identity : Neutral_turn.Identity.t
@@ -315,6 +316,7 @@ type args =
   { env : Eio_unix.Stdenv.base
   ; root_context : Root_context.t option
   ; on_settled_batch : (Settled_tool_batch.t -> Settled_tool_batch.decision) option
+  ; successor : Root_context.Successor.t option
   ; inference_context : Inference_runtime.Context.t
   ; fork_depth : int option
   ; inference_identity : Neutral_turn.Identity.t
@@ -1468,6 +1470,7 @@ let make_run_fork_admitted
       allocator = child_allocator
     ; root_context = None
     ; on_settled_batch = None
+    ; successor = None
     ; take_protected_delivery = None
     ; inference_context = Inference_runtime.Context.detach ctx.inference_context
     ; fork_depth = Option.map ctx.fork_depth ~f:(fun depth -> depth + 1)
@@ -2304,7 +2307,11 @@ let run_turn (root_ctx : ctx) ~sw ~(history : History_entry.t list) =
       (match additions with
        | [] -> ()
        | _ -> History_entry.Id_source.validate c.id_source hist |> Result.ok_or_failwith);
-      let inputs = prepared.inputs @ additions in
+      let pending =
+        Option.value_map c.successor ~default:[] ~f:(fun successor -> successor.pending)
+      in
+      let hist = hist @ pending in
+      let inputs = prepared.inputs @ additions @ pending in
       let inputs =
         match
           Option.bind c.safe_point_input ~f:(fun input ->
@@ -2352,6 +2359,14 @@ let run_turn (root_ctx : ctx) ~sw ~(history : History_entry.t list) =
       let run_request inference_context ~on_prepared ~on_dispatch =
         let c = { c with inference_context } in
         let admitted_attempt = ref None in
+        let successor_guard =
+          Option.value_map
+            c.successor
+            ~default:Inference_runtime.Submission_guard.empty
+            ~f:(fun successor ->
+              Inference_runtime.Submission_guard.create_admission ~refresh:(fun () ->
+                successor.guard (Option.value_exn !admitted_attempt)))
+        in
         let request =
           Inference.Request.create
             ~target:(Inference_runtime.Context.target c.inference_context)
@@ -2366,53 +2381,78 @@ let run_turn (root_ctx : ctx) ~sw ~(history : History_entry.t list) =
         let protected_delivery =
           Option.value_map c.take_protected_delivery ~default:[] ~f:(fun take -> take ())
         in
-        let run () =
+        let run ~with_optional_hint =
           Agent_guidance.with_request
             c.agent_guidance
             ~request
-            ~submission_guard:c.submission_guard
+            ~submission_guard:
+              (Inference_runtime.Submission_guard.compose
+                 c.submission_guard
+                 successor_guard)
             ~limits:Transcript.Admission.default
             (fun request ~guard ~reserved_input_tokens:_ ->
-               Neutral_turn.run
-                 ~submission_guard:guard
-                 ~protected_delivery
-                 ~protect_tool_arguments:c.protect_tool_arguments
-                 c.inference_context
-                 ~sw
-                 ~identity:c.inference_identity
-                 ~relation:c.transcript_relation
+               let hint =
+                 if with_optional_hint
+                 then
+                   Option.bind c.successor ~f:(fun successor -> successor.optional_hint)
+                 else None
+               in
+               Agent_guidance.with_optional_hint
+                 hint
                  ~request
-                 ~before_dispatch:(fun prepared ->
-                   on_prepared prepared;
-                   c.before_inference_dispatch prepared)
-                 ~on_attempt:(fun attempt ->
-                   on_dispatch (Inference_runtime.Attempt.configuration attempt);
-                   c.on_inference_attempt attempt;
-                   c.transcript_scope <- Some (Inference_runtime.Attempt.scope attempt);
-                   admitted_attempt := Some attempt)
-                 ~on_event:(fun event ->
-                   match Inference.Event.view event with
-                   | Live event -> publish_inference_live c ~st:!st event
-                   | Candidate_ready { item; payload; local_execution } ->
-                     st
-                     := accept_inference_candidate
-                          ~turn:turn_for_fork
-                          c
-                          ~hist
-                          ~st:!st
-                          ~sem
-                          ~attempt:!admitted_attempt
-                          ~item
-                          ~payload
-                          ~local_execution
-                   | Terminal _ -> ())
-                 ~on_observation:c.on_inference_observation
-                 ~on_completion:c.on_inference_completion
-               |> Result.map_error ~f:(fun error ->
-                 Sexp.to_string_hum (Neutral_turn.Error.sexp_of_t error))
+                 ~submission_guard:guard
+                 ~limits:Transcript.Admission.default
+                 (fun request ~guard ~included:optional_hint ->
+                    Neutral_turn.run
+                      ~submission_guard:guard
+                      ~protected_delivery
+                      ~protect_tool_arguments:(c.protect_tool_arguments || optional_hint)
+                      c.inference_context
+                      ~sw
+                      ~identity:c.inference_identity
+                      ~relation:c.transcript_relation
+                      ~request
+                      ~before_dispatch:(fun prepared ->
+                        Option.iter c.successor ~f:(fun successor ->
+                          successor.check_prepared ~optional_hint prepared);
+                        on_prepared prepared;
+                        c.before_inference_dispatch prepared)
+                      ~on_attempt:(fun attempt ->
+                        on_dispatch (Inference_runtime.Attempt.configuration attempt);
+                        c.on_inference_attempt attempt;
+                        c.transcript_scope
+                        <- Some (Inference_runtime.Attempt.scope attempt);
+                        admitted_attempt := Some attempt)
+                      ~on_event:(fun event ->
+                        match Inference.Event.view event with
+                        | Live event -> publish_inference_live c ~st:!st event
+                        | Candidate_ready { item; payload; local_execution } ->
+                          st
+                          := accept_inference_candidate
+                               ~turn:turn_for_fork
+                               c
+                               ~hist
+                               ~st:!st
+                               ~sem
+                               ~attempt:!admitted_attempt
+                               ~item
+                               ~payload
+                               ~local_execution
+                        | Terminal _ -> ())
+                      ~on_observation:c.on_inference_observation
+                      ~on_completion:c.on_inference_completion
+                    |> Result.map_error ~f:(fun error ->
+                      Sexp.to_string_hum (Neutral_turn.Error.sexp_of_t error))
+                    |> Result.ok_or_failwith)
+               |> Result.map_error ~f:(fun failure ->
+                 failure.Agent_protocol.Error.message)
                |> Result.ok_or_failwith)
           |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
           |> Result.ok_or_failwith
+        in
+        let run () =
+          try run ~with_optional_hint:true with
+          | Root_context.Successor.Omit_optional_hint -> run ~with_optional_hint:false
         in
         let receipt =
           if List.is_empty protected_delivery
@@ -2421,7 +2461,7 @@ let run_turn (root_ctx : ctx) ~sw ~(history : History_entry.t list) =
             Exn.protect ~f:run ~finally:(fun () ->
               List.iter protected_delivery ~f:Inference_runtime.Protected_delivery.retire)
         in
-        c, !admitted_attempt, receipt
+        { c with successor = None }, !admitted_attempt, receipt
       in
       let c, attempt, receipt =
         match c.root_context with
@@ -2505,22 +2545,22 @@ let run_turn (root_ctx : ctx) ~sw ~(history : History_entry.t list) =
             ~tool_followup:(st.run_again || deferred.user_input)
             (tool_requests @ appended_requests @ finish_requests)
         in
-        match decision.end_session_reason with
-        | Some _ -> hist
-        | None ->
-          (match decision.continue with
-           | `Stop -> hist
-           | `Continue ->
-             if st.run_again || deferred.user_input
-             then turn_with_budget c hist ~request_turn_budget:0
-             else (
-               let next_budget =
-                 Runtime_semantics.next_self_triggered_turn_budget
-                   ~policy
-                   ~request_turn_budget
-                 |> Result.ok_or_failwith
-               in
-               turn_with_budget c hist ~request_turn_budget:next_budget)))
+        (match decision.end_session_reason with
+         | Some _ -> hist
+         | None ->
+           (match decision.continue with
+            | `Stop -> hist
+            | `Continue ->
+              if st.run_again || deferred.user_input
+              then turn_with_budget c hist ~request_turn_budget:0
+              else (
+                let next_budget =
+                  Runtime_semantics.next_self_triggered_turn_budget
+                    ~policy
+                    ~request_turn_budget
+                  |> Result.ok_or_failwith
+                in
+                turn_with_budget c hist ~request_turn_budget:next_budget))))
   in
   turn_with_budget root_ctx history ~request_turn_budget:0
 ;;
@@ -2534,6 +2574,7 @@ let setup_ctx ~(sw : Eio.Switch.t) (a : args) =
     { env = a.env
     ; root_context = a.root_context
     ; on_settled_batch = a.on_settled_batch
+    ; successor = a.successor
     ; inference_context = a.inference_context
     ; fork_depth = a.fork_depth
     ; inference_identity = a.inference_identity
@@ -2612,6 +2653,7 @@ let run_completion_stream_in_memory_entries
       ~inference_context
       ?root_context
       ?on_settled_batch
+      ?successor
       ~inference_identity
       ~on_inference_attempt
       ~on_inference_completion
@@ -2744,6 +2786,7 @@ let run_completion_stream_in_memory_entries
     { env
     ; root_context
     ; on_settled_batch
+    ; successor
     ; inference_context
     ; fork_depth
     ; inference_identity

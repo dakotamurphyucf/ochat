@@ -20,6 +20,12 @@ let create (state : Session_state.t) ~change ~retention =
   }
 ;;
 
+let successor_operation t =
+  match t.change with
+  | Adopt { boundary = Successor id; _ } -> Some id
+  | _ -> None
+;;
+
 let prepare t state ~limits =
   let open Result.Let_syntax in
   let%bind retention = Pending_disposition.Retention.create ~max_records:t.max_records in
@@ -49,6 +55,8 @@ let boundary_to_json = function
   | Pending_eligibility.Boundary.Idle_start -> `Object [ "kind", `String "idle" ]
   | Worker id ->
     `Object [ "kind", `String "worker"; "operation_id", P.Id.Operation.to_json id ]
+  | Successor id ->
+    `Object [ "kind", `String "successor"; "operation_id", P.Id.Operation.to_json id ]
 ;;
 
 let boundary_of_json json =
@@ -60,6 +68,9 @@ let boundary_of_json json =
   | "worker" ->
     X.required fields "operation_id" P.Id.Operation.of_json
     |> Result.map ~f:(fun id -> Pending_eligibility.Boundary.Worker id)
+  | "successor" ->
+    X.required fields "operation_id" P.Id.Operation.of_json
+    |> Result.map ~f:(fun id -> Pending_eligibility.Boundary.Successor id)
   | _ -> Error (P.Error.invalid_request "unknown pending adoption boundary")
 ;;
 

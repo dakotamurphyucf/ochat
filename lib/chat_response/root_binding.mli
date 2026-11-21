@@ -12,7 +12,8 @@ val create : Inference_runtime.Session.t -> t
     Candidate preparation/retirement may yield outside the actor mailbox.
     Callback exits always release ownership, preserving original exceptions. *)
 val with_context
-  :  t
+  :  ?fresh:bool
+  -> t
   -> resolved:Inference_runtime.Context.t
   -> f:(Inference_runtime.Context.t -> 'a)
   -> ('a, Inference_runtime.Preparation_error.t) result
@@ -24,4 +25,4 @@ val close : t -> unit
 
 (** Decorate the actor capture port at runtime graph construction. Resolution and
     actor admission remain with [source]; receiver owns transport resources only. *)
-val wrap : t -> Root_context.t -> Root_context.t
+val wrap : ?fresh:(unit -> bool) -> t -> Root_context.t -> Root_context.t

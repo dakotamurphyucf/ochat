@@ -396,15 +396,98 @@ let rec contains_rollover_publication = function
   | _ -> false
 ;;
 
-let validate_rollover_transaction = function
+let validate_rollover_transaction delta =
+  let module P = Agent_protocol in
+  let invalid message = Error (P.Error.invalid_request message) in
+  let rec leaves = function
+    | Batch deltas -> List.concat_map deltas ~f:leaves
+    | delta -> [ delta ]
+  in
+  match delta with
   | Batch
       [ (Recovery_rollover_committed _ | Recovery_rollover_changed (Record_checkpoint _))
       ] -> Ok ()
   | Batch deltas when List.exists deltas ~f:contains_rollover_publication ->
-    Error
-      (Agent_protocol.Error.invalid_request
-         "rollover archive or checkpoint requires a standalone delta")
-  | _ -> Ok ()
+    invalid "rollover archive or checkpoint requires a standalone delta"
+  | _ ->
+    let changes = leaves delta in
+    let successor_operations =
+      List.filter_map changes ~f:(function
+        | Pending_inputs_changed (mutation, _, _) ->
+          Pending_mutation.successor_operation mutation
+        | _ -> None)
+    in
+    let admission =
+      List.filter_map changes ~f:(function
+        | Recovery_rollover_changed (Schedule { change = Admit { operation; _ }; _ }) ->
+          Some operation
+        | _ -> None)
+    in
+    (match successor_operations, admission with
+     | [], ([] | [ _ ]) -> Ok ()
+     | [ pending ], [ operation ] when P.Id.Operation.equal pending operation -> Ok ()
+     | _ -> invalid "successor inputs must share their exact admission transaction")
+;;
+
+let validate_successor_dispatch state delta =
+  let module P = Agent_protocol in
+  let open Result.Let_syntax in
+  let deltas =
+    match delta with
+    | Batch deltas -> deltas
+    | leaf -> [ leaf ]
+  in
+  let admission =
+    List.find_map deltas ~f:(function
+      | Recovery_rollover_changed (Schedule { change = Admit { operation; _ }; _ }) ->
+        Some operation
+      | _ -> None)
+  in
+  let accept_wake_from selected delta =
+    match delta with
+    | Delivery_wake_changed { wake_disposition = Some (Accepted_wake operation); _ } ->
+      P.Id.Operation.equal operation selected
+    | _ -> false
+  in
+  match admission with
+  | None ->
+    (match state.Session_state.recovery_windows, state.recovery_rollover with
+     | Some windows, Some receipts ->
+       let scope = Recovery_window_record.scope (Recovery_window_ledger.active windows) in
+       (match Recovery_rollover.foreground receipts ~scope with
+        | Some { phase = Preparing operation; _ }
+          when List.exists deltas ~f:(accept_wake_from operation) ->
+          Error
+            (P.Error.invalid_request "successor wake requires its admission transaction")
+        | _ -> Ok ())
+     | _ -> Ok ())
+  | Some operation ->
+    let%bind entries, wakes =
+      Recovery_rollover_input.dispatch_selection state ~operation
+    in
+    let%bind expected_wakes =
+      List.map wakes ~f:(P.Delivery.accept_wake ~operation_id:operation) |> Result.all
+    in
+    let actual_wakes =
+      List.filter_map deltas ~f:(function
+        | Delivery_wake_changed wake -> Some wake
+        | _ -> None)
+    in
+    let pending =
+      List.filter_map deltas ~f:(function
+        | Pending_inputs_changed (mutation, _, _) ->
+          Pending_mutation.successor_operation mutation
+        | _ -> None)
+    in
+    if
+      List.equal P.Delivery.equal expected_wakes actual_wakes
+      &&
+      if List.is_empty entries
+      then List.is_empty pending
+      else List.equal P.Id.Operation.equal pending [ operation ]
+    then Ok ()
+    else
+      Error (P.Error.invalid_request "successor dispatch did not claim its exact inputs")
 ;;
 
 let rollover_retained_history
@@ -422,14 +505,185 @@ let rollover_retained_history
   |> Result.all
 ;;
 
-let awaiting_settled_foreground (state : Session_state.t) =
+let successor_retained_history
+      (state : Session_state.t)
+      (operation : Agent_protocol.Operation.t)
+  =
+  let module P = Agent_protocol in
+  let history = state.conversation.canonical_history in
+  let prompt, rest = List.split_n history state.conversation.initial_prompt_entry_count in
+  let managed_ids =
+    List.filter_map state.managed_submissions ~f:(fun receipt ->
+      match receipt.status with
+      | Assigned id when P.Id.Operation.equal id operation.id -> Some receipt.history_id
+      | _ -> None)
+  in
+  let required =
+    match managed_ids, operation.kind with
+    | [], Turn User_submit ->
+      List.find_map (List.rev rest) ~f:(fun entry ->
+        match entry.role, entry.kind, entry.provenance with
+        | User, Message, Canonical when not entry.redacted -> Some entry.id
+        | _ -> None)
+      |> Option.to_list
+    | [], (Compaction | Turn _) -> []
+    | ids, _ -> ids
+  in
+  let required = Hash_set.of_list (module P.History.Id) required in
+  let available_user (entry : P.History.entry) =
+    P.History.equal_role entry.role User
+    && P.History.equal_kind entry.kind Message
+    && P.History.equal_provenance entry.provenance Canonical
+    && not entry.redacted
+  in
+  let wakes = Hash_set.create (module P.History.Id) in
+  List.iter state.deliveries ~f:(fun delivery ->
+    match delivery.status, delivery.wake_disposition with
+    | Committed { history_id; _ }, Some Pending_wake -> Hash_set.add wakes history_id
+    | _ -> ());
+  let entries =
+    List.filter rest ~f:(fun entry ->
+      Hash_set.mem required entry.id || Hash_set.mem wakes entry.id)
+  in
+  if
+    Int.equal
+      (Hash_set.length required)
+      (List.count entries ~f:(fun entry ->
+         Hash_set.mem required entry.id && available_user entry))
+  then Ok (List.map (prompt @ entries) ~f:(fun entry -> entry.id))
+  else Error (P.Error.invalid_request "managed rollover input is unavailable")
+;;
+
+let release_rollover_inputs state (operation : Agent_protocol.Operation.t) ~limits =
+  let module P = Agent_protocol in
+  let open Result.Let_syntax in
+  let actual =
+    { operation with
+      state =
+        P.Operation.Interrupted { reason = "context window retired"; retryable = false }
+    }
+  in
+  let has_barrier =
+    List.exists state.Session_state.conversation.deferred_user_entries ~f:(fun document ->
+      match P.Pending_input.binding (Pending_input_document.value document) with
+      | After_root { operation_id; generation; terminal = None } ->
+        P.Id.Operation.equal operation_id actual.id && Int.equal generation actual.generation
+      | Safe_boundary | Await_idle | After_root _ -> false)
+  in
+  if not has_barrier
+  then Ok state
+  else (
+    let%bind proof = P.Pending_input.Terminal_proof.of_operation actual in
+    let%bind plan =
+      Pending_plan.prepare
+        state
+        ~expected_pending_revision:state.conversation.pending_revision
+        ~change:(Release proof)
+        ~limits
+        ~retention:Pending_disposition.Retention.default
+    in
+    if List.is_empty (Pending_plan.expired_dispositions plan)
+    then Pending_plan.apply plan state
+    else Error (P.Error.invalid_request "rollover release would discard pending evidence"))
+;;
+
+let suspend_managed_rollover receipts ~predecessor ~continuation =
+  List.map receipts ~f:(fun (receipt : Managed_submission.t) ->
+    match receipt.status with
+    | Assigned id when Agent_protocol.Id.Operation.equal id predecessor ->
+      Managed_submission.suspend_rollover receipt ~predecessor ~continuation
+    | _ -> Ok receipt)
+  |> Result.all
+;;
+
+let foreground_continuation (state : Session_state.t) =
   match state.recovery_windows, state.recovery_rollover with
   | Some windows, Some receipts ->
     let scope =
       Recovery_window_ledger.active windows |> Recovery_window_ledger.Window.scope
     in
-    Recovery_rollover.awaiting_foreground receipts ~scope
+    Recovery_rollover.foreground receipts ~scope
+  | _ -> None
+;;
+
+let awaiting_settled_foreground state =
+  Option.exists
+    (foreground_continuation state)
+    ~f:Recovery_rollover_continuation.is_pending
+;;
+
+let permits_successor_operation
+      (state : Session_state.t)
+      (operation : Agent_protocol.Operation.t)
+  =
+  match foreground_continuation state with
+  | Some { phase = Preparing id; _ } ->
+    Agent_protocol.Id.Operation.equal id operation.id
+    && Int.equal operation.generation state.identity.generation
+    &&
+      (match operation.kind, operation.state with
+      | Turn _, Starting -> true
+      | _ -> false)
   | _ -> false
+;;
+
+let check_continuation_change (state : Session_state.t) change =
+  let quiescent =
+    match state.active_operation, state.lifecycle.observed with
+    | None, Idle -> true
+    | _ -> false
+  in
+  match change with
+  | (Recovery_rollover_continuation.Begin _ | Wait | Finish _) when quiescent -> Ok ()
+  | (Hold { operation; _ } | Stop_preparation { operation; _ })
+    when Option.for_all state.active_operation ~f:(fun current ->
+           Agent_protocol.Id.Operation.equal operation current.id) -> Ok ()
+  | Admit { operation; ordinal } ->
+    let module P = Agent_protocol in
+    let%bind.Result active =
+      Option.value_map
+        state.active_operation
+        ~default:(Error (P.Error.invalid_request "successor has no running operation"))
+        ~f:(fun current ->
+          match current.kind, current.state with
+          | Turn _, Running when P.Id.Operation.equal operation current.id -> Ok current
+          | _ -> Error (P.Error.invalid_request "successor dispatch operation changed"))
+    in
+    (match Inference_ledger.find state.inference_ledger ~ordinal with
+     | Some row ->
+       let handle = Inference_ledger.Row.handle row in
+       let scope = Inference_ledger.Handle.scope handle in
+       if
+         Option.equal
+           P.Id.Operation.equal
+           (Inference_ledger.Handle.operation_id handle)
+           (Some active.id)
+         && Option.is_none (Inference_ledger.Handle.invocation_id handle)
+         &&
+         match scope.relation with
+         | Root -> true
+         | Nested _ -> false
+       then Ok ()
+       else
+         Error (P.Error.invalid_request "continuation attempt is owned by another root")
+     | None -> Error (P.Error.invalid_request "continuation has no admitted attempt"))
+  | Begin _ | Wait | Hold _ | Finish _ | Stop_preparation _ ->
+    Error (Agent_protocol.Error.invalid_request "rollover continuation lifecycle changed")
+;;
+
+let settle_managed_continuation receipts ~owner change =
+  List.map receipts ~f:(fun (receipt : Managed_submission.t) ->
+    match receipt.status with
+    | Suspended_rollover { continuation; _ }
+      when Agent_protocol.Id.Operation.equal owner continuation ->
+      (match change with
+       | Recovery_rollover_continuation.Admit { operation; _ } ->
+         Managed_submission.claim_rollover receipt ~continuation ~successor:operation
+       | Finish _ | Stop_preparation _ ->
+         Managed_submission.finish_rollover receipt ~continuation
+       | Wait | Begin _ | Hold _ -> Ok receipt)
+    | _ -> Ok receipt)
+  |> Result.all
 ;;
 
 let require_quiescent_rollover_cut (state : Session_state.t) =
@@ -442,7 +696,8 @@ let require_quiescent_rollover_cut (state : Session_state.t) =
       (Agent_protocol.Error.invalid_request "rollover requires a quiescent canonical cut")
 ;;
 
-let apply_rollover (state : Session_state.t) (change : Recovery_rollover.Commit.t) =
+let apply_rollover (state : Session_state.t) (change : Recovery_rollover.Commit.t) ~limits
+  =
   let open Result.Let_syntax in
   let module P = Agent_protocol in
   let module R = Recovery_rollover in
@@ -502,6 +757,31 @@ let apply_rollover (state : Session_state.t) (change : Recovery_rollover.Commit.
       ~retained
   in
   let%bind recovery_effective = Recovery_effective_capture.relocate state ~archive in
+  let%bind state =
+    match change.batch with
+    | None -> Ok state
+    | Some _ when not change.schedule_foreground -> Ok state
+    | Some batch ->
+      let%bind operation =
+        Result.of_option
+          state.active_operation
+          ~error:(P.Error.invalid_request "rollover operation unavailable")
+      in
+      let%bind expected_retained = successor_retained_history state operation in
+      let%bind () =
+        if List.equal P.History.Id.equal expected_retained change.retain
+        then Ok ()
+        else Error (P.Error.invalid_request "successor changed the required local input")
+      in
+      let%bind managed_submissions =
+        suspend_managed_rollover
+          state.managed_submissions
+          ~predecessor:batch.operation
+          ~continuation:change.id
+      in
+      let%map state = release_rollover_inputs state operation ~limits in
+      { state with managed_submissions }
+  in
   let%map next = with_canonical_history state retained ~recovery_windows:(Some windows) in
   attach_archive
     { next with
@@ -523,6 +803,7 @@ let apply_rollover (state : Session_state.t) (change : Recovery_rollover.Commit.
 let rec apply ?(limits = native_limits) (state : Session_state.t) = function
   | Batch deltas as delta ->
     let%bind.Result () = validate_rollover_transaction delta in
+    let%bind.Result () = validate_successor_dispatch state delta in
     List.fold_result deltas ~init:state ~f:(apply ~limits)
   | Created created ->
     let open Result.Let_syntax in
@@ -776,6 +1057,16 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
       |> Result.of_option
            ~error:(Agent_protocol.Error.invalid_request "managed submission is absent")
     in
+    let%bind () =
+      match previous.status, receipt.status with
+      | Suspended_rollover _, Terminal (_, Invalidated)
+      | Suspended_rollover _, Suspended_rollover _ -> Ok ()
+      | Suspended_rollover _, _ | _, Suspended_rollover _ ->
+        Error
+          (Agent_protocol.Error.invalid_request
+             "managed assignment requires its owning rollover transition")
+      | _ -> Ok ()
+    in
     let%map () = Managed_submission.validate_transition ~previous receipt in
     { state with
       managed_submissions =
@@ -1025,8 +1316,10 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
             Option.to_list archive @ next.conversation.compaction_archives
         }
     }
-  | Active_operation_changed (Some _)
-    when Option.is_none state.active_operation && awaiting_settled_foreground state ->
+  | Active_operation_changed (Some operation)
+    when Option.is_none state.active_operation
+         && awaiting_settled_foreground state
+         && not (permits_successor_operation state operation) ->
     Error
       (Agent_protocol.Error.create
          Conflict
@@ -1955,6 +2248,7 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
     let%bind () =
       match change with
       | Record_checkpoint _ -> require_quiescent_rollover_cut state
+      | Schedule { change; _ } -> check_continuation_change state change
       | Admit _ | Settle _ -> Ok ()
     in
     let%bind windows =
@@ -1963,7 +2257,7 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
         ~error:(Agent_protocol.Error.invalid_request "recovery window ledger is unavailable")
     in
     let active = Recovery_window_record.scope (Recovery_window_ledger.active windows) in
-    let%map ledger =
+    let%bind ledger =
       Recovery_rollover.apply
         state.recovery_rollover
         ~active
@@ -1972,8 +2266,14 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
         ~catalog:state.recovery_notes
         change
     in
-    { state with recovery_rollover = Some ledger }
-  | Recovery_rollover_committed change -> apply_rollover state change
+    let%map managed_submissions =
+      match change with
+      | Schedule { id; change; _ } ->
+        settle_managed_continuation state.managed_submissions ~owner:id change
+      | Admit _ | Record_checkpoint _ | Settle _ -> Ok state.managed_submissions
+    in
+    { state with recovery_rollover = Some ledger; managed_submissions }
+  | Recovery_rollover_committed change -> apply_rollover state change ~limits
   | Recovery_note_share_changed change ->
     let%map.Result shares =
       Recovery_note_share_change.apply

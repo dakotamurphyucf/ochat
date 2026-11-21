@@ -959,8 +959,9 @@ let%expect_test
            |> ok
            |> ignore
          in
-         let capture revision model =
+         let capture ?fresh revision model =
            Chat_response.Root_binding.with_context
+             ?fresh
              root
              ~resolved:(resolve revision model)
              ~f:execute
@@ -977,16 +978,22 @@ let%expect_test
          assert (has_previous (List.nth_exn !bodies 2));
          capture "2" "model-B";
          assert (!connections = 2);
-         execute original;
+         capture ~fresh:true "2" "model-B";
          assert (!connections = 3);
+         assert (not (has_previous (List.nth_exn !bodies 4)));
+         capture "2" "model-B";
+         assert (!connections = 3);
+         assert (has_previous (List.nth_exn !bodies 5));
+         execute original;
+         assert (!connections = 4);
          Chat_response.Root_binding.close root;
          assert (not (Runtime.Session.is_closed owner));
          Runtime.Session.close owner;
          print_endline
            "B reuses qualified WS across operations; changed envelope/revision resets; \
-            moderator A survives"));
+            rollover resets the same target; moderator A survives"));
   [%expect
-    {|B reuses qualified WS across operations; changed envelope/revision resets; moderator A survives|}]
+    {|B reuses qualified WS across operations; changed envelope/revision resets; rollover resets the same target; moderator A survives|}]
 ;;
 
 module Runtime = Inference_runtime

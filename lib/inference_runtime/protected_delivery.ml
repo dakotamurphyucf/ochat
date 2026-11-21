@@ -17,6 +17,8 @@ type error =
 exception Rejected of error
 exception Lease_timeout
 
+let max_outputs_per_submission = 16
+
 module Lease = struct
   module Source = struct
     module T = struct
@@ -48,6 +50,34 @@ module Lease = struct
     }
 
   let create authority ~source ~scope = { authority; source; scope }
+
+  let grouped leases =
+    if Stdlib.List.compare_length_with leases max_outputs_per_submission > 0
+    then Error Limit_exceeded
+    else
+      List.fold_result
+        leases
+        ~init:(Map.empty (module Source))
+        ~f:(fun by_source lease ->
+          match Map.find by_source lease.source with
+          | None -> Ok (Map.set by_source ~key:lease.source ~data:lease)
+          | Some current when phys_equal current.authority lease.authority -> Ok by_source
+          | Some _ -> Error Unavailable)
+      |> Result.map ~f:Map.data
+  ;;
+
+  let rec with_sources leases checks submit =
+    match leases with
+    | [] -> submit (fun () -> List.for_all checks ~f:(fun check -> check ()))
+    | lease :: rest ->
+      lease.scope.run (fun check -> with_sources rest (check :: checks) submit)
+  ;;
+
+  let with_submission leases ~f =
+    match grouped leases with
+    | Error error -> raise (Rejected error)
+    | Ok leases -> with_sources leases [] f
+  ;;
 end
 
 type custody =
@@ -74,7 +104,6 @@ let create ~call ~output ~materialize ~custody ~refresh =
 
 let retire t = Atomic.set t.state Retired
 let expire_pending t = ignore (Atomic.compare_and_set t.state Pending Retired : bool)
-let max_outputs_per_submission = 16
 
 let preparing t =
   match Atomic.get t.state with
@@ -264,30 +293,9 @@ module Materialized = struct
 
   type submission =
     { refresh : unit -> unit -> unit
-    ; custody : Lease.scope option
+    ; claim : unit -> unit
+    ; leases : Lease.t list
     }
-
-  let source_leases sources =
-    List.fold_result
-      sources
-      ~init:(Map.empty (module Lease.Source))
-      ~f:(fun leases (source : pending) ->
-        match source.custody with
-        | Local -> Ok leases
-        | Source lease ->
-          (match Map.find leases lease.source with
-           | None -> Ok (Map.set leases ~key:lease.source ~data:lease)
-           | Some current when phys_equal current.authority lease.authority -> Ok leases
-           | Some _ -> Error Unavailable))
-    |> Result.map ~f:Map.data
-  ;;
-
-  let rec with_sources leases checks submit =
-    match leases with
-    | [] -> submit (fun () -> List.for_all checks ~f:(fun check -> check ()))
-    | (lease : Lease.t) :: rest ->
-      lease.scope.run (fun check -> with_sources rest (check :: checks) submit)
-  ;;
 
   let bind t ~scope =
     let open Result.Let_syntax in
@@ -299,23 +307,29 @@ module Materialized = struct
       match scope.Transcript.Scope.relation with
       | Nested _ when not (List.is_empty t.sources) -> Error Unavailable
       | Root | Nested _ ->
-        let%map leases = source_leases t.sources in
-        let custody =
-          match leases with
-          | [] -> None
-          | _ -> Some { Lease.run = (fun submit -> with_sources leases [] submit) }
+        let%map leases =
+          List.filter_map t.sources ~f:(fun source ->
+            match source.custody with
+            | Local -> None
+            | Source lease -> Some lease)
+          |> Lease.grouped
+        in
+        let current () =
+          if (not (List.for_all t.sources ~f:preparing)) || Atomic.get t.submitted
+          then raise (Rejected Expired)
         in
         let refresh () =
-          if (not (List.for_all t.sources ~f:preparing)) || Atomic.get t.submitted
-          then raise (Rejected Expired);
+          current ();
           let checks = List.map t.sources ~f:(fun source -> source.refresh ~scope) in
           fun () ->
-            if not (Atomic.compare_and_set t.submitted false true)
-            then raise (Rejected Expired);
-            if not (List.for_all t.sources ~f:preparing) then raise (Rejected Expired);
+            current ();
             if not (List.for_all checks ~f:(fun check -> check ()))
             then raise (Rejected Unavailable)
         in
-        { refresh; custody })
+        let claim () =
+          if not (Atomic.compare_and_set t.submitted false true)
+          then raise (Rejected Expired)
+        in
+        { refresh; claim; leases })
   ;;
 end

@@ -20,7 +20,7 @@ type origin =
       ; operation : Operation.t
       }
   | New_generation of { previous : Window_id.t }
-[@@deriving sexp_of]
+[@@deriving equal, sexp_of]
 
 type state = P.Recovery_query.State.t =
   | Open
@@ -73,6 +73,14 @@ let at t ~ordinal =
 let fold_members t ~init ~f = Array.fold_result t.members ~init ~f
 let scope t = Manifest.scope (manifest t)
 let id t = Scope.window (scope t)
+
+let equal left right =
+  phys_equal left right
+  || (Scope.equal (scope left) (scope right)
+      && equal_origin left.origin right.origin
+      && equal_state left.state right.state
+      && Array.equal Member.equal left.members right.members)
+;;
 
 let origin_to_jsonaf = function
   | Root -> `Object [ "kind", `String "root" ]

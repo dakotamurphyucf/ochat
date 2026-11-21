@@ -18862,7 +18862,7 @@ let managed_wait t borrowed child_id ~target ~timeout_ms =
         let ready =
           match receipt.status with
           | Terminal _ -> Some "receipt_terminal"
-          | Deferred | Ready | Assigned _ -> None
+          | Deferred | Ready | Suspended_rollover _ | Assigned _ -> None
         in
         ready, M.to_json receipt, `Null
       | S.Output { cursor; receipt_id } ->
@@ -19071,7 +19071,8 @@ let authored_one_off t prepared borrowed ~input =
             P.History.Id.equal receipt.M.history_id receipt_id)
         with
         | Some { status = Terminal _; _ } -> Ok state
-        | Some { status = Deferred | Ready | Assigned _; _ } -> await ()
+        | Some { status = Deferred | Ready | Suspended_rollover _ | Assigned _; _ } ->
+          await ()
         | None ->
           Error (unavailable Invalid_state "one-off submission receipt was lost")
           |> authored_protocol

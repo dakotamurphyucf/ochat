@@ -137,6 +137,17 @@ val apply
 
 val validate_rollover_transaction : t -> (unit, Agent_protocol.Error.t) result
 
+val validate_successor_dispatch
+  :  Session_state.t
+  -> t
+  -> (unit, Agent_protocol.Error.t) result
+
+val successor_retained_history
+  :  Session_state.t
+  -> Agent_protocol.Operation.t
+  -> (Agent_protocol.History.Id.t list, Agent_protocol.Error.t) result
+
+val foreground_continuation : Session_state.t -> Recovery_rollover_continuation.t option
 val awaiting_settled_foreground : Session_state.t -> bool
 
 val rollover_retained_history

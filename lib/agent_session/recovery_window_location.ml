@@ -126,7 +126,7 @@ module Member = struct
     | Observed
     | Carried_from of Window_id.t
     | Derived_summary of Operation.t
-  [@@deriving sexp_of]
+  [@@deriving equal, sexp_of]
 
   type t =
     { citation : Citation.t
@@ -136,6 +136,7 @@ module Member = struct
     ; provenance : provenance
     ; withdrawn : bool
     }
+  [@@deriving equal]
 
   let create citation ~source ~source_ordinal ~provenance =
     let scope = Citation.scope citation in

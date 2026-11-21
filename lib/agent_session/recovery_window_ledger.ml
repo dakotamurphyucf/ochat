@@ -73,6 +73,12 @@ let windows t = t.windows
 let active t = t.active
 let has_withdrawals t = t.has_withdrawals
 
+let equal left right =
+  phys_equal left right
+  || (P.Session_ref.equal left.owner right.owner
+      && List.equal Window.equal left.windows right.windows)
+;;
+
 let is_derived_summary t citation =
   let has revision =
     P.Session_ref.equal t.owner (Scope.session (Citation.scope citation))

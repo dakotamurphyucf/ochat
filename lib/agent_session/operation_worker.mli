@@ -226,6 +226,12 @@ module Capabilities : sig
           accepts its consumed notification wakes, including without a moderator.
           A failed save prevents provider dispatch. *)
     ; root_context : Chat_response.Root_context.t option
+    ; select_rollover_followup :
+        (Recovery_rollover_continuation.Hook.view
+         -> Recovery_rollover_continuation.Hook.decision)
+          option
+        -> (unit, Agent_protocol.Error.t) result
+    ; successor_inference : Chat_response.Root_context.Successor.t option
     ; settle_tool_batch :
         (Chat_response.Settled_tool_batch.t
          -> (Chat_response.Settled_tool_batch.decision, Agent_protocol.Error.t) result)

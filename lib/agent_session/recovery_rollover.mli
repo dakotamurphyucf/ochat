@@ -85,6 +85,7 @@ module Receipt : sig
         { owner : P.Id.Operation.t
         ; predecessor : P.Id.Operation.t
         }
+    | Scheduled_foreground of Recovery_rollover_continuation.t
   [@@deriving equal, sexp_of]
 
   type committed =
@@ -128,10 +129,12 @@ module Commit : sig
     ; checkpoint : Receipt.checkpoint_quality
     ; retain : P.History.Id.t list
     ; batch : Recovery_rollover_batch.t option
+    ; schedule_foreground : bool
     }
 
   val create
     :  ?batch:Recovery_rollover_batch.t
+    -> ?schedule_foreground:bool
     -> Intent.t
     -> expected:Expected.t
     -> successor:P.Recovery_window.Scope.t
@@ -158,6 +161,12 @@ type t
 val find : t -> id:P.Id.Operation.t -> Receipt.t option
 val pending : t -> Intent.t option
 val checkpoint : t -> Checkpoint.t option
+
+val foreground
+  :  t
+  -> scope:P.Recovery_window.Scope.t
+  -> Recovery_rollover_continuation.t option
+
 val awaiting_foreground : t -> scope:P.Recovery_window.Scope.t -> bool
 
 (** Exact normalized retries are resolved before comparing current head or
@@ -175,6 +184,11 @@ module Change : sig
     | Settle of
         { id : P.Id.Operation.t
         ; terminal : Receipt.terminal
+        }
+    | Schedule of
+        { id : P.Id.Operation.t
+        ; expected : Expected.t
+        ; change : Recovery_rollover_continuation.change
         }
 
   val to_json : t -> Jsonaf.t

@@ -112,7 +112,10 @@ module Compaction_archive = struct
     in
     if List.equal equal (select previous) (select incoming)
     then Ok ()
-    else Error (Agent_protocol.Error.invalid_request "replacement changed rollover archive custody")
+    else
+      Error
+        (Agent_protocol.Error.invalid_request
+           "replacement changed rollover archive custody")
   ;;
 end
 
@@ -1127,12 +1130,15 @@ let validate_domain (t : t) ~recovery_revision =
       in
       let has_archive (source : Recovery_window_ledger.Source.archive) =
         reference source.operation ~f:(fun archive ->
-          Compaction_archive.equal_kind archive.kind (Compaction_archive.of_recovery_source source.kind)
+          Compaction_archive.equal_kind
+            archive.kind
+            (Compaction_archive.of_recovery_source source.kind)
           && Int64.equal archive.revision source.basis.revision
           && String.equal archive.sha256 (Chatml_source.Digest.to_hex source.digest))
       in
       let has_summary_operation operation =
-        reference operation ~f:(fun archive -> Compaction_archive.equal_kind archive.kind Compaction)
+        reference operation ~f:(fun archive ->
+          Compaction_archive.equal_kind archive.kind Compaction)
       in
       Recovery_window_ledger.validate_state
         ledger
@@ -1422,7 +1428,7 @@ let validate_domain (t : t) ~recovery_revision =
       let current =
         match receipt.status with
         | Terminal _ -> true
-        | Deferred | Ready | Assigned _ ->
+        | Deferred | Ready | Assigned _ | Suspended_rollover _ ->
           Int.equal receipt.generation t.identity.generation
           && Option.exists
                t.spec.delegation
@@ -1430,6 +1436,18 @@ let validate_domain (t : t) ~recovery_revision =
       in
       let correlation =
         match receipt.status with
+        | Suspended_rollover { predecessor; continuation } ->
+          Option.exists t.recovery_windows ~f:(fun windows ->
+            let scope =
+              Recovery_window_ledger.Window.scope (Recovery_window_ledger.active windows)
+            in
+            Option.exists t.recovery_rollover ~f:(fun receipts ->
+              Option.exists
+                (Recovery_rollover.foreground receipts ~scope)
+                ~f:(fun schedule ->
+                  Recovery_rollover_continuation.is_pending schedule
+                  && Agent_protocol.Id.Operation.equal schedule.predecessor predecessor
+                  && Agent_protocol.Id.Operation.equal schedule.owner continuation)))
         | Assigned id ->
           Option.exists t.active_operation ~f:(fun operation ->
             Agent_protocol.Id.Operation.equal id operation.id

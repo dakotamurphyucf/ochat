@@ -700,8 +700,12 @@ let recovery_window_delta_requires payload =
   | Value (`Array changes) ->
     List.exists changes ~f:(fun change ->
       match D.Json.field change ~name:"kind", D.Json.field change ~name:"state" with
-      | Value (`String ("recovery_window_enabled" | "recovery_window_expired" | "recovery_summary_compacted")), _ ->
-        true
+      | ( Value
+            (`String
+               ( "recovery_window_enabled"
+               | "recovery_window_expired"
+               | "recovery_summary_compacted" ))
+        , _ ) -> true
       | Value (`String "created"), Value state ->
         (match D.Json.field state ~name:"payload" with
          | Value payload -> recovery_window_state_requires payload
@@ -1015,7 +1019,7 @@ let check_delta document =
 
 let rollover_batch_name = Agent_protocol.Session_storage_semantics.recovery_rollover_batch
 
-let state_has_rollover_batch payload =
+let state_has_rollover_continuation payload ~matches =
   let value json name =
     match D.Json.field json ~name with
     | Value json -> Some json
@@ -1032,10 +1036,16 @@ let state_has_rollover_batch payload =
          match value receipt "status" >>= fun status -> value status "continuation" with
          | Some continuation ->
            (match value continuation "kind" with
-            | Some (`String "awaiting_settled_foreground") -> true
+            | Some (`String kind) -> matches kind
             | _ -> false)
          | None -> false)
      | _ -> false)
+;;
+
+let state_has_rollover_batch payload =
+  state_has_rollover_continuation payload ~matches:(function
+    | "awaiting_settled_foreground" | "scheduled_foreground" -> true
+    | _ -> false)
 ;;
 
 let delta_has_rollover_batch payload =
@@ -1100,6 +1110,83 @@ let check_delta document =
     ~required:(delta_has_rollover_batch (D.Document.payload document))
 ;;
 
+let successor_name =
+  Agent_protocol.Session_storage_semantics.recovery_rollover_continuation
+;;
+
+let state_has_successor payload =
+  state_has_rollover_continuation payload ~matches:(String.equal "scheduled_foreground")
+;;
+
+let delta_has_successor payload =
+  match D.Json.field payload ~name:"changes" with
+  | Value (`Array changes) ->
+    List.exists changes ~f:(fun change ->
+      match D.Json.field change ~name:"kind" with
+      | Value (`String "recovery_rollover_committed") ->
+        (match D.Json.field change ~name:"value" with
+         | Value value ->
+           (match D.Json.field value ~name:"schedule_foreground" with
+            | Value `True -> true
+            | _ -> false)
+         | _ -> false)
+      | Value (`String "recovery_rollover_changed") ->
+        (match D.Json.field change ~name:"value" with
+         | Value value ->
+           (match D.Json.field value ~name:"kind" with
+            | Value (`String "schedule") -> true
+            | _ -> false)
+         | _ -> false)
+      | Value (`String "created") ->
+        (match D.Json.field change ~name:"state" with
+         | Value state ->
+           (match D.Json.field state ~name:"payload" with
+            | Value payload -> state_has_successor payload
+            | _ -> false)
+         | _ -> false)
+      | _ -> false)
+  | _ -> false
+;;
+
+let require_state_without_successor = require_state
+let check_state_without_successor = check_state
+let require_delta_without_successor = require_delta
+let check_delta_without_successor = check_delta
+
+let require_state document ~limits =
+  let%bind.Result document = require_state_without_successor document ~limits in
+  require
+    document
+    ~name:successor_name
+    ~required:(state_has_successor (D.Document.payload document))
+    ~limits
+;;
+
+let check_state document =
+  let%bind.Result () = check_state_without_successor document in
+  check
+    document
+    ~name:successor_name
+    ~required:(state_has_successor (D.Document.payload document))
+;;
+
+let require_delta document ~limits =
+  let%bind.Result document = require_delta_without_successor document ~limits in
+  require
+    document
+    ~name:successor_name
+    ~required:(delta_has_successor (D.Document.payload document))
+    ~limits
+;;
+
+let check_delta document =
+  let%bind.Result () = check_delta_without_successor document in
+  check
+    document
+    ~name:successor_name
+    ~required:(delta_has_successor (D.Document.payload document))
+;;
+
 let recovery_effective_name = Agent_protocol.Session_storage_semantics.recovery_effective
 
 let recovery_effective_state_requires payload =
@@ -1139,8 +1226,13 @@ let state_has_effective_field payload ~field =
   | Absent | Null -> false
 ;;
 
-let state_has_effective_transfer payload = state_has_effective_field payload ~field:"archive"
-let state_has_effective_attempt payload = state_has_effective_field payload ~field:"attempt"
+let state_has_effective_transfer payload =
+  state_has_effective_field payload ~field:"archive"
+;;
+
+let state_has_effective_attempt payload =
+  state_has_effective_field payload ~field:"attempt"
+;;
 
 let delta_created_requires change ~state_requires =
   match D.Json.field change ~name:"state" with
@@ -1193,7 +1285,9 @@ let check_effective_archive document ~requires =
     ~required:(requires (D.Document.payload document))
 ;;
 
-let effective_attempt_name = Agent_protocol.Session_storage_semantics.recovery_effective_attempt
+let effective_attempt_name =
+  Agent_protocol.Session_storage_semantics.recovery_effective_attempt
+;;
 
 let require_state_without_effective = require_state
 let check_state_without_effective = check_state
@@ -1203,8 +1297,11 @@ let check_delta_without_effective = check_delta
 let require_state document ~limits =
   let%bind.Result document = require_state_without_effective document ~limits in
   let%bind.Result document =
-    require document ~name:effective_attempt_name
-      ~required:(state_has_effective_attempt (D.Document.payload document)) ~limits
+    require
+      document
+      ~name:effective_attempt_name
+      ~required:(state_has_effective_attempt (D.Document.payload document))
+      ~limits
   in
   let%bind.Result document =
     require_effective_archive document ~limits ~requires:state_has_effective_transfer
@@ -1219,7 +1316,9 @@ let require_state document ~limits =
 let check_state document =
   let%bind.Result () = check_state_without_effective document in
   let%bind.Result () =
-    check document ~name:effective_attempt_name
+    check
+      document
+      ~name:effective_attempt_name
       ~required:(state_has_effective_attempt (D.Document.payload document))
   in
   let%bind.Result () =
@@ -1234,8 +1333,11 @@ let check_state document =
 let require_delta document ~limits =
   let%bind.Result document = require_delta_without_effective document ~limits in
   let%bind.Result document =
-    require document ~name:effective_attempt_name
-      ~required:(delta_has_effective_attempt (D.Document.payload document)) ~limits
+    require
+      document
+      ~name:effective_attempt_name
+      ~required:(delta_has_effective_attempt (D.Document.payload document))
+      ~limits
   in
   let%bind.Result document =
     require_effective_archive document ~limits ~requires:delta_has_effective_transfer
@@ -1250,7 +1352,9 @@ let require_delta document ~limits =
 let check_delta document =
   let%bind.Result () = check_delta_without_effective document in
   let%bind.Result () =
-    check document ~name:effective_attempt_name
+    check
+      document
+      ~name:effective_attempt_name
       ~required:(delta_has_effective_attempt (D.Document.payload document))
   in
   let%bind.Result () =

@@ -8,46 +8,64 @@ module Protected_delivery = Protected_delivery
 module Recovery_input = Recovery_input
 
 module Submission_guard = struct
-  type t = Protected_delivery.Materialized.submission list
+  type t =
+    { checks : Protected_delivery.Materialized.submission list
+    ; admission : (unit -> unit -> unit) list
+    }
 
-  let empty = []
-  let create ~refresh =
-    [ { Protected_delivery.Materialized.refresh = refresh; custody = None } ]
+  let empty = { checks = []; admission = [] }
+
+  let create_scoped ~leases ~refresh =
+    { empty with
+      checks = [ { Protected_delivery.Materialized.refresh; claim = ignore; leases } ]
+    }
   ;;
 
-  let compose parent child = List.append parent child
+  let create ~refresh = create_scoped ~leases:[] ~refresh
+  let create_admission ~refresh = { empty with admission = [ refresh ] }
+  let with_protected t guard = { t with checks = t.checks @ [ guard ] }
+
+  let compose parent child =
+    { checks = parent.checks @ child.checks
+    ; admission = parent.admission @ child.admission
+    }
+  ;;
 
   let check_all t source_checks =
     let final_checks =
-      List.map t ~f:(fun (guard : Protected_delivery.Materialized.submission) ->
+      List.map t.checks ~f:(fun (guard : Protected_delivery.Materialized.submission) ->
         guard.refresh ())
     in
-    List.iter source_checks ~f:(fun check ->
-      if not (check ()) then raise (Protected_delivery.Rejected Unavailable));
-    List.iter final_checks ~f:(fun check -> check ())
+    let check_current () =
+      if not (source_checks ()) then raise (Protected_delivery.Rejected Unavailable);
+      List.iter final_checks ~f:(fun check -> check ())
+    in
+    check_current ();
+    (match t.admission with
+     | [] -> ()
+     | _ ->
+       Eio.Fiber.check ();
+       let admitted = List.map t.admission ~f:(fun admit -> admit ()) in
+       check_current ();
+       List.iter admitted ~f:(fun check -> check ()));
+    List.iter t.checks ~f:(fun guard -> guard.claim ())
   ;;
 
-  let scopes t =
-    List.filter_map t ~f:(fun (guard : Protected_delivery.Materialized.submission) ->
-      guard.custody)
+  let leases t =
+    List.concat_map t.checks ~f:(fun guard -> guard.Protected_delivery.Materialized.leases)
   ;;
 
   let check t =
-    if not (List.is_empty (scopes t)) then raise (Protected_delivery.Rejected Unavailable);
-    check_all t []
+    if not (List.is_empty (leases t)) then raise (Protected_delivery.Rejected Unavailable);
+    check_all t (fun () -> true)
   ;;
 
   let with_submission t ~f =
-    let rec wrap (scopes : Protected_delivery.Lease.scope list) checks =
-      match scopes with
-      | [] ->
-        Eio.Fiber.check ();
-        check_all t checks;
-        Eio.Fiber.check ();
-        f ()
-      | scope :: rest -> scope.run (fun check -> wrap rest (check :: checks))
-    in
-    wrap (scopes t) []
+    Protected_delivery.Lease.with_submission (leases t) ~f:(fun source_checks ->
+      Eio.Fiber.check ();
+      check_all t source_checks;
+      Eio.Fiber.check ();
+      f ())
   ;;
 end
 
@@ -404,6 +422,7 @@ module Attempt = struct
     ; limits : Limits.t
     ; scope : Transcript.Scope.t
     ; accounting_id : Observation.Observation_id.t
+    ; preparation_identity : unit ref
     ; started : bool Atomic.t
     ; delivery : Event.Terminal.delivery Atomic.t
     }
@@ -589,10 +608,18 @@ module Attempt = struct
   ;;
 end
 
+let history_entry_equal left right =
+  History_entry.Id.equal (History_entry.id left) (History_entry.id right)
+  && Document_schema.Json.equal
+       (History_entry.Payload.to_json (History_entry.payload left))
+       (History_entry.Payload.to_json (History_entry.payload right))
+;;
+
 module Prepared = struct
   type t =
     { plan : Plan.t
     ; limits : Limits.t
+    ; preparation_identity : unit ref
     ; capacity_binding : Context_capacity.Binding.t
     ; binding_guard : unit -> bool
     ; protected_input : Protected_delivery.Materialized.t option
@@ -602,6 +629,24 @@ module Prepared = struct
   let preparation_id t = Observation.Configuration.preparation_id t.plan.configuration
   let configuration t = t.plan.configuration
   let fingerprint t = t.plan.fingerprint
+
+  let owns_attempt t (attempt : Attempt.t) =
+    phys_equal t.preparation_identity attempt.preparation_identity
+  ;;
+
+  let includes_history t expected =
+    let rec includes actual expected =
+      match actual, expected with
+      | _, [] -> true
+      | [], _ :: _ -> false
+      | entry :: tail, wanted :: remaining ->
+        if History_entry.Id.equal (History_entry.id entry) (History_entry.id wanted)
+        then history_entry_equal entry wanted && includes tail remaining
+        else includes tail expected
+    in
+    includes (Request.history t.plan.request) expected
+  ;;
+
   let binding_guard t = t.binding_guard
 
   let recovery_input t =
@@ -647,7 +692,8 @@ module Prepared = struct
             ~note_delivery
             ~on_event
             ~on_observation
-            ~submission_guard:(Submission_guard.compose submission_guard [ protected_guard ])
+            ~submission_guard:
+              (Submission_guard.with_protected submission_guard protected_guard)
         in
         { t.plan with Plan.run }
     in
@@ -655,6 +701,7 @@ module Prepared = struct
     ; limits = t.limits
     ; scope
     ; accounting_id
+    ; preparation_identity = t.preparation_identity
     ; started = Atomic.make false
     ; delivery = Atomic.make Event.Terminal.Definitely_not_submitted
     }
@@ -664,14 +711,7 @@ end
 let request_equal a b =
   Option.equal Request.Guidance.equal (Request.guidance a) (Request.guidance b)
   && Request.Target.equal (Request.target a) (Request.target b)
-  && List.equal
-       (fun a b ->
-          History_entry.Id.equal (History_entry.id a) (History_entry.id b)
-          && Document_schema.Json.equal
-               (History_entry.Payload.to_json (History_entry.payload a))
-               (History_entry.Payload.to_json (History_entry.payload b)))
-       (Request.history a)
-       (Request.history b)
+  && List.equal history_entry_equal (Request.history a) (Request.history b)
   && List.equal Request.Tool_spec.equal (Request.tools a) (Request.tools b)
   && List.equal Request.Asset.equal (Request.assets a) (Request.assets b)
 ;;
@@ -947,6 +987,7 @@ module Context = struct
         Ok
           { Prepared.plan
           ; limits = t.adapter.limits
+          ; preparation_identity = ref ()
           ; capacity_binding
           ; binding_guard
           ; protected_input

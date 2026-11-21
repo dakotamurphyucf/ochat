@@ -132,7 +132,27 @@ let%expect_test
        let operation = (Option.value_exn emitted.active_operation).id in
        List.iter emitted.managed_submissions ~f:(fun receipt ->
          assert (M.equal_status (Assigned operation) receipt.status);
-         [%test_eq: int] 1 (List.length receipt.output_ids));
+         [%test_eq: int] 1 (List.length receipt.output_ids);
+         let continuation = P.Id.Operation.create () in
+         let suspended =
+           M.suspend_rollover receipt ~predecessor:operation ~continuation |> protocol_ok
+         in
+         let decoded = M.to_jsonaf suspended |> M.of_jsonaf |> protocol_ok in
+         assert (M.equal suspended decoded);
+         let successor = P.Id.Operation.create () in
+         assert (
+           Result.is_error
+             (M.claim_rollover
+                decoded
+                ~continuation:(P.Id.Operation.create ())
+                ~successor));
+         let reassigned =
+           M.claim_rollover decoded ~continuation ~successor |> protocol_ok
+         in
+         assert (M.same_key reassigned receipt);
+         assert (P.History.Id.equal reassigned.history_id receipt.history_id);
+         assert (List.equal P.History.Id.equal reassigned.output_ids receipt.output_ids);
+         assert (M.equal_status reassigned.status (Assigned successor)));
        Eio.Promise.resolve finish_u ();
        let done_state = await_idle actor in
        List.iter done_state.managed_submissions ~f:(fun receipt ->

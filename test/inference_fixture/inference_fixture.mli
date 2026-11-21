@@ -37,6 +37,16 @@ val create_with_capacity
   -> post_stream:post_stream
   -> t
 
+(** Exercise capacity against the same isolated request-guidance test adapter. *)
+val create_with_capacity_and_guidance
+  :  request_guidance:bool
+  -> capacity_source:(Inference.Request.t -> Inference_runtime.Context_capacity.Source.t)
+  -> binding_is_current:(unit -> bool)
+  -> namespace:string
+  -> default_model:string
+  -> post_stream:post_stream
+  -> t
+
 (** Explicitly opts into the actual pure OpenAI input translator and final
     submission guard. Default fixtures preserve history-only DTO input and reject
     request guidance. Synthetic outputs remain reconstructed. *)

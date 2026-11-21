@@ -243,6 +243,8 @@
   recovery_note_share
   recovery_note_share_change
   recovery_rollover_checkpoint
+  recovery_rollover_continuation
+  recovery_rollover_input
   recovery_rollover_batch
   recovery_rollover_batch_cut
   recovery_rollover

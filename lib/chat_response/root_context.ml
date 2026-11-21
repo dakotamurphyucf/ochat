@@ -12,3 +12,16 @@ type t =
           -> 'a)
       -> 'a
   }
+
+(** Exact first root admission of a fresh window. Preview entries remain
+    transient until the selected attempt crosses the guarded submission cut. *)
+module Successor = struct
+  type t =
+    { pending : History_entry.t list
+    ; optional_hint : Agent_guidance.t option
+    ; check_prepared : optional_hint:bool -> Inference_runtime.Prepared.t -> unit
+    ; guard : Inference_runtime.Attempt.t -> unit -> unit
+    }
+
+  exception Omit_optional_hint
+end

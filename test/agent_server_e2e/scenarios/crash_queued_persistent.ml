@@ -442,7 +442,7 @@ let test env environment =
         "wrong persistent receipt";
       (match submission.status with
        | Terminal (Some _, Completed) -> ()
-       | Deferred | Ready | Assigned _ | Terminal _ ->
+       | Deferred | Ready | Suspended_rollover _ | Assigned _ | Terminal _ ->
          F.fail "submission lacks actual completion");
       let retained =
         ( job

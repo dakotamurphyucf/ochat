@@ -6,6 +6,7 @@ module Cursor = Managed_output_cursor
 let operation (receipt : M.t) =
   match receipt.status with
   | Assigned id | Terminal (Some id, _) -> Some id
+  | Suspended_rollover { predecessor; _ } -> Some predecessor
   | Deferred | Ready | Terminal (None, _) -> None
 ;;
 

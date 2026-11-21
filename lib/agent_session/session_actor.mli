@@ -803,7 +803,6 @@ module Resource_observation : sig
     -> state:Recovery_window_record.state option
     -> Agent_protocol.Page.Request.t
     -> (Recovery_window_page.summary Agent_protocol.Page.t, Agent_protocol.Error.t) result
-
 end
 
 (** Exact authority to list or search retained history on this observed
@@ -3918,6 +3917,19 @@ val settle_context_rollover
   -> Recovery_rollover.Expected.t
   -> Recovery_rollover.Settlement.t
   -> (Recovery_rollover.Receipt.t, Agent_protocol.Error.t) result
+
+(** Control a durable successor using the current owner writer and exact window revision.
+    Continue selects one fresh foreground preparation. Pending input and wakes are
+    accepted only if the exact resulting attempt reaches transport admission. *)
+val control_context_rollover
+  :  t
+  -> actor:Operator_authorization.t
+  -> attachment_id:Agent_protocol.Id.Attachment.t
+  -> authorize:(Session_state.t -> (unit, Agent_protocol.Error.t) result)
+  -> id:Agent_protocol.Id.Operation.t
+  -> Recovery_rollover.Expected.t
+  -> Recovery_rollover_continuation.action
+  -> (Recovery_rollover_continuation.t, Agent_protocol.Error.t) result
 
 (** Record the owning writer's explicit checkpoint recipe against the exact
     quiescent history and immutable note revisions. The holder needs transcript
