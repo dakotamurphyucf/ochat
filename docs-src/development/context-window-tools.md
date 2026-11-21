@@ -54,6 +54,26 @@ make a previously accepted registration ineligible for rollover. A note write
 leaves the checkpoint unregistered. A retry can read the receipt without
 creating a fresh checkpoint or claiming that the current history is covered.
 
+**Automatic checkpoint opportunity.** A host with a qualified automatic
+capacity policy may offer one checkpoint-only model request when the finalized
+foreground request reaches the soft limit. The checkpoint request keeps the
+same authored instructions, history, input assets and model. The host measures
+the narrowed request again against the hard input limit before dispatch.
+
+With committed local notes, the request exposes `context_checkpoint` for
+selecting their exact revisions. When the definition selected both checkpoint
+and note writing and the catalog is empty, the request exposes one
+`recovery_note_write` creation at a host-selected path and catalog revision.
+A single completed call can write the new note and register its exact revision
+in one durable session transaction. The canonical tool result is an
+acknowledgment of the write. Its matching invocation, output and source remain
+part of the checkpoint proof.
+
+The host records the opportunity before the provider write. An interruption
+consumes it for that window, and strict recovery can verify any completed proof
+from the exact retained attempt. The next capacity decision uses a freshly
+prepared foreground request from the current source cut.
+
 To request a transition, pass the string in the returned scope's `window`
 field as `expected_window`. The following illustrates the argument shape.
 Replace the example ID with the one from the current observation.

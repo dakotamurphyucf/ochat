@@ -8,7 +8,10 @@ let cases =
   ; "daemon-recovery.converter-adoption", Support.Recovery_asset_converter.run
   ; "daemon-recovery.configured-capacity", Recovery_capacity_scenario.run
   ; "daemon-recovery.operator-rollover", Recovery_operator_rollover_scenario.run
+  ; "daemon-recovery.automatic-capacity", Recovery_automatic_scenario.run
+  ; "daemon-recovery.automatic-soft-checkpoint", Recovery_automatic_scenario.run_soft
   ; "daemon-recovery.ordinary-hard-limit", Recovery_successor_guard_scenario.ordinary_hard_limit
+  ; "daemon-recovery.checkpoint-wake", Recovery_wake_admission_scenario.checkpoint
   ; "daemon-recovery.ordinary-wake-denied", Recovery_wake_admission_scenario.denied
   ; "daemon-recovery.ordinary-wake-at-write", Recovery_wake_admission_scenario.accepted
   ; "daemon-recovery.near-limit-reminder", Recovery_reminder_scenario.run_stock
@@ -17,6 +20,9 @@ let cases =
   ; "daemon-recovery.successor-hint-guards", Recovery_successor_guard_scenario.run
   ; "daemon-recovery.selected-successor-sources", Recovery_successor_selection_scenario.run
   ; "daemon-recovery.authored-checkpoint", Recovery_checkpoint_scenario.run
+  ; "daemon-recovery.soft-checkpoint", Recovery_soft_checkpoint_scenario.run
+  ; "daemon-recovery.soft-checkpoint-lost-accept",
+    Recovery_soft_checkpoint_scenario.run_lost_accept
   ; "daemon-recovery.authored-rollover-hooks", Recovery_rollover_hooks_scenario.run
   ; "daemon-recovery.installed-originals", Support.Installed_originals.run
   ; "daemon-recovery.installed-handoff", Support.Installed_originals.run_handoff

@@ -18,6 +18,9 @@ val finish : request -> unit
     The complete response retains the actual output item. Reject double completion. *)
 val reply_summary : request -> string -> unit
 
+(** Deliver a complete empty provider rejection with the typed context-limit code. *)
+val reject_context : request -> unit
+
 val reasoning : string -> string -> Openai.Responses.Response_stream.Item.t
 val message : string -> string -> Openai.Responses.Response_stream.Item.t
 val added : Openai.Responses.Response_stream.Item.t -> Openai.Responses.Response_stream.t

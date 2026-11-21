@@ -4842,7 +4842,11 @@ let build_product_attachment
   in
   let worker =
     Turn_worker.create
-      ?successor_guidance:(Option.bind script_tools ~f:Script_tool_calls.successor_guidance)
+      ?checkpoint_tools:
+        (Option.map advertised_dispatch ~f:(fun (_, selected) ->
+           Recovery_checkpoint_candidate.selected_tools selected))
+      ?successor_guidance:
+        (Option.bind script_tools ~f:Script_tool_calls.successor_guidance)
       ~root_binding:(Prepared_native.root_binding prepared_native)
       ?authoring_context:(Option.map authoring ~f:Authoring_runtime.materialize)
       ?agent_guidance:

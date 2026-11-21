@@ -7,6 +7,8 @@ module Catalog = Recovery_notes.Catalog
 
 val name : string
 val implementation_revision : string
+val note_name : string
+val note_implementation_revision : string
 
 module Request : sig
   type action =
@@ -34,6 +36,12 @@ module Receipt : sig
   val to_json : t -> Jsonaf.t
 end
 
+type soft_note =
+  { opportunity : P.Id.Operation.t
+  ; created : Catalog.selection
+  }
+[@@deriving equal, sexp_of]
+
 type t = private
   { principal : P.Id.Principal.t
   ; key : Chatml_source.Digest.t
@@ -50,6 +58,7 @@ type t = private
   ; instruction_revision : int64 option
   ; instruction_digest : Chatml_source.Digest.t option
   ; covered_rows : int
+  ; soft_note : soft_note option
   }
 [@@deriving equal, sexp_of]
 
@@ -71,11 +80,13 @@ val create
   -> covered_rows:int
   -> (t, P.Error.t) result
 
+val with_soft_note : t -> soft_note -> t
 val same_key : t -> principal:P.Id.Principal.t -> key:Chatml_source.Digest.t -> bool
 
 (** Matches the exact original, selected native model route and call occurrence.
     The actor or reducer separately checks the execution and its owning attempt. *)
 val selected_invocation : P.Invocation.t -> bool
+val selected_note_invocation : P.Invocation.t -> bool
 
 val matches_invocation : t -> P.Invocation.t -> bool
 val to_json : t -> Jsonaf.t

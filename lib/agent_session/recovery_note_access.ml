@@ -17,9 +17,21 @@ module Effect = struct
     | Read -> "recovery_note_read"
     | List -> "recovery_note_list"
     | Search -> "recovery_note_search"
-    | Write -> "recovery_note_write"
+    | Write -> Recovery_authored_checkpoint.note_name
     | Append -> "recovery_note_append"
     | Delete -> "recovery_note_delete"
+  ;;
+
+  let implementation_revision t =
+    let namespace =
+      match t with
+      | Read -> "ochat.recovery.notes.native.v2:"
+      | List | Search | Write | Append | Delete -> "ochat.recovery.notes.native.v1:"
+    in
+    match t with
+    | Write -> Recovery_authored_checkpoint.note_implementation_revision
+    | Read | List | Search | Append | Delete ->
+      Chatmd_shell_spec.Source_ref.digest (namespace ^ name t)
   ;;
 
   let of_query = function
@@ -174,4 +186,9 @@ let check_management t state ~owner =
        in
        principal, attachment_id)
   | Native_route _ -> denied ()
+;;
+
+let selected_native_tools = function
+  | Native_route { token; _ } -> N.selected_capabilities token
+  | Operator_route _ -> denied ()
 ;;

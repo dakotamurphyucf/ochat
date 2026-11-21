@@ -34,6 +34,11 @@ module Capacity_basis = struct
   ;;
 
   let has_policy t = Option.is_some (Capacity.Selection.policy t.selection)
+  let automatic_policy t =
+    if Capacity.Mode.equal (Capacity.availability t.selection).effective Automatic
+    then Capacity.Selection.policy t.selection
+    else None
+  ;;
 
   let equal a b =
     Int.equal a.generation b.generation
@@ -169,6 +174,32 @@ let reminder_custody t token ~scope ~current =
               ~f:(Agent_protocol.Recovery_window.Scope.equal scope) ->
     Option.map captured.reminder ~f:(fun policy -> captured, phase, policy)
   | _ -> None
+;;
+
+let checkpoint_policy t token ~scope ~current ~attempt =
+  let open Option.Let_syntax in
+  let%bind captured, phase = t.current in
+  let%bind basis = current in
+  let eligible =
+    owns t token
+    && Option.exists captured.capacity ~f:(Capacity_basis.equal basis)
+    && Option.exists
+         captured.recovery_scope
+         ~f:(Agent_protocol.Recovery_window.Scope.equal scope)
+    &&
+    match phase, attempt with
+    | Preparing, None -> true
+    | Effective, Some attempt ->
+      Option.exists
+        captured.configuration
+        ~f:(phys_equal (R.Attempt.configuration attempt))
+      &&
+        (match (R.Attempt.scope attempt).relation with
+        | Root -> true
+        | Nested _ -> false)
+    | Preparing, Some _ | (Effective | Retained), None | Retained, Some _ -> false
+  in
+  if eligible then Capacity_basis.automatic_policy basis else None
 ;;
 
 let claim_reminder t token ~scope ~current prepared =
@@ -493,6 +524,7 @@ let require = function
 ;;
 
 let root_port
+      ~select_checkpoint
       ~begin_capture
       ~publish_capacity
       ~publish_recovery
@@ -583,8 +615,12 @@ let root_port
                 in
                 Inference_client.Prepared_selection.choose candidate ~for_attempt
             in
-            f context ~select_prepared ~on_prepared ~on_dispatch:(fun configuration ->
-              mark token configuration |> require)
+            f
+              context
+              ~select_checkpoint:(select_checkpoint token)
+              ~select_prepared
+              ~on_prepared
+              ~on_dispatch:(fun configuration -> mark token configuration |> require)
           with
           | result ->
             complete true;
@@ -595,5 +631,6 @@ let root_port
             (try complete false with
              | _ -> ());
             Stdlib.Printexc.raise_with_backtrace exn backtrace)
+    ; checkpoint_tools = Chat_response.Soft_checkpoint.Unselected
     }
 ;;

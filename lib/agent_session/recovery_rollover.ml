@@ -10,6 +10,7 @@ let invalid message = Error (P.Error.invalid_request message)
 let conflict message = Error (P.Error.create Conflict ~message ~retryable:true ())
 
 module Checkpoint = Recovery_rollover_checkpoint
+module Opportunity = Recovery_checkpoint_opportunity
 module Expected = Checkpoint.Expected
 
 module Requester = struct
@@ -654,6 +655,7 @@ type t =
   { receipts : Receipt.t list
   ; checkpoint : Checkpoint.t option
   ; authored : Checkpoint.t list
+  ; checkpoint_opportunity : Opportunity.t option
   }
 
 let max_authored_per_window = 64
@@ -680,6 +682,7 @@ let pending t =
 ;;
 
 let checkpoint t = t.checkpoint
+let checkpoint_opportunity t = t.checkpoint_opportunity
 
 let latest t ~scope =
   List.find t.receipts ~f:(fun receipt ->
@@ -747,6 +750,10 @@ module Change = struct
   type t =
     | Admit of Intent.t
     | Record_checkpoint of Checkpoint.t
+    | Record_checkpoint_with_note of
+        { checkpoint : Checkpoint.t
+        ; note : Recovery_note_change.t
+        }
     | Settle of
         { id : P.Id.Operation.t
         ; terminal : Receipt.terminal
@@ -761,13 +768,25 @@ module Change = struct
         ; expected : Expected.t
         ; change : Recovery_rollover_hooks.change
         }
+    | Checkpoint_opportunity of Opportunity.change
 
   let to_json = function
+    | Checkpoint_opportunity change ->
+      `Object
+        [ "kind", `String "checkpoint_opportunity"
+        ; "change", Opportunity.change_to_json change
+        ]
     | Admit intent -> `Object [ "kind", `String "admit"; "intent", Intent.to_json intent ]
     | Record_checkpoint checkpoint ->
       `Object
         [ "kind", `String "record_checkpoint"
         ; "checkpoint", Checkpoint.to_json checkpoint
+        ]
+    | Record_checkpoint_with_note { checkpoint; note } ->
+      `Object
+        [ "kind", `String "record_checkpoint_with_note"
+        ; "checkpoint", Checkpoint.to_json checkpoint
+        ; "note", Recovery_note_change.to_json note
         ]
     | Settle { id; terminal } ->
       `Object
@@ -799,9 +818,16 @@ module Change = struct
     | "admit" ->
       let%map intent = J.required_as fields "intent" Intent.of_json in
       Admit intent
+    | "checkpoint_opportunity" ->
+      let%map change = J.required_as fields "change" Opportunity.change_of_json in
+      Checkpoint_opportunity change
     | "record_checkpoint" ->
       let%map checkpoint = J.required_as fields "checkpoint" Checkpoint.of_json in
       Record_checkpoint checkpoint
+    | "record_checkpoint_with_note" ->
+      let%bind checkpoint = J.required_as fields "checkpoint" Checkpoint.of_json in
+      let%map note = J.required_as fields "note" Recovery_note_change.of_json in
+      Record_checkpoint_with_note { checkpoint; note }
     | "settle" ->
       let%bind id = J.required_as fields "id" P.Id.Operation.of_json in
       let%bind status = J.required_as fields "status" Receipt.status_of_json in
@@ -833,6 +859,9 @@ let to_json t =
      ]
      @ Option.to_list
          (Option.map t.checkpoint ~f:(fun value -> "checkpoint", Checkpoint.to_json value))
+     @ Option.to_list
+         (Option.map t.checkpoint_opportunity ~f:(fun value ->
+            "checkpoint_opportunity", Opportunity.to_json value))
      @
      match t.authored with
      | [] -> []
@@ -926,10 +955,16 @@ let apply previous_ledger ~active ~revision ~history ~catalog change =
   let t =
     Option.value
       previous_ledger
-      ~default:{ receipts = []; checkpoint = None; authored = [] }
+      ~default:
+        { receipts = []; checkpoint = None; authored = []; checkpoint_opportunity = None }
   in
   let%bind next =
     match change with
+    | Change.Checkpoint_opportunity change ->
+      let%map checkpoint_opportunity =
+        Opportunity.apply t.checkpoint_opportunity ~active ~revision change
+      in
+      { t with checkpoint_opportunity = Some checkpoint_opportunity }
     | Change.Admit intent ->
       let%bind duplicate =
         previous previous_ledger ~requester:intent.requester ~expected:intent.expected
@@ -948,7 +983,7 @@ let apply previous_ledger ~active ~revision ~history ~catalog change =
           { t with
             receipts = Receipt.{ intent; status = Pending; hooks = None } :: t.receipts
           }
-    | Record_checkpoint checkpoint ->
+    | Record_checkpoint checkpoint | Record_checkpoint_with_note { checkpoint; _ } ->
       if
         Scope.equal active (Checkpoint.expected checkpoint).scope
         && Int64.equal revision (Checkpoint.expected checkpoint).revision
@@ -1095,7 +1130,7 @@ let commit
     | Archive_only _ -> Ok ()
   in
   let%bind t = settle t ~id:change.id ~terminal:(Commit.terminal change) in
-  let next = { t with checkpoint = None; authored = [] } in
+  let next = { t with checkpoint = None; authored = []; checkpoint_opportunity = None } in
   let%map () = bounded next in
   next
 ;;
@@ -1122,6 +1157,9 @@ let of_json json =
         | _ -> invalid "invalid authored checkpoint receipts")
     in
     let authored = Option.value authored ~default:[] in
+    let%bind checkpoint_opportunity =
+      J.optional_as fields "checkpoint_opportunity" Opportunity.of_json
+    in
     let%bind _ =
       let scope =
         Option.map (List.hd authored) ~f:(fun value -> (Checkpoint.expected value).scope)
@@ -1165,7 +1203,7 @@ let of_json json =
             Hash_set.add ids receipt.intent.id;
             Ok (active || pending, Set.add requesters key)))
     in
-    { receipts; checkpoint; authored })
+    { receipts; checkpoint; authored; checkpoint_opportunity })
 ;;
 
 let validate_state t ~windows ~revision ~has_archive =
@@ -1196,6 +1234,13 @@ let validate_state t ~windows ~revision ~has_archive =
         covers_existing_window (Checkpoint.expected checkpoint))
     then Ok ()
     else invalid "authored checkpoint receipt has no owning recovery window"
+  in
+  let%bind () =
+    if
+      Option.for_all t.checkpoint_opportunity ~f:(fun opportunity ->
+        covers_existing_window (Opportunity.claim opportunity).expected)
+    then Ok ()
+    else invalid "checkpoint opportunity has no owning recovery window"
   in
   List.fold_result t.receipts ~init:() ~f:(fun () (receipt : Receipt.t) ->
     let expected = receipt.intent.expected in
@@ -1232,6 +1277,10 @@ let check_unchanged t ~incoming =
     List.equal Receipt.equal left.receipts right.receipts
     && Option.equal Checkpoint.equal left.checkpoint right.checkpoint
     && List.equal Checkpoint.equal left.authored right.authored
+    && Option.equal
+         Opportunity.equal
+         left.checkpoint_opportunity
+         right.checkpoint_opportunity
   in
   if Option.equal equal t incoming
   then Ok ()

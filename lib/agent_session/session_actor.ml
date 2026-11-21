@@ -5660,6 +5660,30 @@ module Recovery_rollover_request = struct
         -> R.Checkpoint.t t
 end
 
+module Soft_checkpoint_request = struct
+  module O = Recovery_checkpoint_opportunity
+  module R = Inference_runtime
+  module P = Agent_protocol
+
+  type owner = Foreground_publication.t * Configuration_capture.Token.t
+
+  type plan =
+    { id : P.Id.Operation.t
+    ; expected : O.Expected.t
+    ; original : Operator_authorization.t
+    ; policy : R.Context_capacity.Policy.t
+    ; candidate : (Recovery_checkpoint_candidate.t, Recovery_checkpoint_opportunity.unavailable) result
+    }
+
+  type _ t =
+    | Plan : owner * Chat_response.Soft_checkpoint.tools * R.Prepared.t -> plan option t
+    | Admit : owner * plan * O.decision * R.Prepared.t -> O.Claim.t t
+    | Accept : owner * plan * O.Claim.t * R.Prepared.t * R.Attempt.t -> (unit -> unit) t
+    | Settle :
+        owner * plan * O.Claim.t * R.Attempt.t * Chat_response.Soft_checkpoint.outcome
+        -> unit t
+end
+
 module Context_request = struct
   module Capacity = struct
     type _ t =
@@ -5680,6 +5704,7 @@ module Context_request = struct
   end
 
   type _ t =
+    | Soft_checkpoint : 'a Soft_checkpoint_request.t -> 'a t
     | Capacity : 'a Capacity.t -> 'a t
     | Recovery_effective :
         Configuration_capture.Token.t
@@ -26208,8 +26233,77 @@ let accept_recovery_reminder t capture claim prepared attempt =
   else Error (error Conflict "reminder acceptance could not be retained")
 ;;
 
-let root_configuration_context t operation_id ~automatic =
+let root_configuration_context t (publication : Foreground_publication.t) ~automatic =
+  let operation_id = publication.operation.id in
+  let select_checkpoint capture ~tools ~request ~prepare_isolated baseline =
+    let module R = Inference_runtime in
+    let module O = Recovery_checkpoint_opportunity in
+    let module C = Recovery_checkpoint_candidate in
+    let module P = Inference_client.Prepared_selection in
+    let open Option.Let_syntax in
+    let owner = publication, capture in
+    let ask : type a. a Soft_checkpoint_request.t -> a =
+      fun req ->
+      match call t (Context_request (Soft_checkpoint req)) with
+      | Ok value -> value
+      | Error failure -> raise (Native_tool_dispatch.Dispatch_error failure)
+    in
+    let%bind plan = ask (Plan (owner, tools, baseline)) in
+    let withhold reason =
+      ignore (ask (Admit (owner, plan, Withhold reason, baseline)) : O.Claim.t)
+    in
+    match plan.candidate with
+    | Error reason ->
+      withhold reason;
+      None
+    | Ok recipe ->
+      let preview =
+        let%bind alternative = C.project recipe request in
+        let%bind candidate = prepare_isolated alternative |> Result.ok in
+        let selected = P.prepared candidate in
+        match C.pressure plan.policy selected with
+        | Some (Below_warning | Near_limit | Checkpoint_due)
+          when R.Prepared.includes_history selected (Inference.Request.history request) ->
+          Some (candidate, selected)
+        | Some _ | None -> None
+      in
+      (match preview with
+       | None ->
+         withhold Unproven_fit;
+         None
+       | Some (candidate, prepared) ->
+         let claim = ask (Admit (owner, plan, Offer (C.recipe recipe), prepared)) in
+         let%bind () =
+           match claim.decision with
+           | Offer _ -> Some ()
+           | Withhold _ -> None
+         in
+         let for_attempt attempt =
+           let entered = ref false in
+           R.Submission_guard.create_write_admission ~refresh:(fun () ->
+             if !entered
+             then
+               raise
+                 (Native_tool_dispatch.Dispatch_error
+                    (error Conflict "checkpoint opportunity already submitted"));
+             entered := true;
+             ask (Accept (owner, plan, claim, prepared, attempt)))
+         in
+         let approve_call attempt ~name ~arguments =
+           R.Prepared.owns_attempt prepared attempt && C.accepts recipe ~name ~arguments
+         in
+         let settle attempt outcome =
+           call
+             t
+             (Context_request
+                (Soft_checkpoint (Settle (owner, plan, claim, attempt, outcome))))
+         in
+         Some
+           Chat_response.Soft_checkpoint.Selected.
+             { candidate; for_attempt; approve_call; settle })
+  in
   Configuration_capture.root_port
+    ~select_checkpoint:(fun capture -> Option.some_if automatic (select_checkpoint capture))
     ~begin_capture:(fun () ->
       call t (Begin_configuration_capture (operation_id, automatic)))
     ~publish_capacity:(fun capture observation ->
@@ -30021,7 +30115,7 @@ let worker_capabilities t worker (publication : Foreground_publication.t) id_sou
               }))
     ; root_context =
         Option.map t.configuration_policy ~f:(fun _ ->
-          root_configuration_context t operation_id ~automatic)
+          root_configuration_context t publication ~automatic)
     ; capacity_rollover =
         (if automatic then Some (foreground_rollover_port t publication) else None)
     ; settle_tool_batch =
@@ -50094,6 +50188,7 @@ let lifecycle_request_allowed : type a. a request -> bool = function
   | Set_organization_admission _
   | Set_configuration_policy _
   | Context_request (Capacity (Set_host _ | Claim_reminder _ | Accept_reminder _))
+  | Context_request (Soft_checkpoint _)
   | Context_request (Recovery_effective _)
   | Prepare_configuration_update _
   | Commit_configuration_update _
@@ -58247,7 +58342,337 @@ let persist_recovery_delta
   Ok ()
 ;;
 
-let prepare_recovery_note_delivery t ~source ~(invocation : Agent_protocol.Invocation.t) catalog query =
+module Soft_checkpoint_host = struct
+  module P = Agent_protocol
+  module R = Inference_runtime
+  module O = Recovery_checkpoint_opportunity
+  module Candidate = Recovery_checkpoint_candidate
+  module Scope = P.Recovery_window.Scope
+  module Policy = R.Context_capacity.Policy
+  module Checkpoint = Recovery_rollover.Checkpoint
+  module Id = Inference.Observation.Observation_id
+
+  let unavailable () = error Conflict "checkpoint opportunity is no longer current"
+
+  let retained state ~scope =
+    let open Option.Let_syntax in
+    let%bind ledger = state.Session_state.recovery_rollover in
+    let%bind opportunity = Recovery_rollover.checkpoint_opportunity ledger in
+    Option.some_if (Scope.equal (O.claim opportunity).expected.scope scope) opportunity
+  ;;
+
+  let basis t ((publication, capture) : Soft_checkpoint_request.owner) ~scope ~attempt =
+    let open Result.Let_syntax in
+    let%bind () = check_live_foreground_publication t publication in
+    let%bind () = require_runtime_admission t in
+    let%bind actor =
+      operation_agent_actor t publication.operation.id
+      >>= Result.of_option ~error:(unavailable ())
+    in
+    let principal = Operator_authorization.principal actor in
+    let%bind () =
+      if
+        Operator_authorization.is_current actor
+        && P.Principal.has_scope principal Send_messages
+        && P.Principal.has_scope principal View_session_transcript
+        && Option.exists (current_recovery_preparation_scope t) ~f:(Scope.equal scope)
+        && not t.rollover_requires_recovery
+      then Ok ()
+      else Error (unavailable ())
+    in
+    let%map policy =
+      Configuration_capture.checkpoint_policy
+        t.configuration_capture
+        capture
+        ~scope
+        ~current:(current_context_capacity_basis t)
+        ~attempt
+      |> Result.of_option ~error:(unavailable ())
+    in
+    actor, policy
+  ;;
+
+  let current_plan t owner (plan : Soft_checkpoint_request.plan) ~attempt =
+    let%bind.Result actor, policy = basis t owner ~scope:plan.expected.scope ~attempt in
+    if phys_equal actor plan.original && phys_equal policy plan.policy
+    then Ok ()
+    else Error (unavailable ())
+  ;;
+
+  let persist t change ~check =
+    persist_recovery_delta
+      t
+      ~rollover:true
+      ~delta:(Recovery_rollover_changed (Checkpoint_opportunity change))
+      ~check_before_commit:check
+  ;;
+
+  let usable_checkpoint state ~scope =
+    let open Option.Let_syntax in
+    let%bind ledger = state.Session_state.recovery_rollover in
+    let%bind checkpoint = Recovery_rollover.checkpoint ledger in
+    let current = (Checkpoint.expected checkpoint).scope in
+    if not (Scope.equal current scope)
+    then None
+    else (
+      let usable =
+        match Checkpoint.recipe checkpoint with
+        | Owner_selection _ ->
+          Checkpoint.check_contents
+            checkpoint
+            ~history:state.conversation.canonical_history
+            ~catalog:state.recovery_notes
+        | Authored _ -> Recovery_checkpoint_cut.check_checkpoint state checkpoint
+      in
+      Option.some_if (Result.is_ok usable) checkpoint)
+  ;;
+
+  let qualified t opportunity pair =
+    let open Option.Let_syntax in
+    let%bind binding =
+      Recovery_checkpoint_cut.opportunity_checkpoint t.state opportunity
+    in
+    let%bind invocation =
+      List.find
+        t.state.invocations
+        ~f:(Recovery_authored_checkpoint.matches_invocation binding)
+    in
+    let exact_pair (pair : Chat_response.Settled_tool_batch.pair) =
+      String.equal
+        (P.History.Id.to_string binding.call)
+        (History_entry.Id.to_string pair.call)
+      && Option.exists invocation.output_entry_id ~f:(fun output ->
+        String.equal
+          (P.History.Id.to_string output)
+          (History_entry.Id.to_string pair.output))
+    in
+    Option.some_if
+      (Option.for_all pair ~f:exact_pair)
+      (O.Checkpointed
+         { invocation = binding.invocation; attempt_ordinal = binding.attempt_ordinal })
+  ;;
+
+  let policy_matches t (claim : O.Claim.t) =
+    Int64.equal claim.configuration_revision t.state.spec.configuration_revision
+    && Option.exists
+         (Option.bind
+            (current_context_capacity_basis t)
+            ~f:Configuration_capture.Capacity_basis.automatic_policy)
+         ~f:(fun policy ->
+           Chatml_source.Digest.equal claim.policy (Policy.revision policy))
+  ;;
+
+  let settle_retained t opportunity outcome ~check =
+    let claim = O.claim opportunity in
+    let%bind.Result expected =
+      O.Expected.create claim.expected.scope ~revision:t.state.counters.revision
+    in
+    persist t (Settle { id = claim.id; expected; outcome }) ~check
+  ;;
+
+  let plan t ((publication, _) as owner) tools baseline =
+    let open Result.Let_syntax in
+    let previous = t.state in
+    match current_recovery_preparation_scope t with
+    | None -> Ok None
+    | Some scope ->
+      (match basis t owner ~scope ~attempt:None with
+       | Error _ -> Ok None
+       | Ok (actor, policy) ->
+         (match Candidate.pressure policy baseline with
+          | Some Checkpoint_due ->
+            (match retained previous ~scope with
+             | Some opportunity ->
+               let claim = O.claim opportunity in
+               if
+                 Option.is_none (O.outcome opportunity)
+                 && not (P.Id.Operation.equal publication.operation.id claim.owner)
+               then (
+                 let check () =
+                   let%bind _ = basis t owner ~scope ~attempt:None in
+                   if phys_equal previous t.state then Ok () else Error (unavailable ())
+                 in
+                 let outcome =
+                   Option.value (qualified t opportunity None) ~default:O.Interrupted
+                 in
+                 let%map () = settle_retained t opportunity outcome ~check in
+                 None)
+               else Ok None
+             | None when Option.is_some (usable_checkpoint previous ~scope) -> Ok None
+             | None ->
+               let%bind expected =
+                 O.Expected.create scope ~revision:previous.counters.revision
+               in
+               let%map catalog =
+                 Recovery_note_session.for_owner
+                   previous.recovery_notes
+                   ~owner:(Scope.session scope)
+               in
+               let id = P.Id.Operation.create () in
+               let candidate =
+                 if
+                   Recovery_effective_ledger.has_record_capacity
+                     previous.recovery_effective
+                 then
+                   Result.of_option
+                     (Candidate.create ~scope ~id ~tools catalog)
+                     ~error:O.No_recipe
+                 else Error O.Unproven_source
+               in
+               Some
+                 Soft_checkpoint_request.
+                   { id; expected; original = actor; policy; candidate })
+          | Some (Below_warning | Near_limit | Hard_limit_exceeded) | None -> Ok None))
+  ;;
+
+  let admit
+        t
+        ((publication, _) as owner)
+        (plan : Soft_checkpoint_request.plan)
+        decision
+        prepared
+    =
+    let open Result.Let_syntax in
+    let policy = Policy.revision plan.policy in
+    let principal = (Operator_authorization.principal plan.original).id in
+    let check () =
+      let%bind () = current_plan t owner plan ~attempt:None in
+      if Int64.equal plan.expected.revision t.state.counters.revision
+      then Ok ()
+      else Error (unavailable ())
+    in
+    let%bind () = check () in
+    let decision, source =
+      match decision with
+      | O.Withhold _ -> decision, None
+      | Offer _ ->
+        (match O.Source.capture t.state.conversation.canonical_history with
+         | Ok source -> decision, Some source
+         | Error _ -> O.Withhold Unproven_source, None)
+    in
+    let%bind claim =
+      O.Claim.create
+        ~id:plan.id
+        plan.expected
+        ~owner:publication.operation.id
+        ~principal
+        ~configuration_revision:t.state.spec.configuration_revision
+        ~preparation:(R.Prepared.preparation_id prepared)
+        ~policy
+        ~decision
+        ~source
+    in
+    let%map () = persist t (Admit claim) ~check in
+    claim
+  ;;
+
+  let check_claim t owner plan (claim : O.Claim.t) attempt =
+    let open Result.Let_syntax in
+    let%bind () = current_plan t owner plan ~attempt:(Some attempt) in
+    let%bind opportunity =
+      retained t.state ~scope:claim.expected.scope
+      |> Result.of_option ~error:(unavailable ())
+    in
+    if O.Claim.equal claim (O.claim opportunity) && Option.is_none (O.outcome opportunity)
+    then Ok opportunity
+    else Error (unavailable ())
+  ;;
+
+  let accept t owner plan (claim : O.Claim.t) prepared attempt =
+    let open Result.Let_syntax in
+    let previous = t.state in
+    let accounting = R.Attempt.accounting_id attempt in
+    let valid_prepared = R.Prepared.binding_guard prepared in
+    let check () =
+      let%bind opportunity = check_claim t owner plan claim attempt in
+      if
+        phys_equal previous t.state
+        && Option.is_none (O.attempt opportunity)
+        && valid_prepared ()
+        && R.Prepared.owns_attempt prepared attempt
+      then Ok ()
+      else Error (unavailable ())
+    in
+    let%bind () = check () in
+    let%bind expected =
+      O.Expected.create claim.expected.scope ~revision:previous.counters.revision
+    in
+    let%map () =
+      persist t (Accept { id = claim.id; expected; attempt = accounting }) ~check
+    in
+    fun () ->
+      let valid =
+        check_claim t owner plan claim attempt
+        |> Result.ok
+        |> Option.exists ~f:(fun current ->
+          valid_prepared () && Option.exists (O.attempt current) ~f:(Id.equal accounting))
+      in
+      if not valid then raise (Native_tool_dispatch.Dispatch_error (unavailable ()))
+  ;;
+
+  let settle t ((publication, _) as owner) plan (claim : O.Claim.t) attempt outcome =
+    let open Result.Let_syntax in
+    let previous = t.state in
+    let accounting = R.Attempt.accounting_id attempt in
+    let current () =
+      match outcome with
+      | Chat_response.Soft_checkpoint.Interrupted ->
+        (* Interruption bookkeeping survives the original actor losing permission.
+           The exact physical foreground slot and the retained offer still match. *)
+        let%bind () = check_foreground_publication t publication in
+        let%bind opportunity =
+          retained t.state ~scope:claim.expected.scope
+          |> Result.of_option ~error:(unavailable ())
+        in
+        if
+          (not t.rollover_requires_recovery)
+          && O.Claim.equal claim (O.claim opportunity)
+          && Option.is_none (O.outcome opportunity)
+        then Ok opportunity
+        else Error (unavailable ())
+      | Settled _ | Ineligible -> check_claim t owner plan claim attempt
+    in
+    let%bind selected = current () in
+    let check () =
+      let%bind effective = current () in
+      if
+        phys_equal previous t.state
+        && Option.for_all (O.attempt effective) ~f:(Id.equal accounting)
+      then Ok ()
+      else Error (unavailable ())
+    in
+    let outcome =
+      match outcome with
+      | Chat_response.Soft_checkpoint.Settled pair ->
+        Option.value
+          (qualified t selected (Some pair))
+          ~default:(O.Unavailable Checkpoint_refused)
+      | Ineligible -> Unavailable Ineligible_response
+      | Interrupted -> Interrupted
+    in
+    settle_retained t selected outcome ~check
+  ;;
+
+  let handle : type a. t -> a Soft_checkpoint_request.t -> (a, P.Error.t) result =
+    fun t request ->
+    match request with
+    | Plan (owner, tools, baseline) -> plan t owner tools baseline
+    | Admit (owner, planned, decision, prepared) ->
+      admit t owner planned decision prepared
+    | Accept (owner, planned, claim, prepared, attempt) ->
+      accept t owner planned claim prepared attempt
+    | Settle (owner, planned, claim, attempt, outcome) ->
+      settle t owner planned claim attempt outcome
+  ;;
+end
+
+let prepare_recovery_note_delivery
+      t
+      ~source
+      ~(invocation : Agent_protocol.Invocation.t)
+      catalog
+      query
+  =
   let module P = Agent_protocol in
   let open Result.Let_syntax in
   let unavailable () = Error (error Invalid_state "recovery note disclosure is unavailable") in
@@ -58500,6 +58925,34 @@ let record_authored_checkpoint t ~access (request : Recovery_authored_checkpoint
            context_native_execution t ~access ~effect_kind:Checkpoint
          in
          let%bind () = require_runtime_admission t in
+         let%bind () =
+           match Soft_checkpoint_host.retained prior ~scope with
+           | Some opportunity ->
+             let module O = Recovery_checkpoint_opportunity in
+             let claim = O.claim opportunity in
+             if
+               P.Id.Operation.equal operation claim.owner
+               && Option.is_none (O.outcome opportunity)
+             then (
+               let key =
+                 Chatml_source.Digest.of_contents
+                   (P.Id.Operation.to_string claim.id)
+                   ~checkpoint:ignore
+               in
+               match claim.decision with
+               | Offer Register
+                 when P.Id.Principal.equal principal claim.principal
+                      && Chatml_source.Digest.equal key request.key
+                      && Soft_checkpoint_host.policy_matches t claim
+                      && Option.is_some (O.attempt opportunity) -> Ok ()
+               | Offer _ | Withhold _ ->
+                 Error
+                   (error
+                      Conflict
+                      "checkpoint registration is outside its accepted opportunity"))
+             else Ok ()
+           | None -> Ok ()
+         in
          let%bind capacity = read_context_capacity t operation in
          match capacity with
          | Current _
@@ -60192,6 +60645,92 @@ let expire_recovery_window_internal t actor attachment_id authorize scope =
       ~check_before_commit:check
 ;;
 
+let prepare_soft_checkpoint_note
+      t
+      ~access
+      ~identity
+      mutation
+      ~catalog
+      ~(receipt : Recovery_notes.Catalog.Receipt.t)
+  =
+  let module P = Agent_protocol in
+  let module O = Recovery_checkpoint_opportunity in
+  let module Catalog = Recovery_notes.Catalog in
+  let module Checkpoint = Recovery_rollover.Checkpoint in
+  let module Authored = Recovery_authored_checkpoint in
+  let open Result.Let_syntax in
+  let previous = t.state in
+  let pending =
+    let open Option.Let_syntax in
+    let%bind scope = current_recovery_preparation_scope t in
+    let%bind opportunity = Soft_checkpoint_host.retained previous ~scope in
+    let claim = O.claim opportunity in
+    let%bind operation = previous.active_operation in
+    Option.some_if
+      (P.Id.Operation.equal operation.id claim.owner
+       && Option.is_none (O.outcome opportunity))
+      (scope, claim)
+  in
+  match identity, pending with
+  | Catalog.Mutation_identity.Client _, _ | Native _, None -> Ok None
+  | Native id, Some (scope, claim) ->
+    let check () =
+      let%bind _, access = recovery_note_access t ~access ~effect_kind:Write in
+      match access with
+      | Native (invocation, operation)
+        when phys_equal previous t.state
+             && (not t.rollover_requires_recovery)
+             && Soft_checkpoint_host.policy_matches t claim
+             && P.Id.Operation.equal operation claim.owner
+             && P.Id.Invocation.equal id invocation.context.id
+             && Authored.selected_note_invocation invocation -> Ok invocation
+      | Operator _ | Native _ ->
+        Error (error Conflict "checkpoint note no longer owns its foreground cut")
+    in
+    let%bind invocation = check () in
+    let%bind selected = Recovery_note_access.selected_native_tools access in
+    let%bind () =
+      if
+        Recovery_checkpoint_candidate.checkpoint_selected selected
+        && Catalog.Receipt.equal_kind receipt.kind Created
+        &&
+        match claim.decision with
+        | Offer recipe -> Recovery_checkpoint_candidate.matches_create recipe mutation
+        | Withhold _ -> false
+      then Ok ()
+      else
+        Error (error Permission_denied "checkpoint note is outside the selected recipe")
+    in
+    let key =
+      Chatml_source.Digest.of_contents
+        (P.Id.Operation.to_string claim.id)
+        ~checkpoint:ignore
+    in
+    let%bind binding =
+      Recovery_checkpoint_cut.capture_soft_note
+        previous
+        ~scope
+        ~principal:claim.principal
+        ~operation:claim.owner
+        ~invocation
+        ~key
+        ~catalog
+        ~note:Authored.{ opportunity = claim.id; created = receipt.selection }
+    in
+    let%bind expected =
+      Recovery_rollover.Expected.create scope ~revision:previous.counters.revision
+    in
+    let%map checkpoint =
+      Checkpoint.capture
+        expected
+        ~history:previous.conversation.canonical_history
+        ~catalog:(Some catalog)
+        ~notes:[ receipt.selection ]
+        ~recipe:(Authored binding)
+    in
+    Some (checkpoint, fun () -> Result.map (check ()) ~f:ignore)
+;;
+
 let handle_recovery_note
   : type a. t -> a Recovery_note_request.t -> (a, Agent_protocol.Error.t) result
   =
@@ -60246,12 +60785,25 @@ let handle_recovery_note
     in
     (match outcome with
      | Replayed receipt -> Ok receipt
-     | Applied (_, receipt) ->
-       let check_before_commit () = Result.map (check ()) ~f:ignore in
+     | Applied (catalog, receipt) ->
+       let%bind checkpoint =
+         prepare_soft_checkpoint_note t ~access ~identity operation ~catalog ~receipt
+       in
+       let delta =
+         match checkpoint with
+         | None -> Session_delta.Recovery_note_changed change
+         | Some (checkpoint, _) ->
+           Recovery_rollover_changed (Record_checkpoint_with_note { checkpoint; note = change })
+       in
+       let check_before_commit () =
+         let%bind _ = check () in
+         Option.value_map checkpoint ~default:(Ok ()) ~f:(fun (_, check) -> check ())
+       in
        let%map () =
          persist_recovery_delta
            t
-           ~delta:(Recovery_note_changed change)
+           ~rollover:(Option.is_some checkpoint)
+           ~delta
            ~check_before_commit
        in
        receipt)
@@ -60880,6 +61432,7 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
       claim_recovery_reminder t capture prepared
     | Context_request (Capacity (Accept_reminder (capture, claim, prepared, attempt))) ->
       accept_recovery_reminder t capture claim prepared attempt
+    | Context_request (Soft_checkpoint request) -> Soft_checkpoint_host.handle t request
     | Context_request (Capacity (Publish (capture, observation))) ->
       mark_context_capacity t capture observation
     | Context_request (Recovery_effective (capture, input, configuration, binding_is_current)) ->

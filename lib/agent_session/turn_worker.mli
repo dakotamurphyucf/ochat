@@ -50,6 +50,7 @@ end
     existing paths. *)
 val create
   :  ?root_binding:Chat_response.Root_binding.t
+  -> ?checkpoint_tools:Chat_response.Soft_checkpoint.tools
   -> ?runtime_policy:Chat_response.Runtime_semantics.policy
   -> ?authoring_context:
        (input:Operation_worker.Input.t

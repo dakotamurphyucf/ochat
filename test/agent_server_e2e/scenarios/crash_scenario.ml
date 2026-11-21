@@ -106,6 +106,8 @@ let run_child env arguments =
   | [ "creator-recover"; root; boundary ] ->
     Crash_creator.run_child env ~root ~boundary ~recover:true
   | [ "generated-provider"; root ] -> Generated_provider_scenario.run_child env root
+  | [ "soft-checkpoint-lost-accept"; root; port ] ->
+    Recovery_soft_checkpoint_scenario.run_lost_accept_child env ~root ~port:(Int.of_string port)
   | [ "pending-input"; root ] -> Crash_pending_input.run_child env ~root ~recover:false
   | [ "pending-input-recover"; root ] ->
     Crash_pending_input.run_child env ~root ~recover:true

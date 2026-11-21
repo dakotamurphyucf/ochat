@@ -268,6 +268,11 @@ module Admission : sig
       The actual Actor compares this with its physically registered callback. *)
   val callback_scope : t -> Chat_response.Goal_native_scope.t option
 
+  (** Actual selected native surface while this exact admitted call is live. *)
+  val selected_capabilities
+    :  t
+    -> (Chat_response.Tool_capability.t, Agent_protocol.Error.t) result
+
   val invocation : t -> Agent_protocol.Invocation.t
 
   (** Exact checked503 borrow captured from this dispatched invocation. None is

@@ -7,11 +7,13 @@ type t =
       previous:Inference_runtime.Context.t
       -> history:History_entry.t list
       -> (Inference_runtime.Context.t
+          -> select_checkpoint:Soft_checkpoint.select option
           -> select_prepared:Inference_client.Prepared_selection.select option
           -> on_prepared:(Inference_runtime.Prepared.t -> unit)
           -> on_dispatch:(Inference.Observation.Configuration.t -> unit)
           -> 'a)
       -> 'a
+  ; checkpoint_tools : Soft_checkpoint.tools
   }
 
 (** Exact first root admission of a fresh window. Preview entries remain

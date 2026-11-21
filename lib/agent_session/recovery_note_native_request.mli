@@ -12,5 +12,6 @@ val decode
   -> Jsonaf.t
   -> (t, Agent_protocol.Error.t) result
 
+val decode_text : string -> (Jsonaf.t, Agent_protocol.Error.t) result
 val decode_text_exn : string -> Jsonaf.t
 val parameters : Recovery_note_access.Effect.t -> Jsonaf.t

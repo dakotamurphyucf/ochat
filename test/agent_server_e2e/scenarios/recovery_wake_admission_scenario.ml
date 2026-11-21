@@ -13,15 +13,16 @@ let require = F.require
 type trial =
   | Oversized
   | Fitting
+  | Checkpoint
 [@@deriving equal]
 
 let payload trial =
   match trial with
   | Fitting -> "Follow the completed wake."
-  | Oversized ->
+  | (Oversized | Checkpoint) as trial ->
     (* Distinct printable strings exercise the real encoder without relying on
        a guessed byte-to-token ratio or asking the provider to exceed its limit. *)
-    List.init 640 ~f:(fun i -> Md5.digest_string (Int.to_string i) |> Md5.to_hex)
+    List.init (if equal_trial trial Oversized then 640 else 200) ~f:(fun i -> Md5.digest_string (Int.to_string i) |> Md5.to_hex)
     |> String.concat
 ;;
 
@@ -178,9 +179,25 @@ let run_trial env environment trial =
       Eio.Promise.await release);
     Openai.Responses_driver.Auth.bearer "recovery-wake-loopback"
   in
+  let capacity = Recovery_successor_guard_scenario.config () in
+  let capacity =
+    match trial with
+    | Fitting | Oversized -> capacity
+    | Checkpoint ->
+      let module C = Agent_server.Recovery_capacity_configuration in
+      let targets = List.map capacity.targets ~f:(fun target ->
+        { target with C.Target.input = Some 12_000L; session_total = Some 15_000L;
+                      checkpoint_reserve = 9_000L; warning_lead = 32L }) in
+      C.create ~mode:Automatic ~host_total:16_000L ~targets |> ok
+  in
   Notes.with_fixture
-    ~prompt_xml:(prompt trial)
-    ~recovery_capacity:(Recovery_successor_guard_scenario.config ())
+    ~prompt_xml:
+      (prompt trial
+       ^ (match trial with
+          | Oversized | Fitting -> ""
+          | Checkpoint ->
+            {|<tool name="context_checkpoint"/><tool name="recovery_note_write"/>|}))
+    ~recovery_capacity:capacity
     ~on_preparation:(fun () ->
       Int.incr preparations;
       if !check_next_preparation
@@ -379,6 +396,56 @@ let run_trial env environment trial =
                  && P.Moderator_execution.equal intent saved_intent
                  && Int.equal (fst (latest_root restored ~operation:operation.id)) count)
                 "canonical replay changed the denied wake disposition or attempt ledger"
+            | Checkpoint ->
+              let module Soft = Recovery_soft_checkpoint_scenario in
+              await_barrier approached "checkpoint did not reach authentication";
+              let initial_wake_state = state () in
+              let delivery, pending_intent = expect_pending initial_wake_state ~operation:operation.id in
+              Eio.Promise.resolve signal_release ();
+              let selected = await_request count in
+              require
+                (Set.equal (Recovery_checkpoint_scenario.tools selected)
+                   (String.Set.singleton "recovery_note_write"))
+                "wake expected a checkpoint-only inference";
+              let saved, _ = expect_pending (replay ()) ~operation:operation.id in
+              require (P.Delivery.equal saved delivery)
+                "checkpoint-only write changed the notification";
+              (* Refusing the optional note must also leave the wake available
+                 for the host's next ordinary request. *)
+              Provider.reply_summary selected "No checkpoint note.";
+              let fresh = await_request (count + 1) in
+              let restored = replay () in
+              let successor = Option.value_exn restored.active_operation in
+              require
+                (not (P.Id.Operation.equal operation.id successor.id)
+                 && not (P.Recovery_window.Scope.equal
+                    (Soft.active_scope restored) (Soft.active_scope initial_wake_state))
+                 && String.is_substring (Provider.body fresh |> Jsonaf.to_string)
+                      ~substring:"ordinary wake delivery")
+                "fresh successor did not recover the original wake";
+              let row = List.find_exn restored.deliveries ~f:(fun row ->
+                P.Id.Delivery.equal row.context.id delivery.context.id) in
+              require
+                (Option.equal P.Delivery.equal_wake_disposition
+                   row.wake_disposition (Some (Accepted_wake successor.id)))
+                "fresh successor did not acknowledge the exact notification";
+              let follow_up = List.find_exn restored.moderator_executions ~f:(fun row ->
+                P.Id.Moderator_execution.equal row.context.id pending_intent.context.id) in
+              (match follow_up.intent with
+               | Some Applied -> ()
+               | disposition -> raise_s
+                   [%sexp "successor wake follow-up", (disposition : P.Moderator_execution.intent option)]);
+              Provider.reply_summary fresh "The successor handled the wake.";
+              let settled = Support.Background_fixture.await env "settled successor wake"
+                (fun () ->
+                   let value = state () in
+                   Option.some_if (Option.is_none value.active_operation) value)
+              in
+              let saved = List.find_exn settled.deliveries ~f:(fun current ->
+                P.Id.Delivery.equal current.context.id delivery.context.id) in
+              require
+                (P.Delivery.equal saved row && Provider.request_count provider = count + 2)
+                "successor completion repeated the wake or changed its disposition"
             | Fitting ->
               await_barrier approached "fitting wake ended before provider authentication";
               let expected = expect_pending (state ()) ~operation:operation.id in
@@ -425,3 +492,5 @@ let run_trial env environment trial =
 
 let denied env environment = run_trial env environment Oversized
 let accepted env environment = run_trial env environment Fitting
+
+let checkpoint env environment = run_trial env environment Checkpoint
