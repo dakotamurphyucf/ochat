@@ -45,7 +45,30 @@ let with_sources f =
         f env root))
 ;;
 
-let with_daemon ?(on_timeout = fun () -> ()) env root configuration principal provider f =
+let phase_timeout = 20.
+
+let with_progress_watchdog env ~last_progress f =
+  let clock = Eio.Stdenv.mono_clock env in
+  let limit = Mtime.Span.of_uint64_ns (Int64.of_float (phase_timeout *. 1e9)) in
+  let rec watch () =
+    let progress = last_progress () in
+    let deadline = Mtime.add_span progress limit |> Option.value_exn in
+    Eio.Time.Mono.sleep_until clock deadline;
+    if Mtime.equal progress (last_progress ()) then raise Eio.Time.Timeout else watch ()
+  in
+  Eio.Fiber.first f watch
+;;
+
+let with_daemon
+      ?(on_timeout = fun () -> ())
+      ?with_deadline
+      env
+      root
+      configuration
+      principal
+      provider
+      f
+  =
   Eio.Switch.run (fun sw ->
     let daemon =
       D.start
@@ -69,22 +92,20 @@ let with_daemon ?(on_timeout = fun () -> ()) env root configuration principal pr
     Exn.protect
       ~finally:(fun () -> D.shutdown daemon |> protocol_ok)
       ~f:(fun () ->
+        let run () =
+          let client =
+            Agent_server_wire_fixture.http_connector ~sw ~env ~daemon ~root ~principal ()
+          in
+          Exn.protect
+            ~finally:(fun () -> Agent_client.Connection.close client)
+            ~f:(fun () ->
+              initialize client;
+              f sw daemon client)
+        in
         try
-          Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 20. (fun () ->
-            let client =
-              Agent_server_wire_fixture.http_connector
-                ~sw
-                ~env
-                ~daemon
-                ~root
-                ~principal
-                ()
-            in
-            Exn.protect
-              ~finally:(fun () -> Agent_client.Connection.close client)
-              ~f:(fun () ->
-                initialize client;
-                f sw daemon client))
+          match with_deadline with
+          | None -> Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) phase_timeout run
+          | Some with_deadline -> with_deadline run
         with
         | Eio.Time.Timeout as exn ->
           let backtrace = Stdlib.Printexc.get_raw_backtrace () in
@@ -163,7 +184,14 @@ let qualify_authored_shell ~snapshot_replacement =
       Failure_diagnostic.create ~now:(fun () -> Eio.Time.now (Eio.Stdenv.clock env))
     in
     let creation_ordinal = ref 0 in
-    let mark = Failure_diagnostic.mark diagnostic in
+    (* Each mark starts a finite scenario phase. Polling, provider waits and
+       command retries within a phase cannot renew its deadline. *)
+    let clock = Eio.Stdenv.mono_clock env in
+    let last_progress = ref (Eio.Time.Mono.now clock) in
+    let mark phase =
+      last_progress := Eio.Time.Mono.now clock;
+      Failure_diagnostic.mark diagnostic phase
+    in
     let requests = ref 0 in
     let mode = ref "persistent" in
     let preflight = ref (fun () -> ()) in
@@ -198,12 +226,18 @@ let qualify_authored_shell ~snapshot_replacement =
     in
     let principal = principal () in
     let with_daemon =
-      with_daemon ~on_timeout:(fun () ->
-        Failure_diagnostic.report
-          diagnostic
-          ~context:
-            [%sexp
-              (snapshot_replacement : bool), (!creation_ordinal : int), (!requests : int)])
+      with_daemon
+        ~on_timeout:(fun () ->
+          Failure_diagnostic.report
+            diagnostic
+            ~context:
+              [%sexp
+                (snapshot_replacement : bool)
+              , (!creation_ordinal : int)
+              , (!requests : int)])
+        ~with_deadline:(fun run ->
+          mark "connect HTTP client";
+          with_progress_watchdog env ~last_progress:(fun () -> !last_progress) run)
     in
     with_daemon env root configuration principal provider (fun sw daemon client ->
       Failure_diagnostic.reset diagnostic;
@@ -270,8 +304,8 @@ let qualify_authored_shell ~snapshot_replacement =
           Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
           wait_idle entry
       in
-      let idle entry =
-        mark "wait for inactive operation";
+      let idle ?(phase = "wait for inactive operation") entry =
+        mark phase;
         wait_idle entry
       in
       let records () =
@@ -331,6 +365,7 @@ let qualify_authored_shell ~snapshot_replacement =
             Eio.Promise.await release_read;
             Ok ()))
       in
+      mark "wait for loaded child read";
       Eio.Promise.await entered;
       let attached = Eio.Fiber.fork_promise ~sw (fun () -> attach client child_id) in
       (* Keep the real read reservation held while the HTTP command arrives.
@@ -647,8 +682,12 @@ let qualify_authored_shell ~snapshot_replacement =
         mode := requested_mode;
         let unattended, release = create () in
         release ();
-        ignore (idle unattended : Agent_session.Session_state.t);
-        ignore (idle parent_entry : Agent_session.Session_state.t);
+        ignore
+          (idle ~phase:("settle " ^ requested_mode ^ " unattended child") unattended
+           : Agent_session.Session_state.t);
+        ignore
+          (idle ~phase:"settle parent after unattended child" parent_entry
+           : Agent_session.Session_state.t);
         let rejected = state unattended in
         assert (List.is_empty rejected.shell.approval_grants);
         List.iter rejected.invocations ~f:(fun invocation ->
