@@ -771,7 +771,7 @@ let%expect_test "every architecture method has request and result dispatch" =
           (List.equal String.equal expected (normalize Method_result.supported_methods)
            : bool)
       }];
-  [%expect {| ((method_count 128) (requests true) (results true)) |}]
+  [%expect {| ((method_count 129) (requests true) (results true)) |}]
 ;;
 
 let%expect_test "note share management binds a closed receipt to its exact request" =

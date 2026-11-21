@@ -103,8 +103,11 @@ let run env temporary =
               env
               "authored Wait after physical cut"
               (fun () ->
-                 let status = follow (Inspect reference) |> ok in
-                 Option.some_if (F.Reply.equal_phase status.phase Waiting) status)
+                 match follow (Inspect reference) with
+                 | Error { code = Conflict; _ } -> None
+                 | result ->
+                   let status = ok result in
+                   Option.some_if (F.Reply.equal_phase status.phase Waiting) status)
           in
           require
             (not (P.Recovery_window.Scope.equal initial waiting.basis.scope))
